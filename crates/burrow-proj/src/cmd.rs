@@ -98,8 +98,9 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                     .parse::<i64>()
                     .map_err(|_| Fail::new(2, "usage: proj usage hold UNTIL (seconds)"))?;
                 // Fails unless the hold has it: the watchdog keeps its own
-                // till then.
-                usage::earlier(cfg, "the stall watchdog", until, now()).map_err(|e| Fail::new(1, e))
+                // till then. It doesn't say when it was written: before
+                // this proj ran.
+                usage::earlier(cfg, "the stall watchdog", until, None).map_err(|e| Fail::new(1, e))
             }
             Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
         },

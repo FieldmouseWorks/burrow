@@ -477,6 +477,7 @@ fn an_earlier_projs_resets_are_the_hold_now() {
     let mut released = kept(&cfg).unwrap();
     released.back = Some(t - 3);
     keep(&cfg, &released).unwrap();
+    fs::write(cfg.jobs.join(RELEASED), format!("{}\n", t - 3)).unwrap();
     fs::write(cfg.jobs.join("web-3/1.outcome"), "error\n").unwrap();
     let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs((t - 5) as u64);
     fs::File::options()
@@ -509,10 +510,126 @@ fn a_hold_that_cant_be_written_takes_nothing() {
     fs::write(cfg.jobs.join(".usage.lock"), "").unwrap();
     fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
     let adopted = adopt(&cfg);
-    let held = earlier(&cfg, "the stall watchdog", t + 3600, t);
+    let held = earlier(&cfg, "the stall watchdog", t + 3600, Some(t));
     let recorded = record(&cfg, "web-2", Some(t + 3600), SAID, t);
     fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(adopted.is_err() && held.is_err() && recorded.is_err());
     assert!(dir.join("1.resets").exists());
     assert_eq!(kept(&cfg), None);
+}
+
+/// An earlier proj's limit counts its refusal from when it was written, not
+/// from when it's taken: a run started since then ends it, one started
+/// before doesn't. Taken again, it changes nothing. #428's watchdog's says
+/// no time: it counts from 0, so any run ends it.
+#[test]
+fn an_earlier_limit_counts_from_when_it_was_written() {
+    let (_d, cfg) = rig();
+    let t = now();
+    earlier(&cfg, "web-1", t + 3600, Some(t - 600)).unwrap();
+    let s = kept(&cfg).unwrap();
+    assert_eq!((s.until, s.refused()), (t + 3600, t - 600));
+    earlier(&cfg, "web-1", t + 3600, Some(t - 600)).unwrap();
+    assert_eq!(kept(&cfg).unwrap(), s);
+    back(&cfg, Some(t - 601));
+    assert!(out(&cfg).is_some());
+    back(&cfg, Some(t - 300));
+    assert_eq!(out(&cfg), None);
+
+    let (_d, cfg) = rig();
+    earlier(&cfg, "the stall watchdog", t + 3600, None).unwrap();
+    assert_eq!(kept(&cfg).unwrap().refused(), 0);
+    earlier(&cfg, "the stall watchdog", t + 3600, None).unwrap();
+    assert_eq!(kept(&cfg).unwrap().refused(), 0);
+    back(&cfg, Some(1));
+    assert_eq!(out(&cfg), None);
+    // A live refusal on top of one taken keeps the latest refusal.
+    let (_d, cfg) = rig();
+    record(&cfg, "web-2", Some(t + 3600), SAID, t).unwrap();
+    earlier(&cfg, "web-1", t + 7200, Some(t - 600)).unwrap();
+    let s = kept(&cfg).unwrap();
+    assert_eq!((s.until, s.refused()), (t + 7200, t));
+}
+
+/// A release outlives its record: once the record is gone (its notice
+/// settled) or replaced by a new refusal, an earlier proj's limit written
+/// before the release, an N.resets, a retained await's or the watchdog's,
+/// still never holds again; one written after it does.
+#[test]
+fn a_release_outlives_its_record() {
+    let (d, cfg) = rig();
+    let t = now();
+    record(&cfg, "web-1", Some(t + 7200), SAID, t - 100).unwrap();
+    back(&cfg, Some(t - 50));
+    assert_eq!(released(&cfg).unwrap(), kept(&cfg).unwrap().back.unwrap());
+    // Settled: the record goes a stall after the release.
+    let mut s = kept(&cfg).unwrap();
+    s.back = Some(t - cfg.stall_queued() - 1);
+    keep(&cfg, &s).unwrap();
+    assert!(!d.path().join("pending").exists());
+    assert_eq!(tend(&cfg), None);
+    assert_eq!(kept(&cfg), None);
+    earlier(&cfg, "web-1", t + 7200, Some(t - 100)).unwrap();
+    earlier(&cfg, "the stall watchdog", t + 7200, None).unwrap();
+    let dir = cfg.jobs.join("web-1");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("turns"), "1\n").unwrap();
+    fs::write(dir.join("1.outcome"), "error\n").unwrap();
+    fs::write(dir.join("1.resets"), format!("{}\n", t + 7200)).unwrap();
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs((t - 100) as u64);
+    fs::File::options()
+        .write(true)
+        .open(dir.join("1.resets"))
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    adopt(&cfg).unwrap();
+    assert_eq!(kept(&cfg), None);
+    // Replaced by a new refusal: the old ones don't move its reset on.
+    record(&cfg, "web-2", Some(t + 600), SAID, t).unwrap();
+    earlier(&cfg, "web-1", t + 7200, Some(t - 100)).unwrap();
+    earlier(&cfg, "the stall watchdog", t + 7200, None).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 600);
+    // One written after the release is a hold of its own.
+    earlier(&cfg, "web-3", t + 7200, Some(t + 60)).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 7200);
+}
+
+/// A notice that can't be tended (the lock not had, the record unreadable)
+/// is booked again in RETRY, never sooner and never forgotten, and tended
+/// once it can be.
+#[test]
+fn a_look_that_cant_tend_books_another() {
+    let (d, cfg) = rig();
+    let t = now();
+    record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    back(&cfg, None);
+    let mut s = kept(&cfg).unwrap();
+    s.told -= RETELL;
+    keep(&cfg, &s).unwrap();
+    let before = told(&d).len();
+    // No lock to be had: the jobs dir is shut, and the lock not there yet.
+    let _ = fs::remove_file(cfg.jobs.join(".usage.lock"));
+    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
+    let next = tend(&cfg);
+    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(next.is_some_and(|n| n >= t + RETRY), "{next:?}");
+    assert_eq!(told(&d).len(), before);
+    tend(&cfg);
+    assert_eq!(told(&d).len(), before + 1);
+    // Holding, its open due and the lock not had: not booked in the past.
+    let mut s = kept(&cfg).unwrap();
+    s.back = None;
+    s.until = t + 7200;
+    s.told = t - RETELL;
+    keep(&cfg, &s).unwrap();
+    let _ = fs::remove_file(cfg.jobs.join(".usage.lock"));
+    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
+    let next = tend(&cfg);
+    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(next.is_some_and(|n| n >= t + RETRY), "{next:?}");
+    // An unreadable record: looked at again too.
+    fs::write(cfg.jobs.join(FILE), "{").unwrap();
+    assert!(tend(&cfg).is_some_and(|n| n >= t + RETRY));
 }

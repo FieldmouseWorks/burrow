@@ -53,7 +53,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             }
             if a.target == OLD_LIMIT {
                 let reset = a.was.parse::<i64>().unwrap_or(0);
-                let written = a.since.parse::<i64>().unwrap_or_else(|_| now());
+                let written = a.since.parse::<i64>().ok();
                 // Not taken: the job's waits stay as they are, for the next
                 // look, which is booked.
                 if let Err(e) = usage::earlier(cfg, &id, reset, written) {

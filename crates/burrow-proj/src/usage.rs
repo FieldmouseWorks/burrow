@@ -38,6 +38,10 @@ use crate::{filled, mtime, now, swap};
 
 /// Where it's kept, in jobs.
 pub(crate) const FILE: &str = ".usage.json";
+/// When a hold last ended, in jobs: kept for good, past the record (which
+/// goes once its notice is settled, or is replaced by a new refusal), so an
+/// earlier proj's limit written before it never holds again ([`earlier`]).
+const RELEASED: &str = ".usage.released";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
@@ -46,6 +50,9 @@ const UNSAID: i64 = 3600;
 /// How often the owner's notice is sent again while it may not have got
 /// through: HOST-notify never says.
 const RETELL: i64 = 3600;
+/// How soon proj-watch looks at the notice again when it couldn't be
+/// tended (the lock or the record couldn't be had, or written).
+const RETRY: i64 = RETELL / 12;
 
 /// The machine out of usage: until when, Claude Code's own words, and the
 /// job and time it was refused at.
@@ -65,10 +72,12 @@ pub struct Spent {
     #[serde(default)]
     pub told: i64,
     /// When a run was last refused while it held: only a run that started
-    /// after that says usage is back ([`back`]). 0 in a record from before
-    /// it was kept, which `at` stands for.
+    /// after that says usage is back ([`back`]). An earlier proj's limit
+    /// taken in ([`earlier`]) counts from when that was written, not from
+    /// when it was taken, and from 0 when it doesn't say. None in a record
+    /// from before it was kept, which `at` stands for.
     #[serde(default)]
-    pub last: i64,
+    pub last: Option<i64>,
 }
 
 impl Spent {
@@ -85,7 +94,7 @@ impl Spent {
     /// When a run was last refused: a run that started then or before
     /// proves nothing of usage now.
     pub fn refused(&self) -> i64 {
-        self.last.max(self.at)
+        self.last.unwrap_or(self.at)
     }
 }
 
@@ -146,8 +155,33 @@ pub fn out(cfg: &Config) -> Option<Spent> {
 
 /// Its record, holding or not, while it's kept.
 pub fn kept(cfg: &Config) -> Option<Spent> {
-    let text = fs::read_to_string(cfg.jobs.join(FILE)).ok()?;
-    serde_json::from_str(&text).ok()
+    read(cfg).ok().flatten()
+}
+
+/// Its record, None when there's none, or why it couldn't be read.
+fn read(cfg: &Config) -> Result<Option<Spent>, String> {
+    let path = cfg.jobs.join(FILE);
+    match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("proj: {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("proj: {}: {e}", path.display())),
+    }
+}
+
+/// When a hold last ended ([`RELEASED`]), 0 if none has; or why it
+/// couldn't be read, when it's there.
+fn released(cfg: &Config) -> Result<i64, String> {
+    let path = cfg.jobs.join(RELEASED);
+    match fs::read_to_string(&path) {
+        Ok(text) => text
+            .trim()
+            .parse()
+            .map_err(|e| format!("proj: {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(format!("proj: {}: {e}", path.display())),
+    }
 }
 
 /// jobs/.usage.lock, held: every change to the record goes under it, and
@@ -179,11 +213,19 @@ pub fn record(
     at: i64,
 ) -> Result<Spent, String> {
     let _lock = lock(cfg)?;
-    put(cfg, id, until, said, at)
+    put(cfg, id, until, said, at, at)
 }
 
-/// [`record`], under the lock.
-fn put(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Result<Spent, String> {
+/// [`record`], under the lock, with `last` when it was refused: only a run
+/// started after that ends it.
+fn put(
+    cfg: &Config,
+    id: &str,
+    until: Option<i64>,
+    said: &str,
+    at: i64,
+    last: i64,
+) -> Result<Spent, String> {
     let until = until.filter(|&t| t > at).unwrap_or(at + UNSAID);
     let was = kept(cfg).filter(|w| w.back.is_none());
     let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
@@ -192,7 +234,7 @@ fn put(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Resul
         // the rest move the reset on, and when it was last refused.
         Some(w) => Spent {
             until: w.until.max(until),
-            last: w.refused().max(at),
+            last: Some(w.refused().max(last)),
             told: if lapsed { now() } else { w.told },
             ..w.clone()
         },
@@ -203,7 +245,7 @@ fn put(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Resul
             at,
             back: None,
             told: now(),
-            last: at,
+            last: Some(last),
         },
     };
     if was.as_ref() == Some(&spent) {
@@ -268,7 +310,13 @@ pub fn back(cfg: &Config, started: Option<i64>) {
         }
         s.back = Some(now);
         s.told = now;
-        if let Err(e) = keep(cfg, &s) {
+        // What it ended is kept first, past the record: without it, an
+        // earlier proj's limit could hold it again.
+        let mark = released(cfg).map(|r| r.max(now)).and_then(|r| {
+            swap(&cfg.jobs.join(RELEASED), &format!("{r}\n"))
+                .map_err(|e| format!("proj: {RELEASED}: {e}"))
+        });
+        if let Err(e) = mark.and_then(|()| keep(cfg, &s)) {
             eprintln!("{e}");
             return;
         }
@@ -285,23 +333,35 @@ pub fn back(cfg: &Config, started: Option<i64>) {
 /// what's left settled ([`settle`]). When it next needs a look, while
 /// there's anything left: one past its reset that no run has ended yet
 /// waits for the next run that isn't refused, which closes it.
+/// What couldn't be done (the lock or the record not had, a send or the
+/// record's removal not written) is looked at again in RETRY, never
+/// sooner, so the look neither forgets it nor spins on it.
 pub fn tend(cfg: &Config) -> Option<i64> {
-    let s = kept(cfg)?;
     let now = now();
-    if s.holds(now) {
+    let retry = Some(now + RETRY);
+    let s = match read(cfg) {
+        Ok(s) => s?,
+        Err(e) => {
+            eprintln!("{e}");
+            return retry;
+        }
+    };
+    let next = if s.holds(now) {
         remind(cfg);
-        return kept(cfg).map(|s| s.told + RETELL);
-    }
-    s.back?;
-    let _lock = lock(cfg).ok()?;
-    let s = kept(cfg).filter(|s| s.back.is_some())?;
-    settle(cfg, s, now);
-    let s = kept(cfg)?;
-    Some(if pending(cfg) {
-        s.told + RETELL / 12
+        kept(cfg).map(|s| s.told + RETELL)
     } else {
-        s.release() + cfg.stall_queued()
-    })
+        s.back?;
+        let Ok(_lock) = lock(cfg) else { return retry };
+        let s = kept(cfg).filter(|s| s.back.is_some())?;
+        settle(cfg, s, now);
+        let s = kept(cfg)?;
+        Some(if pending(cfg) {
+            s.told + RETELL / 12
+        } else {
+            s.release() + cfg.stall_queued()
+        })
+    };
+    Some(next.unwrap_or(now).max(now + RETRY))
 }
 
 /// What's left once it has ended, under the lock: the close sent again
@@ -325,19 +385,28 @@ pub const EARLIER: &str = "a usage limit an earlier proj or watchdog recorded";
 
 /// A usage limit an earlier proj or watchdog recorded apart from this one,
 /// written at `written` and resetting at `reset`, taken into the hold: none
-/// once it has reset, nor when a release since (`proj usage back`, or a run
-/// that wasn't refused) has ended the hold it came from. Each caller drops
-/// its own record of it only once this has succeeded.
-pub fn earlier(cfg: &Config, id: &str, reset: i64, written: i64) -> Result<(), String> {
+/// once it has reset, nor when any release since (`proj usage back`, or a
+/// run that wasn't refused) has ended a hold, which [`RELEASED`] keeps for
+/// good. Its refusal counts from `written`, so a run started since then
+/// ends it. A limit that doesn't say when it was written (#428's
+/// watchdog's: None) was written before this proj ran, so before any
+/// release it made, and counts from 0. Taking one again changes nothing.
+/// Each caller drops its own record of it only once this has succeeded.
+pub fn earlier(cfg: &Config, id: &str, reset: i64, written: Option<i64>) -> Result<(), String> {
     let _lock = lock(cfg)?;
     earlier_locked(cfg, id, reset, written)
 }
 
-fn earlier_locked(cfg: &Config, id: &str, reset: i64, written: i64) -> Result<(), String> {
-    if reset <= now() || kept(cfg).and_then(|s| s.back).is_some_and(|b| written <= b) {
+fn earlier_locked(cfg: &Config, id: &str, reset: i64, written: Option<i64>) -> Result<(), String> {
+    let released = released(cfg)?.max(read(cfg)?.and_then(|s| s.back).unwrap_or(0));
+    let ended = match written {
+        Some(w) => w <= released,
+        None => released > 0,
+    };
+    if reset <= now() || ended {
         return Ok(());
     }
-    put(cfg, id, Some(reset), EARLIER, now()).map(|_| ())
+    put(cfg, id, Some(reset), EARLIER, now(), written.unwrap_or(0)).map(|_| ())
 }
 
 /// The holds an earlier proj (#428's) kept apart from this one, each taken
@@ -367,8 +436,7 @@ pub fn adopt(cfg: &Config) -> Result<(), String> {
             continue;
         };
         if let Ok(reset) = text.trim().parse::<i64>() {
-            let written = mtime(&f).unwrap_or_else(now);
-            earlier_locked(cfg, &id, reset, written)?;
+            earlier_locked(cfg, &id, reset, mtime(&f))?;
         }
         match fs::remove_file(&f) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
