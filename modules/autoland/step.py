@@ -32,7 +32,7 @@ import waits
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way, provenance
-from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task, red_fix, red_undos
+from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, negative, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
@@ -411,7 +411,8 @@ def handle(repo, pr, repo_info, digest, held=None):
             proofs = {c: machine[c] for c in ci_names if c in machine} if ci == "red" and not conflict else {}
             train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
             before = claims.unposted(st, kind, at)
-            if started(kind, fix_task(repo, pr, why, proofs, train, tested, before), at, bool(how)):
+            red_negative = negative(ci_names) if ci == "red" and not conflict else None
+            if started(kind, fix_task(repo, pr, why, proofs, train, tested, before, red_negative), at, bool(how)):
                 if retry:
                     if not how:
                         st[kind + "Again"] = at

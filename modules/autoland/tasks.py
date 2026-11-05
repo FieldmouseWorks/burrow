@@ -57,13 +57,33 @@ def answers(repo, pr):
     )
 
 
-def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None):
+def negative(names):
+    """The failing check among names that is burrow's shared CI's negative,
+    which flake-check.yml names `negative` (under its caller's job, as
+    `check / negative`), or None."""
+    return next((c for c in names if c == "negative" or c.endswith(" / negative")), None)
+
+
+# What a red negative means, and the ways of turning it green that don't
+# count: its fix is a test that tests the change (Conary#206).
+NEGATIVE = ("{} is red because the tests this PR adds or changes pass on its base's code too: its log names them and "
+            "the checks it built. They don't test what the PR changes. Make them fail without the PR's change, by "
+            "testing the behaviour it adds or fixes, and check that they do on the base. If some of those test "
+            "changes are a tidy the code doesn't need, take them out of this PR into one of their own. Never delete, "
+            "skip or weaken a test to turn it green, and never move a test into the code it tests (an inline "
+            "#[cfg(test)] block counts as code) to get it out of the negative's sight.")
+
+
+def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, red_negative=None):
     """proofs: the failing checks that run on a machine, not in CI, and how;
     train: the merge train's failure is among them; has_ci: the repo's CI
     runs its gate on a push; before: why the last job's answers on this
-    head didn't go up (claims.unposted)."""
+    head didn't go up (claims.unposted); red_negative: the failing check
+    that is burrow's negative (negative())."""
     machine = "".join(f" {c} isn't CI: it's run on a machine, like this: {how} Rerun it that way on what you push."
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
+    if red_negative:
+        machine += " " + NEGATIVE.format(red_negative)
     if train:
         base = pr["baseRefName"]
         machine += (f" The failing {CFG['trainContext']} status is the merge train's: it merged this head alone onto {base} "
