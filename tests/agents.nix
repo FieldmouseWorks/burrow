@@ -25,6 +25,7 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.default identity ];
     burrow = {
       claude.enable = true;
+      claude.effort = "high";
       proj.enable = true;
       agents.enable = true;
       toolbox.enable = true;
@@ -132,6 +133,8 @@ pkgs.testers.runNixOSTest {
         settings = json.loads(vm(a, "cat /etc/claude-code/managed-settings.json"))
         assert settings["permissions"]["defaultMode"] == "bypassPermissions"
         assert settings["skipDangerousModePermissionPrompt"] is True
+        # The host's effort, which sessions and `proj run --vm` jobs start at.
+        assert settings["effortLevel"] == "high", settings
         assert json.loads(vm(a, "cat ~/.claude.json"))["projects"]["/data/dev/src/demo"]["hasTrustDialogAccepted"]
 
     with subtest("it has KVM of its own, for projects with VMs"):

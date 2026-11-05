@@ -38,6 +38,7 @@ in
     gid = lib.mkOption { type = lib.types.int; };
     home = lib.mkOption { type = lib.types.str; };
     claudePackage = lib.mkOption { type = lib.types.package; };
+    claudeEffort = lib.mkOption { type = lib.types.nullOr lib.types.str; };
   };
 
   config = {
@@ -221,7 +222,7 @@ in
     # A copy, not a link into the store (../claude/etc.nix).
     environment.etc."claude-code/managed-settings.json" = {
       mode = "0444";
-      text = builtins.toJSON {
+      text = builtins.toJSON ({
         permissions.defaultMode = "bypassPermissions";
         skipDangerousModePermissionPrompt = true;
         env = {
@@ -229,7 +230,9 @@ in
           # Telemetry and error reports only need more domains on the allowlist.
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
         };
-      };
+      } // lib.optionalAttrs (cfg.claudeEffort != null) {
+        effortLevel = cfg.claudeEffort;
+      });
     };
 
     documentation.enable = false;
