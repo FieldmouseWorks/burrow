@@ -198,6 +198,42 @@ fn lines(out: &Out) -> Vec<(&str, &str, &str)> {
 }
 
 #[test]
+fn a_stuck_item_reads_the_same_wherever_the_dashboard_moves_it() {
+    // Renovate moves a scheduled branch between sections as its schedule
+    // opens and shuts. The stuck issue tells what's new by its words, so a
+    // line that named the section was news at every move: a comment, and a
+    // Claude job woken to find nothing had changed.
+    let d = tempfile::tempdir().unwrap();
+    let cfg = config(d.path());
+    let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
+    hits(&mut hub, 7, "sam");
+    let line = " - [ ] <!-- other-branch=renovate/lock-file-maintenance -->chore(deps): lock file maintenance\n";
+    let other = format!("## Other Branches\n\n{line}");
+    let awaiting = format!("## Awaiting Schedule\n\n{line}");
+    dashboard(&mut hub, &other, &[]);
+    watch_at(&cfg, &mut hub, &mut jobs, 0.0);
+    let due = cfg.dashboard.as_ref().unwrap().wait_days as f64 * DAY;
+    assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, due).jobs.len(), 1);
+    start(&cfg, due, "dashboard", "dash-1");
+    let mut listed = vec![];
+    for (i, body) in [&other, &awaiting, &other].into_iter().enumerate() {
+        dashboard(&mut hub, body, &[]);
+        let out = watch_at(&cfg, &mut hub, &mut jobs, due + DAY + i as f64 * HOUR);
+        assert!(out.jobs.is_empty(), "{out:?}");
+        listed.push(out.stuck);
+    }
+    let since = day(T);
+    let first = [(
+        STUCK.to_string(),
+        "sam/r#7".to_string(),
+        format!(
+            "chore(deps): lock file maintenance (branch renovate/lock-file-maintenance), there since {since}"
+        ),
+    )];
+    assert!(listed.iter().all(|l| l[..] == first[..]), "{listed:?}");
+}
+
+#[test]
 fn whats_stuck_goes_to_a_job_then_the_stuck_issue() {
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());
@@ -334,7 +370,7 @@ fn whats_stuck_goes_to_a_job_then_the_stuck_issue() {
     );
     let since = day(T);
     assert!(lines(&out).contains(&(STUCK, "sam/r#7", &format!(
-        "Errored: chore(deps): update npm packages (`a`, `b`) (branch renovate/npm-packages), there since {since}"
+        "chore(deps): update npm packages (`a`, `b`) (branch renovate/npm-packages), there since {since}"
     ))));
     assert!(
         !lines(&out)

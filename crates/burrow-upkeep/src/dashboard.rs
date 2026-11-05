@@ -316,7 +316,10 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
         if let Some(handed) = it.handed {
             // A day after the job it went to, once that job has ended.
             if p.now >= handed + DAY && !working(p, it.job.as_deref().unwrap_or_default()) {
-                let what = format!("{}: {}, there since {}", it.section, it.what, day(it.since));
+                // By what stays the same while it's there: the stuck issue
+                // tells news by its words, and Renovate moves a branch
+                // between sections as its schedule opens and shuts.
+                let what = format!("{}, there since {}", it.what, day(it.since));
                 p.list(STUCK, at.clone(), what);
             } else {
                 p.wake(handed + DAY); // ends: listed on the stuck issue then
