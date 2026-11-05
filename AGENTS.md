@@ -77,7 +77,8 @@ CI splits it across legs, each on a runner of its own, where flake-gate runs
 it whole. The
 gate builds the example machine, evaluates each module on its own, runs
 `lib/project.nix`'s gates on the test projects in `tests/house/`, and builds
-the other checks.
+the other checks. A check is a file of its own, `checks/NAME.nix`, so
+adding one touches nothing another check's PR does.
 
 One check on its own: `nix build .#checks.x86_64-linux.agents -L` boots the
 agent sandboxes (nested KVM: it needs `/dev/kvm`).
