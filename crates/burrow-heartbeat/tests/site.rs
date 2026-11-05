@@ -38,7 +38,11 @@ impl Unit {
         }
     }
 
+    /// Every process this binary's tests start is started here, and only
+    /// once the stand-in HOST-health is written: a child started while it's
+    /// being written would hold it open for writing ("Text file busy").
     fn command(&self, args: &[&str]) -> Command {
+        health();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-heartbeat"));
         cmd.args(args)
             .env("CREDENTIALS_DIRECTORY", &self.creds)
@@ -74,9 +78,7 @@ impl Unit {
     /// One beat, pinging `url`, with a HOST-health that says nothing: the
     /// path the machine's own ping takes.
     fn beat(&self, url: &str) -> Output {
-        // The shared stand-in, written before any test starts a process:
-        // one written here could be open for writing in another test's child
-        // when this one runs it ("Text file busy").
+        // The shared stand-in (command waits for it).
         let health = health();
         let report = self.root.join("health-report");
         fs::write(&report, "").unwrap();
