@@ -136,6 +136,7 @@ fn inputs() -> Vec<(&'static str, V)> {
         ("inputs.docs-checks", "".into()),
         ("inputs.legs", 1.into()),
         ("inputs.keep-builds", false.into()),
+        ("inputs.negative-runner", "".into()),
     ]
 }
 
@@ -187,7 +188,7 @@ fn group(jobs: &Value, name: &str, r: &Run) -> String {
     value(text(&c["group"]), &c2).text()
 }
 
-const JOBS: [&str; 5] = ["lane", "check", "gate", "docs", "commits"];
+const JOBS: [&str; 6] = ["lane", "check", "gate", "docs", "commits", "negative"];
 const TITLE: &[&str] = &["title"];
 const BODY: &[&str] = &["body"];
 const BASE: &[&str] = &["base"];
@@ -292,6 +293,17 @@ fn only_a_prs_newer_run_cancels() {
         distinct.dedup();
         assert_eq!(distinct.len(), others.len(), "{name}: {others:?}");
     }
+    // Where the negative runs is the negative's alone.
+    assert_ne!(
+        g(
+            "negative",
+            Run {
+                inputs: &[("negative-runner", "fresh-remi")],
+                ..PUSHED
+            }
+        ),
+        g("negative", PUSHED)
+    );
     let mut all: Vec<_> = JOBS.iter().map(|n| g(n, PUSHED)).collect();
     all.sort();
     all.dedup();

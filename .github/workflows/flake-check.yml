@@ -133,6 +133,16 @@ on:
           it builds nothing.
         type: string
         default: ''
+      negative-runner:
+        description: >-
+          The runner label a PR's negative run (its new tests on its base's
+          code) runs on, when not the runner's: one started fresh for each
+          job, say, the only kind whose result Conary counts on a
+          self-hosted runner (Conary's docs/ci-attestation.md, rule 5).
+          Conary reads which runner took the job from GitHub, not from this,
+          so a PR that changes it changes only where its negative runs.
+        type: string
+        default: ''
 jobs:
   # Which gate a PR gets: none here when the train lands it (pr-gate off,
   # and its base is the default branch, compared as git compares refs: an
@@ -633,9 +643,9 @@ jobs:
   # its result, with a subject of its own.
   negative:
     if: github.event_name == 'pull_request'
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.negative-runner || inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} {11}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::{Gate, lines};
+use crate::expr::{V, value};
 use crate::harness::{read, repo_file, script, step, steps, text, workflow, write, yaml};
 
 /// A repo with the flake on main, and a clone of it as the job's checkout.
@@ -220,6 +221,17 @@ fn every_pr_gets_one_from_the_workflows_own_files() {
     let job = &wf["jobs"]["negative"];
     assert_eq!(job["if"], "github.event_name == 'pull_request'");
     assert_eq!(job["permissions"]["id-token"], "write");
+    // On the runner's runner, or the one the caller names for it.
+    for (negative, runner) in [("", "remi"), ("fresh-remi", "fresh-remi")] {
+        let ctx = [
+            ("inputs.runner", V::from("remi")),
+            ("inputs.negative-runner", V::from(negative)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        assert_eq!(value(text(&job["runs-on"]), &ctx).text(), runner);
+    }
     let st = steps(job);
     assert_eq!(st[0]["with"]["fetch-depth"], 0, "{:?}", st[0]);
     assert_eq!(
