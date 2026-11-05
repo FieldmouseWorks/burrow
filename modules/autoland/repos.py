@@ -255,8 +255,12 @@ def watch_default(r, info, prs, digest):
             red = st["red"] = {"named": named}
     # Its job ended, or the steward named the PR itself: that undo is the
     # fix, asked for before anything else (and again, a few times, if cn
-    # stopped before it was done).
-    if (not working and (red.get("job") or red.get("named")) and CFG.get("undo")
+    # stopped before it was done). One the steward named waits while
+    # another fix is open, as it did before it was first asked, unless cn
+    # opened its undo already: a retry finds that one and records it,
+    # opening none beside it.
+    others = [pr for pr in fixes if pr["number"] not in red.get("undos", ())]
+    if (not working and (red.get("job") or (red.get("named") and (red.get("undos") or not others))) and CFG.get("undo")
             and not (red.get("asked") or red.get("refused"))):
         booked = undo_red(repo, red)
         save(key, st)

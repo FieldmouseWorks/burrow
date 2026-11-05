@@ -19,6 +19,9 @@ C.CFG["undo"] = f"{tmp}/writer-cn"
 repo = {"repo": "sam/u", "private": False, "default": "main"}
 mine = []
 TIP = "c" * 40
+# A retry's time is the clock's (repos.clock), here the pass's.
+kept_now, kept_clock = C.NOW, R.clock
+R.clock = lambda: C.NOW
 
 
 def landed(number=12, sha=TIP, head="feature", body="It does a thing.", base="main", state="MERGED"):
@@ -117,6 +120,30 @@ writer(rc=75, err="cn: GitHub is unavailable")
 R.watch_default(repo, default(), [], mine)
 assert red()["undoTries"] == 1 and not red().get("asked") and JOBS == [], (red(), JOBS)
 
+# A red fix opened before that retry: it's the fix in hand, so cn isn't
+# asked again, and no job starts, while it's open. Without it, the retry
+# runs as booked.
+C.NOW = red()["retryAt"]
+fix = mkpr(branch="autoland/red-bbbbbbbbbbbb")
+for _ in range(2):
+    assert R.watch_default(repo, default(), [fix], mine) == {}
+assert len(writer_runs()) == 1 and red()["undoTries"] == 1 and JOBS == [], (writer_runs(), red(), JOBS)
+writer(out=[ROW])
+R.watch_default(repo, default(), [], mine)
+assert len(writer_runs()) == 1 and red()["undos"] == [40] and red()["asked"], (writer_runs(), red())
+C.NOW = kept_now
+# One cn opened before it stopped is no other fix: the retry records it,
+# whatever red fix is open beside it.
+fresh()
+writer(rc=1, out=[{"unrecorded": "https://github.com/sam/u/pull/40", "pr": 40}], err="cn: GitHub said 502")
+R.watch_default(repo, default(), [], mine)
+assert red()["undos"] == [40] and not red().get("asked"), red()
+C.NOW = red()["retryAt"]
+writer(out=[dict(ROW, opened=False)])
+assert R.watch_default(repo, default(), [undo_pr(), fix], mine) == {}
+assert len(writer_runs()) == 1 and red()["undos"] == [40] and red()["asked"] and JOBS == [], (writer_runs(), red(), JOBS)
+C.NOW = kept_now
+
 # Anything less certain starts the job as ever, and asks cn nothing.
 for why, info in (
         ("its parent's CI is pending", default(parent="PENDING")),
@@ -172,6 +199,7 @@ FAIL.clear()
 for j in ("job-1", "job-2"):
     STATES.pop(j, None)
 C.CFG["undo"] = kept_undo
+R.clock = kept_clock
 C.save("repo-sam_u.json", {})
 JOBS.clear()
 C._for.pop()
