@@ -1,7 +1,5 @@
 //! proj-watch's look (`proj _watch [OWNER/REPO]`): jobs waiting on GitHub
-//! whose PRs or issues (in that repo, or any) changed get their next turn,
-//! and so do jobs whose usage limit has reset ([`crate::limit`]), whatever
-//! the repo.
+//! whose PRs or issues (in that repo, or any) changed get their next turn.
 //! One look at a time, whoever started it (burrow-events, from before a
 //! restart too, or a hand): two would each write the wake file from what
 //! they saw.
@@ -15,10 +13,14 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::github::{changes, fingerprint, target};
 use crate::job::{Job, awaits};
-use crate::limit;
 use crate::turn::start;
-use crate::waits::seconds;
-use crate::{Fail, filled, io_fail, now, read, swap};
+use crate::{Fail, filled, io_fail, now, read, swap, usage};
+
+/// What a proj from before usage.rs (#422's) wrote to a job's await for a
+/// turn that ended on a usage limit: `usage-limit\tSINCE\tRESET`. A look
+/// takes it into the machine's hold (usage.rs), in a look at any repo, and
+/// the job's next turn starts at once, to wait in line for the reset.
+const OLD_LIMIT: &str = "usage-limit";
 
 /// Seconds before a repo GitHub couldn't be asked about, or a turn that
 /// couldn't start, is looked at again.
@@ -34,7 +36,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     pass.lock().map_err(|e| io_fail(&lock, e))?;
     let hours = cfg.await_hours as i64;
     let mut retry: Vec<(String, i64)> = Vec::new();
-    for id in job_ids(cfg) {
+    'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
         let f = job.path("await");
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
@@ -49,19 +51,17 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             if a.target.is_empty() {
                 continue;
             }
-            // A usage limit's reset is due by the clock alone, in any look.
-            if a.target == limit::TARGET {
-                match seconds(&a.was) {
-                    Some(due) if now() >= due => news.push_str(&format!(
-                        "- the usage limit your last turn ended on: it reset by {}\n",
-                        limit::utc(due)
-                    )),
-                    Some(_) => lines.push_str(&a.line()),
-                    None => news.push_str(&format!(
-                        "- {}: not something proj can watch; no longer watched\n",
-                        a.target
-                    )),
+            if a.target == OLD_LIMIT {
+                let reset = a.was.parse::<i64>().unwrap_or(0);
+                let written = a.since.parse::<i64>().ok();
+                // Not taken: the job's waits stay as they are, for the next
+                // look, which is booked.
+                if let Err(e) = usage::earlier(cfg, &id, reset, written) {
+                    eprintln!("{e}");
+                    retry.push((String::new(), now() + RETRY));
+                    continue 'jobs;
                 }
+                news.push_str("- the usage limit your last turn ended on: proj holds every turn in line until it resets, this one included\n");
                 continue;
             }
             let was = (!a.was.is_empty()).then(|| serde_json::from_str::<Value>(&a.was).ok());
@@ -131,8 +131,10 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             );
             if let Err(e) = start(cfg, &id, &prompt, false) {
                 eprintln!("{e}");
+                // By repo; "" (every repo's look) for one that's no repo's.
                 for a in awaits(&waits) {
-                    retry.push((repo_of(&a.target), now() + RETRY));
+                    let repo = target(&a.target).map(|(r, _)| r).unwrap_or_default();
+                    retry.push((repo, now() + RETRY));
                 }
             }
         } else {
@@ -140,16 +142,22 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         }
         drop(held);
     }
+    // The owner's notice of the machine out of usage, tended here as well as
+    // by the runs, which may never come: booked again, in every repo's look,
+    // while there's anything left of it.
+    if let Some(at) = usage::tend(cfg) {
+        retry.push((String::new(), at));
+    }
     book(cfg, only, &retry)
 }
 
-/// The wake file's key a look at a target is booked under: its repo, or ""
-/// (every repo's look) for a usage limit, which is no repo's.
-fn repo_of(target: &str) -> String {
-    if target == limit::TARGET {
-        String::new()
-    } else {
-        target.split('#').next().unwrap_or_default().to_owned()
+/// What a turn's end kicks for a wait on `target`: its repo's look, or
+/// every repo's for one that's no repo's, such as an OLD_LIMIT (which only
+/// that takes in). burrow-events has no look for a repo by any other name.
+pub fn kick_for(target: &str) -> String {
+    match crate::github::target(target) {
+        Some((repo, _)) => format!("proj-watch/{repo}"),
+        None => "proj-watch".to_owned(),
     }
 }
 
@@ -169,8 +177,7 @@ fn job_ids(cfg: &Config) -> Vec<String> {
 }
 
 /// When each repo needs a look next, for burrow-events: the deadline of
-/// every job's waits that's still to come (a usage limit's reset under "",
-/// every repo's look), and the retries. One already past
+/// every job's waits that's still to come, and the retries. One already past
 /// is a turn that couldn't start (its retry stands for it) or one this look
 /// skipped as running, whose end kicks proj-watch itself. A look at one repo
 /// keeps the other repos' wake-ups (their retries too).
@@ -201,12 +208,6 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     let hours = cfg.await_hours as i64;
     for id in job_ids(cfg) {
         for a in awaits(&read(&Job::new(cfg, &id).path("await")).unwrap_or_default()) {
-            if a.target == limit::TARGET {
-                if let Some(due) = seconds(&a.was).filter(|due| *due > now) {
-                    add("", due);
-                }
-                continue;
-            }
             let Some(since) = (!a.since.is_empty() && a.since.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| a.since.parse::<i64>().ok())
                 .flatten()
@@ -228,4 +229,28 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     }
     let text = serde_json::to_string_pretty(&at).map_err(|e| Fail::new(1, format!("proj: {e}")))?;
     swap(&cfg.wake, &format!("{text}\n")).map_err(|e| io_fail(&cfg.wake, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OLD_LIMIT, kick_for};
+
+    // A wait on a PR or issue kicks its repo's look, however it's written; one
+    // that's no repo's (an earlier proj's usage limit) kicks every repo's,
+    // the only look that takes it in: burrow-events has none by its name.
+    #[test]
+    fn a_turns_end_kicks_the_look_that_takes_its_wait() {
+        for (t, kick) in [
+            ("sam/r#7", "proj-watch/sam/r"),
+            ("https://github.com/sam/r/pull/7", "proj-watch/sam/r"),
+            (
+                "https://github.com/sam/r/issues/7#issuecomment-1",
+                "proj-watch/sam/r",
+            ),
+            (OLD_LIMIT, "proj-watch"),
+            ("not a target", "proj-watch"),
+        ] {
+            assert_eq!(kick_for(t), kick, "{t}");
+        }
+    }
 }

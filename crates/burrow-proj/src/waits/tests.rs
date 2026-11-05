@@ -2,8 +2,7 @@
 // find of its latest turn: a turn in line or running is watched to its
 // deadline (one waiting in line inside its run as one in line for a slot
 // is), one that ended without saying what comes next is due at once, one that
-// failed once proj-inbox has had time to resume it (one that hit a usage
-// limit once proj-watch has, at its reset), an await to its deadline past proj-watch's, and a question for a
+// failed once proj-inbox has had time to resume it, an await to its deadline past proj-watch's, and a question for a
 // person, a finished job, a stopped turn and an --owned job's end aren't
 // watched at all. And what a running turn waits in line for: only a waiter
 // that still holds its file, so one that died mid-wait never stops the
@@ -44,7 +43,6 @@ fn facts(lines: &[&str]) -> Facts {
             "deadline" => f.deadline = v.parse().unwrap(),
             "wait" => f.wait = Some(pair()),
             "await" => f.awaits.push(pair()),
-            "resets" => f.resets = Some(v.parse().unwrap()),
             _ => panic!("no such fact: {k}"),
         }
     }
@@ -84,6 +82,59 @@ fn none(lines: &[&str]) {
 
 fn none_more(more: &[&str]) {
     none(&BASE.iter().chain(more).copied().collect::<Vec<_>>());
+}
+
+/// Out of usage, no turn takes a slot till it resets (usage.rs): a turn in
+/// line is due a stall's time after that, not after it came, and says why.
+/// From 2026-11-01 to 11-04 every turn was refused, and each went to the
+/// stuck issue as an error of its own.
+#[test]
+fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let mut f = facts(
+        &BASE
+            .iter()
+            .chain(&["state queued"])
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    f.spent = Some(crate::usage::Spent {
+        until: 50_000,
+        said: "You've hit your monthly spend limit".into(),
+        job: "web-1".into(),
+        at: 900,
+        back: None,
+        told: 900,
+        last: Some(900),
+    });
+    let w = job_wait(&cfg, &f).unwrap();
+    assert_eq!((w.since, w.due), (1000.0, 57_200.0));
+    assert!(w.line);
+    assert!(
+        w.phase
+            .starts_with("turn 2 is waiting in line: Claude is out of usage until ")
+            && w.phase
+                .ends_with("(\"You've hit your monthly spend limit\")"),
+        "{}",
+        w.phase
+    );
+    // One that came after the reset's own stall is held to its own.
+    f.queued = 60_000;
+    assert_eq!(job_wait(&cfg, &f).unwrap().due, 67_200.0);
+    // Back sooner than its reset: a stall from then, and said so.
+    f.queued = 1000;
+    f.spent.as_mut().unwrap().back = Some(20_000);
+    let w = job_wait(&cfg, &f).unwrap();
+    assert_eq!(w.due, 27_200.0);
+    assert!(
+        w.phase
+            .starts_with("turn 2 is waiting in line for a slot, which usage was out for till "),
+        "{}",
+        w.phase
+    );
+    // Back after it: from the reset.
+    f.spent.as_mut().unwrap().back = Some(70_000);
+    assert_eq!(job_wait(&cfg, &f).unwrap().due, 57_200.0);
 }
 
 #[test]
@@ -165,18 +216,6 @@ fn waits() {
         w.due == 3120.0 && w.phase.contains("ended (error)")
     });
     case(&["state failed"], |w| w.due == 3120.0);
-    // Ended on a usage limit: past GRACE after proj-watch resumes it, which
-    // is what's kicked, and says when that is. Done, it has nothing to wait
-    // for (a reply started its next turn).
-    case(&["state error", "resets 1793822460"], |w| {
-        w.since == 3000.0
-            && w.due == 1793823060.0
-            && w.kick.as_deref() == Some("proj-watch")
-            && w.phase
-                == "turn 2 ended on a usage limit; proj-watch resumes it once that resets, at 2026-11-04 20:01 UTC"
-    });
-    none_more(&["state done", "resets 1793822460"]);
-    none_more(&["state error", "resets 1793822460", "stopped 1"]);
     // A question for a person, a finished job, and a turn that didn't have
     // to say (a sandbox's, or one from before turns said) aren't watched.
     none_more(&["state done", "end ask"]);

@@ -23,12 +23,9 @@
 # row at most (a reply's turn starting a new row, a stop ending it, one that
 # can't start tried again) while one that answered first has its answer
 # posted, that a job dir removed or a wait it can't read stops neither
-# proj-inbox nor _watch, that a repo proj-inbox forgets (its name now
+# proj-inbox nor _watch, and that a repo proj-inbox forgets (its name now
 # another repo's) has its open issues taken up as new jobs, once a pass
-# under way has ended, and that a job whose turn ended on a usage limit is
-# the stall watchdog's past its reset, and is resumed by proj-watch's look
-# once that's past, while an --owned one waits on nothing, proj resets
-# saying when its starter may try again.
+# under way has ended.
 #
 #   nix build .#checks.x86_64-linux.proj-github -L
 { self, pkgs }:
@@ -696,42 +693,6 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       assert "waiting on CI" in machine.succeed("cat /tmp/gh/posted")
       github("repos/o/c/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/c'")
-
-  with subtest("a job whose turn ended on a usage limit is resumed once it resets"):
-      machine.succeed("truncate -s 0 /tmp/kicks")
-      e = proj('run web "limit 3pm"')
-      machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x error", timeout=120)
-      target, since, due = machine.succeed(f"cat /data/dev/jobs/{e}/await").strip().split("\t")
-      since, due = int(since), int(due)
-      # A minute past the next 3pm UTC, and fifteen minutes after the turn
-      # ended at the soonest.
-      assert target == "usage-limit" and since + 900 <= due <= since + 24 * 3600 + 60, (target, since, due)
-      # Its end kicked proj-watch's whole look, which books the look that
-      # resumes it, and leaves it be till then.
-      machine.wait_until_succeeds("grep -x /kick/proj-watch /tmp/kicks", timeout=30)
-      proj("_watch")
-      wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
-      assert wake.get("") == due, wake
-      assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
-      w = waits()[e]
-      assert w["kick"] == "proj-watch" and w["due"] == due + 600 and "usage limit" in w["phase"], w
-      assert "proj resumes the job by itself" in proj(f"log {e}"), proj(f"log {e}")
-      assert int(proj(f"resets {e}")) == due, proj(f"resets {e}")
-      # Once it's due, a look resumes it, saying so.
-      machine.succeed(f"sed -i 's/\\t[0-9]*$/\\t1/' /data/dev/jobs/{e}/await")
-      proj("_watch")
-      machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
-      machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
-      prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
-      assert "the usage limit your last turn ended on" in prompt, prompt
-      assert proj(f"resets {e}").strip() == "", proj(f"resets {e}")
-      # An --owned job's starter acts on its end, trying again itself: it
-      # waits on nothing, and proj resets says when it may.
-      o = proj('run --owned --kick autoland/o/w web "limit 3pm"')
-      machine.wait_until_succeeds(f"su - dev -c 'proj state {o}' | grep -x error", timeout=120)
-      machine.fail(f"test -e /data/dev/jobs/{o}/await")
-      at = int(proj(f"resets {o}"))
-      assert at >= int(machine.succeed("date +%s")) + 800, at
 
   with subtest("a job with no turn count doesn't stop _watch looking at the rest"):
       machine.succeed("su - dev -c 'mkdir -p /data/dev/jobs/broken && printf \"o/r#6\\t0\\t{}\\n\" >/data/dev/jobs/broken/await'")

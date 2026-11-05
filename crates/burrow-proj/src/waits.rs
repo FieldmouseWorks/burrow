@@ -3,14 +3,14 @@
 //! running turn waits in line for.
 //!
 //! Watched: a turn waiting in line, for a slot or inside its run (its clock
-//! stands still meanwhile), for stallAfterMinutes; one running, until its
+//! stands still meanwhile), for stallAfterMinutes, and while the machine is
+//! out of usage, for that long after it resets; one running, until its
 //! deadline and GRACE (proj stops it before then); one that ended without
 //! saying what comes next even when asked again, at once, since nothing resumes
 //! it; one that ended in a failure, for RESUME_GRACE from its end, since
-//! proj-inbox resumes an issue's job seconds later when a reply waits, but
-//! one that ended on a usage limit for GRACE past when proj-watch resumes it
-//! ([`crate::limit`]); one awaiting GitHub, for awaitHours and GRACE
-//! (proj-watch resumes it by then, told nothing changed). Not watched:
+//! proj-inbox resumes an issue's job seconds later when a reply waits; one
+//! awaiting GitHub, for awaitHours and GRACE (proj-watch resumes it by then,
+//! told nothing changed). Not watched:
 //! a turn that asks a person (their reply resumes it) or is done, one proj
 //! stop ended, and any ended turn of an --owned job.
 
@@ -25,9 +25,8 @@ use serde_json::{Map, Value, json};
 
 use crate::config::Config;
 use crate::job::Job;
-use crate::limit;
 use crate::slot::successor;
-use crate::{GRACE, RESUME_GRACE, mtime, now, swap};
+use crate::{GRACE, RESUME_GRACE, mtime, now, swap, usage};
 
 /// What [`job_wait`] reads of a job's latest turn.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -59,9 +58,8 @@ pub struct Facts {
     pub wait: Option<(String, String)>,
     /// Each PR or issue it awaits, and since when, as its await has them.
     pub awaits: Vec<(String, String)>,
-    /// When proj-watch resumes it after the usage limit its turn ended on,
-    /// in seconds, as its await has it ([`crate::limit`]).
-    pub resets: Option<i64>,
+    /// The machine out of Claude usage, if it is (usage.rs).
+    pub spent: Option<usage::Spent>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -71,6 +69,21 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let turn = &f.turn;
     let mut kick = None;
     let (since, due, phase) = match f.state.as_str() {
+        // Out of usage, no turn takes a slot till it's back (usage.rs): each
+        // has stallAfterMinutes from then, its reset or the sooner end the
+        // record has, which stays a while after.
+        "queued" if let Some(spent) = &f.spent => (
+            f.queued,
+            (f.queued + stall).max(spent.release() + stall),
+            if spent.back.is_none() {
+                format!("turn {turn} is waiting in line: {}", usage::line(spent))
+            } else {
+                format!(
+                    "turn {turn} is waiting in line for a slot, which usage was out for till {}",
+                    usage::when(spent.release())
+                )
+            },
+        ),
         "queued" => (
             f.queued,
             f.queued + stall,
@@ -102,17 +115,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
             if f.stopped || f.owned {
                 return None;
             }
-            if let (false, Some(due)) = (state == "done", f.resets) {
-                kick = Some("proj-watch".to_owned());
-                (
-                    f.ended,
-                    due + GRACE,
-                    format!(
-                        "turn {turn} ended on a usage limit; proj-watch resumes it once that resets, at {}",
-                        limit::utc(due)
-                    ),
-                )
-            } else if state != "done" {
+            if state != "done" {
                 (
                     f.ended,
                     f.ended + RESUME_GRACE,
@@ -140,8 +143,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
                             .copied()
                             .reduce(|a, b| if b.1 < a.1 { b } else { a })?;
                         let targets: Vec<&str> = awaits.iter().map(|(t, _)| *t).collect();
-                        let repo = first.rsplit_once('#').map_or(first, |(r, _)| r);
-                        kick = Some(format!("proj-watch/{repo}"));
+                        kick = Some(crate::watch::kick_for(first));
                         let hours = cfg.await_hours;
                         (
                             at,
@@ -176,7 +178,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
 }
 
 /// Whole seconds, written as digits alone.
-pub fn seconds(s: &str) -> Option<i64> {
+fn seconds(s: &str) -> Option<i64> {
     (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
         .then(|| s.parse().ok())
         .flatten()
@@ -262,6 +264,21 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
             ids.join(" ")
         );
     }
+}
+
+/// [`rewatch`] for every job it watches: the machine's usage changed
+/// ([`usage`]), which moves the deadline of every turn in line.
+pub fn rewatch_all(cfg: &Config) {
+    let mut ids: Vec<String> = fs::read_dir(cfg.jobs.join(".waits"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// [`rewatch`] in the background, never waited for: the watchdog's lock, or

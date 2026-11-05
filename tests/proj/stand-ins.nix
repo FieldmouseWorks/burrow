@@ -22,6 +22,11 @@
   # ("hang") for good, resumed putting out an empty result first; told it
   # was cut off, it answers, or with /tmp/again hangs again. "eat" and
   # "bloat" name theirs too.
+  # "spent" is refused as Claude Code refuses a run once the plan's usage is
+  # spent, while /tmp/spent holds how many seconds on its limit resets (with
+  # /tmp/spent-stray, leaving work behind that ignores TERM); told
+  # it was refused, it keeps what it was told in /tmp/told-spent, and how it
+  # was run in /tmp/spent-args, and answers.
   # "scratch" makes a worktree of web, with a file in it, in its scratch and
   # says where that is in /tmp/scratch; "scratch ask" then asks.
   # As a job, it says what comes next before it answers (proj done; "ask"
@@ -41,7 +46,7 @@
       sleep 600
     }
     if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
-      case $prompt in silent*) ;; *) proj done >/dev/null ;; esac
+      case $prompt in silent*|spent*) ;; *) proj done >/dev/null ;; esac
     fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
@@ -83,6 +88,26 @@
         printf '%s' "$prompt" >/tmp/told
         echo '{"type":"result","session_id":"s","result":"told","is_error":false}'
         exit 0 ;;
+      spent*)
+        if [ -e /tmp/spent ]; then
+          init spent
+          # Work it started before the refusal, deaf to TERM and in a
+          # session of its own.
+          if [ -e /tmp/spent-stray ]; then
+            # shellcheck disable=SC2016
+            setsid bash -c 'trap "" TERM; exec -a proj-spent-stray sleep 600' </dev/null >/dev/null 2>&1 &
+          fi
+          resets=$(( $(date +%s) + $(cat /tmp/spent) ))
+          said="You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)"
+          ${pkgs.jq}/bin/jq -nc --arg s "$said" --argjson r "$resets" '{type: "assistant", session_id: "spent", error: "rate_limit", api_error: "usage_limit_reached", api_error_params: {rate_limit_info: {status: "rejected", resetsAt: $r, rateLimitType: "seven_day"}}, message: {content: [{type: "text", text: $s}]}}'
+          ${pkgs.jq}/bin/jq -nc --arg s "$said" '{type: "result", subtype: "success", session_id: "spent", is_error: true, api_error_status: 429, api_error: "usage_limit_reached", result: $s}'
+          exit 1
+        fi
+        proj done >/dev/null ;;
+      "Your last run was refused"*)
+        printf '%s' "$prompt" >/tmp/told-spent
+        echo "$args" >/tmp/spent-args
+        proj done >/dev/null ;;
       ask) proj ask >/dev/null ;;
       scratch*)
         echo "''${PROJ_SCRATCH-}" >/tmp/scratch
@@ -110,12 +135,6 @@
         exit 1 ;;
       # Fails as Claude does when the API refuses it: a result with no text.
       fail) echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'; exit 1 ;;
-      # Fails as Claude Code does at a usage limit, in its words for when it
-      # resets: "limit 3pm" resets at the next 3pm UTC.
-      limit*)
-        ${pkgs.jq}/bin/jq -nc --arg r "You've hit your session limit · resets ''${prompt#limit } (UTC)" \
-          '{type: "result", session_id: "s", result: $r, is_error: true}'
-        exit 1 ;;
       # An issue's task (proj-inbox) that takes a while to answer.
       *inbox-slow*) sleep 8 ;;
       # What it would act on GitHub as: its App's socket, git's settings and
@@ -123,6 +142,13 @@
       *showenv*) prompt="socket=''${GH_TOKEN_SOCKET-none} count=''${GIT_CONFIG_COUNT-none} token=''${GH_TOKEN-none}" ;;
     esac
     ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
+  '';
+  # HOST-notify, as far as its callers can tell: each call's words, a line
+  # each (its body's lines joined), in /tmp/notices; every notice got through
+  # (`pending` says none is).
+  notify = pkgs.writeShellScriptBin "notify" ''
+    [ "$1" != pending ] || exit 1
+    { printf '%s' "$*" | tr '\n' ' '; echo; } >>/tmp/notices
   '';
   # GitHub, as far as proj-watch and proj-inbox can tell: each endpoint's
   # answer is a file in /tmp/gh that the test writes. A file holding one JSON

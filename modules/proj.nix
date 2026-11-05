@@ -41,12 +41,12 @@ let
     inherit (config.burrow) flake;
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
+    notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     roles = "${config.users.users.${user}.home}/.config/proj/roles";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) label unstickLabel authors vm;
       host = config.networking.hostName;
-      notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
       wake = inboxWake;
       machinery = if machineApp == null then null else machineApp.name;
     } else null;
@@ -193,8 +193,8 @@ in
         command of its holding a file in its PROJ_WAIT_DIR: its timeout
         stands still meanwhile), before the stall watchdog, when it's on,
         takes it. A turn running past its timeout, one awaiting GitHub past
-        awaitHours, one waiting on a usage limit past its reset, or one that
-        ended without saying what comes next, it takes then.
+        awaitHours, or one that ended without saying what comes next, it
+        takes then.
       '';
     };
     awaitHours = lib.mkOption {
