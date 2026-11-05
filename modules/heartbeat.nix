@@ -31,6 +31,20 @@ let
     makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-heartbeat}/bin/burrow-heartbeat \
       $out/bin/${name} --add-flags ${heartbeatConfig}
   '';
+
+  # One site's watch: a success ping to its check while it answers, nothing
+  # when it doesn't (its silence is the alert). Neither a site down nor a
+  # lost ping fails the unit: a failed unit would only be noise in HOST-health.
+  siteWatch = slug: url: pkgs.writeShellScript "${name}-site-${slug}" ''
+    key=$(tr -d '[:space:]' <"$CREDENTIALS_DIRECTORY/ping-key")
+    if ! ${lib.getExe pkgs.curl} -fsS -o /dev/null --max-time 20 ${lib.escapeShellArg url} 2>/dev/null; then
+      echo ${lib.escapeShellArg "${slug}: ${url} didn't answer, so no ping"}
+    elif ${lib.getExe pkgs.curl} -fsS -o /dev/null --max-time 10 --retry 2 "${cfg.url}/$key/${slug}" 2>/dev/null; then
+      echo ${lib.escapeShellArg "${slug}: ${url} answers"}
+    else
+      echo ${lib.escapeShellArg "${slug}: ${url} answers, but the ping to ${slug} didn't land"} >&2
+    fi
+  '';
 in
 {
   imports = [
@@ -94,9 +108,24 @@ in
         down, and when the machine's own network is, the pings stop anyway.
       '';
     };
+
+    sites = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      example = { shop = "https://shop.example.org/health"; };
+      description = ''
+        Sites elsewhere this machine watches, by the slug of their own check
+        in the same Healthchecks project. Every `every` the site's URL is
+        fetched, and while it answers 2xx its check gets a success ping. When
+        it stops answering, the pings stop and Healthchecks alerts after the
+        check's period and grace, so a blip shorter than the grace wakes no
+        one. Make each check by hand, as for `check`. The pings also stop when
+        this machine is down, which its own check says too.
+      '';
+    };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [ {
     systemd.services.${name} = {
       description = "Tell the outside watcher how this machine is";
       after = [ "network-online.target" ];
@@ -126,5 +155,29 @@ in
         AccuracySec = "10s";
       };
     };
-  };
+  } {
+    systemd.services = lib.mapAttrs' (slug: url: lib.nameValuePair "${name}-site-${slug}" {
+      description = "Tell the outside watcher that ${url} answers";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = siteWatch slug url;
+        LoadCredential = "ping-key:${cfg.pingKeyFile}";
+      };
+    }) cfg.sites;
+    systemd.timers = lib.mapAttrs' (slug: _: lib.nameValuePair "${name}-site-${slug}" {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "1min";
+        OnUnitActiveSec = cfg.every;
+        AccuracySec = "10s";
+      };
+    }) cfg.sites;
+    burrow.claude.machineMd = lib.mkIf (cfg.sites != { }) (lib.mkOrder 1311 ''
+      ${name} also watches ${lib.concatStringsSep ", " (lib.mapAttrsToList (slug: url: "${url} (check ${slug})") cfg.sites)}:
+      while a site answers, its check gets a ping every ${cfg.every}, and
+      when it stops, Healthchecks tells ${config.burrow.owner}.
+    '');
+  } ]);
 }

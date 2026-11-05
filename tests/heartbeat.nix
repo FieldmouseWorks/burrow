@@ -6,6 +6,10 @@
 # a switch). The beats themselves, and the pings against a stand-in
 # Healthchecks, are crates/burrow-heartbeat's tests.
 #
+# A watched site's unit, too: a site that answers is pinged (and a ping that
+# doesn't land is said, without the key), one that doesn't isn't, and
+# neither fails the unit.
+#
 #   nix build .#checks.x86_64-linux.heartbeat -L
 { self, pkgs }:
 let
@@ -20,10 +24,15 @@ let
       burrow.tools.health = lib.mkForce health;
       # The discard port: nothing answers it.
       burrow.heartbeat.url = "http://127.0.0.1:9";
+      burrow.heartbeat.sites = {
+        up = "file://${pkgs.writeText "up" "ok"}";
+        down = "file:///nonexistent";
+      };
     }];
   };
   inherit (machine.config.burrow.heartbeat) check;
   beat = machine.config.systemd.services."${machine.config.burrow.prefix}-heartbeat".serviceConfig.ExecStart;
+  site = slug: machine.config.systemd.services."${machine.config.burrow.prefix}-heartbeat-site-${slug}".serviceConfig.ExecStart;
 in
 pkgs.runCommand "heartbeat-check" { } ''
   mkdir creds run
@@ -33,5 +42,11 @@ pkgs.runCommand "heartbeat-check" { } ''
   [ "$(cat said)" = "/ healthy: 2 checks pass" ] || { echo "the beat said: $(cat said)"; exit 1; }
   grep -q "^the ping to ${check} didn't land (" err || { echo "the lost ping went unsaid: $(cat err)"; exit 1; }
   ! grep -q KEY err || { echo "the key reached the journal: $(cat err)"; exit 1; }
+
+  ${site "up"} >said 2>err || { echo "a site's lost ping failed its unit: $(cat err)"; exit 1; }
+  grep -q "^up: .* answers, but the ping to up didn't land$" err || { echo "the up site's lost ping went unsaid: $(cat said) $(cat err)"; exit 1; }
+  ! grep -q KEY said err || { echo "the key reached the journal: $(cat said err)"; exit 1; }
+  ${site "down"} >said 2>err || { echo "a site that's down failed its unit: $(cat err)"; exit 1; }
+  [ "$(cat said)" = "down: file:///nonexistent didn't answer, so no ping" ] || { echo "the down site said: $(cat said) $(cat err)"; exit 1; }
   touch $out
 ''
