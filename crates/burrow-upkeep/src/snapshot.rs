@@ -136,38 +136,72 @@ pub fn take(cfg: &Config, state: &Path, repo: &str, look: &Look) -> Result<Meta,
     {
         return Ok(meta);
     }
-    let hide = Hide::new(&cfg.snapshot, repo)?;
     let more = [format!("+refs/heads/{base}:refs/base/{base}")];
     let m = mirror::fetch_pr(cfg, state, repo, look.number, head, &more)?;
     let base_ref = format!("refs/base/{base}");
     let mb = line(&git_in(&m).args(["merge-base", &base_ref, head]).run()?);
-    let changed = names(
-        &git_in(&m)
-            .args(["diff", "-z", "--name-only", "--no-renames", &mb, head])
-            .run()?,
-    );
-    let moved = moved(&m, &mb, head, &hide)?;
-    let unseen = |p: &[u8]| hide.hidden(p) || moved.contains(p);
+    let changed = Changed::read(&cfg.snapshot, repo, &m, &mb, head)?;
+    let unseen = |p: &[u8]| changed.unseen(p);
     let tip = commits(&m, name, &mb, head, &unseen)?;
     checkout(&m, name, &tip, &dst)?;
     let shown_paths: Vec<&[u8]> = changed
+        .paths
         .iter()
         .map(Vec::as_slice)
         .filter(|p| !unseen(p))
         .collect();
-    let (rules, house) = rules(&m, &base_ref, &shown_paths, &hide)?;
-    let secret = changed
-        .iter()
-        .filter(|p| unseen(p))
-        .map(|p| shown(p))
-        .collect();
+    let (rules, house) = rules(&m, &base_ref, &shown_paths, &changed.hide)?;
     let meta = Meta {
         rules,
         house,
-        secret,
+        secret: changed.secret(),
     };
     save(state, &kept, &meta)?;
     Ok(meta)
+}
+
+/// The paths a head changes since `mb`, and which of them the reviewers
+/// aren't shown: what the repo's patterns hide, and where a secret was
+/// renamed or copied to.
+pub struct Changed {
+    pub paths: Vec<Vec<u8>>,
+    pub hide: Hide,
+    moved: BTreeSet<Vec<u8>>,
+}
+
+impl Changed {
+    /// Read from the repo at `m`, with `repo`'s patterns.
+    pub fn read(
+        cfg: &config::Snapshot,
+        repo: &str,
+        m: &Path,
+        mb: &str,
+        head: &str,
+    ) -> Result<Changed, String> {
+        let hide = Hide::new(cfg, repo)?;
+        let paths = names(
+            &git_in(m)
+                .args(["diff", "-z", "--name-only", "--no-renames", mb, head])
+                .run()?,
+        );
+        let moved = moved(m, mb, head, &hide)?;
+        Ok(Changed { paths, hide, moved })
+    }
+
+    /// Whether the reviewers aren't shown `p`.
+    pub fn unseen(&self, p: &[u8]) -> bool {
+        self.hide.hidden(p) || self.moved.contains(p)
+    }
+
+    /// The changed paths the reviewers aren't shown, as text, which a judge
+    /// looks at before the PR lands.
+    pub fn secret(&self) -> Vec<String> {
+        self.paths
+            .iter()
+            .filter(|p| self.unseen(p))
+            .map(|p| shown(p))
+            .collect()
+    }
 }
 
 /// Where a secret was renamed or copied to: a secret still, so its new name

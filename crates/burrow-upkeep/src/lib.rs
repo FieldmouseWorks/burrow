@@ -5,8 +5,8 @@
 //! one's look at a PR queued (queue.rs) with its brief (brief.rs) on the
 //! snapshot it reads (snapshot.rs, from the steward's mirror of the repo,
 //! mirror.rs), their answers, posted on its PRs (post.rs) and read back
-//! as their verdicts (verdict.rs), a clean one carried to a head whose own
-//! change is the same (change.rs), and what they leave, swept once nothing
+//! as their verdicts (verdict.rs), carried to a head that only merged its
+//! base in (carry.rs), and what they leave, swept once nothing
 //! needs it (sweep.rs); and for its Claude jobs that settle a PR (claims.rs),
 //! their answers, posted only once the PR's head is their push (answer.rs). A
 //! pass of the steward's runs
@@ -22,7 +22,7 @@
 pub mod answer;
 pub mod branches;
 pub mod brief;
-pub mod change;
+pub mod carry;
 pub mod claims;
 pub mod config;
 pub mod dashboard;

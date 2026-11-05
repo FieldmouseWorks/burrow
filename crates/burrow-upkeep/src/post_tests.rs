@@ -39,7 +39,6 @@ fn of(reviewer: &str, name: &str, answer: Value) -> Look {
         answer,
         description: Some("4f2a".into()),
         now: "4f2a".into(),
-        change: Some("c0de".into()),
     }
 }
 
@@ -199,7 +198,7 @@ fn each_finding_goes_where_it_can_and_counts() {
     );
     // The review says so, lists the file-level ones in full (a thread
     // GitHub won't take loses nothing), and is marked once, with the
-    // description its reviewer was shown and the PR's own change it read.
+    // description its reviewer was shown.
     let body = review["body"].as_str().unwrap();
     assert!(body.starts_with("**Rival review** of aaaaaaa: 3 findings. Fix or answer each, then resolve its thread.\n\ns\n\n"), "{body}");
     assert!(body.contains("Findings on whole files (each a thread too):\n- `gone.txt`: **Rival · P2** t b\n- `nope.py`: **Rival · P1** t2 b2"), "{body}");
@@ -210,7 +209,7 @@ fn each_finding_goes_where_it_can_and_counts() {
     assert_eq!(body.matches("<!-- rival-review:v1").count(), 1);
     assert_eq!(
         said(body, "rival"),
-        json!({"commit_sha": HEAD, "base": "main", "findings": 3, "description": "4f2a", "change": "c0de"})
+        json!({"commit_sha": HEAD, "base": "main", "findings": 3, "description": "4f2a"})
     );
 }
 
@@ -399,12 +398,11 @@ fn a_base_and_head_go_in_the_compare_whole() {
     let mut l = of("codex", "Codex", json!({"findings": []}));
     l.base = "release/1.0#x".into();
     l.description = None;
-    l.change = None;
     assert_eq!(posted(&mut hub, &l), Ok(Posted::Clean));
     let body = sent(&hub)[0].1["body"].as_str().unwrap().to_string();
     assert_eq!(
         said(&body, "codex"),
-        json!({"commit_sha": HEAD, "base": "release/1.0#x", "findings": 0, "description": null, "change": null})
+        json!({"commit_sha": HEAD, "base": "release/1.0#x", "findings": 0, "description": null})
     );
 }
 

@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use crate::config::Config;
 
@@ -59,7 +59,27 @@ impl Git {
 
     /// What it printed, or why it failed: its first two arguments, and the
     /// start of what it said.
-    pub fn run(mut self) -> Result<Vec<u8>, String> {
+    pub fn run(self) -> Result<Vec<u8>, String> {
+        let (what, out) = self.output()?;
+        if out.status.success() {
+            return Ok(out.stdout);
+        }
+        Err(failed(&what, &out))
+    }
+
+    /// What it printed, None if it exited 1 (a merge that conflicts, say),
+    /// or why it failed otherwise.
+    pub fn run_or_1(self) -> Result<Option<Vec<u8>>, String> {
+        let (what, out) = self.output()?;
+        match out.status.code() {
+            Some(0) => Ok(Some(out.stdout)),
+            Some(1) => Ok(None),
+            _ => Err(failed(&what, &out)),
+        }
+    }
+
+    /// What it said of itself and how it exited, with what to call it.
+    fn output(mut self) -> Result<(String, Output), String> {
         let what = format!("git {}", self.said.join(" "));
         let stdin = if self.input.is_some() {
             Stdio::piped()
@@ -81,16 +101,18 @@ impl Git {
         let out = child
             .wait_with_output()
             .map_err(|e| format!("{what}: {e}"))?;
-        if out.status.success() {
-            return Ok(out.stdout);
-        }
-        let said: String = String::from_utf8_lossy(&out.stderr)
-            .trim()
-            .chars()
-            .take(300)
-            .collect();
-        Err(format!("{what}: {said}"))
+        Ok((what, out))
     }
+}
+
+/// Why git failed: what it was, and the start of what it said.
+fn failed(what: &str, out: &Output) -> String {
+    let said: String = String::from_utf8_lossy(&out.stderr)
+        .trim()
+        .chars()
+        .take(300)
+        .collect();
+    format!("{what}: {said}")
 }
 
 /// Where the repo's mirror is, in the steward's state.

@@ -57,7 +57,7 @@ PROOF_RUN = os.path.abspath(sys.argv[7])
 # its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
 # every fix job as it was and says nothing of any (unpushed.py runs the real
 # one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
-# which ask GitHub nothing, and its `change`, which reads the stand-in for
+# which ask GitHub nothing, and its `carry`, which reads the stand-in for
 # GitHub's git remote, on the config upkeep_config writes (UPKEEP_REAL).
 # Those it starts as they are, from sh: every pass's PRs read their verdicts,
 # and a Python's start for each would be most of the Python check's time.
@@ -77,7 +77,7 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict|change) shift; exec {shlex.quote(UPKEEP)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|sweep|verdict|carry) shift; exec {shlex.quote(UPKEEP)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
@@ -265,8 +265,7 @@ WROTE, JOBS, POSTED, FORGOT = [], [], [], []
 SINCE = []  # each job's place in line (C.job's since), in the order they started
 ROLES = []  # and the kind of work each is (C.job's role), which picks its model
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
-MARKED = []  # the PR's own change each posted review was marked with (its fingerprint)
-CHANGES = {}  # what V.change says of a head: its own change's fingerprint, None unless set
+CARRY = {}  # what V.carry says of a head: nothing carries unless set
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 COMMITTERS = {}  # a PR's commits' committer emails, by number, as the REST API gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
@@ -362,14 +361,13 @@ def queue(repo, pr, key, r):
             "description": C.fingerprint(pr["body"])})
 
 
-def post(repo, pr, r, answer, description, change):
+def post(repo, pr, r, answer, description):
     if STUB["post"]:
         raise STUB["post"]
     if not isinstance(answer, dict) or not isinstance(answer.get("findings"), list):
         raise ValueError("not a review")
     POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
     DESCRIBED.append(description)
-    MARKED.append(change)
     # Its review covers the PR's description if it was shown it (post.rs).
     return "findings" if answer["findings"] else "clean", description == C.fingerprint(pr["body"])
 
@@ -403,14 +401,14 @@ info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAll
 STEWARD = {"login": "steward", "__typename": "Bot"}
 
 
-def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", body="", change=None):
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", body=""):
     """A review the steward posted for reviewer r, with k findings, shown
-    the description `body`, marked with the PR's own change `change`; with
-    who, one a user of that login posted with the same marker."""
+    the description `body`; with who, one a user of that login posted with
+    the same marker."""
     author = STEWARD if who is None else {"login": who, "__typename": "User"}
     return {"author": author, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
             "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k,
-                                                          "description": C.fingerprint(body), "change": change}) + " -->"}
+                                                          "description": C.fingerprint(body)}) + " -->"}
 
 
 def judgment(v, n=6, sha=head, base="main", body="", on=None):
@@ -472,7 +470,6 @@ def run(pr, after, held=None):
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()
-    MARKED.clear()
     digest = []
     with C.acting_for("sam/r"):
         H.handle("sam/r", pr, info, digest, held)
@@ -518,7 +515,7 @@ def fresh_pr_state():
 
 
 REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
-        "onto": H.onto, "change": V.change}  # the steward's own, for the checks of what it runs
+        "onto": H.onto, "carry": V.carry}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
 ALREADY, TIP = {}, {"v": "f" * 40}
@@ -533,8 +530,9 @@ def onto(repo, pr):
 
 def stand_in():
     """gh, Claude jobs, the queue, the posting, what a merge would change
-    (every merge changes something unless ALREADY says) and a PR's own
-    change (none known unless CHANGES says), for handle() and the passes."""
+    (every merge changes something unless ALREADY says) and which earlier
+    heads' looks carry (none unless CARRY says), for handle() and the
+    passes."""
     H.onto = onto
     C.gh = gh_stub
     C.write = write
@@ -544,4 +542,4 @@ def stand_in():
     C.forget_issues = FORGOT.append
     V.queue = queue
     V.post = post
-    V.change = lambda repo, pr, st: CHANGES.get(pr["headRefOid"])
+    V.carry = lambda repo, pr, st, names: CARRY.get(pr["headRefOid"])
