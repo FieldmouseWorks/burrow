@@ -96,14 +96,24 @@ def bot_edited(repo, pr, st):
     job's fix) or that someone else committed (a Claude job's rebase keeps the
     author and makes itself the committer): code no reviewer has read, which
     Renovate won't merge either, since it counts both addresses of a commit.
+    Where that's unknown (provenance), it counts as not edited on a Renovate
+    branch, since Renovate checks for itself before it merges, and as edited
+    on a Dependabot one, which the steward merges."""
+    edited = provenance(repo, pr, st)
+    return (not pr["headRefName"].startswith("renovate/")) if edited is None else edited
+
+
+def provenance(repo, pr, st):
+    """True if a dependency bot's branch has a commit some other author,
+    co-author or committer made (bot_edited), False if every one is the bots'
+    alone, None if that's unknown: its commits couldn't be read, or a Renovate
+    branch on a machine with no Renovate address to check them against.
     Asked once per head, base and bots' addresses, since retargeting changes
     which commits are the PR's, and setting Renovate's address right changes
-    whose they are. A failed ask is asked again: on a Renovate branch it
-    counts as not edited meanwhile, since Renovate checks for itself before
-    it merges; on a Dependabot one, which the steward merges, as edited."""
+    whose they are. A failed ask is asked again."""
     renovate = pr["headRefName"].startswith("renovate/")
     if renovate and not CFG["renovateEmail"]:
-        return False
+        return None
     bots = {CFG["renovateEmail"], DEPENDABOT_EMAIL}
     # GITHUB_EMAIL marks a read that looked at committers too: one from before
     # that said nothing of them, so the same head is read again.
@@ -114,7 +124,7 @@ def bot_edited(repo, pr, st):
         pages = got and C.gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100",
                              check=False)
         if not pages:
-            return not renovate
+            return None
         st["edited"] = (any(a.get("email") not in bots for c in got["commits"] for a in c["authors"])
                         or any(c["commit"]["committer"]["email"] not in bots | {GITHUB_EMAIL}
                                for page in pages for c in page))
