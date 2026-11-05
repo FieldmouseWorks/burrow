@@ -4,9 +4,6 @@ NixOS modules for a machine you run by talking to Claude. Claude Code gets the
 whole box, with no permission prompts, because everything it can do is either
 undone automatically or is one of the few one-way doors that still asks.
 
-This sentence is deliberately wrong: it is the M4 undo exit check (Conary#173)
-and an undo will remove it.
-
 It's the generic half of a real box: one always-on "operator" Claude session
 you talk to from your phone, which changes the system itself and hands project
 work to Claude sessions inside each project.
