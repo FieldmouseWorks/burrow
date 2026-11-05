@@ -9,11 +9,13 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 
 import common as C
 import reviewers as V
 from common import CFG, DRY, load, log, save
+import claims
 from tasks import RED_BRANCH, red_default_task, red_fix
 
 # Each owner's own repos, not forks, a page at a time (what `gh repo list
@@ -182,7 +184,9 @@ def watch_default(r, info, prs, digest):
     built on it. With no merge queue (docs/repo-baseline.md), this is how
     two PRs that broke it together get undone: a Claude job finds the
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
-    lands like any other. Nothing more while that job works or a fix is
+    lands like any other; with the ledger on, a revert of one PR's merge is
+    instead the ledger's undo of that PR, which the job names and the
+    steward has it open (undo_red). Nothing more while that job works or a fix is
     open; a second job if it's still red after (seen on two passes), then
     the owner. A fix lands only while CI says the branch is red: while it
     says nothing yet (the branch moved on, a fix landed, say, and its CI is
@@ -197,7 +201,7 @@ def watch_default(r, info, prs, digest):
     st = load(key, {})
     red = st.get("red") or {}
     working = red.get("job") and C.job_state(red["job"]) in (None, "queued", "running")
-    fixes = [pr for pr in prs if red_fix(pr, default)]
+    fixes = [pr for pr in prs if red_fix(pr, default, red.get("undos", ()))]
     if state not in ("FAILURE", "ERROR", "SUCCESS"):
         # CI on the branch hasn't said (it's running, or has nothing on the
         # tip): it may have gone green since it was red. A fix waits for it,
@@ -224,9 +228,10 @@ def watch_default(r, info, prs, digest):
         unclosed = []
         for pr in fixes:
             log(f"{repo}: closing #{pr['number']}, {default} is green again without it")
+            which = (f"fix for {pr['headRefName'].removeprefix(RED_BRANCH)[:7]}" if pr["headRefName"].startswith(RED_BRANCH)
+                     else "undo")
             if C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
-                       f"{default} is green again at {sha[:7]}, so this fix for {pr['headRefName'].removeprefix(RED_BRANCH)[:7]} "
-                       "isn't needed.", check=False) is None:
+                       f"{default} is green again at {sha[:7]}, so this {which} isn't needed.", check=False) is None:
                 unclosed.append(pr)
         # One GitHub wouldn't close is still known by its branch, and tried
         # again soon.
@@ -238,7 +243,16 @@ def watch_default(r, info, prs, digest):
             save(key, st)
         return {pr["number"]: gone for pr in fixes}
     line = f"{repo} {default} at {sha[:7]}"
-    if working or fixes:
+    # Its job ended: an undo it named is the fix, asked for before anything
+    # else (and again, a few times, if cn stopped before it was done).
+    if not working and red.get("job") and CFG.get("undo") and not (red.get("asked") or red.get("refused")):
+        booked = undo_red(repo, red)
+        save(key, st)
+        if booked:
+            return {}
+    # Someone else's undo of what broke it (theirs) is the fix in hand too,
+    # while it's open, though nothing of this red's.
+    if working or fixes or any(pr["number"] in red.get("theirs", ()) for pr in prs):
         return {}
     # Its job ended with no PR to show. Seen on two passes: this one may
     # have read the PRs just before the job opened its own.
@@ -250,15 +264,119 @@ def watch_default(r, info, prs, digest):
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
         return {}
-    jid = C.job(repo, red_default_task(repo, default, sha), role="red-main")
+    jid = C.job(repo, red_default_task(repo, default, sha, red.get("refused")), role="red-main")
     if not jid:
         digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
         C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue
         return {}
     log(f"{repo}: {default} is red at {sha[:7]}; a Claude job {jid} fixes it")
-    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1}
+    # One told the ledger couldn't undo it isn't asked to: what it names
+    # isn't undone.
+    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, **({"refused": red["refused"]} if red.get("refused") else {})}
     save(key, st)
     return {}
+
+
+# How many times cn may stop partway through a red's undo (GitHub
+# unavailable or erring) before the red's next job is told it couldn't be.
+UNDO_TRIES = 3
+# The time now, not when the pass started (C.NOW): a pass can wait for its
+# lock and see to other repos first, and a retry's spacing is real time.
+clock = time.time
+UNDO_NAMED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})")
+
+
+def undo_asked(repo, jid):
+    """The PR a red's job named to undo, as REPO#N, from its answers file
+    (tasks.undo): None when it named none, or one that isn't the repo's
+    own PR, which it may not undo."""
+    try:
+        with open(claims.answers_file(jid)) as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return None
+    what = got.get("undo") if isinstance(got, dict) else None
+    m = UNDO_NAMED.fullmatch(what) if isinstance(what, str) else None
+    if m is None or m[1].lower() != repo.lower():
+        if what is not None:
+            log(f"{repo}: job {jid} named {str(what)[:100]!r} to undo, which isn't one of its PRs")
+        return None
+    return f"{repo}#{m[2]}"
+
+
+def undo_red(repo, red):
+    """The undo the red's ended job named, run by the ledger's writer cn
+    (CFG["undo"]). A PR it opened for this red, or opened and stopped
+    before recording, is kept in the red's undos, the red's fix from now on
+    (tasks.red_fix); one it found open already is only if it was this red's
+    already (a run that stopped before), and anyone else's (the door's,
+    say) is kept apart in theirs: it's that PR's undo in hand, so no other
+    job starts while it's open, but it's an ordinary PR, never held or
+    closed for this red. Whether this pass is to stop here, with a pass
+    booked: once there's a PR to see, or while cn may yet finish what it
+    stopped partway, a few times, no sooner than five minutes after the
+    last stop, whatever pass comes first. Otherwise it's asked: a job that
+    named nothing, an undo the ledger refused (cn's exit 65) or had nothing
+    to revert, or one that kept stopping, goes on as a job with no PR to
+    show, the next one told why."""
+    asked = undo_asked(repo, red["job"])
+    if asked is None:
+        red["asked"] = True
+        return False
+    if red.get("retryAt", 0) > clock():
+        C.wake(repo, red["retryAt"])  # ends: retryAt, UNDO_TRIES
+        return True
+    if DRY:
+        log(f"  would: cn undo {asked}")
+        return True
+    # The writer's own token, never the steward's: its PR is the machinery's.
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "CONARY_TOKEN_COMMAND")}
+    try:
+        p = subprocess.run([CFG["undo"], "undo", asked], env=env, capture_output=True, text=True, timeout=600)
+        rc, out, said = p.returncode, p.stdout, p.stderr.strip()[-300:]
+    except subprocess.TimeoutExpired as e:
+        # What it printed before then counts all the same: a PR it opened.
+        out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        rc, said = None, "it ran past ten minutes"
+    url = f"https://github.com/{repo}/pull/".lower()
+    ours, theirs, rows = set(red.get("undos", [])), set(red.get("theirs", [])), []
+    for row in out.splitlines():
+        try:
+            row = json.loads(row)
+        except ValueError:
+            continue
+        rows.append(row)
+        where = (row.get("url") or row.get("unrecorded")) if isinstance(row, dict) else None
+        if not (isinstance(where, str) and where.lower().startswith(url) and type(row.get("pr")) is int):
+            continue
+        if row.get("opened") is True or "unrecorded" in row or row["pr"] in ours:
+            ours.add(row["pr"])
+        else:
+            theirs.add(row["pr"])
+    red["undos"], red["theirs"] = sorted(ours), sorted(theirs - ours)
+    if rc == 0 and (ours or theirs):
+        log(f"{repo}: undid {asked} for its red default branch: #{', #'.join(map(str, red['undos'] + red['theirs']))}"
+            + (" (asked for already, by someone else)" if red["theirs"] else ""))
+        red["asked"] = True
+        C.wake(repo, C.NOW + 60)  # ends: its undo is a fix, which the next pass sees
+        return True
+    if rc in (0, 65):
+        red["asked"] = True
+        gone = any(isinstance(r, dict) and r.get("gone") for r in rows)
+        why = f"was refused: {said}" if rc else f"opened no undo of {repo}" + (": trunk lacks what it brought already" if gone else "")
+        red["refused"] = f"cn undo {asked} {why}"
+        log(f"{repo}: {red['refused']}")
+        return False
+    red["undoTries"] = red.get("undoTries", 0) + 1
+    log(f"{repo}: cn undo {asked} stopped ({said}), try {red['undoTries']} of {UNDO_TRIES}")
+    if red["undoTries"] < UNDO_TRIES:
+        # From when it stopped: a pass that comes sooner (any event) waits.
+        red["retryAt"] = clock() + 5 * 60
+        C.wake(repo, red["retryAt"])  # ends: UNDO_TRIES
+        return True
+    red["asked"] = True
+    red["refused"] = f"cn undo {asked} stopped {UNDO_TRIES} times, last: {said}"
+    return False
 
 
 def hooks(repos):
