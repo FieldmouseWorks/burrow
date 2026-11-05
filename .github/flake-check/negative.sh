@@ -442,11 +442,13 @@ negative() {
       one=$(GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" \
         git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
         commit-tree "$one" -p "$fork" -m "the tests of $HEAD_SHA on $fork's code, but one")
-      # Laid out as failed_there takes trees: this one, and the base.
+      # Laid out as failed_there takes trees: this one, and as the tree
+      # that has to evaluate beside it, the whole negative tree, where the
+      # check evaluated and passed (it may be one the base hasn't got).
       mkdir "$work/one/$j"
       git clone -q --shared --no-checkout . "$work/one/$j/negative"
       git -C "$work/one/$j/negative" checkout -q --detach "$one"
-      ln -s "$work/base" "$work/one/$j/base"
+      ln -s "$work/negative" "$work/one/$j/base"
       printf '%s\0' "$f" > "$work/one/$j.file"
       for k in "${undeclared[@]}"; do
         while [ "$(jobs -pr | wc -l)" -ge "$side" ]; do wait -n || true; done
