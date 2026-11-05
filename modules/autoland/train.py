@@ -36,7 +36,10 @@ HELD = {"red": "it was red alone in it, until a new head",
         # closed (step.py's mergeable), or left to its dependency bot.
         "empty": "it changes nothing after the PRs ahead of it, until they've landed or left",
         "refused": "{}, until the default branch moves or a new head",
-        "elsewhere": "it was just retargeted off the default branch, so it's seen to again"}
+        "elsewhere": "it was just retargeted off the default branch, so it's seen to again",
+        # Why its negative (the repo's trainNegative) doesn't count, as cn
+        # says it, its head's id cut short.
+        "unproven": "{}, until a run of it on this head counts"}
 # The PR's waiting label while it's in the train (labels.waiting.train,
 # prs.show_waiting), put on and taken off with its status. Renovate's
 # stopUpdatingLabel is the same label: a new head on a PR in a candidate
@@ -104,18 +107,23 @@ def seat(repo, n):
 
 def join(repo, pr, alone=False):
     """Put the PR in the train at its head. None once it's in, else why the
-    train holds it out (HELD's). Alone, it rides in a candidate of its own,
-    which lands only while the default branch is still its base: a PR
-    touching a one-way path (R2)."""
+    train holds it out (HELD's) and what cn said of it, if anything. Alone,
+    it rides in a candidate of its own, which lands only while the default
+    branch is still its base: a PR touching a one-way path (R2). In a repo
+    with a trainNegative, only once its negative on that head counts."""
     n, head = pr["number"], pr["headRefOid"]
+    negative = repo_cfg(repo)["trainNegative"]
     if DRY:
         log(f"  would: put {repo}#{n} in its train at {head[:7]}{' alone' * alone}")
     else:
-        got = cn("train", "join", repo, str(n), "--head", head, *["--alone"] * alone)
+        got = cn("train", "join", repo, str(n), "--head", head, *["--alone"] * alone,
+                 *(["--negative", negative] if negative else []))
+        if got.get("unproven"):
+            return "unproven", got["unproven"].replace(head, head[:7])
         if got.get("held"):
-            return got["held"]
+            return got["held"], None
         if got.get("targets"):
-            return "elsewhere"
+            return "elsewhere", None
         if got["joined"]:
             log(f"{repo}#{n}: joined its train at {head[:7]}")
     t = TRAINS.setdefault(repo, {"joined": [], "in_flight": None, "candidates": []})
@@ -142,7 +150,8 @@ def ride(repo, pr, st, alone, desc, settle, strike, said):
     if where is None:
         held = join(repo, pr, alone=alone)
         if held:
-            said = HELD.get(held, held).format(said or "GitHub refused its merge")
+            held, why = held
+            said = HELD.get(held, held).format(why or said or "GitHub refused its merge")
             settle("pending", f"Settled, but held out of the train: {said}", wait=waits.TRAIN)
             return
         st["joined"] = head

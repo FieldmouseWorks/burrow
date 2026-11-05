@@ -153,6 +153,21 @@ for held, checks, says in (("conflict", CI_GREEN, "it won't merge after the PRs 
     seen()
     status, _ = run(clean(checks=checks), 800)
     assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
+# With a negative asked for, it joins only with its negative's run on the
+# head counting, and held out the status says why not, as cn does.
+S.CFG["repos"]["sam/r"]["trainNegative"] = "check / negative"
+fresh_pr_state()
+seen(join={"joined": False, "unproven": f"check / negative hasn't finished on {head}"})
+waits.begin()
+status, _ = run(clean(), 700)
+assert cn_runs() == [SHOW, JOIN + ["--negative", "check / negative"]], cn_runs()
+says = f"held out of the train: check / negative hasn't finished on {head[:7]}, until a run of it on this head counts"
+assert "state=pending" in status and says in status and not merges(), status
+assert waits.NOTED["sam/r"]["sam/r#5"]["minutes"] == 240
+seen()
+status, _ = run(clean(), 800)
+assert cn_runs() == [SHOW, JOIN + ["--negative", "check / negative"]] and "In the train" in status, (cn_runs(), status)
+del S.CFG["repos"]["sam/r"]["trainNegative"]
 # Held out, it isn't labelled in the train: the new head that lets one red
 # alone back in is Renovate's to push, for one of its own.
 fresh_pr_state()
