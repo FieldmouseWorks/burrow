@@ -1,6 +1,6 @@
 [package]
 name = "burrow-heartbeat"
-description = "HOST-heartbeat: one beat to the Healthchecks check off the machine that alerts when the beats stop"
+description = "HOST-heartbeat: one beat to the Healthchecks check off the machine that alerts when the beats stop, and one watch of a site elsewhere to its own check"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -32,19 +32,17 @@ let
       $out/bin/${name} --add-flags ${heartbeatConfig}
   '';
 
-  # One site's watch: a success ping to its check while it answers, nothing
-  # when it doesn't (its silence is the alert). Neither a site down nor a
-  # lost ping fails the unit: a failed unit would only be noise in HOST-health.
-  siteWatch = slug: url: pkgs.writeShellScript "${name}-site-${slug}" ''
-    key=$(tr -d '[:space:]' <"$CREDENTIALS_DIRECTORY/ping-key")
-    if ! ${lib.getExe pkgs.curl} -fsS -o /dev/null --max-time 20 ${lib.escapeShellArg url} 2>/dev/null; then
-      echo ${lib.escapeShellArg "${slug}: ${url} didn't answer, so no ping"}
-    elif ${lib.getExe pkgs.curl} -fsS -o /dev/null --max-time 10 --retry 2 "${cfg.url}/$key/${slug}" 2>/dev/null; then
-      echo ${lib.escapeShellArg "${slug}: ${url} answers"}
-    else
-      echo ${lib.escapeShellArg "${slug}: ${url} answers, but the ping to ${slug} didn't land"} >&2
-    fi
-  '';
+  # One site's watch (crates/burrow-heartbeat's site.rs): a success ping to
+  # its check while it answers 2xx, nothing when it doesn't (its silence is
+  # the alert), sent as the beat's is.
+  siteWatch = slug: url: let
+    config = pkgs.writeText "${name}-site-${slug}.json" (builtins.toJSON {
+      name = "${name}-site-${slug}";
+      inherit (cfg) url;
+      check = slug;
+      site = url;
+    });
+  in "${lib.getExe' inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-heartbeat "burrow-heartbeat"} --site ${config}";
 in
 {
   imports = [
@@ -116,7 +114,8 @@ in
       description = ''
         Sites elsewhere this machine watches, by the slug of their own check
         in the same Healthchecks project. Every `every` the site's URL is
-        fetched, and while it answers 2xx its check gets a success ping. When
+        fetched, and while it answers 2xx (a redirect isn't followed, and isn't
+        an answer) its check gets a success ping, sent as the beat's is. When
         it stops answering, the pings stop and Healthchecks alerts after the
         check's period and grace, so a blip shorter than the grace wakes no
         one. Make each check by hand, as for `check`. The pings also stop when

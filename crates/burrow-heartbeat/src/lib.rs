@@ -23,6 +23,8 @@ use std::time::Duration;
 use burrow_health::State;
 use serde::Deserialize;
 
+pub mod site;
+
 /// What modules/heartbeat.nix builds in.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

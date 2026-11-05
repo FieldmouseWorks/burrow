@@ -6,9 +6,11 @@
 # a switch). The beats themselves, and the pings against a stand-in
 # Healthchecks, are crates/burrow-heartbeat's tests.
 #
-# A watched site's unit, too: a site that answers is pinged (and a ping that
-# doesn't land is said, without the key), one that doesn't isn't, and
-# neither fails the unit.
+# A watched site's unit, too, against a local web server: a site that
+# answers 2xx is pinged (and a ping that doesn't land is said, without the
+# key), a redirect or a site that doesn't answer isn't, and none fails the
+# unit. What counts as an answer, and the pings against a stand-in
+# Healthchecks, are crates/burrow-heartbeat's tests/site.rs.
 #
 #   nix build .#checks.x86_64-linux.heartbeat -L
 { self, pkgs }:
@@ -25,8 +27,10 @@ let
       # The discard port: nothing answers it.
       burrow.heartbeat.url = "http://127.0.0.1:9";
       burrow.heartbeat.sites = {
-        up = "file://${pkgs.writeText "up" "ok"}";
-        down = "file:///nonexistent";
+        up = "http://127.0.0.1:8000/health";
+        # busybox httpd sends a directory asked for without its slash on.
+        moved = "http://127.0.0.1:8000/dir";
+        down = "http://127.0.0.1:9/health";
       };
     }];
   };
@@ -43,10 +47,24 @@ pkgs.runCommand "heartbeat-check" { } ''
   grep -q "^the ping to ${check} didn't land (" err || { echo "the lost ping went unsaid: $(cat err)"; exit 1; }
   ! grep -q KEY err || { echo "the key reached the journal: $(cat err)"; exit 1; }
 
+  mkdir -p www/dir
+  echo ok >www/health
+  ${pkgs.busybox}/bin/httpd -f -p 127.0.0.1:8000 -h www &
+  httpd=$!
+  for _ in $(seq 50); do
+    ${lib.getExe pkgs.curl} -fs -o /dev/null http://127.0.0.1:8000/health && break
+    sleep 0.1
+  done
   ${site "up"} >said 2>err || { echo "a site's lost ping failed its unit: $(cat err)"; exit 1; }
-  grep -q "^up: .* answers, but the ping to up didn't land$" err || { echo "the up site's lost ping went unsaid: $(cat said) $(cat err)"; exit 1; }
+  [ "$(cat said)" = "up: http://127.0.0.1:8000/health answers HTTP 200" ] || { echo "the up site said: $(cat said) $(cat err)"; exit 1; }
+  grep -q "^up: the ping to up didn't land (" err || { echo "the up site's lost ping went unsaid: $(cat said) $(cat err)"; exit 1; }
   ! grep -q KEY said err || { echo "the key reached the journal: $(cat said err)"; exit 1; }
+  ${site "moved"} >said 2>err || { echo "a redirect failed its unit: $(cat err)"; exit 1; }
+  grep -q "^moved: http://127.0.0.1:8000/dir didn't answer 2xx (HTTP 30[0-9]), so no ping$" said || { echo "the moved site said: $(cat said) $(cat err)"; exit 1; }
+  [ ! -s err ] || { echo "the moved site pinged: $(cat err)"; exit 1; }
   ${site "down"} >said 2>err || { echo "a site that's down failed its unit: $(cat err)"; exit 1; }
-  [ "$(cat said)" = "down: file:///nonexistent didn't answer, so no ping" ] || { echo "the down site said: $(cat said) $(cat err)"; exit 1; }
+  grep -q "^down: http://127.0.0.1:9/health didn't answer 2xx (.*), so no ping$" said || { echo "the down site said: $(cat said) $(cat err)"; exit 1; }
+  [ ! -s err ] || { echo "the down site pinged: $(cat err)"; exit 1; }
+  kill $httpd
   touch $out
 ''

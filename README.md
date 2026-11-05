@@ -296,7 +296,7 @@ Each has an entry below, and each can be imported on its own.
   one has failed two beats running, and when the pings stop (down, hung, cut
   off) Healthchecks alerts you by email or push after the check's grace.
   Nothing on the box has to be alive for that. `sites` has it watch other
-  sites the same way: each answering URL pings a check of its own, and its
+  sites the same way: each URL answering 2xx pings a check of its own, and its
   silence is the alert.
 - **`usage-reset`** (`burrow.usageReset`): `burrow-usage-reset`: the Claude
   plan's banked weekly reset gets used, once, when the week is nearly gone
