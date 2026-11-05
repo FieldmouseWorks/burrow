@@ -128,6 +128,13 @@ impl Gate {
       case $a in /nix/store/*) {real_bin}/nix-store --check-validity "${{a%^*}}" || exit 1 ;; esac
     done
     [ -z "$BUILD_FAIL" ] || case "$*" in *"$BUILD_FAIL"*) exit 1 ;; esac
+    # Or when a derivation it's given, as nix's compact JSON, holds one of
+    # these.
+    for p in $BUILD_FAIL_TEXT; do
+      for a in "$@"; do
+        case $a in /nix/store/*.drv*) ! {real_nix} derivation show "${{a%^*}}" | jq -c . | grep -qF -- "$p" || exit 1 ;; esac
+      done
+    done
     exit 0 ;;
   flake) [ "$2" = check ] && {{
     echo "$*" >> "$NIX_LOG"
@@ -154,6 +161,8 @@ impl Gate {
       esac
     done
     [ -z "$what" ] || echo "eval $what" >> "$NIX_LOG"
+    # Killed, as a limit would, when it evaluates what this names.
+    [ -z "$EVAL_KILL" ] || case "$*" in *"$EVAL_KILL"*) exit 137 ;; esac
     # The checkout edited once the plan is made, if asked.
     [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO"
     # How many entries are being evaluated at once, each held a second, if

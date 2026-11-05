@@ -21,6 +21,9 @@ use super::{Gate, lines};
 use crate::expr::{V, value};
 use crate::harness::{read, repo_file, script, step, steps, text, workflow, write, yaml};
 
+/// t's derivation once its test wants 2, which fails it.
+const WANTS_2: &str = r#""want":"2\n""#;
+
 /// A repo with the flake on main, and a clone of it as the job's checkout.
 struct Repo {
     g: Gate,
@@ -81,10 +84,19 @@ impl Repo {
       # A path of the flake's own, as a source filter makes it: by its
       # contents, not the whole tree's.
       copy = path: builtins.path {{ inherit path; name = baseNameOf path; }};
+      # What the test wants, in t's derivation, so a case can fail its
+      # build by what it holds.
+      want = if builtins.pathExists ./tests/want.txt then builtins.readFile ./tests/want.txt else "nothing";
     in
     {{
       checks.${{system}} = {{
-        t = drv "t" [ (copy ./lib.txt) (copy ./tests) ];
+        t = derivation {{
+          name = "t";
+          inherit system want;
+          dep = drv "dep" [ ];
+          builder = "/bin/sh";
+          args = [ "-c" "echo ${{toString [ (copy ./lib.txt) (copy ./tests) ]}} > $out" ];
+        }};
         other = drv "other" [ (copy ./lib.txt) ];
         fromtests = import ./tests/check.nix {{ inherit drv; }};
       }};
@@ -144,8 +156,14 @@ impl Repo {
     }
 
     /// The job's paths step, then its negative step when the paths step
-    /// says the PR needs one, as the workflow runs them.
-    fn run(&self, head: &str, skip: &str, build_fail: &str) -> Ran {
+    /// says the PR needs one, as the workflow runs them, with builds of a
+    /// derivation whose text holds one of `fail` (space-separated) failing.
+    fn run(&self, head: &str, skip: &str, fail: &str) -> Ran {
+        self.run_with(head, skip, &[("BUILD_FAIL_TEXT", fail)])
+    }
+
+    /// The same, with more of the stand-ins' settings.
+    fn run_with(&self, head: &str, skip: &str, more: &[(&str, &str)]) -> Ran {
         let g = &self.g;
         for suffix in ["", ".links", ".slot", ".roots", ".overlap"] {
             let _ = fs::remove_file(g.s.join(&format!("nix.log{suffix}")));
@@ -159,7 +177,6 @@ impl Repo {
                 ("NIX_CONFIG".into(), g.nix_config.clone()),
                 ("XDG_CACHE_HOME".into(), path(&g.s.join("cache"))),
                 ("NIX_LOG".into(), path(&g.log())),
-                ("BUILD_FAIL".into(), build_fail.into()),
                 ("RUNNER_TEMP".into(), path(&temp)),
                 ("TOOLS".into(), path(&repo_file(".github/flake-check"))),
                 ("BASE".into(), "main".into()),
@@ -167,6 +184,9 @@ impl Repo {
                 ("SKIP".into(), skip.into()),
                 ("PATHS_ONLY".into(), paths_only.into()),
             ]
+            .into_iter()
+            .chain(more.iter().map(|(k, v)| ((*k).into(), (*v).into())))
+            .collect()
         };
         let run = |id: &str, paths_only: &str| {
             let env = env(paths_only);
@@ -281,15 +301,23 @@ fn a_test_that_catches_its_change_fails_on_the_old_code() {
         "real",
         &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
     );
-    let ran = r.run(&head, "", "-t.drv");
+    let ran = r.run(&head, "", WANTS_2);
     assert_eq!(ran.code, 0, "{}", ran.out);
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     assert_eq!(ran.list("tests"), ["tests/want.txt"]);
     assert_eq!(ran.list("checks"), ["t"]);
+    // Built, then again on its own, then what it's built from, then the
+    // base's: its own failure, on what the new tests change.
     let builds = ran.builds();
-    assert_eq!(builds.len(), 1, "{builds:?}");
+    assert_eq!(builds.len(), 4, "{builds:?}");
     assert!(
         builds[0].contains("-t.drv^*") && !builds[0].contains("-other.drv"),
+        "{builds:?}"
+    );
+    assert_eq!(builds[1], builds[0], "{builds:?}");
+    assert!(builds[2].contains("-dep.drv^out"), "{builds:?}");
+    assert!(
+        builds[3].contains("-t.drv^*") && builds[3] != builds[0],
         "{builds:?}"
     );
     // The negative tree: the base's code, the head's tests.
@@ -401,7 +429,7 @@ fn a_deleted_test_is_gone_from_the_negative_tree() {
             ("tests/new.txt", Some("2\n")),
         ],
     );
-    let ran = r.run(&head, "", "-t.drv");
+    let ran = r.run(&head, "", r#""want":"nothing""#);
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     let tree = ran.found.as_ref().unwrap()["tree"]
         .as_str()
@@ -550,4 +578,85 @@ fn what_it_found_is_attested_under_its_own_subject() {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A failure that isn't the new tests' own says nothing, so nothing's
+/// attested and the job fails: a check that fails on the base too, one
+/// whose dependencies didn't build, or one the base can't evaluate.
+#[test]
+fn a_failure_that_isnt_the_tests_own_cant_tell() {
+    let r = Repo::new();
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let both = r.run(&head, "", r#""name":"t""#);
+    let deps = r.run(&head, "", &format!(r#"{WANTS_2} "name":"dep""#));
+    for (ran, says) in [(both, "fails too"), (deps, "didn't build")] {
+        assert_eq!(ran.code, 1, "{says}: {}", ran.out);
+        assert!(ran.found.is_none(), "{says}: {}", ran.out);
+        assert!(ran.out.contains(says), "{says}: {}", ran.out);
+    }
+    // Broken on main: nothing to compare with.
+    let flake = read(&r.origin.join("flake.nix"));
+    let broken = flake.replace(
+        r#"other = drv "other" [ (copy ./lib.txt) ];"#,
+        r#"other = throw "broken on main";"#,
+    );
+    assert_ne!(broken, flake);
+    write(&r.origin.join("flake.nix"), &broken);
+    r.g.s.git(&r.origin, &["commit", "-qam", "break other"]);
+    let head = r.pr(
+        "on-broken",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let ran = r.run(&head, "", WANTS_2);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(
+        ran.out.contains("doesn't evaluate on the base"),
+        "{}",
+        ran.out
+    );
+}
+
+/// An evaluation a signal or a limit stopped didn't fail on the old code.
+#[test]
+fn a_killed_evaluation_cant_tell() {
+    let r = Repo::new();
+    let head = r.pr(
+        "killed",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let ran = r.run_with(&head, "", &[("EVAL_KILL", "/negative#.")]);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(ran.out.contains("ended with 137"), "{}", ran.out);
+}
+
+/// It evaluates side by side only as far as the job's memory goes, as the
+/// gate does: with a limit it can't read, one at a time.
+#[test]
+fn it_evaluates_within_the_jobs_memory() {
+    let r = Repo::new();
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let proc = r.g.s.mkdtemp();
+    write(&proc.join("cgroup"), "0::/job\n");
+    let ran = r.run_with(
+        &head,
+        "",
+        &[
+            ("BUILD_FAIL_TEXT", WANTS_2),
+            ("CGROUP_PROC", proc.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(ran.result(), "fail", "{}", ran.out);
+    assert!(
+        ran.out.contains("memory limit is unknown") && ran.out.contains("one evaluation at a time"),
+        "{}",
+        ran.out
+    );
 }

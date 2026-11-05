@@ -81,3 +81,111 @@ build_checks() {
   fi
   return $rc
 }
+# How many evaluations run side by side (in $side): one a core while
+# each has 2G of the memory free to this job. Uses $work for scratch.
+side_by_side() {
+  local free proc kind at top unknown max holds cache limit held inactive left room
+  # Free to this job: the machine's available memory, or less where
+  # its memory cgroup, or one above that, has a limit (a proj job's
+  # or a Claude server's MemoryMax, a container's): what the limit
+  # leaves, counting as free the inactive page cache the kernel
+  # gives back first. The cgroup is v1's memory controller's when
+  # the job has one, cgroup v2's otherwise, read through the mount
+  # of its hierarchy that shows the most cgroups above it, however
+  # it's mounted (with other v1 controllers, from a subtree). A
+  # limit that can't be read (no mount shows the cgroup, or a
+  # cgroup with a limit doesn't say what it holds) is unknown, so
+  # one evaluation at a time. CGROUP_PROC is where the job's
+  # cgroups and mounts are read from (/proc/self; a test's
+  # stand-in).
+  free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo) * 1024 ))
+  proc=${CGROUP_PROC:-/proc/self}
+  kind='' at='' top='' unknown=''
+  # The hierarchy, then the job's cgroup's directory and the
+  # mount's, a line each; or the hierarchy and "-" when no mount
+  # shows the cgroup. Mount points are unescaped (mountinfo writes
+  # a space \040, a tab \011); one that isn't stays unfound.
+  # No cgroup file at all is a kernel without cgroups; one that's
+  # there but can't be read (or its mounts) is an unknown limit.
+  if [ -e "$proc/cgroup" ]; then
+    if [ -f "$proc/cgroup" ] && [ -f "$proc/mountinfo" ] && awk '
+      function unescape(s) { gsub(/\\040/, " ", s); gsub(/\\011/, "\t", s); return s }
+      FILENAME == ARGV[1] {
+        controllers = $0; sub(/^[^:]*:/, "", controllers)
+        path = controllers; sub(/:.*/, "", controllers); sub(/^[^:]*:/, "", path)
+        if (("," controllers ",") ~ /,memory,/) { kind = "v1"; job = path }
+        else if (controllers == "" && kind == "") { kind = "v2"; job = path }
+        next
+      }
+      {
+        for (i = 7; i < NF && $i != "-"; i++) { }
+        if (kind == "v2" && $(i + 1) != "cgroup2") next
+        if (kind == "v1" && ($(i + 1) != "cgroup" || ("," $(i + 3) ",") !~ /,memory,/)) next
+        root = unescape($4)
+        if (root == "/") root = ""
+        if (job != root && index(job, root "/") != 1) next
+        if (found && length(root) >= length(best)) next
+        best = root; mount = unescape($5); found = 1
+      }
+      END {
+        if (kind == "") exit
+        print kind
+        if (!found) { print "-"; exit }
+        print mount substr(job, length(best) + 1)
+        print mount
+      }
+    ' "$proc/cgroup" "$proc/mountinfo" > "$work/memory-cgroup"; then
+      { IFS= read -r kind; IFS= read -r at; IFS= read -r top; } < "$work/memory-cgroup" || true
+    else
+      unknown="its cgroups couldn't be read"
+    fi
+  fi
+  case $kind in
+    v1) max=memory.limit_in_bytes holds=memory.usage_in_bytes cache=total_inactive_file ;;
+    v2) max=memory.max holds=memory.current cache=inactive_file ;;
+  esac
+  if [ -n "$kind" ] && [ -z "$unknown" ]; then
+    if [ "$at" = - ]; then
+      unknown="its memory cgroup ($kind) isn't mounted here"
+    elif [ ! -d "$at" ]; then
+      unknown="its memory cgroup ($kind) isn't at $at"
+    else
+      # The job's cgroup and each above it to the mount's, each
+      # limit (none past 2^62, v1's "none") less what it holds.
+      at=${at%/} top=${top%/}
+      # A cgroup without the limit's file has none (the root, or
+      # one whose parent doesn't hand it the controller); one
+      # whose file is there but doesn't read as a number or "max"
+      # has a limit nobody can read.
+      number() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
+      while [ -z "$unknown" ]; do
+        if [ -e "$at/$max" ]; then
+          limit=$(cat "$at/$max") || limit=''
+          if [ "$limit" = max ]; then
+            :
+          elif ! number "$limit"; then
+            unknown="$at/$max can't be read"
+          elif [ "$limit" -lt $(( 1 << 62 )) ]; then
+            if held=$(cat "$at/$holds") && inactive=$(awk -v k="$cache" '$1 == k { print $2; got = 1 } END { exit !got }' "$at/memory.stat") \
+                && number "$held" && number "$inactive"; then
+              left=$(( limit - held + inactive ))
+              [ "$left" -ge "$free" ] || free=$left
+            else
+              unknown="$at has a limit but doesn't say what it holds"
+            fi
+          fi
+        fi
+        [ -n "$at" ] && [ "$at" != "$top" ] || break
+        at=${at%/*}
+      done
+    fi
+  fi
+  if [ -n "$unknown" ]; then
+    echo "this job's memory limit is unknown ($unknown): one evaluation at a time"
+    free=0
+  fi
+  side=$(nproc)
+  room=$(( free / 2147483648 ))
+  [ "$room" -ge "$side" ] || side=$room
+  [ "$side" -ge 1 ] || side=1
+}

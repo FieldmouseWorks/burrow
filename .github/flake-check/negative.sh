@@ -36,13 +36,45 @@ found() {
     > "$RUNNER_TEMP/negative.json"
   echo "result=$result" >> "$GITHUB_OUTPUT"
 }
+# Whether an evaluation that failed with exit status $1 failed on what it
+# evaluated, where $2 is the evaluation, run as `$2 TREE ARGS...` with the
+# trees under $3 and $4.. its further arguments: nix's own failure (1), not
+# a signal or a limit's kill; again on a second try; and with the base's
+# evaluation still working. Says why not when it isn't.
+failed_there() {
+  local rc=$1 how=$2 trees=$3
+  shift 3
+  if [ "$rc" != 1 ]; then
+    echo "it ended with $rc, not an evaluation's failure, so it can't tell"
+    return 1
+  fi
+  if "$how" "$trees/negative" "$@" > /dev/null 2>&1; then
+    echo "it evaluated on a second try, so it can't tell"
+    return 1
+  fi
+  if ! "$how" "$trees/base" "$@" > /dev/null 2>&1; then
+    echo "the base no longer evaluates either, so it can't tell"
+    return 1
+  fi
+}
+# A derivation's inputs, each with the outputs it takes, one installable a
+# line: nix's JSON names them by store path or, in its version 4, by name
+# in the store, under `inputDrvs` or, in 4, `inputs.drvs`, and their outputs
+# as a list or, since, under `outputs`.
+inputs() {
+  nix derivation show "$1" | jq -r --arg store "${1%/*}" '(.derivations // .) | to_entries[0].value
+    | (.inputs.drvs // .inputDrvs // error("no inputs"))
+    | to_entries[] | (.value | if type == "array" then . else .outputs end) as $o
+    | select($o | length > 0)
+    | "\(if .key | contains("/") then .key else $store + "/" + .key end)^\($o | join(","))"'
+}
 negative() {
   work=$(mktemp -d "$RUNNER_TEMP/negative.XXXXXX")
   trap 'rm -rf -- "$work"' EXIT
   : > "$work/tests"
   : > "$work/checks"
   : > "$work/skipped"
-  local tip fork f meta mode oid status tree commit when side name q b n system at tree_at
+  local tip fork f meta mode oid status tree commit when side name q b n system at tree_at rc
   tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
   if ! fork=$(git merge-base "$tip" "$HEAD_SHA"); then
     echo "$HEAD_SHA shares no history with $BASE, so it has no base code to fail on"
@@ -104,28 +136,40 @@ negative() {
   system=$(nix config show system)
   [[ $system =~ ^[A-Za-z0-9_-]+$ ]] || { echo "can't evaluate for system $system"; return 1; }
   # Each check's derivation in each tree, a nix process each, as many side
-  # by side as there are cores while each has 2G of the memory available:
-  # its .drv path, or nothing where it doesn't evaluate.
+  # by side as the job's memory allows (build.sh): its .drv path, or
+  # nothing where it doesn't evaluate.
   names() { nix eval --no-update-lock-file --option eval-cache false --json "$1#." --apply "o: builtins.attrNames (o.checks.$system or { })"; }
-  names "$work/base" > "$work/base.names" || { echo "the base's checks don't evaluate"; return 1; }
-  if ! names "$work/negative" > "$work/negative.names"; then
+  names "$work/base" > "$work/base.names" || { echo "the base's checks don't evaluate, so there's nothing to compare with"; return 1; }
+  rc=0
+  names "$work/negative" > "$work/negative.names" 2> "$work/negative.names.err" || rc=$?
+  if [ "$rc" != 0 ]; then
+    cat "$work/negative.names.err"
+    if ! failed_there "$rc" names "$work"; then
+      return 1
+    fi
     echo "the checks don't evaluate with the new tests on the old code: they fail there"
     found fail "$tree"
     return 0
   fi
   jq -rs 'add | unique | .[]' "$work/base.names" "$work/negative.names" > "$work/names"
-  side=$(nproc)
-  room=$(( $(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo) * 1024 / 2147483648 ))
-  [ "$room" -ge "$side" ] || side=$room
-  [ "$side" -ge 1 ] || side=1
+  side_by_side
   # A check's derivation, by its name as a Nix string, in the tree at $1:
   # its .drv path in $3, made a GC root at once, until the build is done;
-  # nothing in $3 where it doesn't evaluate, and why in $3.err. One that
-  # isn't a valid derivation (or that a GC took in between) is an error.
+  # nothing in $3 where it doesn't evaluate, and why in $3.err and nix's
+  # exit status in $3.rc. One that isn't a valid derivation (or that a GC
+  # took in between) is an error.
+  drv_of() {
+    nix eval --no-update-lock-file --option eval-cache false --raw "$1#." \
+      --apply "o: o.checks.$system.$2.drvPath"
+  }
   evaluate() {
-    local drv
-    drv=$(nix eval --no-update-lock-file --option eval-cache false --raw "$1#." \
-      --apply "o: o.checks.$system.$2.drvPath" 2> "$3.err") || { : > "$3"; return 0; }
+    local drv rc=0
+    drv=$(drv_of "$1" "$2" 2> "$3.err") || rc=$?
+    echo "$rc" > "$3.rc"
+    if [ "$rc" != 0 ]; then
+      : > "$3"
+      return 0
+    fi
     # shellcheck disable=SC2016 # Nix's own strings
     nix-instantiate --add-root "$roots/${3##*/}" --argstr drv "$drv" \
       --expr '{ drv }: { type = "derivation"; name = "root"; outputName = "out"; drvPath = drv; }' > /dev/null
@@ -144,19 +188,28 @@ negative() {
       evaluate "$work/$tree_at" "$q" "$work/drvs/$i.$tree_at" &
     done
     echo "$name" > "$work/drvs/$i.name"
+    echo "$q" > "$work/drvs/$i.q"
   done < "$work/names"
   wait || true
   # A check that reads none of the PR's test files has the base's
   # derivation, which passed there. The rest are built, but those SKIP
-  # names; one that doesn't evaluate on the negative tree fails there.
-  local targets=() caught=0
+  # names. One the base has that doesn't evaluate there leaves nothing to
+  # compare with; one that doesn't evaluate on the negative tree, while it
+  # does on the base, fails there.
+  local targets=() bases=() caught=0
   for ((k = 1; k <= i; k++)); do
     name=$(cat "$work/drvs/$k.name")
+    q=$(cat "$work/drvs/$k.q")
     b=$(cat "$work/drvs/$k.base")
     n=$(cat "$work/drvs/$k.negative")
-    if [ -z "$n" ]; then
+    if [ -z "$b" ] && jq -e --arg n "$name" 'index([$n])' "$work/base.names" > /dev/null; then
+      echo "check $name doesn't evaluate on the base, so there's nothing to compare with:"
+      cat "$work/drvs/$k.base.err"
+      return 1
+    elif [ -z "$n" ]; then
       echo "check $name doesn't evaluate with the new tests on the old code:"
       cat "$work/drvs/$k.negative.err"
+      failed_there "$(cat "$work/drvs/$k.negative.rc")" drv_of "$work" "$q" || return 1
       printf '%s\0' "$name" >> "$work/checks"
       caught=1
     elif [ "$n" = "$b" ]; then
@@ -167,11 +220,37 @@ negative() {
     else
       echo "check $name reads the new tests: building it"
       printf '%s\0' "$name" >> "$work/checks"
-      targets+=("$n^*")
+      targets+=("$n")
+      bases+=("$b")
     fi
   done
-  if [ ${#targets[@]} -gt 0 ] && ! build_checks "" "${targets[@]}"; then
-    caught=1
+  # A check failed on the old code only when everything it's built from
+  # built, it failed again on its own, and the base's builds: its own
+  # builder failed, on what the new tests change. Anything else (a fetch,
+  # the daemon, a dependency, a check broken on the base too) can't say.
+  if [ ${#targets[@]} -gt 0 ] && ! build_checks "" "${targets[@]/%/^*}"; then
+    local unsure=0
+    for k in "${!targets[@]}"; do
+      if build_checks "" "${targets[$k]}^*" > /dev/null 2>&1; then
+        continue
+      fi
+      echo "${targets[$k]} failed: checking that it's its own failure"
+      if ! inputs "${targets[$k]}" > "$work/inputs"; then
+        echo "can't tell what ${targets[$k]} is built from"
+        unsure=1
+      elif [ -s "$work/inputs" ] && ! xargs -a "$work/inputs" -d '\n' nix build --no-link -L; then
+        echo "what ${targets[$k]} is built from didn't build, so it can't tell"
+        unsure=1
+      elif [ -n "${bases[$k]}" ] && ! build_checks "" "${bases[$k]}^*"; then
+        echo "${bases[$k]}, the same check on the base, fails too, so it can't tell"
+        unsure=1
+      else
+        caught=1
+      fi
+    done
+    if [ "$caught" = 0 ] && [ "$unsure" = 1 ]; then
+      return 1
+    fi
   fi
   if [ "$caught" = 1 ]; then
     echo "the new tests fail on the old code, as they should"
