@@ -193,20 +193,30 @@ for rc, out, said in ((65, [], "cn: no landed change for sam/u#12"),
     STATES.pop("job-2")
 
 # GitHub unavailable (75), or a stop partway (any other exit): asked again
-# in five minutes, keeping any PR it opened and stopped before recording,
-# which is a fix already; after UNDO_TRIES, the next job is told.
+# five minutes after it stopped, keeping any PR it opened and stopped
+# before recording, which is a fix already; after UNDO_TRIES, the next job
+# is told. A pass sooner than that (any event starts one) asks nothing and
+# uses up no try: it books the pass for then.
+kept_now = C.NOW
 start()
 STATES["job-1"] = "done"
 answer("job-1", {"undo": "sam/u#12"})
 writer(rc=1, out=[{"unrecorded": "https://github.com/sam/u/pull/40", "pr": 40}], err="cn: GitHub said 502")
 C.WAKE.clear()
 assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
-assert red()["undos"] == [40] and not red().get("asked") and C.WAKE.get("sam/u") == C.NOW + 300, (red(), C.WAKE)
-# Asked again with its PR open: cn finds and records it.
-writer(out=[ROW])
+assert red()["undos"] == [40] and not red().get("asked"), red()
+assert C.NOW + 300 <= C.WAKE.get("sam/u") == red()["retryAt"] < C.NOW + 310, (red(), C.WAKE)
+for _ in range(3):
+    C.WAKE.clear()
+    assert R.watch_default(repo, default("FAILURE"), [undo_pr()], mine) == {}
+    assert len(writer_runs()) == 1 and red()["undoTries"] == 1 and C.WAKE.get("sam/u") == red()["retryAt"], (red(), C.WAKE)
+# Asked again then, with its PR open: cn finds and records it.
+C.NOW = red()["retryAt"]
+writer(out=[dict(ROW, opened=False)])
 assert R.watch_default(repo, default("FAILURE"), [undo_pr()], mine) == {}
-assert len(writer_runs()) == 1 and red()["undos"] == [40] and red()["asked"], (writer_runs(), red())
+assert len(writer_runs()) == 1 and red()["undos"] == [40] and not red()["theirs"] and red()["asked"], (writer_runs(), red())
 assert len(JOBS) == 1, JOBS
+C.NOW = kept_now
 start()
 STATES["job-1"] = "done"
 answer("job-1", {"undo": "sam/u#12"})
@@ -214,10 +224,59 @@ writer(rc=75, err="cn: GitHub is unavailable")
 for n in range(1, R.UNDO_TRIES):
     assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
     assert red()["undoTries"] == n and not red().get("asked") and len(JOBS) == 1, (red(), JOBS)
+    C.NOW = red()["retryAt"]
 R.watch_default(repo, default("FAILURE"), [], mine)
 R.watch_default(repo, default("FAILURE"), [], mine)
 assert len(writer_runs()) == R.UNDO_TRIES, writer_runs()
 assert len(JOBS) == 2 and f"stopped {R.UNDO_TRIES} times" in JOBS[1] and "GitHub is unavailable" in JOBS[1], JOBS[1]
+C.NOW = kept_now
+
+# Run past its time, what it printed before then counts all the same.
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+kept_run = R.subprocess.run
+
+
+def timed_out(args, **kw):
+    raise R.subprocess.TimeoutExpired(args, 600, output=(json.dumps(ROW) + "\n").encode())
+
+
+R.subprocess.run = timed_out
+try:
+    assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
+finally:
+    R.subprocess.run = kept_run
+assert red()["undos"] == [40] and red()["undoTries"] == 1, red()
+assert R.watch_default(repo, default("PENDING"), [undo_pr()], mine) == {40: "Waiting for CI on main: it lands only while main is red"}
+
+# An undo cn found open that this red didn't ask for (the door's, say) is
+# that PR's undo in hand: no other job starts while it's open, but it's no
+# fix of this red's, never held or closed for it.
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+writer(out=[dict(ROW, opened=False)])
+R.watch_default(repo, default("FAILURE"), [], mine)
+assert red()["theirs"] == [40] and not red()["undos"] and red()["asked"], red()
+for _ in range(2):
+    assert R.watch_default(repo, default("FAILURE"), [undo_pr()], mine) == {}
+assert len(JOBS) == 1, JOBS
+assert R.watch_default(repo, default("PENDING"), [undo_pr()], mine) == {}
+WROTE.clear()
+for _ in range(2):  # the second look, as for any job's red
+    assert R.watch_default(repo, default("SUCCESS"), [undo_pr()], mine) == {}
+assert WROTE == [] and not red(), (WROTE, red())
+# Closed without landing, still red: the next job starts, and may name it
+# again, for an undo of its own.
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+writer(out=[dict(ROW, opened=False)])
+R.watch_default(repo, default("FAILURE"), [], mine)
+R.watch_default(repo, default("FAILURE"), [], mine)
+R.watch_default(repo, default("FAILURE"), [], mine)
+assert len(JOBS) == 2 and '{"undo": "sam/u#N"}' in JOBS[1], JOBS
 
 # A PR cn names in another repo isn't kept: only the red repo's are its fix.
 start()

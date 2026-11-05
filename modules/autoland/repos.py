@@ -250,7 +250,9 @@ def watch_default(r, info, prs, digest):
         save(key, st)
         if booked:
             return {}
-    if working or fixes:
+    # Someone else's undo of what broke it (theirs) is the fix in hand too,
+    # while it's open, though nothing of this red's.
+    if working or fixes or any(pr["number"] in red.get("theirs", ()) for pr in prs):
         return {}
     # Its job ended with no PR to show. Seen on two passes: this one may
     # have read the PRs just before the job opened its own.
@@ -301,30 +303,41 @@ def undo_asked(repo, jid):
 
 def undo_red(repo, red):
     """The undo the red's ended job named, run by the ledger's writer cn
-    (CFG["undo"]): its PR (one cn opened, found open, or opened and stopped
-    before recording) is kept in the red's undos, the red's fix from now on
-    (tasks.red_fix). Whether this pass is to stop here, with a pass booked:
-    once there's a PR to see, or while cn may yet finish what it stopped
-    partway, a few times. Otherwise it's asked: a job that named nothing,
-    an undo the ledger refused (cn's exit 65) or had nothing to revert, or
-    one that kept stopping, goes on as a job with no PR to show, the next
-    one told why."""
+    (CFG["undo"]). A PR it opened for this red, or opened and stopped
+    before recording, is kept in the red's undos, the red's fix from now on
+    (tasks.red_fix); one it found open already is only if it was this red's
+    already (a run that stopped before), and anyone else's (the door's,
+    say) is kept apart in theirs: it's that PR's undo in hand, so no other
+    job starts while it's open, but it's an ordinary PR, never held or
+    closed for this red. Whether this pass is to stop here, with a pass
+    booked: once there's a PR to see, or while cn may yet finish what it
+    stopped partway, a few times, no sooner than five minutes after the
+    last stop, whatever pass comes first. Otherwise it's asked: a job that
+    named nothing, an undo the ledger refused (cn's exit 65) or had nothing
+    to revert, or one that kept stopping, goes on as a job with no PR to
+    show, the next one told why."""
     asked = undo_asked(repo, red["job"])
     if asked is None:
         red["asked"] = True
         return False
+    if red.get("retryAt", 0) > C.NOW:
+        C.wake(repo, red["retryAt"])  # ends: retryAt, UNDO_TRIES
+        return True
     if DRY:
         log(f"  would: cn undo {asked}")
         return True
     # The writer's own token, never the steward's: its PR is the machinery's.
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "CONARY_TOKEN_COMMAND")}
+    started = time.monotonic()
     try:
         p = subprocess.run([CFG["undo"], "undo", asked], env=env, capture_output=True, text=True, timeout=600)
         rc, out, said = p.returncode, p.stdout, p.stderr.strip()[-300:]
-    except subprocess.TimeoutExpired:
-        rc, out, said = None, "", "it ran past ten minutes"
+    except subprocess.TimeoutExpired as e:
+        # What it printed before then counts all the same: a PR it opened.
+        out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        rc, said = None, "it ran past ten minutes"
     url = f"https://github.com/{repo}/pull/".lower()
-    opened, rows = [], []
+    ours, theirs, rows = set(red.get("undos", [])), set(red.get("theirs", [])), []
     for row in out.splitlines():
         try:
             row = json.loads(row)
@@ -332,11 +345,16 @@ def undo_red(repo, red):
             continue
         rows.append(row)
         where = (row.get("url") or row.get("unrecorded")) if isinstance(row, dict) else None
-        if isinstance(where, str) and where.lower().startswith(url) and type(row.get("pr")) is int:
-            opened.append(row["pr"])
-    red["undos"] = sorted({*red.get("undos", []), *opened})
-    if rc == 0 and opened:
-        log(f"{repo}: undid {asked} for its red default branch: #{', #'.join(map(str, opened))}")
+        if not (isinstance(where, str) and where.lower().startswith(url) and type(row.get("pr")) is int):
+            continue
+        if row.get("opened") is True or "unrecorded" in row or row["pr"] in ours:
+            ours.add(row["pr"])
+        else:
+            theirs.add(row["pr"])
+    red["undos"], red["theirs"] = sorted(ours), sorted(theirs - ours)
+    if rc == 0 and (ours or theirs):
+        log(f"{repo}: undid {asked} for its red default branch: #{', #'.join(map(str, red['undos'] + red['theirs']))}"
+            + (" (asked for already, by someone else)" if red["theirs"] else ""))
         red["asked"] = True
         C.wake(repo, C.NOW + 60)  # ends: its undo is a fix, which the next pass sees
         return True
@@ -350,7 +368,9 @@ def undo_red(repo, red):
     red["undoTries"] = red.get("undoTries", 0) + 1
     log(f"{repo}: cn undo {asked} stopped ({said}), try {red['undoTries']} of {UNDO_TRIES}")
     if red["undoTries"] < UNDO_TRIES:
-        C.wake(repo, C.NOW + 5 * 60)  # ends: UNDO_TRIES
+        # From when it stopped: a pass that comes sooner (any event) waits.
+        red["retryAt"] = C.NOW + (time.monotonic() - started) + 5 * 60
+        C.wake(repo, red["retryAt"])  # ends: UNDO_TRIES
         return True
     red["asked"] = True
     red["refused"] = f"cn undo {asked} stopped {UNDO_TRIES} times, last: {said}"
