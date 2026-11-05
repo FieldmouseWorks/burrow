@@ -28,8 +28,8 @@ claude.ai. It changes the machine through the machine's own flake checkout,
 and hands project work to Claude jobs inside each project (`proj`), or to a
 microVM when a task should be fenced off (`agents`). Work lands as pull
 requests: the steward (`autoland`) has Codex review each one, has Claude jobs
-fix every finding and red check, and merges once the exact head is reviewed
-clean and green. A merge to the machine's flake goes live through
+fix every finding and red check, and merges once the head's own change is
+reviewed clean and the head is green. A merge to the machine's flake goes live through
 `HOST-update`, behind the dead man's switch (`switch`) and a health check, and
 the same pipeline keeps the flake's inputs, Claude Code and every repo's
 dependencies current (`updates`). Work starts within seconds of a GitHub
@@ -169,8 +169,8 @@ Each has an entry below, and each can be imported on its own.
   Codex reviews each ready PR, Claude jobs settle every finding, red check and
   conflict with its base (what a job says it did goes up only once its push is
   the PR's head, and one whose PR someone else pushes to stands down), and
-  once Codex finds nothing on the exact head and CI is green it merges and
-  deletes the branch. A PR pushed again keeps its place: its reviews and
+  once Codex finds nothing in the head's own change and CI is green on the
+  head it merges and deletes the branch. A PR pushed again keeps its place: its reviews and
   Claude jobs wait in line by when it was opened, not when its latest head
   came. A repo can land through
   [Conary](https://github.com/FieldmouseWorks/Conary)'s merge train instead

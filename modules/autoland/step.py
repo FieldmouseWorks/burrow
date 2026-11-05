@@ -990,7 +990,7 @@ def handle(repo, pr, repo_info, digest, held=None):
                else f"it went past the review-round limit ({rounds} rounds with findings)",
                PAST_LIMIT if capped else REVIEWED)
     else:
-        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green{' (docs only)' * docs}")
+        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing in this commit's change, every thread is resolved, CI is green{' (docs only)' * docs}")
 
     open_a_day(our_status(pr)[1] or "unsettled")
     save(key, st)

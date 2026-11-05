@@ -109,10 +109,10 @@ worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
 real_post = V.post
 
 
-def post_but_newer(repo, pr, r, answer, description):
+def post_but_newer(repo, pr, r, answer, description, change):
     if pr["headRefOid"] == newer:
         raise RuntimeError("HTTP 502")
-    return real_post(repo, pr, r, answer, description)
+    return real_post(repo, pr, r, answer, description, change)
 
 
 V.post = post_but_newer

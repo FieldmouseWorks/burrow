@@ -6,7 +6,7 @@
 //! reviewer on one; `claims`, which sees to the steward's Claude jobs that
 //! settle a PR, posting each one's answers once its push is the PR's head;
 //! `fetch`, which fetches refs into the steward's mirror of a
-//! repo, and `sweep`, which deletes what the reviewers leave of its closed
+//! repo; `change`, which works out a PR's own change from it; and `sweep`, which deletes what the reviewers leave of its closed
 //! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
+use burrow_upkeep::change;
 use burrow_upkeep::claims;
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
@@ -87,6 +88,11 @@ const USAGE: &str = "usage:
       the head, the jobs to stop, what came of each one's answers (posted,
       wrong, unpushed, moved, refused or unanswered), when to look again and
       a rate limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG change OWNER/REPO --now SECONDS
+      the fingerprint of a PR's own change, its diff against its merge base
+      with its base, from the steward's mirror, with both fetched into it;
+      a JSON object on stdin gives the PR's number, the head and its base:
+      the fingerprint or why it couldn't be worked out, as JSON on stdout
   burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
       what the reviewers leave of the repo's PRs, deleted once nothing needs
       it, a JSON list on stdin giving the snapshots of its open PRs' heads:
@@ -208,7 +214,8 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "sweep",
+        "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "change",
+        "sweep",
     ]
     .contains(&word)
     {
@@ -230,6 +237,9 @@ fn run(args: &[String]) -> Result<(), Stop> {
     }
     if word == "fetch" {
         return fetched(config, repo, f.dry);
+    }
+    if word == "change" {
+        return changed(config, repo, f.dry);
     }
     if word == "sweep" {
         return swept(config, repo, f.dry);
@@ -371,7 +381,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the open PRs' snapshots, or the
+/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose change is worked out, the open PRs' snapshots, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
@@ -418,6 +428,34 @@ fn fetched(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
     let out = match got {
         Ok(m) => json!({"mirror": m, "why": null, "limited": null}),
         Err(why) => json!({"mirror": null, "why": why, "limited": null}),
+    };
+    println!("{out}");
+    Ok(())
+}
+
+/// What `change` is asked for: the PR, at its head on its base.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeOf {
+    number: u64,
+    head: String,
+    base: String,
+}
+
+/// `change`, which a status run never asks for: it fetches into the
+/// steward's mirror, as `fetch` does, and like it asks GitHub's API nothing.
+fn changed(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
+    if dry {
+        return Err(Stop::Usage(
+            "change has no status run: it writes the steward's mirror".into(),
+        ));
+    }
+    let ask: ChangeOf = stdin("the PR's head and base, as a JSON object on stdin")?;
+    let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+    let got = change::change(&cfg, &cfg.state_dir, repo, ask.number, &ask.head, &ask.base);
+    let out = match got {
+        Ok(c) => json!({"change": c, "why": null, "limited": null}),
+        Err(why) => json!({"change": null, "why": why, "limited": null}),
     };
     println!("{out}");
     Ok(())

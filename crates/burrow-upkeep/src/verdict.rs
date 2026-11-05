@@ -1,10 +1,17 @@
 //! What each of a PR's reviewers last said of its head, read back from the
 //! reviews the steward posted for them (post.rs). Each such review carries
 //! a mark of what it was a look at, `<!-- REVIEWER-review:v1 {...} -->`:
-//! the head and base the reviewer read, how many findings it had, and the
-//! description it was shown. The mark is written here (`mark`) and read
-//! here (`said`), and only the steward's own count, since anyone can write
-//! one. The pass hands over the PR's reviews as it read them
+//! the head and base the reviewer read, how many findings it had, the
+//! description it was shown, and the fingerprint of the PR's own change at
+//! that head (change.rs). The mark is written here (`mark`) and read here
+//! (`said`), and only the steward's own count, since anyone can write one.
+//!
+//! A clean look covers its own head, and any later head whose own change is
+//! the same, on the same base and description: a merge of the base that
+//! leaves the PR's lines alone adds nothing of the PR's that the reviewer
+//! didn't read (what the base brought had its own review, and CI tests the
+//! merged tree on every head). Findings never carry: their threads are
+//! answered on GitHub. The pass hands over the PR's reviews as it read them
 //! (review_step.py) and gets each reviewer's verdict back.
 
 use std::collections::BTreeMap;
@@ -24,6 +31,10 @@ pub struct Asked {
     pub base: String,
     /// The fingerprint of its description (common.py `fingerprint`).
     pub description: String,
+    /// The fingerprint of its own change at the head (change.rs), or None
+    /// when it couldn't be worked out: then only a look at this head covers
+    /// it.
+    pub change: Option<String>,
     /// The reviewers to say of, as their marks name them.
     pub reviewers: Vec<String>,
     /// Its reviews, as GraphQL gives them (prs.py).
@@ -88,17 +99,25 @@ pub fn named(r: &str) -> bool {
 }
 
 /// The mark on the reviewer's review of `head` on `base`: how many
-/// findings it had, and the fingerprint of the description it was shown,
-/// or None when that isn't known (the review then covers no description).
+/// findings it had, the fingerprint of the description it was shown, or
+/// None when that isn't known (the review then covers no description), and
+/// the fingerprint of the PR's own change at `head`, or None when that
+/// isn't known (the review then covers its own head alone).
 pub fn mark(
     reviewer: &str,
     head: &str,
     base: &str,
     findings: usize,
     description: Option<&str>,
+    change: Option<&str>,
 ) -> String {
-    let said =
-        json!({"commit_sha": head, "base": base, "findings": findings, "description": description});
+    let said = json!({
+        "commit_sha": head,
+        "base": base,
+        "findings": findings,
+        "description": description,
+        "change": change,
+    });
     format!("<!-- {reviewer}-review:v1 {said} -->")
 }
 
@@ -113,16 +132,24 @@ pub fn covers(shown: Option<&str>, now: &str) -> bool {
 
 /// What each reviewer last said of the PR as it is now, from the reviews
 /// `me` (the steward, as REST gives its login) posted: the newest of them
-/// marked for this head on this base, shown this description, and on this
-/// head. Retargeted, the PR is another change on the same head, so what
-/// was said on its old base doesn't count. Fails on a review whose time
-/// isn't one.
+/// that covers it, on this base and shown this description, each on the
+/// commit its mark names: one of this head, or a clean one of a head whose
+/// own change is this one's (`carries`). Retargeted, the PR is another
+/// change on the same head, so what was said on its old base doesn't count.
+/// Fails on a review whose time isn't one.
 pub fn said(me: &str, asked: &Asked) -> Result<BTreeMap<String, Said>, String> {
     asked
         .reviewers
         .iter()
         .map(|r| Ok((r.clone(), one(me, asked, r)?)))
         .collect()
+}
+
+/// Whether a clean look at a PR whose own change was `seen` (its
+/// fingerprint, None when its mark doesn't say) covers a head whose own
+/// change is `now` (None when that couldn't be worked out).
+pub fn carries(seen: Option<&str>, now: Option<&str>) -> bool {
+    seen.is_some() && seen == now
 }
 
 fn one(me: &str, asked: &Asked, reviewer: &str) -> Result<Said, String> {
@@ -157,10 +184,14 @@ fn one(me: &str, asked: &Asked, reviewer: &str) -> Result<Said, String> {
         } > 0;
         s.rounds += u64::from(found);
         let text = |k: &str| m.get(k).and_then(Value::as_str);
-        if text("commit_sha") == Some(&asked.head)
+        let of = text("commit_sha");
+        let on = x.commit.as_ref().map(|c| c.oid.as_str());
+        if of.is_some()
+            && of == on
+            && (of == Some(&asked.head)
+                || !found && carries(text("change"), asked.change.as_deref()))
             && text("base") == Some(&asked.base)
             && covers(text("description"), &asked.description)
-            && x.commit.as_ref().map(|c| c.oid.as_str()) == Some(&asked.head)
         {
             let at = match x.submitted_at.as_deref() {
                 None | Some("") => 0.0,

@@ -38,6 +38,10 @@ pub struct Look {
     /// The fingerprint of the PR's description now, which the review covers
     /// if it's the one it was shown (verdict.rs `covers`).
     pub now: String,
+    /// The fingerprint of the PR's own change at the head (change.rs), or
+    /// None when that isn't known: its review then covers that head alone
+    /// (verdict.rs `carries`).
+    pub change: Option<String>,
 }
 
 /// A review on the head: what its reviewer found, or that it found nothing.
@@ -309,6 +313,7 @@ pub fn post(p: &mut Pass, look: &Look) -> Result<Posted, Unposted> {
         &look.base,
         k,
         look.description.as_deref(),
+        look.change.as_deref(),
     );
     body.push_str(&format!("\n\n{said}"));
     let review = json!({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments});

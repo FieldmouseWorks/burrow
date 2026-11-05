@@ -131,8 +131,9 @@ For every reviewer, the steward's included. Flag as P1:
   skippable
 - a sandbox that reaches more than it's given: egress past the allowlist
   proxy, a GitHub token, or host paths beyond its clones
-- the steward merging what it shouldn't: a head other than the one its
-  reviewers and CI checked, a one-way path, or a PR with open threads
+- the steward merging what it shouldn't: a head whose own change its
+  reviewers didn't check, or a head CI didn't check, a one-way path, or a
+  PR with open threads
 - a review agent that reaches more than its snapshot: a GitHub token, a
   secrets path (`reviewers.skipPaths`), the PR's own copy of its review
   rules, or its own key in what gets posted

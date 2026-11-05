@@ -7,6 +7,8 @@ use super::*;
 
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OLD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+/// The fingerprint of the PR's own change at HEAD (change.rs).
+const CHANGE: &str = "c0de";
 /// The steward, as REST gives its login (Pass::me).
 const ME: &str = "steward[bot]";
 const T0: &str = "2026-10-24T00:00:00Z";
@@ -34,18 +36,20 @@ fn review(author: Value, mark: &str, on: &str, at: &str) -> Review {
 fn posted(reviewer: &str, k: usize, at: &str) -> Review {
     review(
         steward(),
-        &mark(reviewer, HEAD, "main", k, Some("4f2a")),
+        &mark(reviewer, HEAD, "main", k, Some("4f2a"), None),
         HEAD,
         at,
     )
 }
 
-/// The PR at HEAD on main, its description's fingerprint 4f2a.
+/// The PR at HEAD on main, its description's fingerprint 4f2a, its own
+/// change's CHANGE.
 fn asked(reviews: Vec<Review>) -> Asked {
     Asked {
         head: HEAD.into(),
         base: "main".into(),
         description: "4f2a".into(),
+        change: Some(CHANGE.into()),
         reviewers: vec!["rival".into(), "codex".into()],
         reviews,
     }
@@ -67,7 +71,7 @@ fn only_the_stewards_own_reviews_count() {
     // Anyone can write the mark: a user, even one whose login is the App's
     // name, which GraphQL gives the App's bot too, without "[bot]"; another
     // App; an account since deleted.
-    let clean = mark("rival", HEAD, "main", 0, Some("4f2a"));
+    let clean = mark("rival", HEAD, "main", 0, Some("4f2a"), None);
     let forged = review(
         json!({"login": "mallory", "__typename": "User"}),
         &clean,
@@ -108,7 +112,7 @@ fn a_verdict_is_on_this_head_on_this_base_shown_this_description() {
     // A review on another commit than the one its mark names, either way.
     let elsewhere = review(
         steward(),
-        &mark("rival", HEAD, "main", 0, Some("4f2a")),
+        &mark("rival", HEAD, "main", 0, Some("4f2a"), None),
         OLD,
         T0,
     );
@@ -118,7 +122,7 @@ fn a_verdict_is_on_this_head_on_this_base_shown_this_description() {
     );
     let misnamed = review(
         steward(),
-        &mark("rival", OLD, "main", 0, Some("4f2a")),
+        &mark("rival", OLD, "main", 0, Some("4f2a"), None),
         HEAD,
         T0,
     );
@@ -138,15 +142,104 @@ fn a_verdict_is_on_this_head_on_this_base_shown_this_description() {
         ..asked(vec![posted("rival", 2, T0)])
     };
     assert_eq!(of(&edited, "rival"), (Verdict::None, 0.0, 1));
-    let unsaid = review(steward(), &mark("rival", HEAD, "main", 2, None), HEAD, T0);
+    let unsaid = review(
+        steward(),
+        &mark("rival", HEAD, "main", 2, None, None),
+        HEAD,
+        T0,
+    );
     assert_eq!(of(&asked(vec![unsaid]), "rival"), (Verdict::None, 0.0, 1));
+}
+
+/// The steward's review for `reviewer` with `k` findings of OLD, an earlier
+/// head, on main, shown the description the PR has, the PR's own change
+/// there marked as `change`.
+fn of_old(reviewer: &str, k: usize, change: Option<&str>, at: &str) -> Review {
+    review(
+        steward(),
+        &mark(reviewer, OLD, "main", k, Some("4f2a"), change),
+        OLD,
+        at,
+    )
+}
+
+#[test]
+fn a_clean_look_carries_to_a_head_whose_own_change_is_the_same() {
+    // OLD was found clean; main merged in since left the PR's own change as
+    // it was: the look covers HEAD, at its own time.
+    let a = asked(vec![of_old("rival", 0, Some(CHANGE), T0)]);
+    assert_eq!(of(&a, "rival"), (Verdict::Clean, at(T0), 0));
+    assert_eq!(of(&a, "codex"), (Verdict::None, 0.0, 0));
+    // A merge whose resolution edited the PR's lines, or a commit since:
+    // another change, which nobody has looked at.
+    let other = Asked {
+        change: Some("beef".into()),
+        ..asked(vec![of_old("rival", 0, Some(CHANGE), T0)])
+    };
+    assert_eq!(of(&other, "rival"), (Verdict::None, 0.0, 0));
+    // HEAD's own change couldn't be worked out: only a look at it covers it.
+    let unknown = Asked {
+        change: None,
+        ..asked(vec![of_old("rival", 0, Some(CHANGE), T0)])
+    };
+    assert_eq!(of(&unknown, "rival"), (Verdict::None, 0.0, 0));
+    // A mark that doesn't say what change it read (every review posted
+    // before marks said) covers its own head alone.
+    let unmarked = asked(vec![of_old("rival", 0, None, T0)]);
+    assert_eq!(of(&unmarked, "rival"), (Verdict::None, 0.0, 0));
+    // Retargeted, or redescribed, as for a look at HEAD itself.
+    let retargeted = Asked {
+        base: "release".into(),
+        ..asked(vec![of_old("rival", 0, Some(CHANGE), T0)])
+    };
+    assert_eq!(of(&retargeted, "rival"), (Verdict::None, 0.0, 0));
+    let edited = Asked {
+        description: "9e1c".into(),
+        ..asked(vec![of_old("rival", 0, Some(CHANGE), T0)])
+    };
+    assert_eq!(of(&edited, "rival"), (Verdict::None, 0.0, 0));
+    // Findings never carry: their threads are answered on GitHub. They're
+    // still a round.
+    let found = asked(vec![of_old("rival", 2, Some(CHANGE), T0)]);
+    assert_eq!(of(&found, "rival"), (Verdict::None, 0.0, 1));
+    // A review on another commit than the one its mark names.
+    let elsewhere = review(
+        steward(),
+        &mark("rival", OLD, "main", 0, Some("4f2a"), Some(CHANGE)),
+        "cccccccccccccccccccccccccccccccccccccccc",
+        T0,
+    );
+    assert_eq!(
+        of(&asked(vec![elsewhere]), "rival"),
+        (Verdict::None, 0.0, 0)
+    );
+    // Only the steward's own count, carried or not.
+    let forged = review(
+        json!({"login": "mallory", "__typename": "User"}),
+        &mark("rival", OLD, "main", 0, Some("4f2a"), Some(CHANGE)),
+        OLD,
+        T0,
+    );
+    assert_eq!(of(&asked(vec![forged]), "rival"), (Verdict::None, 0.0, 0));
+    // The newest that covers HEAD decides: findings on HEAD since outweigh
+    // the clean look carried, and a clean look at HEAD since outweighs them.
+    let a = asked(vec![
+        of_old("rival", 0, Some(CHANGE), T0),
+        posted("rival", 1, T1),
+    ]);
+    assert_eq!(of(&a, "rival"), (Verdict::Findings, at(T1), 1));
+    let a = asked(vec![
+        posted("rival", 1, T0),
+        of_old("rival", 0, Some(CHANGE), T1),
+    ]);
+    assert_eq!(of(&a, "rival"), (Verdict::Clean, at(T1), 1));
 }
 
 #[test]
 fn the_newest_says_it_and_every_review_with_findings_is_a_round() {
     let earlier = review(
         steward(),
-        &mark("rival", OLD, "main", 3, Some("4f2a")),
+        &mark("rival", OLD, "main", 3, Some("4f2a"), None),
         OLD,
         T0,
     );
@@ -222,7 +315,7 @@ fn a_mark_that_isnt_one_is_no_review() {
     // A mark ends where its JSON does, whatever follows it on its line.
     let followed = format!(
         "{} then {{x}} -->",
-        mark("rival", HEAD, "main", 0, Some("4f2a"))
+        mark("rival", HEAD, "main", 0, Some("4f2a"), None)
     );
     assert_eq!(
         of(
@@ -234,7 +327,7 @@ fn a_mark_that_isnt_one_is_no_review() {
     // The first mark decides, and a mark is on one line.
     let first = format!(
         "<!-- rival-review:v1 {{oops}} -->\n{}",
-        mark("rival", HEAD, "main", 0, Some("4f2a"))
+        mark("rival", HEAD, "main", 0, Some("4f2a"), None)
     );
     assert_eq!(
         of(&asked(vec![review(steward(), &first, HEAD, T0)]), "rival"),
@@ -252,7 +345,7 @@ fn a_mark_that_isnt_one_is_no_review() {
     };
     assert_eq!(of(&a, "r.v"), (Verdict::None, 0.0, 0));
     // Another reviewer's mark, even one whose name ends with this one's.
-    let theirs = mark("arival", HEAD, "main", 0, Some("4f2a"));
+    let theirs = mark("arival", HEAD, "main", 0, Some("4f2a"), None);
     let a = Asked {
         reviewers: vec!["rival".into(), "arival".into()],
         ..asked(vec![review(steward(), &theirs, HEAD, T0)])
@@ -278,7 +371,7 @@ fn the_pr_is_read_as_graphql_gives_it_and_a_reviewer_is_a_plain_word() {
     let a: Asked = serde_json::from_value(json!({
         "head": HEAD, "base": "main", "description": "4f2a", "reviewers": ["rival"],
         "reviews": [
-            {"author": steward(), "state": "COMMENTED", "body": mark("rival", HEAD, "main", 1, Some("4f2a")),
+            {"author": steward(), "state": "COMMENTED", "body": mark("rival", HEAD, "main", 1, Some("4f2a"), None),
              "commit": {"oid": HEAD}, "submittedAt": T0},
             {"author": null, "state": "COMMENTED", "body": null, "commit": null, "submittedAt": null},
         ],

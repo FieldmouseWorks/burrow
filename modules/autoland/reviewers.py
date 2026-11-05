@@ -6,8 +6,9 @@ snapshot and writes the brief);
 the reviewers' service (crates/burrow-review) runs the agents as a user of
 their own, with no GitHub access and no secrets paths in what they read;
 the next pass posts what came back (`post`, burrow-upkeep's), as the
-steward's App and marked as that reviewer's, and reads each reviewer's
-verdict back from those posts (`verdicts`, burrow-upkeep's); and each pass
+steward's App and marked as that reviewer's and with the PR's own change
+(`change`, burrow-upkeep's), and reads each reviewer's verdict back from
+those posts (`verdicts`, burrow-upkeep's); and each pass
 sweeps away what no open PR needs any more (`sweep`, burrow-upkeep's)."""
 
 import fcntl
@@ -65,16 +66,17 @@ def finding(r):
     return f"<!-- {r}-finding -->"
 
 
-def verdicts(repo, pr, names):
+def verdicts(repo, pr, names, change):
     """What each of the reviewers `names` last said of the PR's head on its
     base, shown its description as it is now (clean, findings or none),
     when, and how many of its reviews on the PR had findings, by
     burrow-upkeep (crates/burrow-upkeep/src/verdict.rs): read back from the
-    reviews the steward posted, since anyone can write the mark. Asks
-    GitHub nothing; raises when it couldn't tell."""
+    reviews the steward posted, since anyone can write the mark. A clean one
+    of an earlier head whose own change was `change` (`change`'s) covers
+    this one. Asks GitHub nothing; raises when it couldn't tell."""
     out = C.upkeep("verdict", repo, as_app=False, input=json.dumps({
         "head": pr["headRefOid"], "base": pr["baseRefName"], "description": C.fingerprint(pr["body"]),
-        "reviewers": names, "reviews": pr["reviews"]["nodes"]}))
+        "change": change, "reviewers": names, "reviews": pr["reviews"]["nodes"]}))
     if out["said"] is None:
         raise RuntimeError(out["why"])
     return {r: (s["verdict"], s["at"], s["rounds"]) for r, s in out["said"].items()}
@@ -101,6 +103,26 @@ def fetch(repo, *refs, pr=None):
     if out["mirror"] is None:
         raise RuntimeError(out["why"])
     return out["mirror"]
+
+
+def change(repo, pr, st):
+    """The fingerprint of the PR's own change at its head on its base, by
+    burrow-upkeep (crates/burrow-upkeep/src/change.rs), from the steward's
+    mirror: worked out once a head, and kept in its state `st`. None when
+    it couldn't be (logged, and tried again next pass) or, in a status run,
+    before a pass has: then only a look at this head covers it."""
+    on = f"{pr['headRefOid']} {pr['baseRefName']}"
+    if (st.get("change") or {}).get("on") == on:
+        return st["change"]["fp"]
+    if DRY:
+        return None
+    out = C.upkeep("change", repo, bounded=False, input=json.dumps({
+        "number": pr["number"], "head": pr["headRefOid"], "base": pr["baseRefName"]}))
+    if out["change"] is None:
+        log(f"{repo}#{pr['number']}: couldn't work out its own change at {pr['headRefOid'][:7]}: {out['why'][:200]}")
+        return None
+    st["change"] = {"on": on, "fp": out["change"]}
+    return out["change"]
 
 
 def snap_name(key, head, base):
@@ -264,17 +286,19 @@ def sweep(repo, live):
 
 # ---------------------------------------------------------------- posting
 
-def post(repo, pr, r, answer, description):
+def post(repo, pr, r, answer, description, change):
     """The reviewer's answer as one review on the head, marked with the
-    description it was shown (its fingerprint, or None if that's unknown),
-    by burrow-upkeep (crates/burrow-upkeep/src/post.rs). Returns "clean" or
-    "findings", and whether the review covers the PR's description as it is
+    description it was shown (its fingerprint, or None if that's unknown)
+    and the PR's own change at that head (`change`'s, or None if that's
+    unknown: the review then covers that head alone), by burrow-upkeep
+    (crates/burrow-upkeep/src/post.rs). Returns "clean" or "findings", and
+    whether the review covers the PR's description as it is
     now (verdict.rs `covers`). Raises ValueError if the answer isn't a
     review, RuntimeError if GitHub didn't take it (the same answer can go
     next pass), and C.Unavailable if GitHub didn't answer."""
     out = C.upkeep("post", repo, input=json.dumps({
         "number": pr["number"], "head": pr["headRefOid"], "base": pr["baseRefName"], "reviewer": r, "name": NAMES[r],
-        "answer": answer, "description": description, "now": C.fingerprint(pr["body"])}))
+        "answer": answer, "description": description, "now": C.fingerprint(pr["body"]), "change": change}))
     if out["outcome"] in ("clean", "findings"):
         return out["outcome"], out["covers"]
     raise {"notAReview": ValueError, "refused": RuntimeError, "unanswered": C.Unavailable}[out["outcome"]](out["why"])

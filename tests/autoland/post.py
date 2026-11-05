@@ -53,6 +53,7 @@ head = "a" * 40
 pr = {"number": 7, "headRefOid": head, "baseRefName": "release/1.0", "title": "Add b", "url": "u", "reviews": {"nodes": []},
       "body": "Adds b.\n\nWhy not Rust: a throwaway script, deleted once it's run"}
 shown = C.fingerprint(pr["body"])  # the description the reviews were shown
+CHANGE = "c0de" * 16  # the PR's own change at the head they read (burrow-upkeep's `change`)
 answer = {"findings": [
     {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad"},
     {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"}], "summary": "s"}
@@ -60,7 +61,7 @@ answer = {"findings": [
 # head the reviewer read, of its base, named as the steward names it.
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", pr, "rival", answer, shown) == ("findings", True)
+    assert V.post("sam/r", pr, "rival", answer, shown, CHANGE) == ("findings", True)
 got = calls()
 assert [(m, p, t) for m, p, _, t in got] == [
     ("GET", f"repos/sam/r/compare/release%2F1.0...{head}", "ghs_app_sam"), ("POST", "repos/sam/r/pulls/7/reviews", "ghs_app_sam"),
@@ -76,7 +77,7 @@ assert V.finding("rival") in got[2][2]["body"] and "@​evil" in posted["comment
 pr["baseRefName"] = "main"
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", pr, "rival", answer, shown) == ("findings", True)
+    assert V.post("sam/r", pr, "rival", answer, shown, CHANGE) == ("findings", True)
 posted = calls()[1][2]
 assert '"findings":2' in posted["body"], posted["body"]
 mine = {"author": {"login": "steward", "__typename": "Bot"}, "body": posted["body"], "commit": {"oid": head},
@@ -87,10 +88,11 @@ namesake = dict(forged, author={"login": "steward", "__typename": "User"})
 pr["reviews"]["nodes"] = [mine, forged, namesake]
 
 
-def said(pr, names=("rival",)):
+def said(pr, names=("rival",), change=CHANGE):
     """burrow-upkeep's `verdict`, the real one, which asks GitHub nothing: a
-    pass reads it outside acting_for, with no token."""
-    return V.verdicts("sam/r", pr, list(names))
+    pass reads it outside acting_for, with no token, the PR's own change at
+    its head as `change`."""
+    return V.verdicts("sam/r", pr, list(names), change)
 
 
 assert said(pr, ["rival", "codex"]) == {"rival": ("findings", C.ts(mine["submittedAt"]), 1), "codex": ("none", 0, 0)}
@@ -112,12 +114,16 @@ assert said(edited)["rival"][0::2] == ("none", 1)
 assert said(dict(pr, body=pr["body"] + "  \n"))["rival"][0] == "findings"  # what it was shown, quoted, is the same
 unsaid = dict(mine, body=posted["body"].replace(f'"description":"{shown}"', '"description":null'))
 assert said(dict(pr, reviews={"nodes": [unsaid]}))["rival"][0::2] == ("none", 1)
+# It's marked with the PR's own change at the head it read: findings there
+# say nothing of another head, whatever its change.
+assert f'"change":"{CHANGE}"' in posted["body"], posted["body"]
+assert said(dict(pr, headRefOid="b" * 40))["rival"][0::2] == ("none", 1)
 # A review the pass posts itself isn't among the PR's reviews yet: it's a
 # verdict if it covers the description as it is now, which `post` says.
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", edited, "rival", answer, shown) == ("findings", False)
-    assert V.post("sam/r", pr, "rival", answer, None) == ("findings", False)
+    assert V.post("sam/r", edited, "rival", answer, shown, CHANGE) == ("findings", False)
+    assert V.post("sam/r", pr, "rival", answer, None, CHANGE) == ("findings", False)
 # A time that isn't one stops it, saying why. A reviewer's name goes into
 # the mark it's read by, so it's a plain word.
 try:
@@ -133,14 +139,20 @@ for name in ("Rival", "ri-val", ""):
         assert str(e) == "burrow-upkeep verdict exited 2", e
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == ("clean", True)
+    assert V.post("sam/r", pr, "codex", {"findings": []}, shown, CHANGE) == ("clean", True)
     assert "**Codex review** of aaaaaaa: nothing found." in calls()[1][2]["body"]
+    # A clean one covers a later head whose own change is the same (its
+    # base merged in, and nothing of its own touched), and no other.
+    moved = dict(pr, headRefOid="b" * 40, reviews={"nodes": [dict(mine, body=calls()[1][2]["body"])]})
+    assert said(moved, ["codex"])["codex"][0] == "clean"
+    assert said(moved, ["codex"], change="beef" * 16)["codex"][0] == "none"
+    assert said(moved, ["codex"], change=None)["codex"][0] == "none"
     # An answer without a list of findings is no review, never a clean
     # one, and nothing is asked of GitHub for it.
     github()
     for bad in ({"summary": "couldn't finish"}, ["not", "a", "dict"]):
         try:
-            V.post("sam/r", pr, "rival", bad, shown)
+            V.post("sam/r", pr, "rival", bad, shown, CHANGE)
             raise AssertionError(f"{bad} passed as a review")
         except ValueError as e:
             assert "not a review" in str(e), e
@@ -149,14 +161,14 @@ with C.acting_for("sam/r"):
     # next pass), and so is GitHub not answering, its rate limit noted.
     github(reviews=(422, {"message": "Validation Failed"}))
     try:
-        V.post("sam/r", pr, "rival", answer, shown)
+        V.post("sam/r", pr, "rival", answer, shown, CHANGE)
         raise AssertionError("a review GitHub didn't take passed")
     except RuntimeError as e:
         assert "didn't take" in str(e) and not isinstance(e, C.Unavailable), e
     github(compare=(403, {"message": "API rate limit exceeded for installation ID 1."}))
     C.LIMITED.clear()
     try:
-        V.post("sam/r", pr, "rival", answer, shown)
+        V.post("sam/r", pr, "rival", answer, shown, CHANGE)
         raise AssertionError("posted with GitHub unavailable")
     except C.Unavailable as e:
         assert "rate limit" in str(e), e

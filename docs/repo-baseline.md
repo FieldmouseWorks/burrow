@@ -130,7 +130,9 @@ root only.
    after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a
    PR whose body links the Claude session that opened it, since that session
    is fixing them itself.
-4. The reviewers look again, until none of them finds anything on the exact head.
+4. The reviewers look again, until none of them finds anything on the head, or
+   on an earlier one whose own change was the same: a merge of the base that
+   leaves the PR's lines alone isn't looked at again, while CI still runs on it.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
    branch is deleted. In a repo with its merge train on (`train`), it goes

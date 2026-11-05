@@ -49,7 +49,10 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         # in, say, is the owner's to do.
         if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
             digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
-    said = V.verdicts(repo, pr, names)  # verdict, when, rounds with findings
+    # The PR's own change at this head: a clean look at an earlier head with
+    # the same one covers this head too (a merge of its base, say).
+    change = V.change(repo, pr, st) if names else None
+    said = V.verdicts(repo, pr, names, change)  # verdict, when, rounds with findings
     found = []  # the reviewers whose findings on this head this pass posted
     late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
 
@@ -77,7 +80,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         if back and not DRY:
             if back["result"] == "review":
                 try:
-                    v, covers = V.post(repo, pr, r, back["answer"], back.get("description"))
+                    v, covers = V.post(repo, pr, r, back["answer"], back.get("description"), change)
                     _, _, rr = said[r]
                     said[r] = (v if covers else "none", C.NOW, rr + (v == "findings"))
                     if v == "findings":
@@ -170,7 +173,10 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
                     f"its look at {head[:7]} decides")
             elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
-                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"], back.get("description"))[0] == "findings":
+                    # Marked with no change: what this head's is says
+                    # nothing of that one's, so it covers its own alone.
+                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"], back.get("description"),
+                              None)[0] == "findings":
                         v, at, rr = said[r]
                         said[r] = (v, at, rr + 1)
                         late.append(back["head"][:7])
