@@ -76,27 +76,13 @@ pub fn supervise(threads: Vec<(String, JoinHandle<()>)>) -> String {
     }
 }
 
-/// OWNER/REPO as GitHub has them, and never one that reads as an option.
-pub fn repo_name(s: &str) -> bool {
-    let Some((owner, name)) = s.split_once('/') else {
-        return false;
-    };
-    let mut o = owner.chars();
-    let mut n = name.chars();
-    o.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && o.all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && n.next()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-        && n.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
-    use super::{repo_name, supervise};
+    use super::supervise;
 
     // The first thread to end is the one named, however it ends.
     #[test]
@@ -121,18 +107,5 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(10)).as_deref(),
             Ok("autoland")
         );
-    }
-
-    #[test]
-    fn repo_names() {
-        for good in ["sam/r", "Sam-2/my.repo_x", "a/.github", "a/_b-c"] {
-            assert!(repo_name(good), "{good}");
-        }
-        for bad in [
-            "--help", "--help/x", "sam", "sam/", "/r", "sam/r/x", "sam/-r", "-sam/r", "sa_m/r",
-            "sam/r\n", "sam /r", "",
-        ] {
-            assert!(!repo_name(bad), "{bad:?}");
-        }
     }
 }

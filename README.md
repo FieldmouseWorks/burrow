@@ -247,7 +247,9 @@ Each has an entry below, and each can be imported on its own.
   against the anchor. With `daemon`, conaryd serves the ledger's calls on
   `/run/conary/conaryd.sock`, read-only, as a user of its own, with no
   network, and every Claude of `burrow.user` gets them, and `why`, as the
-  `conary` MCP server.
+  `conary` MCP server. With `door`, an issue labelled `undo` in the probe's
+  repo asks for a `cn undo` with no Claude in between
+  ([front door](docs/front-door.md#undo-with-no-claude)).
 - **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
   (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
   permissions bypassed inside, egress only through an allowlist proxy, no

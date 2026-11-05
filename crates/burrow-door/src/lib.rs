@@ -145,15 +145,17 @@ impl Door<'_> {
         ))
     }
 
-    /// The comment, then the close, as `reason` (GitHub's `state_reason`:
-    /// `completed`, `not_planned`).
+    /// The comment, cut to what one holds ([`MAX_COMMENT`]), then the
+    /// close, as `reason` (GitHub's `state_reason`: `completed`,
+    /// `not_planned`). A comment longer than GitHub takes would be refused
+    /// on every pass, its issue answered never; cut, it's answered once.
     pub fn reply(&self, api: &mut dyn Api, n: u64, body: &str, reason: &str) -> Result<(), String> {
         let repo = self.repo;
         call(
             api,
             "POST",
             &format!("repos/{repo}/issues/{n}/comments"),
-            Some(&json!({ "body": body })),
+            Some(&json!({ "body": bounded(body) })),
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -208,6 +210,50 @@ pub fn asked(issue: &Value) -> Vec<String> {
     } else {
         body
     }
+}
+
+/// `text`'s first `max` characters, saying when there were more.
+/// The most a door's comment holds, in bytes, under GitHub's 65,536
+/// characters.
+pub const MAX_COMMENT: usize = 60_000;
+
+/// What a comment cut to [`MAX_COMMENT`] ends with.
+const CUT: &str = "\n\n(cut here, past what a comment holds)";
+
+/// `body`, at most [`MAX_COMMENT`] bytes, cut at a character's end. Only
+/// ever shorter, so what a cut leaves was scrubbed with the rest.
+pub fn bounded(body: &str) -> String {
+    if body.len() <= MAX_COMMENT {
+        return body.to_owned();
+    }
+    let mut at = MAX_COMMENT - CUT.len();
+    while !body.is_char_boundary(at) {
+        at -= 1;
+    }
+    format!("{}{CUT}", &body[..at])
+}
+
+pub fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!(
+            "{}... ({} more characters)",
+            &text[..at],
+            text[at..].chars().count()
+        ),
+        None => text.to_string(),
+    }
+}
+
+/// `text` in a code block whose fence no run of backticks in it can close.
+pub fn fenced(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}text\n{}\n{fence}", text.trim_end())
 }
 
 #[cfg(test)]

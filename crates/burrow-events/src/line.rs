@@ -108,7 +108,7 @@ impl Line {
     pub fn wakes(&self, booked: &Map<String, Value>) {
         let mut s = self.lock();
         for (key, at) in booked {
-            if !(key.is_empty() || crate::repo_name(key)) {
+            if !(key.is_empty() || burrow_github::repo_name(key)) {
                 continue;
             }
             let pass = Pass::key(key);

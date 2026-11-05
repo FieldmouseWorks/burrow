@@ -33,6 +33,9 @@ claude.ai project chat                   GitHub                  the box
 thread ── issue labelled `probe` ───▶ the machine's repo ──▶ burrow-probe (on its webhook)
        ◀── answers, then closed ────
 
+thread ── issue labelled `undo` ────▶ the machine's repo ──▶ burrow-ledger-door (on its webhook)
+       ◀── the undo's PR, then closed
+
 thread ── issue labelled `claude` ──▶ the project's repo ──▶ proj-inbox (on its webhook)
        ◀── answer as a comment ─────                     ──▶ proj run / proj reply
 
@@ -71,6 +74,32 @@ own, say), in seconds and without starting a Claude.
   nothing.
 - On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
   the machine says it.
+
+## Undo with no Claude
+
+`burrow.ledger.door` (crates/burrow-ledger-door) asks Conary's ledger for an
+undo on the same kind of issue: `undo`-labelled (`door.label`), in the
+probe's repo and from its authors unless set otherwise (`door.repo`,
+`door.authors`).
+
+- **Ask:** one line, in `cn undo`'s words: `undo OWNER/REPO#N` (the change
+  that PR is), `undo --actor SESSION_URL` (everything an agent session
+  landed, one PR per repo) or `undo --since TIME --repo OWNER/REPO`
+  (everything that landed there after an RFC 3339 time). Which repos it
+  reaches is the ledger's to say: cn refuses a change or a repo it keeps
+  nothing of.
+- **Answer:** `cn undo` runs as the ledger's writers do, as the machine's
+  App, and the comment links each undo's PR, with any change left out (its
+  revert conflicts with the rest: ask again) or already gone from trunk.
+  Then the issue is closed. GitHub being unavailable leaves it open for the
+  next pass. When cn refuses, nothing was undone and its words say why;
+  when it stops partway, the comment links what it found or opened before
+  then, a PR it hadn't recorded yet included, and asking again finds those
+  rather than open more.
+- **What keeps it safe:** the probe's door, whose text runs only when its
+  authors alone wrote it; no shell, and nothing of the issue's text reaches
+  `cn` but the words the grammar checked. The PR is a change like any other:
+  the steward settles it, and undoing an undo puts things back.
 
 ## Jobs: the inbox, nothing to approve
 

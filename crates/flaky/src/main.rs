@@ -107,9 +107,9 @@ fn go(args: &[String]) -> Result<i32, Usage> {
     }
 }
 
-/// OWNER/REPO, as GitHub allows them (quarantine::repo_name).
+/// OWNER/REPO, as GitHub allows them (burrow_github::repo_name).
 fn repo_arg(r: &str) -> Result<&str, Usage> {
-    if quarantine::repo_name(r) {
+    if burrow_github::repo_name(r) {
         Ok(r)
     } else {
         Err(Usage(format!("{r:?} isn't OWNER/REPO")))

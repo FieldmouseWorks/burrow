@@ -4,19 +4,16 @@
 //! probe ran, and is closed too. A repo GitHub doesn't say is private gets
 //! nothing: the answers are the machine's own business.
 
-use burrow_door::{Door, asked};
+use burrow_door::{Door, MAX_COMMENT, asked, clip, fenced};
 use burrow_github::{Api, call};
 use serde_json::Value;
 
 use crate::query::Query;
-use crate::scrub::{Scrubbed, scrub};
+use crate::scrub::scrub;
 use crate::{Config, MARK};
 
 /// The most questions one issue gets answered.
 pub const MAX_QUESTIONS: usize = 10;
-
-/// The most a comment holds, under GitHub's 65,536 characters.
-const MAX_COMMENT: usize = 60_000;
 
 /// The most of a question, or of why it isn't one, a comment echoes.
 const MAX_ECHO: usize = 200;
@@ -65,10 +62,7 @@ pub fn pass(
         };
         let author = vetted.is_ok();
         let (body, reason) = match vetted {
-            Ok(text) => (
-                bounded(scrub(&answers(cfg, &text, answer, now))),
-                "completed",
-            ),
+            Ok(text) => (scrub(&answers(cfg, &text, answer, now)), "completed"),
             Err(why) => (scrub(&format!("{MARK}\n{why}")), "not_planned"),
         };
         match door.reply(api, n, body.as_str(), reason) {
@@ -81,24 +75,6 @@ pub fn pass(
         Ok(done)
     } else {
         Err(format!("{repo}: {}", failed.join("; ")))
-    }
-}
-
-/// A comment cut to what one holds, whatever made it long: answers are fit
-/// to their share already, so this is for what nothing else bounds.
-fn bounded(body: Scrubbed) -> Scrubbed {
-    body.cut(MAX_COMMENT, "\n\n(cut here, past what a comment holds)")
-}
-
-/// `text`'s first `max` characters, saying when there were more.
-fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((at, _)) => format!(
-            "{}... ({} more characters)",
-            &text[..at],
-            text[at..].chars().count()
-        ),
-        None => text.to_string(),
     }
 }
 
@@ -149,18 +125,6 @@ fn answers(
         );
     }
     out
-}
-
-/// `text` in a code block whose fence no run of backticks in it can close.
-fn fenced(text: &str) -> String {
-    let mut longest = 0;
-    let mut run = 0;
-    for c in text.chars() {
-        run = if c == '`' { run + 1 } else { 0 };
-        longest = longest.max(run);
-    }
-    let fence = "`".repeat((longest + 1).max(3));
-    format!("{fence}text\n{}\n{fence}", text.trim_end())
 }
 
 /// `text` cut to `max` bytes, at a line's end: its last lines when `end`

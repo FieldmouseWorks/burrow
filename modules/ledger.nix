@@ -10,7 +10,9 @@
 # the ledger against the anchor. With `daemon`, conaryd serves the ledger's
 # calls on a socket for everything else on the machine: read-only, as a user
 # of its own, with no network and no git. Every Claude of burrow.user gets
-# them, and `why`, as the `conary` MCP server (conary-mcp).
+# them, and `why`, as the `conary` MCP server (conary-mcp). With `door`, an
+# `undo` issue in a repo (the probe's, by default) asks the ledger for an
+# undo with no Claude in between (crates/burrow-ledger-door).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -29,22 +31,45 @@ let
   passDir = "${config.burrow.stateDir}/ledger";
   wake = "${passDir}/wake.json";
 
+  # How a writer of the ledger asks GitHub, and what it tells cn: the
+  # passes' and the door's alike.
+  writer = (if machineApp == null then ''
+    # The user's own gh login reads GitHub and writes the anchor, notes and
+    # undo PRs.
+    GH_TOKEN=$(gh auth token)
+    export GH_TOKEN
+  '' else ''
+    # The machine's own App reads GitHub and writes the anchor, notes and
+    # undo PRs: each repo's token from its owner's installation, asked for
+    # each repo.
+    # shellcheck source=/dev/null
+    . ${machineApp.envFile}
+    export CONARY_TOKEN_COMMAND=${lib.escapeShellArg "${config.burrow.tools.gh-token}/bin/gh-token get"}
+  '') + ''
+    # What cn is told about the ledger (env, below).
+    ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") cfg.env)}
+  '';
+
+  # cn, as a writer of the ledger: the door's.
+  writerCn = pkgs.writeShellApplication {
+    name = "burrow-ledger-cn";
+    runtimeInputs = [ cfg.package cfg.gh ];
+    text = writer + ''
+      exec cn "$@"
+    '';
+  };
+
+  # What crates/burrow-ledger-door reads (its Config).
+  doorConfig = pkgs.writeText "burrow-ledger-door.json" (builtins.toJSON {
+    inherit (cfg.door) repo label authors;
+    host = config.networking.hostName;
+    cn = lib.getExe writerCn;
+  });
+
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
     runtimeInputs = [ cfg.package cfg.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
-    text = (if machineApp == null then ''
-      # The user's own gh login reads GitHub and writes the anchor and notes.
-      GH_TOKEN=$(gh auth token)
-      export GH_TOKEN
-    '' else ''
-      # The machine's own App reads GitHub and writes the anchor and notes:
-      # each repo's token from its owner's installation, asked for each repo.
-      # shellcheck source=/dev/null
-      . ${machineApp.envFile}
-      export CONARY_TOKEN_COMMAND=${lib.escapeShellArg "${config.burrow.tools.gh-token}/bin/gh-token get"}
-    '') + ''
-      # What cn is told about the ledger (env, below).
-      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") cfg.env)}
+    text = writer + ''
       wake=${lib.escapeShellArg wake}
       # Sets the ledger up, until set-up has finished: its last step keeps
       # the anchor's copy beside the log. Run on a ledger that's set up, it
@@ -229,6 +254,33 @@ in
       '';
     };
 
+    door = {
+      enable = lib.mkEnableOption ''
+        the undo door: an issue labelled `label` in `repo`, from one of
+        `authors`, asks for one `cn undo` (a PR, a session, or since a time),
+        which runs as the ledger's writers do and answers with the undo's PR,
+        with no Claude in between. The PR is the steward's to settle like any
+        other, and an undo can itself be undone
+      '';
+      repo = mkOption {
+        type = types.nullOr (types.strMatching "[^/]+/[^/]+");
+        default = config.burrow.probe.repo or null;
+        defaultText = lib.literalExpression "config.burrow.probe.repo";
+        description = "OWNER/NAME of the repo whose issues ask for undos: the probe's, by default.";
+      };
+      label = mkOption {
+        type = types.str;
+        default = "undo";
+        description = "The label that makes an issue an undo request.";
+      };
+      authors = mkOption {
+        type = types.listOf types.str;
+        default = config.burrow.probe.authors or [ ];
+        defaultText = lib.literalExpression "config.burrow.probe.authors";
+        description = "Who may ask for an undo (GitHub logins): the probe's, by default.";
+      };
+    };
+
     trainContext = mkOption {
       type = types.str;
       readOnly = true;
@@ -246,6 +298,12 @@ in
     assertions = [{
       assertion = cfg.reviewers != [ ];
       message = "burrow.ledger.reviewers: name the steward's App (its SLUG[bot]), or no merge could be told from a bypass.";
+    } {
+      assertion = cfg.door.enable -> cfg.door.authors != [ ];
+      message = "burrow.ledger.door.authors: name who may ask for an undo.";
+    } {
+      assertion = cfg.door.enable -> cfg.door.repo != null;
+      message = "burrow.ledger.door.repo: name the repo whose issues ask for undos.";
     }];
 
     # `cn` for everyone, on this ledger.
@@ -270,6 +328,22 @@ in
       ownStatuses = cfg.ownContexts ++ [ cfg.trainContext ];
       inherit wake;
     };
+    # Only the door repo's issue events: a comment asks nothing (reopen to
+    # ask again), and a pass reads every open request anyway.
+    burrow.events.handlers.ledger-door = lib.mkIf cfg.door.enable {
+      events = [ "issues" ];
+      unit = "burrow-ledger-door";
+      perRepo = false;
+      repos = [ cfg.door.repo ];
+      gap = 2;
+    };
+    burrow.claude.machineMd = lib.mkIf cfg.door.enable (lib.mkOrder 703 ''
+      An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
+      `${cfg.door.label}` (as ${lib.concatStringsSep " or " cfg.door.authors}), its body one line:
+      `undo OWNER/REPO#N`, `undo --actor SESSION_URL` or
+      `undo --since RFC3339_TIME --repo OWNER/REPO`. The undo's PR comes back as
+      a comment, and the steward settles it like any other.
+    '');
     # conary-mcp answers `why` in the session's own checkout, and asks
     # conaryd for the rest. Its own default socket is the user's runtime dir.
     burrow.claude.mcpServers.conary = lib.mkIf cfg.daemon {
@@ -300,6 +374,24 @@ in
         Nice = 10;
       };
     }) // {
+      burrow-ledger-door = lib.mkIf cfg.door.enable {
+        description = "ledger: answer the undo issues in ${cfg.door.repo}";
+        # A switch leaves a running pass be (see burrow.switch's check); the
+        # next one is the new system's.
+        restartIfChanged = false;
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+        path = [ cfg.gh ];
+        environment.GH_NO_UPDATE_NOTIFIER = "1";
+        serviceConfig = {
+          Type = "oneshot";
+          # burrow.user, whose key signs the ledger's ops; cn takes the
+          # ledger's lock, so it queues behind a pass.
+          User = user;
+          ExecStart = "${lib.getExe inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-ledger-door} ${doorConfig}";
+          TimeoutStartSec = "30min";
+        };
+      };
       conaryd = lib.mkIf cfg.daemon {
         description = "ledger: serve Conary's ledger on ${socket}";
         wantedBy = [ "multi-user.target" ];
