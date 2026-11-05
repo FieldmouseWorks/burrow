@@ -169,6 +169,9 @@ let
       cn = "${ledger.package}/bin/cn";
       inherit (ledger) env;
     } else null;
+    # The ledger's writer `cn`, which undoes the merge that turned a default
+    # branch red when its job names it (autoland/repos.py's undo_red).
+    undo = if ledger.enable then lib.getExe ledger.writer else null;
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
     kick = stewardKick;

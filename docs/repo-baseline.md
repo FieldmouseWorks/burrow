@@ -177,6 +177,14 @@ root only.
    (it moved on, a fix landed, say, or the tip has no checks), or the tip
    has moved since the pass read it, a fix waits, and green again (fixed
    some other way, or a flake) the fixes are closed once the job has ended.
+   With the ledger on (burrow.ledger), a revert of one PR's merge is that
+   PR's undo instead: the job names the PR in its answers file and opens
+   nothing, and once it has ended the steward has the ledger's writer `cn
+   undo` it, as the door does. That undo's PR (`conary/undo/...`, the
+   machinery's) is the red's fix from then on, waiting and closed like the
+   rest; an undo anyone else asked for isn't one. If the ledger refuses it,
+   finds nothing to revert, or keeps stopping partway, the next job is
+   told why and writes the fix itself.
 9. A PR whose merge would change nothing on its base (its head merged into
    the base's tip has the tip's own tree: another PR made the same change)
    is closed, saying so, instead of landing as an empty commit. A dependency

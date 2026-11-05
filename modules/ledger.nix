@@ -50,7 +50,7 @@ let
     ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") cfg.env)}
   '';
 
-  # cn, as a writer of the ledger: the door's.
+  # cn, as a writer of the ledger: the door's, and the steward's undos (writer).
   writerCn = pkgs.writeShellApplication {
     name = "burrow-ledger-cn";
     runtimeInputs = [ cfg.package cfg.gh ];
@@ -63,7 +63,7 @@ let
   doorConfig = pkgs.writeText "burrow-ledger-door.json" (builtins.toJSON {
     inherit (cfg.door) repo label authors;
     host = config.networking.hostName;
-    cn = lib.getExe writerCn;
+    cn = lib.getExe cfg.writer;
   });
 
   sync = pkgs.writeShellApplication {
@@ -279,6 +279,20 @@ in
         defaultText = lib.literalExpression "config.burrow.probe.authors";
         description = "Who may ask for an undo (GitHub logins): the probe's, by default.";
       };
+    };
+
+    writer = mkOption {
+      type = types.package;
+      readOnly = true;
+      default = writerCn;
+      defaultText = lib.literalMD "`cn` as the ledger's writers run it";
+      description = ''
+        `cn` as a writer of the ledger (burrow-ledger-cn): as the machine's
+        App where there is one, else the user's gh login, told about the
+        ledger as `env` says. The undo door runs its undos with it, and so
+        does the steward a red default branch's (autoland/repos.py), so an
+        undo's PR is the machinery's, like the fixes its jobs open.
+      '';
     };
 
     trainContext = mkOption {

@@ -32,7 +32,7 @@ import waits
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
-from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task, red_fix
+from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
@@ -474,7 +474,7 @@ def handle(repo, pr, repo_info, digest, held=None):
             already_landed(tip)
             return False
         default = repo_info["defaultBranchRef"]["name"]
-        if tip and red_fix(pr, default) and tip != ((repo_info["defaultBranchRef"].get("target") or {}).get("oid")):
+        if tip and red_fix(pr, default, red_undos(repo)) and tip != ((repo_info["defaultBranchRef"].get("target") or {}).get("oid")):
             settle("pending", f"Waiting for CI on {default}: it lands only while {default} is red, and it's moved on"[:140])
             return False
         return True
