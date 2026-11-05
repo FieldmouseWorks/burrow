@@ -158,6 +158,7 @@ let
       train = false;
       trainSize = 8;
       trainRequire = [ ];
+      trainNegative = null;
       trainStallAfter = cfg.trainStallAfterMinutes;
     };
     # The merge train's status, which a repo's baseline requires while its
@@ -764,7 +765,13 @@ in
         isn't directPush, and has no proofJobs, proofBuilds or proofRuns yet), trainSize (the
         most PRs a candidate holds, 8), trainRequire (checks the train's CI
         waits for even before they report, when more than one workflow
-        runs there), trainStallAfter (minutes, trainStallAfterMinutes). Any
+        runs there), trainNegative (the check run of the repo's CI that runs
+        a PR's new tests on its base's code, burrow's shared CI's `negative`
+        under its caller's job, such as "check / negative": a PR joins the
+        train only once that run's attested result on the head it joins at
+        is that the tests failed there, or that it adds none to code;
+        Conary's `cn train join --negative`. Unset, none is asked for),
+        trainStallAfter (minutes, trainStallAfterMinutes). Any
         other setting is refused, a typo or a newer burrow's alike, rather
         than doing nothing.
       '';

@@ -179,7 +179,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
                      "directPush": False, "ruleset": True, "requireCi": True,
                      "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True, "rival": True,
-                     "train": False, "trainSize": 8, "trainRequire": [], "trainStallAfter": 240},
+                     "train": False, "trainSize": 8, "trainRequire": [], "trainNegative": None, "trainStallAfter": 240},
         "trainContext": "conary/train",
         "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"}},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
