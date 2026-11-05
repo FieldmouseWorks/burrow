@@ -36,26 +36,74 @@ found() {
     > "$RUNNER_TEMP/negative.json"
   echo "result=$result" >> "$GITHUB_OUTPUT"
 }
-# Whether an evaluation that failed with exit status $1 failed on what it
-# evaluated, where $2 is the evaluation, run as `$2 TREE ARGS...` with the
-# trees under $3 and $4.. its further arguments: nix's own failure (1), not
-# a signal or a limit's kill; again on a second try; and with the base's
-# evaluation still working. Says why not when it isn't.
-failed_there() {
-  local rc=$1 how=$2 trees=$3
-  shift 3
-  if [ "$rc" != 1 ]; then
-    echo "it ended with $rc, not an evaluation's failure, so it can't tell"
+# nix's evaluations here log as its JSON (--log-format internal-json), so
+# what each did on the way can be read. What the one logged in $1 said.
+errors() {
+  jq -rR 'if startswith("@nix ") then .[5:] | fromjson? | select(.action == "msg" and .level <= 1) | .msg else . end' "$1"
+}
+# Whether an evaluation that ended with $1, having logged $2, failed on
+# what it evaluated: nix's own failure (1, not a signal or a limit's
+# kill), not nix out of memory, and with nothing built, fetched or
+# substituted on the way, any of which could be what failed (a store
+# path it only had to find is fine). Says why not when it isn't.
+own() {
+  local why
+  if [ "$1" != 1 ]; then
+    echo "it ended with $1, not an evaluation's failure, so it can't tell"
     return 1
   fi
-  if "$how" "$trees/negative" "$@" > /dev/null 2>&1; then
+  if ! why=$(jq -nrR '[inputs | select(startswith("@nix ")) | .[5:] | fromjson?] as $log
+      | first(([$log[] | select(.action == "start" and (.type | IN(100, 101, 105, 108, 109, 110, 111, 112))) | .text]
+          | select(length > 0) | "it built or fetched on the way (\(join("; ")))"),
+        ($log[] | select(.action == "msg" and .level == 0 and (.msg | test("out of memory"))) | "nix ran out of memory"))' "$2"); then
+    echo "its log can't be read, so it can't tell"
+    return 1
+  fi
+  if [ -n "$why" ]; then
+    echo "$why, so it can't tell"
+    return 1
+  fi
+}
+# Whether an evaluation on the negative tree failed on what it
+# evaluated, where $1 and $2 are its exit status and log, and $3 how
+# it's run, as `$3 TREE ARGS...` with the trees under $4 and $5.. its
+# further arguments: its own failure (own), and again on a second try,
+# with the base's evaluation, which worked beside the first, working
+# after both.
+failed_there() {
+  local rc=$1 log=$2 how=$3 trees=$4
+  shift 4
+  own "$rc" "$log" || return 1
+  rc=0
+  "$how" "$trees/negative" "$@" > /dev/null 2> "$log.again" || rc=$?
+  if [ "$rc" = 0 ]; then
     echo "it evaluated on a second try, so it can't tell"
     return 1
   fi
+  own "$rc" "$log.again" || return 1
   if ! "$how" "$trees/base" "$@" > /dev/null 2>&1; then
     echo "the base no longer evaluates either, so it can't tell"
     return 1
   fi
+}
+# Whether every output of the derivation $1 is in the store.
+built() {
+  local outs
+  outs=$(nix-store -q --outputs "$1") || return 1
+  [ -n "$outs" ] && xargs -d '\n' nix-store --check-validity <<< "$outs" 2> /dev/null
+}
+# Whether nix's log of a failed build, $2, says the builder of $1, the
+# derivation, failed with an exit code: in nix's words since 2.30 or so,
+# `Cannot build 'DRV'.` and on the next line `Reason: builder failed
+# with exit code N.`, and before, `builder for 'DRV' failed with exit
+# code N`. A signal, a timeout, a dependency or nix's own failure is
+# none of those.
+builder_failed() {
+  awk -v d="$1" '
+    index($0, "builder for \047" d "\047 failed with exit code ") { found = 1 }
+    named && $0 ~ /^ *Reason: builder failed with exit code / { found = 1 }
+    { named = index($0, "Cannot build \047" d "\047.") > 0 }
+    END { exit !found }' "$2"
 }
 # A derivation's inputs, each with the outputs it takes, one installable a
 # line: nix's JSON names them by store path or, in its version 4, by name
@@ -138,13 +186,20 @@ negative() {
   # Each check's derivation in each tree, a nix process each, as many side
   # by side as the job's memory allows (build.sh): its .drv path, or
   # nothing where it doesn't evaluate.
-  names() { nix eval --no-update-lock-file --option eval-cache false --json "$1#." --apply "o: builtins.attrNames (o.checks.$system or { })"; }
-  names "$work/base" > "$work/base.names" || { echo "the base's checks don't evaluate, so there's nothing to compare with"; return 1; }
+  names() {
+    nix eval --no-update-lock-file --option eval-cache false --log-format internal-json \
+      --json "$1#." --apply "o: builtins.attrNames (o.checks.$system or { })"
+  }
+  if ! names "$work/base" > "$work/base.names" 2> "$work/base.names.err"; then
+    errors "$work/base.names.err"
+    echo "the base's checks don't evaluate, so there's nothing to compare with"
+    return 1
+  fi
   rc=0
   names "$work/negative" > "$work/negative.names" 2> "$work/negative.names.err" || rc=$?
   if [ "$rc" != 0 ]; then
-    cat "$work/negative.names.err"
-    if ! failed_there "$rc" names "$work"; then
+    errors "$work/negative.names.err"
+    if ! failed_there "$rc" "$work/negative.names.err" names "$work"; then
       return 1
     fi
     echo "the checks don't evaluate with the new tests on the old code: they fail there"
@@ -155,12 +210,12 @@ negative() {
   side_by_side
   # A check's derivation, by its name as a Nix string, in the tree at $1:
   # its .drv path in $3, made a GC root at once, until the build is done;
-  # nothing in $3 where it doesn't evaluate, and why in $3.err and nix's
+  # nothing in $3 where it doesn't evaluate, and nix's log in $3.err and
   # exit status in $3.rc. One that isn't a valid derivation (or that a GC
   # took in between) is an error.
   drv_of() {
-    nix eval --no-update-lock-file --option eval-cache false --raw "$1#." \
-      --apply "o: o.checks.$system.$2.drvPath"
+    nix eval --no-update-lock-file --option eval-cache false --log-format internal-json \
+      --raw "$1#." --apply "o: o.checks.$system.$2.drvPath"
   }
   evaluate() {
     local drv rc=0
@@ -204,12 +259,12 @@ negative() {
     n=$(cat "$work/drvs/$k.negative")
     if [ -z "$b" ] && jq -e --arg n "$name" 'index([$n])' "$work/base.names" > /dev/null; then
       echo "check $name doesn't evaluate on the base, so there's nothing to compare with:"
-      cat "$work/drvs/$k.base.err"
+      errors "$work/drvs/$k.base.err"
       return 1
     elif [ -z "$n" ]; then
       echo "check $name doesn't evaluate with the new tests on the old code:"
-      cat "$work/drvs/$k.negative.err"
-      failed_there "$(cat "$work/drvs/$k.negative.rc")" drv_of "$work" "$q" || return 1
+      errors "$work/drvs/$k.negative.err"
+      failed_there "$(cat "$work/drvs/$k.negative.rc")" "$work/drvs/$k.negative.err" drv_of "$work" "$q" || return 1
       printf '%s\0' "$name" >> "$work/checks"
       caught=1
     elif [ "$n" = "$b" ]; then
@@ -224,28 +279,39 @@ negative() {
       bases+=("$b")
     fi
   done
-  # A check failed on the old code only when everything it's built from
-  # built, it failed again on its own, and the base's builds: its own
-  # builder failed, on what the new tests change. Anything else (a fetch,
-  # the daemon, a dependency, a check broken on the base too) can't say.
+  # A check failed on the old code only when, with everything it's
+  # built from built and the base's same check too, it failed again on
+  # its own, and nix says its own builder failed, with an exit code: on
+  # what the new tests change. One that builds then passed. Anything else
+  # (a fetch, the daemon, a dependency, a signal or a timeout, a check
+  # broken on the base too) can't say. Each build goes through
+  # build_checks, so one with a VM to run waits for its slot.
   if [ ${#targets[@]} -gt 0 ] && ! build_checks "" "${targets[@]/%/^*}"; then
-    local unsure=0
+    local unsure=0 deps
     for k in "${!targets[@]}"; do
-      if build_checks "" "${targets[$k]}^*" > /dev/null 2>&1; then
+      if built "${targets[$k]}"; then
         continue
       fi
       echo "${targets[$k]} failed: checking that it's its own failure"
       if ! inputs "${targets[$k]}" > "$work/inputs"; then
         echo "can't tell what ${targets[$k]} is built from"
         unsure=1
-      elif [ -s "$work/inputs" ] && ! xargs -a "$work/inputs" -d '\n' nix build --no-link -L; then
+        continue
+      fi
+      mapfile -t deps < "$work/inputs"
+      if [ ${#deps[@]} -gt 0 ] && ! build_checks "" "${deps[@]}"; then
         echo "what ${targets[$k]} is built from didn't build, so it can't tell"
         unsure=1
       elif [ -n "${bases[$k]}" ] && ! build_checks "" "${bases[$k]}^*"; then
         echo "${bases[$k]}, the same check on the base, fails too, so it can't tell"
         unsure=1
-      else
+      elif build_checks "" "${targets[$k]}^*" 2>&1 | tee "$work/again"; then
+        echo "${targets[$k]} built once what it's built from had: it passes"
+      elif builder_failed "${targets[$k]}" "$work/again"; then
         caught=1
+      else
+        echo "nix doesn't say ${targets[$k]}'s own builder failed with an exit code, so it can't tell"
+        unsure=1
       fi
     done
     if [ "$caught" = 0 ] && [ "$unsure" = 1 ]; then

@@ -128,14 +128,46 @@ impl Gate {
       case $a in /nix/store/*) {real_bin}/nix-store --check-validity "${{a%^*}}" || exit 1 ;; esac
     done
     [ -z "$BUILD_FAIL" ] || case "$*" in *"$BUILD_FAIL"*) exit 1 ;; esac
-    # Or when a derivation it's given, as nix's compact JSON, holds one of
-    # these.
-    for p in $BUILD_FAIL_TEXT; do
-      for a in "$@"; do
-        case $a in /nix/store/*.drv*) ! {real_nix} derivation show "${{a%^*}}" | jq -c . | grep -qF -- "$p" || exit 1 ;; esac
-      done
+    # Or, for each derivation it's given, when one in its closure holds, as
+    # nix's compact JSON, one of BUILD_FAIL_TEXT, or BUILD_SIGNAL_TEXT (its
+    # builder killed), or BUILD_FLAKY_TEXT in the first BUILD_FLAKY_TIMES
+    # builds (2 if not given): nix's error for each that failed, and for
+    # the one given, in nix's words. One with none of them is built, its
+    # outputs in the store (nix-store, below, says), and the rest are tried
+    # too, as --keep-going does.
+    flaky=
+    if [ -n "$BUILD_FLAKY_TEXT" ]; then
+      n=$(cat "$NIX_LOG.flaky" 2> /dev/null || echo 0)
+      [ "$n" -ge "${{BUILD_FLAKY_TIMES:-2}}" ] || flaky=$BUILD_FLAKY_TEXT
+      echo $((n + 1)) > "$NIX_LOG.flaky"
+    fi
+    failed=0
+    for a in "$@"; do
+      case $a in /nix/store/*.drv*) ;; *) continue ;; esac
+      d=${{a%^*}}
+      bad=$({real_nix} derivation show -r "$d" | jq -r --arg fail "$BUILD_FAIL_TEXT $flaky" --arg signal "$BUILD_SIGNAL_TEXT" '
+        def holds($ps): tojson as $j | $ps | split(" ") | any(.[]; . != "" and (. as $p | $j | contains($p)));
+        (.derivations // .) | to_entries[] | (if .key | contains("/") then .key else "/nix/store/" + .key end) as $k
+        | if .value | holds($signal) then "\($k) signal" elif .value | holds($fail) then "\($k) exit" else empty end')
+      if [ -z "$bad" ]; then
+        {real_bin}/nix-store -q --outputs "$d" >> "$NIX_LOG.valid"
+        continue
+      fi
+      failed=1
+      while read -r k how; do
+        echo "error: Cannot build '$k'." >&2
+        if [ "$how" = signal ]; then
+          echo "       Reason: builder failed due to signal 9 (Killed)." >&2
+        else
+          echo "       Reason: builder failed with exit code 1." >&2
+        fi
+      done <<< "$bad"
+      if ! grep -q "^$d " <<< "$bad"; then
+        echo "error: Cannot build '$d'." >&2
+        echo "       Reason: 1 dependency failed." >&2
+      fi
     done
-    exit 0 ;;
+    exit $failed ;;
   flake) [ "$2" = check ] && {{
     echo "$*" >> "$NIX_LOG"
     [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
@@ -161,8 +193,16 @@ impl Gate {
       esac
     done
     [ -z "$what" ] || echo "eval $what" >> "$NIX_LOG"
-    # Killed, as a limit would, when it evaluates what this names.
+    # Killed, as a limit would, when it evaluates what this names, or
+    # from the second time it does what EVAL_KILL_AGAIN names; out of
+    # memory, as nix says it is, for EVAL_OOM.
     [ -z "$EVAL_KILL" ] || case "$*" in *"$EVAL_KILL"*) exit 137 ;; esac
+    [ -z "$EVAL_KILL_AGAIN" ] || case "$*" in *"$EVAL_KILL_AGAIN"*)
+      [ ! -e "$NIX_LOG.tried" ] || exit 137
+      : > "$NIX_LOG.tried" ;; esac
+    [ -z "$EVAL_OOM" ] || case "$*" in *"$EVAL_OOM"*)
+      echo '@nix {{"action":"msg","level":0,"msg":"\u001b[31;1merror:\u001b[0m out of memory"}}' >&2
+      exit 1 ;; esac
     # The checkout edited once the plan is made, if asked.
     [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO"
     # How many entries are being evaluated at once, each held a second, if
@@ -204,11 +244,15 @@ exec {real_bin}/nix-instantiate "${{args[@]}}"
             ),
         );
         // Builds are only logged, so whether an output is built is the
-        // case's to say.
+        // case's to say, or the build stand-in's for those it built.
         s.stub(
             "nix-store",
             &format!(
-                r#"if [ "$1" = --add-root ] && [ -n "$ALL_BUILT" ]; then
+                r#"if [ "$1" = --check-validity ] && [ -e "$NIX_LOG.valid" ]; then
+  for p in "${{@:2}}"; do grep -qxF -- "$p" "$NIX_LOG.valid" || exec {real_bin}/nix-store "$@"; done
+  exit 0
+fi
+if [ "$1" = --add-root ] && [ -n "$ALL_BUILT" ]; then
   echo "root $2 $5" >> "$NIX_LOG.roots"
   exit 0
 fi
@@ -295,7 +339,9 @@ exec {real_bin}/nix-store "$@"
     /// The gate step's script, and its environment for a run, with the logs
     /// of a run before cleared.
     fn gate_step(&self, r: &Run) -> (String, Vec<(String, String)>) {
-        for suffix in ["", ".links", ".slot", ".roots", ".overlap"] {
+        for suffix in [
+            "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried",
+        ] {
             let _ = fs::remove_file(self.s.join(&format!("nix.log{suffix}")));
         }
         let wf = workflow(".github/workflows/flake-check.yml");

@@ -45,11 +45,11 @@ unbuilt_vms() {
     [ -z "$pending" ] || echo "$name"
   done < "$RUNNER_TEMP/vms"
 }
-# Builds these checks (each a derivation and ^*), keeping the outputs
-# under the link $1 if it's given: first those with no VM to run in
-# their closures, with no slot, then the rest in one. Both are built
-# by derivation, so neither holds an evaluation. A check that can't
-# be told apart counts as a VM test.
+# Builds these checks (each a derivation and ^*, or the outputs it
+# names), keeping the outputs under the link $1 if it's given: first
+# those with no VM to run in their closures, with no slot, then the
+# rest in one. Both are built by derivation, so neither holds an
+# evaluation. A check that can't be told apart counts as a VM test.
 build_checks() {
   local link=$1 rc=0 target closure found plain=() vms=() plain_link=(--no-link) vm_link=(--no-link)
   shift
@@ -58,14 +58,14 @@ build_checks() {
     nix build -L "${plain_link[@]}" --keep-going "$@"
     return
   fi
-  if ! unbuilt_vms "${@%^\*}" > "$RUNNER_TEMP/unbuilt-vms"; then
+  if ! unbuilt_vms "${@%^*}" > "$RUNNER_TEMP/unbuilt-vms"; then
     echo "couldn't tell which checks are VM tests, so all of them take the slot"
     vms=("$@")
   else
     for target in "$@"; do
       # grep's 1 is no match, and only that's no VM.
       found=2
-      if closure=$(nix-store -q -R "${target%^\*}"); then
+      if closure=$(nix-store -q -R "${target%^*}"); then
         found=0
         grep -qFf "$RUNNER_TEMP/unbuilt-vms" <<< "$closure" || found=$?
       fi

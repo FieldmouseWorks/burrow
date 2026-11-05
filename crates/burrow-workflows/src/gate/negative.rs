@@ -165,7 +165,9 @@ impl Repo {
     /// The same, with more of the stand-ins' settings.
     fn run_with(&self, head: &str, skip: &str, more: &[(&str, &str)]) -> Ran {
         let g = &self.g;
-        for suffix in ["", ".links", ".slot", ".roots", ".overlap"] {
+        for suffix in [
+            "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried",
+        ] {
             let _ = fs::remove_file(g.s.join(&format!("nix.log{suffix}")));
         }
         let temp = g.s.mkdtemp();
@@ -306,20 +308,20 @@ fn a_test_that_catches_its_change_fails_on_the_old_code() {
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     assert_eq!(ran.list("tests"), ["tests/want.txt"]);
     assert_eq!(ran.list("checks"), ["t"]);
-    // Built, then again on its own, then what it's built from, then the
-    // base's: its own failure, on what the new tests change.
+    // Built, then what it's built from, then the base's, then again on
+    // its own: its own builder's failure, on what the new tests change.
     let builds = ran.builds();
     assert_eq!(builds.len(), 4, "{builds:?}");
     assert!(
         builds[0].contains("-t.drv^*") && !builds[0].contains("-other.drv"),
         "{builds:?}"
     );
-    assert_eq!(builds[1], builds[0], "{builds:?}");
-    assert!(builds[2].contains("-dep.drv^out"), "{builds:?}");
+    assert!(builds[1].contains("-dep.drv^out"), "{builds:?}");
     assert!(
-        builds[3].contains("-t.drv^*") && builds[3] != builds[0],
+        builds[2].contains("-t.drv^*") && builds[2] != builds[0],
         "{builds:?}"
     );
+    assert_eq!(builds[3], builds[0], "{builds:?}");
     // The negative tree: the base's code, the head's tests.
     let tree = ran.found.as_ref().unwrap()["tree"]
         .as_str()
@@ -618,6 +620,119 @@ fn a_failure_that_isnt_the_tests_own_cant_tell() {
         "{}",
         ran.out
     );
+}
+
+/// A check that failed only while a dependency did, or whose builder a
+/// signal stopped, says nothing either: the last try, once everything it's
+/// built from has built, is what counts, and only its own builder's exit.
+#[test]
+fn only_the_checks_own_builder_failing_counts() {
+    let r = Repo::new();
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let dep = r#""name":"dep""#;
+    // Failing in the build and its retry, then building: the old order
+    // counted it once the dependency built.
+    let twice = r.run_with(&head, "", &[("BUILD_FLAKY_TEXT", dep)]);
+    assert_eq!(twice.code, 1, "{}", twice.out);
+    assert!(twice.found.is_none(), "{}", twice.out);
+    assert!(twice.out.contains("didn't build"), "{}", twice.out);
+    // Failing once, then building: then the check, on its own, passes.
+    let once = r.run_with(
+        &head,
+        "",
+        &[("BUILD_FLAKY_TEXT", dep), ("BUILD_FLAKY_TIMES", "1")],
+    );
+    assert_eq!(once.code, 1, "{}", once.out);
+    assert_eq!(once.result(), "pass", "{}", once.out);
+    assert!(once.out.contains("it passes"), "{}", once.out);
+    let killed = r.run_with(&head, "", &[("BUILD_SIGNAL_TEXT", WANTS_2)]);
+    assert_eq!(killed.code, 1, "{}", killed.out);
+    assert!(killed.found.is_none(), "{}", killed.out);
+    assert!(
+        killed.out.contains("own builder failed with an exit code"),
+        "{}",
+        killed.out
+    );
+}
+
+/// What a check that failed is built from builds as the check did: in the
+/// heavy slot when there's a VM to run in it.
+#[test]
+fn its_dependencies_wait_for_the_slot_too() {
+    let r = Repo::new();
+    let flake = read(&r.origin.join("flake.nix"));
+    let vm = flake.replace(
+        r#"dep = drv "dep" [ ];"#,
+        r#"dep = derivation { name = "dep"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; requiredSystemFeatures = [ "kvm" ]; };"#,
+    );
+    assert_ne!(vm, flake);
+    write(&r.origin.join("flake.nix"), &vm);
+    r.g.s.git(&r.origin, &["commit", "-qam", "a VM for t"]);
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let (_, path) = super::slots::heavy(&r.g);
+    let ran = r.run_with(&head, "", &[("BUILD_FAIL_TEXT", WANTS_2), ("PATH", &path)]);
+    assert_eq!(ran.result(), "fail", "{}", ran.out);
+    let in_slot = lines(&r.g.s.join("nix.log.slot"));
+    assert!(
+        in_slot
+            .iter()
+            .any(|b| b.contains("-dep.drv^out") && b.contains("--max-jobs")),
+        "{in_slot:?}\n{}",
+        ran.out
+    );
+}
+
+/// An evaluation that failed with a fetch or a build on the way, or with
+/// nix out of memory, or that a signal stopped the second time, didn't
+/// fail on what it evaluated.
+#[test]
+fn an_evaluation_counts_only_failing_on_its_own_expression() {
+    let r = Repo::new();
+    let throws = r.pr(
+        "throws",
+        &[
+            ("lib.txt", Some("2\n")),
+            (
+                "tests/check.nix",
+                Some("{ drv }: throw \"needs what the change adds\"\n"),
+            ),
+        ],
+    );
+    let fromtests = format!(
+        r#"negative#. --apply o: o.checks.{}."fromtests""#,
+        r.g.system
+    );
+    let again = r.run_with(&throws, "", &[("EVAL_KILL_AGAIN", &fromtests)]);
+    let oom = r.run_with(&throws, "", &[("EVAL_OOM", &fromtests)]);
+    let fetches = r.pr(
+        "fetches",
+        &[
+            ("lib.txt", Some("2\n")),
+            (
+                "tests/check.nix",
+                Some(
+                    "{ drv }: drv \"fromtests\" [ (builtins.fetchurl { url = \"http://127.0.0.1:9/x\"; sha256 = \"0000000000000000000000000000000000000000000000000000\"; }) ]\n",
+                ),
+            ),
+        ],
+    );
+    let config = format!("{}\ndownload-attempts = 1", r.g.nix_config);
+    let fetched = r.run_with(&fetches, "", &[("NIX_CONFIG", &config)]);
+    for (ran, says) in [
+        (again, "ended with 137"),
+        (oom, "out of memory"),
+        (fetched, "fetched on the way"),
+    ] {
+        assert_eq!(ran.code, 1, "{says}: {}", ran.out);
+        assert!(ran.found.is_none(), "{says}: {}", ran.out);
+        assert!(ran.out.contains(says), "{says}: {}", ran.out);
+    }
 }
 
 /// An evaluation a signal or a limit stopped didn't fail on the old code.
