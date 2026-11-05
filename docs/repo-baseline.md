@@ -250,7 +250,11 @@ owner, since nothing else merges it.
 - **One dependency bot.** Renovate covers every repo from the machine (no
   per-repo config needed; a `renovate.json` only adds to it). Don't also have
   Dependabot version updates in `.github/dependabot.yml`, unless the repo is
-  set aside for Dependabot on purpose.
+  set aside for Dependabot on purpose. Such a repo goes on
+  `burrow.updates.renovate.followOnly`, not out of Renovate: Dependabot can't
+  move a pin on a branch (`@SHA # main`), so Renovate still moves its pins on
+  the owner's own repos (the shared workflow, the house action, the burrow
+  flake input) and nothing else.
 - **CODEOWNERS** only for paths the owner must sign off on themselves, never
   `*`: the owner can't approve PRs their own Claude sessions open.
 
