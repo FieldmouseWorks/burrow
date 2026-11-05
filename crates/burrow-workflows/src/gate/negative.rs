@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::{Gate, lines};
+use super::{Gate, LOGS, lines};
 use crate::expr::{V, value};
 use crate::harness::{read, repo_file, script, step, steps, text, workflow, write, yaml};
 
@@ -165,9 +165,7 @@ impl Repo {
     /// The same, with more of the stand-ins' settings.
     fn run_with(&self, head: &str, skip: &str, more: &[(&str, &str)]) -> Ran {
         let g = &self.g;
-        for suffix in [
-            "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried",
-        ] {
+        for suffix in LOGS {
             let _ = fs::remove_file(g.s.join(&format!("nix.log{suffix}")));
         }
         let temp = g.s.mkdtemp();
@@ -704,6 +702,28 @@ fn a_fetch_failing_cant_tell() {
     assert_eq!(ran.code, 1, "{}", ran.out);
     assert!(ran.found.is_none(), "{}", ran.out);
     assert!(ran.out.contains("is a fetch"), "{}", ran.out);
+}
+
+/// A check nix's JSON can't say is or isn't a fetch says nothing either.
+#[test]
+fn a_check_not_known_not_to_be_a_fetch_cant_tell() {
+    let r = Repo::new();
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let ran = r.run_with(
+        &head,
+        "",
+        &[("BUILD_FAIL_TEXT", WANTS_2), ("DRV_SHOW_BREAK", "-t.drv")],
+    );
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(
+        ran.out.contains("can't tell whether") && ran.out.contains("is a fetch"),
+        "{}",
+        ran.out
+    );
 }
 
 /// What a check that failed is built from builds as the check did: in the

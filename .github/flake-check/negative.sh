@@ -48,7 +48,11 @@ errors() {
 # fine), and an error nix places in code, at a file's line and column,
 # as the evaluator's are. One it doesn't place (the daemon or the store
 # out of reach, nix out of memory, anything else of nix's own) says
-# nothing. Says why not when it isn't.
+# nothing. Nix doesn't say which errors are the evaluator's own, only
+# where they were, so a store failure nix places inside the expression
+# (one a builtin raises, under the frames of its caller) reads as one
+# too: the base's evaluation beside the first try and after the second
+# is what's left to stop that. Says why not when it isn't.
 own() {
   local why
   if [ "$1" != 1 ]; then
@@ -114,8 +118,14 @@ builder_failed() {
 }
 # Whether the derivation $1 is a fetch: an output with a fixed hash,
 # which its builder downloads, so its failing can be the network's.
+# 0 says it is and 1 that it isn't, as nix's JSON (either version) has
+# it; anything else, that it can't be told.
 fetch() {
-  nix derivation show "$1" | jq -e '(.derivations // .) | to_entries[0].value | any(.outputs[]; has("hash"))' > /dev/null
+  local json
+  json=$(nix derivation show "$1") || return 2
+  jq -e '(.derivations // .) | to_entries | if length == 1 then .[0].value.outputs else error("not one derivation") end
+    | if type == "object" and length > 0 and all(.[]; type == "object") then any(.[]; has("hash")) else error("no outputs") end' \
+    <<< "$json" > /dev/null 2>&1 || { local rc=$?; [ "$rc" = 1 ] && return 1; return 2; }
 }
 # A derivation's inputs, each with the outputs it takes, one installable a
 # line: nix's JSON names them by store path or, in its version 4, by name
@@ -299,7 +309,7 @@ negative() {
   # broken on the base too) can't say. Each build goes through
   # build_checks, so one with a VM to run waits for its slot.
   if [ ${#targets[@]} -gt 0 ] && ! build_checks "" "${targets[@]/%/^*}"; then
-    local unsure=0 deps
+    local unsure=0 deps kind
     for k in "${!targets[@]}"; do
       if built "${targets[$k]}"; then
         continue
@@ -319,8 +329,12 @@ negative() {
         unsure=1
       elif build_checks "" "${targets[$k]}^*" 2>&1 | tee "$work/again"; then
         echo "${targets[$k]} built once what it's built from had: it passes"
-      elif fetch "${targets[$k]}"; then
-        echo "${targets[$k]} is a fetch, whose failure can be the network's, so it can't tell"
+      elif kind=0 && { fetch "${targets[$k]}" || kind=$?; } && [ "$kind" != 1 ]; then
+        if [ "$kind" = 0 ]; then
+          echo "${targets[$k]} is a fetch, whose failure can be the network's, so it can't tell"
+        else
+          echo "can't tell whether ${targets[$k]} is a fetch, so it can't tell"
+        fi
         unsure=1
       elif builder_failed "${targets[$k]}" "$work/again"; then
         caught=1

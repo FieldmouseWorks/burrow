@@ -36,6 +36,12 @@ mod outputs;
 mod slots;
 mod whole;
 
+/// What the stand-ins keep beside their log, `nix.log`, cleared before
+/// each run.
+const LOGS: [&str; 9] = [
+    "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried", ".shown",
+];
+
 /// A case's runner: real nix for evaluation, in a store under its scratch
 /// directory, so it runs in the build sandbox; builds are only logged, and
 /// fail on request.
@@ -179,6 +185,11 @@ impl Gate {
   # An older nix's JSON, if asked: store paths for names, structured attrs in
   # the env.
   derivation)
+    # Nothing nix's JSON could be, from the second time it's asked about
+    # what DRV_SHOW_BREAK names.
+    [ -z "$DRV_SHOW_BREAK" ] || case "$*" in *"$DRV_SHOW_BREAK"*)
+      if [ -e "$NIX_LOG.shown" ]; then echo '{{}}'; exit 0; fi
+      : > "$NIX_LOG.shown" ;; esac
     if [ -n "$OLD_JSON" ]; then
       {real_nix} "$@" | jq '.derivations | with_entries(.key = "/nix/store/" + .key | .value |= (
         if .structuredAttrs then .env.__json = (.structuredAttrs | tojson) | del(.structuredAttrs) else . end))'
@@ -344,9 +355,7 @@ exec {real_bin}/nix-store "$@"
     /// The gate step's script, and its environment for a run, with the logs
     /// of a run before cleared.
     fn gate_step(&self, r: &Run) -> (String, Vec<(String, String)>) {
-        for suffix in [
-            "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried",
-        ] {
+        for suffix in LOGS {
             let _ = fs::remove_file(self.s.join(&format!("nix.log{suffix}")));
         }
         let wf = workflow(".github/workflows/flake-check.yml");
