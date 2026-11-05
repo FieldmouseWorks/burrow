@@ -33,31 +33,38 @@ struct Slotted {
     vms: PathBuf,
 }
 
+/// Heavy with one slot for `g`'s runs, as burrow.cpu wraps burrow-heavy:
+/// the slot's lock file, and PATH with heavy first.
+pub(super) fn heavy(g: &Gate) -> (PathBuf, String) {
+    let slots = g.s.join("slots");
+    fs::create_dir(&slots).unwrap();
+    let slot = slots.join("slot1");
+    File::create(&slot).unwrap();
+    let bin = g.s.join("slotted");
+    fs::create_dir(&bin).unwrap();
+    let config = g.s.join("heavy.json");
+    fs::write(
+        &config,
+        serde_json::json!({ "slots": 1, "grace": 3, "dir": slots, "setsid": which("setsid") })
+            .to_string(),
+    )
+    .unwrap();
+    executable(
+        &bin.join("heavy"),
+        &format!(
+            "exec -a \"$0\" {} {} \"$@\"\n",
+            workspace_bin("burrow-heavy").display(),
+            config.display()
+        ),
+    );
+    let path = format!("{}:{}", bin.display(), g.s.path_var());
+    (slot, path)
+}
+
 impl Slotted {
     fn new() -> Slotted {
         let g = Gate::new();
-        let slots = g.s.join("slots");
-        fs::create_dir(&slots).unwrap();
-        let slot = slots.join("slot1");
-        File::create(&slot).unwrap();
-        let bin = g.s.join("slotted");
-        fs::create_dir(&bin).unwrap();
-        let config = g.s.join("heavy.json");
-        fs::write(
-            &config,
-            serde_json::json!({ "slots": 1, "grace": 3, "dir": slots, "setsid": which("setsid") })
-                .to_string(),
-        )
-        .unwrap();
-        executable(
-            &bin.join("heavy"),
-            &format!(
-                "exec -a \"$0\" {} {} \"$@\"\n",
-                workspace_bin("burrow-heavy").display(),
-                config.display()
-            ),
-        );
-        let path = format!("{}:{}", bin.display(), g.s.path_var());
+        let (slot, path) = heavy(&g);
         let vms = g.flake(
             r#"{
       checks.${system} = {

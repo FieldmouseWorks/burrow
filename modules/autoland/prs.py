@@ -28,7 +28,7 @@ PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
-    defaultBranchRef { name target { ... on Commit { oid statusCheckRollup { state } } } }
+    defaultBranchRef { name target { ... on Commit { %s } } }
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -63,7 +63,14 @@ query($owner: String!, $name: String!, $cursor: String) {
 # What each review and comment is read for, in PRS and the older pages.
 OLDER = {"reviews": "author { login __typename } state body submittedAt commit { oid }",
          "comments": "databaseId body createdAt updatedAt author { login __typename }"}
-PRS = PRS % (OLDER["reviews"], OLDER["comments"])
+# The default branch's tip, read with the PRs each pass: how its CI stands,
+# and what repos.landed_alone asks of it (its first parent's CI, the PR it
+# landed, how its check runs ended), so a red one landing caused is undone
+# with no further call.
+TIP = ("oid statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { conclusion } } } } "
+       "parents(first: 1) { nodes { statusCheckRollup { state } } } "
+       "associatedPullRequests(first: 5) { nodes { number state headRefName baseRefName body mergeCommit { oid } } }")
+PRS = PRS % (TIP, OLDER["reviews"], OLDER["comments"])
 OLDER_PAGE = """
 query($id: ID!, $cursor: String) {
   node(id: $id) { ... on PullRequest { %s(last: 100, before: $cursor) { pageInfo { hasPreviousPage startCursor } nodes { %s } } } }

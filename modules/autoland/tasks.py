@@ -219,17 +219,22 @@ def fixers():
     return ", ".join([*CFG["authors"], *(f"app/{b}" for b in CFG["bots"])])
 
 
-def undo(repo, branch, refused):
+def undo(repo, branch, refused, undone=()):
     """With the ledger on, how a job has a merge that broke the branch
     undone: it names the PR, and the steward has the ledger open the revert
     (repos.undo_red), recorded as that PR's undo. Unless the ledger couldn't
-    for an earlier job (refused, what it said)."""
+    for this red already (refused, what it said). What it undid for this red
+    already (undone, as REPO#N), which left it red, isn't named again."""
     if not CFG.get("undo"):
         return ""
     if refused:
-        return (f"An earlier job named a PR whose merge broke it for the steward to undo, and that couldn't be done: {refused[:300]}. "
+        return (f"The steward asked the ledger to undo a PR whose merge broke it, and that couldn't be done: {refused[:300]}. "
                 "Don't name one again: fix it yourself, as follows. ")
-    return (f"If one merge of a PR to {branch} broke it, and reverting that merge alone makes it green (check: in {WORKTREE}, "
+    done = ""
+    if undone:
+        done = (f"The steward had the ledger undo {', '.join(undone)} for this red already, and {branch} is red still: "
+                "that undo landed and didn't make it green, or closed without landing. Don't name it again. ")
+    return (f"{done}If one merge of a PR to {branch} broke it, and reverting that merge alone makes it green (check: in {WORKTREE}, "
             "git revert the commit it landed as, with -m 1 if that's a merge commit, then run the checks that failed), don't push the revert yourself: the steward has "
             "the ledger undo it, which opens the revert PR and records it as that PR's undo. Check both of the above again, then "
             f'write {{"undo": "{repo}#N"}}, N being that PR\'s number, to {claims.brief_file()} as JSON, and stop there, with no PR. '
@@ -237,7 +242,7 @@ def undo(repo, branch, refused):
             "go on as follows. ")
 
 
-def red_default_task(repo, branch, sha, refused=None):
+def red_default_task(repo, branch, sha, refused=None, undone=()):
     # Done first and again just before the push: the red may have been fixed
     # meanwhile, or someone else may be fixing it.
     still = (f"(1) CI on {branch}'s tip is what counts, and {branch} may have moved on since {sha} (git fetch origin {branch}, "
@@ -252,7 +257,7 @@ def red_default_task(repo, branch, sha, refused=None):
         f"The default branch {branch} of {repo} is red: CI failed on {sha}, and every open PR is built on it. "
         f"Before anything else, check that it still needs you. {still}"
         f"Find which checks fail and why (gh run list --commit {sha}, then gh run view RUN_ID --log-failed for each failed run), "
-        f"and which merge broke it. {undo(repo, branch, refused)}Then, in {WORKTREE}, "
+        f"and which merge broke it. {undo(repo, branch, refused, undone)}Then, in {WORKTREE}, "
         f"make the smallest change that makes it green: revert the merge that broke it if the fix isn't plain, otherwise fix it. "
         f"Run the repo's tests. Just before you push, check both again, then merge {branch}'s tip into your branch: if your "
         f"branch changes nothing against it then (git diff origin/{branch} is empty), the same fix landed another way: "

@@ -188,7 +188,12 @@ root only.
    open, it only keeps another job from starting while it's open. If the
    ledger refuses it, finds nothing to revert, or keeps stopping partway
    (tried again five minutes after each stop, whatever pass comes first),
-   the next job is told why and writes the fix itself.
+   the next job is told why and writes the fix itself. When one landing
+   alone turned it red (the tip is one merged PR's landing, its first
+   parent's CI passed, and a check run on the tip failed, not only
+   cancelled), the steward names that PR itself and starts no job: one
+   starts only if the ledger won't undo it, or the branch is red still
+   after, told which. An undo's or a red fix's own landing goes to the job.
 9. A PR whose merge would change nothing on its base (its head merged into
    the base's tip has the tip's own tree: another PR made the same change)
    is closed, saying so, instead of landing as an empty commit. A dependency
