@@ -168,7 +168,7 @@ def handle(repo, pr, repo_info, digest, held=None):
         show_waiting(repo, pr, labels, label)
         if why:
             digest.append((why, line, desc))
-        waits.note(repo, pr, desc, wait, **refresh)
+        waits.note(repo, pr, desc, wait, jobs=looked, **refresh)
         # Not settled (any more): nothing may merge it.
         if state != "success" and (C.queued(pr) or st.get("landed")):
             if C.unland(repo, pr):

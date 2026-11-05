@@ -70,6 +70,9 @@ assert sorted(items) == ["sam/r#5", "sam/r#7", "sam/r#8"], items
 five = items["sam/r#5"]
 assert five["what"] == "sam/r#5 PR 5" and five["link"] == "https://github.com/sam/r/pull/5", five
 assert five["since"] == T + 100 and five["due"] == T + 100 + 120 * MIN and five["kick"] == "autoland/sam/r", five
+# No Claude job of its own has it: the watchdog doesn't hold it while
+# Claude is out of usage (lost.py has one that does).
+assert five["claude"] is False, five
 # Its wait is what its status says.
 assert any(f"description={five['phase']} -f target_url={five['link']}" in x for x in WROTE), (five, WROTE)
 # A hold gets its own allowance, and no pass to kick: one waits on a person.
@@ -186,7 +189,7 @@ assert sorted(run(1100)) == ["sam/q#2", "sam/r#5"]
 OPEN["sam/r"] = [pr("sam/r", 5), {"number": 9, "headRefName": "x", "baseRefName": "main", "headRefOid": "b" * 40}]
 items = run(1200)
 assert items["sam/r#9"] == {"what": "sam/r#9", "link": None, "phase": waits.FAILS, "since": T + 1200,
-                            "due": T + 1200 + 120 * MIN, "kick": "autoland/sam/r", "rev": None}, items
+                            "due": T + 1200 + 120 * MIN, "kick": "autoland/sam/r", "claude": False, "rev": None}, items
 assert items["sam/r#5"]["since"] == T + 1100, items
 
 

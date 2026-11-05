@@ -141,6 +141,10 @@ RUNNING = "a Claude job is running remi-proof"
 fresh_pr_state()
 status, _ = a_pass(proof, 700)
 assert RUNNING in status and len(JOBS) == 1, (status, JOBS)
+# Its wait is on that Claude job, which the watchdog holds while Claude is
+# out of usage; once the job has ended, or its step keeps failing, it's
+# the steward's again (claude False below).
+assert stall()["claude"] is True, stall()
 t = 700
 BROKE = (("timed out after 60m", "timed out after 60m"), ("went quiet for 20m", "went quiet for 20m"),
          ("failed", "crashed"), ("error", "ended in an error"))
@@ -149,6 +153,7 @@ for i, (end, said) in enumerate(BROKE):
     ends(end)
     status, _ = a_pass(proof, t + 100)  # the first look
     assert JOBS == [] and RUNNING in status and overdue() == (LOST if i >= 3 else None), (i, status, waits.FAILING)
+    assert stall()["claude"] is False, (i, stall())
     one_stall(i)
     status, digest = a_pass(proof, t + 200)
     due = t + 200 + 2 ** i * 60
@@ -169,6 +174,7 @@ for i, (end, said) in enumerate(BROKE):
     one_stall(i)
     status, _ = a_pass(proof, due + 50)
     assert JOBS == [] and RUNNING in status and overdue() == late, (i, status, waits.FAILING)
+    assert stall()["claude"] is (late is None), (i, stall())
     one_stall(i)
     t = due + 50
 assert STUCK, "the run's stall was watched"
@@ -260,3 +266,14 @@ STATES.clear()
 C.job = kept
 fresh_pr_state()
 print("jobs that broke: ok")
+
+# A wait is on Claude only while a Claude job it looked at is queued or at
+# work: not once it has ended or proj can't say, nor for a proof build.
+for jobs, claude in (({"job-1": "queued"}, True), ({"job-1": "running"}, True), ({"job-1": ""}, False),
+                     ({"job-1": "unknown"}, False), ({C.BUILD + "1": "running"}, False), (None, False)):
+    waits.begin()
+    waits.read("sam/r", [clean()])
+    waits.note("sam/r", clean(), "Settled", waits.STEWARD, jobs=jobs)
+    assert waits.NOTED["sam/r"]["sam/r#5"]["claude"] is claude, (jobs, waits.NOTED)
+waits.begin()
+print("waits on Claude: ok")

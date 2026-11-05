@@ -633,3 +633,99 @@ fn a_look_that_cant_tend_books_another() {
     fs::write(cfg.jobs.join(FILE), "{").unwrap();
     assert!(tend(&cfg).is_some_and(|n| n >= t + RETRY));
 }
+
+/// Job `id`'s latest turn ended on a usage limit an earlier proj wrote,
+/// resetting at `reset`, its N.resets written at `written`; `owned` for an
+/// --owned job's.
+fn earlier_resets(cfg: &Config, id: &str, reset: i64, written: i64, owned: bool) {
+    let dir = cfg.jobs.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("turns"), "1\n").unwrap();
+    fs::write(dir.join("1.outcome"), "error\n").unwrap();
+    if owned {
+        fs::write(dir.join("owned"), "").unwrap();
+    }
+    fs::write(dir.join("1.resets"), format!("{reset}\n")).unwrap();
+    let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(written as u64);
+    fs::File::options()
+        .write(true)
+        .open(dir.join("1.resets"))
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
+/// The owner's release (`proj usage back`) with no record to end, the
+/// machine never out by this proj's lights (an earlier proj's limits still
+/// to be taken in), is kept all the same: every limit written before it
+/// (an owned or unowned job's N.resets, a usage-limit await's, the
+/// watchdog's, which says no time) never holds; one written after it, or a
+/// run refused after it, does. The watchdog and proj-watch are kicked, to
+/// drop the ones they keep.
+#[test]
+fn the_owners_release_with_no_record_still_ends_earlier_limits() {
+    let (d, cfg) = rig();
+    let t = now();
+    assert_eq!(released(&cfg).unwrap(), 0);
+    back(&cfg, None);
+    assert!(released(&cfg).unwrap() >= t);
+    assert_eq!(kept(&cfg), None);
+    assert_eq!(kicked(&d), ["/kick/proj-watch", "/kick/watchdog"]);
+    // A run that wasn't refused, with no hold, keeps nothing.
+    let (_d2, other) = rig();
+    back(&other, Some(t));
+    assert_eq!(released(&other).unwrap(), 0);
+
+    earlier_resets(&cfg, "web-1", t + 7200, t - 100, false);
+    earlier_resets(&cfg, "owned-1", t + 7200, t - 100, true);
+    adopt(&cfg).unwrap();
+    for f in ["web-1/1.resets", "owned-1/1.resets"] {
+        assert!(!cfg.jobs.join(f).exists(), "{f}");
+    }
+    earlier(&cfg, "web-2", t + 7200, Some(t - 100)).unwrap();
+    earlier(&cfg, "the stall watchdog", t + 7200, None).unwrap();
+    assert_eq!(kept(&cfg), None);
+    assert_eq!(out(&cfg), None);
+    // Written since: a hold of its own, each.
+    earlier_resets(&cfg, "web-3", t + 3600, t + 60, false);
+    adopt(&cfg).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 3600);
+    let (_d, cfg) = rig();
+    back(&cfg, None);
+    earlier(&cfg, "web-4", t + 3600, Some(t + 60)).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 3600);
+    let (_d, cfg) = rig();
+    back(&cfg, None);
+    record(&cfg, "web-5", Some(t + 3600), SAID, t + 1).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 3600);
+}
+
+/// The owner's release once the hold has ended already (its record kept,
+/// its notice still to settle) is a release of its own, later than the
+/// hold's: a limit written between the two never holds; one written after
+/// it does.
+#[test]
+fn the_owners_release_after_a_settled_hold_moves_the_release_on() {
+    let (d, cfg) = rig();
+    let t = now();
+    record(&cfg, "web-1", Some(t + 7200), SAID, t - 1000).unwrap();
+    back(&cfg, Some(t - 900));
+    let mut s = kept(&cfg).unwrap();
+    s.back = Some(t - 800);
+    keep(&cfg, &s).unwrap();
+    fs::write(cfg.jobs.join(RELEASED), format!("{}\n", t - 800)).unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    kicked(&d);
+    back(&cfg, None);
+    assert!(released(&cfg).unwrap() >= t);
+    assert_eq!(kept(&cfg).unwrap().back, Some(t - 800));
+    assert_eq!(kicked(&d), ["/kick/proj-watch", "/kick/watchdog"]);
+    earlier_resets(&cfg, "web-2", t + 7200, t - 100, false);
+    earlier_resets(&cfg, "owned-2", t + 7200, t - 100, true);
+    adopt(&cfg).unwrap();
+    earlier(&cfg, "web-3", t + 7200, Some(t - 100)).unwrap();
+    earlier(&cfg, "the stall watchdog", t + 7200, None).unwrap();
+    assert_eq!(out(&cfg), None);
+    earlier(&cfg, "web-4", t + 3600, Some(t + 60)).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 3600);
+}

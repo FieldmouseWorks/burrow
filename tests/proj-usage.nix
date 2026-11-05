@@ -76,4 +76,16 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       prompt = machine.succeed(f"cat /data/dev/jobs/{j}/prompt.2")
       assert "the usage limit your last turn ended on" in prompt, prompt
       assert proj("usage") == "", proj("usage")
+
+  with subtest("proj usage back before an earlier proj's usage-limit await is taken in: that limit never holds"):
+      j = proj("run web hello")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=60)
+      since = int(machine.succeed("date +%s"))
+      # The owner raised the limit, with no hold on for it to end.
+      proj("usage back")
+      machine.succeed(f"su - dev -c \"printf 'usage-limit\\t{since}\\t{since + 3600}\\n' >/data/dev/jobs/{j}/await\"")
+      proj("_watch")
+      assert proj("usage") == "", proj("usage")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+      machine.succeed(f"test -s /data/dev/jobs/{j}/prompt.2")
 ''

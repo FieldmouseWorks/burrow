@@ -145,7 +145,8 @@ Each has an entry below, and each can be imported on its own.
   resets: no turn takes a slot till then, the refused turn waits in line and
   runs again by itself after, `proj status` says why and until when, and
   `HOST-notify` tells you once (`proj usage back` lets the line go sooner,
-  once you've raised the limit).
+  once you've raised the limit, and keeps any older proj's or watchdog's
+  limit from holding it again).
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
@@ -204,8 +205,12 @@ Each has an entry below, and each can be imported on its own.
   for nothing. You hear only of what that issue can't take: the steward itself
   stuck, no steward, or that issue's own job stuck. A job that finds one
   legitimately slow gives it more time, once, with a reason. While proj says
-  the machine is out of Claude usage, it holds every stall not already on the
-  issue or yours, and takes each up again from its kick after the reset. It
+  the machine is out of Claude usage, it holds what only a Claude can move (a
+  turn in proj's line, a wait its source says is on a Claude job) and not
+  already on the issue or yours, and takes each up again from its kick after
+  the reset. Anything else that stalls meanwhile (a source stuck or never
+  written, a turn past its deadline) still gets its kick, and since no Claude
+  can take it, you hear of it by the deadline a job's would have had. It
   books its own next pass for the next deadline: no timer,
   and no GitHub calls of its own. `burrow-watchdog status` shows what it
   watches.
