@@ -93,7 +93,7 @@ fn command() {
     assert_eq!(*kicks.lock().unwrap(), ["/kick/autoland/sam/r"]);
     let log = fs::read_to_string(d.join("proj.log")).unwrap();
     assert!(
-        log.starts_with("run --pipeline --timeout 60m --idle 20m --kick watchdog --owned homelab "),
+        log.starts_with("run --pipeline --timeout 60m --idle 20m --kick watchdog --role watchdog --owned homelab "),
         "{log}"
     );
     assert!(log.contains("PR #2") && !log.contains("PR #7"), "{log}");

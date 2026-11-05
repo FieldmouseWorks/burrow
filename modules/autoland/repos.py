@@ -262,7 +262,7 @@ def watch_default(r, info, prs, digest):
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
         return {}
-    jid = C.job(repo, red_default_task(repo, default, sha, red.get("refused")))
+    jid = C.job(repo, red_default_task(repo, default, sha, red.get("refused")), role="red-main")
     if not jid:
         digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
         C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue

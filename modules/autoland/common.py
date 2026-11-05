@@ -670,7 +670,7 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, role=None):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
@@ -679,7 +679,8 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=No
     when it was opened), is where it stands in line among those, so a PR
     pushed again keeps its place. key, what proj keeps it under (proj run
     --key), for whatever finds it by that rather than its id: a key a job
-    has is refused. Returns the job id."""
+    has is refused. role, the kind of work it is (proj run --role), which
+    the machine may run on a model of its own. Returns the job id."""
     if retiring(repo):
         log(f"{repo}: no job until the deleted repo whose name it took on is retired")
         return None
@@ -701,6 +702,7 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=No
     # Never after now, which proj refuses: a clock that's behind GitHub's.
     when = ["--since", str(int(min(since, time.time())))] if since else []
     keyed = ["--key", key] if key else []
+    keyed += ["--role", role] if role else []
     p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when, *keyed,
                         "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],

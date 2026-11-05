@@ -262,6 +262,7 @@ def session_name(r, snap):
 head = "a" * 40
 WROTE, JOBS, POSTED, FORGOT = [], [], [], []
 SINCE = []  # each job's place in line (C.job's since), in the order they started
+ROLES = []  # and the kind of work each is (C.job's role), which picks its model
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 COMMITTERS = {}  # a PR's commits' committer emails, by number, as the REST API gives them (None: the ask fails)
@@ -338,9 +339,10 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, role=None):
     JOBS.append(task)
     SINCE.append(since)
+    ROLES.append(role)
     return f"job-{len(JOBS)}"
 
 
@@ -462,6 +464,7 @@ def run(pr, after, held=None):
     WROTE.clear()
     JOBS.clear()
     SINCE.clear()
+    ROLES.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()

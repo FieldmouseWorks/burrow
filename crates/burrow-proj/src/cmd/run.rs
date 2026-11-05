@@ -39,6 +39,8 @@ pub struct New {
     pub since: Option<String>,
     /// What its starter knows it by before it has its id (`proj find`).
     pub key: Option<String>,
+    /// The kind of work it is, which picks its model (Config::roles).
+    pub role: Option<String>,
 }
 
 /// A --key: what a starter names a job by before it has its id, so it can
@@ -264,6 +266,18 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
                 new.since = Some(t.to_owned());
                 i += 1;
             }
+            Some("--role") => {
+                only_run("--role: the job's own is kept")?;
+                let r = value
+                    .filter(|r| {
+                        !r.is_empty()
+                            && r.len() <= 40
+                            && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    })
+                    .ok_or_else(|| Fail::new(2, "proj run --role NAME (letters, digits and -)"))?;
+                new.role = Some(r.to_owned());
+                i += 1;
+            }
             Some("--first") => new.first = true,
             Some("--cut-off") => {
                 let bad = || Fail::new(2, "proj reply --cut-off N ID \"message\"");
@@ -295,7 +309,7 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
         self::reply(cfg, id, &args[i + 1], new.first, cutoff.as_deref())?;
         id.to_owned()
     } else {
-        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] PROJECT \"task\"";
+        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
         start_job(cfg, &new, p, &args[i + 1])?
@@ -399,6 +413,9 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     }
     if let Some(a) = &new.app {
         write("app", &format!("{a}\n"))?;
+    }
+    if let Some(r) = &new.role {
+        write("role", &format!("{r}\n"))?;
     }
     if new.vm {
         let out = File::create(job.path("agent")).map_err(|e| io_fail(&job.path("agent"), e))?;

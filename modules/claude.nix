@@ -77,7 +77,7 @@ let
     "git push -f origin master*"
   ] ++ both cfg.extraAsk;
 
-  managed = lib.recursiveUpdate {
+  managed = lib.recursiveUpdate ({
     permissions = {
       defaultMode = "bypassPermissions";
       ask = r2;
@@ -99,7 +99,9 @@ let
         ];
       }
     ];
-  } cfg.extraSettings;
+  } // lib.optionalAttrs (cfg.effort != null) {
+    effortLevel = cfg.effort;
+  }) cfg.extraSettings;
 
   robot = config.burrow.robot.enable or false;
 

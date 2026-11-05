@@ -308,7 +308,8 @@ impl Config {
             &token,
         );
         let mut proj = Command::new(&self.tools.proj);
-        proj.args(["run", "--pipeline"]);
+        // The kind of work it is, which the machine may give a model of its own.
+        proj.args(["run", "--pipeline", "--role", "renovate-sweep"]);
         if let Some(app) = &self.app {
             proj.args(["--app", &app.name]);
         }
