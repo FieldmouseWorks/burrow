@@ -6,6 +6,12 @@
 //! here (`said`), and only the steward's own count, since anyone can write
 //! one. The pass hands over the PR's reviews as it read them
 //! (review_step.py) and gets each reviewer's verdict back.
+//!
+//! A look at an earlier head covers this one too when this head is that
+//! head's change merged onto a newer base and nothing else (carry.rs says
+//! which heads are): what the base brought had its own review, and CI
+//! tests every head. Its findings don't carry as findings, but they stop an
+//! older clean look carrying: the reviewer then looks at this head.
 
 use std::collections::BTreeMap;
 
@@ -24,6 +30,9 @@ pub struct Asked {
     pub base: String,
     /// The fingerprint of its description (common.py `fingerprint`).
     pub description: String,
+    /// The earlier heads whose looks cover this one (carry.rs).
+    #[serde(default)]
+    pub carried: Vec<String>,
     /// The reviewers to say of, as their marks name them.
     pub reviewers: Vec<String>,
     /// Its reviews, as GraphQL gives them (prs.py).
@@ -31,7 +40,7 @@ pub struct Asked {
 }
 
 /// One of a PR's reviews, as GraphQL gives it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Review {
     /// Who posted it (null for a deleted account).
@@ -43,7 +52,7 @@ pub struct Review {
     pub submitted_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Commit {
     pub oid: String,
 }
@@ -113,10 +122,10 @@ pub fn covers(shown: Option<&str>, now: &str) -> bool {
 
 /// What each reviewer last said of the PR as it is now, from the reviews
 /// `me` (the steward, as REST gives its login) posted: the newest of them
-/// marked for this head on this base, shown this description, and on this
-/// head. Retargeted, the PR is another change on the same head, so what
-/// was said on its old base doesn't count. Fails on a review whose time
-/// isn't one.
+/// marked for this head, or one carried to it, on this base, shown this
+/// description, and on the commit its mark names. Retargeted, the PR is
+/// another change on the same head, so what was said on its old base
+/// doesn't count. Fails on a review whose time isn't one.
 pub fn said(me: &str, asked: &Asked) -> Result<BTreeMap<String, Said>, String> {
     asked
         .reviewers
@@ -125,18 +134,30 @@ pub fn said(me: &str, asked: &Asked) -> Result<BTreeMap<String, Said>, String> {
         .collect()
 }
 
-fn one(me: &str, asked: &Asked, reviewer: &str) -> Result<Said, String> {
+/// A mark the steward put on one of its reviews for a reviewer.
+pub struct Mark {
+    /// The head it was a look at, if its mark names one, and that's the
+    /// commit the review is on.
+    pub of: Option<String>,
+    pub base: Option<String>,
+    /// The description it was shown, if its mark says.
+    pub description: Option<String>,
+    /// Whether it had findings.
+    pub found: bool,
+    /// When it was posted, as GitHub gives it.
+    pub at: Option<String>,
+}
+
+/// The marks on the reviews `me` posted for `reviewer`, in their order. A
+/// mark whose count of findings isn't one is no mark.
+pub fn marks(me: &str, reviews: &[Review], reviewer: &str) -> Result<Vec<Mark>, String> {
     let pat = Regex::new(&format!(
         r"<!-- {}-review:v1 (\{{.*?\}}) -->",
         regex::escape(reviewer)
     ))
     .map_err(|e| e.to_string())?;
-    let mut s = Said {
-        verdict: Verdict::None,
-        at: 0.0,
-        rounds: 0,
-    };
-    for x in &asked.reviews {
+    let mut out = vec![];
+    for x in reviews {
         if login(&x.author) != me {
             continue;
         }
@@ -155,25 +176,51 @@ fn one(me: &str, asked: &Asked, reviewer: &str) -> Result<Said, String> {
                 None => continue,
             },
         } > 0;
-        s.rounds += u64::from(found);
-        let text = |k: &str| m.get(k).and_then(Value::as_str);
-        if text("commit_sha") == Some(&asked.head)
-            && text("base") == Some(&asked.base)
-            && covers(text("description"), &asked.description)
-            && x.commit.as_ref().map(|c| c.oid.as_str()) == Some(&asked.head)
+        let text = |k: &str| m.get(k).and_then(Value::as_str).map(String::from);
+        let on = x.commit.as_ref().map(|c| c.oid.as_str());
+        out.push(Mark {
+            of: text("commit_sha").filter(|of| Some(of.as_str()) == on),
+            base: text("base"),
+            description: text("description"),
+            found,
+            at: x.submitted_at.clone(),
+        });
+    }
+    Ok(out)
+}
+
+fn one(me: &str, asked: &Asked, reviewer: &str) -> Result<Said, String> {
+    let mut s = Said {
+        verdict: Verdict::None,
+        at: 0.0,
+        rounds: 0,
+    };
+    for m in marks(me, &asked.reviews, reviewer)? {
+        s.rounds += u64::from(m.found);
+        let Some(of) = &m.of else {
+            continue;
+        };
+        let here = *of == asked.head;
+        if !(here || asked.carried.contains(of))
+            || m.base.as_deref() != Some(&asked.base)
+            || !covers(m.description.as_deref(), &asked.description)
         {
-            let at = match x.submitted_at.as_deref() {
-                None | Some("") => 0.0,
-                Some(t) => crate::ts(t)?,
+            continue;
+        }
+        let at = match m.at.as_deref() {
+            None | Some("") => 0.0,
+            Some(t) => crate::ts(t)?,
+        };
+        if at >= s.at {
+            s.verdict = match (m.found, here) {
+                (false, _) => Verdict::Clean,
+                (true, true) => Verdict::Findings,
+                // Findings on a head carried here: their threads are this
+                // PR's to answer, and the clean look before them no longer
+                // stands, so the reviewer looks at this head.
+                (true, false) => Verdict::None,
             };
-            if at >= s.at {
-                s.verdict = if found {
-                    Verdict::Findings
-                } else {
-                    Verdict::Clean
-                };
-                s.at = at;
-            }
+            s.at = at;
         }
     }
     Ok(s)

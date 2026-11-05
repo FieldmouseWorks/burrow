@@ -7,7 +7,9 @@ the reviewers' service (crates/burrow-review) runs the agents as a user of
 their own, with no GitHub access and no secrets paths in what they read;
 the next pass posts what came back (`post`, burrow-upkeep's), as the
 steward's App and marked as that reviewer's, and reads each reviewer's
-verdict back from those posts (`verdicts`, burrow-upkeep's); and each pass
+verdict back from those posts (`verdicts`, burrow-upkeep's), those on
+earlier heads too where they carry to this one (`carry`, burrow-upkeep's);
+and each pass
 sweeps away what no open PR needs any more (`sweep`, burrow-upkeep's)."""
 
 import fcntl
@@ -65,16 +67,17 @@ def finding(r):
     return f"<!-- {r}-finding -->"
 
 
-def verdicts(repo, pr, names):
+def verdicts(repo, pr, names, carried):
     """What each of the reviewers `names` last said of the PR's head on its
-    base, shown its description as it is now (clean, findings or none),
-    when, and how many of its reviews on the PR had findings, by
-    burrow-upkeep (crates/burrow-upkeep/src/verdict.rs): read back from the
-    reviews the steward posted, since anyone can write the mark. Asks
-    GitHub nothing; raises when it couldn't tell."""
+    base, or of one of the earlier heads `carried` (`carry`'s), shown its
+    description as it is now (clean, findings or none), when, and how many
+    of its reviews on the PR had findings, by burrow-upkeep
+    (crates/burrow-upkeep/src/verdict.rs): read back from the reviews the
+    steward posted, since anyone can write the mark. Asks GitHub nothing;
+    raises when it couldn't tell."""
     out = C.upkeep("verdict", repo, as_app=False, input=json.dumps({
         "head": pr["headRefOid"], "base": pr["baseRefName"], "description": C.fingerprint(pr["body"]),
-        "reviewers": names, "reviews": pr["reviews"]["nodes"]}))
+        "carried": carried, "reviewers": names, "reviews": pr["reviews"]["nodes"]}))
     if out["said"] is None:
         raise RuntimeError(out["why"])
     return {r: (s["verdict"], s["at"], s["rounds"]) for r, s in out["said"].items()}
@@ -101,6 +104,24 @@ def fetch(repo, *refs, pr=None):
     if out["mirror"] is None:
         raise RuntimeError(out["why"])
     return out["mirror"]
+
+
+def carry(repo, pr, st, names):
+    """Which of the PR's earlier heads' looks by the reviewers `names` cover
+    its head, and what the head changes that they aren't shown, by
+    burrow-upkeep (crates/burrow-upkeep/src/carry.rs), from the steward's
+    mirror. None when no clean look could carry, or it couldn't tell
+    (logged): then the reviewers look at this head. Its answer is kept in
+    the PR's state `st` and handed back to it, which reuses it as it sees
+    fit."""
+    out = C.upkeep("carry", repo, bounded=False, input=json.dumps({
+        "number": pr["number"], "head": pr["headRefOid"], "base": pr["baseRefName"], "reviewers": names,
+        "reviews": pr["reviews"]["nodes"], "kept": st.get("carry")}))
+    if out["why"] is not None:
+        log(f"{repo}#{pr['number']}: couldn't tell whether earlier reviews cover {pr['headRefOid'][:7]}: {out['why'][:200]}")
+    if out["carry"] is not None:
+        st["carry"] = out["carry"]
+    return out["carry"]
 
 
 def snap_name(key, head, base):

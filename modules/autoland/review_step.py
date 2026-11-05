@@ -38,9 +38,14 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
     # service (its usage spent, say) isn't waited for meanwhile. Each review
     # is queued for the reviewers' own service; a pass posts what comes back.
     names = V.on(repo)
+    # The earlier heads whose looks cover this one: it's one of them merged
+    # onto a newer base, and nothing else (V.carry).
+    carry = V.carry(repo, pr, st, names) if names else None
     # What the reviewers weren't shown: their clean reviews don't cover it,
-    # so a judge, who sees it all, looks before it lands.
+    # so a judge, who sees it all, looks before it lands. A head their looks
+    # carry to has no snapshot of its own, so `carry` says.
     unseen = V.unseen(key, head, pr["baseRefName"])
+    unseen += [p for p in (carry or {}).get("unseen", []) if p not in unseen]
     away = {r: V.out(r) for r in names}
     live = [r for r in names if not away[r]]
     for r in names:
@@ -49,7 +54,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         # in, say, is the owner's to do.
         if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
             digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
-    said = V.verdicts(repo, pr, names)  # verdict, when, rounds with findings
+    said = V.verdicts(repo, pr, names, (carry or {}).get("carried", []))  # verdict, when, rounds with findings
     found = []  # the reviewers whose findings on this head this pass posted
     late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
 

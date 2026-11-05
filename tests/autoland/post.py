@@ -87,10 +87,11 @@ namesake = dict(forged, author={"login": "steward", "__typename": "User"})
 pr["reviews"]["nodes"] = [mine, forged, namesake]
 
 
-def said(pr, names=("rival",)):
+def said(pr, names=("rival",), carried=()):
     """burrow-upkeep's `verdict`, the real one, which asks GitHub nothing: a
-    pass reads it outside acting_for, with no token."""
-    return V.verdicts("sam/r", pr, list(names))
+    pass reads it outside acting_for, with no token, the earlier heads whose
+    looks carry to the PR's `carried`."""
+    return V.verdicts("sam/r", pr, list(names), list(carried))
 
 
 assert said(pr, ["rival", "codex"]) == {"rival": ("findings", C.ts(mine["submittedAt"]), 1), "codex": ("none", 0, 0)}
@@ -135,6 +136,10 @@ github()
 with C.acting_for("sam/r"):
     assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == ("clean", True)
     assert "**Codex review** of aaaaaaa: nothing found." in calls()[1][2]["body"]
+    # It covers a later head its look carries to (carry.rs), and no other.
+    moved = dict(pr, headRefOid="b" * 40, reviews={"nodes": [dict(mine, body=calls()[1][2]["body"])]})
+    assert said(moved, ["codex"], carried=[head])["codex"][0] == "clean"
+    assert said(moved, ["codex"])["codex"][0] == "none"
     # An answer without a list of findings is no review, never a clean
     # one, and nothing is asked of GitHub for it.
     github()

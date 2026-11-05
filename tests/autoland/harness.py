@@ -57,7 +57,8 @@ PROOF_RUN = os.path.abspath(sys.argv[7])
 # its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
 # every fix job as it was and says nothing of any (unpushed.py runs the real
 # one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
-# which ask GitHub nothing, on the config upkeep_config writes (UPKEEP_REAL).
+# which ask GitHub nothing, and its `carry`, which reads the stand-in for
+# GitHub's git remote, on the config upkeep_config writes (UPKEEP_REAL).
 # Those it starts as they are, from sh: every pass's PRs read their verdicts,
 # and a Python's start for each would be most of the Python check's time.
 UPKEEP_RAN, UPKEEP_REAL, UPKEEP_FAKE = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json", f"{tmp}/upkeep-fake"
@@ -76,7 +77,7 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict) shift; exec {shlex.quote(UPKEEP)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|sweep|verdict|carry) shift; exec {shlex.quote(UPKEEP)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
@@ -264,6 +265,7 @@ WROTE, JOBS, POSTED, FORGOT = [], [], [], []
 SINCE = []  # each job's place in line (C.job's since), in the order they started
 ROLES = []  # and the kind of work each is (C.job's role), which picks its model
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
+CARRY = {}  # what V.carry says of a head: nothing carries unless set
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 COMMITTERS = {}  # a PR's commits' committer emails, by number, as the REST API gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
@@ -513,7 +515,7 @@ def fresh_pr_state():
 
 
 REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
-        "onto": H.onto}  # the steward's own, for the checks of what it runs
+        "onto": H.onto, "carry": V.carry}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
 ALREADY, TIP = {}, {"v": "f" * 40}
@@ -527,9 +529,10 @@ def onto(repo, pr):
 
 
 def stand_in():
-    """gh, Claude jobs, the queue, the posting and what a merge would change
-    (every merge changes something unless ALREADY says), for handle() and
-    the passes."""
+    """gh, Claude jobs, the queue, the posting, what a merge would change
+    (every merge changes something unless ALREADY says) and which earlier
+    heads' looks carry (none unless CARRY says), for handle() and the
+    passes."""
     H.onto = onto
     C.gh = gh_stub
     C.write = write
@@ -539,3 +542,4 @@ def stand_in():
     C.forget_issues = FORGOT.append
     V.queue = queue
     V.post = post
+    V.carry = lambda repo, pr, st, names: CARRY.get(pr["headRefOid"])

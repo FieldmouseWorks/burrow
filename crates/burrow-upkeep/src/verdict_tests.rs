@@ -46,6 +46,7 @@ fn asked(reviews: Vec<Review>) -> Asked {
         head: HEAD.into(),
         base: "main".into(),
         description: "4f2a".into(),
+        carried: vec![],
         reviewers: vec!["rival".into(), "codex".into()],
         reviews,
     }
@@ -140,6 +141,82 @@ fn a_verdict_is_on_this_head_on_this_base_shown_this_description() {
     assert_eq!(of(&edited, "rival"), (Verdict::None, 0.0, 1));
     let unsaid = review(steward(), &mark("rival", HEAD, "main", 2, None), HEAD, T0);
     assert_eq!(of(&asked(vec![unsaid]), "rival"), (Verdict::None, 0.0, 1));
+}
+
+/// The steward's review for "rival" with `k` findings of OLD, an earlier
+/// head, on main, shown the description the PR has.
+fn of_old(k: usize, at: &str) -> Review {
+    review(
+        steward(),
+        &mark("rival", OLD, "main", k, Some("4f2a")),
+        OLD,
+        at,
+    )
+}
+
+/// The PR at HEAD, OLD's looks carried to it (carry.rs).
+fn carried(reviews: Vec<Review>) -> Asked {
+    Asked {
+        carried: vec![OLD.into()],
+        ..asked(reviews)
+    }
+}
+
+#[test]
+fn a_look_at_a_head_carried_here_covers_it() {
+    // OLD was found clean, and HEAD is OLD merged onto a newer main: the
+    // look covers HEAD, at its own time. Not carried, it covers only OLD.
+    assert_eq!(
+        of(&carried(vec![of_old(0, T0)]), "rival"),
+        (Verdict::Clean, at(T0), 0)
+    );
+    assert_eq!(of(&asked(vec![of_old(0, T0)]), "rival").0, Verdict::None);
+    // Retargeted, or redescribed, as for a look at HEAD itself.
+    let retargeted = Asked {
+        base: "release".into(),
+        ..carried(vec![of_old(0, T0)])
+    };
+    assert_eq!(of(&retargeted, "rival").0, Verdict::None);
+    let edited = Asked {
+        description: "9e1c".into(),
+        ..carried(vec![of_old(0, T0)])
+    };
+    assert_eq!(of(&edited, "rival").0, Verdict::None);
+    // A review on another commit than the one its mark names, and one
+    // someone else posted.
+    let elsewhere = review(
+        steward(),
+        &mark("rival", OLD, "main", 0, Some("4f2a")),
+        "cccccccccccccccccccccccccccccccccccccccc",
+        T0,
+    );
+    assert_eq!(of(&carried(vec![elsewhere]), "rival").0, Verdict::None);
+    let forged = review(
+        json!({"login": "mallory", "__typename": "User"}),
+        &mark("rival", OLD, "main", 0, Some("4f2a")),
+        OLD,
+        T0,
+    );
+    assert_eq!(of(&carried(vec![forged]), "rival").0, Verdict::None);
+    // Findings there aren't findings here, but they're a round, and newer
+    // than a clean look they stop it carrying: the reviewer looks again.
+    assert_eq!(
+        of(&carried(vec![of_old(2, T0)]), "rival"),
+        (Verdict::None, at(T0), 1)
+    );
+    assert_eq!(
+        of(&carried(vec![of_old(0, T0), of_old(1, T1)]), "rival"),
+        (Verdict::None, at(T1), 1)
+    );
+    assert_eq!(
+        of(&carried(vec![of_old(1, T0), of_old(0, T1)]), "rival"),
+        (Verdict::Clean, at(T1), 1)
+    );
+    // The newest of the looks at HEAD and those carried decides.
+    let a = carried(vec![of_old(0, T0), posted("rival", 1, T1)]);
+    assert_eq!(of(&a, "rival"), (Verdict::Findings, at(T1), 1));
+    let a = carried(vec![posted("rival", 1, T0), of_old(0, T1)]);
+    assert_eq!(of(&a, "rival"), (Verdict::Clean, at(T1), 1));
 }
 
 #[test]

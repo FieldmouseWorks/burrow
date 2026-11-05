@@ -1,6 +1,7 @@
 """The steward, with gh, Claude jobs, GitHub's git remote and the review
 agent stood in for: the App it acts as, the reviewers (the snapshot they read, the brief
 they're queued with, the reviewers' service taking it, what gets posted), handle() end to end, past the review-round limit,
+a clean look carried to a head that only merged its base in,
 on a conflict with its base and on dependency updates too, and the reviewers'
 answers through it, a PR whose merge would change nothing, Claude jobs that end without their answer, a fix job's answers (posted only on its own push), what a pass
 keeps up in each repo, what a PR touches, what starts its passes, the
@@ -25,5 +26,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: E402,F401 (the steward, set up from argv)
 
-for part in ("app", "review", "post", "handle", "rounds", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "legs", "lost", "unpushed", "superseded", "deps", "answers", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting"):
+for part in ("app", "review", "post", "handle", "rounds", "carried", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "legs", "lost", "unpushed", "superseded", "deps", "answers", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting"):
     importlib.import_module(part)

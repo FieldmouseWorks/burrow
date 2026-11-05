@@ -4,7 +4,7 @@
 #   ready -> Codex reviews it (an agent reading a snapshot of the head, as
 #            a user of its own with no GitHub access)
 #         -> Claude fixes or answers every finding
-#         -> it finds nothing on the exact head, CI green
+#         -> it finds nothing in the head's own change, CI green on the head
 #         -> (one-way paths, no CI: a Claude job judges it)
 #         -> `review-settled` status -> merged at that head -> branch deleted
 #            (a repo with `train` on: into its merge train instead, which
@@ -909,8 +909,9 @@ in
         ${cfg.app.slug}[bot], each thread marked as Codex's. Fix or answer
         every finding (reply on the thread, push the fix) and resolve the thread; Codex
         looks again once they're all resolved.
-      - Once it finds nothing on the exact head, every thread is resolved and CI is
-        green, it posts `${cfg.context}` and merges it, `.github/` changes included; the
+      - Once it finds nothing on the head (or on an earlier one whose own change was
+        the same: a merge of the base alone isn't looked at again), every thread is
+        resolved and CI is green on the head, it posts `${cfg.context}` and merges it, `.github/` changes included; the
         branch goes too.${lib.optionalString (trains != [ ]) ''
           In ${lib.concatStringsSep ", " trains} it goes into the repo's merge train
           instead, which lands it once CI is green on it merged onto the default branch with

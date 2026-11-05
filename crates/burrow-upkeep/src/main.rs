@@ -6,7 +6,8 @@
 //! reviewer on one; `claims`, which sees to the steward's Claude jobs that
 //! settle a PR, posting each one's answers once its push is the PR's head;
 //! `fetch`, which fetches refs into the steward's mirror of a
-//! repo, and `sweep`, which deletes what the reviewers leave of its closed
+//! repo; `carry`, which works out from it which of a PR's earlier heads'
+//! looks cover its head; and `sweep`, which deletes what the reviewers leave of its closed
 //! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
@@ -20,6 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
+use burrow_upkeep::carry;
 use burrow_upkeep::claims;
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
@@ -87,6 +89,15 @@ const USAGE: &str = "usage:
       the head, the jobs to stop, what came of each one's answers (posted,
       wrong, unpushed, moved, refused or unanswered), when to look again and
       a rate limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG carry OWNER/REPO --now SECONDS [--dry]
+      which of a PR's earlier heads' reviews cover its head (the head is
+      that head's change merged onto its base, and nothing else), from the
+      steward's mirror, with the head and base fetched into it; a JSON
+      object on stdin gives the PR's number, the head, its base, the
+      reviewers, the PR's reviews and what it said last: the heads checked,
+      those carried and what the head hides from the reviewers (or null
+      when no clean review could carry), or why it couldn't tell, as JSON
+      on stdout; --dry reads only what it said last
   burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
       what the reviewers leave of the repo's PRs, deleted once nothing needs
       it, a JSON list on stdin giving the snapshots of its open PRs' heads:
@@ -208,7 +219,8 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "sweep",
+        "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "carry",
+        "sweep",
     ]
     .contains(&word)
     {
@@ -255,6 +267,15 @@ fn run(args: &[String]) -> Result<(), Stop> {
         _ => None,
     };
     if let Some(why) = asked.as_ref().and_then(Asked::wrong) {
+        return Err(Stop::Usage(why));
+    }
+    let carrying = match word {
+        "carry" => Some(stdin::<carry::Ask>(
+            "the PR and its reviews, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
+    if let Some(why) = carrying.as_ref().and_then(carry::Ask::wrong) {
         return Err(Stop::Usage(why));
     }
     let ask = match word {
@@ -325,6 +346,15 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 Err(why) => json!({"said": null, "why": why, "limited": null}),
             }
         }
+        ("carry", _) => {
+            let Some(ask) = &carrying else {
+                return Err(Stop::Usage("no PR to carry to".into()));
+            };
+            match carry::carry(p.cfg, repo, &p.me(), ask, p.dry) {
+                Ok(c) => json!({"carry": c, "why": null, "limited": null}),
+                Err(why) => json!({"carry": null, "why": why, "limited": null}),
+            }
+        }
         ("queue", _) => {
             let Some(ask) = &ask else {
                 return Err(Stop::Usage("no reviewer to queue".into()));
@@ -371,7 +401,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the open PRs' snapshots, or the
+/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose earlier looks may carry, the open PRs' snapshots, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
