@@ -420,8 +420,10 @@ negative() {
   # A check that doesn't say runs the new tests it reads: each one that,
   # taken out of the negative tree (back to the base's version, or gone
   # where the base has none) and nothing else, changes the check's
-  # derivation there or stops it evaluating. So a test only another
-  # changed file brings in counts, and one nothing reads doesn't.
+  # derivation there or stops it evaluating on its own expression (as
+  # failed_there tells it from the store, the daemon, the network or a
+  # kill, any of which can't tell). So a test only another changed file
+  # brings in counts, and one nothing reads doesn't.
   if [ ${#undeclared[@]} -gt 0 ]; then
     mkdir "$work/one"
     j=0
@@ -440,19 +442,34 @@ negative() {
       one=$(GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" \
         git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
         commit-tree "$one" -p "$fork" -m "the tests of $HEAD_SHA on $fork's code, but one")
-      git clone -q --shared --no-checkout . "$work/one/$j"
-      git -C "$work/one/$j" checkout -q --detach "$one"
+      # Laid out as failed_there takes trees: this one, and the base.
+      mkdir "$work/one/$j"
+      git clone -q --shared --no-checkout . "$work/one/$j/negative"
+      git -C "$work/one/$j/negative" checkout -q --detach "$one"
+      ln -s "$work/base" "$work/one/$j/base"
       printf '%s\0' "$f" > "$work/one/$j.file"
       for k in "${undeclared[@]}"; do
         while [ "$(jobs -pr | wc -l)" -ge "$side" ]; do wait -n || true; done
-        evaluate "$work/one/$j" "${tqs[$k]}" "$work/one/$j.$k" &
+        evaluate "$work/one/$j/negative" "${tqs[$k]}" "$work/one/$j.$k" &
       done
     done < "$work/added"
     wait || true
     local m
     for ((m = 1; m <= j; m++)); do
       for k in "${undeclared[@]}"; do
-        if [ "$(cat "$work/one/$m.$k.rc")" != 0 ] || [ "$(cat "$work/one/$m.$k")" != "${targets[$k]}" ]; then
+        if [ ! -e "$work/one/$m.$k.rc" ] || { [ "$(cat "$work/one/$m.$k.rc")" = 0 ] && [ ! -e "$work/one/$m.$k" ]; }; then
+          echo "check ${targets[$k]}'s evaluation without $(tr -d '\0' < "$work/one/$m.file") left nothing to read, so it can't tell"
+          return 1
+        fi
+        rc=$(cat "$work/one/$m.$k.rc")
+        if [ "$rc" != 0 ]; then
+          echo "check ${targets[$k]} doesn't evaluate without $(tr -d '\0' < "$work/one/$m.file"):"
+          errors "$work/one/$m.$k.err"
+          failed_there "$rc" "$work/one/$m.$k.err" drv_of "$work/one/$m" "${tqs[$k]}" || return 1
+          cat "$work/one/$m.file" >> "$work/covered"
+          break
+        fi
+        if [ "$(cat "$work/one/$m.$k")" != "${targets[$k]}" ]; then
           cat "$work/one/$m.file" >> "$work/covered"
           break
         fi

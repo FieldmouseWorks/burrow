@@ -132,6 +132,56 @@ fn a_failure_counts_whatever_the_check_runs() {
     assert_eq!(ran.result(), "fail", "{}", ran.out);
 }
 
+/// A test the check can't evaluate without, on its own expression, counts
+/// as read: the new tests/check.nix imports the new tests/helper.nix.
+#[test]
+fn a_test_the_check_cant_evaluate_without_counts_as_read() {
+    let r = Repo::declaring("{ testFiles = [ ]; }");
+    let head = r.pr(
+        "helper",
+        &[
+            ("lib.txt", Some("2\n")),
+            (
+                "tests/check.nix",
+                Some("{ drv }: import ./helper.nix { inherit drv; }\n"),
+            ),
+            (
+                "tests/helper.nix",
+                Some("{ drv }: drv \"fromtests\" [ ./helper.nix ]\n"),
+            ),
+        ],
+    );
+    let ran = r.run(&head, "", "");
+    assert_eq!(ran.result(), "pass", "{}", ran.out);
+    assert!(ran.list("unrun").is_empty(), "{}", ran.out);
+    assert!(
+        ran.out
+            .contains("doesn't evaluate without tests/helper.nix"),
+        "{}",
+        ran.out
+    );
+}
+
+/// A probe that fails for anything but its own expression (killed, here)
+/// says nothing of what the check reads: it can't tell, rather than count
+/// the unread test as read.
+#[test]
+fn a_probe_killed_cant_tell() {
+    let r = Repo::new();
+    let head = r.pr(
+        "mixed",
+        &[
+            ("lib.txt", Some("2\n")),
+            ("tests/want.txt", Some("1\n# also\n")),
+            ("docs/tests/x.txt", Some("x\n")),
+        ],
+    );
+    let ran = r.run_with(&head, "", &[("EVAL_KILL", "/one/")]);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(ran.out.contains("ended with 137"), "{}", ran.out);
+}
+
 /// A test another changed file brings in counts as read: fromtests reads
 /// tests/new.txt only once the new tests/check.nix does, so neither alone
 /// on the old code would show it, but taking either out of the negative
