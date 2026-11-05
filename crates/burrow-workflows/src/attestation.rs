@@ -144,10 +144,7 @@ impl Repo {
             ("GH_TOKEN", "t"),
         ];
         if c.oidc {
-            env.push((
-                "ACTIONS_ID_TOKEN_REQUEST_URL",
-                "https://token.example/idtoken?api-version=2.0",
-            ));
+            env.push(("ACTIONS_ID_TOKEN_REQUEST_URL", c.token_url));
             env.push(("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token"));
         }
         let job = job();
@@ -191,6 +188,8 @@ struct Case<'a> {
     event: &'a str,
     oidc: bool,
     token_fails: bool,
+    /// Where the job asks for its token.
+    token_url: &'a str,
     /// What gh says the PR left its base at.
     merge_base: &'a str,
     /// The PR's head as the event gives it, when it isn't the merge's.
@@ -205,6 +204,7 @@ impl Default for Case<'_> {
             event: "push",
             oidc: true,
             token_fails: false,
+            token_url: "https://token.example/idtoken?api-version=2.0",
             merge_base: "",
             pr_head: None,
         }
@@ -339,6 +339,55 @@ fn a_token_request_that_fails_fails_the_step() {
         "{:?}",
         a.outputs
     );
+}
+
+/// GitHub's token service sometimes answers with a 503 (a LoK-web PR's
+/// passing gate, 2026-11-05): the job asks again, as it would after any
+/// answer that says try later, rather than fail a gate that passed.
+#[test]
+fn a_token_request_answered_try_later_is_asked_again() {
+    let r = Repo::new();
+    // The machine's curl, past the stand-in, which still logs what it's asked.
+    r.s.stub(
+        "curl",
+        "printf '%s\\n' \"$@\" >> \"$CURL_LOG\"\nPATH=${PATH#*:} exec curl \"$@\"\n",
+    );
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/idtoken?api-version=2.0",
+        server.local_addr().unwrap()
+    );
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = asked.clone();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        for mut conn in server.incoming().flatten() {
+            let mut request = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            while request.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
+            }
+            let answer = if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned()
+            } else {
+                let body = format!("{{\"count\": 1, \"value\": \"{TOKEN}\"}}");
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let _ = conn.write_all(answer.as_bytes());
+        }
+    });
+    let a = r.run(Case {
+        token_url: &url,
+        ..Case::default()
+    });
+    assert_eq!(a.code, 0, "{}", a.said);
+    let (_, token) = statement_of(a.attested.as_deref().expect("an attestation"));
+    assert_eq!(token, TOKEN);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 /// A private repo's PR: the revision, the merge step's merge of the head

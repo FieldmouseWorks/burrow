@@ -94,7 +94,8 @@
       # tests in a slot of the real heavy (burrow-heavy); proj's clone repos
       # to read their origins, gh-token's make keys with openssl, lock-age's
       # check its wait against what the steward reads (lock_wait.py), and
-      # house-sync's read burrow's own house blocks.
+      # house-sync's read burrow's own house blocks, and attestation's ask a
+      # token server of their own with curl.
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -111,7 +112,7 @@
             "modules/autoland/lock_wait.py"
             "house"
           ];
-          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
+          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside
