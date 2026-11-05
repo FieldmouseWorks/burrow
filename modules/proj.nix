@@ -42,6 +42,7 @@ let
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
+    roles = "${config.users.users.${user}.home}/.config/proj/roles";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) label unstickLabel authors vm;
@@ -327,6 +328,7 @@ in
           proj run --first web "the task"   the same, ahead of the line
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj run --app NAME web "task"    acting on GitHub as the App NAME
+          proj run --role NAME web "task"   on the model ~/.config/proj/roles gives NAME
           proj status                       what's running, what finished
           proj status --line                every turn in line, next first, and its wait
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
@@ -343,7 +345,8 @@ in
       relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
-      them. ${config.burrow.owner} can also open any project's own session directly from their phone.
+      them. A job has the machine's MCP servers but not the claude.ai connectors (mail,
+      calendar, drive) or skills: work that needs those is a session's. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
   }
 

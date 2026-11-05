@@ -217,11 +217,27 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         .unwrap_or(0);
     let mut killed = 0;
     let (last, mut rc) = loop {
-        let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
-            .map(String::from)
-            .to_vec();
+        let mut args: Vec<String> = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            // No skills or slash commands: a job is handed its task as
+            // text, and in 14 days none of 2,188 jobs called a skill, while
+            // their list rode along in every call.
+            "--disable-slash-commands",
+        ]
+        .map(String::from)
+        .to_vec();
         if let Some(s) = read(&job.path("session")).filter(|s| !s.is_empty()) {
             args.extend(["--resume".into(), s]);
+        }
+        // Its role's model, as the machine has it now.
+        if let Some(m) = read(&job.path("role"))
+            .filter(|r| !r.is_empty())
+            .and_then(|r| cfg.model(&r))
+        {
+            args.extend(["--model".into(), m]);
         }
         // Where this run's stream starts: an earlier run's answer isn't its.
         let from = fs::metadata(&stream).map_or(0, |m| m.len());
@@ -478,7 +494,12 @@ fn spawn(
 ) -> std::io::Result<Child> {
     let out = File::options().append(true).open(job.turn(n, "jsonl"))?;
     let mut c = Command::new(&cfg.tools.timeout);
-    c.args(["-k", "1m", "0"]).stdout(out);
+    // No claude.ai connectors (mail, calendar, drive, design tools): one of
+    // 2,188 jobs in 14 days called one, and their tools were a ninth of
+    // every job's context. The machine's own MCP servers stay.
+    c.args(["-k", "1m", "0"])
+        .stdout(out)
+        .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
     if let Some(agent) = agent {
         c.args(["agent", "sh", agent, "claude"])
             .args(&args)

@@ -55,9 +55,11 @@ const STAND_INS: [(&str, &str); 6] = [
     (
         // GitHub: the user's login (FAKE/user-fails to fail), a repo's
         // Renovate PRs (FAKE/prs-OWNER_REPO, or FAKE/prs for every repo),
-        // PR N's comments (FAKE/comments-N) and Renovate's comments as REST
-        // has them (FAKE/rest-N). It refuses an edit when FAKE/gh-refuses
-        // is there, and the first to read PR N's comments when FAKE/gh-blocks
+        // PR N's comments (FAKE/comments-N), Renovate's comments as REST
+        // has them (FAKE/rest-N) and PR N's timeline (FAKE/timeline-N, as
+        // the pages --slurp gives them, or none; FAKE/timeline-fails has it
+        // fail after printing them, as gh does when a page doesn't come). It refuses an edit when
+        // FAKE/gh-refuses is there, and the first to read PR N's comments when FAKE/gh-blocks
         // says N waits for FAKE/gh-go.
         "gh",
         r#"echo "gh $*" >>"$FAKE/log"
@@ -69,7 +71,12 @@ case "$1 $2" in
       while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done
     fi
     cat "$FAKE/comments-$3" 2>/dev/null || echo '{"comments": []}' ;;
-  "api --paginate") n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
+  "api --paginate")
+    case "$4" in
+      */timeline) n=${4%/timeline}; cat "$FAKE/timeline-${n##*/}" 2>/dev/null || echo '[[]]'
+        [ ! -e "$FAKE/timeline-fails" ] ;;
+      *) n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
+    esac ;;
   "api -X") [ ! -e "$FAKE/gh-refuses" ] ;;
   "label create"|"pr edit") ;;
   *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
@@ -101,10 +108,12 @@ while read -r who when; do [ "$who" != "$1" ] || echo "$when"; done
     (
         // A job, kept whether or not it starts (FAKE/proj-fails), that
         // starts once FAKE/proj-blocks is gone. FAKE/proj-held-lock says it
-        // was handed the sweep's lock.
+        // was handed the sweep's lock. ls says nothing on stderr, which the
+        // sweep passes on: a descriptor that closes while it lists them
+        // (one the shell had for a moment) is no failure of the sweep's.
         "proj",
         r#"n=$(ls "$FAKE" | grep -c '^job-'); printf '%s\0' "$@" >"$FAKE/job-$n"
-if ls -l /proc/$$/fd | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
+if ls -l /proc/$$/fd 2>/dev/null | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
 while [ -e "$FAKE/proj-blocks" ]; do sleep 0.05; done
 [ ! -e "$FAKE/proj-fails" ] || exit 3
 "#,
@@ -170,26 +179,34 @@ impl Pass {
         self.notice("majors")
     }
 
-    /// The titles it asked GitHub for.
+    /// What it asked GitHub to do to a PR's rebase label.
     fn asked(&self) -> Vec<&str> {
         self.log
             .iter()
-            .filter_map(|l| l.strip_prefix("gh api -X PATCH "))
+            .filter_map(|l| l.strip_prefix("gh api -X "))
             .collect()
     }
 }
 
-/// What asking for PR `n` to have `title` looks like.
-fn retitled(n: u64, title: &str) -> String {
-    format!("repos/{REPO}/pulls/{n} -f title={title}")
-}
-
+/// Asking for PR `n` to be refreshed: Renovate's rebase label on it.
 fn rebase(n: u64) -> Vec<String> {
-    vec![retitled(n, &format!("rebase!{LOCK}"))]
+    vec![format!(
+        "POST repos/{REPO}/issues/{n}/labels -f labels[]=rebase"
+    )]
 }
 
-fn unasked(n: u64, title: &str) -> Vec<String> {
-    vec![retitled(n, title)]
+/// Taking that request back.
+fn unasked(n: u64) -> Vec<String> {
+    vec![format!("DELETE repos/{REPO}/issues/{n}/labels/rebase")]
+}
+
+/// `p` with the rebase label on it: a request standing.
+fn requested(mut p: Value) -> Value {
+    p["labels"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "rebase"}));
+    p
 }
 
 impl Machine {

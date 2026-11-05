@@ -12,7 +12,10 @@ fn a_major_without_a_verdict_goes_to_a_job_that_is_told_what_to_trust() {
     // Settling the pipeline's PRs is pipeline work: ahead of everything, in
     // its own slot where the repo is one of the pipeline's own (proj
     // decides).
-    assert_eq!(p.jobs[0][..3], ["run", "--pipeline", "r"]);
+    assert_eq!(
+        p.jobs[0][..5],
+        ["run", "--pipeline", "--role", "renovate-sweep", "r"]
+    );
     let task = p.task();
     assert!(task.starts_with("Renovate's PRs in sam/r can't merge themselves:\n- #1 \"Update foo1 to v2\" (branch renovate/foo1-2.x): a major version bump\nMake them"), "{task}");
     // What it reads in the PRs, titles and logs too, is a claim.
@@ -53,8 +56,16 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
     m.prs(&[pr(1)]);
     let p = m.pass();
     assert_eq!(
-        p.jobs[0][..5],
-        ["run", "--pipeline", "--app", "workers", "r"]
+        p.jobs[0][..7],
+        [
+            "run",
+            "--pipeline",
+            "--role",
+            "renovate-sweep",
+            "--app",
+            "workers",
+            "r"
+        ]
     );
     assert!(
         !p.log.iter().any(|l| l.starts_with("gh api user")),

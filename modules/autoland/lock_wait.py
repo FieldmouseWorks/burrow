@@ -30,7 +30,8 @@ ARTIFACTS = "renovate/artifacts"  # the status Renovate fails a refresh's artifa
 PROBLEM = "Artifact update problem"  # the title of Renovate's comment on it
 WAITING = re.compile(r"lock-age: nothing in the refresh is old enough until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
 BLOCK = re.compile(r"^```\n(.*?)^```", re.S | re.M)
-REQUEST = "rebase!"  # the title's prefix that has Renovate redo the branch, on its every run
+REQUEST = "rebase"  # the label that has Renovate redo the branch on its next run, which takes it off (its rebaseLabel)
+TITLE = "rebase!"  # the title prefix that has it redo the branch on every run, until someone takes it off
 ASKS, STANDING = 3, 6 * 3600  # requests on a head, and how long each may stand
 RELEASES, RELEASE_GAP = 3, 600  # tries to take one back, and how far apart
 PASS = 3600  # how often the sweep's timer fires
@@ -62,10 +63,10 @@ def recovery(run):
 
 def guard(run):
     """What a job the watchdog hands the PR to is told. Whether or not the
-    title has it now: a request just gone may be what a run is acting on."""
-    return (f"; {REQUEST} at the start of its title has Renovate redo the branch over what you push: if it's there, "
-            f"take it off, and push nothing to it until {run // 60} minutes after it last had it (the PR's timeline "
-            "shows its renamed events)")
+    PR has it now: a request just gone may be what a run is acting on."""
+    return (f"; the {REQUEST} label, or a title starting {TITLE}, has Renovate redo the branch over what you "
+            f"push: if either is there, take it off, and push nothing to it until {run // 60} minutes after it last "
+            "had one (the PR's timeline shows when it came off)")
 
 
 def when(body):
@@ -95,14 +96,20 @@ def ripe(comments, renovate):
 
 
 def requested(pr, now, run):
-    """Whether a Renovate PR has a request standing, or had one recently
-    enough for a run that read it to be going on still: `run` seconds from
-    the rename that took it off, as the PR's timeline has it, so whatever a
-    pass saw of it or when, and whatever the head has done since."""
-    if pr["title"].startswith(REQUEST):
+    """Whether a Renovate PR has a request standing (the label, or the title
+    prefix anyone may still type), or had one recently enough for a run that
+    read it to be going on still: `run` seconds from it coming off, as the
+    PR's timeline has it, so whatever a pass saw of it or when, and whatever
+    the head has done since. A timeline cut short inside that window (other
+    labels coming and going) may have lost one, so it counts as one."""
+    if any(x["name"] == REQUEST for x in pr["labels"]["nodes"]) or pr["title"].startswith(TITLE):
         return True
-    gone = [stamp(e["createdAt"]) for e in pr["timelineItems"]["nodes"] if e["previousTitle"].startswith(REQUEST)]
-    return bool(gone) and now < max(gone) + run
+    items = pr["timelineItems"]
+    seen = [(stamp(e["createdAt"]), (e.get("label") or {}).get("name") == REQUEST
+             or (e.get("previousTitle") or "").startswith(TITLE)) for e in items["nodes"]]
+    if any(now < t + run for t, gone in seen if gone):
+        return True
+    return items["pageInfo"]["hasPreviousPage"] and any(now < t + run for t, _ in seen[:1])
 
 
 def refresh(pr, red, names, renovate, asked):

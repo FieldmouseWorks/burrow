@@ -262,6 +262,7 @@ def session_name(r, snap):
 head = "a" * 40
 WROTE, JOBS, POSTED, FORGOT = [], [], [], []
 SINCE = []  # each job's place in line (C.job's since), in the order they started
+ROLES = []  # and the kind of work each is (C.job's role), which picks its model
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 COMMITTERS = {}  # a PR's commits' committer emails, by number, as the REST API gives them (None: the ask fails)
@@ -338,9 +339,10 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, role=None):
     JOBS.append(task)
     SINCE.append(since)
+    ROLES.append(role)
     return f"job-{len(JOBS)}"
 
 
@@ -429,14 +431,14 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
-         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), renames=()):
+         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), unlabels=(), cut=False):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
-        "changedFiles": len(files), "reactions": {"nodes": []}, "timelineItems": {"nodes": list(renames)}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "timelineItems": {"pageInfo": {"hasPreviousPage": cut}, "nodes": list(unlabels)}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
@@ -462,6 +464,7 @@ def run(pr, after, held=None):
     WROTE.clear()
     JOBS.clear()
     SINCE.clear()
+    ROLES.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()

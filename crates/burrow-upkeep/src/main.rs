@@ -204,7 +204,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         [word, repo, rest @ ..] => (word.as_str(), repo.as_str(), rest),
         _ => return Err(Stop::Usage("no word and repo".into())),
     };
-    if !flaky::quarantine::repo_name(repo) {
+    if !burrow_github::repo_name(repo) {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![

@@ -8,7 +8,9 @@ use serde_json::Value;
 use crate::handler::Handler;
 use crate::http::{Request, signed};
 use crate::line::{DEBOUNCE, Line, Pass};
-use crate::{now, repo_name};
+use burrow_github::repo_name;
+
+use crate::now;
 
 pub type Handlers = Arc<BTreeMap<String, Handler>>;
 pub type Lines = Arc<BTreeMap<String, Line>>;

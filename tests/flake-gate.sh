@@ -88,6 +88,29 @@ done
 d=$(repo "$(caller o/burrow/.github/workflows/flake-check.yml@main)")
 if (cd "$d" && GATE_OUT=$tmp/out flake-gate); then fail "ran another ref's gate than main's"; fi
 
+# A gate step that runs the gate's own files (its TOOLS) runs them as the
+# workflow's commit has them: this repo's own, or the named repo's at the
+# ref it names.
+tools_wf() { shared '          TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check' '          bash "$TOOLS/gate.sh"'; }
+gate_file() { mkdir -p "$1/.github/flake-check" && printf 'echo "%s $PWD" >> "$GATE_OUT"\n' "$2" > "$1/.github/flake-check/gate.sh"; }
+d=$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(tools_wf)")
+gate_file "$d" local && git -C "$d" add . && git -C "$d" commit -qm tools
+(cd "$d" && GATE_OUT=$tmp/out flake-gate) || fail "a gate that runs its files failed"
+[ "$(tail -n 1 "$tmp/out")" = "local $d" ] || fail "ran its files as $(cat "$tmp/out")"
+(cd "$d" && flake-gate --print) > "$tmp/print"
+grep -qx "env: TOOLS=$d/.github/flake-check" "$tmp/print" || fail "printed its files' place as $(grep TOOLS "$tmp/print")"
+tools=$(mktemp -d "$tmp/tools.XXXXXX")
+mkdir -p "$tools/.github/workflows"
+tools_wf > "$tools/.github/workflows/flake-check.yml"
+gate_file "$tools" v1
+git -C "$tools" init -q && git -C "$tools" add . && git -C "$tools" commit -qm v1 && git -C "$tools" tag v1
+gate_file "$tools" v2
+git -C "$tools" commit -qam v2
+git config --global url."file://$tools".insteadOf https://github.com/o/tools
+d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@v1)")
+(cd "$d" && GATE_OUT=$tmp/out flake-gate) || fail "a named workflow that runs its files failed"
+[ "$(tail -n 1 "$tmp/out")" = "v1 $d" ] || fail "ran v1's files as $(cat "$tmp/out")"
+
 # What it can't run as GitHub would, it refuses, and runs nothing.
 refused() {
   rm -f "$tmp/out"
@@ -103,6 +126,8 @@ refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '     
   "a matrix value that isn't the leg" 'env OS is matrix.os'
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared | sed 's/shell: bash/shell: sh/')")" \
   "a step that isn't bash" "isn't shell: bash"
+refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(tools_wf)")" \
+  "a gate whose files aren't there" "there's no .github/flake-check/gate.sh beside it"
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)
   again:
     uses: ./.github/workflows/flake-check.yml" "$(shared)")" "two gates" "2 jobs calling flake-check.yml"
@@ -114,6 +139,9 @@ git -C "$d" init -q && git -C "$d" add . && git -C "$d" commit -qm burrow
 (cd "$d" && flake-gate --print) > "$tmp/print"
 yq '.jobs.check.steps[] | select(.id == "gate") | .run' "$d/.github/workflows/flake-check.yml" > "$tmp/step"
 diff <(grep -vE '^(workflow|env): ' "$tmp/print") "$tmp/step" || fail "flake-gate runs another script than CI's gate step"
+# Its files, from the checkout the workflow came from.
+grep -qx "env: TOOLS=$d/.github/flake-check" "$tmp/print" || fail "burrow's gate runs its files from $(grep TOOLS "$tmp/print")"
+[ -f "$d/.github/flake-check/gate.sh" ] && [ -f "$d/.github/flake-check/plan.nix" ] || fail "burrow's gate has no files to run"
 # The whole flake at once holds 6-7G until its last build ends, beside every
 # other job on remi; one output at a time holds a fraction of that.
 grep -qx 'env: APART=true' "$tmp/print" || fail "burrow's gate evaluates the whole flake at once: $(head -3 "$tmp/print")"

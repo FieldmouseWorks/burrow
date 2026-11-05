@@ -110,7 +110,7 @@ every = 3600 + 7200
 drain = 4 * every + 7200
 recovery = 3 * (6 * 3600 + every) + drain
 assert waiting["sam/r#9"]["since"] == T + 260 and waiting["sam/r#9"]["due"] == ripe + recovery + 120 * MIN, waiting
-assert "rebase! at the start of its title" in waiting["sam/r#9"]["phase"] and "until 120 minutes after it last had it" in waiting["sam/r#9"]["phase"], waiting
+assert "the rebase label, or a title starting rebase!, has Renovate redo the branch" in waiting["sam/r#9"]["phase"] and "until 120 minutes after it last had one" in waiting["sam/r#9"]["phase"], waiting
 # A date long gone counts the same from when it began waiting, and the wait
 # is the same one whether or not a request stands: asks don't move its deadline.
 past = {**lock, "comments": [said("### Artifact update problem\n\n```\nlock-age: nothing in the refresh is old enough until "
@@ -118,7 +118,7 @@ past = {**lock, "comments": [said("### Artifact update problem\n\n```\nlock-age:
 OPEN["sam/r"][-1] = pr("sam/r", 9, **past)
 gone = run(262)
 assert gone["sam/r#9"]["since"] == T + 262 and gone["sam/r#9"]["due"] == T + 262 + recovery + 120 * MIN, gone
-OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "title": "rebase!Lock file maintenance (cargo)"})
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "labels": ["rebase"]})
 asking = run(264)
 assert asking["sam/r#9"]["since"] == T + 262 and asking["sam/r#9"]["due"] == gone["sam/r#9"]["due"], asking
 # Open threads put it down as red CI, which waits for the same date: the sweep
@@ -130,17 +130,17 @@ assert "CI red" in threads["sam/r#9"]["phase"] and threads["sam/r#9"]["due"] == 
 # back: past that, and the longest run that read it, before its allowance.
 OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": []})
 red = run(266)
-assert red["sam/r#9"]["due"] == T + 266 + drain + 120 * MIN and "rebase! at the start of its title" in red["sam/r#9"]["phase"], red
+assert red["sam/r#9"]["due"] == T + 266 + drain + 120 * MIN and "the rebase label, or a title starting rebase!, has Renovate redo the branch" in red["sam/r#9"]["phase"], red
 # Past that bound's cases: three failed tries an hour apart, the job at hour
 # four and its wait to hour six are all inside a default stallAfter's deadline.
 assert drain > 6 * 3600, drain
 # Green with a request just gone, the job the watchdog hands it to is told the same.
-OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "title": "rebase!Lock file maintenance (cargo)"})
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "labels": ["rebase"]})
 run(267)
-OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "renames": [
-    {"createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T + 267)), "previousTitle": "rebase!Lock file maintenance (cargo)"}]})
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "unlabels": [
+    {"createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T + 267)), "label": {"name": "rebase"}}]})
 just = run(268)
-assert "rebase! at the start of its title" in just["sam/r#9"]["phase"], just
+assert "the rebase label, or a title starting rebase!, has Renovate redo the branch" in just["sam/r#9"]["phase"], just
 OPEN["sam/r"].pop()
 run(270)
 

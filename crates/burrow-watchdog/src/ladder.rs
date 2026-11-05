@@ -296,6 +296,9 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
         &idle,
         "--kick",
         "watchdog",
+        // The kind of work it is, which the machine may give a model of its own.
+        "--role",
+        "watchdog",
         "--owned",
         &cfg.project,
         &task,

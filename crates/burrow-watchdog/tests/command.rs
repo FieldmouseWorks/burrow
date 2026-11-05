@@ -95,7 +95,7 @@ fn command() {
     assert!(
         // Whether the machine is out of Claude usage, which would hold it.
         log.starts_with(
-            "usage\nrun --pipeline --timeout 60m --idle 20m --kick watchdog --owned homelab "
+            "usage\nrun --pipeline --timeout 60m --idle 20m --kick watchdog --role watchdog --owned homelab "
         ),
         "{log}"
     );
