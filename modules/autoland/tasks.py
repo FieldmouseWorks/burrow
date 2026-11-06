@@ -246,13 +246,11 @@ def fixers():
 
 
 def undo(repo, branch, refused, undone=()):
-    """With the ledger on, how a job has a merge that broke the branch
-    undone: it names the PR, and the steward has the ledger open the revert
-    (repos.undo_red), recorded as that PR's undo. Unless the ledger couldn't
-    for this red already (refused, what it said). What it undid for this red
-    already (undone, as REPO#N), which left it red, isn't named again."""
-    if not CFG.get("undo"):
-        return ""
+    """How a job has a merge that broke the branch undone: it names the
+    PR, and the steward has the ledger open the revert (repos.undo_red),
+    recorded as that PR's undo. Unless the ledger couldn't for this red
+    already (refused, what it said). What it undid for this red already
+    (undone, as REPO#N), which left it red, isn't named again."""
     if refused:
         return (f"The steward asked the ledger to undo a PR whose merge broke it, and that couldn't be done: {refused[:300]}. "
                 "Don't name one again: fix it yourself, as follows. ")

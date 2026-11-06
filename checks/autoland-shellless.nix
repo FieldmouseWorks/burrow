@@ -6,8 +6,10 @@ let
     modules = [
       self.nixosModules.autoland
       ../examples/machine.nix
-      ({ lib, ... }: {
+      ({ lib, pkgs, ... }: {
         burrow.autoland = { enable = true; owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; };
+        # The steward needs the ledger; a stand-in for Conary's `cn`.
+        burrow.ledger = { enable = true; package = pkgs.writeShellScriptBin "cn" "exit 1"; anchorRepo = "sam/homelab"; };
         burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; };
         environment.binsh = lib.mkForce null;
       })

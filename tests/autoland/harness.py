@@ -106,27 +106,35 @@ def review_service():
                                                       "PATH": os.environ["PATH"]})
 
 
-# Conary's cn, for the merge train: it records how it was run, then answers
-# what CN says for its subcommand (show, join, leave, step), or fails with
-# that subcommand's exit code. With "token", it first runs its token command
-# for the repo, as cn does, and records what that did.
-CN, CN_LOG = f"{tmp}/cn.json", f"{tmp}/cn-log"
+# Conary's cn: it records how it was run, then answers what CN says for its
+# subcommand (the train's show, join, leave, step; class), or fails with that
+# subcommand's exit code. With "token", it first runs its token command for
+# the repo, as cn does, and records what that did. Unless CN says otherwise,
+# `class` classes the files the PR at that head lists (TOUCHED, which mkpr
+# and run keep) by the policy's R2 paths, as Conary does.
+CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 args = sys.argv[1:]
+sub, repo = (args[1], args[2]) if args[0] == "train" else (args[0], args[1])
 do = json.load(open({CN!r}))
 token = None
 if do.get("token"):
-    p = subprocess.run(os.environ["CONARY_TOKEN_COMMAND"].split() + [args[2]], capture_output=True, text=True)
+    p = subprocess.run(os.environ["CONARY_TOKEN_COMMAND"].split() + [repo], capture_output=True, text=True)
     token = {{"rc": p.returncode, "out": p.stdout, "err": p.stderr}}
 with open({CN_LOG!r}, "a") as f:
     f.write(json.dumps({{"args": args, "env": {{k: v for k, v in os.environ.items() if k.startswith("CONARY_")}},
                         "token": token}}) + "\\n")
-if do.get("rc", {{}}).get(args[1]):
-    print("cn: " + args[1] + " failed", file=sys.stderr)
-    sys.exit(do["rc"][args[1]])
-print(json.dumps(do[args[1]]))
+if do.get("rc", {{}}).get(sub):
+    print("cn: " + sub + " failed", file=sys.stderr)
+    sys.exit(do["rc"][sub])
+if sub == "class" and "class" not in do:
+    paths = json.load(open({TOUCHED!r})).get(args[2] + "@" + args[4], [])
+    r2 = json.load(open(os.environ["CONARY_POLICY"]))["r2"]
+    because = next((p for p in paths if any(re.search(x, p) for x in r2)), None)
+    do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": False}}
+print(json.dumps(do[sub]))
 """)
 os.chmod(f"{tmp}/cn", 0o755)
 IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "unready": [], "finished": [],
@@ -143,12 +151,27 @@ def cn(**do):
 
 
 def cn_runs():
-    """How cn was run since its answers were last set, its arguments alone."""
-    return [json.loads(x)["args"] for x in open(CN_LOG)]
+    """How cn was run for anything but a class since its answers were last
+    set, its arguments alone."""
+    return [x["args"] for x in cn_log()]
 
 
 def cn_log():
-    return [json.loads(x) for x in open(CN_LOG)]
+    return [x for x in map(json.loads, open(CN_LOG)) if x["args"][0] != "class"]
+
+
+def cn_classed():
+    """The PRs cn was asked to class since its answers were last set, as
+    (repo, number, head)."""
+    return [(a[1], int(a[2]), a[4]) for a in (json.loads(x)["args"] for x in open(CN_LOG)) if a[0] == "class"]
+
+
+def touching(number, sha, files):
+    """What `cn class` reads a PR at a head touches."""
+    touched = json.load(open(TOUCHED)) if os.path.exists(TOUCHED) else {}
+    touched[f"{number}@{sha}"] = list(files)
+    with open(TOUCHED, "w") as f:
+        json.dump(touched, f)
 
 
 def agent(**do):
@@ -164,9 +187,8 @@ def agent_runs():
 
 agent()
 cn()
-# The module's default one-way paths.
-with open(sys.argv[2]) as f:
-    ONE_WAY = json.load(f)
+# The example machine's class policy (burrow.ledger.policy), as cn reads it.
+POLICY = sys.argv[2]
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
@@ -176,13 +198,14 @@ with open(f"{tmp}/config.json", "w") as f:
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer", "train": "waiting: train"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
         "defaults": {"rounds": 5,
-                     "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
+                     "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
                      "directPush": False, "ruleset": True, "requireCi": True,
                      "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True, "rival": True,
                      "train": False, "trainSize": 8, "trainRequire": [], "trainNegative": None, "trainStallAfter": 240},
         "trainContext": "conary/train",
-        "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"}},
+        "conary": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab",
+                                              "CONARY_POLICY": POLICY}},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",
@@ -434,6 +457,7 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
          branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), unlabels=(), cut=False):
+    touching(number, sha, files)
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
@@ -471,6 +495,8 @@ def run(pr, after, held=None):
     C.LIMITED.clear()
     POSTED.clear()
     digest = []
+    touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]])
+    H.T.GATES.clear()
     with C.acting_for("sam/r"):
         H.handle("sam/r", pr, info, digest, held)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest

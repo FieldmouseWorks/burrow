@@ -184,7 +184,7 @@ def watch_default(r, info, prs, digest):
     built on it. With no merge queue (docs/repo-baseline.md), this is how
     two PRs that broke it together get undone: a Claude job finds the
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
-    lands like any other; with the ledger on, a revert of one PR's merge is
+    lands like any other, except that a revert of one PR's merge is
     instead the ledger's undo of that PR, which the job names and the
     steward has it open (undo_red). When one PR's landing alone turned it
     red (landed_alone), the steward names that PR itself, and starts a job
@@ -248,7 +248,7 @@ def watch_default(r, info, prs, digest):
     # A new red one landing caused: its undo is asked for with no job,
     # unless a fix is open already (anyone's of the steward's own, from a
     # RED_BRANCH branch), which is the red's fix in hand, as for a job.
-    if not red and not fixes and CFG.get("undo"):
+    if not red and not fixes:
         named = landed_alone(repo, default, target)
         if named:
             log(f"{repo}: {default} is red at {sha[:7]}, and {named}'s landing alone made it so: undoing it, with no job")
@@ -260,7 +260,7 @@ def watch_default(r, info, prs, digest):
     # opened its undo already: a retry finds that one and records it,
     # opening none beside it.
     others = [pr for pr in fixes if pr["number"] not in red.get("undos", ())]
-    if (not working and (red.get("job") or (red.get("named") and (red.get("undos") or not others))) and CFG.get("undo")
+    if (not working and (red.get("job") or (red.get("named") and (red.get("undos") or not others)))
             and not (red.get("asked") or red.get("refused"))):
         booked = undo_red(repo, red)
         save(key, st)

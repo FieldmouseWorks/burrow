@@ -1,36 +1,36 @@
-"""What a PR touches: the one-way paths, and a dependency bot's edits to
-the gate."""
+"""What a PR touches: the class policy's R2 paths, and a dependency bot's
+edits to the gate."""
 
-from harness import ONE_WAY, PR_DIFF, WROTE, G, S, merged, mkpr, run
+import json
+import re
 
+from harness import POLICY, PR_DIFF, WROTE, G, S, merged, mkpr, run
 
-# The module's one-way paths: CODEOWNERS and secrets are judged before they
-# land; the rest of .github/, and migrations (a deploy backs the data up before
-# it migrates), are settled and merged like anything else.
-def touching(*paths):
-    return {"labels": {"nodes": []}, "files": {"nodes": [{"path": p} for p in paths]}, "changedFiles": len(paths)}
-
-
-for p in (".github/workflows/flake.yml", ".github/dependabot.yml", "server/migrations/0002_users.sql", "migrations/1.sql"):
-    assert G.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
-for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "app/secret/key.yaml"):
-    assert G.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
-assert G.one_way(touching("CODEOWNERS.bak"), {"oneWay": ONE_WAY}, [".github/CODEOWNERS"]) == ".github/CODEOWNERS"
+# The module's R2 paths (burrow.ledger.policy), which Conary classes a PR
+# by: CODEOWNERS and secrets are judged before they land; the rest of
+# .github/, and migrations (a deploy backs the data up before it migrates),
+# are settled and merged like anything else.
+R2 = json.load(open(POLICY))["r2"]
+for p in (".github/workflows/flake.yml", ".github/dependabot.yml", "server/migrations/0002_users.sql", "migrations/1.sql",
+          "src/app.py"):
+    assert not any(re.search(x, p) for x in R2), (p, R2)
+for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "app/secret/key.yaml", "x.sops.json"):
+    assert any(re.search(x, p) for x in R2), (p, R2)
 assert G.unquote('"secrets/caf\\303\\251.yaml"') == "secrets/caf\u00e9.yaml" and G.unquote("a b") == "a b"
 assert G.unquote('"secrets/\\377"') == "secrets/\ufffd" and G.unquote('"secrets/bad\\x"') == "secrets/bad\\x"
-print("one-way: ok")
+print("r2 paths: ok")
 
 
 # A dependency bot's change to the gate: a workflow edit past repinning its
 # actions is reviewed like a Claude PR, since nothing else reads it; a pin
 # bump alone merges on green CI like any dependency update.
-def bump(diff, path=".github/workflows/ci.yml", change="MODIFIED"):
+def bump(diff, path=".github/workflows/ci.yml", change="MODIFIED", unlisted=0):
     PR_DIFF["v"] = diff
     WROTE.clear()
     pr = mkpr()
     pr.update(number=12, headRefName="dependabot/github_actions/actions/checkout-4.2.0",
               title="Bump actions/checkout from 4.1.0 to 4.2.0", author={"login": "dependabot", "__typename": "Bot"},
-              files={"nodes": [{"path": path, "changeType": change}]})
+              files={"nodes": [{"path": path, "changeType": change}]}, changedFiles=1 + unlisted)
     S.save("pr-sam_r-12.json", {})
     return run(pr, 4000)[0]
 
@@ -94,4 +94,7 @@ for diff, path, change in (
 status = bump("diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\nrename from src/a.rs\nrename to src/b.rs\n",
               "src/b.rs", "RENAMED")
 assert "Dependency update, CI green" in status and merged(), (status, WROTE)
+# A file list too long to read whole could hide a workflow edit: reviewed.
+status = bump(PIN, unlisted=150)
+assert "Dependency update" not in status and not merged(), (status, WROTE)
 print("gate edits: ok")

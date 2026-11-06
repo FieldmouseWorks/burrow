@@ -168,21 +168,20 @@ impl Settle {
 
 /// Which branches are never deleted, by glob: those of every repo, each
 /// repo's own on top (by OWNER/NAME), and the merge train's candidates' in
-/// a repo whose train is on (cn makes and deletes them), when there's a
-/// train.
+/// a repo whose train is on (cn makes and deletes them).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Branches {
     pub keep: Vec<String>,
     pub repos: BTreeMap<String, Vec<String>>,
-    pub train: Option<String>,
+    pub train: String,
 }
 
 impl Branches {
     /// The globs the repo's branches are kept by, its train on or not.
     pub fn keep(&self, repo: &str, train: bool) -> Vec<String> {
         let own = self.repos.get(repo).into_iter().flatten();
-        let cn = self.train.iter().filter(|_| train);
+        let cn = std::iter::once(&self.train).filter(|_| train);
         self.keep.iter().chain(own).chain(cn).cloned().collect()
     }
 }

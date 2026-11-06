@@ -143,10 +143,10 @@ root only.
    alone; that PR gets a `conary/train` failure, which a Claude job fixes as
    red CI. A PR that stops being settled comes out of the train.
 6. A settled PR it won't land on its own word gets one Claude job a head
-   that judges it: one touching a one-way path (`burrow.autoland.oneWay`:
-   CODEOWNERS, secrets), one in a repo with no CI yet (the job
+   that judges it: an R2 one (Conary's class policy, `burrow.ledger.policy`:
+   CODEOWNERS, secrets, by default), one in a repo with no CI yet (the job
    builds and tests it itself, unless the repo is set `requireCi = false`:
-   nothing to test), a dependency update touching a one-way path, and a
+   nothing to test), an R2 dependency update, and a
    Dependabot major. The job lands anything a revert or a follow-up can undo,
    and sends the owner only what can't be undone (data dropped or rewritten
    for good, a secret exposed) or is theirs to decide. Its verdict is a

@@ -256,7 +256,10 @@ Each has an entry below, and each can be imported on its own.
   network, and every Claude of `burrow.user` gets them, and `why`, as the
   `conary` MCP server. With `door`, an issue labelled `undo` in the probe's
   repo asks for a `cn undo` with no Claude in between
-  ([front door](docs/front-door.md#undo-with-no-claude)).
+  ([front door](docs/front-door.md#undo-with-no-claude)). `policy` is
+  Conary's class policy, which the steward asks for every PR it settles
+  (`cn class`): which paths make a change R2 (CODEOWNERS and secrets by
+  default), which are documentation, and which repos go live when they land.
 - **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
   (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
   permissions bypassed inside, egress only through an allowlist proxy, no

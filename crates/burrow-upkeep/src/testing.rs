@@ -73,7 +73,7 @@ pub fn config(dir: &Path) -> Config {
         branches: Some(Branches {
             keep: vec!["gh-pages".into()],
             repos: Default::default(),
-            train: Some("conary/*".into()),
+            train: "conary/*".into(),
         }),
         git: dir.join("origin").display().to_string(),
         snapshot: Snapshot {

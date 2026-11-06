@@ -1,28 +1,14 @@
-"""What a PR touches, as the steward's gates read it: the one-way paths
-(renames and copies included, from the diff), which dependency bot's update
-it is and how big, and whether a bot's PR changes .github/ beyond repinning
-actions or carries someone else's commits."""
+"""What a PR touches, as the steward's gates read it: where its renames and
+copies started (from the diff), which dependency bot's update it is and how
+big, and whether a bot's PR changes .github/ beyond repinning actions or
+carries someone else's commits. Whether it's R2 is Conary's class policy's
+(train.py's gate)."""
 
 import codecs
 import re
 
 import common as C
 from common import CFG, DEP_RE
-
-
-def one_way(pr, rc, moved=()):
-    """The first path that makes this PR one a Claude job judges before it
-    lands (config oneWay), or None. moved: where its renames and copies
-    started (moved_from), None if that couldn't be read."""
-    for path in [f["path"] for f in pr["files"]["nodes"]] + list(moved or ()):
-        for pat in rc["oneWay"]:
-            if re.search(pat, path):
-                return path
-    if pr["changedFiles"] > len(pr["files"]["nodes"]):
-        return f"{pr['changedFiles']} files (too many to check)"
-    if moved is None:
-        return "a rename or copy whose diff couldn't be read"
-    return None
 
 
 MOVED_RE = re.compile(r"^(?:rename|copy) from (.+)$")
@@ -42,8 +28,8 @@ def unquote(path):
 
 def moved_from(repo, pr, st):
     """Where the PR's renames and copies started: the file list names only
-    where each one went, so a rename out of a one-way path (CODEOWNERS to
-    CODEOWNERS.bak) is read from the diff. Read once per head and base; None
+    where each one went, so a rename out of the docs (docs/a.md to src/a.md)
+    is read from the diff. Read once per head and base; None
     if the diff couldn't be read."""
     if not any(f.get("changeType") in ("RENAMED", "COPIED") for f in pr["files"]["nodes"]):
         return []
@@ -195,10 +181,12 @@ def gate_edit(repo, pr, st):
     """Whether a dependency bot's PR changes .github/ beyond repinning the
     actions its workflows use: that's the gate itself, and a dependency
     update is never reviewed. The file list names only a rename's new path,
-    so a rename or copy is read from the diff too. (A list too long to see
-    whole is already the owner's: one_way.) Read once per head and base; a diff that can't be read counts
+    so a rename or copy is read from the diff too. Read once per head and
+    base; a list too long to see whole, or a diff that can't be read, counts
     as an edit (reviewed, not merged on CI alone)."""
     nodes = pr["files"]["nodes"]
+    if pr["changedFiles"] > len(nodes):
+        return True
     if not any(f["path"].startswith(".github/") or f["changeType"] in ("RENAMED", "COPIED") for f in nodes):
         return False
     if any(f["path"].startswith(".github/") and not WORKFLOW_RE.match(f["path"]) for f in nodes):
