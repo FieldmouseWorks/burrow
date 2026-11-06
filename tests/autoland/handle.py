@@ -560,6 +560,14 @@ C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
 run(mkpr(files=["docs/a.md"]), 0)
 status, _ = run(mkpr(files=["docs/a.md"]), 600)
 assert not merged() and queued() == ["rival"] and "Rival is reviewing" in status, (status, queued())
+# Out of service, it can't look: they hold it all the same, on an earlier
+# head too, until it's back.
+fresh_pr_state()
+C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
+C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(files=["docs/a.md"]), 600)
+assert not merged() and queued() == [] and "Rival's findings on 8888888 couldn't be posted" in status, status
+os.remove(f"{tmp}/state/{V.OUT}")
 # What's open on it still holds it, for a Claude job to fix: a thread, or
 # red CI.
 red = [{**CI_GREEN[0], "conclusion": "FAILURE"}]

@@ -296,8 +296,11 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, 
     for r in names:
         if r in live:
             continue
-        if lost_on.get(r, {}).get(pr["baseRefName"]) == head:
-            waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
+        lost = lost_on.get(r, {}).get(pr["baseRefName"])
+        # With no review round, no look covers them but the one they're
+        # owed: on an earlier head too, they hold it until that one's back.
+        if lost == head or (lost and unreviewed):
+            waiting.append(f"{V.NAMES[r]}'s findings on {lost[:7]} couldn't be posted, and it's out of service")
             out_of_service = True
         elif capped and owed(r) and r not in under_way:
             waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
