@@ -4,6 +4,13 @@
 These hold in every repo. This file's own sections add to them and win where
 they say something more specific.
 
+- Design the class, not the instance. When a bug, finding or stall shares
+  its cause with others, fix that cause once, where it lives (one owning
+  path, a type, a check), so none of its cases can come back. Chasing cases
+  one at a time is how something else breaks later.
+- Do work once. Before starting, look for what's already open or built for
+  it. Extend the shared crate, client or job that does it rather than
+  writing another copy, and never run work twice that once would do.
 - Fix the whole cause. No workarounds, shims, fallbacks or half-migrations:
   when you replace something, delete the old path in the same change.
 - One fact, one home. Each rule or fact lives in one place; link to it instead
