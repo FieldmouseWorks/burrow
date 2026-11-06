@@ -310,9 +310,20 @@ fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsStrin
 }
 
 /// Whether an `--all` run holds the turn: a shared lock it can't have.
+/// Without the turn's file there's no turn to hold, since `--all` can't
+/// run without it either, so an ordinary run doesn't need it: not while a
+/// switch that adds it is still under way, nor where a caller's own slots
+/// are only the slot files.
 fn all_waiting(config: &Config) -> Result<bool, u8> {
     let path = config.all();
-    let file = open(&path)?;
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            note!("heavy: cannot open {}: {e}", path.display());
+            return Err(1);
+        }
+    };
     match flock(&file, FlockOperation::NonBlockingLockShared) {
         Ok(()) => Ok(false),
         Err(Errno::WOULDBLOCK) => Ok(true),

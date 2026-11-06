@@ -399,6 +399,22 @@ fn no_ordinary_run_starts_while_all_waits() {
 }
 
 #[test]
+fn without_the_turn_file_ordinary_runs_go_on_and_all_cant_run() {
+    let s = Slots::new(1, 3);
+    fs::remove_file(s.path().join("all")).unwrap();
+    assert!(s.run(&["--", "touch", "ordinary"]).status.success());
+    assert!(s.path().join("ordinary").exists());
+    let out = s.run(&["--all", "--", "touch", "ran"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("cannot open"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!s.path().join("ran").exists());
+}
+
+#[test]
 fn all_starts_nothing_once_its_wait_has_run_out() {
     let s = Slots::new(2, 3);
     let held = s.hold(2);
