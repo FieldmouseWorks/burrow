@@ -9,8 +9,9 @@
 # nixpkgs which has that builds anyway, and then that part can go. The
 # renovate-cargo-unchanged check holds it to the behaviour either way.
 #
-# Its dashboard leaves out an update that had nothing to commit and has no
-# branch (patches/renovate-dashboard-no-work.patch). It listed one under Other
+# Its dashboard leaves out an update that had nothing to commit, has no
+# branch and no artifact error (patches/renovate-dashboard-no-work.patch); one
+# whose artifacts failed stays, to be retried. It listed one under Other
 # Branches, pending, every run of its schedule: a lock file refresh that keeps
 # changing nothing sat there for good, and the steward's dashboard watch took
 # it for stuck. The renovate-dashboard-no-work check holds it to that.

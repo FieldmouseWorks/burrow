@@ -1,11 +1,13 @@
-renovate: a branch with nothing to commit isn't pending on the dashboard
+renovate: an update with nothing to commit isn't pending on the dashboard
 
 processBranch returns `no-work` with no branch when an update turns out to
 change nothing (a lock file refresh whose lock is already current). The
-dashboard didn't know the branch was absent and listed it under Other
-Branches, "pending", every run of its schedule, though there's nothing a
-PR could bring. A run now keeps whether each branch exists, and the
-dashboard leaves out a no-work branch that doesn't.
+dashboard didn't know that and listed it under Other Branches, "pending",
+every run of its schedule, though there's nothing a PR could bring. It
+returns the same when its artifacts failed and left no files to commit,
+which must stay listed, to be retried. processBranch now says which
+(`upToDate`: nothing to commit, no branch, no artifact error), a run keeps
+it on the branch, and the dashboard leaves out an update that's up to date.
 
 --- a/lib/workers/repository/dependency-dashboard.ts
 +++ b/lib/workers/repository/dependency-dashboard.ts
@@ -13,9 +15,9 @@ dashboard leaves out a no-work branch that doesn't.
    const branches = allBranches.filter(
      (branch) =>
        branch.result !== 'automerged' &&
-+      // Nothing to commit and no branch: the update is already in (a lock
-+      // file refresh that changes nothing), so it isn't pending.
-+      !(branch.result === 'no-work' && branch.branchExists === false) &&
++      // Already in (a lock file refresh that changes nothing): not pending.
++      // One whose artifacts failed stays, to be retried.
++      !branch.upToDate &&
        !branch.upgrades?.every((upgrade) => upgrade.remediationNotPossible),
    );
    if (!(
@@ -25,17 +27,36 @@ dashboard leaves out a no-work branch that doesn't.
          branch.prBlockedBy = res?.prBlockedBy;
          branch.prNo = res?.prNo;
          branch.result = res?.result;
-+        branch.branchExists = res?.branchExists;
++        branch.upToDate = res?.upToDate;
          branch.commitFingerprint = res?.updatesVerified
            ? commitFingerprint
            : branchState.commitFingerprint;
+--- a/lib/workers/repository/update/branch/index.ts
++++ b/lib/workers/repository/update/branch/index.ts
+@@ -131,6 +131,8 @@
+   prNo?: number;
+   result: BranchResult;
+   commitSha?: string | null;
++  // Nothing to commit, no branch and no artifact error: the update is in.
++  upToDate?: boolean;
+ }
+ 
+ export async function processBranch(
+@@ -843,6 +845,7 @@
+       return {
+         branchExists,
+         result: 'no-work',
++        upToDate: !config.artifactErrors?.length,
+       };
+     }
+     if (commitSha) {
 --- a/lib/workers/types.ts
 +++ b/lib/workers/types.ts
 @@ -188,6 +188,7 @@
    forceCommit?: boolean;
    rebaseRequested?: boolean;
    result?: BranchResult;
-+  branchExists?: boolean;
++  upToDate?: boolean;
    upgrades: BranchUpgradeConfig[];
    packageFiles?: Record<string, PackageFile[]>;
    prBlockedBy?: PrBlockedBy;
