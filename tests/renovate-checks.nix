@@ -130,7 +130,7 @@
     export HOME=$TMPDIR
     got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-runners.mjs} ${./renovate-clock.mjs} ${pkgs.renovate} \
       ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
-    want='renovate/ubuntu-24.x new: creates, open: stability green: deps: update dependency ubuntu to v24: github-runners ubuntu major 24.04'
+    want='renovate/major-actions-runner-images new: creates, open: stability green: deps: update dependency ubuntu to v24: github-runners ubuntu major 24.04'
     [ "$got" = "$want" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';

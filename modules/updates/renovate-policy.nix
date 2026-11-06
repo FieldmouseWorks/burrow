@@ -31,13 +31,16 @@ lib.recursiveUpdate ({
   # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
   # the subject the steward squashes onto main, and the house check fails a PR
   # whose title isn't. Left to itself Renovate guesses from each repo's
-  # history, and config:recommended's preset types it fix or chore in package
-  # rules that a run merges after this config's own, so no rule here can
-  # outrank them: the preset is ignored instead.
+  # history, and config:recommended's preset types it fix or chore (below).
   semanticCommits = "enabled";
   semanticCommitType = "deps";
   semanticCommitScope = null;
-  ignorePresets = [ ":semanticPrefixFixDepsChoreOthers" ];
+  # config:recommended's presets that would undo this policy: their package
+  # rules are merged after this config's own on every run, so no rule here
+  # can outrank them. One types a commit fix or chore; the other two group
+  # updates by monorepo and by Renovate's own list, each group a PR of its
+  # own beside the night's one (the grouping below).
+  ignorePresets = [ ":semanticPrefixFixDepsChoreOthers" "group:monorepos" "group:recommended" ];
   prConcurrentLimit = 20;
 
   # Three days before a release counts: hijacked npm and crates releases are
@@ -118,11 +121,21 @@ lib.recursiveUpdate ({
       labels = [ "major" ];
     }
     {
+      # A major moves with the other majors from the same source repo (a
+      # monorepo's packages, which release them together), so none of them
+      # is tried alone against the others' old version.
+      matchUpdateTypes = [ "major" ];
+      matchSourceUrls = [ "/^https?:\\/\\//" ];
+      groupName = "{{{sourceRepo}}}";
+      groupSlug = "{{{sourceRepoSlug}}}";
+    }
+    {
       # One PR a night per repo for everything that isn't major, every
-      # ecosystem's together, so it runs the gate once. A major goes alone,
-      # since the owner merges it; a trusted owner's pins have a PR of their
-      # own (below), which the steward lands; and Renovate can't put a lock
-      # file refresh in a group.
+      # ecosystem's together, so it runs the gate once. Majors go apart, a
+      # source repo's together (above), since the owner merges them; a
+      # trusted owner's pins have a PR of their own (below), which the
+      # steward lands; and Renovate can't put a lock file refresh in a
+      # group.
       matchUpdateTypes = [ "minor" "patch" "digest" "pin" "pinDigest" ];
       groupName = "dependencies";
     }
