@@ -84,14 +84,8 @@ repo = {"repo": "sam/u", "private": False, "default": "main"}
 mine = []
 kept_undo = C.CFG.get("undo")
 
-# With the ledger off, a red's job is told nothing of undos (upkeep.py has
-# the rest of its brief).
-C.CFG["undo"] = None
-start()
-assert '"undo"' not in JOBS[0] and "ledger" not in JOBS[0], JOBS[0]
-
-# On, it's told: revert the one merge that broke it only to check, and name
-# that PR in its answers file, of this repo, one only.
+# A red's job is told: revert the one merge that broke it only to check,
+# and name that PR in its answers file, of this repo, one only.
 C.CFG["undo"] = f"{tmp}/writer-cn"
 start()
 assert '{"undo": "sam/u#N"}' in JOBS[0] and f"{tmp}/jobs/$PROJ_JOB/answers.json" in JOBS[0], JOBS[0]

@@ -174,7 +174,7 @@ let
     # The ledger's writer `cn`, which undoes the merge that turned a default
     # branch red when its job, or the steward, names it (autoland/repos.py's
     # undo_red).
-    undo = if ledger.enable then lib.getExe ledger.writer else null;
+    undo = lib.getExe ledger.writer;
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
     kick = stewardKick;
@@ -244,7 +244,7 @@ let
     branches = if cfg.cleanBranches then {
       keep = cfg.keepBranches;
       repos = lib.filterAttrs (_: k: k != [ ]) (lib.mapAttrs (_: r: r.keepBranches or [ ]) cfg.repos);
-      train = if ledger.enable then "conary/*" else null;
+      train = "conary/*";
     } else null;
   });
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);

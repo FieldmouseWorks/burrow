@@ -189,12 +189,6 @@ R.watch_default(repo, default(parent=None), [], mine)
 R.watch_default(repo, default(), [], mine)
 assert writer_runs() == [] and len(JOBS) == 1, (writer_runs(), JOBS)
 
-# With the ledger off, there's nothing to undo with: the job starts.
-C.CFG["undo"] = None
-fresh()
-R.watch_default(repo, default(), [], mine)
-assert len(JOBS) == 1 and writer_runs() == [], (JOBS, writer_runs())
-
 FAIL.clear()
 for j in ("job-1", "job-2"):
     STATES.pop(j, None)
