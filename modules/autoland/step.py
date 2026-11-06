@@ -29,6 +29,7 @@ import reviewers as V
 import stopping
 import train as T
 import waits
+from aside import aside
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerge_spent, automerges, bot_edited, dep_kind, gate_edit, moved_from, provenance
@@ -68,7 +69,7 @@ def clock(t):
     return time.strftime("%-I:%M%p %Z", time.localtime(t)).replace("AM", "am").replace("PM", "pm")
 
 
-def handle(repo, pr, repo_info, digest, held=None):
+def handle(repo, pr, repo_info, digest, held=None, below=None):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     by_train = T.rides(repo, pr, repo_info)
@@ -748,38 +749,8 @@ def handle(repo, pr, repo_info, digest, held=None):
         settle("pending", said)
         save(key, st)
         return
-    if pr["isDraft"]:
-        # Work in progress, whoever's it is: nobody reviews it yet, and nobody
-        # is told.
-        settle("pending", "Draft: work in progress, reviewed once it's marked ready", wait=None)
-        save(key, st)
-        return
-    if not C.acted_on(pr):
-        settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
-        save(key, st)
-        return
-    # A list longer than one page could hide a hold, an open thread, a
-    # changes-requested review or a verdict: fail closed. (open_prs reads
-    # older reviews and comments, so those two are cut only past its cap.)
-    cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
-                             ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
-                             ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"]),
-                             ("comments", pr["comments"]["pageInfo"]["hasPreviousPage"])) if more]
-    if cut:
-        settle("pending", f"Too many {' and '.join(cut)} to read: {CFG['owner']} merges it", "Too much to read")
-        save(key, st)
-        return
-    if held:
-        # A fix for a red default branch that mustn't land now
-        # (R.watch_default): the branch isn't red any more, or its CI hasn't
-        # said yet whether it still is. Like a hold, nothing may merge it.
-        settle("pending", held[:140])
-        save(key, st)
-        return
-    if CFG["labels"]["hold"] in labels:
-        # Held after it was settled: take back the status and the queued merge.
-        log(f"{tag}: on hold")
-        settle("pending", f"On hold (the {CFG['labels']['hold']} label)", wait=waits.HOLD)
+    if set_aside := aside(tag, pr, labels, held, below):
+        settle("pending", *set_aside[:2], wait=set_aside[2])
         save(key, st)
         return
 

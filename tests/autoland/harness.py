@@ -499,9 +499,10 @@ def clean(sha=head, comments=(), reviews=(), **kw):
 QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
 
 
-def run(pr, after, held=None):
+def run(pr, after, held=None, below=None):
     """One pass, `after` seconds after the head first showed up; held, a
-    red-branch fix the branch's watch holds, and why."""
+    red-branch fix the branch's watch holds, and why; below, the open PR
+    whose head branch is its base."""
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
@@ -514,7 +515,7 @@ def run(pr, after, held=None):
     touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]], [x["name"] for x in pr["labels"]["nodes"]])
     H.T.CLASSES.clear()
     with C.acting_for("sam/r"):
-        H.handle("sam/r", pr, info, digest, held)
+        H.handle("sam/r", pr, info, digest, held, below)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 

@@ -108,7 +108,7 @@ for heading in ("Stale branches it couldn't archive", "Branches GitHub wouldn't 
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.
-src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "review_step.py", "repos.py"))
+src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "aside.py", "review_step.py", "repos.py"))
 src += "".join(open(os.path.join(UPKEEP_SRC, f)).read() for f in sorted(os.listdir(UPKEEP_SRC)) if not f.endswith("_tests.rs"))
 for kind in R.OWNERS:
     assert src.count(f'"{kind}"') >= 2, kind

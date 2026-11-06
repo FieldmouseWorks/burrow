@@ -438,7 +438,7 @@ S.R.settle_repo = lambda r, known: False
 S.R.publish = lambda *a: None
 S.open_prs = lambda owner, name: (info, [mkpr(number=10), mkpr(branch="autoland/red-cccccccccccc", number=9)])
 S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9: GONE}
-H.handle = lambda repo, pr, info, digest, held: order.append((pr["number"], held))
+H.handle = lambda repo, pr, info, digest, held, below: order.append((pr["number"], held))
 S.main()
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, H.handle = kept_fns
 assert order == ["watch", (9, GONE), (10, None)], order

@@ -225,8 +225,11 @@ kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handl
 S.R.discover = lambda: [{"repo": f"sam/{x}", "default": "main"} for x in "rqp"]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
-S.open_prs = lambda owner, name: (info, [mkpr(), mkpr(number=6, sha="b" * 40, base="release")])
-S.step.handle = lambda *a: None
+# #7 is stacked on #5's branch; #6 is into a branch no open PR has.
+S.open_prs = lambda owner, name: (info, [mkpr(), mkpr(number=6, sha="b" * 40, branch="fix", base="release"),
+                                         mkpr(number=7, sha="c" * 40, branch="next", base="feat")])
+below = {}
+S.step.handle = lambda repo, pr, info, digest, held, under: below.setdefault(pr["number"], under)
 
 
 def watch_default(r, *a):
@@ -248,8 +251,11 @@ S.main()
 sys.argv = argv
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, V.sweep, S.R.watch_default = kept_fns
 assert swept == [(repo, {V.snap_name(f"pr-{repo.replace('/', '_')}-5.json", head, "main"),
-                         V.snap_name(f"pr-{repo.replace('/', '_')}-6.json", "b" * 40, "release")})
+                         V.snap_name(f"pr-{repo.replace('/', '_')}-6.json", "b" * 40, "release"),
+                         V.snap_name(f"pr-{repo.replace('/', '_')}-7.json", "c" * 40, "feat")})
                  for repo in ("sam/r", "sam/p")], swept
+# Each PR's step is told the open PR its base is the head branch of, if any.
+assert below == {5: None, 6: None, 7: 5}, below
 assert len(published) == 1, published
 print("swept: ok")
 

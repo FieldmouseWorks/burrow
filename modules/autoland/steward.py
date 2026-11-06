@@ -280,6 +280,10 @@ def run_pass(kick):
                 in_use = set()
                 seen_to = True
                 snaps = set()  # its open PRs' heads' snapshots
+                # Each open PR by its head branch, to name the one a stacked PR
+                # is on. .get: one bad PR mustn't stop the rest (it fails in its
+                # own step below).
+                heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
                 # Then in the proof line's order, so proofSlots go to PRs in it.
@@ -287,7 +291,7 @@ def run_pass(kick):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
-                        step.handle(repo, pr, info, mine, held.get(pr["number"]))
+                        step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)

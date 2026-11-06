@@ -68,5 +68,5 @@ for why, new in [("other jobs", [check("check / lane into main", suite="s2"), ch
                   + [check(f"check / leg {k} of 4", "SKIPPED", suite="s2") for k in range(1, 5)]),
                  ("cancelled too", legs(suite="s2", leg=CANCEL))]:
     got = state(old, new)
-    assert got[0] == "red" and LEG in got[1], (why, got)
+    assert got[0] == "pending" and f"{LEG} (cancelled, to be run again)" in got[1], (why, got)
 print("legs: ok")

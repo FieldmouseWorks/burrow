@@ -144,7 +144,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     status is its word on the PR, not a check of it, except its failure: CI
     failed on the head merged alone onto the default branch, which is the
     head's to fix. Only the App's counts, as with ours. A cancelled check run
-    goes by what its workflow did after it (after_cancel). A workflow's
+    goes by what its workflow did after it (after_cancel), and with nothing
+    after it is pending, never red: a stopped run found nothing. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -178,6 +179,12 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             name = c["name"]
             if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
+            elif cancelled(c):
+                # Nothing ran it through since: the run was stopped (a runner
+                # shut down under it, or someone stopped it), not failed, so
+                # there's nothing in the head for a fix job to fix. Pending
+                # until it's run again, and a stall once that's overdue.
+                pending.append(f"{name} (cancelled, to be run again)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
             elif workflow(c) is not None and suite(c).get("status") != "COMPLETED":
@@ -265,10 +272,10 @@ def after_cancel(c, contexts, stale):
     suites: "finished" once one has done that check's work, so the cancelled
     run is no word on the head; "going" while one is still running, whichever
     diff it's for, since CI isn't done speaking; None with neither, as when
-    someone cancelled the run by hand, which stays not green. Done its work:
-    the suite has finished for the PR's diff (stale is those that didn't) with
-    nothing of its own cancelled, so two cancelled runs don't clear each other,
-    and it ran the same work (same_work), whatever that said. A skip vouches
+    someone cancelled the run by hand, which stays not green (pending).
+    Done its work: the suite has finished for the PR's diff (stale is those
+    that didn't) with nothing of its own cancelled, so two cancelled runs
+    don't clear each other, and it ran the same work (same_work), whatever that said. A skip vouches
     for nothing: a caller skipped on a title edit completes too. A check of a
     shared CI call (one with a lane job) must also be matched in a call whose
     lane ran and chose this PR's base: a push's or a dispatch's run of the same
