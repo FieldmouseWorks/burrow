@@ -307,13 +307,22 @@ in
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
-        # null where unset, which Conary takes as the machine's.
-        CONARY_POLICY = "${pkgs.writeText "conary-policy.json" (builtins.toJSON {
-          inherit (cfg.policy) r2 docs live;
-          inherit (cfg.policy) notDocs;
-          hidden = skips.machine;
-          repos = skips.repos;
-        })}";
+        # null where unset, which Conary takes as the machine's. Checked by
+        # the machine's own cn as it's built (`cn policy`): a cn that doesn't
+        # know a key of it (an older Conary than this burrow needs) fails the
+        # build, rather than every class the steward asks once it's live,
+        # which would stop it landing the bump that fixes it.
+        CONARY_POLICY = "${pkgs.runCommand "conary-policy.json" {
+          policy = builtins.toJSON {
+            inherit (cfg.policy) r2 docs live notDocs;
+            hidden = skips.machine;
+            repos = skips.repos;
+          };
+          passAsFile = [ "policy" ];
+        } ''
+          ${cfg.package}/bin/cn policy "$policyPath" >/dev/null
+          cp "$policyPath" "$out"
+        ''}";
       } // lib.optionalAttrs ((fresh.enable or false) && fresh.fresh.enable) {
         # A self-hosted runner's CI counts only from one started fresh for
         # its job, and only burrow.dispatch.fresh names a runner so

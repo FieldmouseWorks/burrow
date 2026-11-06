@@ -89,7 +89,8 @@
     ledger = {
       enable = true;
       # A stand-in: a real machine takes Conary's flake's packages.default.
-      package = pkgs.writeShellScriptBin "cn" "exit 1";
+      # It passes the policy file the build checks (`cn policy`).
+      package = pkgs.writeShellScriptBin "cn" ''[ "$1" = policy ] && exit 0; exit 1'';
       anchorRepo = "sam/homelab";
       daemon = true;
       # A change to docs alone lands on green CI with no review round.
