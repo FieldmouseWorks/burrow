@@ -23,6 +23,7 @@ impl Slots {
         for i in 1..=slots {
             File::create(dir.path().join(format!("slot{i}"))).unwrap();
         }
+        File::create(dir.path().join("all")).unwrap();
         let config = dir.path().join("heavy.json");
         fs::write(
             &config,
@@ -366,6 +367,53 @@ fn all_holds_what_it_has_while_it_waits_for_the_rest() {
     assert!(s.path().join("ran").exists());
     let err = text(&waiting.wait_with_output().unwrap().stderr);
     assert!(err.contains("heavy: waiting for all 3 slots"), "{err}");
+}
+
+#[test]
+fn no_ordinary_run_starts_while_all_waits() {
+    let s = Slots::new(2, 3);
+    let held = s.hold(1);
+    let mut waiting = s
+        .heavy(&["--all", "--", "touch", "ran"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    until("the turn taken", || {
+        let all = File::open(s.path().join("all")).unwrap();
+        flock(&all, FlockOperation::NonBlockingLockShared).is_err()
+    });
+    // Slot 2 is free, but the waiting run has the turn: a new arrival
+    // doesn't take it, so arrivals can't keep the machine from emptying.
+    let out = s.run(&["--wait", "0", "--", "touch", "ordinary"]);
+    assert_eq!(out.status.code(), Some(75));
+    assert!(!s.path().join("ordinary").exists());
+    drop(held);
+    assert!(exits(&mut waiting).success());
+    assert!(s.path().join("ran").exists());
+    // Once it's done, ordinary runs start again.
+    assert!(
+        s.run(&["--wait", "0", "--", "touch", "ordinary"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn all_starts_nothing_once_its_wait_has_run_out() {
+    let s = Slots::new(2, 3);
+    let held = s.hold(2);
+    let mut waiting = s
+        .heavy(&["--wait", "1", "--all", "--", "touch", "ran"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Slot 2 comes free while it naps to its deadline; waking after it, the
+    // run gives up instead of taking the slot.
+    thread::sleep(Duration::from_millis(500));
+    drop(held);
+    assert_eq!(exits(&mut waiting).code(), Some(75));
+    assert!(!s.path().join("ran").exists());
+    assert_eq!(s.status().matches(": free").count(), 2, "every slot back");
 }
 
 #[test]

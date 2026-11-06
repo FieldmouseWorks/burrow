@@ -96,7 +96,9 @@ in
       });
       # Read-only to everyone, so runners under ProtectSystem=strict lock them too.
       systemd.tmpfiles.rules = [ "d ${cfg.heavy.dir} 0755 root root -" ]
-        ++ map (i: "f ${cfg.heavy.dir}/slot${toString i} 0444 root root -") (lib.range 1 cfg.heavy.slots);
+        ++ map (i: "f ${cfg.heavy.dir}/slot${toString i} 0444 root root -") (lib.range 1 cfg.heavy.slots)
+        # The turn a `heavy --all` run holds while it waits for every slot.
+        ++ [ "f ${cfg.heavy.dir}/all 0444 root root -" ];
 
       burrow.claude.machineMd = lib.mkOrder 720 ''
         ## Heavy work: take a slot

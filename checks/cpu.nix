@@ -15,7 +15,7 @@ let
 in pkgs.runCommand "cpu-check" { } ''
   [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
   ${pkgs.lib.optionalString nested "echo 'a nested gate slice (nix-builds) was taken'; exit 1"}
-  mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
+  mkdir -p /build/heavy && : >/build/heavy/slot1 && : >/build/heavy/all && chmod 0444 /build/heavy/slot1 /build/heavy/all
   h=${heavy}/bin/heavy
   threads=$(nproc)
   # Waits until COMMAND succeeds, for what process PID makes ready, and

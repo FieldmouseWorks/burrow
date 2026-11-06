@@ -7,9 +7,9 @@
 //! busy (up to `--wait` seconds, then exit 75). It gets the slot's share of
 //! the threads in HEAVY_JOBS, and CARGO_BUILD_JOBS and RUST_TEST_THREADS from
 //! it unless they're set already. With `--all` it takes every slot instead,
-//! lowest first, holding each while it waits for the next, and gets all of
-//! the threads: for a run that has to have the machine to itself, such as a
-//! long gate with a deadline. Its exit status passes through. Inside a
+//! and gets all of the threads: for a run that has to have the machine to
+//! itself, such as a long gate with a deadline. While one waits, no
+//! ordinary run starts, so the machine empties under it. Its exit status passes through. Inside a
 //! slot (HEAVY_SLOT set) heavy just runs the command, so wrapped tools can
 //! call each other.
 //!
@@ -22,6 +22,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write as _};
 use std::os::unix::process::CommandExt as _;
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -182,105 +183,168 @@ pub(crate) fn not_run(e: &io::Error) -> u8 {
     }
 }
 
-/// Takes the first free slot and runs the command in it, waiting for one
-/// while every slot is busy.
-fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
-    let deadline = wait.map(|s| Instant::now() + Duration::from_secs(s));
-    let expired = || deadline.is_some_and(|d| Instant::now() >= d);
-    let mut said = false;
-    loop {
-        match attempt(config) {
-            Err(code) => return code,
-            Ok(Some((i, slot))) => {
-                let code = run::run(config, &i.to_string(), share, command);
-                drop(slot);
-                return code;
+/// When a wait runs out, and whether it has slept yet: a try comes after
+/// the deadline only while it hasn't, so `--wait 0` still tries every lock
+/// once, and once a run has waited the deadline holds for all of it.
+struct Clock {
+    deadline: Option<Instant>,
+    slept: bool,
+}
+
+impl Clock {
+    fn new(wait: Option<u64>) -> Clock {
+        Clock {
+            deadline: wait.map(|s| Instant::now() + Duration::from_secs(s)),
+            slept: false,
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    /// Tries `get` until it gives something, napping up to a second between
+    /// tries and saying `waiting` once; none once the wait has run out.
+    fn poll<T>(
+        &mut self,
+        said: &mut bool,
+        waiting: impl Fn() -> String,
+        mut get: impl FnMut() -> Result<Option<T>, u8>,
+    ) -> Result<Option<T>, u8> {
+        loop {
+            if self.slept && self.expired() {
+                return Ok(None);
             }
-            Ok(None) => {}
+            if let Some(got) = get()? {
+                return Ok(Some(got));
+            }
+            if self.expired() {
+                return Ok(None);
+            }
+            if !*said {
+                note!("{}", waiting());
+                *said = true;
+            }
+            let mut nap = Duration::from_secs(1);
+            if let Some(d) = self.deadline {
+                nap = nap.min(d.saturating_duration_since(Instant::now()));
+            }
+            thread::sleep(nap);
+            self.slept = true;
         }
-        if expired() {
+    }
+}
+
+/// Takes the first free slot and runs the command in it, waiting for one
+/// while every slot is busy, or while an `--all` run waits for them.
+fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
+    let mut clock = Clock::new(wait);
+    let mut said = false;
+    let waiting = || {
+        format!(
+            "heavy: all {} slots busy, waiting (heavy status)",
+            config.slots
+        )
+    };
+    let got = clock.poll(&mut said, waiting, || {
+        if all_waiting(config)? {
+            return Ok(None);
+        }
+        attempt(config)
+    });
+    match got {
+        Err(code) => code,
+        Ok(Some((i, slot))) => {
+            let code = run::run(config, &i.to_string(), share, command);
+            drop(slot);
+            code
+        }
+        Ok(None) => {
             note!("heavy: every slot still busy after {}s", wait.unwrap_or(0));
-            return BUSY;
-        }
-        if !said {
-            note!(
-                "heavy: all {} slots busy, waiting (heavy status)",
-                config.slots
-            );
-            said = true;
-        }
-        let mut nap = Duration::from_secs(1);
-        if let Some(d) = deadline {
-            nap = nap.min(d.saturating_duration_since(Instant::now()));
-        }
-        thread::sleep(nap);
-        if expired() {
-            note!("heavy: every slot still busy after {}s", wait.unwrap_or(0));
-            return BUSY;
+            BUSY
         }
     }
 }
 
 /// Takes every slot, lowest first, and runs the command in all of them
-/// with all of the threads. Each slot it has stays held while it waits for
-/// the next, so the machine empties under it instead of a single run
-/// keeping it from ever being free. Two of these can't deadlock: both take
-/// the slots in the same order, and an ordinary run holds only one.
+/// with all of the threads. It first takes the turn (the `all` file), which
+/// ordinary runs look at before they take a slot: while it's held, none
+/// starts, so the machine empties under the run instead of new arrivals
+/// taking each slot as it comes free. Holding the turn throughout also
+/// keeps two of these from waiting on each other's slots.
 fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
-    let deadline = wait.map(|s| Instant::now() + Duration::from_secs(s));
-    let mut held = Vec::new();
+    let mut clock = Clock::new(wait);
     let mut said = false;
+    let waiting = || {
+        format!(
+            "heavy: waiting for all {} slots (heavy status)",
+            config.slots
+        )
+    };
+    let turn = match clock.poll(&mut said, waiting, || lock(&config.all())) {
+        Err(code) => return code,
+        Ok(Some(turn)) => turn,
+        Ok(None) => {
+            note!(
+                "heavy: another run still waiting for every slot after {}s",
+                wait.unwrap_or(0)
+            );
+            return BUSY;
+        }
+    };
+    let mut held = Vec::new();
     for i in 1..=config.slots {
-        loop {
-            match lock(config, i) {
-                Err(code) => return code,
-                Ok(Some(slot)) => {
-                    held.push(slot);
-                    break;
-                }
-                Ok(None) => {}
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+        match clock.poll(&mut said, waiting, || lock(&config.slot(i))) {
+            Err(code) => return code,
+            Ok(Some(slot)) => held.push(slot),
+            Ok(None) => {
                 note!("heavy: slot{i} still busy after {}s", wait.unwrap_or(0));
                 return BUSY;
             }
-            if !said {
-                note!(
-                    "heavy: waiting for all {} slots (heavy status)",
-                    config.slots
-                );
-                said = true;
-            }
-            let mut nap = Duration::from_secs(1);
-            if let Some(d) = deadline {
-                nap = nap.min(d.saturating_duration_since(Instant::now()));
-            }
-            thread::sleep(nap);
         }
     }
     let code = run::run(config, "all", threads, command);
     drop(held);
+    drop(turn);
     code
+}
+
+/// Whether an `--all` run holds the turn: a shared lock it can't have.
+fn all_waiting(config: &Config) -> Result<bool, u8> {
+    let path = config.all();
+    let file = open(&path)?;
+    match flock(&file, FlockOperation::NonBlockingLockShared) {
+        Ok(()) => Ok(false),
+        Err(Errno::WOULDBLOCK) => Ok(true),
+        Err(e) => {
+            note!("heavy: flock failed on {}: {e}", path.display());
+            Err(1)
+        }
+    }
 }
 
 /// The first free slot, locked, or none; an error is the exit status.
 fn attempt(config: &Config) -> Result<Option<(u32, File)>, u8> {
     for i in 1..=config.slots {
-        if let Some(file) = lock(config, i)? {
+        if let Some(file) = lock(&config.slot(i))? {
             return Ok(Some((i, file)));
         }
     }
     Ok(None)
 }
 
-/// Slot `i`, locked, or none while someone else holds it; an error is the
-/// exit status.
-fn lock(config: &Config, i: u32) -> Result<Option<File>, u8> {
-    let path = config.slot(i);
-    let file = File::open(&path).map_err(|e| {
+/// A lock file, opened read-only: anyone may lock what they can read.
+fn open(path: &Path) -> Result<File, u8> {
+    File::open(path).map_err(|e| {
         note!("heavy: cannot open {}: {e}", path.display());
         1
-    })?;
+    })
+}
+
+/// The lock file at `path`, locked, or none while someone else holds it;
+/// an error is the exit status.
+fn lock(path: &Path) -> Result<Option<File>, u8> {
+    let file = open(path)?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(Some(file)),
         Err(Errno::WOULDBLOCK) => Ok(None),
