@@ -6,7 +6,7 @@ reviewed, and whose each one's threads and red CI are."""
 import json
 import time
 
-from harness import CI_GREEN, COMMITS, COMMITTERS, JOBS, C, S, T0, clean, cn, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept, tmp
+from harness import CI_GREEN, COMMITS, COMMITTERS, JOBS, C, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept, tmp
 from touches import DEPENDABOT_EMAIL
 
 other = "c" * 40  # another head
@@ -60,13 +60,6 @@ assert merged()
 fresh_pr_state()
 status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", number=9), 900)
 assert "state=success" in status and not merged() and JOBS == []
-# Asked for a review round (`review`, which `cn class` says Conary holds,
-# label on or not), it's reviewed like any PR rather than merged on green CI.
-fresh_pr_state()
-cn(**{"class": {"class": "R0", "because": None, "docs": False, "review": True, "raised": ["review"]}})
-status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", number=9), 900)
-cn()
-assert "state=success" not in status and "Dependency update" not in status and not merged(), status
 # A batch of a trusted owner's branch pins (its label) the steward lands:
 # Renovate merges none while that branch keeps moving. Only one Renovate
 # would merge itself (automerge on), and only with the label.

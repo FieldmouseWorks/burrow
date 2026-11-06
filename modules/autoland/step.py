@@ -874,8 +874,7 @@ def handle(repo, pr, repo_info, digest, held=None):
         save(key, st)
         return
 
-    # Green CI and no review round, unless its author asked for one (`review`).
-    if dep and not fixed and "review" not in T.raised(repo, pr):
+    if dep and not fixed:
         major_verdict = C.marker(pr, MAJOR_VERDICT, head, repo, pr["baseRefName"]) if dep == "major" and renovate else None
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
