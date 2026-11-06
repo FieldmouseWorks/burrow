@@ -86,16 +86,19 @@
   # days. Either way the open PR's stability check then passes, so
   # Renovate can merge it. Until then Renovate leaves the open PR be,
   # merge included, so the trusted owner's has the label the steward
-  # lands it by. A flake input not pinned by commit isn't looked
-  # up (the lock file refresh moves it), and nixpkgs keeps its channel
-  # versioning. A project on followOnly gets the trusted owner's pins
-  # alone: no one else's, no lock file refresh.
+  # lands it by. Someone else's pins go with the rest of the night's
+  # updates, in the one group. A flake input not pinned by commit isn't
+  # looked up (the lock file refresh moves it), and nixpkgs keeps its
+  # channel versioning. Out of the night's window no branch is made, and
+  # an open PR still merges, but the trusted owner's isn't moved. A
+  # project on followOnly gets the trusted owner's pins alone: no one
+  # else's, no lock file refresh.
   renovate-follow = pkgs.runCommand "renovate-follow-check" { } ''
     export HOME=$TMPDIR
-    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-follow.mjs} ${pkgs.renovate} \
+    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-follow.mjs} ${./renovate-clock.mjs} ${pkgs.renovate} \
       ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
     sam='github-actions sam/homelab digest 2222222, github-actions sam/homelab digest 2222222, github-actions sam/homelab pinDigest 2222222'
-    kim='github-actions kim/homelab digest 2222222, github-actions kim/homelab digest 2222222'
+    kim='github-actions kim/homelab digest 2222222, github-actions kim/homelab digest 2222222, github-actions kim/homelab pinDigest 2222222'
     nix='nix homelab digest 2222222'
     channels='nixpkgs nixpkgs, unstable nixpkgs'
     want="pinned: nix homelab exact, $channels
@@ -108,12 +111,12 @@
     unpinned 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab digest to 2222222 [upstream batch]: $sam
     unpinned 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab digest to 2222222 [upstream batch]: $sam
     someone else's, pinned: nix homelab exact, $channels
-    someone else's, pinned 40 min: renovate/ci-actions new: pending, open: pending: deps: update kim/homelab digest to 2222222 []: $kim
-    someone else's, pinned 40 min: renovate/homelab-digest new: pending, open: pending: deps: update homelab digest to 2222222 []: $nix
-    someone else's, pinned 40 min: renovate/pin-dependencies new: pending, open: pending: deps: pin kim/homelab action to 2222222 []: github-actions kim/homelab pinDigest 2222222
-    someone else's, pinned 4400 min: renovate/ci-actions new: creates, open: stability green: deps: update kim/homelab digest to 2222222 []: $kim
-    someone else's, pinned 4400 min: renovate/homelab-digest new: creates, open: stability green: deps: update homelab digest to 2222222 []: $nix
-    someone else's, pinned 4400 min: renovate/pin-dependencies new: creates, open: stability green: deps: pin kim/homelab action to 2222222 []: github-actions kim/homelab pinDigest 2222222
+    someone else's, pinned 40 min: renovate/dependencies new: pending, open: pending: deps: update dependencies to 2222222 []: $kim, $nix
+    someone else's, pinned 4400 min: renovate/dependencies new: creates, open: stability green: deps: update dependencies to 2222222 []: $kim, $nix
+    pinned at noon: nix homelab exact, $channels
+    pinned at noon 40 min: renovate/sam-homelab new: not-scheduled, open: update-not-scheduled: deps: update sam/homelab to 2222222 [upstream batch]: $sam, $nix
+    someone else's, pinned at noon: nix homelab exact, $channels
+    someone else's, pinned at noon 4400 min: renovate/dependencies new: not-scheduled, open: stability green: deps: update dependencies to 2222222 []: $kim, $nix
     kept 40 min: renovate/sam-homelab: deps: update sam/homelab to 2222222: $sam, $nix"
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
@@ -125,7 +128,7 @@
   # rather than waiting on a release date that never comes.
   renovate-runners = pkgs.runCommand "renovate-runners-check" { } ''
     export HOME=$TMPDIR
-    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-runners.mjs} ${pkgs.renovate} \
+    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-runners.mjs} ${./renovate-clock.mjs} ${pkgs.renovate} \
       ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
     want='renovate/ubuntu-24.x new: creates, open: stability green: deps: update dependency ubuntu to v24: github-runners ubuntu major 24.04'
     [ "$got" = "$want" ] || { echo "got: $got"; exit 1; }
