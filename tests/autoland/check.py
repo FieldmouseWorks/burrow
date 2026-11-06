@@ -10,9 +10,9 @@ flaky tests, the merge train, that
 no failing step loops quietly, and the label that says what a PR waits on.
 Each module is one part, run in this order.
 
-  nix eval --json .#nixosConfigurations.example.config.burrow.autoland.oneWay >/tmp/one-way.json
+  nix eval --json .#nixosConfigurations.example.config.burrow.ledger.policy >/tmp/policy.json
   (cd crates && cargo build -p burrow-review -p burrow-upkeep -p burrow-proof)
-  python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/one-way.json \
+  python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/policy.json \
     crates/target/debug/burrow-review crates/burrow-review/tests/fakes \
     crates/target/debug/burrow-upkeep crates/burrow-upkeep/src \
     crates/target/debug/burrow-proof

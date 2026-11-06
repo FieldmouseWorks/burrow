@@ -5,7 +5,7 @@
 #            a user of its own with no GitHub access)
 #         -> Claude fixes or answers every finding
 #         -> it finds nothing in the head's own change, CI green on the head
-#         -> (one-way paths, no CI: a Claude job judges it)
+#         -> (R2 by Conary's class policy, no CI: a Claude job judges it)
 #         -> `review-settled` status -> merged at that head -> branch deleted
 #            (a repo with `train` on: into its merge train instead, which
 #            lands it once CI passes it merged onto trunk with the PRs ahead
@@ -141,7 +141,7 @@ let
       renovateSweep = sweeping;
     } else null;
     defaults = {
-      inherit (cfg) rounds oneWay;
+      inherit (cfg) rounds;
       handoffAfter = cfg.handoffAfterMinutes;
       sessionHandoffAfter = cfg.sessionHandoffAfterMinutes;
       settleDelay = cfg.settleDelayMinutes;
@@ -164,12 +164,13 @@ let
     # The merge train's status, which a repo's baseline requires while its
     # train is on and gives up once it's off, the ledger on or not.
     trainContext = ledger.trainContext;
-    # The merge train's `cn` (autoland/train.py), on the ledger's own log:
-    # the train's ops are ledger ops. Its token command is the steward's own.
-    train = if ledger.enable then {
+    # Conary's `cn` (autoland/train.py), on the ledger's own log: each PR's
+    # class (burrow.ledger.policy), and the merge train, whose ops are
+    # ledger ops. Its token command is the steward's own.
+    conary = {
       cn = "${ledger.package}/bin/cn";
       inherit (ledger) env;
-    } else null;
+    };
     # The ledger's writer `cn`, which undoes the merge that turned a default
     # branch red when its job, or the steward, names it (autoland/repos.py's
     # undo_red).
@@ -407,22 +408,6 @@ in
       type = types.ints.positive;
       default = 5;
       description = "Review rounds with findings (one reviewer's, whichever has had more) before its reviewers stop looking: a Claude job then fixes or answers what's left, and a judge decides whether it lands.";
-    };
-
-    oneWay = mkOption {
-      type = types.listOf types.str;
-      default = [ "(^|/)CODEOWNERS$" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" ];
-      description = ''
-        Path regexes that make a settled PR one a Claude job judges before it
-        lands: it lands anything a revert or a follow-up can undo, and sends
-        you only what can't be undone or is yours to decide. The default is
-        CODEOWNERS (who signs off on what) and secrets. The rest of
-        `.github/` isn't on it: the reviewers read workflow changes like any
-        other, and the steward merges them once settled. Nor are database
-        migrations: what undoes a bad one is the backup its deploy takes
-        before migrating, not a wait at merge. A repo whose deploy takes no
-        such backup can put `(^|/)migrations?/` on its own list (`repos`).
-      '';
     };
 
     handoffAfterMinutes = mkOption {
@@ -691,12 +676,12 @@ in
         {
           # Its update pipeline pushes to main: rules stop force pushes and deletion only.
           "sam/homelab".directPush = true;
-          "sam/website" = { oneWay = [ "^deploy/" ]; rounds = 3; };
+          "sam/website".rounds = 3;
           "sam/firmware".proofJobs.hil = "Run `just hil` on the bench box and post its result as the `hil` commit status.";
         }
       '';
       description = ''
-        Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
+        Per-repo overrides (OWNER/NAME): any of rounds,
         handoffAfter, sessionHandoffAfter, settleDelay, stallAfter,
         holdStallAfter, renovateMergeAfter (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
@@ -758,8 +743,8 @@ in
         `cn train`, instead of being merged: the train merges the PRs in it
         onto the default branch together, has CI run on that on a
         `conary/train/` branch, lands them in order once it's green, and
-        splits a red one to find the PR that broke it. A PR touching a
-        oneWay path rides alone, landing only while the default branch is
+        splits a red one to find the PR that broke it. An R2 PR
+        (burrow.ledger.policy) rides alone, landing only while the default branch is
         still the base its CI ran on. CI on the PRs themselves is optional:
         with none, a reviewed PR goes straight in. It needs burrow.ledger,
         isn't directPush, and has no proofJobs, proofBuilds or proofRuns yet), trainSize (the
@@ -795,8 +780,9 @@ in
       assertion = config.burrow.events.host != null;
       message = "burrow.autoland needs burrow.events.host and .secretFile: GitHub's events reach its passes through them.";
     } {
-      assertion = trains == [ ] || ledger.enable;
-      message = "burrow.autoland: a repo's train (${lib.concatStringsSep ", " trains}) is on the ledger's log: turn on burrow.ledger.";
+      # Each PR's class is Conary's, and the merge train is on its log.
+      assertion = ledger.enable;
+      message = "burrow.autoland needs burrow.ledger: each PR's class comes from Conary's policy (burrow.ledger.policy).";
     } {
       # A proof runs on a PR's head; the train's evidence is its candidates'.
       assertion = lib.all (r: lib.all (kind: (cfg.repos.${r}.${kind} or { }) == { }) [ "proofJobs" "proofBuilds" "proofRuns" ]) trains;

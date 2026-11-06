@@ -1,4 +1,7 @@
-"""The merge train, in a repo with `train` on: Conary's `cn train` (its
+"""Conary's `cn`, as the steward asks it: each PR's class (`cn class`, its
+docs/DESIGN.md, section 4.4), and the merge train.
+
+The merge train, in a repo with `train` on: Conary's `cn train` (its
 docs/DESIGN.md, section 4.7), on the ledger's own log. The steward puts each
 PR it settles in the repo's train instead of merging it (one_pr.py), takes
 it out once it isn't settled any more, and steps the train once the repo's
@@ -27,7 +30,7 @@ import common as C
 import waits
 from common import CFG, DRY, log, repo_cfg
 
-TRAIN = CFG["train"] or {}
+CONARY = CFG["conary"]
 CONTEXT = CFG["trainContext"]
 # Why the train holds a PR out, as cn says it, and until what, in words.
 HELD = {"red": "it was red alone in it, until a new head",
@@ -49,6 +52,7 @@ TRAINS = {}  # each train repo's train, as this pass read it (begin)
 # The train repos this pass mustn't step, and why: a PR in the train it
 # couldn't take out, or wasn't sure was still settled.
 STOPPED = {}
+GATES = {}  # what makes each PR R2 at a head, as cn said this pass (gate)
 
 
 def on(repo):
@@ -65,8 +69,8 @@ def rides(repo, pr, info):
 def cn(*args):
     """What cn answered, as JSON. GitHub unavailable (cn's exit 75): C.Unavailable."""
     me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steward.py")
-    env = {**os.environ, **TRAIN["env"], "CONARY_TOKEN_COMMAND": f"{sys.executable} -E -s {me} token"}
-    p = subprocess.run([TRAIN["cn"], *args], env=env, capture_output=True, text=True)
+    env = {**os.environ, **CONARY["env"], "CONARY_TOKEN_COMMAND": f"{sys.executable} -E -s {me} token"}
+    p = subprocess.run([CONARY["cn"], *args], env=env, capture_output=True, text=True)
     what = f"cn {' '.join(args[:3])}"
     if p.returncode == 75:
         raise C.Unavailable(f"{what}: GitHub is unavailable")
@@ -75,11 +79,30 @@ def cn(*args):
     return json.loads(p.stdout)
 
 
+def gate(repo, pr):
+    """What makes the PR R2 at its head, as Conary's class policy says
+    (`cn class`, which records it): the path that does, or why its paths
+    couldn't all be read. None below R2. Asked once a pass, and only when a
+    decision turns on it. A dry run asks nothing, since cn would record the
+    class, and takes every PR for R2."""
+    n, head = pr["number"], pr["headRefOid"]
+    if (repo, n, head) not in GATES:
+        if DRY:
+            GATES[repo, n, head] = "a path a dry run doesn't class"
+        else:
+            got = cn("class", repo, str(n), "--head", head)
+            GATES[repo, n, head] = (got["because"] or "an R2 path") if got["class"] == "R2" else None
+    return GATES[repo, n, head]
+
+
 def begin(repo):
     """The repo's train, as the ledger holds it, for this pass: none with
-    its train off, whatever an earlier pass read."""
+    its train off, whatever an earlier pass read. Its PRs' classes are asked
+    afresh."""
     TRAINS.pop(repo, None)
     STOPPED.pop(repo, None)
+    for k in [k for k in GATES if k[0] == repo]:
+        del GATES[k]
     if on(repo):
         TRAINS[repo] = cn("train", "show", repo)
 
@@ -109,7 +132,7 @@ def join(repo, pr, alone=False):
     """Put the PR in the train at its head. None once it's in, else why the
     train holds it out (HELD's) and what cn said of it, if anything. Alone,
     it rides in a candidate of its own, which lands only while the default
-    branch is still its base: a PR touching a one-way path (R2). In a repo
+    branch is still its base: an R2 PR (gate). In a repo
     with a trainNegative, only once its negative on that head counts."""
     n, head = pr["number"], pr["headRefOid"]
     negative = repo_cfg(repo)["trainNegative"]
@@ -134,8 +157,8 @@ def join(repo, pr, alone=False):
 
 def ride(repo, pr, st, alone, desc, settle, strike, said):
     """A PR settled against the default branch: into the train at this head,
-    which lands it, rather than merged by the steward; alone if it touches a
-    one-way path. Its status says where in the train it is, or why the train
+    which lands it, rather than merged by the steward; alone if it's R2
+    (gate). Its status says where in the train it is, or why the train
     holds it out and until what. Nothing else may merge it: a merge queued on
     it is taken off, or it's tried again (strike). st is the PR's state, which
     remembers the head it joined at; settle and strike are its step's own

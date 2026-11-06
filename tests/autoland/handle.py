@@ -10,8 +10,8 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
-                     WROTE, clean, fresh_pr_state, head, info, judgment, merged,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
+                     WROTE, clean, cn, cn_classed, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
 stand_in()
@@ -504,43 +504,29 @@ for verdicts, start in (([said(judgment("land"))], True), ([said(judgment("land"
 status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", base="release"))], base="release", **gated), 900)
 assert merged() and "state=success" in status, status
 
-# More files than the query reads: a one-way path could be past them, so
-# it's judged too.
+# Whether it's R2 is Conary's: what `cn class` says of the PR at its head,
+# asked once a decision turns on it. R2 is judged, naming what made it so;
+# a class cn couldn't give lands nothing.
 fresh_pr_state()
-big = {**clean(files=["a.py"]), "changedFiles": 150}
-status, _ = run(big, 700)
-assert len(JOBS) == 1 and "150 files (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
-
-
-# The file list names only where a rename went: one out of a one-way path
-# (CODEOWNERS to CODEOWNERS.bak) is read from the diff and judged, and so is
-# one whose diff can't be read. A rename elsewhere merges.
-def renamed(to, diff):
-    PR_DIFF["v"] = diff
-    pr = clean(files=[to])
-    pr["files"]["nodes"][0]["changeType"] = "RENAMED"
-    return pr
-
-
+cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False}})
+status, _ = run(clean(files=["a.py"]), 700)
+assert len(JOBS) == 1 and "150 files or more (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
+assert cn_classed() == [("sam/r", 5, head)], cn_classed()
+for rc, raised in ((1, RuntimeError), (75, C.Unavailable)):
+    fresh_pr_state()
+    cn(rc={"class": rc})
+    try:
+        run(clean(), 700)
+    except raised:
+        pass
+    else:
+        raise AssertionError(f"cn class exiting {rc} went unnoticed")
+    assert not merged() and JOBS == [], (WROTE, JOBS)
+cn()
+# Unsettled, nothing turns on its class yet: cn isn't asked.
 fresh_pr_state()
-gone = renamed("CODEOWNERS.bak", "diff --git a/.github/CODEOWNERS b/CODEOWNERS.bak\nsimilarity index 100%\n"
-                                 "rename from .github/CODEOWNERS\nrename to CODEOWNERS.bak\n")
-status, _ = run(gone, 700)
-assert len(JOBS) == 1 and ".github/CODEOWNERS" in JOBS[0] and not merged(), (status, JOBS)
-fresh_pr_state()
-status, _ = run(renamed("CODEOWNERS.bak", ""), 700)
-assert len(JOBS) == 1 and "diff couldn't be read" in JOBS[0] and not merged(), (status, JOBS)
-fresh_pr_state()
-status, _ = run(renamed("src/b.rs", "diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\n"
-                                    "rename from src/a.rs\nrename to src/b.rs\n"), 700)
-assert "state=success" in status and merged() and JOBS == [], (status, JOBS)
-# A quoted old name, bytes that aren't UTF-8 and all, still reads as where
-# it came from.
-fresh_pr_state()
-status, _ = run(renamed("keys/x", 'diff --git "a/secrets/\\377" b/keys/x\nsimilarity index 100%\n'
-                                  'rename from "secrets/\\377"\nrename to keys/x\n'), 700)
-assert len(JOBS) == 1 and "secrets/" in JOBS[0] and not merged(), (status, JOBS)
-PR_DIFF["v"] = ""
+run(mkpr(), 700)
+assert cn_classed() == [], cn_classed()
 
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.

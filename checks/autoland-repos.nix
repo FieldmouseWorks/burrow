@@ -13,7 +13,7 @@ let
   in lib.any (a: !a.assertion && lib.hasPrefix "burrow.autoland.repos: no such setting:" a.message
     && lib.hasInfix "\"${repo}\"." a.message) (lib.concatMap (d: d.value) mine);
   every = {
-    rounds = 3; oneWay = [ "^deploy/" ]; handoffAfter = 30; sessionHandoffAfter = 30; settleDelay = 5;
+    rounds = 3; handoffAfter = 30; sessionHandoffAfter = 30; settleDelay = 5;
     stallAfter = 60; holdStallAfter = 60; renovateMergeAfter = 60; directPush = false; ruleset = true;
     requireCi = false; proofJobs.hil = "Run the bench."; proofBuilds.vm = "checks.x86_64-linux.vm";
     proofRuns.gate = "make check"; proofSlots = 1; keepBranches = [ "keep/*" ]; codex = true;
@@ -21,7 +21,8 @@ let
   };
   wrong = lib.filter (k: refused "sam/one" { ${k} = every.${k}; }) (lib.attrNames every)
     ++ map (k: "${k}, which is no setting") (lib.filter (k: !(refused "sam/typo" { ${k} = { }; }))
-      [ "proofRun" "keepBranch" "Rounds" "proofjobs" "slots" ]);
+      # oneWay moved to Conary's class policy (burrow.ledger.policy).
+      [ "proofRun" "keepBranch" "Rounds" "proofjobs" "slots" "oneWay" ]);
 in pkgs.runCommand "autoland-repos-check" { } ''
   ${lib.concatMapStrings (w: "echo 'wrong for ${w}'
 ") wrong}

@@ -31,7 +31,7 @@ import train as T
 import waits
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
-from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way, provenance
+from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, provenance
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, negative, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
@@ -500,7 +500,7 @@ def handle(repo, pr, repo_info, digest, held=None):
             # GitHub says of merging it alone is no wait of its own: GitHub
             # works that out afresh each time the branch moves, which the
             # train's every landing does.
-            T.ride(repo, pr, st, bool(gate), desc, settle, strike, our_status(pr, T.CONTEXT)[1])
+            T.ride(repo, pr, st, bool(gate()), desc, settle, strike, our_status(pr, T.CONTEXT)[1])
             return
         if merging in ("wait", "refused"):
             settle("pending", "Settled; GitHub is still working out whether it can be merged" if merging == "wait"
@@ -784,7 +784,7 @@ def handle(repo, pr, repo_info, digest, held=None):
         return
 
     machine = C.machine(rc)  # the checks a machine runs, not CI, and how
-    ci, ci_names, docs = ci_state(pr, machine, moved := moved_from(repo, pr, st), repo)
+    ci, ci_names, docs = ci_state(pr, machine, moved_from(repo, pr, st), repo)
     # A build's or run's verdicts GitHub took only some of: the rest go up
     # whatever CI says now, so a failure it took doesn't leave the others
     # unposted behind a red PR. Their statuses kick the pass that sees them.
@@ -821,7 +821,8 @@ def handle(repo, pr, repo_info, digest, held=None):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
-    gate = one_way(pr, rc, moved)
+    def gate():  # what makes it R2, from Conary's class policy (train.py's gate)
+        return T.gate(repo, pr)
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in machine for c in ci_names)
     # A check the steward builds itself costs no Claude job, so it needn't
@@ -847,7 +848,7 @@ def handle(repo, pr, repo_info, digest, held=None):
     # Renovate merges its own once they're green, but none in a repo with its
     # train on (updates.nix), so it reads their commits for itself first.
     rechecked = renovate and not T.on(repo)
-    fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st, rechecked) or gate_edit(repo, pr, st))
+    fixed = dep == "minor" and (bot_edited(repo, pr, st, rechecked) or gate_edit(repo, pr, st)) and not gate()
     swept = fixed and ci == "red" and renovate
     # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
     requested = renovate and lock_wait.requested(pr, C.NOW, CFG["renovateRun"] or 0)
@@ -908,8 +909,8 @@ def handle(repo, pr, repo_info, digest, held=None):
             prove()
         elif ci == "pending":
             settle("pending", "Dependency update, CI pending")
-        elif gate or ci == "none" or asked:
-            judged(f"a dependency update touching {gate}" if gate else "the repo has no CI" if ci == "none"
+        elif gate() or ci == "none" or asked:
+            judged(f"a dependency update touching {gate()}" if gate() else "the repo has no CI" if ci == "none"
                    else "a Claude job was asked to judge this head",
                    DEP_SEEN + ("; renovate-sweep cleared the major version for this head" if major_verdict == "ok" else ""))
         elif dep == "major" and not renovate:
@@ -984,8 +985,8 @@ def handle(repo, pr, repo_info, digest, held=None):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate or unseen or ci == "none" or asked or capped:
-        judged(f"it touches {gate}" if gate else
+    elif gate() or unseen or ci == "none" or asked or capped:
+        judged(f"it touches {gate()}" if gate() else
                f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
                else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head" if asked
                else f"it went past the review-round limit ({rounds} rounds with findings)",

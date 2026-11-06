@@ -184,6 +184,54 @@ in
       description = "The gh the ledger's passes ask GitHub with (the test's is a stand-in).";
     };
 
+    policy = mkOption {
+      type = types.submodule {
+        options = let
+          paths = what: mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = "Path regexes ${what}.";
+          };
+          rules = {
+            r2 = paths "that make a change R2: it rides alone, and a Claude job judges it before it lands";
+            docs = paths "naming documentation: a change to these alone needs green CI and no review round, unless it's R2";
+            notDocs = paths "that are never documentation, whatever `docs` says: a design doc, a page the repo publishes. AGENTS.md, CLAUDE.md and `.github/` never are";
+            live = mkOption {
+              type = types.nullOr types.bool;
+              default = null;
+              description = "Whether landing goes live (R1) rather than changing nothing outside the repo (R0); unset, the machine's.";
+            };
+          };
+        in rules // {
+          r2 = rules.r2 // {
+            default = [ "(^|/)CODEOWNERS$" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" ];
+          };
+          repos = mkOption {
+            type = types.attrsOf (types.submodule { options = rules; });
+            default = { };
+            example = lib.literalExpression ''
+              { "sam/app" = { r2 = [ "^migrations/" ]; docs = [ "^docs/" ]; live = true; }; }
+            '';
+            description = "Each repo's (OWNER/NAME) additions: its lists add to the machine's, so no repo takes a path off R2.";
+          };
+        };
+      };
+      default = { };
+      description = ''
+        Conary's class policy (its docs/DESIGN.md, section 4.4): which
+        changes are R2, which are documentation only, and which repos go
+        live when they land, from the paths a change touches, renames and
+        copies included. `cn class` reads it (CONARY_POLICY), and the
+        steward asks it for every PR it settles. The machine's R2 paths
+        default to CODEOWNERS (who signs off on what) and secrets. The rest
+        of `.github/` isn't on it: the reviewers read workflow changes like
+        any other, and the steward merges them once settled. Nor are
+        database migrations: what undoes a bad one is the backup its deploy
+        takes before migrating, not a wait at merge. A repo whose deploy
+        takes no such backup puts `(^|/)migrations?/` on its own list.
+      '';
+    };
+
     sessionLinks = mkOption {
       type = types.listOf (types.strMatching "[^/]+/[^/]+");
       default = [ ];
@@ -238,6 +286,11 @@ in
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
+        # null where unset, which Conary takes as the machine's.
+        CONARY_POLICY = "${pkgs.writeText "conary-policy.json" (builtins.toJSON {
+          inherit (cfg.policy) r2 docs notDocs live;
+          repos = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
+        })}";
       } // lib.optionalAttrs ((fresh.enable or false) && fresh.fresh.enable) {
         # A self-hosted runner's CI counts only from one started fresh for
         # its job, and only burrow.dispatch.fresh names a runner so
