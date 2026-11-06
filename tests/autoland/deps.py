@@ -80,6 +80,14 @@ for kw in (batch, {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 t
     fresh_pr_state()
     status, _ = run(mkpr(**{**kw, "body": spent}), 900)
     assert merged() and "Dependency update, CI green" in status and JOBS == [], (kw, status)
+# The sentence quoted in release notes Renovate embeds doesn't count: the
+# configuration's own status is what decides, and a conflicting one is no yes.
+quoted = "### Release Notes\n\n\U0001f6a6 **Automerge**: Disabled because a matching PR was automerged previously.\n\n---\n\n### Configuration\n\n"
+for kw in (batch, {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 13}):
+    for status_line in ("\U0001f6a6 **Automerge**: Disabled by config.", "\U0001f6a6 **Automerge**: Enabled.", "> " + spent):
+        fresh_pr_state()
+        status, _ = run(mkpr(**{**kw, "body": quoted + status_line}), 900)
+        assert not merged() and JOBS == [], (kw, status_line, status)
 fresh_pr_state()
 COMMITS[11] = ["bot@renovateapp.com", "claude@remi"]
 status, _ = run(mkpr(**{**batch, "body": spent}), 900)
