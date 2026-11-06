@@ -147,14 +147,18 @@ def join(repo, pr):
     train holds it out (HELD's) and what cn said of it, if anything. cn
     classes it by the machine's policy, as `cn class` does: an R2 one rides
     in a candidate of its own, which lands only while the default branch is
-    still its base. In a repo with a trainNegative, only once its negative
-    on that head counts."""
+    still its base. It names the raise labels this pass settled it with
+    (`cn class`'s raised): one cn finds that this pass didn't settle it
+    with holds it out, for the next pass to settle it with. In a repo with
+    a trainNegative, only once its negative on that head counts."""
     n, head = pr["number"], pr["headRefOid"]
     negative = repo_cfg(repo)["trainNegative"]
     if DRY:
         log(f"  would: put {repo}#{n} in its train at {head[:7]}")
     else:
-        got = cn("train", "join", repo, str(n), "--head", head, *(["--negative", negative] if negative else []))
+        raised = [a for label in classed(repo, pr).get("raised", []) for a in ("--raised", label)]
+        got = cn("train", "join", repo, str(n), "--head", head, *raised,
+                 *(["--negative", negative] if negative else []))
         if got.get("unproven"):
             return "unproven", got["unproven"].replace(head, head[:7])
         if got.get("held"):
