@@ -346,11 +346,13 @@ def gh_stub(*a, **k):
                 raise got
             return None
         return got
-    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/check-runs/") and a[1].endswith("/annotations"):
-        got = ANNOTATIONS.get(int(a[1].split("/")[-2]), [])
+    if a[:3] == ("api", "--paginate", "--slurp") and a[3].startswith("repos/sam/r/check-runs/") \
+            and a[3].endswith("/annotations?per_page=100"):
+        got = ANNOTATIONS.get(int(a[3].split("/")[-2]), [])
         if isinstance(got, Exception):
             raise got
-        return got
+        msgs = [{"message": m} for m in got]
+        return [msgs[i:i + 100] for i in range(0, len(msgs), 100)] or [[]]  # --slurp: the pages
     if a[:2] == ("pr", "view") and "commits" in a:
         got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
         return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}

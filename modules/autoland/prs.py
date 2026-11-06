@@ -291,8 +291,10 @@ def timed_out(repo, c):
     run = c.get("databaseId")
     if not run or not repo:
         return False
-    said = C.gh("api", f"repos/{repo}/check-runs/{run}/annotations", "--jq", "[.[].message]")
-    return any(TIMED_OUT in (m or "") for m in (said if isinstance(said, list) else []))
+    # Every page: a job can warn many times before it runs out of time.
+    pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/check-runs/{run}/annotations?per_page=100")
+    return any(TIMED_OUT in (a.get("message") or "") for page in (pages if isinstance(pages, list) else [])
+               for a in (page if isinstance(page, list) else []) if isinstance(a, dict))
 
 
 def after_cancel(c, contexts, stale):

@@ -84,6 +84,9 @@ ANNOTATIONS[41] = ["The job running on runner remi-3 has exceeded the maximum ex
 assert state(timeout) == ("red", [f"{CHECK} (timed out)"])
 status, landed = at(clean(checks=timeout))
 assert not landed and "CI is red: check / check (timed out)" in status, status
+# Past the first page, after a job's many warnings: still red.
+ANNOTATIONS[41] = ["warning"] * 150 + ANNOTATIONS[41]
+assert state(timeout) == ("red", [f"{CHECK} (timed out)"])
 # A newer run that ran through still clears it, unasked.
 ANNOTATIONS[41] = C.Unavailable("gh api check-runs: HTTP 502")
 assert state(timeout, whole(suite="s2")) == ("green", [])
