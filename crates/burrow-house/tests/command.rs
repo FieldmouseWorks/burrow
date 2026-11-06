@@ -19,7 +19,9 @@ case "$*" in
   'api -i -X GET repos/sam/r/compare/ba5e...4ead?per_page=1') answer '200 OK'; cat "$DIR/compare.json" ;;
   'api -i -X GET repos/sam/r/contents/my%20dir/big.rs?ref=4ead')
     answer '200 OK'
-    printf '{"encoding": "base64", "content": "%s"}' "$(base64 "$DIR/big.rs" | sed 's/$/\\n/' | tr -d '\n')" ;;
+    printf '{"type": "file", "encoding": "base64", "content": "%s"}' "$(base64 "$DIR/big.rs" | sed 's/$/\\n/' | tr -d '\n')" ;;
+  'api -i -X GET repos/sam/r/contents/vendor/lib?ref='*) answer '200 OK'; echo '{"type": "submodule", "sha": "5ab"}' ;;
+  'api -i -X GET repos/sam/r/contents/bin/run?ref='*) answer '200 OK'; echo '{"type": "symlink", "target": "../tools/run"}' ;;
   'api -i -X POST repos/sam/r/statuses/4ead --input -') answer '201 Created'; echo '{}' ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
@@ -37,10 +39,16 @@ fn setup(d: &Path, fork: bool) {
         "base": {"sha": "ba5e", "ref": "main"},
     });
     fs::write(d.join("pr.json"), pr.to_string()).unwrap();
-    let files = [json!({
-        "status": "modified", "filename": "my dir/big.rs", "additions": 20, "deletions": 5,
-        "patch": format!("@@ -1,5 +1,20 @@{}{}", "\n-x".repeat(5), "\n+x".repeat(20)),
-    })];
+    // A submodule moved and a link GitHub doesn't follow, changed, with no
+    // patch: read whole, neither stops the check.
+    let files = [
+        json!({
+            "status": "modified", "filename": "my dir/big.rs", "additions": 20, "deletions": 5,
+            "patch": format!("@@ -1,5 +1,20 @@{}{}", "\n-x".repeat(5), "\n+x".repeat(20)),
+        }),
+        json!({"status": "modified", "filename": "vendor/lib", "additions": 1, "deletions": 1}),
+        json!({"status": "added", "filename": "bin/run", "additions": 1, "deletions": 0}),
+    ];
     let compare = json!({"merge_base_commit": {"sha": "3e7b"}, "files": files});
     fs::write(d.join("compare.json"), compare.to_string()).unwrap();
     fs::write(d.join("big.rs"), "x\n".repeat(1001)).unwrap();

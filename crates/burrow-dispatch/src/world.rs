@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use burrow_github::{Gh, call};
+use burrow_github::{Gh, call, call_once};
 use serde_json::{Value, json};
 
 use crate::config::{Config, Fresh};
@@ -158,12 +158,13 @@ impl World for Real<'_> {
     }
 
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String> {
-        gh(
-            "POST",
-            &format!("repos/{repo}/actions/runs/{run}/cancel"),
-            None,
-        )
-        .map(drop)
+        // Once, whatever comes back, even a 429: `still` read the run queued
+        // on its first attempt just before, and after a wait it could have
+        // started or been run again, which a cancel must never touch. The
+        // next pass reads it again.
+        let path = format!("repos/{repo}/actions/runs/{run}/cancel");
+        call_once(&mut Gh::default(), "POST", &path, None)?;
+        Ok(())
     }
 
     fn kick(&self, path: &str) {

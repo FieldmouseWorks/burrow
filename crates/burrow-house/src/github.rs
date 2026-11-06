@@ -24,7 +24,8 @@ pub trait GitHub {
     /// the files it changes, 300 at most, each with its patch when GitHub
     /// shows one.
     fn compare(&self, base: &str, head: &str) -> Result<Value, String>;
-    /// A file's bytes at a commit.
+    /// A path's bytes at a commit, as git keeps them: a file's content, a
+    /// symlink's target, and nothing for a submodule, which has no blob.
     fn content(&self, path: &str, at: &str) -> Result<Vec<u8>, String>;
     /// Post a status on a commit.
     fn post(&self, sha: &str, status: &Status) -> Result<(), String>;
@@ -89,20 +90,26 @@ impl<A: Api> GitHub for Real<A> {
 
     /// The contents API's answer carries a file of up to 1 MB; past that its
     /// encoding is `none`, and the file's blob, named by the same answer,
-    /// carries it (up to 100 MB).
+    /// carries it (up to 100 MB). A symlink to a file in the repo comes back
+    /// as that file; one GitHub doesn't follow, as its target.
     fn content(&self, path: &str, at: &str) -> Result<Vec<u8>, String> {
         let url = format!("repos/{}/contents/{}?ref={at}", self.repo, encode(path));
-        let file = self.json(&url)?;
-        match file["encoding"].as_str() {
-            Some("base64") => decoded(&url, &file),
-            Some("none") => {
-                let sha = file["sha"]
+        let entry = self.json(&url)?;
+        match (entry["type"].as_str(), entry["encoding"].as_str()) {
+            (Some("file"), Some("base64")) => decoded(&url, &entry),
+            (Some("file"), Some("none")) => {
+                let sha = entry["sha"]
                     .as_str()
                     .ok_or_else(|| format!("GET {url}: GitHub named no blob"))?;
                 let blob = format!("repos/{}/git/blobs/{sha}", self.repo);
                 decoded(&blob, &self.json(&blob)?)
             }
-            _ => Err(format!("GET {url}: not a file GitHub can give")),
+            (Some("symlink"), _) => entry["target"]
+                .as_str()
+                .map(|t| t.as_bytes().to_vec())
+                .ok_or_else(|| format!("GET {url}: GitHub gave the link no target")),
+            (Some("submodule"), _) => Ok(Vec::new()),
+            _ => Err(format!("GET {url}: not a file, link or submodule")),
         }
     }
 
@@ -129,7 +136,8 @@ mod tests {
     }
 
     // A file comes from the base64 GitHub sends in lines; one over 1 MB,
-    // from its blob; a directory or a submodule is no file.
+    // from its blob; a link GitHub doesn't follow, its target; a submodule,
+    // nothing; a directory is refused.
     #[test]
     fn content() {
         let mut gh = Fake::default();
@@ -141,7 +149,7 @@ mod tests {
                 ok(502, Value::Null, &[]),
                 ok(
                     200,
-                    json!({"encoding": "base64", "content": "eCB5\nCg==\n"}),
+                    json!({"type": "file", "encoding": "base64", "content": "eCB5\nCg==\n"}),
                     &[],
                 ),
             ],
@@ -156,7 +164,7 @@ mod tests {
             "repos/sam/r/contents/big",
             vec![ok(
                 200,
-                json!({"encoding": "none", "content": "", "sha": "b10b"}),
+                json!({"type": "file", "encoding": "none", "content": "", "sha": "b10b"}),
                 &[],
             )],
         );
@@ -178,7 +186,23 @@ mod tests {
             vec![ok(200, json!([]), &[])],
         );
         let e = real(gh).content("dir", "4ead").unwrap_err();
-        assert!(e.ends_with("not a file GitHub can give"), "{e}");
+        assert!(e.ends_with("not a file, link or submodule"), "{e}");
+
+        // A link GitHub doesn't follow is its target, a submodule nothing.
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            "repos/sam/r/contents/run",
+            vec![ok(200, json!({"type": "symlink", "target": "../x"}), &[])],
+        );
+        gh.on(
+            "GET",
+            "repos/sam/r/contents/vendor/lib",
+            vec![ok(200, json!({"type": "submodule", "sha": "5ab"}), &[])],
+        );
+        let r = real(gh);
+        assert_eq!(r.content("run", "4ead").unwrap(), b"../x");
+        assert!(r.content("vendor/lib", "4ead").unwrap().is_empty());
     }
 
     // A status that GitHub didn't answer for is posted again: the newest
