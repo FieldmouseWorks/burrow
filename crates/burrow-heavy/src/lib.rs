@@ -1,12 +1,15 @@
 //! heavy: one machine-wide set of slots for heavy work (a gate, a VM test, a
 //! replay, a large build), shared by every repo, runner and account.
 //!
-//!   heavy [--wait SECONDS] -- COMMAND...  |  heavy status
+//!   heavy [--wait SECONDS] [--all] -- COMMAND...  |  heavy status
 //!
 //! COMMAND runs in the first free slot, and waits for one while all are
 //! busy (up to `--wait` seconds, then exit 75). It gets the slot's share of
 //! the threads in HEAVY_JOBS, and CARGO_BUILD_JOBS and RUST_TEST_THREADS from
-//! it unless they're set already. Its exit status passes through. Inside a
+//! it unless they're set already. With `--all` it takes every slot instead,
+//! lowest first, holding each while it waits for the next, and gets all of
+//! the threads: for a run that has to have the machine to itself, such as a
+//! long gate with a deadline. Its exit status passes through. Inside a
 //! slot (HEAVY_SLOT set) heavy just runs the command, so wrapped tools can
 //! call each other.
 //!
@@ -37,7 +40,7 @@ pub const BUSY: u8 = 75;
 /// The exit status for a call heavy can't read.
 pub const USAGE: u8 = 2;
 
-const USAGE_LINE: &str = "usage: heavy [--wait SECONDS] -- COMMAND...  |  heavy status";
+const USAGE_LINE: &str = "usage: heavy [--wait SECONDS] [--all] -- COMMAND...  |  heavy status";
 
 /// A line to stderr, best effort: heavy's own words are only ever
 /// diagnostics, and the command's status is what the caller acts on.
@@ -56,9 +59,11 @@ pub(crate) use note;
 pub enum Call {
     /// Which slots are busy.
     Status,
-    /// COMMAND in a slot, giving up after `wait` seconds if one is set.
+    /// COMMAND in a slot, or in every slot with `all`, giving up after
+    /// `wait` seconds if one is set.
     Run {
         wait: Option<u64>,
+        all: bool,
         command: Vec<OsString>,
     },
 }
@@ -70,6 +75,7 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
         return Some(Call::Status);
     }
     let mut wait = None;
+    let mut all = false;
     let mut rest = args;
     loop {
         match rest {
@@ -82,6 +88,10 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
                 rest = more;
             }
             [flag] if flag == "--wait" => return None,
+            [flag, more @ ..] if flag == "--all" => {
+                all = true;
+                rest = more;
+            }
             [dashes, more @ ..] if dashes == "--" => {
                 rest = more;
                 break;
@@ -94,6 +104,7 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
     }
     Some(Call::Run {
         wait,
+        all,
         command: rest.to_vec(),
     })
 }
@@ -124,7 +135,16 @@ pub fn main(config: &Config, args: &[OsString]) -> u8 {
         {
             exec(&command)
         }
-        Call::Run { wait, command } => take(config, share, wait, &command),
+        Call::Run {
+            wait,
+            all: false,
+            command,
+        } => take(config, share, wait, &command),
+        Call::Run {
+            wait,
+            all: true,
+            command,
+        } => take_all(config, threads, wait, &command),
     }
 }
 
@@ -172,7 +192,7 @@ fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) ->
         match attempt(config) {
             Err(code) => return code,
             Ok(Some((i, slot))) => {
-                let code = run::run(config, i, share, command);
+                let code = run::run(config, &i.to_string(), share, command);
                 drop(slot);
                 return code;
             }
@@ -201,24 +221,74 @@ fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) ->
     }
 }
 
+/// Takes every slot, lowest first, and runs the command in all of them
+/// with all of the threads. Each slot it has stays held while it waits for
+/// the next, so the machine empties under it instead of a single run
+/// keeping it from ever being free. Two of these can't deadlock: both take
+/// the slots in the same order, and an ordinary run holds only one.
+fn take_all(config: &Config, threads: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
+    let deadline = wait.map(|s| Instant::now() + Duration::from_secs(s));
+    let mut held = Vec::new();
+    let mut said = false;
+    for i in 1..=config.slots {
+        loop {
+            match lock(config, i) {
+                Err(code) => return code,
+                Ok(Some(slot)) => {
+                    held.push(slot);
+                    break;
+                }
+                Ok(None) => {}
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                note!("heavy: slot{i} still busy after {}s", wait.unwrap_or(0));
+                return BUSY;
+            }
+            if !said {
+                note!(
+                    "heavy: waiting for all {} slots (heavy status)",
+                    config.slots
+                );
+                said = true;
+            }
+            let mut nap = Duration::from_secs(1);
+            if let Some(d) = deadline {
+                nap = nap.min(d.saturating_duration_since(Instant::now()));
+            }
+            thread::sleep(nap);
+        }
+    }
+    let code = run::run(config, "all", threads, command);
+    drop(held);
+    code
+}
+
 /// The first free slot, locked, or none; an error is the exit status.
 fn attempt(config: &Config) -> Result<Option<(u32, File)>, u8> {
     for i in 1..=config.slots {
-        let path = config.slot(i);
-        let file = File::open(&path).map_err(|e| {
-            note!("heavy: cannot open {}: {e}", path.display());
-            1
-        })?;
-        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(Some((i, file))),
-            Err(Errno::WOULDBLOCK) => {}
-            Err(e) => {
-                note!("heavy: flock failed on {}: {e}", path.display());
-                return Err(1);
-            }
+        if let Some(file) = lock(config, i)? {
+            return Ok(Some((i, file)));
         }
     }
     Ok(None)
+}
+
+/// Slot `i`, locked, or none while someone else holds it; an error is the
+/// exit status.
+fn lock(config: &Config, i: u32) -> Result<Option<File>, u8> {
+    let path = config.slot(i);
+    let file = File::open(&path).map_err(|e| {
+        note!("heavy: cannot open {}: {e}", path.display());
+        1
+    })?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(file)),
+        Err(Errno::WOULDBLOCK) => Ok(None),
+        Err(e) => {
+            note!("heavy: flock failed on {}: {e}", path.display());
+            Err(1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +302,15 @@ mod tests {
     fn run(wait: Option<u64>, command: &[&str]) -> Option<Call> {
         Some(Call::Run {
             wait,
+            all: false,
+            command: args(command),
+        })
+    }
+
+    fn run_all(wait: Option<u64>, command: &[&str]) -> Option<Call> {
+        Some(Call::Run {
+            wait,
+            all: true,
             command: args(command),
         })
     }
@@ -263,6 +342,16 @@ mod tests {
             run(None, &["--wait", "1"])
         );
         assert_eq!(parse(&args(&["--", "--", "x"])), run(None, &["--", "x"]));
+        assert_eq!(parse(&args(&["--all", "--", "x"])), run_all(None, &["x"]));
+        assert_eq!(
+            parse(&args(&["--wait", "5", "--all", "x"])),
+            run_all(Some(5), &["x"])
+        );
+        assert_eq!(
+            parse(&args(&["--all", "--wait", "5", "--", "x"])),
+            run_all(Some(5), &["x"])
+        );
+        assert_eq!(parse(&args(&["--", "--all"])), run(None, &["--all"]));
     }
 
     #[test]
@@ -277,6 +366,8 @@ mod tests {
             &["--wait", "-1", "--", "x"],
             &["--wait", "1s", "--", "x"],
             &["--wait", "+1", "--", "x"],
+            &["--all"],
+            &["--all", "--"],
         ] {
             assert_eq!(parse(&args(bad)), None, "{bad:?}");
         }

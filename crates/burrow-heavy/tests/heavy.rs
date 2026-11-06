@@ -319,6 +319,82 @@ fn a_bounded_wait_gives_up_on_time_and_a_nested_call_waits_for_nothing() {
     assert!(s.path().join("ran").exists());
 }
 
+#[test]
+fn all_takes_every_slot_and_all_the_threads() {
+    let s = Slots::new(3, 3);
+    let status = format!(
+        "{} {}",
+        env!("CARGO_BIN_EXE_burrow-heavy"),
+        s.config.display()
+    );
+    let out = s.run(&[
+        "--all",
+        "--",
+        "sh",
+        "-c",
+        &format!("echo $HEAVY_SLOT $HEAVY_JOBS $CARGO_BUILD_JOBS $RUST_TEST_THREADS; {status} status; exit 7"),
+    ]);
+    assert_eq!(out.status.code(), Some(7));
+    let all = threads();
+    let share = (all / 3).max(1);
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "all {all} {all} {all}\n3 slots of {share} threads (of {all})\nslot1: busy\nslot2: busy\nslot3: busy\n"
+        )
+    );
+    assert_eq!(s.status().matches(": free").count(), 3, "every slot back");
+}
+
+#[test]
+fn all_holds_what_it_has_while_it_waits_for_the_rest() {
+    let s = Slots::new(3, 3);
+    let held = s.hold(2);
+    let mut waiting = s
+        .heavy(&["--all", "--", "touch", "ran"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Slot 1 is taken and kept while slot 2 is busy; slot 3 isn't asked yet.
+    until("slot1 taken", || s.status().contains("slot1: busy"));
+    thread::sleep(Duration::from_millis(300));
+    assert!(waiting.try_wait().unwrap().is_none());
+    assert!(!s.path().join("ran").exists());
+    assert!(s.status().contains("slot3: free"));
+    drop(held);
+    assert!(exits(&mut waiting).success());
+    assert!(s.path().join("ran").exists());
+    let err = text(&waiting.wait_with_output().unwrap().stderr);
+    assert!(err.contains("heavy: waiting for all 3 slots"), "{err}");
+}
+
+#[test]
+fn all_gives_back_what_it_took_when_its_wait_runs_out() {
+    let s = Slots::new(2, 3);
+    let _held = s.hold(2);
+    let start = Instant::now();
+    let out = s.run(&["--wait", "1", "--all", "--", "touch", "ran"]);
+    let took = start.elapsed();
+    assert_eq!(out.status.code(), Some(75));
+    assert!(
+        took >= Duration::from_secs(1) && took < Duration::from_millis(1800),
+        "{took:?}"
+    );
+    assert!(text(&out.stderr).contains("slot2 still busy after 1s"));
+    assert!(!s.path().join("ran").exists());
+    assert!(s.status().contains("slot1: free"), "slot 1 given back");
+    // Inside a slot it takes no other, so it can't wait on its own.
+    let out = s
+        .heavy(&["--all", "--", "sh", "-c", "echo $HEAVY_SLOT"])
+        .env("HEAVY_SLOT", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        (out.status.code(), text(&out.stdout)),
+        (Some(0), "1\n".into())
+    );
+}
+
 /// A cancellable run, whose worker writes its pid to `worker` once its
 /// traps are set. Whatever is left of it when the test ends is killed.
 struct WorkerRun {

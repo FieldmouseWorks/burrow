@@ -106,12 +106,15 @@ in
 
             heavy -- COMMAND...               run it in one of ${toString cfg.heavy.slots} machine-wide slots
             heavy --wait 600 -- COMMAND...    give up (exit 75) after 10 minutes
+            heavy --all -- COMMAND...         take every slot: the machine to itself
             heavy status                      which slots are busy
 
         It waits for a free slot, then runs the command with HEAVY_JOBS (its
         share of the threads), CARGO_BUILD_JOBS and RUST_TEST_THREADS set:
         size your own parallelism (browser workers, `-j`) from HEAVY_JOBS.
-        Calls inside a slot don't take another.
+        Calls inside a slot don't take another. `--all` is for a run that
+        has a deadline and must not share the machine (a nightly gate), and
+        holds every other heavy run off until it ends, so keep it to those.
 
         Gates (${
           if cfg.gates.slices == [ ] then "none here yet" else lib.concatMapStringsSep ", " (s: "${s}.slice") cfg.gates.slices

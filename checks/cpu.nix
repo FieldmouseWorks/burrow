@@ -1,5 +1,5 @@
 # heavy's slots: one holder at a time per slot, its share of the
-# threads, nested calls let through, the exit status and stdin passed
+# threads (all of them with --all), nested calls let through, the exit status and stdin passed
 # on, a cancelled workload stopped before its slot goes, a bounded
 # wait refused on time; and the example's gate slice weighted.
 { self, pkgs, ... }:
@@ -29,6 +29,8 @@ in pkgs.runCommand "cpu-check" { } ''
     done
   }
   [ "$($h -- printenv HEAVY_JOBS)" = "$threads" ] || { echo "share: not $threads"; exit 1; }
+  [ "$($h --all -- printenv HEAVY_SLOT HEAVY_JOBS)" = "all
+$threads" ] || { echo "--all: not every slot and $threads threads"; exit 1; }
   [ "$(CARGO_BUILD_JOBS=3 $h -- printenv CARGO_BUILD_JOBS)" = 3 ] || { echo "overrode CARGO_BUILD_JOBS"; exit 1; }
   rc=0; $h -- sh -c 'exit 7' || rc=$?
   [ "$rc" = 7 ] || { echo "exit status $rc, not 7"; exit 1; }
