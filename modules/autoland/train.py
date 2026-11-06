@@ -52,7 +52,7 @@ TRAINS = {}  # each train repo's train, as this pass read it (begin)
 # The train repos this pass mustn't step, and why: a PR in the train it
 # couldn't take out, or wasn't sure was still settled.
 STOPPED = {}
-GATES = {}  # what makes each PR R2 at a head, as cn said this pass (gate)
+CLASSES = {}  # each PR's class at a head, as cn said this pass (classed)
 
 
 def on(repo):
@@ -79,20 +79,34 @@ def cn(*args):
     return json.loads(p.stdout)
 
 
-def gate(repo, pr):
-    """What makes the PR R2 at its head, as Conary's class policy says
-    (`cn class`, which records it): the path that does, or why its paths
-    couldn't all be read. None below R2. Asked once a pass, and only when a
+def classed(repo, pr):
+    """The PR's class at its head, as Conary's class policy says (`cn
+    class`, which records it): its class, what made it R2 (`because`), and
+    whether it needs a review round (`review`: anything but documentation,
+    and documentation that's R2). Asked once a pass, and only when a
     decision turns on it. A dry run asks nothing, since cn would record the
     class, and takes every PR for R2."""
     n, head = pr["number"], pr["headRefOid"]
-    if (repo, n, head) not in GATES:
+    if (repo, n, head) not in CLASSES:
         if DRY:
-            GATES[repo, n, head] = "a path a dry run doesn't class"
+            CLASSES[repo, n, head] = {"class": "R2", "because": "a path a dry run doesn't class", "review": True}
         else:
-            got = cn("class", repo, str(n), "--head", head)
-            GATES[repo, n, head] = (got["because"] or "an R2 path") if got["class"] == "R2" else None
-    return GATES[repo, n, head]
+            CLASSES[repo, n, head] = cn("class", repo, str(n), "--head", head)
+    return CLASSES[repo, n, head]
+
+
+def gate(repo, pr):
+    """What makes the PR R2 at its head: the path that does, or why its
+    paths couldn't all be read. None below R2."""
+    got = classed(repo, pr)
+    return (got["because"] or "an R2 path") if got["class"] == "R2" else None
+
+
+def review(repo, pr):
+    """Whether the PR needs a review round at its head: documentation alone
+    that isn't R2 needs green CI and nothing more (Conary's docs/DESIGN.md,
+    section 4.4)."""
+    return bool(classed(repo, pr)["review"])
 
 
 def begin(repo):
@@ -101,8 +115,8 @@ def begin(repo):
     afresh."""
     TRAINS.pop(repo, None)
     STOPPED.pop(repo, None)
-    for k in [k for k in GATES if k[0] == repo]:
-        del GATES[k]
+    for k in [k for k in CLASSES if k[0] == repo]:
+        del CLASSES[k]
     if on(repo):
         TRAINS[repo] = cn("train", "show", repo)
 

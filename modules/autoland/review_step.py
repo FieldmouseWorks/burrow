@@ -24,13 +24,15 @@ class Looked(NamedTuple):
     waiting: list  # what it still waits on from the reviewers, in words
     stuck: list  # the reviewers whose look keeps failing, in words
     out_of_service: bool  # what it waits on is a reviewer out of service
+    unreviewed: bool  # it needs no review round: documentation alone, not R2
 
 
-def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
+def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, needed):
     """The reviewers' part of the PR's step this pass. key, st and lost_on
     are its state file's name, its state and the findings its reviewers
     couldn't post; digest and line its listing; age how long its head has
-    been seen; after, strike and cleared its step's own (step.py)."""
+    been seen; after, strike and cleared its step's own (step.py); needed,
+    whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     head = pr["headRefOid"]
     tag = f"{repo}#{pr['number']}"
@@ -256,6 +258,13 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
             # Back in service then: its look at this head is asked for.
             C.wake(repo, load(V.OUT, {})[r]["until"] + 1)  # ends: once; listed while it's out
     rounds, clean, capped = limit()
+    # Documentation alone that isn't R2 needs green CI and no review round
+    # (Conary's class, asked only when the reviewers haven't settled it):
+    # none is asked or waited for, nor is it past any limit. What they
+    # found already still holds it, as threads and late findings.
+    unreviewed = not clean and not needed()
+    if unreviewed:
+        clean, capped = True, False
 
     def owed(r):
         """Past the limit, what the reviewer still owes the PR, which the
@@ -273,7 +282,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
 
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN
-    looking = [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
+    looking = [] if unreviewed else [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
     if not quiet and looking:
         after(st["seen"], rc["settleDelay"])  # ends: the reviewers are asked then, once a head
     waiting = [f"Posting {x}" for x in unposted]
@@ -290,7 +299,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
             waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
             out_of_service = True
     waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
-    if not live and not capped:
+    if not live and not capped and not unreviewed:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
@@ -302,10 +311,10 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
                        else f"Waiting for {V.NAMES[r]}'s review" + ("" if capped else " of this commit"))
     # A look that can't happen, a first one or a second: the owner hears either way.
     stuck = []
-    for r in live:
+    for r in [] if unreviewed else live:
         if st["rv"].get(r, {}).get("fails", 0) >= 3:
             x = f"failed {st['rv'][r]['fails']} times on {head[:7]}"
             stuck.append(f"{V.NAMES[r]} {x}")
             digest.append((f"{V.NAMES[r]} couldn't review it", line, x + " (journalctl -u autoland-review)"))
 
-    return Looked(live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service)
+    return Looked(live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed)

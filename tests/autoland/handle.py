@@ -508,7 +508,7 @@ assert merged() and "state=success" in status, status
 # asked once a decision turns on it. R2 is judged, naming what made it so;
 # a class cn couldn't give lands nothing.
 fresh_pr_state()
-cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False}})
+cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False, "review": True}})
 status, _ = run(clean(files=["a.py"]), 700)
 assert len(JOBS) == 1 and "150 files or more (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
 assert cn_classed() == [("sam/r", 5, head)], cn_classed()
@@ -523,10 +523,27 @@ for rc, raised in ((1, RuntimeError), (75, C.Unavailable)):
         raise AssertionError(f"cn class exiting {rc} went unnoticed")
     assert not merged() and JOBS == [], (WROTE, JOBS)
 cn()
-# Unsettled, nothing turns on its class yet: cn isn't asked.
+# Documentation alone that isn't R2 (the example's policy: docs/ and
+# READMEs) needs green CI and no review round: no reviewer is asked or
+# waited for, and it lands as soon as CI is green, its class asked once.
 fresh_pr_state()
-run(mkpr(), 700)
-assert cn_classed() == [], cn_classed()
+status, _ = run(mkpr(files=["docs/a.md", "README.md"]), 5)
+assert merged() and queued() == [] and "Documentation only, so no review round" in status, (status, queued())
+assert cn_classed() == [("sam/r", 5, head)], cn_classed()
+# Code beside it, a rule for agents, or an R2 path among the docs: the
+# reviewers are asked, as for any change.
+for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"]):
+    fresh_pr_state()
+    run(mkpr(files=files), 0)
+    status, _ = run(mkpr(files=files), 600)
+    assert not merged() and queued() == ["codex", "rival"], (files, status, queued())
+# What's open on it still holds it, for a Claude job to fix: a thread, or
+# red CI.
+red = [{**CI_GREEN[0], "conclusion": "FAILURE"}]
+for kw, why in (({"threads": [False]}, "1 open review thread"), ({"checks": red}, "CI is red")):
+    fresh_pr_state()
+    status, _ = run(mkpr(files=["docs/a.md"], **kw), 5)
+    assert not merged() and queued() == [] and why in status and "Claude job" in status, (kw, status)
 
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.

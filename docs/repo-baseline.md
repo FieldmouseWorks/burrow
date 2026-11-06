@@ -124,7 +124,10 @@ root only.
    resumes the one before, told which head it last read, and still judges
    the whole change at the new head. A PR's sessions are deleted for good
    once it merges or closes. While its usage is spent, or it's logged out,
-   PRs wait for it, and it comes back on its own.
+   PRs wait for it, and it comes back on its own. A change to documentation
+   alone (Conary's class policy, `burrow.ledger.policy`'s `docs`) gets no
+   review round, unless it's R2: it lands once CI is green and nothing is
+   open on it.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a

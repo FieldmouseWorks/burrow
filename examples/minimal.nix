@@ -90,6 +90,8 @@
       package = pkgs.writeShellScriptBin "cn" "exit 1";
       anchorRepo = "sam/homelab";
       daemon = true;
+      # A change to docs alone lands on green CI with no review round.
+      policy.docs = [ "^docs/" "(^|/)README\\.md$" ];
       # `undo` issues in the probe's repo, from its authors.
       door.enable = true;
     };

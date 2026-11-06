@@ -259,7 +259,8 @@ Each has an entry below, and each can be imported on its own.
   ([front door](docs/front-door.md#undo-with-no-claude)). `policy` is
   Conary's class policy, which the steward asks for every PR it settles
   (`cn class`): which paths make a change R2 (CODEOWNERS and secrets by
-  default), which are documentation, and which repos go live when they land.
+  default), which are documentation (a change to them alone gets no review
+  round, unless it's R2), and which repos go live when they land.
 - **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
   (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
   permissions bypassed inside, egress only through an allowlist proxy, no

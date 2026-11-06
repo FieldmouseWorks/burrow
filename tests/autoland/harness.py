@@ -111,7 +111,8 @@ def review_service():
 # subcommand's exit code. With "token", it first runs its token command for
 # the repo, as cn does, and records what that did. Unless CN says otherwise,
 # `class` classes the files the PR at that head lists (TOUCHED, which mkpr
-# and run keep) by the policy's R2 paths, as Conary does.
+# and run keep) by the policy's R2, docs and notDocs paths, as Conary does
+# (AGENTS.md, CLAUDE.md and .github/ are never docs).
 CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -131,9 +132,14 @@ if do.get("rc", {{}}).get(sub):
     sys.exit(do["rc"][sub])
 if sub == "class" and "class" not in do:
     paths = json.load(open({TOUCHED!r})).get(args[2] + "@" + args[4], [])
-    r2 = json.load(open(os.environ["CONARY_POLICY"]))["r2"]
-    because = next((p for p in paths if any(re.search(x, p) for x in r2)), None)
-    do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": False}}
+    policy = json.load(open(os.environ["CONARY_POLICY"]))
+    rules = [policy, policy.get("repos", {{}}).get(repo, {{}})]
+    pick = lambda key: [x for r in rules for x in r.get(key, [])]
+    because = next((p for p in paths if any(re.search(x, p) for x in pick("r2"))), None)
+    never = pick("notDocs") + [r"(^|/)AGENTS(\\.override)?\\.md$", r"(^|/)CLAUDE(\\.local)?\\.md$", r"^\\.github/"]
+    docs = bool(paths) and all(any(re.search(x, p) for x in pick("docs")) and not any(re.search(x, p) for x in never)
+                               for p in paths)
+    do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": docs, "review": bool(because) or not docs}}
 print(json.dumps(do[sub]))
 """)
 os.chmod(f"{tmp}/cn", 0o755)
@@ -496,7 +502,7 @@ def run(pr, after, held=None):
     POSTED.clear()
     digest = []
     touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]])
-    H.T.GATES.clear()
+    H.T.CLASSES.clear()
     with C.acting_for("sam/r"):
         H.handle("sam/r", pr, info, digest, held)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
