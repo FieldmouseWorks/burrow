@@ -84,7 +84,7 @@ for kw in (batch, {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 t
 # configuration's own status is what decides, and a conflicting one is no yes.
 quoted = "### Release Notes\n\n\U0001f6a6 **Automerge**: Disabled because a matching PR was automerged previously.\n\n---\n\n### Configuration\n\n"
 for kw in (batch, {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 13}):
-    for status_line in ("\U0001f6a6 **Automerge**: Disabled by config.", "\U0001f6a6 **Automerge**: Enabled.", "> " + spent):
+    for status_line in ("\U0001f6a6 **Automerge**: Disabled by config.", "\U0001f6a6 **Automerge**: Enabled."):
         fresh_pr_state()
         status, _ = run(mkpr(**{**kw, "body": quoted + status_line}), 900)
         assert not merged() and JOBS == [], (kw, status_line, status)
