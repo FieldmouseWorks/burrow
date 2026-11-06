@@ -31,7 +31,7 @@ import train as T
 import waits
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
-from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, provenance
+from touches import automerge_spent, automerges, bot_edited, dep_kind, gate_edit, moved_from, provenance
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, negative, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
@@ -918,7 +918,7 @@ def handle(repo, pr, repo_info, digest, held=None):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        elif renovate and not T.on(repo) and not (automerges(pr) and CFG["labels"]["batch"] in labels
+        elif renovate and not T.on(repo) and not ((automerge_spent(pr) or automerges(pr) and CFG["labels"]["batch"] in labels)
                                                   and provenance(repo, pr, st) is False):
             # Renovate merges its own, on its next run on the repo, except in
             # a repo with its train on, where it merges none (updates.nix):
@@ -928,7 +928,10 @@ def handle(repo, pr, repo_info, digest, held=None):
             # (updates/renovate-policy.nix), but only one whose commits were
             # read and are Renovate's alone (provenance): Renovate checks
             # that before it merges, so one that couldn't be read waits for
-            # it. One with automerge on that's still open past
+            # it. So does one Renovate itself switched automerge off on
+            # (automerge_spent: it recreated a branch it had automerged), which
+            # it would never merge: waiting for it was a stall of the hour.
+            # One with automerge on that's still open past
             # renovateMergeAfter is a stall, which that run is kicked for
             # first (waits.py). Not one nothing may merge (mergeable): one
             # whose change has landed already is Renovate's to close.

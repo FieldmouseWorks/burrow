@@ -55,6 +55,17 @@ def automerges(pr):
     return bool(AUTOMERGE_RE.search(pr.get("body") or ""))
 
 
+SPENT_RE = re.compile(r"\*\*Automerge\*\*: Disabled because a matching PR was automerged previously")
+
+
+def automerge_spent(pr):
+    """Renovate switched automerge off on this PR itself ("🚦 **Automerge**:
+    Disabled because a matching PR was automerged previously."): it recreated
+    a branch whose earlier PR it had automerged, which it never merges again.
+    Not "Disabled by config", which is the owner's choice."""
+    return bool(SPENT_RE.search(pr.get("body") or ""))
+
+
 def dep_kind(pr):
     """None, 'minor' or 'major' for a dependency bot's PR."""
     if not DEP_RE.match(pr["headRefName"]):
