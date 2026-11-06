@@ -4,6 +4,7 @@
 use std::env;
 use std::process::ExitCode;
 
+use burrow_github::Gh;
 use burrow_house::check::{self, Event};
 use burrow_house::github::Real;
 
@@ -14,9 +15,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let ran = event().and_then(|event| {
-        let gh = Real {
-            repo: event.repo.clone(),
-        };
+        let gh = Real::new(event.repo.clone(), Gh::default());
         check::run(&event, &gh, &mut std::io::stdout().lock())
     });
     match ran {

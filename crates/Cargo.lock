@@ -104,6 +104,7 @@ name = "burrow-dispatch"
 version = "0.0.0"
 dependencies = [
  "burrow-events",
+ "burrow-github",
  "burrow-watchdog",
  "jiff",
  "serde",
@@ -147,6 +148,7 @@ name = "burrow-github"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -196,6 +198,8 @@ dependencies = [
 name = "burrow-house"
 version = "0.0.0"
 dependencies = [
+ "base64",
+ "burrow-github",
  "regex",
  "serde_json",
  "tempfile",
