@@ -48,7 +48,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
+            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -145,7 +145,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     failed on the head merged alone onto the default branch, which is the
     head's to fix. Only the App's counts, as with ours. A cancelled check run
     goes by what its workflow did after it (after_cancel), and with nothing
-    after it is pending, never red: a stopped run found nothing. A workflow's
+    after it is pending, since a stopped run found nothing, unless it ran out
+    of time (timed_out), which is red. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -179,11 +180,17 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             name = c["name"]
             if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
+            elif cancelled(c) and timed_out(repo, c):
+                # GitHub stops a job that runs past its timeout-minutes as
+                # cancelled: the head's tests hang, or take too long, which
+                # is the head's to fix.
+                red.append(f"{name} (timed out)")
             elif cancelled(c):
                 # Nothing ran it through since: the run was stopped (a runner
-                # shut down under it, or someone stopped it), not failed, so
-                # there's nothing in the head for a fix job to fix. Pending
-                # until it's run again, and a stall once that's overdue.
+                # shut down under it, a newer run's concurrency, or someone
+                # stopped it), not failed, so there's nothing in the head for
+                # a fix job to fix. Pending until it's run again, and a stall
+                # once that's overdue.
                 pending.append(f"{name} (cancelled, to be run again)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
@@ -265,6 +272,27 @@ def judged(c):
 def cancelled(c):
     """Whether a check run finished by being cancelled."""
     return c.get("status") == "COMPLETED" and c.get("conclusion") == "CANCELLED"
+
+
+# What GitHub Actions says, in an annotation on the job's check run, of a
+# job it stopped at its timeout-minutes: "The job running on runner NAME has
+# exceeded the maximum execution time of N minutes." It ends the check run
+# as cancelled, as a runner shutting down, a newer run's concurrency or a
+# person's cancel does, and those say something else.
+TIMED_OUT = "has exceeded the maximum execution time"
+
+
+def timed_out(repo, c):
+    """Whether a cancelled check run was stopped for running past its
+    job's timeout, as its annotations say. Asked only of one nothing ran
+    through since (ci_state), so rarely. A check run with no id to ask
+    by (or no repo) wasn't. GitHub not answering fails the PR's step, to be
+    tried again, rather than guess either way."""
+    run = c.get("databaseId")
+    if not run or not repo:
+        return False
+    said = C.gh("api", f"repos/{repo}/check-runs/{run}/annotations", "--jq", "[.[].message]")
+    return any(TIMED_OUT in (m or "") for m in (said if isinstance(said, list) else []))
 
 
 def after_cancel(c, contexts, stale):

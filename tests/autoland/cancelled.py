@@ -7,7 +7,7 @@ it or someone cancelled it by hand: never red, since a stopped run found
 nothing in the head, so no fix job is sent for it."""
 
 from docs import at, check, docs, whole
-from harness import JOBS, C, clean
+from harness import ANNOTATIONS, JOBS, C, clean
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
@@ -74,6 +74,30 @@ assert state(old, renamed(going("s2"), RETARGET, "twin"))[0] == "pending"
 assert state(renamed(whole(suite="s1", conclusion=CANCEL), RETARGET, "twin"), going("s2"))[0] == "pending"
 assert state(old, renamed([check(CHECK, "SKIPPED", suite="s2")], RETARGET, "twin")) == stopped(CHECK)
 assert state(old, renamed(whole(suite="s2", conclusion=CANCEL), RETARGET, "twin"))[0] != "green"
+
+# One GitHub stopped at its job's timeout-minutes, as its annotation says, is
+# the head's: red, and a fix job's. A runner shut down under it, or a
+# person's cancel, says something else, and is pending. GitHub not saying
+# fails the step, to be tried again: neither way is guessed.
+timeout = [{**c, "databaseId": 41} if c["name"] == CHECK else c for c in old]
+ANNOTATIONS[41] = ["The job running on runner remi-3 has exceeded the maximum execution time of 90 minutes."]
+assert state(timeout) == ("red", [f"{CHECK} (timed out)"])
+status, landed = at(clean(checks=timeout))
+assert not landed and "CI is red: check / check (timed out)" in status, status
+# A newer run that ran through still clears it, unasked.
+ANNOTATIONS[41] = C.Unavailable("gh api check-runs: HTTP 502")
+assert state(timeout, whole(suite="s2")) == ("green", [])
+try:
+    state(timeout)
+except C.Unavailable:
+    pass
+else:
+    raise AssertionError("annotations GitHub didn't give were guessed at")
+ANNOTATIONS[41] = ["The runner has received a shutdown signal. This can happen when the runner service is stopped."]
+assert state(timeout) == stopped(CHECK)
+ANNOTATIONS[41] = ["The run was canceled by @sam."]
+assert state(timeout) == stopped(CHECK)
+ANNOTATIONS.clear()
 
 # Nothing stands in for a newer run that ran through. Alone, as when cancelled
 # by hand or its runner shut down under it; two cancelled runs, which mustn't

@@ -326,6 +326,7 @@ def acting():
 FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
+ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless set, or what GitHub raises
 
 
 def gh_stub(*a, **k):
@@ -344,6 +345,11 @@ def gh_stub(*a, **k):
             if k.get("check", True):
                 raise got
             return None
+        return got
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/check-runs/") and a[1].endswith("/annotations"):
+        got = ANNOTATIONS.get(int(a[1].split("/")[-2]), [])
+        if isinstance(got, Exception):
+            raise got
         return got
     if a[:2] == ("pr", "view") and "commits" in a:
         got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
