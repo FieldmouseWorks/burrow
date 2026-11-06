@@ -95,6 +95,13 @@ def classed(repo, pr):
     return CLASSES[repo, n, head]
 
 
+def raised(repo, pr):
+    """The raise labels Conary holds for the PR at its head (`cn class`'s
+    raised): `r2` and `review`, its author's ask, which taking the label
+    off doesn't undo."""
+    return classed(repo, pr).get("raised", [])
+
+
 def gate(repo, pr):
     """What makes the PR R2 at its head: the path that does, or why its
     paths couldn't all be read. None below R2."""
@@ -156,8 +163,8 @@ def join(repo, pr):
     if DRY:
         log(f"  would: put {repo}#{n} in its train at {head[:7]}")
     else:
-        raised = [a for label in classed(repo, pr).get("raised", []) for a in ("--raised", label)]
-        got = cn("train", "join", repo, str(n), "--head", head, *raised,
+        settled = [a for label in raised(repo, pr) for a in ("--raised", label)]
+        got = cn("train", "join", repo, str(n), "--head", head, *settled,
                  *(["--negative", negative] if negative else []))
         if got.get("unproven"):
             return "unproven", got["unproven"].replace(head, head[:7])

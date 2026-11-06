@@ -404,4 +404,5 @@ seen(**{"class": RAISED, "join": {"pr": 5, "joined": False, "held": WORDS}})
 status, _ = run(clean(comments=LAND), 700)
 assert "state=pending" in status and f"Settled, but held out of the train: {WORDS}"[:140] in status, status
 del S.CFG["repos"]["sam/r"]
+cn()
 print("train raises: ok")
