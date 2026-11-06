@@ -1,4 +1,4 @@
-// renovate-follow RENOVATE CONFIG: what Renovate does under CONFIG for a
+// renovate-follow CLOCK RENOVATE CONFIG: what Renovate does under CONFIG for a
 // project that follows a homelab repo, its trusted owner's (sam/homelab)
 // or someone else's (kim/homelab): its workflows and action pinned to
 // homelab's main (one not pinned to a commit yet), and its flake input
@@ -14,12 +14,14 @@
 // where it is): how the flake pins homelab, the head's age, the branch,
 // what processing does with it new (pending, or creates it) and open
 // (pending, or the stability check it sets), its title, the labels its
-// PR gets, and each update in it.
+// PR gets, and each update in it. On CLOCK's night, in the policy's
+// window, and then at noon, outside it.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const [renovate, file] = process.argv.slice(2);
+const [clock, renovate, file] = process.argv.slice(2);
+const { at } = await import(clock);
 const dist = `${renovate}/lib/node_modules/renovate/dist`;
 const { getConfig } = await import(`${dist}/config/defaults.js`);
 const { mergeChildConfig } = await import(`${dist}/config/utils.js`);
@@ -140,19 +142,25 @@ const outcome = async (branch, open) => {
   } catch {
     // Past the point this looks at.
   }
-  if (result === "pending") return "pending";
+  if (["pending", "not-scheduled", "update-not-scheduled"].includes(result)) return result;
   if (!open) return creates ? "creates" : `${result}`;
   return `stability ${statuses["renovate/stability-days"] ?? "none"}`;
 };
 // Someone else's repo soaks three days; the trusted owner's batches half
-// an hour.
+// an hour. At noon, out of the window, neither branch is made, and an open
+// one is merged but the trusted owner's isn't moved.
+const NIGHT = "2026-11-06T01:30:00Z";
+const NOON = "2026-11-06T12:00:00Z";
 const flakes = [
-  ["pinned", "sam", "https://github.com/sam/homelab", true, [10, 40]],
-  ["pinned .git", "sam", "https://GitHub.com/sam/homelab.git", true, [10, 40]],
-  ["unpinned", "sam", "https://github.com/sam/homelab", false, [10, 40]],
-  ["someone else's, pinned", "kim", "https://github.com/kim/homelab", true, [40, 4400]],
+  ["pinned", "sam", "https://github.com/sam/homelab", true, [10, 40], NIGHT],
+  ["pinned .git", "sam", "https://GitHub.com/sam/homelab.git", true, [10, 40], NIGHT],
+  ["unpinned", "sam", "https://github.com/sam/homelab", false, [10, 40], NIGHT],
+  ["someone else's, pinned", "kim", "https://github.com/kim/homelab", true, [40, 4400], NIGHT],
+  ["pinned at noon", "sam", "https://github.com/sam/homelab", true, [40], NOON],
+  ["someone else's, pinned at noon", "kim", "https://github.com/kim/homelab", true, [4400], NOON],
 ];
-for (const [label, owner, repo, pinned, ages] of flakes) {
+for (const [label, owner, repo, pinned, ages, when] of flakes) {
+  at(when);
   const files = { ".github/workflows/flake.yml": workflow(owner), ...flake(repo, pinned) };
   for (const [name, text] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
@@ -194,6 +202,7 @@ for (const [label, owner, repo, pinned, ages] of flakes) {
     fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
     fs.writeFileSync(path.join(dir, name), text);
   }
+  at(NIGHT);
   age = 40;
   const packageFiles = {};
   for (const [manager, names] of [["github-actions", [".github/workflows/flake.yml", ".github/workflows/other.yml"]], ["nix", ["flake.nix"]]]) {

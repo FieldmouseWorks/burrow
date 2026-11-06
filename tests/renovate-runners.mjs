@@ -1,4 +1,4 @@
-// renovate-runners RENOVATE CONFIG: what Renovate does under CONFIG with a
+// renovate-runners CLOCK RENOVATE CONFIG: what Renovate does under CONFIG with a
 // workflow whose job runs on an older GitHub-hosted runner (`runs-on:
 // ubuntu-22.04`). Renovate's own code extracts it, looks it up in its
 // github-runners datasource (a list Renovate ships, with no release dates)
@@ -6,12 +6,14 @@
 // as a branch it would create, and as one whose PR is already open on that
 // update. One line per branch: the branch, what processing does with it new
 // (pending, or creates it) and open (pending, or the stability check it
-// sets), its title, and each update in it.
+// sets), its title, and each update in it. On CLOCK's night, in the
+// policy's window.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const [renovate, file] = process.argv.slice(2);
+const [clock, renovate, file] = process.argv.slice(2);
+await import(clock);
 const dist = `${renovate}/lib/node_modules/renovate/dist`;
 const { getConfig } = await import(`${dist}/config/defaults.js`);
 const { mergeChildConfig } = await import(`${dist}/config/utils.js`);

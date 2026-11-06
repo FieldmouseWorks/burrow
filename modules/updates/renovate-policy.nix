@@ -2,6 +2,14 @@
 # renovate.json can add to it), before ../updates.nix puts lock-age in
 # (its renovateSettings).
 { lib, rcfg, githubRepo, batchLabel }:
+let
+  # Every update but a security fix comes down in one window a night, so a
+  # repo's updates arrive together and its gate runs for them once, before
+  # the night's heavy runs (LoK-web's full tier, 03:15 Pacific) want the
+  # machine, not one gate a dependency all day. In each repo's own
+  # timezone (rcfg.timezone, Pacific on remi).
+  window = [ "before 3am" ];
+in
 lib.recursiveUpdate ({
   platform = "github";
   autodiscover = true;
@@ -23,18 +31,25 @@ lib.recursiveUpdate ({
   # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
   # the subject the steward squashes onto main, and the house check fails a PR
   # whose title isn't. Left to itself Renovate guesses from each repo's
-  # history, and config:recommended's preset types it fix or chore in package
-  # rules that a run merges after this config's own, so no rule here can
-  # outrank them: the preset is ignored instead.
+  # history, and config:recommended's preset types it fix or chore (below).
   semanticCommits = "enabled";
   semanticCommitType = "deps";
   semanticCommitScope = null;
-  ignorePresets = [ ":semanticPrefixFixDepsChoreOthers" ];
+  # config:recommended's presets that would undo this policy: their package
+  # rules are merged after this config's own on every run, so no rule here
+  # can outrank them. One types a commit fix or chore; the other two group
+  # updates by monorepo and by Renovate's own list, each group a PR of its
+  # own beside the night's one (the grouping below).
+  ignorePresets = [ ":semanticPrefixFixDepsChoreOthers" "group:monorepos" "group:recommended" ];
   prConcurrentLimit = 20;
 
   # Three days before a release counts: hijacked npm and crates releases are
   # usually caught and pulled within that. Security fixes don't wait.
   minimumReleaseAge = "3 days";
+  # A PR already open still moves and merges outside it (updateNotScheduled):
+  # held to the window, one whose gate outlasted the window would wait a
+  # day to merge, since Renovate leaves such a branch before its automerge.
+  schedule = window;
   internalChecksFilter = "strict";
   osvVulnerabilityAlerts = true;
   vulnerabilityAlerts = {
@@ -45,11 +60,11 @@ lib.recursiveUpdate ({
     schedule = [ "at any time" ];
   };
 
-  # Transitive fixes arrive through a fresh lockfile, daily (but see the
-  # lock file rules below).
+  # Transitive fixes arrive through a fresh lockfile, nightly with the rest
+  # (but see the lock file rules below).
   lockFileMaintenance = {
     enabled = true;
-    schedule = [ "before 5am" ];
+    schedule = window;
     automerge = true;
   };
 
@@ -105,12 +120,25 @@ lib.recursiveUpdate ({
       automerge = false;
       labels = [ "major" ];
     }
-    # One PR per ecosystem per repo for everything that isn't major.
-    { matchCategories = [ "rust" ]; matchUpdateTypes = [ "minor" "patch" ]; groupName = "Rust crates"; }
-    { matchCategories = [ "js" ]; matchUpdateTypes = [ "minor" "patch" ]; groupName = "npm packages"; }
-    { matchCategories = [ "python" ]; matchUpdateTypes = [ "minor" "patch" ]; groupName = "Python packages"; }
-    { matchCategories = [ "ci" ]; matchUpdateTypes = [ "minor" "patch" "digest" "pin" ]; groupName = "CI actions"; }
-    { matchCategories = [ "nix" ]; groupName = "Nix inputs"; }
+    {
+      # A major moves with the other majors from the same source repo (a
+      # monorepo's packages, which release them together), so none of them
+      # is tried alone against the others' old version.
+      matchUpdateTypes = [ "major" ];
+      matchSourceUrls = [ "/^https?:\\/\\//" ];
+      groupName = "{{{sourceRepo}}}";
+      groupSlug = "{{{sourceRepoSlug}}}";
+    }
+    {
+      # One PR a night per repo for everything that isn't major, every
+      # ecosystem's together, so it runs the gate once. Majors go apart, a
+      # source repo's together (above), since the owner merges them; a
+      # trusted owner's pins have a PR of their own (below), which the
+      # steward lands; and Renovate can't put a lock file refresh in a
+      # group.
+      matchUpdateTypes = [ "minor" "patch" "digest" "pin" "pinDigest" ];
+      groupName = "dependencies";
+    }
     {
       # One lock file refresh per manager, so one that can't merge (below)
       # holds up no other.
@@ -188,22 +216,26 @@ lib.recursiveUpdate ({
     ({
       # Everything pinned to a branch of one of their repos (its workflows,
       # its actions, the flake input) moves in one PR, once that branch has
-      # been quiet for half an hour. It's batching, not a soak: a burst of
-      # merges upstream comes down as one PR, not one a merge, each running
-      # the project's whole gate. A branch that goes on moving holds it
-      # only until it stops for half an hour, and Renovate's next run on
-      # the project (its own events, or burrow-events' hourly catch-up)
-      # opens it. A PR already open keeps its commit meanwhile, and
-      # Renovate doesn't merge it either: a branch pin has one release, the
-      # branch head, and while that's too new internalChecksFilter's strict
-      # leaves the branch before its automerge step. On a branch merged to
-      # all day it would never land, so the steward lands it once it's green
-      # and settled, by the label it has (burrow.autoland.labels.batch).
+      # been quiet for half an hour, in the night's window. It's batching,
+      # not a soak: a day of merges upstream comes down as one PR, not one
+      # a merge, each running the project's whole gate. A branch that goes
+      # on moving holds it only until it stops for half an hour, and
+      # Renovate's next run on the project in the window (its own events,
+      # or burrow-events' hourly catch-up) opens it. Renovate doesn't merge
+      # it: a branch pin has one release, the branch head, and while that's
+      # too new internalChecksFilter's strict leaves the branch before its
+      # automerge step. On a branch merged to all day it would never land,
+      # so the steward lands it once it's green and settled, by the label it
+      # has (burrow.autoland.labels.batch). Since Renovate doesn't merge it,
+      # an open one isn't moved out of the window either: the day's merges
+      # upstream wait for the next night's PR, rather than restarting this
+      # one's gate after each half hour of quiet.
       matchDatasources = [ "github-digest" ];
       matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
       minimumReleaseAge = "30 minutes";
       groupName = "{{{sourceRepo}}}";
       groupSlug = "{{{sourceRepoSlug}}}";
+      updateNotScheduled = false;
     } // lib.optionalAttrs (batchLabel != null) {
       addLabels = [ batchLabel ];
     })
