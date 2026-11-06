@@ -21,6 +21,26 @@ let
   inherit (config.burrow.github) machineApp;
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
+  # What the steward's reviewers aren't shown (their skipPaths, the
+  # machine's and each repo's) is the policy's `hidden`, which Conary
+  # matches as their snapshot hides a path and never takes for
+  # documentation: a change to it gets a review round, whose snapshot names
+  # it for the judge. A Conary without `hidden` refuses the file, so the
+  # docs shortcut never runs on a matcher that would miss one. A repo's are
+  # added to its policy entry by name, as GitHub has it in any case, so a
+  # repo is never in the file twice.
+  skips = let
+    on = autoland.enable or false;
+    own = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
+    theirs = lib.filterAttrs (_: s: s != [ ]) (lib.mapAttrs (_: r: r.skipPaths or [ ]) (if on then autoland.repos else { }));
+    add = repos: name: paths:
+      let hit = lib.findFirst (k: lib.toLower k == lib.toLower name) null (lib.attrNames repos); in
+      if hit == null then repos // { ${name} = { hidden = paths; }; }
+      else repos // { ${hit} = repos.${hit} // { hidden = paths; }; };
+  in {
+    machine = if on then autoland.reviewers.skipPaths else [ ];
+    repos = lib.foldlAttrs add own theirs;
+  };
   # The machine's runners started fresh for one job each, if it has them.
   fresh = lib.attrByPath [ "burrow" "dispatch" ] { } config;
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
@@ -222,7 +242,8 @@ in
         changes are R2, which are documentation only, and which repos go
         live when they land, from the paths a change touches, renames and
         copies included. `cn class` reads it (CONARY_POLICY), and the
-        steward asks it for every PR it settles. The machine's R2 paths
+        steward asks it for every PR it settles. The steward's reviewers'
+        skipPaths are never documentation: they go to Conary as `hidden`. The machine's R2 paths
         default to CODEOWNERS (who signs off on what) and secrets. The rest
         of `.github/` isn't on it: the reviewers read workflow changes like
         any other, and the steward merges them once settled. Nor are
@@ -286,11 +307,22 @@ in
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
-        # null where unset, which Conary takes as the machine's.
-        CONARY_POLICY = "${pkgs.writeText "conary-policy.json" (builtins.toJSON {
-          inherit (cfg.policy) r2 docs notDocs live;
-          repos = lib.mapAttrs (_: r: lib.filterAttrs (_: v: v != null) r) cfg.policy.repos;
-        })}";
+        # null where unset, which Conary takes as the machine's. Checked by
+        # the machine's own cn as it's built (`cn policy`): a cn that doesn't
+        # know a key of it (an older Conary than this burrow needs) fails the
+        # build, rather than every class the steward asks once it's live,
+        # which would stop it landing the bump that fixes it.
+        CONARY_POLICY = "${pkgs.runCommand "conary-policy.json" {
+          policy = builtins.toJSON {
+            inherit (cfg.policy) r2 docs live notDocs;
+            hidden = skips.machine;
+            repos = skips.repos;
+          };
+          passAsFile = [ "policy" ];
+        } ''
+          ${cfg.package}/bin/cn policy "$policyPath" >/dev/null
+          cp "$policyPath" "$out"
+        ''}";
       } // lib.optionalAttrs ((fresh.enable or false) && fresh.fresh.enable) {
         # A self-hosted runner's CI counts only from one started fresh for
         # its job, and only burrow.dispatch.fresh names a runner so

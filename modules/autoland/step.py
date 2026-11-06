@@ -500,7 +500,7 @@ def handle(repo, pr, repo_info, digest, held=None):
             # GitHub says of merging it alone is no wait of its own: GitHub
             # works that out afresh each time the branch moves, which the
             # train's every landing does.
-            T.ride(repo, pr, st, bool(gate()), desc, settle, strike, our_status(pr, T.CONTEXT)[1])
+            T.ride(repo, pr, st, desc, settle, strike, our_status(pr, T.CONTEXT)[1])
             return
         if merging in ("wait", "refused"):
             settle("pending", "Settled; GitHub is still working out whether it can be merged" if merging == "wait"
@@ -941,8 +941,8 @@ def handle(repo, pr, repo_info, digest, held=None):
         return
 
     # The reviewers (review_step.py).
-    live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service = review_step.look(
-        repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared)
+    live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = review_step.look(
+        repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, lambda: T.review(repo, pr))
 
     what = []
     if open_threads:
@@ -993,7 +993,7 @@ def handle(repo, pr, repo_info, digest, held=None):
                else f"it went past the review-round limit ({rounds} rounds with findings)",
                PAST_LIMIT if capped else REVIEWED)
     else:
-        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing in this commit's change, every thread is resolved, CI is green{' (docs only)' * docs}")
+        land_now(("Documentation only, so no review round" if unreviewed else f"{' and '.join(V.NAMES[r] for r in live)} found nothing in this commit's change") + f", every thread is resolved, CI is green{' (docs only)' * docs}")
 
     open_a_day(our_status(pr)[1] or "unsettled")
     save(key, st)

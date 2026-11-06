@@ -508,7 +508,7 @@ assert merged() and "state=success" in status, status
 # asked once a decision turns on it. R2 is judged, naming what made it so;
 # a class cn couldn't give lands nothing.
 fresh_pr_state()
-cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False}})
+cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False, "review": True}})
 status, _ = run(clean(files=["a.py"]), 700)
 assert len(JOBS) == 1 and "150 files or more (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
 assert cn_classed() == [("sam/r", 5, head)], cn_classed()
@@ -523,10 +523,58 @@ for rc, raised in ((1, RuntimeError), (75, C.Unavailable)):
         raise AssertionError(f"cn class exiting {rc} went unnoticed")
     assert not merged() and JOBS == [], (WROTE, JOBS)
 cn()
-# Unsettled, nothing turns on its class yet: cn isn't asked.
+# Documentation alone that isn't R2 (the example's policy: docs/ and
+# READMEs) needs green CI and no review round: no reviewer is asked or
+# waited for, and it lands as soon as CI is green, its class asked once.
 fresh_pr_state()
-run(mkpr(), 700)
-assert cn_classed() == [], cn_classed()
+status, _ = run(mkpr(files=["docs/a.md", "README.md"]), 5)
+assert merged() and queued() == [] and "Documentation only, so no review round" in status, (status, queued())
+assert cn_classed() == [("sam/r", 5, head)], cn_classed()
+# Code beside it, a rule for agents, or an R2 path among the docs: the
+# reviewers are asked, as for any change.
+# Nor is one the reviewers aren't shown (their skipPaths): it's reviewed,
+# and its snapshot names it for the judge.
+for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"], ["docs/.env"], ["docs/private/a/b.md"]):
+    fresh_pr_state()
+    run(mkpr(files=files), 0)
+    status, _ = run(mkpr(files=files), 600)
+    assert not merged() and queued() == ["codex", "rival"], (files, status, queued())
+# Findings its reviewers come back with hold it all the same, though it
+# needs no review round (the policy changed since they were asked, say):
+# on this head, posted this pass, or on an earlier one no look will cover.
+reviewed = {"class": {"class": "R0", "because": None, "docs": False, "review": True}}
+for sha in (head, newer):
+    fresh_pr_state()
+    cn(**reviewed)
+    run(mkpr(files=["docs/a.md"]), 0)
+    run(mkpr(files=["docs/a.md"]), 600)
+    assert queued() == ["codex", "rival"], queued()
+    cn()
+    worker(rival={"result": "review", "answer": {"findings": [{"path": "docs/a.md"}]}})
+    status, _ = run(mkpr(files=["docs/a.md"], sha=sha), 700)
+    assert ("rival", head, 1) in POSTED and not merged(), (sha, POSTED, status)
+# Findings that couldn't be posted are owed a look on this head, which it
+# waits for.
+fresh_pr_state()
+C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
+run(mkpr(files=["docs/a.md"]), 0)
+status, _ = run(mkpr(files=["docs/a.md"]), 600)
+assert not merged() and queued() == ["rival"] and "Rival is reviewing" in status, (status, queued())
+# Out of service, it can't look: they hold it all the same, on an earlier
+# head too, until it's back.
+fresh_pr_state()
+C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
+C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(files=["docs/a.md"]), 600)
+assert not merged() and queued() == [] and "Rival's findings on 8888888 couldn't be posted" in status, status
+os.remove(f"{tmp}/state/{V.OUT}")
+# What's open on it still holds it, for a Claude job to fix: a thread, or
+# red CI.
+red = [{**CI_GREEN[0], "conclusion": "FAILURE"}]
+for kw, why in (({"threads": [False]}, "1 open review thread"), ({"checks": red}, "CI is red")):
+    fresh_pr_state()
+    status, _ = run(mkpr(files=["docs/a.md"], **kw), 5)
+    assert not merged() and queued() == [] and why in status and "Claude job" in status, (kw, status)
 
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.

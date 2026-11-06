@@ -24,13 +24,15 @@ class Looked(NamedTuple):
     waiting: list  # what it still waits on from the reviewers, in words
     stuck: list  # the reviewers whose look keeps failing, in words
     out_of_service: bool  # what it waits on is a reviewer out of service
+    unreviewed: bool  # it needs no review round: documentation alone, not R2
 
 
-def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
+def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, needed):
     """The reviewers' part of the PR's step this pass. key, st and lost_on
     are its state file's name, its state and the findings its reviewers
     couldn't post; digest and line its listing; age how long its head has
-    been seen; after, strike and cleared its step's own (step.py)."""
+    been seen; after, strike and cleared its step's own (step.py); needed,
+    whether its head needs a review round at all (train.review)."""
     rc = repo_cfg(repo)
     head = pr["headRefOid"]
     tag = f"{repo}#{pr['number']}"
@@ -148,7 +150,8 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         this head, that look decides and this one is dropped: posted, it
         would raise again what was fixed meanwhile, and cost a round. One
         the reviewer won't follow with a look at this head (it's out of
-        service, or the PR is past the round limit: `over`) is its last word
+        service, the PR is past the round limit, or this head needs no
+        review round: `over`) is its last word
         on the PR, so it's posted on the commit it read: findings there
         count as a round, and hold this pass back from landing, since the
         threads it read are from before them. "Nothing found" there says
@@ -247,7 +250,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         consume(r)
     over = limit()[2]  # with this head's answers in: no look at it follows
     for r in names:
-        overtaken(r, over)
+        overtaken(r, over or (said[r][0] == "none" and not needed()))
     # Put out by an answer this pass read: its others.
     under_way += reading([r for r in names if V.out(r) and r not in was_out])
     live = [r for r in live if not V.out(r)]
@@ -256,6 +259,13 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
             # Back in service then: its look at this head is asked for.
             C.wake(repo, load(V.OUT, {})[r]["until"] + 1)  # ends: once; listed while it's out
     rounds, clean, capped = limit()
+    # Documentation alone that isn't R2 needs green CI and no review round
+    # (Conary's class, asked only when the reviewers haven't settled it):
+    # none is asked or waited for, nor is it past any limit. What they
+    # found already still holds it, as threads and late findings.
+    unreviewed = not clean and not needed()
+    if unreviewed:
+        clean, capped = True, False
 
     def owed(r):
         """Past the limit, what the reviewer still owes the PR, which the
@@ -267,13 +277,16 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         base = pr["baseRefName"]
         return bool(V.in_queue(key, r, base) or V.answered(key, r) or base in lost_on.get(r, {}))
     # Findings on this head this pass posted are threads it never read: one
-    # out now isn't waited for, and past the limit no look follows to cover
-    # them, so they hold the pass back.
-    late += [head[:7] for r in found if r not in live or capped]
+    # out now isn't waited for, and past the limit or with no review round
+    # no look follows to cover them, so they hold the pass back.
+    late += [head[:7] for r in found if r not in live or capped or unreviewed]
 
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN
-    looking = [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
+    # One needing no review round still gets the look that posts findings
+    # that couldn't be (lost_on): they're owed it whatever its class.
+    looking = ([r for r in live if pr["baseRefName"] in lost_on.get(r, {})] if unreviewed
+               else [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"])
     if not quiet and looking:
         after(st["seen"], rc["settleDelay"])  # ends: the reviewers are asked then, once a head
     waiting = [f"Posting {x}" for x in unposted]
@@ -283,14 +296,17 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
     for r in names:
         if r in live:
             continue
-        if lost_on.get(r, {}).get(pr["baseRefName"]) == head:
-            waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
+        lost = lost_on.get(r, {}).get(pr["baseRefName"])
+        # With no review round, no look covers them but the one they're
+        # owed: on an earlier head too, they hold it until that one's back.
+        if lost == head or (lost and unreviewed):
+            waiting.append(f"{V.NAMES[r]}'s findings on {lost[:7]} couldn't be posted, and it's out of service")
             out_of_service = True
         elif capped and owed(r) and r not in under_way:
             waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
             out_of_service = True
     waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
-    if not live and not capped:
+    if not live and not capped and not unreviewed:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
@@ -302,10 +318,10 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
                        else f"Waiting for {V.NAMES[r]}'s review" + ("" if capped else " of this commit"))
     # A look that can't happen, a first one or a second: the owner hears either way.
     stuck = []
-    for r in live:
+    for r in [] if unreviewed else live:
         if st["rv"].get(r, {}).get("fails", 0) >= 3:
             x = f"failed {st['rv'][r]['fails']} times on {head[:7]}"
             stuck.append(f"{V.NAMES[r]} {x}")
             digest.append((f"{V.NAMES[r]} couldn't review it", line, x + " (journalctl -u autoland-review)"))
 
-    return Looked(live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service)
+    return Looked(live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed)
