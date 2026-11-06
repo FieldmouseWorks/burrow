@@ -189,6 +189,17 @@ in
       '';
     };
 
+    signerWorkflow = mkOption {
+      type = types.strMatching "[^/]+/[^/]+/\\.github/workflows/[^/@]+";
+      default = "FieldmouseWorks/burrow/.github/workflows/flake-check.yml";
+      description = ''
+        The one workflow whose jobs' attestations the train counts, at a
+        commit on its repo's default branch, as OWNER/NAME/PATH (Conary's
+        docs/ci-attestation.md, rule 2): burrow's shared CI, which every
+        project's gate calls.
+      '';
+    };
+
     owners = mkOption {
       type = types.listOf types.str;
       default = if autoland.enable or false then autoland.owners else [ ];
@@ -307,6 +318,8 @@ in
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
+        # Whose attestations count: a train's gate and a PR's negative.
+        CONARY_SIGNER_WORKFLOW = cfg.signerWorkflow;
         # null where unset, which Conary takes as the machine's. Checked by
         # the machine's own cn as it's built (`cn policy`): a cn that doesn't
         # know a key of it (an older Conary than this burrow needs) fails the
@@ -334,8 +347,9 @@ in
       description = ''
         What every writer of the ledger tells `cn` about it: its passes, and
         the steward's merge train (burrow.autoland's `train`), each with its
-        own CONARY_TOKEN_COMMAND. On a machine with runners started fresh
-        for one job each (burrow.dispatch.fresh), the start of their names.
+        own CONARY_TOKEN_COMMAND, and the workflow whose attestations count.
+        On a machine with runners started fresh for one job each
+        (burrow.dispatch.fresh), the start of their names.
       '';
     };
 
