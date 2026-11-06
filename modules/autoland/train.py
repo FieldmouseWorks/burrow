@@ -81,19 +81,25 @@ def cn(*args):
 
 def classed(repo, pr):
     """The PR's class at its head, as Conary's class policy says (`cn
-    class`, which records it): its class, what made it R2 (`because`),
+    class`, which records it): its class, what made it R2 (`because`), and
     whether it needs a review round (`review`: anything but documentation,
-    and documentation that's R2 or labelled `review`), and the labels that
-    raised it (`raised`, which join names). Asked once a pass, and only when a
+    and documentation that's R2). Asked once a pass, and only when a
     decision turns on it. A dry run asks nothing, since cn would record the
     class, and takes every PR for R2."""
     n, head = pr["number"], pr["headRefOid"]
     if (repo, n, head) not in CLASSES:
         if DRY:
-            CLASSES[repo, n, head] = {"class": "R2", "because": "a path a dry run doesn't class", "review": True, "raised": []}
+            CLASSES[repo, n, head] = {"class": "R2", "because": "a path a dry run doesn't class", "review": True}
         else:
             CLASSES[repo, n, head] = cn("class", repo, str(n), "--head", head)
     return CLASSES[repo, n, head]
+
+
+def raised(repo, pr):
+    """The raise labels Conary holds for the PR at its head (`cn class`'s
+    raised): `r2` and `review`, its author's ask, which taking the label
+    off doesn't undo."""
+    return classed(repo, pr).get("raised", [])
 
 
 def gate(repo, pr):
@@ -143,24 +149,25 @@ def seat(repo, n):
     return f"{doing} in candidate {short(flight['candidate'])}" + (f" with {with_}" if with_ else "")
 
 
-def join(repo, pr):
+def join(repo, pr, reviewed):
     """Put the PR in the train at its head. None once it's in, else why the
-    train holds it out (HELD's, or cn's own words) and what cn said of it,
-    if anything. cn classes it by the machine's policy, as `cn class` does:
-    an R2 one rides in a candidate of its own, which lands only while the
-    default branch is still its base. It joins naming the raise labels
-    (`r2`, `review`) of the class this pass read of it (classed, asked once
-    a pass, which is what its settling turned on), and cn takes it only when they're every
-    raise its change has with its labels now: one added since holds it out
-    until a pass settles it with it. In a repo with a trainNegative, only
-    once its negative on that head counts."""
+    train holds it out (HELD's) and what cn said of it, if anything. cn
+    classes it by the machine's policy, as `cn class` does: an R2 one rides
+    in a candidate of its own, which lands only while the default branch is
+    still its base. It names the raise labels this pass settled it with
+    (`cn class`'s raised): one cn finds that this pass didn't settle it
+    with holds it out, for the next pass to settle it with. In a repo with
+    a trainNegative, only once its negative on that head counts. One that
+    had no review round (a dependency update's, whose review is its CI)
+    wasn't settled with a `review` raise, so it doesn't name one."""
     n, head = pr["number"], pr["headRefOid"]
     negative = repo_cfg(repo)["trainNegative"]
     if DRY:
         log(f"  would: put {repo}#{n} in its train at {head[:7]}")
     else:
-        raised = [a for label in classed(repo, pr)["raised"] for a in ("--raised", label)]
-        got = cn("train", "join", repo, str(n), "--head", head, *raised, *(["--negative", negative] if negative else []))
+        settled = [a for label in raised(repo, pr) if reviewed or label != "review" for a in ("--raised", label)]
+        got = cn("train", "join", repo, str(n), "--head", head, *settled,
+                 *(["--negative", negative] if negative else []))
         if got.get("unproven"):
             return "unproven", got["unproven"].replace(head, head[:7])
         if got.get("held"):
@@ -175,7 +182,7 @@ def join(repo, pr):
     return None
 
 
-def ride(repo, pr, st, desc, settle, strike, said):
+def ride(repo, pr, st, desc, settle, strike, said, reviewed):
     """A PR settled against the default branch: into the train at this head,
     which lands it, rather than merged by the steward (alone if it's R2,
     which cn says). Its status says where in the train it is, or why the train
@@ -183,7 +190,8 @@ def ride(repo, pr, st, desc, settle, strike, said):
     it is taken off, or it's tried again (strike). st is the PR's state, which
     remembers the head it joined at; settle and strike are its step's own
     (step.py); said is what GitHub said when it refused its merge, as the
-    train's status on the head has it."""
+    train's status on the head has it; reviewed, whether its reviewers had
+    a round on it (join)."""
     n, head = pr["number"], pr["headRefOid"]
     if C.queued(pr) and not C.unland(repo, pr):
         strike("status")
@@ -191,7 +199,7 @@ def ride(repo, pr, st, desc, settle, strike, said):
         return
     where = seat(repo, n) if st.get("joined") == head else None
     if where is None:
-        held = join(repo, pr)
+        held = join(repo, pr, reviewed)
         if held:
             held, why = held
             said = HELD.get(held, held).format(why or said or "GitHub refused its merge")

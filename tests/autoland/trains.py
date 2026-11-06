@@ -11,6 +11,7 @@ import contextlib
 import io
 import os
 
+import harness
 import train as T
 import waits
 from harness import (C, CI_GREEN, COMMITS, COMMITTERS, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_classed, cn_log, cn_runs, fresh_pr_state,
@@ -141,7 +142,7 @@ for after in (800, 900):  # the retry, then a rejoin: the ledger says it isn't i
 fresh_pr_state()
 seen()
 kept_join = T.join
-T.join = lambda repo, pr: touching(5, head, ["a.py"], ["review", "r2"]) or kept_join(repo, pr)
+T.join = lambda repo, pr, reviewed: touching(5, head, ["a.py"], ["review", "r2"]) or kept_join(repo, pr, reviewed)
 run(clean(labels=["review"]), 700)
 T.join = kept_join
 assert cn_runs() == [SHOW, JOIN + ["--raised", "review"]] and cn_classed() == [("sam/r", 5, head)], (cn_runs(), cn_classed())
@@ -425,3 +426,31 @@ os.environ["CREDENTIALS_DIRECTORY"] = cred
 ran = cn_log()[0]["token"]
 assert ran["rc"] == 1 and ran["out"] == "" and "no token for sam/r: " in ran["err"] and "the App's key" in ran["err"], ran
 print("train token: ok")
+
+# Labelled to raise it (`r2`, `review`): the raises this pass settled it
+# with, as `cn class` said them, go with its join, since cn holds out one a
+# label raises that the steward didn't settle it with. That hold says so
+# in words, and the next pass settles it again.
+LAND = [harness.said(judgment("land", n=5))]
+RAISED = {"class": "R2", "because": "labelled r2", "docs": False, "review": True, "raised": ["r2", "review"]}
+S.CFG["repos"]["sam/r"] = {"train": True}
+fresh_pr_state()
+seen(**{"class": RAISED})
+status, _ = run(clean(comments=LAND), 700)
+assert cn_runs() == [SHOW, JOIN + ["--raised", "r2", "--raised", "review"]], cn_runs()
+assert "In the train" in status, status
+WORDS = "a label raises its class that it wasn't settled with, until it's settled with it"
+fresh_pr_state()
+seen(**{"class": RAISED, "join": {"pr": 5, "joined": False, "held": WORDS}})
+status, _ = run(clean(comments=LAND), 700)
+assert "state=pending" in status and f"Settled, but held out of the train: {WORDS}"[:140] in status, status
+# A dependency update has no review round, its CI being its review, so it
+# names no `review` raise: cn holds it out for one, where naming it would
+# vouch for a round nobody ran. Its `r2` a judge settles, as any PR's.
+fresh_pr_state()
+seen(**{"class": RAISED})
+status, _ = run(mkpr(comments=LAND, branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5"), 700)
+assert cn_runs() == [SHOW, JOIN + ["--raised", "r2"]], cn_runs()
+del S.CFG["repos"]["sam/r"]
+cn()
+print("train raises: ok")
