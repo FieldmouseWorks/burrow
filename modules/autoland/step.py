@@ -928,10 +928,8 @@ def handle(repo, pr, repo_info, digest, held=None):
             # (updates/renovate-policy.nix), but only one whose commits were
             # read and are Renovate's alone (provenance): Renovate checks
             # that before it merges, so one that couldn't be read waits for
-            # it. So does one Renovate itself switched automerge off on
-            # (automerge_spent: it recreated a branch it had automerged), which
-            # it would never merge: waiting for it was a stall of the hour.
-            # One with automerge on that's still open past
+            # it. So does one whose automerge Renovate switched off itself
+            # (automerge_spent), which it never merges. One with it on, open past
             # renovateMergeAfter is a stall, which that run is kicked for
             # first (waits.py). Not one nothing may merge (mergeable): one
             # whose change has landed already is Renovate's to close.
