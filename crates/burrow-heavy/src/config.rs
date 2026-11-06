@@ -13,7 +13,8 @@ pub struct Config {
     /// Seconds a cancelled run gets to stop before what's left of it is
     /// killed.
     pub grace: u64,
-    /// Where the slots' lock files are, `slot1` to `slotN`.
+    /// Where the slots' lock files are, `slot1` to `slotN`, and `all`, the
+    /// turn of a run that takes every slot.
     pub dir: PathBuf,
     /// util-linux's setsid, which starts the command in a session of its own.
     pub setsid: PathBuf,
@@ -33,5 +34,11 @@ impl Config {
     /// Slot `i`'s lock file, from 1.
     pub fn slot(&self, i: u32) -> PathBuf {
         self.dir.join(format!("slot{i}"))
+    }
+
+    /// The turn an `--all` run holds while it waits for every slot and
+    /// runs; ordinary runs don't start while it's held.
+    pub fn all(&self) -> PathBuf {
+        self.dir.join("all")
     }
 }

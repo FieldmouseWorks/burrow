@@ -19,9 +19,9 @@ use crate::{Config, not_run, note};
 /// How often a cancelled run looks for what's left of it.
 const LOOK: Duration = Duration::from_millis(100);
 
-/// Runs `command` in slot `slot` and returns its exit status, once the
-/// whole of it has stopped.
-pub fn run(config: &Config, slot: u32, share: u64, command: &[OsString]) -> u8 {
+/// Runs `command` in slot `slot` (its number, or `all`) and returns its
+/// exit status, once the whole of it has stopped.
+pub fn run(config: &Config, slot: &str, share: u64, command: &[OsString]) -> u8 {
     // Listening before the start: a signal that comes in between is the
     // command's to answer as soon as it has a pid. SIGCHLD wakes the wait
     // when the command exits.
@@ -34,7 +34,7 @@ pub fn run(config: &Config, slot: u32, share: u64, command: &[OsString]) -> u8 {
     };
     let mut cmd = Command::new(&config.setsid);
     cmd.args(command)
-        .env("HEAVY_SLOT", slot.to_string())
+        .env("HEAVY_SLOT", slot)
         .env("HEAVY_JOBS", share.to_string());
     for var in ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS"] {
         if std::env::var_os(var).is_none_or(|v| v.is_empty()) {

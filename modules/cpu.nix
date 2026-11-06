@@ -96,7 +96,9 @@ in
       });
       # Read-only to everyone, so runners under ProtectSystem=strict lock them too.
       systemd.tmpfiles.rules = [ "d ${cfg.heavy.dir} 0755 root root -" ]
-        ++ map (i: "f ${cfg.heavy.dir}/slot${toString i} 0444 root root -") (lib.range 1 cfg.heavy.slots);
+        ++ map (i: "f ${cfg.heavy.dir}/slot${toString i} 0444 root root -") (lib.range 1 cfg.heavy.slots)
+        # The turn a `heavy --all` run holds while it waits for every slot.
+        ++ [ "f ${cfg.heavy.dir}/all 0444 root root -" ];
 
       burrow.claude.machineMd = lib.mkOrder 720 ''
         ## Heavy work: take a slot
@@ -106,12 +108,15 @@ in
 
             heavy -- COMMAND...               run it in one of ${toString cfg.heavy.slots} machine-wide slots
             heavy --wait 600 -- COMMAND...    give up (exit 75) after 10 minutes
+            heavy --all -- COMMAND...         take every slot: the machine to itself
             heavy status                      which slots are busy
 
         It waits for a free slot, then runs the command with HEAVY_JOBS (its
         share of the threads), CARGO_BUILD_JOBS and RUST_TEST_THREADS set:
         size your own parallelism (browser workers, `-j`) from HEAVY_JOBS.
-        Calls inside a slot don't take another.
+        Calls inside a slot don't take another. `--all` is for a run that
+        has a deadline and must not share the machine (a nightly gate), and
+        holds every other heavy run off until it ends, so keep it to those.
 
         Gates (${
           if cfg.gates.slices == [ ] then "none here yet" else lib.concatMapStringsSep ", " (s: "${s}.slice") cfg.gates.slices
