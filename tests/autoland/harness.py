@@ -113,7 +113,10 @@ def review_service():
 # `class` classes the files the PR at that head lists (TOUCHED, which mkpr
 # and run keep) by the policy's R2, docs, notDocs and hidden paths, as Conary
 # does (AGENTS.md, CLAUDE.md and .github/ are never docs; a hidden pattern
-# also hides a directory's files, the directory with a trailing slash).
+# also hides a directory's files, the directory with a trailing slash), and
+# raises it by the PR's labels there, with the raises CN says the ledger
+# kept from before ("kept"), as Conary does: `r2` makes it R2, `review` asks
+# for a review round, and `raised` names them, sorted.
 CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -132,7 +135,9 @@ if do.get("rc", {{}}).get(sub):
     print("cn: " + sub + " failed", file=sys.stderr)
     sys.exit(do["rc"][sub])
 if sub == "class" and "class" not in do:
-    paths = json.load(open({TOUCHED!r})).get(args[2] + "@" + args[4], [])
+    touched = json.load(open({TOUCHED!r})).get(args[2] + "@" + args[4], {{}})
+    paths = touched.get("files", [])
+    raised = sorted({{x.lower() for x in touched.get("labels", [])}} & {{"r2", "review"}} | set(do.get("kept", [])))
     policy = json.load(open(os.environ["CONARY_POLICY"]))
     rules = [policy, policy.get("repos", {{}}).get(repo, {{}})]
     pick = lambda key: [x for r in rules for x in r.get(key, [])]
@@ -142,7 +147,9 @@ if sub == "class" and "class" not in do:
     hidden = lambda p: any(re.search(x, h) for x in pick("hidden") for h in held(p))
     docs = bool(paths) and all(any(re.search(x, p) for x in pick("docs")) and not any(re.search(x, p) for x in never)
                                and not hidden(p) for p in paths)
-    do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": docs, "review": bool(because) or not docs}}
+    because = because or ("labelled r2" if "r2" in raised else None)
+    do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": docs,
+                   "review": bool(because) or not docs or "review" in raised, "raised": raised}}
 print(json.dumps(do[sub]))
 """)
 os.chmod(f"{tmp}/cn", 0o755)
@@ -175,10 +182,10 @@ def cn_classed():
     return [(a[1], int(a[2]), a[4]) for a in (json.loads(x)["args"] for x in open(CN_LOG)) if a[0] == "class"]
 
 
-def touching(number, sha, files):
-    """What `cn class` reads a PR at a head touches."""
+def touching(number, sha, files, labels=()):
+    """What `cn class` reads a PR at a head touches, and its labels."""
     touched = json.load(open(TOUCHED)) if os.path.exists(TOUCHED) else {}
-    touched[f"{number}@{sha}"] = list(files)
+    touched[f"{number}@{sha}"] = {"files": list(files), "labels": list(labels)}
     with open(TOUCHED, "w") as f:
         json.dump(touched, f)
 
@@ -466,7 +473,7 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
          branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), unlabels=(), cut=False):
-    touching(number, sha, files)
+    touching(number, sha, files, labels)
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
@@ -504,7 +511,7 @@ def run(pr, after, held=None):
     C.LIMITED.clear()
     POSTED.clear()
     digest = []
-    touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]])
+    touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]], [x["name"] for x in pr["labels"]["nodes"]])
     H.T.CLASSES.clear()
     with C.acting_for("sam/r"):
         H.handle("sam/r", pr, info, digest, held)
