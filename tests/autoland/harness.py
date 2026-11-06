@@ -326,6 +326,7 @@ def acting():
 FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
+ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless set, or what GitHub raises
 
 
 def gh_stub(*a, **k):
@@ -345,6 +346,13 @@ def gh_stub(*a, **k):
                 raise got
             return None
         return got
+    if a[:3] == ("api", "--paginate", "--slurp") and a[3].startswith("repos/sam/r/check-runs/") \
+            and a[3].endswith("/annotations?per_page=100"):
+        got = ANNOTATIONS.get(int(a[3].split("/")[-2]), [])
+        if isinstance(got, Exception):
+            raise got
+        msgs = [{"message": m} for m in got]
+        return [msgs[i:i + 100] for i in range(0, len(msgs), 100)] or [[]]  # --slurp: the pages
     if a[:2] == ("pr", "view") and "commits" in a:
         got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
         return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}
@@ -499,9 +507,10 @@ def clean(sha=head, comments=(), reviews=(), **kw):
 QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
 
 
-def run(pr, after, held=None):
+def run(pr, after, held=None, below=None):
     """One pass, `after` seconds after the head first showed up; held, a
-    red-branch fix the branch's watch holds, and why."""
+    red-branch fix the branch's watch holds, and why; below, the open PR
+    whose head branch is its base."""
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
@@ -514,7 +523,7 @@ def run(pr, after, held=None):
     touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]], [x["name"] for x in pr["labels"]["nodes"]])
     H.T.CLASSES.clear()
     with C.acting_for("sam/r"):
-        H.handle("sam/r", pr, info, digest, held)
+        H.handle("sam/r", pr, info, digest, held, below)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 

@@ -114,6 +114,9 @@ root only.
 
 1. PRs are opened ready for review. A draft is work in progress: the steward
    leaves it alone (a pending `review-settled`, nothing else) until it's ready.
+   It leaves a PR stacked on another open PR's branch alone too, until it's
+   retargeted (GitHub does that when the PR below merges): merged first, it
+   would fold into the PR below.
 2. The machine's reviewer (`burrow.autoland.reviewers`) reviews the head:
    Codex, through the codex CLI on the owner's ChatGPT plan. The steward
    takes a snapshot of the change with secrets paths left out; the agent
@@ -138,7 +141,11 @@ root only.
    leaves the PR's lines alone isn't looked at again, while CI still runs on it.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
-   branch is deleted. In a repo with its merge train on (`train`), it goes
+   branch is deleted. A check run cancelled with nothing run through since
+   (its runner shut down under it, say) leaves CI pending, not red: no fix
+   job is sent for a run that found nothing, and the stall watchdog takes it
+   if nobody runs it again. One GitHub stopped at its job's `timeout-minutes`
+   (its annotation says so) is red, the head's to fix. In a repo with its merge train on (`train`), it goes
    into the train instead, CI on the PR itself optional: Conary's `cn train`
    merges the PRs in the train onto the default branch together, has CI run
    on that, and once it's green posts `conary/train` on each PR's head and

@@ -48,7 +48,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
+            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -144,7 +144,9 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     status is its word on the PR, not a check of it, except its failure: CI
     failed on the head merged alone onto the default branch, which is the
     head's to fix. Only the App's counts, as with ours. A cancelled check run
-    goes by what its workflow did after it (after_cancel). A workflow's
+    goes by what its workflow did after it (after_cancel), and with nothing
+    after it is pending, since a stopped run found nothing, unless it ran out
+    of time (timed_out), which is red. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -178,6 +180,18 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             name = c["name"]
             if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
+            elif cancelled(c) and timed_out(repo, c):
+                # GitHub stops a job that runs past its timeout-minutes as
+                # cancelled: the head's tests hang, or take too long, which
+                # is the head's to fix.
+                red.append(f"{name} (timed out)")
+            elif cancelled(c):
+                # Nothing ran it through since: the run was stopped (a runner
+                # shut down under it, a newer run's concurrency, or someone
+                # stopped it), not failed, so there's nothing in the head for
+                # a fix job to fix. Pending until it's run again, and a stall
+                # once that's overdue.
+                pending.append(f"{name} (cancelled, to be run again)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
             elif workflow(c) is not None and suite(c).get("status") != "COMPLETED":
@@ -260,15 +274,38 @@ def cancelled(c):
     return c.get("status") == "COMPLETED" and c.get("conclusion") == "CANCELLED"
 
 
+# What GitHub Actions says, in an annotation on the job's check run, of a
+# job it stopped at its timeout-minutes: "The job running on runner NAME has
+# exceeded the maximum execution time of N minutes." It ends the check run
+# as cancelled, as a runner shutting down, a newer run's concurrency or a
+# person's cancel does, and those say something else.
+TIMED_OUT = "has exceeded the maximum execution time"
+
+
+def timed_out(repo, c):
+    """Whether a cancelled check run was stopped for running past its
+    job's timeout, as its annotations say. Asked only of one nothing ran
+    through since (ci_state), so rarely. A check run with no id to ask
+    by (or no repo) wasn't. GitHub not answering fails the PR's step, to be
+    tried again, rather than guess either way."""
+    run = c.get("databaseId")
+    if not run or not repo:
+        return False
+    # Every page: a job can warn many times before it runs out of time.
+    pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/check-runs/{run}/annotations?per_page=100")
+    return any(TIMED_OUT in (a.get("message") or "") for page in (pages if isinstance(pages, list) else [])
+               for a in (page if isinstance(page, list) else []) if isinstance(a, dict))
+
+
 def after_cancel(c, contexts, stale):
     """What a cancelled check run's workflow did on the head in its other
     suites: "finished" once one has done that check's work, so the cancelled
     run is no word on the head; "going" while one is still running, whichever
     diff it's for, since CI isn't done speaking; None with neither, as when
-    someone cancelled the run by hand, which stays not green. Done its work:
-    the suite has finished for the PR's diff (stale is those that didn't) with
-    nothing of its own cancelled, so two cancelled runs don't clear each other,
-    and it ran the same work (same_work), whatever that said. A skip vouches
+    someone cancelled the run by hand, which stays not green (pending).
+    Done its work: the suite has finished for the PR's diff (stale is those
+    that didn't) with nothing of its own cancelled, so two cancelled runs
+    don't clear each other, and it ran the same work (same_work), whatever that said. A skip vouches
     for nothing: a caller skipped on a title edit completes too. A check of a
     shared CI call (one with a lane job) must also be matched in a call whose
     lane ran and chose this PR's base: a push's or a dispatch's run of the same

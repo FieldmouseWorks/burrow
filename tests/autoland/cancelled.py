@@ -2,13 +2,20 @@
 while CI ran, say) cancels its last one, whose suite stays on the head. It goes
 by what its workflow did after it: another suite that has done that check's
 work for the PR's diff clears it, one still going leaves CI pending, and with
-neither it stays not green, as when someone cancelled the run by hand."""
+neither it's pending until it's run again, as when a runner shut down under
+it or someone cancelled it by hand: never red, since a stopped run found
+nothing in the head, so no fix job is sent for it."""
 
 from docs import at, check, docs, whole
-from harness import JOBS, C, clean
+from harness import ANNOTATIONS, JOBS, C, clean
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
+
+
+def stopped(*names):
+    """CI pending on cancelled check runs nothing ran through since."""
+    return "pending", [f"{n} (cancelled, to be run again)" for n in names]
 
 
 def state(*checks, base="main"):
@@ -57,30 +64,59 @@ retargeted = renamed(whole(suite="s2"), RETARGET, "twin")
 assert state(old, retargeted) == ("green", [])
 assert state(retargeted, old) == ("green", [])
 namesake = renamed(whole(suite="s2"), ".github/workflows/ci.yml", "other")
-assert state(old, namesake) == ("red", [CHECK])
-assert state(namesake, old) == ("red", [CHECK])
+assert state(old, namesake) == stopped(CHECK)
+assert state(namesake, old) == stopped(CHECK)
 nameless = renamed(whole(suite="s2"), None, "other")
-assert state(old, nameless) == ("red", [CHECK])
+assert state(old, nameless) == stopped(CHECK)
 # Across the two files, a run still going leaves CI pending, either way round,
 # and a title edit's skipped run or another cancelled one clears nothing.
 assert state(old, renamed(going("s2"), RETARGET, "twin"))[0] == "pending"
 assert state(renamed(whole(suite="s1", conclusion=CANCEL), RETARGET, "twin"), going("s2"))[0] == "pending"
-assert state(old, renamed([check(CHECK, "SKIPPED", suite="s2")], RETARGET, "twin")) == ("red", [CHECK])
+assert state(old, renamed([check(CHECK, "SKIPPED", suite="s2")], RETARGET, "twin")) == stopped(CHECK)
 assert state(old, renamed(whole(suite="s2", conclusion=CANCEL), RETARGET, "twin"))[0] != "green"
 
+# One GitHub stopped at its job's timeout-minutes, as its annotation says, is
+# the head's: red, and a fix job's. A runner shut down under it, or a
+# person's cancel, says something else, and is pending. GitHub not saying
+# fails the step, to be tried again: neither way is guessed.
+timeout = [{**c, "databaseId": 41} if c["name"] == CHECK else c for c in old]
+ANNOTATIONS[41] = ["The job running on runner remi-3 has exceeded the maximum execution time of 90 minutes."]
+assert state(timeout) == ("red", [f"{CHECK} (timed out)"])
+status, landed = at(clean(checks=timeout))
+assert not landed and "CI is red: check / check (timed out)" in status, status
+# Past the first page, after a job's many warnings: still red.
+ANNOTATIONS[41] = ["warning"] * 150 + ANNOTATIONS[41]
+assert state(timeout) == ("red", [f"{CHECK} (timed out)"])
+# A newer run that ran through still clears it, unasked.
+ANNOTATIONS[41] = C.Unavailable("gh api check-runs: HTTP 502")
+assert state(timeout, whole(suite="s2")) == ("green", [])
+try:
+    state(timeout)
+except C.Unavailable:
+    pass
+else:
+    raise AssertionError("annotations GitHub didn't give were guessed at")
+ANNOTATIONS[41] = ["The runner has received a shutdown signal. This can happen when the runner service is stopped."]
+assert state(timeout) == stopped(CHECK)
+ANNOTATIONS[41] = ["The run was canceled by @sam."]
+assert state(timeout) == stopped(CHECK)
+ANNOTATIONS.clear()
+
 # Nothing stands in for a newer run that ran through. Alone, as when cancelled
-# by hand; two cancelled runs, which mustn't clear each other; another
-# workflow's green; a check run of no workflow, whose suite says nothing.
-assert state(old) == ("red", [CHECK])
+# by hand or its runner shut down under it; two cancelled runs, which mustn't
+# clear each other; another workflow's green; a check run of no workflow,
+# whose suite says nothing. Pending, not red: it waits to be run again, and
+# no fix job is sent for a run that found nothing.
+assert state(old) == stopped(CHECK)
 status, landed = at(clean(checks=old))
-assert not landed and "CI is red" in status, status
-assert state(old, whole(suite="s2", conclusion=CANCEL)) == ("red", [CHECK])
-assert state(old, [check("report", suite="s2", workflow="report")]) == ("red", [CHECK])
+assert not landed and JOBS == [] and "waiting for CI: check / check (cancelled, to be run again)" in status, (status, JOBS)
+assert state(old, whole(suite="s2", conclusion=CANCEL)) == stopped(CHECK)
+assert state(old, [check("report", suite="s2", workflow="report")]) == stopped(CHECK)
 other_app = check("scan", CANCEL, app="some-app", suite="a1")
 other_app["checkSuite"]["workflowRun"] = None
 green_app = check("scan", app="some-app", suite="a2")
 green_app["checkSuite"]["workflowRun"] = None
-assert state([other_app], [green_app]) == ("red", ["scan"])
+assert state([other_app], [green_app]) == stopped("scan")
 # A suite that completed without doing the check's work: a caller skipped on a
 # title edit, the gate skipped with no docs lane in its place, only other jobs
 # run, or a docs lane that was itself skipped. Whether it came before or after.
@@ -91,10 +127,10 @@ for why, run in [
     ("docs lane skipped", [check(CHECK, "SKIPPED", suite="s2"),
                            check("check / docs only into main from " + "f" * 40, "SKIPPED", suite="s2")]),
 ]:
-    assert state(old, run) == ("red", [CHECK]), why
-    assert state(run, old) == ("red", [CHECK]), why
+    assert state(old, run) == stopped(CHECK), why
+    assert state(run, old) == stopped(CHECK), why
     status, landed = at(clean(checks=old + run))
-    assert not landed and "CI is red" in status, (why, status)
+    assert not landed and JOBS == [] and "waiting for CI" in status, (why, status, JOBS)
 # The docs lane standing in for the gate it skipped does count, and its red is
 # the head's.
 status, landed = at(clean(checks=old + docs(suite="s2"), files=("README.md",)))
@@ -102,24 +138,24 @@ assert landed and "CI is green (docs only)" in status, status
 status, landed = at(clean(checks=old + docs(suite="s2", conclusion="FAILURE"), files=("README.md",)))
 assert not landed and "CI is red" in status, status
 # From another fork, that docs lane judged another diff: it clears nothing.
-assert state(old, docs(fork="e" * 40, suite="s2"))[0] == "red"
+assert state(old, docs(fork="e" * 40, suite="s2"))[0] == "pending"
 # Outside the shared CI, no lane to ask for: by name, and only a job that ran.
 build = check("build", CANCEL, suite="b1", workflow="b")
 assert state([build], [check("build", suite="b2", workflow="b")]) == ("green", [])
-assert state([build], [check("build", "SKIPPED", suite="b2", workflow="b"), check("lint", suite="b2", workflow="b")]) == ("red", ["build"])
+assert state([build], [check("build", "SKIPPED", suite="b2", workflow="b"), check("lint", suite="b2", workflow="b")]) == stopped("build")
 # A push's or a dispatch's run has no lane, so it judged no PR, however its jobs
 # are named and went, before the cancelled gate or after. A lane cancelled
 # before its name was filled in doesn't let one through either.
 UNFILLED = "check / lane into ${{ github.event.pull_request.base.ref }}"
 push = [check(UNFILLED, "SKIPPED", suite="s2"), check(CHECK, suite="s2")]
-assert state(old, push) == ("red", [CHECK])
-assert state(push, old) == ("red", [CHECK])
-assert state(old, [check(CHECK, suite="s2")]) == ("red", [CHECK])
+assert state(old, push) == stopped(CHECK)
+assert state(push, old) == stopped(CHECK)
+assert state(old, [check(CHECK, suite="s2")]) == stopped(CHECK)
 nameless = [check(UNFILLED, CANCEL, suite="s1"), check(CHECK, CANCEL, suite="s1")]
-assert state(nameless, push) == ("red", [UNFILLED, CHECK])
+assert state(nameless, push) == stopped(UNFILLED, CHECK)
 assert state(nameless, whole(suite="s2")) == ("green", [])
 # A PR's lane that was itself skipped says nothing of the PR.
-assert state(old, [check("check / lane into main", "SKIPPED", suite="s2"), check(CHECK, suite="s2")]) == ("red", [CHECK])
+assert state(old, [check("check / lane into main", "SKIPPED", suite="s2"), check(CHECK, suite="s2")]) == stopped(CHECK)
 # A real run stands beside one of those, and its red is still the head's.
 assert state(old, push, whole(suite="s3")) == ("green", [])
 assert state(old, push, whole(suite="s3", conclusion="FAILURE")) == ("red", [CHECK])
@@ -128,18 +164,18 @@ assert state(old, push, whole(suite="s3", conclusion="FAILURE")) == ("red", [CHE
 # job it skipped beside itself, not the commits check, not a sibling call's
 # gate or a matrix leg's.
 scan = check("check / scan", CANCEL, suite="s1")
-assert state(old + [scan], docs(suite="s2") + [check("check / scan", "SKIPPED", suite="s2")]) == ("red", ["check / scan"])
+assert state(old + [scan], docs(suite="s2") + [check("check / scan", "SKIPPED", suite="s2")]) == stopped("check / scan")
 commits = check("check / commits", CANCEL, suite="s1")
-assert state(old + [commits], docs(suite="s2") + [check("check / commits", "SKIPPED", suite="s2")]) == ("red", ["check / commits"])
+assert state(old + [commits], docs(suite="s2") + [check("check / commits", "SKIPPED", suite="s2")]) == stopped("check / commits")
 assert state(old + [commits], docs(suite="s2") + [check("check / commits", suite="s2")]) == ("green", [])
 sibling = whole(suite="s1") + [check("other / lane into main", suite="s1"), check("other / check", CANCEL, suite="s1")]
 later = docs(suite="s2") + [check("other / lane into main", suite="s2"), check("other / check", "SKIPPED", suite="s2")]
-assert state(sibling, later) == ("red", ["other / check"])
+assert state(sibling, later) == stopped("other / check")
 leg = [check("check (a) / lane into main", suite="s1"), check("check (a) / check", CANCEL, suite="s1")]
-assert state(leg, docs(suite="s2")) == ("red", ["check (a) / check"])
+assert state(leg, docs(suite="s2")) == stopped("check (a) / check")
 # Nor does one call's lane vouch for a sibling's job of the same name's run.
 assert state([check("other / check", CANCEL, suite="s1"), check("other / lane into main", suite="s1")],
-             [check("check / lane into main", suite="s2"), check("other / check", suite="s2")]) == ("red", ["other / check"])
+             [check("check / lane into main", suite="s2"), check("other / check", suite="s2")]) == stopped("other / check")
 # The whole gate replaces a cancelled docs lane in turn, a docs lane another
 # whose name was never filled in, and the replacement's red is the head's.
 assert state(docs(suite="s1", conclusion=CANCEL), whole(suite="s2")) == ("green", [])
@@ -155,14 +191,14 @@ for name in ("browser-tests", "e2e / browser-tests"):
     gone = [check(name, CANCEL, suite="s1")]
     assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, suite="s2")]) == ("green", []), name
     assert state(whole(suite="s2") + [check(name, suite="s2")], whole(suite="s1") + gone) == ("green", []), name
-    assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, "SKIPPED", suite="s2")]) == ("red", [name]), name
+    assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, "SKIPPED", suite="s2")]) == stopped(name), name
     assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, "FAILURE", suite="s2")]) == ("red", [name]), name
-    assert state(whole(suite="s1") + gone, whole(suite="s2")) == ("red", [name]), name
-assert state(old + [check("browser-tests", suite="s1")], push + [check("browser-tests", suite="s2")]) == ("red", [CHECK])
+    assert state(whole(suite="s1") + gone, whole(suite="s2")) == stopped(name), name
+assert state(old + [check("browser-tests", suite="s1")], push + [check("browser-tests", suite="s2")]) == stopped(CHECK)
 
 # A run that judged another base isn't the PR's CI, so it clears nothing: the
 # gate for the PR's own base never ran through.
-assert state(old, whole("next", "s2")) == ("red", [CHECK])
+assert state(old, whole("next", "s2")) == stopped(CHECK)
 # One for the PR's base stands, whatever a cancelled run for another base says.
 assert state(whole("next", "s0", conclusion=CANCEL), whole("main", "s1"), base="main") == ("green", [])
 
