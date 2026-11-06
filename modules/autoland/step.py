@@ -821,6 +821,7 @@ def handle(repo, pr, repo_info, digest, held=None):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
+
     def gate():  # what makes it R2, from Conary's class policy (train.py's gate)
         return T.gate(repo, pr)
     renovate = pr["headRefName"].startswith("renovate/")
