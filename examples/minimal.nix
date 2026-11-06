@@ -51,6 +51,8 @@
       reviewers.codex.enable = true;
       # Its PRs land through its merge train (on the ledger, below).
       repos."sam/homelab".train = true;
+      # Never shown to the reviewers, so never documentation either.
+      repos."sam/r".skipPaths = [ "^docs/private/$" ];
     };
     house.enable = true;
     cpu = {

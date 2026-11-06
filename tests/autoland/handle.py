@@ -534,7 +534,7 @@ assert cn_classed() == [("sam/r", 5, head)], cn_classed()
 # reviewers are asked, as for any change.
 # Nor is one the reviewers aren't shown (their skipPaths): it's reviewed,
 # and its snapshot names it for the judge.
-for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"], ["docs/.env"]):
+for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"], ["docs/.env"], ["docs/private/a/b.md"]):
     fresh_pr_state()
     run(mkpr(files=files), 0)
     status, _ = run(mkpr(files=files), 600)

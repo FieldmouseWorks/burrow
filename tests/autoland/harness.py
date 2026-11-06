@@ -111,8 +111,9 @@ def review_service():
 # subcommand's exit code. With "token", it first runs its token command for
 # the repo, as cn does, and records what that did. Unless CN says otherwise,
 # `class` classes the files the PR at that head lists (TOUCHED, which mkpr
-# and run keep) by the policy's R2, docs and notDocs paths, as Conary does
-# (AGENTS.md, CLAUDE.md and .github/ are never docs).
+# and run keep) by the policy's R2, docs, notDocs and hidden paths, as Conary
+# does (AGENTS.md, CLAUDE.md and .github/ are never docs; a hidden pattern
+# also hides a directory's files, the directory with a trailing slash).
 CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -137,8 +138,10 @@ if sub == "class" and "class" not in do:
     pick = lambda key: [x for r in rules for x in r.get(key, [])]
     because = next((p for p in paths if any(re.search(x, p) for x in pick("r2"))), None)
     never = pick("notDocs") + [r"(^|/)AGENTS(\\.override)?\\.md$", r"(^|/)CLAUDE(\\.local)?\\.md$", r"^\\.github/"]
+    held = lambda p: [p] + [p[:i + 1] for i, c in enumerate(p) if c == "/"]
+    hidden = lambda p: any(re.search(x, h) for x in pick("hidden") for h in held(p))
     docs = bool(paths) and all(any(re.search(x, p) for x in pick("docs")) and not any(re.search(x, p) for x in never)
-                               for p in paths)
+                               and not hidden(p) for p in paths)
     do["class"] = {{"class": "R2" if because else "R0", "because": because, "docs": docs, "review": bool(because) or not docs}}
 print(json.dumps(do[sub]))
 """)

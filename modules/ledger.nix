@@ -22,8 +22,11 @@ let
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
   # What the steward's reviewers aren't shown (their skipPaths, the
-  # machine's and each repo's) is never documentation: a change to it gets
-  # a review round, whose snapshot names it for the judge. A repo's are
+  # machine's and each repo's) is the policy's `hidden`, which Conary
+  # matches as their snapshot hides a path and never takes for
+  # documentation: a change to it gets a review round, whose snapshot names
+  # it for the judge. A Conary without `hidden` refuses the file, so the
+  # docs shortcut never runs on a matcher that would miss one. A repo's are
   # added to its policy entry by name, as GitHub has it in any case, so a
   # repo is never in the file twice.
   skips = let
@@ -32,8 +35,8 @@ let
     theirs = lib.filterAttrs (_: s: s != [ ]) (lib.mapAttrs (_: r: r.skipPaths or [ ]) (if on then autoland.repos else { }));
     add = repos: name: paths:
       let hit = lib.findFirst (k: lib.toLower k == lib.toLower name) null (lib.attrNames repos); in
-      if hit == null then repos // { ${name} = { notDocs = paths; }; }
-      else repos // { ${hit} = repos.${hit} // { notDocs = (repos.${hit}.notDocs or [ ]) ++ paths; }; };
+      if hit == null then repos // { ${name} = { hidden = paths; }; }
+      else repos // { ${hit} = repos.${hit} // { hidden = paths; }; };
   in {
     machine = if on then autoland.reviewers.skipPaths else [ ];
     repos = lib.foldlAttrs add own theirs;
@@ -240,7 +243,7 @@ in
         live when they land, from the paths a change touches, renames and
         copies included. `cn class` reads it (CONARY_POLICY), and the
         steward asks it for every PR it settles. The steward's reviewers'
-        skipPaths are never documentation, added to `notDocs` here. The machine's R2 paths
+        skipPaths are never documentation: they go to Conary as `hidden`. The machine's R2 paths
         default to CODEOWNERS (who signs off on what) and secrets. The rest
         of `.github/` isn't on it: the reviewers read workflow changes like
         any other, and the steward merges them once settled. Nor are
@@ -307,7 +310,8 @@ in
         # null where unset, which Conary takes as the machine's.
         CONARY_POLICY = "${pkgs.writeText "conary-policy.json" (builtins.toJSON {
           inherit (cfg.policy) r2 docs live;
-          notDocs = cfg.policy.notDocs ++ skips.machine;
+          inherit (cfg.policy) notDocs;
+          hidden = skips.machine;
           repos = skips.repos;
         })}";
       } // lib.optionalAttrs ((fresh.enable or false) && fresh.fresh.enable) {
