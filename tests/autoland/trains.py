@@ -403,6 +403,13 @@ fresh_pr_state()
 seen(**{"class": RAISED, "join": {"pr": 5, "joined": False, "held": WORDS}})
 status, _ = run(clean(comments=LAND), 700)
 assert "state=pending" in status and f"Settled, but held out of the train: {WORDS}"[:140] in status, status
+# A dependency update has no review round, its CI being its review, so it
+# names no `review` raise: cn holds it out for one, where naming it would
+# vouch for a round nobody ran. Its `r2` a judge settles, as any PR's.
+fresh_pr_state()
+seen(**{"class": RAISED})
+status, _ = run(mkpr(comments=LAND, branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5"), 700)
+assert cn_runs() == [SHOW, JOIN + ["--raised", "r2"]], cn_runs()
 del S.CFG["repos"]["sam/r"]
 cn()
 print("train raises: ok")
