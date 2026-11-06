@@ -55,6 +55,23 @@ def automerges(pr):
     return bool(AUTOMERGE_RE.search(pr.get("body") or ""))
 
 
+STATUS_RE = re.compile(r"^\U0001f6a6 \*\*Automerge\*\*: (.*)$", re.M)
+SPENT = "Disabled because a matching PR was automerged previously"
+
+
+def automerge_spent(pr):
+    """Renovate switched automerge off on this PR itself ("🚦 **Automerge**:
+    Disabled because a matching PR was automerged previously."): it recreated
+    a branch whose earlier PR it had automerged, which it never merges again.
+    Read from the configuration status lines only (a line that starts with
+    the signal), and only when every one says so: release notes Renovate
+    embeds verbatim can quote the sentence, so any other status beside it
+    (Renovate's own "Disabled by config", which is the owner's choice) is
+    ambiguous and the PR keeps waiting."""
+    statuses = STATUS_RE.findall(pr.get("body") or "")
+    return bool(statuses) and all(x.startswith(SPENT) for x in statuses)
+
+
 def dep_kind(pr):
     """None, 'minor' or 'major' for a dependency bot's PR."""
     if not DEP_RE.match(pr["headRefName"]):

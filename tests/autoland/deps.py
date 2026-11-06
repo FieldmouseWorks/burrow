@@ -71,6 +71,29 @@ for kw in ({**batch, "labels": ()}, {**batch, "body": "\U0001f6a6 **Automerge**:
     assert "state=success" in status and not merged() and JOBS == [], (kw, status)
 status, _ = run(mkpr(**batch), 900)
 assert merged() and "Dependency update, CI green" in status and JOBS == [], status
+# Renovate switches automerge off on a branch it recreates after automerging
+# its earlier PR ("a matching PR was automerged previously") and never merges
+# it: the steward lands it, batch or not, once its commits are read as the
+# bot's alone. LoK-web#776 sat settled for hours otherwise.
+spent = "\U0001f6a6 **Automerge**: Disabled because a matching PR was automerged previously."
+for kw in (batch, {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 13}):
+    fresh_pr_state()
+    status, _ = run(mkpr(**{**kw, "body": spent}), 900)
+    assert merged() and "Dependency update, CI green" in status and JOBS == [], (kw, status)
+# The sentence quoted in release notes Renovate embeds doesn't count: the
+# configuration's own status is what decides, and a conflicting one is no yes.
+quoted = "### Release Notes\n\n\U0001f6a6 **Automerge**: Disabled because a matching PR was automerged previously.\n\n---\n\n### Configuration\n\n"
+for kw in (batch, {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 13}):
+    # (A batch with automerge on is the steward's already: Renovate merges none of them.)
+    for status_line in ("\U0001f6a6 **Automerge**: Disabled by config.",) + ("\U0001f6a6 **Automerge**: Enabled.",) * (kw is not batch):
+        fresh_pr_state()
+        status, _ = run(mkpr(**{**kw, "body": quoted + status_line}), 900)
+        assert not merged() and JOBS == [], (kw, status_line, status)
+fresh_pr_state()
+COMMITS[11] = ["bot@renovateapp.com", "claude@remi"]
+status, _ = run(mkpr(**{**batch, "body": spent}), 900)
+assert not merged() and "Dependency update" not in status, status
+COMMITS.pop(11)
 # Only one whose commits were read and are Renovate's alone: one whose
 # authors or committers can't be read, or on a machine with no Renovate
 # address to check them against, waits for Renovate, which checks for itself.
