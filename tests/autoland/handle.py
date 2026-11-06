@@ -508,7 +508,7 @@ assert merged() and "state=success" in status, status
 # asked once a decision turns on it. R2 is judged, naming what made it so;
 # a class cn couldn't give lands nothing.
 fresh_pr_state()
-cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False, "review": True}})
+cn(**{"class": {"class": "R2", "because": "150 files or more (too many to check)", "docs": False, "review": True, "raised": []}})
 status, _ = run(clean(files=["a.py"]), 700)
 assert len(JOBS) == 1 and "150 files or more (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
 assert cn_classed() == [("sam/r", 5, head)], cn_classed()
@@ -542,7 +542,7 @@ for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"]
 # Findings its reviewers come back with hold it all the same, though it
 # needs no review round (the policy changed since they were asked, say):
 # on this head, posted this pass, or on an earlier one no look will cover.
-reviewed = {"class": {"class": "R0", "because": None, "docs": False, "review": True}}
+reviewed = {"class": {"class": "R0", "because": None, "docs": False, "review": True, "raised": []}}
 for sha in (head, newer):
     fresh_pr_state()
     cn(**reviewed)

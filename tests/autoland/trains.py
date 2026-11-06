@@ -13,8 +13,8 @@ import os
 
 import train as T
 import waits
-from harness import (C, CI_GREEN, COMMITS, COMMITTERS, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state, head,
-                     info, judgment, merges, mkpr, run, said, stand_in, tmp)
+from harness import (C, CI_GREEN, COMMITS, COMMITTERS, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_classed, cn_log, cn_runs, fresh_pr_state,
+                     head, info, judgment, merges, mkpr, run, said, stand_in, tmp, touching)
 
 stand_in()
 other = "c" * 40  # another head
@@ -104,6 +104,47 @@ assert cn_runs() == [SHOW, JOIN], cn_runs()
 seen(show=train([5]))
 run(clean(sha=other), 900)
 assert cn_runs() == [SHOW, ["train", "join", "sam/r", "5", "--head", other]], cn_runs()
+
+# Raised by its labels (Conary's `r2` and `review`), it joins naming every
+# raise of the class this pass settled it by, as `cn class` said: either
+# label, or both. Labelled `r2`, it's R2, so judged first.
+for labels, raised in ((["review"], ["review"]), (["r2"], ["r2"]), (["Review", "r2"], ["r2", "review"])):
+    fresh_pr_state()
+    seen()
+    status, _ = run(clean(labels=labels, comments=[said(judgment("land", n=5))]), 700)
+    assert cn_runs() == [SHOW, JOIN + [a for x in raised for a in ("--raised", x)]] and "In the train" in status, (labels, cn_runs(), status)
+fresh_pr_state()
+seen()
+status, _ = run(clean(labels=["r2"]), 700)
+assert cn_runs() == [SHOW] and len(JOBS) == 1 and "labelled r2" in JOBS[0], (cn_runs(), JOBS)
+# A raise the ledger kept stays when the label's taken off, at a new head
+# too: it joins naming it.
+fresh_pr_state()
+seen(kept=["review"])
+run(clean(sha=other), 700)
+assert cn_runs() == [SHOW, ["train", "join", "sam/r", "5", "--head", other, "--raised", "review"]], cn_runs()
+# Held out for a raise it wasn't settled with (cn's words), it says so, and
+# the next pass, which settles it with the raise, joins naming it; so does
+# one the ledger says has left since, joined again.
+RAISED = "labelled to raise its class since it was classed, to be settled with the label"
+fresh_pr_state()
+seen(join={"joined": False, "held": RAISED})
+status, _ = run(clean(labels=["review"]), 700)
+assert "state=pending" in status and f"held out of the train: {RAISED}" in status and not merges(), status
+for after in (800, 900):  # the retry, then a rejoin: the ledger says it isn't in
+    seen()
+    status, _ = run(clean(labels=["review"]), after)
+    assert cn_runs() == [SHOW, JOIN + ["--raised", "review"]] and "In the train" in status, (after, cn_runs(), status)
+# What it names is the class this pass read, asked once: a label added
+# since (here, just before the join) isn't settled, so cn, reading the
+# labels again, holds it out until a pass settles it with it.
+fresh_pr_state()
+seen()
+kept_join = T.join
+T.join = lambda repo, pr: touching(5, head, ["a.py"], ["review", "r2"]) or kept_join(repo, pr)
+run(clean(labels=["review"]), 700)
+T.join = kept_join
+assert cn_runs() == [SHOW, JOIN + ["--raised", "review"]] and cn_classed() == [("sam/r", 5, head)], (cn_runs(), cn_classed())
 
 # No longer settled while it's in (a new finding, a new head not reviewed
 # yet, a draft, a hold), it comes out of the train, after its status says so:

@@ -81,15 +81,16 @@ def cn(*args):
 
 def classed(repo, pr):
     """The PR's class at its head, as Conary's class policy says (`cn
-    class`, which records it): its class, what made it R2 (`because`), and
+    class`, which records it): its class, what made it R2 (`because`),
     whether it needs a review round (`review`: anything but documentation,
-    and documentation that's R2). Asked once a pass, and only when a
+    and documentation that's R2 or labelled `review`), and the labels that
+    raised it (`raised`, which join names). Asked once a pass, and only when a
     decision turns on it. A dry run asks nothing, since cn would record the
     class, and takes every PR for R2."""
     n, head = pr["number"], pr["headRefOid"]
     if (repo, n, head) not in CLASSES:
         if DRY:
-            CLASSES[repo, n, head] = {"class": "R2", "because": "a path a dry run doesn't class", "review": True}
+            CLASSES[repo, n, head] = {"class": "R2", "because": "a path a dry run doesn't class", "review": True, "raised": []}
         else:
             CLASSES[repo, n, head] = cn("class", repo, str(n), "--head", head)
     return CLASSES[repo, n, head]
@@ -144,17 +145,22 @@ def seat(repo, n):
 
 def join(repo, pr):
     """Put the PR in the train at its head. None once it's in, else why the
-    train holds it out (HELD's) and what cn said of it, if anything. cn
-    classes it by the machine's policy, as `cn class` does: an R2 one rides
-    in a candidate of its own, which lands only while the default branch is
-    still its base. In a repo with a trainNegative, only once its negative
-    on that head counts."""
+    train holds it out (HELD's, or cn's own words) and what cn said of it,
+    if anything. cn classes it by the machine's policy, as `cn class` does:
+    an R2 one rides in a candidate of its own, which lands only while the
+    default branch is still its base. It joins naming the raise labels
+    (`r2`, `review`) of the class this pass read of it (classed, asked once
+    a pass, which is what its settling turned on), and cn takes it only when they're every
+    raise its change has with its labels now: one added since holds it out
+    until a pass settles it with it. In a repo with a trainNegative, only
+    once its negative on that head counts."""
     n, head = pr["number"], pr["headRefOid"]
     negative = repo_cfg(repo)["trainNegative"]
     if DRY:
         log(f"  would: put {repo}#{n} in its train at {head[:7]}")
     else:
-        got = cn("train", "join", repo, str(n), "--head", head, *(["--negative", negative] if negative else []))
+        raised = [a for label in classed(repo, pr)["raised"] for a in ("--raised", label)]
+        got = cn("train", "join", repo, str(n), "--head", head, *raised, *(["--negative", negative] if negative else []))
         if got.get("unproven"):
             return "unproven", got["unproven"].replace(head, head[:7])
         if got.get("held"):
