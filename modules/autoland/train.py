@@ -142,19 +142,19 @@ def seat(repo, n):
     return f"{doing} in candidate {short(flight['candidate'])}" + (f" with {with_}" if with_ else "")
 
 
-def join(repo, pr, alone=False):
+def join(repo, pr):
     """Put the PR in the train at its head. None once it's in, else why the
-    train holds it out (HELD's) and what cn said of it, if anything. Alone,
-    it rides in a candidate of its own, which lands only while the default
-    branch is still its base: an R2 PR (gate). In a repo
-    with a trainNegative, only once its negative on that head counts."""
+    train holds it out (HELD's) and what cn said of it, if anything. cn
+    classes it by the machine's policy, as `cn class` does: an R2 one rides
+    in a candidate of its own, which lands only while the default branch is
+    still its base. In a repo with a trainNegative, only once its negative
+    on that head counts."""
     n, head = pr["number"], pr["headRefOid"]
     negative = repo_cfg(repo)["trainNegative"]
     if DRY:
-        log(f"  would: put {repo}#{n} in its train at {head[:7]}{' alone' * alone}")
+        log(f"  would: put {repo}#{n} in its train at {head[:7]}")
     else:
-        got = cn("train", "join", repo, str(n), "--head", head, *["--alone"] * alone,
-                 *(["--negative", negative] if negative else []))
+        got = cn("train", "join", repo, str(n), "--head", head, *(["--negative", negative] if negative else []))
         if got.get("unproven"):
             return "unproven", got["unproven"].replace(head, head[:7])
         if got.get("held"):
@@ -169,10 +169,10 @@ def join(repo, pr, alone=False):
     return None
 
 
-def ride(repo, pr, st, alone, desc, settle, strike, said):
+def ride(repo, pr, st, desc, settle, strike, said):
     """A PR settled against the default branch: into the train at this head,
-    which lands it, rather than merged by the steward; alone if it's R2
-    (gate). Its status says where in the train it is, or why the train
+    which lands it, rather than merged by the steward (alone if it's R2,
+    which cn says). Its status says where in the train it is, or why the train
     holds it out and until what. Nothing else may merge it: a merge queued on
     it is taken off, or it's tried again (strike). st is the PR's state, which
     remembers the head it joined at; settle and strike are its step's own
@@ -185,7 +185,7 @@ def ride(repo, pr, st, alone, desc, settle, strike, said):
         return
     where = seat(repo, n) if st.get("joined") == head else None
     if where is None:
-        held = join(repo, pr, alone=alone)
+        held = join(repo, pr)
         if held:
             held, why = held
             said = HELD.get(held, held).format(why or said or "GitHub refused its merge")
@@ -259,6 +259,7 @@ def step(repo):
     said += [f"#{x['pr']} refused: {x['why']}" for x in got["refused"]]
     said += [f"#{n} merged" for n in got["landed"]]
     said += [f"#{n} out, no longer settled" for n in got["unready"]]
+    said += [f"#{n} back in alone, R2 since it joined" for n in got["reseated"]]
     now = got["now"]
     if now["state"] == "gating":
         said.append(f"candidate {short(now['candidate'])} gating on {now['branch']}"

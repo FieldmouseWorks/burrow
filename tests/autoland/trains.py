@@ -69,12 +69,12 @@ assert noted["phase"].startswith("In the train, next in line.") and noted["minut
 TRAIN_ON, TRAIN_OFF = (f"pr edit 5 -R sam/r --{x}-label waiting: train" for x in ("add", "remove"))
 assert TRAIN_ON in WROTE, WROTE
 
-# One touching a one-way path (R2), once its judge said land, joins alone: a
-# candidate of its own, which lands only while main is still its base.
+# One touching a one-way path (R2), once its judge said land, joins like any
+# other: cn classes it, and rides it alone.
 fresh_pr_state()
 seen()
 status, _ = run(clean(files=(".github/CODEOWNERS",), comments=[said(judgment("land", n=5))]), 700)
-assert cn_runs() == [SHOW, JOIN + ["--alone"]] and "In the train" in status, (cn_runs(), status)
+assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
 
 # Once it's in at this head, it isn't joined again, and its status names the
 # candidate in flight: its own (gating, or green and landing), or the one
@@ -339,8 +339,8 @@ assert kicked(**KEEP)[-1] == STEP, cn_runs()
 # The step says which it took out, as it says which it merged.
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
-    kicked(show=train([5], "green"), step={**IDLE, "landed": [4], "unready": [5]})
-assert "sam/r: train: #4 merged; #5 out, no longer settled" in out.getvalue(), out.getvalue()
+    kicked(show=train([5], "green"), step={**IDLE, "landed": [4], "unready": [5], "reseated": [6]})
+assert "sam/r: train: #4 merged; #5 out, no longer settled; #6 back in alone, R2 since it joined" in out.getvalue(), out.getvalue()
 # Nor is it stepped when a PR in it wasn't seen to at all: it may not be
 # settled any more. One that isn't in it stops nothing.
 kept_handle = S.step.handle

@@ -146,8 +146,8 @@ if sub == "class" and "class" not in do:
 print(json.dumps(do[sub]))
 """)
 os.chmod(f"{tmp}/cn", 0o755)
-IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "unready": [], "finished": [],
-        "now": {"state": "idle"}}
+IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "unready": [], "reseated": [],
+        "finished": [], "now": {"state": "idle"}}
 
 
 def cn(**do):

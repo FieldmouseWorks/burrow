@@ -500,7 +500,7 @@ def handle(repo, pr, repo_info, digest, held=None):
             # GitHub says of merging it alone is no wait of its own: GitHub
             # works that out afresh each time the branch moves, which the
             # train's every landing does.
-            T.ride(repo, pr, st, bool(gate()), desc, settle, strike, our_status(pr, T.CONTEXT)[1])
+            T.ride(repo, pr, st, desc, settle, strike, our_status(pr, T.CONTEXT)[1])
             return
         if merging in ("wait", "refused"):
             settle("pending", "Settled; GitHub is still working out whether it can be merged" if merging == "wait"
