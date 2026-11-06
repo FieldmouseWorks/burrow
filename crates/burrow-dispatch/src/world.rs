@@ -9,7 +9,8 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use serde_json::Value;
+use burrow_github::{Gh, call};
+use serde_json::{Value, json};
 
 use crate::config::{Config, Fresh};
 
@@ -58,24 +59,19 @@ pub trait World {
 /// cgroup tree.
 pub struct Real<'a>(pub &'a Config);
 
-/// `gh api` with these arguments: what it printed, or why it failed.
-fn gh(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("gh")
-        .args(["api", "-H", "Accept: application/vnd.github+json"])
-        .args(args)
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if out.status.success() {
-        Ok(out.stdout)
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+/// A REST call through burrow-github, which asks again when GitHub doesn't
+/// answer: its JSON.
+fn gh(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+    let r = call(&mut Gh::default(), method, path, body, None)?;
+    if r.body.trim().is_empty() {
+        return Ok(Value::Null);
     }
+    Ok(r.json()?)
 }
 
 impl World for Real<'_> {
     fn github(&self, path: &str) -> Result<Value, String> {
-        let out = gh(&[path]).map_err(|e| format!("GET {path}: {e}"))?;
-        serde_json::from_slice(&out).map_err(|e| format!("GET {path}: {e}"))
+        gh("GET", path, None)
     }
 
     fn unit(&self, unit: &str) -> Unit {
@@ -162,11 +158,11 @@ impl World for Real<'_> {
     }
 
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String> {
-        gh(&[
-            "-X",
+        gh(
             "POST",
             &format!("repos/{repo}/actions/runs/{run}/cancel"),
-        ])
+            None,
+        )
         .map(drop)
     }
 
@@ -187,23 +183,19 @@ impl World for Real<'_> {
 
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String> {
         let name = format!("{}{instance}", f.prefix);
-        let out = gh(&[
-            "-X",
+        let body = json!({"name": name, "runner_group_id": f.group, "labels": [f.label]});
+        let out = gh(
             "POST",
             &format!("orgs/{}/actions/runners/generate-jitconfig", f.owner),
-            "-f",
-            &format!("name={name}"),
-            "-F",
-            &format!("runner_group_id={}", f.group),
-            "-f",
-            &format!("labels[]={}", f.label),
-        ])
+            Some(&body),
+        )
         .map_err(|e| format!("registering {name}: {e}"))?;
         // The registration is the job's to take: it's never printed, and
         // waits only in a file this user alone reads until the unit has it.
-        let config = serde_json::from_slice::<Value>(&out)
-            .ok()
-            .and_then(|v| v.get("encoded_jit_config")?.as_str().map(str::to_owned))
+        let config = out
+            .get("encoded_jit_config")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
             .ok_or_else(|| format!("registering {name}: GitHub gave no JIT config"))?;
         let unit = format!("{}{instance}.service", f.template);
         hand(&f.configs.join(instance), &config, || {

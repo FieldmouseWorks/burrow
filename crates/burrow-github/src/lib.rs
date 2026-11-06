@@ -169,6 +169,22 @@ pub fn call_once(
     kept(&what, r, &[])
 }
 
+/// A write that comes out the same however often it's made, asked again as
+/// a GET is: a commit status, where the newest one for its context is the
+/// one that counts, so a second copy of it changes nothing.
+pub fn call_repeating(
+    api: &mut dyn Api,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Response, Error> {
+    let what = format!("{method} {path}");
+    let r = tried(api, &what, true, |api| {
+        api.request(method, path, body, None)
+    })?;
+    kept(&what, r, &[])
+}
+
 /// A GraphQL query about `owner`'s account (Api::graphql): its `data`,
 /// tried again as a GET is, since a query changes nothing (a mutation isn't
 /// one), and an Error when GitHub's answer holds errors.
@@ -781,6 +797,43 @@ mod tests {
             );
             assert_eq!(call(&mut gh, method, "c", None, None).unwrap().status, 200);
         }
+    }
+
+    #[test]
+    fn asks_a_write_that_comes_out_the_same_again() {
+        let mut gh = Fake::default();
+        gh.on(
+            "POST",
+            "s",
+            vec![
+                Err(Failed {
+                    why: "gh: connection reset by peer".into(),
+                    transient: true,
+                }),
+                ok(502, Value::Null, &[]),
+                ok(201, json!({}), &[]),
+            ],
+        );
+        let r = call_repeating(&mut gh, "POST", "s", Some(&json!({}))).unwrap();
+        assert_eq!(r.status, 201);
+        assert_eq!(gh.paused, vec![2, 8]);
+        // Not past the tries a GET gets, and GitHub's no is final.
+        let mut gh = Fake::default();
+        gh.on("POST", "s", vec![ok(502, Value::Null, &[])]);
+        let e = call_repeating(&mut gh, "POST", "s", None).unwrap_err();
+        assert_eq!(
+            (e.why.as_str(), e.unanswered),
+            ("POST s: HTTP 502, 3 times", true)
+        );
+        let mut gh = Fake::default();
+        gh.on(
+            "POST",
+            "s",
+            vec![ok(422, json!({"message": "No commit"}), &[])],
+        );
+        let e = call_repeating(&mut gh, "POST", "s", None).unwrap_err();
+        assert_eq!(e.why, "POST s: HTTP 422: No commit");
+        assert_eq!(gh.asked.len(), 1);
     }
 
     #[test]
