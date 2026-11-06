@@ -150,7 +150,8 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, 
         this head, that look decides and this one is dropped: posted, it
         would raise again what was fixed meanwhile, and cost a round. One
         the reviewer won't follow with a look at this head (it's out of
-        service, or the PR is past the round limit: `over`) is its last word
+        service, the PR is past the round limit, or this head needs no
+        review round: `over`) is its last word
         on the PR, so it's posted on the commit it read: findings there
         count as a round, and hold this pass back from landing, since the
         threads it read are from before them. "Nothing found" there says
@@ -249,7 +250,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, 
         consume(r)
     over = limit()[2]  # with this head's answers in: no look at it follows
     for r in names:
-        overtaken(r, over)
+        overtaken(r, over or (said[r][0] == "none" and not needed()))
     # Put out by an answer this pass read: its others.
     under_way += reading([r for r in names if V.out(r) and r not in was_out])
     live = [r for r in live if not V.out(r)]
@@ -276,13 +277,16 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, 
         base = pr["baseRefName"]
         return bool(V.in_queue(key, r, base) or V.answered(key, r) or base in lost_on.get(r, {}))
     # Findings on this head this pass posted are threads it never read: one
-    # out now isn't waited for, and past the limit no look follows to cover
-    # them, so they hold the pass back.
-    late += [head[:7] for r in found if r not in live or capped]
+    # out now isn't waited for, and past the limit or with no review round
+    # no look follows to cover them, so they hold the pass back.
+    late += [head[:7] for r in found if r not in live or capped or unreviewed]
 
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN
-    looking = [] if unreviewed else [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
+    # One needing no review round still gets the look that posts findings
+    # that couldn't be (lost_on): they're owed it whatever its class.
+    looking = ([r for r in live if pr["baseRefName"] in lost_on.get(r, {})] if unreviewed
+               else [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"])
     if not quiet and looking:
         after(st["seen"], rc["settleDelay"])  # ends: the reviewers are asked then, once a head
     waiting = [f"Posting {x}" for x in unposted]

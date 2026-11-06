@@ -532,11 +532,34 @@ assert merged() and queued() == [] and "Documentation only, so no review round" 
 assert cn_classed() == [("sam/r", 5, head)], cn_classed()
 # Code beside it, a rule for agents, or an R2 path among the docs: the
 # reviewers are asked, as for any change.
-for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"]):
+# Nor is one the reviewers aren't shown (their skipPaths): it's reviewed,
+# and its snapshot names it for the judge.
+for files in (["docs/a.md", "a.py"], ["docs/AGENTS.md"], ["docs/secrets/x.yaml"], ["docs/.env"]):
     fresh_pr_state()
     run(mkpr(files=files), 0)
     status, _ = run(mkpr(files=files), 600)
     assert not merged() and queued() == ["codex", "rival"], (files, status, queued())
+# Findings its reviewers come back with hold it all the same, though it
+# needs no review round (the policy changed since they were asked, say):
+# on this head, posted this pass, or on an earlier one no look will cover.
+reviewed = {"class": {"class": "R0", "because": None, "docs": False, "review": True}}
+for sha in (head, newer):
+    fresh_pr_state()
+    cn(**reviewed)
+    run(mkpr(files=["docs/a.md"]), 0)
+    run(mkpr(files=["docs/a.md"]), 600)
+    assert queued() == ["codex", "rival"], queued()
+    cn()
+    worker(rival={"result": "review", "answer": {"findings": [{"path": "docs/a.md"}]}})
+    status, _ = run(mkpr(files=["docs/a.md"], sha=sha), 700)
+    assert ("rival", head, 1) in POSTED and not merged(), (sha, POSTED, status)
+# Findings that couldn't be posted are owed a look on this head, which it
+# waits for.
+fresh_pr_state()
+C.save("pr-sam_r-5.json", {"lostOn": {"rival": {"main": "8" * 40}}})
+run(mkpr(files=["docs/a.md"]), 0)
+status, _ = run(mkpr(files=["docs/a.md"]), 600)
+assert not merged() and queued() == ["rival"] and "Rival is reviewing" in status, (status, queued())
 # What's open on it still holds it, for a Claude job to fix: a thread, or
 # red CI.
 red = [{**CI_GREEN[0], "conclusion": "FAILURE"}]
