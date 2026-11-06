@@ -1,0 +1,41 @@
+renovate: a branch with nothing to commit isn't pending on the dashboard
+
+processBranch returns `no-work` with no branch when an update turns out to
+change nothing (a lock file refresh whose lock is already current). The
+dashboard didn't know the branch was absent and listed it under Other
+Branches, "pending", every run of its schedule, though there's nothing a
+PR could bring. A run now keeps whether each branch exists, and the
+dashboard leaves out a no-work branch that doesn't.
+
+--- a/lib/workers/repository/dependency-dashboard.ts
++++ b/lib/workers/repository/dependency-dashboard.ts
+@@ -362,6 +362,9 @@
+   const branches = allBranches.filter(
+     (branch) =>
+       branch.result !== 'automerged' &&
++      // Nothing to commit and no branch: the update is already in (a lock
++      // file refresh that changes nothing), so it isn't pending.
++      !(branch.result === 'no-work' && branch.branchExists === false) &&
+       !branch.upgrades?.every((upgrade) => upgrade.remediationNotPossible),
+   );
+   if (!(
+--- a/lib/workers/repository/process/write.ts
++++ b/lib/workers/repository/process/write.ts
+@@ -199,6 +199,7 @@
+         branch.prBlockedBy = res?.prBlockedBy;
+         branch.prNo = res?.prNo;
+         branch.result = res?.result;
++        branch.branchExists = res?.branchExists;
+         branch.commitFingerprint = res?.updatesVerified
+           ? commitFingerprint
+           : branchState.commitFingerprint;
+--- a/lib/workers/types.ts
++++ b/lib/workers/types.ts
+@@ -188,6 +188,7 @@
+   forceCommit?: boolean;
+   rebaseRequested?: boolean;
+   result?: BranchResult;
++  branchExists?: boolean;
+   upgrades: BranchUpgradeConfig[];
+   packageFiles?: Record<string, PackageFile[]>;
+   prBlockedBy?: PrBlockedBy;

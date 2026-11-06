@@ -186,6 +186,13 @@
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';
+  # A refresh with nothing to commit and no branch is on no list of the
+  # dashboard's, by Renovate's own code (modules/updates/renovate-package.nix).
+  renovate-dashboard-no-work = pkgs.runCommand "renovate-dashboard-no-work-check" { } ''
+    export HOME=$TMPDIR
+    LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-dashboard-no-work.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
+    touch $out
+  '';
   # What a dashboard's Repository Problems lists under the example's
   # config, by Renovate's own logger: not the refresh it was told to take
   # without a release timestamp, but still a warning that's a problem.
