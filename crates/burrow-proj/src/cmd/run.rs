@@ -39,7 +39,9 @@ pub struct New {
     pub since: Option<String>,
     /// What its starter knows it by before it has its id (`proj find`).
     pub key: Option<String>,
-    /// The kind of work it is, which picks its model (Config::roles).
+    /// Inbox label choice, kept for every turn.
+    pub engine: Option<crate::engine::Engine>,
+    /// The kind of work it is, which picks its engine (Config::roles).
     pub role: Option<String>,
 }
 
@@ -384,6 +386,9 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
                 .map(|k| format!("{k}\n"))
                 .collect::<String>(),
         )?;
+    }
+    if let Some(engine) = new.engine {
+        write("engine", engine.name())?;
     }
     if let Some(t) = &new.limit {
         write("timeout", &format!("{t}\n"))?;

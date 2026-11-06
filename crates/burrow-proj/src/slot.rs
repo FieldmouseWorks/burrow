@@ -44,6 +44,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick, project};
 use crate::{mtime, now, now_nanos, read, usage};
@@ -292,6 +293,54 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
         }
     }
     Ok(Look { slots, busy, line })
+}
+
+/// Codex never consumes Claude's slots, its unstick slot or its usage hold.
+/// This small pool stays capped even for pipeline jobs, leaving the plan's
+/// reviewer service first claim. Locks survive exec just as Claude's do.
+fn codex_slot(
+    cfg: &Config,
+    id: &str,
+    n: &str,
+    given: Class,
+    may_hand_over: bool,
+) -> io::Result<File> {
+    let slots = cfg.jobs.join(".codex-slots");
+    fs::create_dir_all(&slots)?;
+    fs::create_dir_all(cfg.jobs.join(".slots"))?;
+    let job = Job::new(cfg, id);
+    fs::write(job.turn(n, "withdrawable"), "")?;
+    loop {
+        if may_hand_over && let Some(to) = successor(cfg) {
+            unmark(&job, n)?;
+            let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
+            lk.lock()?;
+            return Err(hand_over(cfg, &to, id, given));
+        }
+        for i in 1..=cfg.codex_slots {
+            let slot = File::create(slots.join(i.to_string()))?;
+            if slot.try_lock().is_ok() {
+                let slot = held(slot)?;
+                took_slot(&job, n, &format!("codex-{i}"))?;
+                return Ok(slot);
+            }
+        }
+        sleep(Duration::from_secs(2));
+    }
+}
+
+pub fn take_engine(
+    cfg: &Config,
+    id: &str,
+    n: &str,
+    given: Class,
+    may_hand_over: bool,
+    engine: Engine,
+) -> io::Result<File> {
+    match engine {
+        Engine::Claude => take(cfg, id, n, given, may_hand_over),
+        Engine::Codex => codex_slot(cfg, id, n, given, may_hand_over),
+    }
 }
 
 /// Wait in line for a slot, then hold it: the slot is this process's until

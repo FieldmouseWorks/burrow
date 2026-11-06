@@ -33,6 +33,7 @@
 //!                             empty for nothing
 //! proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 //!                             one of burrow.github.apps, never as the user
+//! proj run --role NAME PROJECT "task"  the engine ~/.config/proj/roles gives it
 //! proj run --key KEY PROJECT "task"  what its starter knows it by before
 //!                             it has its id: one job a key, taken at once
 //!                             (a key a started job has is refused)
@@ -68,9 +69,9 @@
 //! proj done                   from inside a job: its work is finished
 //! ```
 //!
-//! Jobs run headless (claude -p) in their project under the same managed
-//! settings as every session: no prompts, and an R2 command is refused rather
-//! than asked, so the job reports it and the operator brings it to the owner.
+//! Jobs run headless in their project: Claude under the managed settings,
+//! Codex in workspace-write with its generated forbidden command rules. Neither
+//! asks mid-turn: an R2 command is refused, so the job reports it and the operator brings it to the owner.
 //! Everything a job said is kept in its folder in jobs ([`job`] has what's
 //! in it); what it builds goes in a scratch dir of its own, PROJ_SCRATCH,
 //! cleared once the job is over ([`scratch`]).
@@ -141,10 +142,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod cmd;
 pub mod config;
+pub mod engine;
 pub mod github;
 pub mod inbox;
 pub mod job;
-pub mod limit;
 pub mod pick;
 pub mod scratch;
 pub mod slot;

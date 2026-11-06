@@ -100,6 +100,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-codex"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-dispatch"
 version = "0.0.0"
 dependencies = [
@@ -253,7 +261,9 @@ dependencies = [
 name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
+ "burrow-codex",
  "burrow-events",
+ "burrow-usage-reset",
  "burrow-watchdog",
  "jiff",
  "rustix",
@@ -289,6 +299,7 @@ dependencies = [
 name = "burrow-review"
 version = "0.0.0"
 dependencies = [
+ "burrow-codex",
  "burrow-events",
  "jiff",
  "rustix",

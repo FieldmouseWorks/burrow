@@ -24,7 +24,7 @@ use burrow_watchdog::watch::Item;
 use serde_json::{Map, Value, json};
 
 use crate::config::Config;
-use crate::job::Job;
+use crate::job::{Job, USAGE_LIMIT};
 use crate::slot::successor;
 use crate::{GRACE, RESUME_GRACE, mtime, now, swap, usage};
 
@@ -60,6 +60,8 @@ pub struct Facts {
     pub awaits: Vec<(String, String)>,
     /// The machine out of Claude usage, if it is (usage.rs).
     pub spent: Option<usage::Spent>,
+    /// A Codex refusal waits for this reset, independently of Claude's hold.
+    pub usage_reset: Option<(i64, i64)>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -69,6 +71,17 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let turn = &f.turn;
     let mut kick = None;
     let (since, due, phase) = match f.state.as_str() {
+        _ if !matches!(f.state.as_str(), "queued" | "running")
+            && !f.stopped
+            && let Some((since, reset)) = f.usage_reset =>
+        {
+            kick = Some(crate::watch::kick_for(USAGE_LIMIT));
+            (
+                since,
+                reset + GRACE,
+                "waiting for Codex's usage reset; proj-watch resumes it then".to_owned(),
+            )
+        }
         // Out of usage, no turn takes a slot till it's back (usage.rs): each
         // has stallAfterMinutes from then, its reset or the sooner end the
         // record has, which stays a while after.

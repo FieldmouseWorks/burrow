@@ -1,13 +1,13 @@
 # One chat for every project
 
 You talk to one claude.ai project chat. The work runs on the box, inside each
-project: its checkout, its CLAUDE.md, its tools and logins. Nothing gets
+project: its checkout, its agent instructions, its tools and logins. Nothing gets
 copied to the cloud and back.
 
 ## Four doors, cheapest first
 
 A thread takes the first door that fits. A probe and a run start no Claude on
-the box; a job and a session each hold one, and its memory, for as long as it
+the box; a job or a session holds an agent, and its memory, for as long as it
 works.
 
 1. **Probe:** a fact about the box that only needs reading (its memory, a
@@ -19,9 +19,9 @@ works.
    ([the PR flow](repo-baseline.md#the-pr-flow-the-steward), step 7). A job
    told to run one command and report, or a `proofJobs` prompt that asks for
    no more, is a run that hasn't been written yet.
-3. **Job:** work in a project that needs judgment, handed over as an issue
+3. **Job:** code or judgment in a project, handed over as an issue
    ([the inbox](#jobs-the-inbox-nothing-to-approve)). It waits for a slot,
-   and holds no Claude until it gets one.
+   and holds no agent until it gets one.
 4. **Session:** work the owner steers live, or that can't wait for a slot:
    Remote Control on the project's server
    ([below](#sessions-remote-control-one-tap-per-thread)). It costs the owner
@@ -107,10 +107,13 @@ probe's repo and from its authors unless set otherwise (`door.repo`,
 into project jobs.
 
 - **Start:** open an issue in the project's own GitHub repo (one checked out in
-  `burrow.projectsDir`) with the label `claude` (`inbox.label`), as one of
+  `burrow.projectsDir`) with a label from `inbox.labels`, as one of
   `inbox.authors`. Put the whole brief in the body: the job knows only the
   issue. Within seconds it's a `proj run` job in that project, and the
   issue gets an "On it" comment naming the job.
+- **Engine:** `codex` for code work with a checkable bar: a gate or tests.
+  `claude` for judgment, anything the owner reads, and one-way calls. If an
+  issue has both, Codex takes it. VM jobs stay Claude-only.
 - **Answer:** when the job finishes a turn, its answer is posted to the issue.
 - **Follow-ups:** reply on the issue. Replies from `inbox.authors` go to the
   same job as its next turn (`proj reply`), with everything it already did in
@@ -118,13 +121,33 @@ into project jobs.
 - **Done:** close the issue, or take the label off.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
   and comments are ignored, labelled or not, except that a labelled issue
-  someone else opened gets one comment saying no job will start. A job runs with everything the
-  box's user can do.
-- Jobs are headless (`claude -p`) and run in the box's normal permission mode.
+  someone else opened gets one comment saying no job will start. Claude jobs
+  have the box user's permissions. Codex jobs use
+  workspace-write with network access; sudo cannot elevate there.
+- Jobs are headless (`claude -p` or `codex exec --json`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.
 - On the box: `proj-inbox status` maps issues to jobs, `proj log ID` shows an
   answer.
+
+Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
+with `ENGINE` either `claude` or `codex`. An unlisted role uses Claude's
+default. Invalid lines fail the turn and name the line. Add
+`over PCT ENGINE[:MODEL]` to move a turn to that engine when Claude's weekly
+meter reaches PCT. Missing readings, or readings an hour old, move nothing.
+`burrow.usageReset` supplies the meter and keeps its history in `meter.log`.
+Each engine keeps its own conversation when a role moves between them.
+
+Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
+an independent login: `autoland-codex-login job` logs the job user in,
+`autoland-codex-login review` logs the reviewer in. Each is a device-code
+login; don't copy tokens between them. Codex jobs have their own small
+pool (`burrow.proj.codex.slots`, two by default), leaving the reviewer first
+claim on the plan. Usage refusals wait for the reset and resume themselves.
+The job user's `.codex/config.toml` picks the default model. Machine
+instructions and one-way command rules are generated alongside Claude's.
+Codex commits carry `Engine: codex`; after the usual review, a Claude job
+judges whether their PR lands. A steward judge always uses Claude.
 
 ### For the Claude in the chat (coordinator and threads)
 
@@ -179,7 +202,7 @@ pre-approved.
 ## What's running
 
 - Inbox and other proj jobs: `proj status` and `proj-inbox status` on the box;
-  open issues labelled `claude` on GitHub.
+  open issues labelled `claude` or `codex` on GitHub.
 - Remote Control: the chat's thread list; on the box, `tmux -L rc-NAME attach`
   shows a project's server and its sessions.
 

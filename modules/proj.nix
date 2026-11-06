@@ -1,9 +1,9 @@
-# proj: the operator hands project work to a Claude inside that project, as a
+# proj: the operator hands project work to an agent inside that project, as a
 # background job (crates/burrow-proj). Jobs run as burrow.user, in
 # burrow.projectsDir/PROJECT, and keep everything they said in jobsDir. Each
 # makes its worktrees in a scratch dir of its own under burrow.scratchDir,
 # cleared once the job is over (its scratch.rs).
-# With proj.inbox, issues labelled for Claude in the projects' GitHub repos
+# With proj.inbox, issues labelled for an engine in the projects' GitHub repos
 # become jobs too (proj-inbox, in the same crate). A job waiting on a PR
 # doesn't hold a slot: proj-watch resumes it when the PR changes. Both are
 # burrow.events handlers: a repo's webhook deliveries, the end of a turn and
@@ -28,6 +28,27 @@ let
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
+  agents = import ./autoland/agents/package.nix { inherit pkgs; };
+  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj;
+  hooks = pkgs.runCommand "proj-codex-git-hooks" { } ''
+    mkdir -p $out
+    ln -s ${package}/bin/burrow-proj-git-hook $out/commit-msg
+    ln -s ${package}/bin/burrow-proj-git-hook $out/pre-push
+  '';
+  codexHome = "${config.users.users.${user}.home}/.codex";
+  policy = import ./claude/codex-rules.nix {
+    inherit lib;
+    patterns = (import ./claude/r2.nix) ++ config.burrow.claude.extraAsk;
+  };
+  rulesFile = pkgs.writeText "proj-codex.rules" policy.text;
+  instructions = pkgs.writeText "proj-AGENTS.md" (config.burrow.claude.machineMd + ''
+
+    Codex jobs run headless in workspace-write with network access. The sandbox's
+    no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
+    them to the owner. Commits carry Engine: codex, and a Claude judge decides
+    whether their PR lands after the usual Codex review and checks.
+  '');
+
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
@@ -42,15 +63,19 @@ let
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
+    codexSlots = cfg.codex.slots;
+    codexHooks = hooks;
+    meter = cfg.meter;
     roles = "${config.users.users.${user}.home}/.config/proj/roles";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) label unstickLabel authors vm;
+      inherit (cfg.inbox) labels unstickLabel authors vm;
       host = config.networking.hostName;
       wake = inboxWake;
       machinery = if machineApp == null then null else machineApp.name;
     } else null;
     tools = {
+      codex = "${agents}/bin/codex";
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
       flock = "${pkgs.util-linux}/bin/flock";
@@ -81,13 +106,25 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    { key = "burrow/codex-login"; imports = [ (import ./codex-login.nix inputs) ]; }
+    { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
   options.burrow.proj = {
-    enable = lib.mkEnableOption "proj, background Claude jobs in each project";
+    enable = lib.mkEnableOption "proj, background agent jobs in each project";
+    codex.slots = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2;
+      description = "How many Codex jobs may run at once, in a pool of their own. Keep it small: the plan's PR reviewer comes first.";
+    };
+    meter = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Claude's weekly meter.json from usage-reset. Role overflow uses readings under an hour old; null disables it.";
+    };
     jobsDir = lib.mkOption {
       type = lib.types.str;
       default = "/data/dev/jobs";
@@ -215,14 +252,14 @@ in
 
     inbox = {
       enable = lib.mkEnableOption ''
-        proj-inbox: an open issue labelled `inbox.label` in a project's GitHub repo,
+        proj-inbox: an open issue carrying a label in `inbox.labels` in a project's GitHub repo,
         opened by one of `inbox.authors`, becomes a proj job in that project; its
         answers go back as comments and their replies there continue it
       '';
-      label = lib.mkOption {
-        type = lib.types.str;
-        default = "claude";
-        description = "The label that hands an issue to Claude. It's created in each repo that lacks it.";
+      labels = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.enum [ "claude" "codex" ]);
+        default = { claude = "claude"; codex = "codex"; };
+        description = "Issue labels and the engine each starts. Codex takes code with a checkable bar; Claude takes judgment and what the owner reads. Each label is created in each repo; Codex wins if an issue has both.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
@@ -233,6 +270,7 @@ in
           `proj run --unstick`, in a slot of its own past maxJobs, so it never
           waits in the line it may be about. Put on an issue whose job is
           still waiting for its first turn, it starts that job over that way.
+          Codex jobs still stay within their own codex.slots cap.
         '';
       };
       authors = lib.mkOption {
@@ -240,7 +278,7 @@ in
         default = [ ];
         example = [ "octocat" ];
         description = ''
-          GitHub logins whose issues and replies Claude acts on. Anyone else's
+          GitHub logins whose issues and replies the agents act on. Anyone else's
           are left alone, labelled or not: an issue is a task given to an agent
           with your logins.
         '';
@@ -248,7 +286,7 @@ in
       vm = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Run issue jobs in agent sandboxes (proj run --vm) instead of on the machine.";
+        description = "Run issue jobs in Claude agent sandboxes (proj run --vm). A Codex selection fails its turn.";
       };
     };
   };
@@ -259,7 +297,7 @@ in
       message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
-    environment.systemPackages = [ proj config.burrow.claude.package ];
+    environment.systemPackages = [ proj config.burrow.claude.package agents ];
     burrow.tools.proj = proj;
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
@@ -299,7 +337,12 @@ in
         ExecStart = "${proj}/bin/proj _ended";
       };
     };
+    # Per-user instructions and policy follow the same options as Claude's.
     systemd.tmpfiles.rules = [
+      "d ${codexHome} 0700 ${user} ${config.users.users.${user}.group} -"
+      "d ${codexHome}/rules 0700 ${user} ${config.users.users.${user}.group} -"
+      "L+ ${codexHome}/AGENTS.md - - - - ${instructions}"
+      "L+ ${codexHome}/rules/burrow.rules - - - - ${rulesFile}"
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
       # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
@@ -316,19 +359,23 @@ in
       look = "`proj status` lists the jobs, and `proj log ID` (with --raw, its whole stream) shows what one did and where it stopped; `proj reply ID \"...\"` gives it its next turn, and `proj stop ID` ends one that's finished or no longer wanted.";
     };
 
+    burrow.claude.codeMd = ''
+      A Claude job has the machine's MCP servers but not the claude.ai connectors
+      (mail, calendar, drive) or skills: work that needs those is a session's.
+    '';
     burrow.claude.machineMd = lib.mkOrder 700 ''
       ## Projects, from the operator
 
       ${config.burrow.owner} talks to one chat, the operator, for machine and project work alike. For
       project work, hand it to a Claude inside that project, so it gets the
-      project's own CLAUDE.md and history:
+      project's own instructions and history:
 
           proj list                         projects in ${projectsDir}
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj run --app NAME web "task"    acting on GitHub as the App NAME
-          proj run --role NAME web "task"   on the model ~/.config/proj/roles gives NAME
+          proj run --role NAME web "task"   on the engine ~/.config/proj/roles gives NAME
           proj status                       what's running, what finished
           proj status --line                every turn in line, next first, and its wait
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
@@ -344,16 +391,21 @@ in
       meanwhile), `proj ask` when its answer is a question for you to settle or
       relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
+      Roles live in ~/.config/proj/roles, one `ROLE ENGINE[:MODEL]` line each,
+      optionally followed by `over PCT ENGINE[:MODEL]` for a fresh weekly meter
+      at that percent. Engines are claude and codex; unlisted roles use Claude.
+      Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
+      `autoland-codex-login job`, separately from the reviewer's login. Codex
+      jobs cannot run in agent VMs. The steward's judge always uses Claude.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
-      them. A job has the machine's MCP servers but not the claude.ai connectors (mail,
-      calendar, drive) or skills: work that needs those is a session's. ${config.burrow.owner} can also open any project's own session directly from their phone.
+      them. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
   }
 
   (lib.mkIf cfg.inbox.enable {
     assertions = [{
       assertion = cfg.inbox.authors != [ ];
-      message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
+      message = "burrow.proj.inbox.authors: name who may hand the agents issues.";
     }];
     environment.systemPackages = [ inbox ];
     # The steward has it forget a repo GitHub's name now means another of.
@@ -367,7 +419,7 @@ in
       wake = inboxWake;
     };
     systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
-      description = "Hand GitHub issues labelled ${cfg.inbox.label} to proj jobs${lib.optionalString (name == "proj-inbox@") " in %I"}";
+      description = "Hand GitHub issues labelled ${lib.concatStringsSep ", " (lib.attrNames cfg.inbox.labels)} to proj jobs${lib.optionalString (name == "proj-inbox@") " in %I"}";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
@@ -379,7 +431,7 @@ in
     systemd.tmpfiles.rules = [ "d ${stateDir}/proj-inbox 0755 ${user} ${config.users.users.${user}.group} -" ];
 
     burrow.claude.machineMd = lib.mkOrder 701 ''
-      Issues work too: label one `${cfg.inbox.label}` in a project's GitHub repo
+      Issues work too: label one `${lib.concatStringsSep "` or `" (lib.attrNames cfg.inbox.labels)}` in a project's GitHub repo
       (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within seconds it's a job there.
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows

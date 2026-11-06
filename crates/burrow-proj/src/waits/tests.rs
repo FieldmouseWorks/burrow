@@ -349,3 +349,22 @@ fn waiting_in_line() {
     saw(None);
     assert_eq!(fs::read_dir(w.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn a_codex_refusal_waits_for_its_reset_even_for_an_owned_job() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let f = Facts {
+        id: "code".into(),
+        turn: "1".into(),
+        owned: true,
+        state: "usage limit; waiting for Codex's reset".into(),
+        usage_reset: Some((1000, 100000)),
+        ..Facts::default()
+    };
+    let wait = job_wait(&cfg, &f).unwrap();
+    assert_eq!(wait.since, 1000.0);
+    assert_eq!(wait.due, (100000 + crate::GRACE) as f64);
+    assert_eq!(wait.kick.as_deref(), Some("proj-watch"));
+    assert!(wait.phase.contains("Codex"));
+    assert!(job_wait(&cfg, &Facts { stopped: true, ..f }).is_none());
+}

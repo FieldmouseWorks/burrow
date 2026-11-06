@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::engine::{Choice, Engine};
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -53,11 +55,14 @@ pub struct Config {
     pub apps: BTreeMap<String, PathBuf>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
-    /// The model each role's jobs run on (`proj run --role`): a file the
-    /// machine keeps outside any repo, a `ROLE MODEL` line a role (# starts a
-    /// comment), since which model does what is the machine's business. A
-    /// role it doesn't list, or no file, runs on Claude's own default.
+    /// ROLE ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
+    /// Missing roles use Claude's default; malformed lines fail the turn.
     pub roles: PathBuf,
+    /// Claude's weekly reading, written by usage-reset; absent disables overflow.
+    pub meter: Option<PathBuf>,
+    /// Codex's own pool, and the immutable hooks dir it gives git.
+    pub codex_slots: usize,
+    pub codex_hooks: PathBuf,
     pub tools: Tools,
     /// proj-inbox's settings; None when it's off.
     pub inbox: Option<Inbox>,
@@ -73,6 +78,7 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tools {
+    pub codex: PathBuf,
     pub bash: PathBuf,
     pub flock: PathBuf,
     pub gh: PathBuf,
@@ -88,9 +94,9 @@ pub struct Tools {
 pub struct Inbox {
     /// What it keeps of each issue it has a job for, a folder an issue.
     pub state: PathBuf,
-    /// The label that hands an issue to Claude.
-    pub label: String,
-    /// The label that, with `label`, makes an issue's job one that waits in no
+    /// Each label selects its engine; Codex wins when both are present.
+    pub labels: BTreeMap<String, Engine>,
+    /// The label that, with an engine label, makes an issue's job one that waits in no
     /// line (proj run --unstick): the steward's stuck issue's.
     pub unstick_label: String,
     /// Whose issues and replies it acts on.
@@ -131,23 +137,33 @@ impl Config {
         ok.then(|| self.apps.get(name)).flatten()
     }
 
-    /// The model `roles` gives `role`, if it lists one.
-    pub fn model(&self, role: &str) -> Option<String> {
-        let text = std::fs::read_to_string(&self.roles).ok()?;
-        // A line starting # is a comment.
-        text.lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .find_map(|l| {
-                let mut w = l.split_whitespace();
-                (w.next() == Some(role))
-                    .then(|| w.next())
-                    .flatten()
-                    .filter(|m| {
-                        m.bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"._:[]-".contains(&b))
-                    })
-                    .map(str::to_owned)
-            })
+    /// Resolve one role once per turn. Every non-comment line must parse,
+    /// so a typo never silently sends work to a different engine.
+    pub fn engine(&self, role: &str) -> Result<Choice, String> {
+        let text = match std::fs::read_to_string(&self.roles) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("{}: {e}", self.roles.display())),
+        };
+        let mut selected = None;
+        for (i, line) in text.lines().enumerate() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let (name, choice) = crate::engine::role(line, self.meter.as_deref(), crate::now())
+                .map_err(|e| format!("{} line {}: {line}: {e}", self.roles.display(), i + 1))?;
+            if name == role {
+                if selected.is_some() {
+                    return Err(format!(
+                        "{} line {}: duplicate role {role}",
+                        self.roles.display(),
+                        i + 1
+                    ));
+                }
+                selected = Some(choice);
+            }
+        }
+        Ok(selected.unwrap_or_default())
     }
 
     /// How long a turn may wait in line, in seconds.
@@ -160,7 +176,7 @@ impl Config {
 pub(crate) mod tests {
     use serde_json::{Value, json};
 
-    use super::Config;
+    use super::{Choice, Config, Engine};
 
     /// A config as the module writes one, for the tests to change.
     pub(crate) fn example() -> Value {
@@ -189,29 +205,47 @@ pub(crate) mod tests {
             "apps": {"workers": "/run/workers.env"},
             "notify": "/bin/notify",
             "roles": "/nowhere/roles",
-            "inbox": {"state": "/var/lib/burrow/proj-inbox", "label": "claude", "unstickLabel": "stuck",
+            "meter": null, "codexSlots": 2, "codexHooks": "/hooks",
+            "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box",
                       "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
-            "tools": {"bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
+            "tools": {"codex": "/bin/codex", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
     }
 
-    // A role's model is its line's second word; a role the file doesn't
-    // list, a line with no model or one with odd bytes, or no file, is none.
     #[test]
     fn roles() {
         let dir = tempfile::tempdir().unwrap();
         let roles = dir.path().join("roles");
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.roles = roles.clone();
-        assert_eq!(cfg.model("routine"), None);
-        std::fs::write(&roles, "# a comment\nroutine  small-1\nbare\nodd a$b\n").unwrap();
-        assert_eq!(cfg.model("routine").as_deref(), Some("small-1"));
-        assert_eq!(cfg.model("bare"), None);
-        assert_eq!(cfg.model("odd"), None);
-        assert_eq!(cfg.model("judge"), None);
-        assert_eq!(cfg.model("#"), None);
+        assert_eq!(cfg.engine("routine").unwrap(), Choice::default());
+        std::fs::write(&roles, "# comment\nroutine codex:chosen\njudge claude\n").unwrap();
+        assert_eq!(
+            cfg.engine("routine").unwrap(),
+            Choice {
+                engine: Engine::Codex,
+                model: Some("chosen".into())
+            }
+        );
+        assert_eq!(cfg.engine("judge").unwrap(), Choice::default());
+        assert_eq!(cfg.engine("missing").unwrap(), Choice::default());
+        for bad in [
+            "bare",
+            "routine old-format",
+            "routine unknown",
+            "routine codex:",
+            "routine codex:a$b",
+            "routine codex extra",
+            "routine claude over 101 codex",
+            "routine claude over nope codex",
+            "routine claude over 50",
+        ] {
+            std::fs::write(&roles, format!("# comment\n{bad}\n")).unwrap();
+            let error = cfg.engine("routine").unwrap_err();
+            assert!(error.contains("line 2") && error.contains(bad), "{error}");
+        }
     }
 
     // The module's config reads whole; a field the binary doesn't know, or
@@ -235,7 +269,13 @@ pub(crate) mod tests {
                 .waits
                 .is_none()
         );
-        assert_eq!(cfg.inbox.as_ref().map(|i| i.label.as_str()), Some("claude"));
+        assert_eq!(
+            cfg.inbox
+                .as_ref()
+                .and_then(|i| i.labels.get("codex"))
+                .copied(),
+            Some(Engine::Codex)
+        );
         let mut off = example();
         off["inbox"] = Value::Null;
         assert!(

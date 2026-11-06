@@ -21,9 +21,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::Value;
-
 use crate::config::Config;
+use crate::engine::{last_result, names_session};
 use crate::waits::Facts;
 use crate::{filled, mtime, now, read, swap, systemd, usage};
 
@@ -151,8 +150,8 @@ impl<'a> Job<'a> {
             && !filled(&self.turn(n, "outcome"))
             && !self.turn(n, "stopped").exists()
             && !filled(&self.path("agent"))
-            && text.contains(r#""session_id""#)
-            && !text.lines().any(|l| result_of(l).is_some())
+            && names_session(&text)
+            && last_result(&self.turn(n, "jsonl"), 0).is_none()
     }
 
     /// How turn N ended, for its log: its outcome, or failed when it has
@@ -251,7 +250,15 @@ impl<'a> Job<'a> {
             } else {
                 Vec::new()
             },
-            spent: usage::kept(self.cfg),
+            usage_reset: read(&self.path("await")).and_then(|text| {
+                awaits(&text)
+                    .into_iter()
+                    .find(|a| a.target == USAGE_LIMIT)
+                    .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
+            }),
+            spent: (read(&self.turn(&n, "engine")).as_deref() != Some("codex"))
+                .then(|| usage::kept(self.cfg))
+                .flatten(),
             turn: n,
             state,
         })
@@ -262,6 +269,9 @@ impl<'a> Job<'a> {
 fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
+
+/// A usage refusal's await target. Its fields are SINCE and reset's epoch.
+pub const USAGE_LIMIT: &str = "usage-limit";
 
 /// One line of a job's await: what it awaits (a PR or issue, OWNER/REPO#N
 /// as `proj await` was given it), since when, and what it was then (its
@@ -291,58 +301,6 @@ pub fn awaits(text: &str) -> Vec<Await> {
             }
         })
         .collect()
-}
-
-/// A line of a stream as a result, but for an empty one: no turn taken, nothing
-/// said, no error. A resumed session whose last run was stopped with work in
-/// the background puts one out before it starts on its prompt, then goes on
-/// working, so it answers nothing.
-pub fn result_of(line: &str) -> Option<Value> {
-    if !line.contains(r#""type":"result""#) {
-        return None;
-    }
-    let v: Value = serde_json::from_str(line).ok()?;
-    let said = match v.get("result") {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(_) => true,
-    };
-    let idle = v.get("num_turns").and_then(Value::as_f64) == Some(0.0);
-    (said || !idle || is_error(&v)).then_some(v)
-}
-
-/// A turn's answer, from its stream: every result with something to say, in
-/// order. Claude answers again each time a background task it left running
-/// reports back, so the last result can be a line about that task with the
-/// real answer one before it.
-pub fn answer(stream: &Path) -> String {
-    let text = fs::read(stream).unwrap_or_default();
-    let mut said = Vec::new();
-    for v in String::from_utf8_lossy(&text).lines().filter_map(result_of) {
-        match v.get("result") {
-            Some(Value::String(s)) if !s.is_empty() => said.push(s.clone()),
-            _ => (),
-        }
-    }
-    said.join("\n\n")
-}
-
-/// The last result in a stream from byte `from` on, if any.
-pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
-    let text = fs::read(stream).ok()?;
-    let text = text.get(from as usize..).unwrap_or_default();
-    String::from_utf8_lossy(text)
-        .lines()
-        .rev()
-        .find_map(result_of)
-}
-
-/// Whether a result says it's an error.
-pub fn is_error(result: &Value) -> bool {
-    match result.get("is_error") {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(_) => true,
-    }
 }
 
 /// Kick each handler named (burrow-events'), once each.
@@ -381,8 +339,9 @@ pub fn escape(s: &str) -> String {
 mod tests {
     use std::fs;
 
-    use super::{Job, answer, awaits, escape, last_result, result_of};
+    use super::{Job, awaits, escape};
     use crate::config::{Config, tests::example};
+    use crate::engine::{answer, last_result, result_of};
     use crate::now;
     use crate::waits::job_wait;
 

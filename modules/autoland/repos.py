@@ -481,8 +481,14 @@ def publish(digest):
         # Closed once the inbox can't take it: what's in it is the owner's then.
         # Its job never waits in proj's line (the unstick label), which may be
         # the very thing stuck.
-        issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
+        issue("stuck.json", "[autoland] Stuck in the pipeline", stuck_label(), "", stuck_brief(),
               [x for x in digest if x not in owner], "Nothing stuck.", also=CFG["inbox"]["unstickLabel"])
+
+
+def stuck_label():
+    """The stuck issue is judgment: only a label configured for Claude routes it.
+    With none, publish leaves the work with the owner and retires the old issue."""
+    return next((label for label, engine in sorted(CFG["inbox"]["labels"].items()) if engine == "claude"), None)
 
 
 def inbox_off():
@@ -493,6 +499,8 @@ def inbox_off():
     ib, nrepo = CFG["inbox"], CFG["notify"]["repo"]
     if not ib["enable"]:
         return "it's off"
+    if stuck_label() is None:
+        return "no inbox label routes to Claude"
     if not nrepo:  # the digest goes to the journal: there's no issue to take
         return "notify.repo isn't set"
     if not C.project_dir(nrepo):
@@ -521,7 +529,10 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
     """One issue in config.notify.repo listing digest, kept up to date: each
     new or changed entry is a comment too, and it's closed once there's none.
     It's found by label, and has the label `also` as well, when there is one:
-    put back on the open one when it's gone."""
+    put back on the open one when it's gone. Without a routing label, only
+    an empty digest is allowed: find the old issue by title and close it."""
+    if not label and digest:
+        raise ValueError("an issue with work needs a routing label")
     nrepo = CFG["notify"]["repo"]
     groups = {}
     for why, line, desc in digest:
@@ -541,7 +552,7 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
     # Unchanged since the last look, under an hour ago: nothing to read or write.
     if prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
-    found = C.gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
+    found = C.gh("issue", "list", "-R", nrepo, *(["--label", label] if label else []), "--state", "open", "--search",
                  f'"{title}" in:title', "--json", "number,body,labels", check=False)
     if not isinstance(found, list):
         return  # couldn't look (no quota?): try next pass, and don't open a second issue

@@ -117,6 +117,7 @@ def review_service():
 # raises it by the PR's labels there, with the raises CN says the ledger
 # kept from before ("kept"), as Conary does: `r2` makes it R2, `review` asks
 # for a review round, and `raised` names them, sorted.
+REST_HEADS = {}  # the head the PR commits endpoint is answering about
 CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -184,6 +185,7 @@ def cn_classed():
 
 def touching(number, sha, files, labels=()):
     """What `cn class` reads a PR at a head touches, and its labels."""
+    REST_HEADS[number] = sha
     touched = json.load(open(TOUCHED)) if os.path.exists(TOUCHED) else {}
     touched[f"{number}@{sha}"] = {"files": list(files), "labels": list(labels)}
     with open(TOUCHED, "w") as f:
@@ -211,7 +213,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer", "train": "waiting: train"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer", "train": "waiting: train"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "authors": ["sam"]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
         "defaults": {"rounds": 5,
                      "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
@@ -358,7 +360,8 @@ def gh_stub(*a, **k):
         return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}
     if a[:1] == ("api",) and "--paginate" in a and a[-1].endswith("/commits?per_page=100"):
         got = COMMITTERS.get(int(a[-1].split("/")[-2]), ["noreply@github.com"])
-        return None if got is None else [[{"commit": {"committer": {"email": e}}} for e in got]]  # --slurp: the pages
+        return None if got is None else [[{"sha": REST_HEADS.get(int(a[-1].split("/")[-2]), head),
+                                           "commit": {"message": "change: fixture", "committer": {"email": e}}} for e in got]]  # --slurp: the pages
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):

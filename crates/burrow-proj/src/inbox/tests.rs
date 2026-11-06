@@ -276,3 +276,44 @@ fn revivals() {
     fs::write(tmp.path().join("revived"), "junk\n").unwrap();
     assert_eq!(revived(tmp.path()), (None, 0));
 }
+
+#[test]
+fn issue_labels_choose_an_engine_and_codex_wins_when_both_are_present() {
+    use crate::engine::Engine;
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let pass = pass(&cfg);
+    for (labels, engine) in [
+        (json!([]), None),
+        (json!([{"name":"claude"}]), Some(Engine::Claude)),
+        (json!([{"name":"codex"}]), Some(Engine::Codex)),
+        (
+            json!([{"name":"claude"},{"name":"codex"}]),
+            Some(Engine::Codex),
+        ),
+    ] {
+        assert_eq!(pass.engine(&json!({"labels": labels})), engine);
+    }
+}
+
+#[test]
+fn an_old_label_marker_is_replaced_for_the_new_engine_map() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.tools.gh = "true".into();
+    cfg.inbox.as_mut().unwrap().state = d.path().into();
+    let marker = d.path().join(".label-sam_box");
+    fs::write(&marker, "").unwrap();
+    pass(&cfg).label("sam/box");
+    let expected = serde_json::to_string(&cfg.inbox.as_ref().unwrap().labels).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), expected);
+    cfg.inbox
+        .as_mut()
+        .unwrap()
+        .labels
+        .insert("code".into(), crate::engine::Engine::Codex);
+    pass(&cfg).label("sam/box");
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        serde_json::to_string(&cfg.inbox.as_ref().unwrap().labels).unwrap()
+    );
+}

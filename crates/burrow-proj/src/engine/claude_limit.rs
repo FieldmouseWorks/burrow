@@ -7,7 +7,7 @@
 //! raise it at … · your weekly limit resets Nov 4, 12pm
 //! (America/Los_Angeles)"), and the year too once it isn't this one.
 //! [`resets`] reads that back, for a refusal whose stream doesn't carry the
-//! reset as a timestamp ([`crate::usage::refused`]).
+//! reset as a timestamp ([`super::claude::refused`]).
 
 use jiff::Timestamp;
 use jiff::civil::{Date, Time};

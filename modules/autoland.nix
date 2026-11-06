@@ -123,7 +123,7 @@ let
     # line, which may be what's stuck. `command` is how the steward has the
     # inbox forget a remade repo's issues (repos.py reset).
     inbox = {
-      inherit (config.burrow.proj.inbox) enable label unstickLabel authors;
+      inherit (config.burrow.proj.inbox) enable labels unstickLabel authors;
       command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
     };
     # Whose login Renovate runs as: the machine's own App, else the user

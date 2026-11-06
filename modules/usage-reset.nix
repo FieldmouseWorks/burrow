@@ -28,6 +28,7 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
   ];
 
@@ -50,6 +51,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    burrow.proj.meter = lib.mkDefault "${dir}/meter.json";
     burrow.events.handlers.usage-reset = {
       # Nothing on GitHub: its own wake-ups, and the hourly catch-up.
       events = [ ];
@@ -92,7 +94,8 @@ in
       /limit-reset (once a week at most) and tells ${config.burrow.owner} with a notice.
       It drives its own Claude Code in `tmux -L ${name}`; leave that one
       alone. Don't run /limit-reset yourself unless ${config.burrow.owner} asks.
-      ${dir}/state.json says what it last saw.
+      ${dir}/state.json says what it last saw. Every fresh reading goes to
+      ${dir}/meter.json and appends to meter.log; proj uses it for role overflow.
     '';
   };
 }

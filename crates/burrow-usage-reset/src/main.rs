@@ -11,8 +11,10 @@ use jiff::tz::TimeZone;
 use serde::Deserialize;
 
 use burrow_usage_reset::claude::ClaudeCode;
+use burrow_usage_reset::meter::Meter;
 use burrow_usage_reset::now;
 use burrow_usage_reset::pass::{FAILED, Notice, State, pass};
+use burrow_usage_reset::store::write;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,10 +68,14 @@ fn run() -> Result<(), String> {
     };
     let dir = cfg.state_dir.join("claude");
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut claude = ClaudeCode {
+    let claude = ClaudeCode {
         claude: cfg.claude,
         tmux: cfg.tmux,
         dir,
+    };
+    let mut claude = Meter {
+        account: claude,
+        dir: cfg.state_dir.clone(),
     };
     let now = now();
     let mut keep = |state: &State| save(&state_file, state);
@@ -108,21 +114,6 @@ fn load(file: &Path) -> Result<State, String> {
 /// Keep STATE in FILE, on disk before this returns.
 fn save(file: &Path, state: &State) -> Result<(), String> {
     write(file, &serde_json::to_vec(state).map_err(|e| e.to_string())?)
-}
-
-/// Write FILE whole and to disk: a pass reading it never sees half of it,
-/// and a crash just after doesn't lose it.
-fn write(file: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = file.with_extension("tmp");
-    let dir = file.parent().unwrap_or(Path::new("."));
-    fs::File::create(&tmp)
-        .and_then(|mut f| {
-            std::io::Write::write_all(&mut f, bytes)?;
-            f.sync_all()
-        })
-        .and_then(|()| fs::rename(&tmp, file))
-        .and_then(|()| fs::File::open(dir)?.sync_all())
-        .map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// Hand a notice to HOST-notify, which never fails its caller; without it,

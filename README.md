@@ -111,8 +111,8 @@ Each has an entry below, and each can be imported on its own.
   biggest process there, the session that grew or a build it ran, and nothing
   else.
 - **`proj`** (`burrow.proj`): `proj run PROJECT "task"`: the operator hands
-  work to a headless Claude inside that project, as a systemd unit, and checks
-  on it later (`status`, `log`, `reply`, `stop`). At most `maxJobs` run at
+  work to a headless agent inside that project, as a systemd unit, and checks
+  on it later (`status`, `log`, `reply`, `stop`). At most `maxJobs` Claude turns run at
   once, `maxJobsPerProject` from one project, and the rest queue (`proj status
   --line` shows the whole line, next first, with each turn's wait; `--first`
   goes ahead, and `--pipeline` jobs, the steward's and renovate-sweep's and
@@ -127,7 +127,7 @@ Each has an entry below, and each can be imported on its own.
   ceiling of its own: the jobs are what the machine gives up first when it
   runs short (the kernel kills them first, and systemd-oomd watches their
   slice), and each may have a cap of its own (`jobMemoryMax`, none by
-  default). With `inbox.enable`, an issue labelled `claude` in a project's
+  default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
   GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
   comes back as a comment and a reply there continues it. One that also has
   `inbox.unstickLabel` (the steward's stuck issue) is run `--unstick`. Every
@@ -138,12 +138,22 @@ Each has an entry below, and each can be imported on its own.
   and still silent is a stall. Only jobs whose starter acts on each turn's end
   (`--owned`: the steward's, the watchdog's) needn't say. A run Claude Code
   refuses because the plan's usage is spent (a monthly spend limit, a weekly
-  or five-hour limit) puts the whole machine out of usage until the limit
-  resets: no turn takes a slot till then, the refused turn waits in line and
+  or five-hour limit) holds Claude's queue until the limit
+  resets: no Claude turn takes a slot till then, the refused turn waits in line and
   runs again by itself after, `proj status` says why and until when, and
   `HOST-notify` tells you once (`proj usage back` lets the line go sooner,
   once you've raised the limit, and keeps any older proj's or watchdog's
   limit from holding it again).
+  Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
+  model and overflow above a fresh weekly meter reading. Codex uses its own
+  small slot pool (`codex.slots`, two), workspace-write with network, the
+  shared one-way command list, and git hooks that mark its commits and
+  refuse rewrites or deletes of the remote default branch. Log it in with
+  `autoland-codex-login job`, separately from `autoland-codex-login review`.
+  Codex-written heads still get a Codex review and need a Claude judge.
+  The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
+  says which label fits which work.
+
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
@@ -312,6 +322,9 @@ Each has an entry below, and each can be imported on its own.
   reset that only works at the limit waits for it, and with nothing banked it
   does nothing. `HOST-notify` tells you when it used one, or when it couldn't.
   It books its own next look, sooner the faster the week is going: no timer.
+  Each fresh weekly reading replaces `meter.json` and appends to `meter.log`
+  in its state dir, for proj's overflow and the meter's history.
+
 - **`ops`** (`burrow.ops`): perf, bpftrace, bcc, strace, gdb, tcpdump,
   nvme-cli, smartctl, fwupd and friends, a systemd hardware watchdog (with
   `watchdogIdentity`, the board's own one, whichever driver came up first, and
