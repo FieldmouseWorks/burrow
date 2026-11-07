@@ -219,7 +219,10 @@ impl Places<'_> {
 
 /// What `refspec` updates, if that can be a shared branch: its destination,
 /// or its source where it names no other, by name or by wildcard. `:` alone
-/// is every branch both sides have.
+/// is every branch both sides have. A wildcard is git's `*`, or a glob or
+/// brace list the shell expands (marked [`shell::UNKNOWN`]), which may
+/// become any name: an unquoted `refs/heads/*` that matches no file reaches
+/// git as it is.
 fn shared_target(refspec: &str) -> Option<String> {
     let spec = refspec.strip_prefix('+').unwrap_or(refspec);
     let (source, dest) = spec.rsplit_once(':').unwrap_or((spec, spec));
@@ -231,23 +234,95 @@ fn shared_target(refspec: &str) -> Option<String> {
         .strip_prefix("refs/heads/")
         .or_else(|| dest.strip_prefix("heads/"))
         .unwrap_or(dest);
-    let shared = match name.split_once('*') {
-        None => SHARED.contains(&name),
-        Some((before, after)) => SHARED.iter().any(|branch| {
+    let pattern = Piece::pattern(name);
+    let shared = if pattern.contains(&Piece::Any) {
+        SHARED.iter().any(|branch| {
             [
                 (*branch).to_owned(),
                 format!("heads/{branch}"),
                 format!("refs/heads/{branch}"),
             ]
             .iter()
-            .any(|full| {
-                full.len() >= before.len() + after.len()
-                    && full.starts_with(before)
-                    && full.ends_with(after)
-            })
-        }),
+            .any(|full| Piece::matches(&pattern, &full.chars().collect::<Vec<_>>()))
+        })
+    } else {
+        SHARED.contains(&name)
     };
-    shared.then(|| name.to_owned())
+    shared.then(|| name.replace(shell::UNKNOWN, ""))
+}
+
+/// A part of a destination's name, as what it may become.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Piece {
+    /// Itself.
+    Char(char),
+    /// Any text: a wildcard.
+    Any,
+}
+
+impl Piece {
+    /// `name` as pieces: git's `*`, and each shell glob (`*`, `?`, a `[…]`)
+    /// or brace list the shell reading marked, are [`Piece::Any`]. A
+    /// substitution's mark is its own character, which no branch holds.
+    fn pattern(name: &str) -> Vec<Piece> {
+        let mut pieces = Vec::new();
+        let mut chars = name.chars().peekable();
+        while let Some(c) = chars.next() {
+            match (c, chars.peek()) {
+                ('*', _) => pieces.push(Piece::Any),
+                (shell::UNKNOWN, Some('*' | '?')) => {
+                    chars.next();
+                    pieces.push(Piece::Any);
+                }
+                (shell::UNKNOWN, Some('[')) => {
+                    chars.next();
+                    // Up to its `]`, where it has one; the rest is
+                    // itself either way.
+                    let mut class = chars.clone();
+                    if class.by_ref().skip(1).any(|c| c == ']') {
+                        chars = class;
+                    }
+                    pieces.push(Piece::Any);
+                }
+                // A list's mark is ahead of its `}`: back to its `{`, past
+                // the pairs it holds that aren't lists.
+                (shell::UNKNOWN, Some('}')) => {
+                    chars.next();
+                    let mut depth = 0;
+                    while let Some(piece) = pieces.pop() {
+                        match piece {
+                            Piece::Char('}') => depth += 1,
+                            Piece::Char('{') if depth == 0 => break,
+                            Piece::Char('{') => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    pieces.push(Piece::Any);
+                }
+                (c, _) => pieces.push(Piece::Char(c)),
+            }
+        }
+        pieces
+    }
+
+    /// Whether `pattern` can become `text`: for each piece in turn, the
+    /// lengths of `text` it and those before it can become.
+    fn matches(pattern: &[Piece], text: &[char]) -> bool {
+        let mut reach = vec![false; text.len() + 1];
+        reach[0] = true;
+        for piece in pattern {
+            reach = match piece {
+                Piece::Any => {
+                    let first = reach.iter().position(|&r| r).unwrap_or(reach.len());
+                    (0..reach.len()).map(|at| at >= first).collect()
+                }
+                Piece::Char(c) => (0..reach.len())
+                    .map(|at| at > 0 && reach[at - 1] && text[at - 1] == *c)
+                    .collect(),
+            };
+        }
+        reach[text.len()]
+    }
 }
 
 /// What a long option of `git push` means here.
@@ -324,4 +399,79 @@ fn run(git: &Path, at: &Path, args: &[&str]) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::asks;
+
+    /// What the guard asks of `cmd`; each names its refspecs, so git is
+    /// never asked.
+    fn said(cmd: &str) -> Vec<String> {
+        asks(cmd, Path::new("/"), Path::new("git"))
+    }
+
+    #[test]
+    fn a_glob_or_brace_list_in_a_destination_is_a_wildcard() {
+        for cmd in [
+            // Quoted, git's own wildcard; unquoted, the shell's too, which
+            // reaches git as it is when no file matches.
+            "git push -f origin 'refs/heads/*:refs/heads/*'",
+            "git push -f origin refs/heads/*:refs/heads/*",
+            "git push origin +refs/heads/*:refs/heads/*",
+            "git push origin +refs/*:refs/*",
+            "git push -f origin refs/heads/m*:refs/heads/m*",
+            "git push -f origin refs/heads/*",
+            "git push -f origin -- refs/heads/*",
+            "git push origin -- +refs/heads/*:refs/heads/*",
+            "git push --force origin x:*",
+            "git push -f origin ma?n",
+            "git push -f origin [m]ain",
+            "git push -f origin refs/heads/ma[a-z]n",
+            "git push -f origin {main,x}",
+            "git push -f origin x:m{a,i}in",
+            "git push -f origin x:refs/heads/{{},main}",
+            "git push -f origin x:{a,{main,b}}",
+            "git push -f origin {l..n}ain",
+            "bash -c 'git push -f origin refs/heads/*:refs/heads/*'",
+            "sh -c \"git push -f origin x:ma?n\"",
+        ] {
+            assert!(
+                said(cmd)
+                    .iter()
+                    .any(|s| s.starts_with("Force-push or delete of '")),
+                "{cmd}: {:?}",
+                said(cmd)
+            );
+        }
+        for cmd in [
+            "git push -f origin refs/heads/f*:refs/heads/f*",
+            "git push -f origin +refs/heads/*:refs/tags/*",
+            "git push -f origin feature-{a,b}",
+            "git push -f origin feat?re",
+            "git push -f origin x:refs/heads/f[a-z]*",
+            "git push origin refs/heads/*:refs/heads/*",
+            "git push -f origin feature $(echo main)",
+        ] {
+            assert_eq!(said(cmd), Vec::<String>::new(), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_push_after_a_here_document_with_a_glob_in_its_end_word_is_read() {
+        for cmd in [
+            "cat <<EOF?\nbody\nEOF?\ngit push \\\n-f origin main",
+            "cat <<-E*\n\tbody\n\tE*\ngit push \\\n-f origin main",
+            "cat <<'E'{a,b}\nbody\nE{a,b}\ngit push \\\n-f origin main",
+            "echo \"$(cat <<E?\nbody\nE?\n)\"; git push \\\n-f origin main",
+        ] {
+            assert_eq!(
+                said(cmd),
+                ["Force-push or delete of 'main' (R2: rewrites history other clones depend on)."],
+                "{cmd:?}"
+            );
+        }
+    }
 }
