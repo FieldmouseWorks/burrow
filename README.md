@@ -145,7 +145,8 @@ Each has an entry below, and each can be imported on its own.
   once you've raised the limit, and keeps any older proj's or watchdog's
   limit from holding it again).
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
-  model and overflow above a fresh weekly meter reading. Codex uses its own
+  model and overflow above a fresh weekly meter reading. A `ROLE@OWNER/REPO`
+  key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
   small slot pool (`codex.slots`, two), workspace-write with network, the
   shared one-way command list, and git hooks that mark its commits and
   refuse rewrites or deletes of the remote default branch. Log it in with

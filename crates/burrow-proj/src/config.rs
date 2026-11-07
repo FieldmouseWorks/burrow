@@ -55,7 +55,7 @@ pub struct Config {
     pub apps: BTreeMap<String, PathBuf>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
-    /// ROLE ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
+    /// ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
     /// Missing roles use Claude's default; malformed lines fail the turn.
     pub roles: PathBuf,
     /// Claude's weekly reading, written by usage-reset; absent disables overflow.
@@ -138,32 +138,39 @@ impl Config {
     }
 
     /// Resolve one role once per turn. Every non-comment line must parse,
-    /// so a typo never silently sends work to a different engine.
-    pub fn engine(&self, role: &str) -> Result<Choice, String> {
+    /// so a typo never silently sends work to a different engine. Repo scopes
+    /// beat bare roles; duplicate keys fail with both lines, even on other roles.
+    pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Choice, String> {
         let text = match std::fs::read_to_string(&self.roles) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("{}: {e}", self.roles.display())),
         };
-        let mut selected = None;
+        let mut entries = BTreeMap::new();
+        let now = crate::now();
         for (i, line) in text.lines().enumerate() {
             if line.trim().is_empty() || line.trim_start().starts_with('#') {
                 continue;
             }
-            let (name, choice) = crate::engine::role(line, self.meter.as_deref(), crate::now())
+            let (key, choice) = crate::engine::role(line, self.meter.as_deref(), now)
                 .map_err(|e| format!("{} line {}: {line}: {e}", self.roles.display(), i + 1))?;
-            if name == role {
-                if selected.is_some() {
-                    return Err(format!(
-                        "{} line {}: duplicate role {role}",
-                        self.roles.display(),
-                        i + 1
-                    ));
-                }
-                selected = Some(choice);
+            if let Some((first, original, _)) = entries.get(&key) {
+                return Err(format!(
+                    "{}: duplicate role key: line {first}: {original}; line {}: {line}",
+                    self.roles.display(),
+                    i + 1
+                ));
             }
+            entries.insert(key, (i + 1, line, choice));
         }
-        Ok(selected.unwrap_or_default())
+        Ok(entries
+            .into_iter()
+            .filter_map(|(key, (_, _, choice))| {
+                key.specificity(role, repo).map(|rank| (rank, choice))
+            })
+            .max_by_key(|(rank, _)| *rank)
+            .map(|(_, choice)| choice)
+            .unwrap_or_default())
     }
 
     /// How long a turn may wait in line, in seconds.
@@ -220,17 +227,17 @@ pub(crate) mod tests {
         let roles = dir.path().join("roles");
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.roles = roles.clone();
-        assert_eq!(cfg.engine("routine").unwrap(), Choice::default());
+        assert_eq!(cfg.engine("routine", None).unwrap(), Choice::default());
         std::fs::write(&roles, "# comment\nroutine codex:chosen\njudge claude\n").unwrap();
         assert_eq!(
-            cfg.engine("routine").unwrap(),
+            cfg.engine("routine", None).unwrap(),
             Choice {
                 engine: Engine::Codex,
                 model: Some("chosen".into())
             }
         );
-        assert_eq!(cfg.engine("judge").unwrap(), Choice::default());
-        assert_eq!(cfg.engine("missing").unwrap(), Choice::default());
+        assert_eq!(cfg.engine("judge", None).unwrap(), Choice::default());
+        assert_eq!(cfg.engine("missing", None).unwrap(), Choice::default());
         for bad in [
             "bare",
             "routine old-format",
@@ -241,10 +248,111 @@ pub(crate) mod tests {
             "routine claude over 101 codex",
             "routine claude over nope codex",
             "routine claude over 50",
+            "work@ codex",
+            "work@owner codex",
+            "work@/repo codex",
+            "work@owner/ codex",
+            "work@owner/repo/extra codex",
+            "work@owner/repo@other codex",
+            "@owner/repo codex",
         ] {
             std::fs::write(&roles, format!("# comment\n{bad}\n")).unwrap();
-            let error = cfg.engine("routine").unwrap_err();
+            let error = cfg.engine("routine", None).unwrap_err();
             assert!(error.contains("line 2") && error.contains(bad), "{error}");
+        }
+    }
+
+    #[test]
+    fn scoped_roles_beat_bare_roles_in_either_order_and_bare_beats_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        let scoped = "work@Sam/Code codex:scoped";
+        let bare = "work claude:bare";
+        for lines in [format!("{scoped}\n{bare}\n"), format!("{bare}\n{scoped}\n")] {
+            std::fs::write(&cfg.roles, lines).unwrap();
+            assert_eq!(
+                cfg.engine("work", Some("sAM/cODE")).unwrap(),
+                Choice {
+                    engine: Engine::Codex,
+                    model: Some("scoped".into())
+                }
+            );
+            for repo in [Some("sam/other"), Some("other/code"), None] {
+                assert_eq!(
+                    cfg.engine("work", repo).unwrap(),
+                    Choice {
+                        engine: Engine::Claude,
+                        model: Some("bare".into())
+                    }
+                );
+            }
+            assert_eq!(
+                cfg.engine("missing", Some("sam/code")).unwrap(),
+                Choice::default()
+            );
+        }
+        std::fs::write(&cfg.roles, scoped).unwrap();
+        assert_eq!(cfg.engine("work", None).unwrap(), Choice::default());
+        assert_eq!(
+            cfg.engine("work", Some("sam/other")).unwrap(),
+            Choice::default()
+        );
+    }
+
+    #[test]
+    fn duplicate_role_keys_report_both_lines_even_for_an_unselected_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        for (first, second) in [
+            ("work claude:bare", "work codex"),
+            ("work@Sam/Code claude", "work@sam/code codex over 80 claude"),
+        ] {
+            std::fs::write(
+                &cfg.roles,
+                format!("# header\n{first}\n# comment\n{second}\n"),
+            )
+            .unwrap();
+            let error = cfg.engine("other", Some("sam/other")).unwrap_err();
+            assert!(
+                error.contains(&format!("line 2: {first}"))
+                    && error.contains(&format!("line 4: {second}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn overflow_belongs_to_the_winning_scoped_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        let meter = dir.path().join("meter.json");
+        cfg.meter = Some(meter.clone());
+        std::fs::write(
+            &cfg.roles,
+            "work codex:bare\nwork@sam/code claude:scoped over 80 codex:burst\n",
+        )
+        .unwrap();
+        for (used, expected) in [
+            (
+                79,
+                Choice {
+                    engine: Engine::Claude,
+                    model: Some("scoped".into()),
+                },
+            ),
+            (
+                80,
+                Choice {
+                    engine: Engine::Codex,
+                    model: Some("burst".into()),
+                },
+            ),
+        ] {
+            std::fs::write(&meter, json!({"utilization":used, "resets_at":"2026-11-07T12:00:00Z", "read_at":crate::now()}).to_string()).unwrap();
+            assert_eq!(cfg.engine("work", Some("sam/code")).unwrap(), expected);
         }
     }
 

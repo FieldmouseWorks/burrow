@@ -13,7 +13,7 @@ mod command;
 mod role;
 mod stream;
 pub use command::{LONG, NEXT, exec_codex, spawn};
-pub use role::role;
+pub(crate) use role::role;
 pub use stream::{Said, answer, last_result, names_session, stream_names_session};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -41,7 +41,12 @@ pub struct Choice {
 /// Judges always use Claude, so a role or overflow cannot make Codex judge itself.
 pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     let role = read(&job.path("role")).unwrap_or_default();
-    let mut c = cfg.engine(&role)?;
+    let repo = if role.is_empty() {
+        String::new()
+    } else {
+        crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
+    };
+    let mut c = cfg.engine(&role, (!repo.is_empty()).then_some(repo.as_str()))?;
     if let Some(engine) = read(&job.path("engine")) {
         c = Choice::parse(&engine)?;
     }
@@ -138,5 +143,64 @@ mod tests {
         fs::remove_file(job.path("engine")).unwrap();
         fs::write(&cfg.roles, "steward-judged claude:chosen\n").unwrap();
         assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("chosen"));
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn scoped_choices_follow_the_project_origin_and_keep_judges_on_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        cfg.roles = dir.path().join("roles");
+        cfg.tools.git = "git".into();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&project)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        fs::create_dir(&project).unwrap();
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(job.path("role"), "steward-handed").unwrap();
+        fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
+        fs::write(&cfg.roles, "steward-handed claude:bare\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n").unwrap();
+        for url in [
+            "https://github.com/Sam/Code.git",
+            "git@github.com:SAM/CODE.git",
+            "ssh://git@github.com/Sam/Code",
+        ] {
+            git(&["remote", "set-url", "origin", url]);
+            assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
+        }
+        fs::write(job.path("role"), "steward-judged").unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
+        fs::write(job.path("role"), "steward-handed").unwrap();
+        for url in [
+            "https://github.com/other/code.git",
+            "https://gitlab.com/sam/code.git",
+            "/tmp/clone",
+        ] {
+            git(&["remote", "set-url", "origin", url]);
+            assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("bare"));
+        }
+        git(&["remote", "remove", "origin"]);
+        assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("bare"));
+        fs::remove_file(job.path("project")).unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("bare"));
     }
 }

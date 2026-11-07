@@ -131,8 +131,19 @@ into project jobs.
   answer.
 
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
-with `ENGINE` either `claude` or `codex`. An unlisted role uses Claude's
-default. Invalid lines fail the turn and name the line. Add
+with `ENGINE` either `claude` or `codex`. Scope a key to one repo with
+`ROLE@OWNER/REPO`:
+
+```
+steward-handed@octocat/project  codex
+steward-handed                  claude
+```
+
+The scoped line wins for that repo, regardless of line order; repo names
+match case-insensitively. Other repos, and jobs with no repo, use the bare
+role. With neither, the role uses Claude's default. Duplicate keys fail the
+turn and name both lines, including scopes spelled in different cases.
+Other invalid lines fail the turn and name the line. Add
 `over PCT ENGINE[:MODEL]` to move a turn to that engine when Claude's weekly
 meter reaches PCT. Missing readings, or readings an hour old, move nothing.
 `burrow.usageReset` supplies the meter and keeps its history in `meter.log`.

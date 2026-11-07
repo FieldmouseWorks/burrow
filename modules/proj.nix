@@ -391,9 +391,12 @@ in
       meanwhile), `proj ask` when its answer is a question for you to settle or
       relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
-      Roles live in ~/.config/proj/roles, one `ROLE ENGINE[:MODEL]` line each,
-      optionally followed by `over PCT ENGINE[:MODEL]` for a fresh weekly meter
-      at that percent. Engines are claude and codex; unlisted roles use Claude.
+      Roles live in ~/.config/proj/roles, one `ROLE ENGINE[:MODEL]` line each.
+      `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
+      other repos and jobs with no repo use the bare role. Duplicate keys fail
+      the turn with both lines named. Engines are claude and codex; unlisted
+      roles use Claude. Either kind of line may end with `over PCT ENGINE[:MODEL]`
+      for a fresh weekly meter at that percent.
       Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
       `autoland-codex-login job`, separately from the reviewer's login. Codex
       jobs cannot run in agent VMs. The steward's judge always uses Claude.

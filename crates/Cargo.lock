@@ -263,6 +263,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-codex",
  "burrow-events",
+ "burrow-github",
  "burrow-usage-reset",
  "burrow-watchdog",
  "jiff",
