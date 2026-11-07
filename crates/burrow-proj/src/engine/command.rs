@@ -1,9 +1,10 @@
 //! Engine argv and environment, inside the turn's timeout and login shell.
 
+use super::sandbox::{self, Env};
 use super::{Choice, Engine, stream::resume};
-use crate::{config::Config, job::Job, read, scratch};
+use crate::{config::Config, job::Job, scratch};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 /// How a job waits on its own long work, which its answer would stop.
@@ -27,7 +28,7 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
         .to_vec(),
         // Stay in the turn's unit, rather than a shared background daemon.
         // No --sandbox: the pinned CLI reads that flag as the legacy policy
-        // and drops the named profile configure_codex gives (its
+        // and drops the named profile `proj _codex` gives (its
         // resolve_permission_config_syntax), leaving only the cwd and /tmp
         // writable, .git read-only and the network, unix sockets included,
         // refused. The profile is the whole sandbox.
@@ -60,85 +61,6 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
 fn exec_flags(args: &mut Vec<String>, flags: Vec<String>) {
     let at = args.iter().position(|a| a == "exec").map_or(0, |i| i + 1);
     args.splice(at..at, flags);
-}
-
-/// The job's sandbox, as Codex's named permissions profile `proj`: the
-/// project, scratch, the job's own dir and git's common dir (worktrees made
-/// in scratch write there; an explicit grant also lifts the automatic .git
-/// protection) are writable, the rest of the machine is read-only but
-/// Codex's own login, and the network is on. The network grant is also what
-/// lets a command connect() to the gh-token socket under /run/gh-token: the
-/// pinned CLI's seccomp has no finer switch for unix sockets. Commands keep
-/// no_new_privs, since the filesystem isn't all writable, so sudo can't
-/// elevate.
-/// A project that isn't a repository yet gets its own `.git` granted
-/// without making it, so the job can `git init` there (the pinned CLI
-/// grants a path that doesn't exist yet), and Codex is told to start
-/// outside one. Returns the exec flags that go before `resume`.
-fn configure_codex(
-    cfg: &Config,
-    job: &Job,
-    scratch: &Path,
-    instructions: &str,
-    home: &Path,
-    codex_home: &Path,
-    args: &mut Vec<String>,
-) -> std::io::Result<Vec<String>> {
-    let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
-    // proj await/done and commands' wait files write only this job's state.
-    let mut roots = vec![project.clone(), scratch.to_owned(), job.dir.clone()];
-    let git = Command::new(&cfg.tools.git)
-        .arg("-C")
-        .arg(&project)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()?;
-    let (metadata, exec) = if git.status.success() {
-        let common = String::from_utf8_lossy(&git.stdout).trim().to_owned();
-        (PathBuf::from(common), Vec::new())
-    } else {
-        (
-            project.join(".git"),
-            vec!["--skip-git-repo-check".to_owned()],
-        )
-    };
-    for (var, default) in [
-        ("CARGO_HOME", home.join(".cargo")),
-        ("XDG_CACHE_HOME", home.join(".cache")),
-    ] {
-        let root = std::env::var_os(var).map(PathBuf::from).unwrap_or(default);
-        std::fs::create_dir_all(&root)?;
-        roots.push(if var == "XDG_CACHE_HOME" {
-            root.join("nix")
-        } else {
-            root
-        });
-    }
-    for root in &roots {
-        std::fs::create_dir_all(root)?;
-    }
-    roots.push(metadata);
-    let quoted = |s: &str| serde_json::to_string(s).expect("string");
-    // Its login, which the job's commands have no use for, isn't theirs to read.
-    let auth = codex_home.join("auth.json");
-    let roots = roots
-        .iter()
-        .map(|p| format!("{}=\"write\"", quoted(&p.to_string_lossy())))
-        .chain([format!("{}=\"deny\"", quoted(&auth.to_string_lossy()))])
-        .collect::<Vec<_>>()
-        .join(",");
-    for config in [
-        r#"approval_policy="never""#.to_owned(),
-        r#"default_permissions="proj""#.to_owned(),
-        format!("permissions.proj.filesystem={{\":root\"=\"read\",\"/tmp\"=\"write\",{roots}}}"),
-        "permissions.proj.network.enabled=true".to_owned(),
-        // The login shell's App env and git hook config must reach commands.
-        r#"shell_environment_policy.inherit="all""#.to_owned(),
-        "shell_environment_policy.ignore_default_excludes=true".to_owned(),
-        format!("developer_instructions={}", quoted(instructions)),
-    ] {
-        args.extend(["-c".into(), config]);
-    }
-    Ok(exec)
 }
 
 /// One run of Claude, its output appended to the turn's stream. It goes
@@ -195,22 +117,10 @@ pub fn spawn(
     if choice.engine == Engine::Claude {
         args.extend(["--append-system-prompt".into(), instructions]);
     } else {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| std::io::Error::other("HOME isn't set"))?;
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
-        let exec = configure_codex(
-            cfg,
-            job,
-            &scratch,
-            &instructions,
-            &home,
-            &codex_home,
-            &mut args,
-        )?;
-        exec_flags(&mut args, exec);
+        // The sandbox's own flags come once the login and the App's env have
+        // set the environment Codex starts in (`codex_args`).
+        let quoted = serde_json::to_string(&instructions).expect("string");
+        args.extend(["-c".into(), format!("developer_instructions={quoted}")]);
         args.push("-".into());
     }
     // A login shell, so the job sees the same PATH and env as an SSH login,
@@ -237,6 +147,27 @@ pub fn spawn(
         .spawn()
 }
 
+/// The login shell has applied the App's env, so this is the environment
+/// Codex starts in: the job's sandbox goes into its exec flags now
+/// ([`sandbox`]), naming the paths Codex and the job's commands will find.
+pub fn codex_args(
+    cfg: &Config,
+    args: &[String],
+    env: Env,
+    uid: u32,
+) -> Result<Vec<String>, String> {
+    let id = env("PROJ_JOB")
+        .and_then(|v| v.into_string().ok())
+        .filter(|v| !v.is_empty())
+        .ok_or("PROJ_JOB: proj _codex starts a proj job's Codex")?;
+    let job = Job::new(cfg, &id);
+    let flags = sandbox::flags(cfg, &job, &scratch::dir(cfg, &id), env, uid)
+        .map_err(|e| format!("couldn't make the job's sandbox: {e}"))?;
+    let mut args = args.to_vec();
+    exec_flags(&mut args, flags);
+    Ok(args)
+}
+
 /// The login shell has applied the App's env. Append this job's hooks to
 /// its git configuration now, preserving the App's credentials and rewrites.
 pub fn codex_command(
@@ -258,8 +189,11 @@ pub fn codex_command(
 pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let count = std::env::var("GIT_CONFIG_COUNT").ok();
+    let uid = rustix::process::getuid().as_raw();
+    let args = codex_args(cfg, args, &|name| std::env::var_os(name), uid)
+        .map_err(|e| crate::Fail::new(1, e))?;
     let mut command =
-        codex_command(cfg, args, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
+        codex_command(cfg, &args, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
     Err(crate::Fail::new(
         1,
         format!("couldn't start codex: {}", command.exec()),
@@ -302,75 +236,49 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_grants_are_exact_and_git_metadata_is_explicit() {
+    fn the_sandbox_is_made_in_the_environment_codex_starts_in() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
+        cfg.scratch = dir.path().join("scratch");
         cfg.tools.git = "git".into();
-        let project = dir.path().join("project");
-        assert!(
-            Command::new("git")
-                .arg("init")
-                .arg(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
         let job = Job::new(&cfg, "job");
         std::fs::create_dir_all(&job.dir).unwrap();
-        std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        let mut args = Vec::new();
-        let exec = configure_codex(
-            &cfg,
-            &job,
-            &dir.path().join("scratch"),
-            "This is proj job job",
-            &dir.path().join("home"),
-            &dir.path().join("home/.codex"),
-            &mut args,
-        )
-        .unwrap();
-        assert!(exec.is_empty());
-        let config = args.join("\n");
-        assert!(config.contains("default_permissions=\"proj\""));
-        assert!(config.contains("permissions.proj.network.enabled=true"));
-        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
-        assert!(config.contains("developer_instructions=\"This is proj job job\""));
-        assert!(config.contains(&format!("\"{}\"=\"write\"", job.dir.display())));
-        let auth = dir.path().join("home/.codex/auth.json");
-        assert!(config.contains(&format!("\"{}\"=\"deny\"", auth.display())));
-        // A sandbox mode anywhere would put the legacy policy in its place.
-        assert!(!config.contains("sandbox_mode"));
-    }
-
-    #[test]
-    fn a_project_with_no_repository_starts_and_may_make_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.jobs = dir.path().join("jobs");
-        cfg.tools.git = "git".into();
         let project = dir.path().join("plain");
         std::fs::create_dir_all(&project).unwrap();
-        let job = Job::new(&cfg, "job");
-        std::fs::create_dir_all(&job.dir).unwrap();
         std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        let mut args = Vec::new();
-        let exec = configure_codex(
-            &cfg,
-            &job,
-            &dir.path().join("scratch"),
-            "This is proj job job",
-            &dir.path().join("home"),
-            &dir.path().join("home/.codex"),
-            &mut args,
-        )
-        .unwrap();
-        assert_eq!(exec, ["--skip-git-repo-check"]);
-        // Its .git is granted, for a `git init`, but not made: an empty one
-        // would read as a broken repository.
+        let home = dir.path().join("home");
+        // Where the login shell's profile moved Codex's home to.
+        let moved = dir.path().join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let env = |name: &str| match name {
+            "PROJ_JOB" => Some("job".into()),
+            "HOME" => Some(home.clone().into()),
+            "CODEX_HOME" => Some(moved.clone().into()),
+            _ => None,
+        };
+        let c = Choice {
+            engine: Engine::Codex,
+            model: None,
+        };
+        let mut given = args(&c, Some("thread".into()));
+        given.push("-".into());
+        let args = codex_args(&cfg, &given, &env, u32::MAX).unwrap();
+        let auth = |dir: &Path| format!("\"{}\"=\"deny\"", dir.join("auth.json").display());
         let config = args.join("\n");
-        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
-        assert!(!project.join(".git").exists());
+        assert!(
+            config.contains(&auth(&moved.canonicalize().unwrap())),
+            "{config}"
+        );
+        assert!(!config.contains(&auth(&home.join(".codex"))), "{config}");
+        assert!(config.contains(&format!(
+            "\"{}\"=\"write\"",
+            cfg.scratch.join("jobs/job").display()
+        )));
+        // All of it is exec's, before resume; the prompt still comes last.
+        assert_eq!(args[..3], ["--no-daemon", "exec", "--skip-git-repo-check"]);
+        assert_eq!(args[args.len() - 4..], ["resume", "--json", "thread", "-"]);
+        assert!(codex_args(&cfg, &given, &|_| None, u32::MAX).is_err());
     }
 
     #[test]

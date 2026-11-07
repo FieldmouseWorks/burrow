@@ -45,7 +45,9 @@ let
   instructions = pkgs.writeText "proj-AGENTS.md" (config.burrow.claude.machineMd + ''
 
     Codex jobs run headless with network access, in a sandbox that writes only
-    the project, $PROJ_SCRATCH, the job's own dir and git's metadata. The
+    the project, $PROJ_SCRATCH, the job's own dir and git's metadata, and
+    hides Codex's login, the user's runtime dir (its D-Bus and systemd
+    manager: no systemctl --user or systemd-run --user) and tmux's servers. The
     sandbox's no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
     them to the owner. The machine's guard checks every command and patch first:
     what deletes or rewrites files gets an undo snapshot, or is refused without

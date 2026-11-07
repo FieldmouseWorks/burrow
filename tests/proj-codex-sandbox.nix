@@ -42,17 +42,52 @@ let
   # only its success writes, so a sandbox that refuses one shows: fetch,
   # make a worktree in its scratch and commit there, reach its App's token
   # socket, write its job's state (`proj done`), and, to be refused, write
-  # outside its roots and read Codex's login. No redirects: the guard wants
-  # an undo snapshot for those, and there's no ZFS here.
-  jobCalls = pkgs.writeText "codex-job-calls.json" (builtins.toJSON (map (cmd: [ "exec_command" { inherit cmd; } ]) [
+  # outside its roots, read Codex's login where the login shell moved it
+  # (through its symlink, and at its target), and reach what runs things
+  # outside the sandbox: the user's D-Bus and the systemd manager's private
+  # socket, spoken to directly, and a tmux server of the user's. No redirects: the guard wants an undo
+  # snapshot for those, and there's no ZFS here.
+  connect = path: "python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"${path}\")'";
+  calls = cmds: map (cmd: [ "exec_command" { inherit cmd; } ]) cmds;
+  firstCalls = calls [
     "git fetch -q origin && touch /data/dev/jobs/$PROJ_JOB/fetched"
     "git worktree add -q -b work \"$PROJ_SCRATCH/tree\" origin/trunk && git -C \"$PROJ_SCRATCH/tree\" commit -q --allow-empty -m changed && touch /data/dev/jobs/$PROJ_JOB/committed"
     "python3 -c 'import os, socket; socket.socket(socket.AF_UNIX).connect(os.environ[\"GH_TOKEN_SOCKET\"])' && touch /data/dev/jobs/$PROJ_JOB/connected"
     "grep -qx 'NoNewPrivs:[[:space:]]1' /proc/self/status && touch /data/dev/jobs/$PROJ_JOB/no-new-privs"
     "touch /data/dev/elsewhere/written || touch /data/dev/jobs/$PROJ_JOB/elsewhere-refused"
-    "cat ~/.codex/auth.json || touch /data/dev/jobs/$PROJ_JOB/login-refused"
+    "cat \"$CODEX_HOME/auth.json\" || touch /data/dev/jobs/$PROJ_JOB/login-refused"
+    "cat /data/dev/codex-home/auth.json || touch /data/dev/jobs/$PROJ_JOB/login-target-refused"
+    "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/bus-refused"
+    "${connect "/run/user/1001/systemd/private"} || touch /data/dev/jobs/$PROJ_JOB/manager-refused"
+    "tmux -L host new-window 'touch /data/dev/elsewhere/by-tmux' || touch /data/dev/jobs/$PROJ_JOB/tmux-refused"
     "proj done"
-  ]));
+  ];
+  # Its next turn, a resumed Codex with a fresh profile, held to the same.
+  resumedCalls = calls [
+    "touch /data/dev/elsewhere/resumed || touch /data/dev/jobs/$PROJ_JOB/resumed-elsewhere-refused"
+    "cat \"$CODEX_HOME/auth.json\" || touch /data/dev/jobs/$PROJ_JOB/resumed-login-refused"
+    "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/resumed-bus-refused"
+    "proj done"
+  ];
+  jobCalls = pkgs.writeText "codex-job-calls.json" (builtins.toJSON firstCalls);
+  bothCalls = pkgs.writeText "codex-job-calls-resumed.json" (builtins.toJSON (firstCalls ++ resumedCalls));
+  # Configs that would widen a profile proj names: the user's (with its
+  # default selection, an inherited parent and an extra grant) and the
+  # trusted project's. Neither may reach the job's sandbox.
+  widening = pkgs.writeText "codex-widening.toml" ''
+    [projects."/data/dev/src/web"]
+    trust_level = "trusted"
+    [permissions.wide]
+    filesystem = { ":root" = "write" }
+    network.enabled = true
+    [permissions.proj]
+    extends = "wide"
+    filesystem = { "/data/dev/elsewhere" = "write" }
+  '';
+  projectWidening = pkgs.writeText "codex-project-widening.toml" ''
+    [permissions.proj]
+    filesystem = { "/data/dev/elsewhere" = "write" }
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "proj-codex-sandbox";
@@ -74,7 +109,7 @@ pkgs.testers.runNixOSTest {
     };
     systemd.services.burrow-events.enable = false;
     systemd.timers.burrow-events-catch-up.enable = false;
-    environment.systemPackages = [ pkgs.git pkgs.python3 pkgs.jq ];
+    environment.systemPackages = [ pkgs.git pkgs.python3 pkgs.jq pkgs.tmux ];
     users.users.dev = { isNormalUser = true; uid = 1001; group = "dev"; };
     users.groups.dev.gid = 1001;
     virtualisation.memorySize = 2048;
@@ -105,19 +140,30 @@ pkgs.testers.runNixOSTest {
     upstream = dev("git -C /tmp/upstream rev-parse HEAD")
     # The stand-in model, the CLI's own catalog entry for one, and a login
     # the job mustn't read.
-    jobs.succeed("${model} 18555 ${jobCalls} >/tmp/model.log 2>&1 &")
+    jobs.succeed("cp ${jobCalls} /tmp/calls.json && chmod 0644 /tmp/calls.json")
+    jobs.succeed("${model} 18555 /tmp/calls.json >/tmp/model.log 2>&1 &")
     jobs.wait_for_open_port(18555)
+    # The login shell moves Codex's home, through a symlink, after proj has
+    # started the turn's unit: the deny must follow it there.
+    jobs.succeed("install -d -o dev -g dev -m 0700 /data/dev/codex-home")
+    dev("ln -s /data/dev/codex-home ~/codex-link && echo 'export CODEX_HOME=$HOME/codex-link' >>~/.bash_profile")
+    assert dev("echo $CODEX_HOME") == "/home/dev/codex-link"
     catalog = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
     dev("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(catalog) + " >~/catalog.json && jq -e '.models | length == 1' ~/catalog.json")
-    # Top-level, so before the config's provider table.
-    dev("(echo 'model_catalog_json = \"'$HOME'/catalog.json\"' && cat ${modelConfig}) >~/.codex/config.toml && chmod 0600 ~/.codex/config.toml")
-    dev("""echo '{"OPENAI_API_KEY": "sk-stand-in-login"}' >~/.codex/auth.json && chmod 0600 ~/.codex/auth.json""")
+    # Top-level, so before the config's tables.
+    dev("(echo 'model_catalog_json = \"'$HOME'/catalog.json\"' && echo 'default_permissions = \"proj\"' && cat ${modelConfig} ${widening}) >$CODEX_HOME/config.toml && chmod 0600 $CODEX_HOME/config.toml")
+    dev("""echo '{"OPENAI_API_KEY": "sk-stand-in-login"}' >$CODEX_HOME/auth.json && chmod 0600 $CODEX_HOME/auth.json""")
+    # Untracked, as a job's own write there would be.
+    dev("mkdir /data/dev/src/web/.codex && cp ${projectWidening} /data/dev/src/web/.codex/config.toml")
+    # A tmux server of the user's, outside any sandbox.
+    dev("tmux -L host new-session -d 'sleep infinity'")
     dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
     j = dev('proj run --role coder --app workers web "go"')
     jobs.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
-    for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused"]:
+    for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
+                 "login-target-refused", "bus-refused", "manager-refused", "tmux-refused"]:
         assert mark in marks, (mark, marks, said)
     # The job's own state, written by `proj done` inside the sandbox.
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
@@ -125,9 +171,22 @@ pkgs.testers.runNixOSTest {
     # git's common dir, went through proj's hooks.
     assert dev("git -C /data/dev/src/web rev-parse origin/trunk") == upstream
     assert "Engine: codex" in dev("git -C /data/dev/src/web log -1 --format=%B work")
-    jobs.fail("test -e /data/dev/elsewhere/written")
+    for path in ["written", "by-tmux"]:
+        jobs.fail(f"test -e /data/dev/elsewhere/{path}")
     assert "sk-stand-in-login" not in said, said
     assert "is ignored" not in said and "metadata for `stand-in` not found" not in said, said
+
+    # A reply resumes it: a fresh start of Codex, under the same configs.
+    jobs.succeed("cp ${bothCalls} /tmp/calls.json")
+    dev(f'proj reply {j} "again"')
+    jobs.wait_until_succeeds(f"test -e /data/dev/jobs/{j}/2.jsonl && su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
+    marks = dev(f"ls /data/dev/jobs/{j}").split()
+    said = jobs.execute(f"cat /data/dev/jobs/{j}/2.jsonl /data/dev/jobs/{j}/2.stderr")[1]
+    for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-bus-refused"]:
+        assert mark in marks, (mark, marks, said)
+    assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
+    jobs.fail("test -e /data/dev/elsewhere/resumed")
+    assert "sk-stand-in-login" not in said, said
 
     machine.wait_for_unit("multi-user.target")
     def worker(command):
