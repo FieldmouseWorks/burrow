@@ -40,7 +40,25 @@ fn grown() {
             "a/AGENTS.md",
         )])
         .tree("4ead", "b/AGENTS.md", &own(GUIDE + 1)),
-        // Something else renamed to one is new to it.
+        // Something else renamed to one is new to it, lines added or not.
+        case(vec![from(
+            change("renamed", "AGENTS.md", 0, 0),
+            "docs/guide.md",
+        )])
+        .tree("4ead", "AGENTS.md", &own(GUIDE + 1)),
+        // Its own part grew while the whole file shrank: the house blocks
+        // lost more lines than the guide gained.
+        case(vec![change("modified", "AGENTS.md", 1, 10)])
+            .tree(
+                "4ead",
+                "AGENTS.md",
+                &format!("{}{}", own(GUIDE + 1), blocks(5)),
+            )
+            .tree(
+                "3e7b",
+                "AGENTS.md",
+                &format!("{}{}", own(GUIDE), blocks(15)),
+            ),
         case(vec![from(
             change("renamed", "AGENTS.md", 1, 0),
             "docs/guide.md",

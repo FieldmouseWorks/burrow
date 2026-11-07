@@ -34,3 +34,24 @@ fn not_a_block() {
         3
     );
 }
+
+// A block's end is its own name's: an unclosed rules block can't borrow the
+// prs block's end, and a nested or interleaved marker breaks the span.
+#[test]
+fn names_must_match() {
+    let own = "x\n".repeat(101);
+    let agents = format!(
+        "<!-- house:rules v1 begin -->\n{own}<!-- house:prs v1 begin -->\nP\n<!-- house:prs end -->\n"
+    );
+    assert_eq!(own_lines(agents.as_bytes()), 102);
+    assert_eq!(
+        own_lines(b"<!-- house:rules v1 begin -->\na\n<!-- house:prs end -->\n"),
+        3
+    );
+    assert_eq!(
+        own_lines(
+            b"<!-- house:rules v1 begin -->\n<!-- house:prs v1 begin -->\nP\n<!-- house:prs end -->\n<!-- house:rules end -->\n"
+        ),
+        2
+    );
+}

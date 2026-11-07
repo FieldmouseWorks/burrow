@@ -144,7 +144,7 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
                 diff.big.push((file.to_owned(), length));
             }
         }
-        if status != "removed" && (new_file || added > removed) && rules::is_guide(file) {
+        if status != "removed" && rules::is_guide(file) {
             let own = contents.own_lines(file, head)?;
             let had = match (new_file, rules::is_guide(previous)) {
                 (false, true) => contents.own_lines(previous, origin)?,
