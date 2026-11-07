@@ -148,11 +148,12 @@ pub fn spawn(
 }
 
 /// Codex's argv, the job's own /tmp it runs over, and the machine's paths
-/// under /tmp kept there.
+/// under /tmp kept there, and where the CODEX_HOME it was given leads.
 pub struct Start {
     pub args: Vec<String>,
     pub tmp: PathBuf,
     pub kept: Vec<PathBuf>,
+    pub codex_home: Option<PathBuf>,
 }
 
 /// The login shell has applied the App's env, so this is the environment
@@ -181,6 +182,7 @@ pub fn codex_args(
         args,
         tmp,
         kept: sandbox.kept,
+        codex_home: sandbox.codex_home,
     })
 }
 
@@ -193,11 +195,16 @@ pub fn codex_command(cfg: &Config, start: &Start, count: Option<&str>) -> Result
         .parse()
         .map_err(|_| "GIT_CONFIG_COUNT isn't a number")?;
     let mut c = Command::new(&cfg.tools.bwrap);
-    c.args(sandbox::wrap(&start.tmp, &start.kept, &cfg.tools.codex))
-        .args(&start.args)
-        .env("GIT_CONFIG_COUNT", (count + 1).to_string())
-        .env(format!("GIT_CONFIG_KEY_{count}"), "core.hooksPath")
-        .env(format!("GIT_CONFIG_VALUE_{count}"), &cfg.codex_hooks);
+    c.args(sandbox::wrap(
+        &start.tmp,
+        &start.kept,
+        start.codex_home.as_deref(),
+        &cfg.tools.codex,
+    ))
+    .args(&start.args)
+    .env("GIT_CONFIG_COUNT", (count + 1).to_string())
+    .env(format!("GIT_CONFIG_KEY_{count}"), "core.hooksPath")
+    .env(format!("GIT_CONFIG_VALUE_{count}"), &cfg.codex_hooks);
     Ok(c)
 }
 pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
@@ -241,6 +248,7 @@ mod tests {
             args: vec!["exec".into(), "--json".into()],
             tmp: "/scratch/tmp".into(),
             kept: vec!["/tmp/codex".into()],
+            codex_home: Some("/home/dev/codex".into()),
         };
         let command = codex_command(&cfg, &start, Some("9")).unwrap();
         // Codex, over the job's own /tmp with what it keeps of the
@@ -254,6 +262,12 @@ mod tests {
         assert_eq!(
             argv[argv.len() - 4..],
             ["--", "/bin/codex", "exec", "--json"]
+        );
+        // With the CODEX_HOME it was given, where that leads.
+        let home = argv.iter().position(|a| *a == "CODEX_HOME").unwrap();
+        assert_eq!(
+            argv[home - 1..=home + 1],
+            ["--setenv", "CODEX_HOME", "/home/dev/codex"]
         );
         let env: std::collections::BTreeMap<_, _> = command
             .get_envs()
@@ -295,8 +309,14 @@ mod tests {
         };
         let mut given = args(&c, Some("thread".into()));
         given.push("-".into());
-        let Start { args, tmp, kept } = codex_args(&cfg, &given, &env, &machine).unwrap();
+        let Start {
+            args,
+            tmp,
+            kept,
+            codex_home,
+        } = codex_args(&cfg, &given, &env, &machine).unwrap();
         assert_eq!(tmp, cfg.scratch.join("jobs/job/tmp"));
+        assert_eq!(codex_home, Some(moved.canonicalize().unwrap()));
         assert!(kept.is_empty(), "{kept:?}");
         let denied = |dir: &Path| format!("\"{}\"=\"deny\"", dir.display());
         let config = args.join("\n");

@@ -204,13 +204,15 @@ pkgs.testers.runNixOSTest {
     jobs.succeed("cp ${jobCalls} /tmp/calls.json && chmod 0644 /tmp/calls.json")
     jobs.succeed("${model} 18555 /tmp/calls.json >/tmp/model.log 2>&1 &")
     jobs.wait_for_open_port(18555)
-    # The login shell moves Codex's home, through a symlink, after proj has
-    # started the turn's unit: the deny must follow it there. It's in the
-    # machine's /tmp, which Codex's own start keeps, or Codex would find no
-    # config, login or session there.
+    # The login shell moves Codex's home, through a chain of symlinks, after
+    # proj has started the turn's unit: the deny must follow it there. The
+    # chain starts in the machine's /tmp, which the job's own hides, so
+    # Codex starts with where it ends; that's in the machine's /tmp too,
+    # which Codex's own start keeps, or Codex would find no config, login
+    # or session there.
     jobs.succeed("install -d -o dev -g dev -m 0700 /tmp/codex-home")
-    dev("ln -s /tmp/codex-home ~/codex-link && echo 'export CODEX_HOME=$HOME/codex-link' >>~/.bash_profile")
-    assert dev("echo $CODEX_HOME") == "/home/dev/codex-link"
+    dev("ln -s /tmp/codex-home ~/codex-hop && ln -s ~/codex-hop /tmp/codex-link && echo 'export CODEX_HOME=/tmp/codex-link' >>~/.bash_profile")
+    assert dev("echo $CODEX_HOME") == "/tmp/codex-link"
     catalog = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
     dev("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(catalog) + " >~/catalog.json && jq -e '.models | length == 1' ~/catalog.json")
     # Top-level, so before the config's tables.

@@ -185,30 +185,98 @@ fn denied(env: Env) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Where resolving PATH looks in the machine's TMP, the way the kernel walks
+/// it: each name of TMP it looks up, with the rest of the path after it
+/// (`/tmp/link/rest`, where a symlink led there), and where it ends. The job's
+/// /tmp is another dir, so each of those lookups has to find its path kept
+/// there, or PATH would lead somewhere else, or nowhere, in the job: a
+/// symlink in /tmp that leads out, one outside that leads in, and every hop
+/// of a chain between them. TMP is canonical, as the machine's /tmp is.
+fn lookups_in(path: &Path, tmp: &Path) -> io::Result<(Vec<PathBuf>, PathBuf)> {
+    use std::collections::VecDeque;
+    let named = path.to_owned();
+    let parts = |path: &Path| -> VecDeque<OsString> {
+        path.components()
+            .map(|c| c.as_os_str().to_owned())
+            .collect()
+    };
+    let mut rest = parts(&std::path::absolute(path)?);
+    let mut at = PathBuf::from("/");
+    let mut lookups = Vec::new();
+    let mut links = 0;
+    while let Some(part) = rest.pop_front() {
+        match part.to_str() {
+            Some("/") => at = "/".into(),
+            Some(".") => {}
+            Some("..") => {
+                at.pop();
+            }
+            _ => {
+                if at == tmp {
+                    // Only names follow, or the lookup's path would say
+                    // something other than where it leads.
+                    if rest.iter().any(|p| p == "..") {
+                        return Err(io::Error::other(format!(
+                            "{} goes back up (..) under {}, which the job's own /tmp can't keep",
+                            named.display(),
+                            tmp.display()
+                        )));
+                    }
+                    let mut lookup = at.join(&part);
+                    lookup.extend(rest.iter().filter(|p| *p != "."));
+                    lookups.push(lookup);
+                }
+                let next = at.join(&part);
+                match next.symlink_metadata() {
+                    Ok(meta) if meta.is_symlink() => {
+                        links += 1;
+                        if links > 40 {
+                            return Err(io::Error::other(format!(
+                                "{} has too many symlinks to resolve",
+                                named.display()
+                            )));
+                        }
+                        let mut target = parts(&std::fs::read_link(&next)?);
+                        target.extend(rest);
+                        rest = target;
+                    }
+                    _ => at = next,
+                }
+            }
+        }
+    }
+    Ok((lookups, at))
+}
+
 /// The machine's paths under its /tmp that the job's sandbox names, as
-/// named and where a symlink leads, each with the access its entry gives:
-/// Codex starts over the job's own /tmp, so these are kept there, bound
-/// from the machine's, or Codex's home, the project, its git metadata, the
-/// job's state and the tools' config there would be gone or other files.
-/// Nothing else of the machine's /tmp is. One that isn't there has nothing
-/// to keep; /tmp itself can't be kept, as the job's own is there.
+/// named, at each hop of a symlink there ([`lookups_in`]), and where they
+/// lead, each with the access its entry gives: Codex starts over the job's
+/// own /tmp, so these are kept there, bound from the machine's, or Codex's
+/// home, the project, its git metadata, the job's state and the tools'
+/// config there would be gone or other files. Nothing else of the machine's
+/// /tmp is. One that isn't there has nothing to keep; /tmp itself can't be
+/// kept, as the job's own is there.
 fn under_tmp(
     entries: &BTreeMap<PathBuf, Access>,
     tmp: &Path,
 ) -> io::Result<Vec<(PathBuf, Access)>> {
+    // Walked from the machine's root, so compared where /tmp really is,
+    // and kept where it's named.
+    let real = tmp.canonicalize().unwrap_or_else(|_| tmp.to_owned());
     let mut kept = Vec::new();
     for (path, access) in entries {
-        let canonical = path.canonicalize().ok();
-        for place in [Some(path), canonical.as_ref()].into_iter().flatten() {
-            if place == tmp {
-                return Err(io::Error::other(format!(
-                    "{} is {}, which is the job's own",
-                    path.display(),
-                    tmp.display()
-                )));
-            }
-            if place.starts_with(tmp) && place.exists() {
-                kept.push((place.clone(), *access));
+        let (lookups, end) = lookups_in(path, &real)?;
+        if end == real {
+            return Err(io::Error::other(format!(
+                "{} is {}, which is the job's own",
+                path.display(),
+                tmp.display()
+            )));
+        }
+        for lookup in lookups {
+            let place = tmp.join(lookup.strip_prefix(&real).map_err(io::Error::other)?);
+            if place.exists() && !kept.contains(&(place.clone(), *access)) {
+                kept.push((place, *access));
             }
         }
     }
@@ -273,7 +341,14 @@ pub fn private_tmp(scratch: &Path) -> io::Result<PathBuf> {
 /// the machine's paths KEPT there bound over it from the machine's (bwrap
 /// takes a bind's source from the machine's own root), and the rest of the
 /// machine as it is: Codex's own sandbox for each command then nests in it.
-pub fn wrap(tmp: &Path, kept: &[PathBuf], codex: &Path) -> Vec<OsString> {
+/// A CODEX_HOME that was set is set again to where it leads
+/// ([`Sandbox::codex_home`]).
+pub fn wrap(
+    tmp: &Path,
+    kept: &[PathBuf],
+    codex_home: Option<&Path>,
+    codex: &Path,
+) -> Vec<OsString> {
     let mut argv: Vec<OsString> = ["--dev-bind", "/", "/", "--bind"]
         .iter()
         .map(OsString::from)
@@ -284,6 +359,13 @@ pub fn wrap(tmp: &Path, kept: &[PathBuf], codex: &Path) -> Vec<OsString> {
             "--bind".into(),
             path.as_os_str().to_owned(),
             path.as_os_str().to_owned(),
+        ]);
+    }
+    if let Some(home) = codex_home {
+        argv.extend([
+            "--setenv".into(),
+            "CODEX_HOME".into(),
+            home.as_os_str().to_owned(),
         ]);
     }
     argv.extend(
@@ -315,6 +397,12 @@ pub struct Sandbox {
     /// The machine's paths under its /tmp that Codex or the job uses, kept
     /// in the job's own ([`under_tmp`]).
     pub kept: Vec<PathBuf>,
+    /// Where a CODEX_HOME that was set leads ([`codex_home`]), for Codex to
+    /// start with in its place: the path it was set to may go by way of the
+    /// machine's /tmp (a symlink there, or one hop of a chain), which the
+    /// job's own replaces, while where it leads is the home the profile
+    /// denies, there outside /tmp or kept in it.
+    pub codex_home: Option<PathBuf>,
 }
 
 /// The job's sandbox. A project that isn't a repository yet gets its own
@@ -412,502 +500,15 @@ pub fn flags(
     ] {
         flags.extend(["-c".into(), config]);
     }
-    Ok(Sandbox { flags, kept })
+    let codex_home = var(env, "CODEX_HOME")
+        .map(|_| codex_home(env))
+        .transpose()?;
+    Ok(Sandbox {
+        flags,
+        kept,
+        codex_home,
+    })
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    /// An environment of just these variables.
-    fn env_of(vars: &[(&str, &Path)]) -> impl Fn(&str) -> Option<OsString> + use<> {
-        let vars: HashMap<String, OsString> = vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.as_os_str().to_owned()))
-            .collect();
-        move |name| vars.get(name).cloned()
-    }
-
-    /// A job in DIR whose project is PROJECT, and its config.
-    fn job_in(dir: &Path, project: &Path) -> Config {
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.jobs = dir.join("jobs");
-        cfg.tools.git = "git".into();
-        let job = Job::new(&cfg, "job");
-        std::fs::create_dir_all(&job.dir).unwrap();
-        std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        cfg
-    }
-
-    /// A machine in DIR: its own paths are `system`, which is there, and
-    /// `gone`, which isn't; its resolver config links to `resolved/stub`;
-    /// its /tmp is `tmp`.
-    pub(crate) fn machine_in(dir: &Path) -> Machine {
-        std::fs::create_dir_all(dir.join("system")).unwrap();
-        std::fs::create_dir_all(dir.join("resolved")).unwrap();
-        std::fs::write(dir.join("resolved/stub"), "nameserver 127.0.0.53\n").unwrap();
-        std::os::unix::fs::symlink(dir.join("resolved/stub"), dir.join("resolv.conf")).unwrap();
-        Machine {
-            system: vec![dir.join("system"), dir.join("gone")],
-            resolver: dir.join("resolv.conf"),
-            tmp: dir.join("tmp"),
-        }
-    }
-
-    fn deny(path: &Path) -> String {
-        format!("\"{}\"=\"deny\"", path.display())
-    }
-
-    #[test]
-    fn grants_are_exact_git_metadata_is_explicit_and_the_login_hidden() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        assert!(
-            Command::new("git")
-                .arg("init")
-                .arg(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let cfg = job_in(dir.path(), &project);
-        let job = Job::new(&cfg, "job");
-        let machine = machine_in(dir.path());
-        let home = dir.path().join("home");
-        let env = env_of(&[("HOME", &home)]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
-            .unwrap()
-            .flags;
-        assert_eq!(flags[0], "-c", "no exec flags for a repository");
-        let config = flags.join("\n");
-        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
-        assert!(config.contains(&format!("\"{}\"=\"write\"", job.dir.display())));
-        assert!(config.contains(&format!("\"{}\"=\"write\"", home.join(".cargo").display())));
-        // Codex's home, its login in it, is denied whole.
-        assert!(config.contains(&deny(&home.join(".codex"))));
-        assert!(!config.contains(&deny(&home.join(".codex/auth.json"))));
-        // A sandbox mode anywhere would put the legacy policy in its place.
-        assert!(!config.contains("sandbox_mode"));
-    }
-
-    #[test]
-    fn the_profile_is_one_no_config_can_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("plain");
-        std::fs::create_dir_all(&project).unwrap();
-        let cfg = job_in(dir.path(), &project);
-        let job = Job::new(&cfg, "job");
-        let machine = machine_in(dir.path());
-        let home = dir.path().join("home");
-        let env = env_of(&[("HOME", &home)]);
-        let profile = |flags: &[String]| {
-            let selected = flags
-                .iter()
-                .find_map(|f| f.strip_prefix("default_permissions=\""))
-                .and_then(|f| f.strip_suffix('"'))
-                .expect("a profile")
-                .to_owned();
-            let named: Vec<&String> = flags
-                .iter()
-                .filter(|f| f.starts_with("permissions."))
-                .collect();
-            assert_eq!(named.len(), 2, "{named:?}");
-            for f in named {
-                assert!(f.starts_with(&format!("permissions.{selected}.")), "{f}");
-            }
-            selected
-        };
-        let scratch = dir.path().join("scratch");
-        let first = profile(&flags(&cfg, &job, &scratch, &env, &machine).unwrap().flags);
-        let again = profile(&flags(&cfg, &job, &scratch, &env, &machine).unwrap().flags);
-        assert_ne!(first, "proj");
-        assert!(
-            first.starts_with("proj-") && first.len() == "proj-".len() + 32,
-            "{first}"
-        );
-        assert_ne!(first, again, "each start of Codex names its own");
-    }
-
-    #[test]
-    fn a_project_with_no_repository_starts_and_may_make_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("plain");
-        std::fs::create_dir_all(&project).unwrap();
-        let cfg = job_in(dir.path(), &project);
-        let job = Job::new(&cfg, "job");
-        let machine = machine_in(dir.path());
-        let env = env_of(&[("HOME", &dir.path().join("home"))]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
-            .unwrap()
-            .flags;
-        assert_eq!(flags[0], "--skip-git-repo-check");
-        // Its .git is granted, for a `git init`, but not made: an empty one
-        // would read as a broken repository.
-        let config = flags.join("\n");
-        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
-        assert!(!project.join(".git").exists());
-    }
-
-    #[test]
-    fn codex_home_is_found_as_codex_finds_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        let real = dir.path().join("real-codex");
-        std::fs::create_dir_all(&real).unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let empty = PathBuf::new();
-        // Unset or empty: HOME's .codex.
-        assert_eq!(
-            codex_home(&env_of(&[("HOME", &home)])).unwrap(),
-            home.join(".codex")
-        );
-        assert_eq!(
-            codex_home(&env_of(&[("HOME", &home), ("CODEX_HOME", &empty)])).unwrap(),
-            home.join(".codex")
-        );
-        // Set: canonical, through a symlink or a relative path.
-        let real = real.canonicalize().unwrap();
-        assert_eq!(codex_home(&env_of(&[("CODEX_HOME", &link)])).unwrap(), real);
-        assert_eq!(
-            codex_home(&env_of(&[("CODEX_HOME", &link.join("../real-codex"))])).unwrap(),
-            real
-        );
-        assert_eq!(
-            codex_home(&env_of(&[("CODEX_HOME", Path::new("."))])).unwrap(),
-            std::env::current_dir().unwrap().canonicalize().unwrap()
-        );
-        // Codex won't start on a CODEX_HOME that isn't a directory; nor does the job.
-        assert!(codex_home(&env_of(&[("CODEX_HOME", &dir.path().join("missing"))])).is_err());
-        // A relative HOME is made absolute; none at all stops the job.
-        assert_eq!(
-            codex_home(&env_of(&[("HOME", Path::new("rel"))])).unwrap(),
-            std::env::current_dir().unwrap().join("rel/.codex")
-        );
-        assert!(codex_home(&env_of(&[("HOME", &empty)])).is_err());
-    }
-
-    #[test]
-    fn the_login_is_denied_where_codex_keeps_it_and_where_it_leads() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real-codex");
-        std::fs::create_dir_all(&real).unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        std::fs::write(real.join("elsewhere.json"), "{}").unwrap();
-        std::os::unix::fs::symlink(real.join("elsewhere.json"), real.join("auth.json")).unwrap();
-        let env = env_of(&[("HOME", &dir.path().join("home")), ("CODEX_HOME", &link)]);
-        let paths = denied(&env).unwrap();
-        let real = real.canonicalize().unwrap();
-        assert!(paths.contains(&real.join("auth.json")), "{paths:?}");
-        assert!(paths.contains(&real.join("elsewhere.json")), "{paths:?}");
-        // Not yet there, it's denied all the same.
-        let env = env_of(&[("HOME", &dir.path().join("home"))]);
-        let paths = denied(&env).unwrap();
-        assert!(
-            paths.contains(&dir.path().join("home/.codex/auth.json")),
-            "{paths:?}"
-        );
-    }
-
-    #[test]
-    fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing_else() {
-        use std::os::unix::net::UnixListener;
-        let dir = tempfile::tempdir().unwrap();
-        let machine = machine_in(dir.path());
-        let home = dir.path().join("home");
-        std::fs::create_dir_all(home.join(".config/git")).unwrap();
-        std::fs::create_dir_all(home.join(".rustup")).unwrap();
-        std::fs::write(home.join(".gitconfig"), "[user]\n").unwrap();
-        // A socket where git's XDG config would be: not a file, not read.
-        let _server = UnixListener::bind(home.join(".config/git/config")).unwrap();
-        let token = dir.path().join("gh-token/workers.sock");
-        let env = env_of(&[("HOME", &home), ("GH_TOKEN_SOCKET", &token)]);
-        let paths = readable(&env, &machine).unwrap();
-        assert_eq!(
-            paths,
-            [
-                dir.path().join("system"),
-                dir.path().join("resolved/stub").canonicalize().unwrap(),
-                dir.path().join("gh-token"),
-                home.join(".rustup"),
-                home.join(".gitconfig"),
-            ]
-        );
-        // GIT_CONFIG_GLOBAL is the only global config git reads, and
-        // RUSTUP_HOME where rustup's toolchains are, when set; a resolver
-        // config that isn't a file adds nothing.
-        let global = dir.path().join("global");
-        std::fs::write(&global, "").unwrap();
-        let toolchains = dir.path().join("toolchains");
-        std::fs::create_dir_all(&toolchains).unwrap();
-        let env = env_of(&[
-            ("HOME", &home),
-            ("GIT_CONFIG_GLOBAL", &global),
-            ("RUSTUP_HOME", &toolchains),
-        ]);
-        let machine = Machine {
-            resolver: dir.path().join("missing"),
-            ..machine
-        };
-        assert_eq!(
-            readable(&env, &machine).unwrap(),
-            [dir.path().join("system"), toolchains, global]
-        );
-        // Nor one of the CLI's platform defaults below it, where the CLI's
-        // own helpers mount it again.
-        for path in SYSTEM {
-            for default in PLATFORM {
-                assert!(
-                    path == default || !Path::new(default).starts_with(path),
-                    "{path} holds {default}"
-                );
-            }
-        }
-        // The real list holds none of the places a user's process binds
-        // its sockets, nor a dir above one.
-        for shared in [
-            "/tmp",
-            "/var/tmp",
-            "/run/user",
-            "/home",
-            "/data",
-            "/dev/shm",
-        ] {
-            for path in SYSTEM {
-                let path = Path::new(path);
-                assert!(
-                    !path.starts_with(shared) && !Path::new(shared).starts_with(path),
-                    "{}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_profile_starts_from_nothing_but_its_grants() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("plain");
-        std::fs::create_dir_all(&project).unwrap();
-        let cfg = job_in(dir.path(), &project);
-        let job = Job::new(&cfg, "job");
-        let machine = machine_in(dir.path());
-        let home = dir.path().join("home");
-        let env = env_of(&[("HOME", &home)]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
-            .unwrap()
-            .flags;
-        let filesystem = flags
-            .iter()
-            .find(|f| f.contains(".filesystem="))
-            .expect("a filesystem table");
-        assert!(!filesystem.contains(":root"), "{filesystem}");
-        assert!(!filesystem.contains(":minimal"), "{filesystem}");
-        assert!(filesystem.contains(&format!(
-            "\"{}\"=\"read\"",
-            dir.path().join("system").display()
-        )));
-        assert!(!filesystem.contains(&dir.path().join("gone").display().to_string()));
-        assert!(
-            filesystem.contains(&format!("\"{}\"=\"write\"", machine.tmp.display())),
-            "{filesystem}"
-        );
-        // Nothing of home is there but its grants: not home itself.
-        assert!(!filesystem.contains(&format!("\"{}\"=", home.display())));
-        // Commands build through the daemon, the store being read-only.
-        assert!(flags.contains(&r#"shell_environment_policy.set.NIX_REMOTE="daemon""#.to_owned()));
-    }
-
-    /// The filesystem table's entry for PATH, if it has one.
-    fn entry(flags: &[String], path: &Path) -> Option<String> {
-        let filesystem = flags.iter().find(|f| f.contains(".filesystem="))?;
-        let key = format!("\"{}\"=\"", path.display());
-        let at = filesystem.find(&key)? + key.len();
-        Some(filesystem[at..].split('"').next()?.to_owned())
-    }
-
-    #[test]
-    fn what_codex_and_the_job_use_under_tmp_is_kept_with_its_own_access() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let machine = machine_in(dir.path());
-        let tmp = machine.tmp.clone();
-        // The project a worktree under /tmp, its repository's git metadata
-        // there too; the job's state and scratch there.
-        let repo = tmp.join("repo");
-        let project = tmp.join("project");
-        let git = |args: &[&str]| {
-            assert!(Command::new("git").args(args).status().unwrap().success());
-        };
-        git(&["init", "-q", repo.to_str().unwrap()]);
-        git(&[
-            "-C",
-            repo.to_str().unwrap(),
-            "-c",
-            "user.name=T",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "i",
-        ]);
-        git(&[
-            "-C",
-            repo.to_str().unwrap(),
-            "worktree",
-            "add",
-            "-q",
-            project.to_str().unwrap(),
-        ]);
-        let mut cfg = job_in(&tmp, &project);
-        cfg.scratch = tmp.join("scratch");
-        let job = Job::new(&cfg, "job");
-        let scratch = cfg.scratch.join("job");
-        // HOME there, so cargo's and nix's caches are; Codex's home there
-        // through a symlink from outside; git's config a file right in
-        // /tmp; rustup's toolchains through a symlink in /tmp to outside;
-        // the token's socket in a dir there.
-        let home = tmp.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(tmp.join("codex-home")).unwrap();
-        std::fs::write(tmp.join("codex-home/auth.json"), "{}").unwrap();
-        let link = dir.path().join("codex-link");
-        symlink(tmp.join("codex-home"), &link).unwrap();
-        let global = tmp.join("gitconfig");
-        std::fs::write(&global, "[user]\n").unwrap();
-        let toolchains = dir.path().join("toolchains");
-        std::fs::create_dir_all(&toolchains).unwrap();
-        let rustup = tmp.join("rustup");
-        symlink(&toolchains, &rustup).unwrap();
-        std::fs::create_dir_all(tmp.join("gh-token")).unwrap();
-        let token = tmp.join("gh-token/workers.sock");
-        // What else is in the machine's /tmp: none of the job's.
-        std::fs::create_dir_all(tmp.join("tmux-1001")).unwrap();
-        let env = env_of(&[
-            ("HOME", &home),
-            ("CODEX_HOME", &link),
-            ("GIT_CONFIG_GLOBAL", &global),
-            ("RUSTUP_HOME", &rustup),
-            ("GH_TOKEN_SOCKET", &token),
-        ]);
-        let first = flags(&cfg, &job, &scratch, &env, &machine).unwrap();
-        let kept = [
-            tmp.join("codex-home"),
-            tmp.join("gh-token"),
-            global.clone(),
-            home.join(".cache/nix"),
-            home.join(".cargo"),
-            tmp.join("jobs/job"),
-            project.clone(),
-            repo.join(".git"),
-            rustup.clone(),
-            scratch.clone(),
-        ];
-        let mut sorted = kept.to_vec();
-        sorted.sort();
-        assert_eq!(first.kept, sorted);
-        // Each has its own entry, as it would outside /tmp, so the job's
-        // /tmp grant doesn't reach it: Codex's home stays denied (its
-        // login with it), and what's read stays read.
-        let access = |path: &Path| entry(&first.flags, path);
-        assert_eq!(access(&tmp).as_deref(), Some("write"));
-        assert_eq!(access(&tmp.join("codex-home")).as_deref(), Some("deny"));
-        assert_eq!(access(&tmp.join("codex-home/auth.json")), None);
-        for read in [&global, &rustup, &tmp.join("gh-token")] {
-            assert_eq!(access(read).as_deref(), Some("read"), "{}", read.display());
-        }
-        for write in [
-            &project,
-            &repo.join(".git"),
-            &scratch,
-            &tmp.join("jobs/job"),
-            &home.join(".cargo"),
-        ] {
-            assert_eq!(
-                access(write).as_deref(),
-                Some("write"),
-                "{}",
-                write.display()
-            );
-        }
-        // Not HOME, nor anything else of the machine's /tmp.
-        assert_eq!(access(&home), None);
-        assert_eq!(access(&tmp.join("tmux-1001")), None);
-        // The next start keeps the same.
-        let again = flags(&cfg, &job, &scratch, &env, &machine).unwrap();
-        assert_eq!(again.kept, first.kept);
-        // /tmp itself can't be kept: the job's own is there.
-        let env = env_of(&[("HOME", &home), ("CARGO_HOME", &tmp)]);
-        let error = flags(&cfg, &job, &scratch, &env, &machine).err().unwrap();
-        assert!(error.to_string().contains("the job's own"), "{error}");
-    }
-
-    #[test]
-    fn nothing_the_job_left_in_its_tmp_moves_what_it_keeps() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let machine = machine_in(dir.path());
-        let private = private_tmp(&dir.path().join("scratch")).unwrap();
-        let kept = [machine.tmp.join("codex-home"), machine.tmp.join("a/b")];
-        // Not there yet, or a dir bwrap made: kept where it is.
-        check_kept(&private, &machine, &kept).unwrap();
-        std::fs::create_dir_all(private.join("codex-home")).unwrap();
-        std::fs::create_dir_all(private.join("a/b")).unwrap();
-        check_kept(&private, &machine, &kept).unwrap();
-        // A symlink where it goes, or above it, and Codex doesn't start.
-        std::fs::remove_dir(private.join("codex-home")).unwrap();
-        symlink(dir.path(), private.join("codex-home")).unwrap();
-        assert!(check_kept(&private, &machine, &kept[..1]).is_err());
-        std::fs::remove_dir_all(private.join("a")).unwrap();
-        symlink(dir.path(), private.join("a")).unwrap();
-        assert!(check_kept(&private, &machine, &kept[1..]).is_err());
-    }
-
-    #[test]
-    fn the_jobs_tmp_is_its_own() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let scratch = dir.path().join("scratch");
-        let tmp = private_tmp(&scratch).unwrap();
-        assert_eq!(tmp, scratch.join("tmp"));
-        let meta = tmp.symlink_metadata().unwrap();
-        assert!(meta.is_dir());
-        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
-        // Made again (the next turn's start), it keeps what's there.
-        std::fs::write(tmp.join("kept"), "").unwrap();
-        assert_eq!(private_tmp(&scratch).unwrap(), tmp);
-        assert!(tmp.join("kept").exists());
-        // Never a symlink to somewhere else.
-        let other = dir.path().join("other");
-        std::fs::create_dir_all(other.join("tmp-target")).unwrap();
-        std::os::unix::fs::symlink(other.join("tmp-target"), other.join("tmp")).unwrap();
-        assert!(private_tmp(&other).is_err());
-        // Codex runs with it over /tmp, TMPDIR saying so.
-        let argv: Vec<String> = wrap(&tmp, &[], Path::new("/bin/codex"))
-            .into_iter()
-            .map(|a| a.into_string().unwrap())
-            .collect();
-        let tmp = tmp.display().to_string();
-        assert_eq!(
-            argv,
-            [
-                "--dev-bind",
-                "/",
-                "/",
-                "--bind",
-                tmp.as_str(),
-                "/tmp",
-                "--setenv",
-                "TMPDIR",
-                "/tmp",
-                "--die-with-parent",
-                "--",
-                "/bin/codex"
-            ]
-        );
-    }
-}
+pub(crate) mod tests;
