@@ -14,9 +14,11 @@
 //! (`ssh host '…'`, `sh -c "…"`) counts the same as one typed bare.
 //!
 //! The same guard is Codex's managed PreToolUse hook for proj's Codex jobs
-//! (`--codex-user`, modules/claude.nix). There no one is asked: the pinned
-//! Codex runs a command whose hook asks, so every question is a refusal,
-//! and it refuses what would hide a commit from the job's hooks (codex.rs).
+//! (`--codex-user`, modules/claude/guard.nix). There no one is asked: the
+//! pinned Codex runs a command whose hook asks, so every question is a
+//! refusal, and it refuses what would hide a commit from the job's hooks
+//! (codex.rs). Codex's apply_patch, which deletes and replaces files with no
+//! command, gets the undo snapshot too.
 
 mod ansi_c;
 mod codex;
@@ -25,6 +27,7 @@ mod doors;
 mod push;
 mod shell;
 mod undo;
+mod walk;
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -35,8 +38,9 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 
-/// The hook's input, as Claude Code sends it on stdin; the rest of its
-/// fields are no business of the guard's.
+/// The hook's input, as Claude Code or Codex sends it on stdin: a Bash
+/// command, or Codex's apply_patch with its patch as `command`. The rest of
+/// its fields are no business of the guard's.
 #[derive(Debug, Default, Deserialize)]
 pub struct Hook {
     pub tool_name: Option<String>,
@@ -64,7 +68,8 @@ impl Guard<'_> {
     /// question asks the owner first.
     #[must_use]
     pub fn check(&self, hook: &Hook, now: SystemTime) -> Option<String> {
-        if hook.tool_name.as_deref() != Some("Bash") {
+        let tool = hook.tool_name.as_deref();
+        if !matches!(tool, Some("Bash" | "apply_patch")) {
             return None;
         }
         let cmd = hook
@@ -75,8 +80,11 @@ impl Guard<'_> {
         let cwd = Path::new(hook.cwd.as_deref().filter(|c| !c.is_empty()).unwrap_or("."));
         let mut asks = Vec::new();
         // The undo first, so a command the owner lets through at a question
-        // has its snapshot too.
-        if !self.config.snapshot_datasets.is_empty() && undo::destroys(cmd) {
+        // has its snapshot too. A patch, Codex's own tool's or one a command
+        // hands Codex, is read for the files it deletes or replaces.
+        let destroys =
+            undo::patch_destroys(cmd, cwd) || (tool == Some("Bash") && undo::destroys(cmd));
+        if !self.config.snapshot_datasets.is_empty() && destroys {
             asks.extend(undo::snapshot(
                 &self.config.zfs,
                 &self.config.snapshot_datasets,
@@ -84,10 +92,13 @@ impl Guard<'_> {
                 now,
             ));
         }
-        asks.extend(push::asks(cmd, cwd, &self.config.git));
-        asks.extend(doors::asks(cmd));
-        if self.codex {
-            asks.extend(codex::refusals(cmd));
+        // A patch is only files: what it says isn't run.
+        if tool == Some("Bash") {
+            asks.extend(push::asks(cmd, cwd, &self.config.git));
+            asks.extend(doors::asks(cmd));
+            if self.codex {
+                asks.extend(codex::refusals(cmd));
+            }
         }
         asks.dedup();
         (!asks.is_empty()).then(|| asks.join(" "))

@@ -4,7 +4,8 @@
 # machine's /etc/codex/requirements.toml runs the guard on every command a
 # Codex job (as the machine's user) runs, and refuses what has no undo here
 # (no ZFS in this VM, so no snapshot) or would hide a commit from the job's
-# hooks; another user's Codex runs the same command unguarded.
+# hooks, and a patch by Codex's own apply_patch that deletes a file; another
+# user's Codex runs the same command and patch unguarded.
 { self, pkgs }:
 let
   example = self.nixosConfigurations.example.config;
@@ -37,7 +38,7 @@ in
 pkgs.testers.runNixOSTest {
   name = "proj-codex-sandbox";
   nodes.machine = {
-    environment.systemPackages = [ agents pkgs.git pkgs.bash ];
+    environment.systemPackages = [ agents pkgs.git pkgs.bash pkgs.jq ];
     users.users.worker = { isNormalUser = true; uid = 1000; extraGroups = [ "wheel" ]; };
     users.users.${example.burrow.user} = { isNormalUser = true; uid = 1001; };
     environment.etc."codex/requirements.toml".source = example.environment.etc."codex/requirements.toml".source;
@@ -78,12 +79,19 @@ pkgs.testers.runNixOSTest {
     machine.succeed("echo '[]' > /work/calls && chmod 0644 /work/calls")
     machine.succeed("${pkgs.python3}/bin/python3 ${model} 18555 /work/calls >/dev/null 2>&1 &")
     machine.wait_for_open_port(18555)
+    # The stand-in, as a model with Codex's own apply_patch: the CLI's own
+    # catalog entry for one, renamed.
+    with_patch = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
+    machine.succeed("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(with_patch) + " > /work/catalog.json")
+    machine.succeed("jq -e '.models | length == 1' /work/catalog.json && chmod 0644 /work/catalog.json")
     def codex_run(user, calls):
         machine.succeed(f"echo {shlex.quote(json.dumps(calls))} > /work/calls")
-        script = "mkdir -p ~/.codex ~/work && install -m 0600 ${modelConfig} ~/.codex/config.toml && cd ~/work && echo go | codex --no-daemon exec --skip-git-repo-check --sandbox workspace-write --json -"
+        script = "mkdir -p ~/.codex ~/work && install -m 0600 ${modelConfig} ~/.codex/config.toml && cd ~/work && echo go | codex --no-daemon exec -c model_catalog_json=/work/catalog.json --skip-git-repo-check --sandbox workspace-write --json -"
         return machine.succeed(f"su - {user} -c {shlex.quote(script)} 2>&1")
     def run(command):
         return [["exec_command", {"cmd": command}]]
+    def patch(body):
+        return [["apply_patch", {"input": "*** Begin Patch\n" + body + "\n*** End Patch\n"}]]
     job = "${example.burrow.user}"
     machine.succeed(f"su - {job} -c 'mkdir -p ~/work && touch ~/work/victim && git init -q ~/work'")
     # No undo snapshot here (no ZFS), so what destroys files is refused.
@@ -104,9 +112,24 @@ pkgs.testers.runNixOSTest {
         ["write_stdin", {"session_id": "SID", "chars": "rm victim\n", "yield_time_ms": 1000}],
     ])
     machine.succeed(f"su - {job} -c 'test -e ~/work/victim'")
-    # The control: the same command, by a user whose Codex isn't a job's.
+    # Codex's own apply_patch deletes with no command: no undo, so refused,
+    # and so is the same patch a command hands Codex to apply.
+    said = codex_run(job, patch("*** Delete File: victim"))
+    assert "blocked by PreToolUse hook" in said and "undo snapshot" in said, said
+    said = codex_run(job, run("apply_patch <<'EOF'\n*** Begin Patch\n*** Delete File: victim\n*** End Patch\nEOF"))
+    assert "blocked by PreToolUse hook" in said and "undo snapshot" in said, said
+    machine.succeed(f"su - {job} -c 'test -e ~/work/victim'")
+    # A patch that only adds a file has nothing to undo, and goes through.
+    said = codex_run(job, patch("*** Add File: added\n+new"))
+    machine.succeed(f"su - {job} -c 'test -e ~/work/added'")
+    # The control: the same command and patch, by a user whose Codex isn't
+    # a job's.
     machine.succeed("su - worker -c 'mkdir -p ~/work && touch ~/work/victim'")
     said = codex_run("worker", run("rm victim"))
+    assert "blocked by PreToolUse hook" not in said, said
+    machine.fail("su - worker -c 'test -e ~/work/victim'")
+    machine.succeed("su - worker -c 'touch ~/work/victim'")
+    said = codex_run("worker", patch("*** Delete File: victim"))
     assert "blocked by PreToolUse hook" not in said, said
     machine.fail("su - worker -c 'test -e ~/work/victim'")
   '';

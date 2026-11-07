@@ -1,5 +1,5 @@
-//! burrow-guard [--codex-user USER] CONFIG, as modules/claude.nix's hooks
-//! run it: the hook's JSON on stdin, and nothing (allow) or a decision on
+//! burrow-guard [--codex-user USER] CONFIG, as modules/claude/guard.nix's
+//! hooks run it: the hook's JSON on stdin, and nothing (allow) or a decision on
 //! stdout. Claude Code's asks the owner; Codex's (`--codex-user`) refuses,
 //! since a Codex job has no one to ask and Codex runs what its hook asks
 //! about.

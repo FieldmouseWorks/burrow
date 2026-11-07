@@ -1,7 +1,8 @@
 # A Responses API stand-in for the pinned Codex CLI. Each turn replays the
 # tool calls in the JSON file named by argv[2] ([[NAME, ARGS], ...]), one per
 # request, then answers. A "SID" session_id stands for the session the last
-# call left running. Why not Rust: a fixture the VM test runs, never shipped.
+# call left running. apply_patch is Codex's freeform tool: its ARGS' input is
+# the patch. Why not Rust: a fixture the VM test runs, never shipped.
 import http.server
 import json
 import re
@@ -30,7 +31,10 @@ class Model(http.server.BaseHTTPRequestHandler):
             session = re.search(r"session ID (\d+)", " ".join(outputs))
             if args.get("session_id") == "SID" and session:
                 args = dict(args, session_id=int(session.group(1)))
-            item = {"type": "function_call", "name": name, "arguments": json.dumps(args), "call_id": f"c{len(outputs)}"}
+            if name == "apply_patch":
+                item = {"type": "custom_tool_call", "name": name, "input": args["input"], "call_id": f"c{len(outputs)}"}
+            else:
+                item = {"type": "function_call", "name": name, "arguments": json.dumps(args), "call_id": f"c{len(outputs)}"}
         else:
             item = {"type": "message", "role": "assistant", "id": "m", "content": [{"type": "output_text", "text": "done"}]}
         event({"type": "response.output_item.done", "item": item})

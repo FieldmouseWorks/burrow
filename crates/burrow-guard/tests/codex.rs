@@ -109,6 +109,149 @@ fn ordinary_work_goes_through() {
     }
 }
 
+/// Each command is read on its own: a read beside a write, in any way the
+/// shell joins them, never speaks for the write.
+#[test]
+fn a_read_never_exempts_a_write() {
+    let read = "gh api -X GET repos/o/r";
+    let write = "gh api -X PATCH repos/o/r/git/refs/heads/main -F force=true -f sha=abc";
+    for cmd in [
+        format!("{read} && {write}"),
+        format!("{read}; {write}"),
+        format!("{read} | {write}"),
+        format!("{read}\n{write}"),
+        format!("({read}) || ({write})"),
+        format!("echo $({read}) $({write})"),
+        format!("{write} && {read}"),
+        format!("bash -c '{read} && {write}'"),
+        format!("git log --oneline && {write}"),
+        format!("{read} && git revert HEAD"),
+    ] {
+        assert!(says(&cmd, true).is_some(), "let through: {cmd}");
+    }
+}
+
+/// git's own options, before its command, never hide what the command is.
+#[test]
+fn gits_own_options_dont_hide_its_command() {
+    for cmd in [
+        "git --no-pager revert HEAD",
+        "git -p cherry-pick abc",
+        "git -P rebase origin/main",
+        "git --paginate am change.patch",
+        "git --git-dir=.git --work-tree=. rebase main",
+        "git --git-dir .git --work-tree . revert HEAD",
+        "git --namespace ns commit-tree HEAD^{tree} -m x",
+        "git -c user.name=x revert HEAD",
+        "git --no-optional-locks --literal-pathspecs commit -n -m x",
+        "git -C /work --bare send-pack origin work",
+        "/usr/bin/git --no-replace-objects cherry-pick abc",
+        "git commit --no-verif -m x",
+        "git -c pull.rebase=true pull",
+        "git -c pull.rebase pull origin main",
+        "git -c branch.work.rebase=true pull",
+        "git pull --rebase=merges",
+        "git pull -qr",
+        "git pull --strategy ours --rebase",
+    ] {
+        assert!(says(cmd, true).is_some(), "let through: {cmd}");
+    }
+}
+
+/// git's commands that make commits of their own, with no commit-msg, and
+/// an alias, which could be any of them.
+#[test]
+fn plumbing_and_aliases_are_refused() {
+    for cmd in [
+        "git fast-import < stream",
+        "git filter-branch --msg-filter cat HEAD",
+        "git filter-repo --force",
+        "git replace --graft HEAD HEAD~2",
+        "git subtree split --prefix lib",
+        "git -c alias.r=revert r HEAD",
+        "git -c alias.r='!git revert' r HEAD",
+        "git --config-env=alias.r=CMD r",
+        "git config alias.r revert",
+        "git config set alias.r revert",
+        "git config --global alias.r '!sh -c x'",
+    ] {
+        assert!(says(cmd, true).is_some(), "let through: {cmd}");
+    }
+}
+
+/// GitHub's writes of commits and refs, by gh's commands, its API (REST or
+/// GraphQL, any spelling of the method), or curl.
+#[test]
+fn githubs_commit_and_ref_writes_are_refused() {
+    for cmd in [
+        "gh pr merge 5 --squash",
+        "gh -R o/r pr merge 5",
+        "gh pr --repo o/r merge 5",
+        "gh pr update-branch 5",
+        "gh pr revert 5",
+        "gh repo sync o/r --force",
+        "gh api --method=PATCH repos/o/r/git/refs/heads/main -f sha=x",
+        "gh api -XPATCH repos/o/r/git/refs/heads/main -f sha=x",
+        "gh api -X PUT repos/o/r/pulls/5/merge",
+        "gh api repos/o/r/pulls/5/update-branch -X PUT",
+        "gh api repos/o/r/merge-upstream -f branch=main",
+        "gh api repos/o/r/branches/main/rename -f new_name=old",
+        "gh api repos/o/r/git/refs/ -f ref=refs/heads/x -f sha=abc",
+        "gh api https://api.github.com/repos/o/r/git/refs/heads/main -X DELETE",
+        "gh api repos/o/r/contents/a.txt --input body.json",
+        "gh api graphql -f query='mutation { createCommitOnBranch(input: {}) { commit { oid } } }'",
+        "gh api graphql -F query='mutation($i: UpdateRefInput!) { updateRef(input: $i) { ref { name } } }'",
+        "gh api graphql -f query='mutation { mergePullRequest(input: {}) { clientMutationId } }'",
+        "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+        "gh api graphql -F query=@mutation.graphql",
+        "gh api graphql --input body.json",
+        "curl -X PATCH -H 'Authorization: token x' https://api.github.com/repos/o/r/git/refs/heads/main -d '{\"sha\":\"x\"}'",
+        "curl --request=DELETE https://api.github.com/repos/o/r/git/refs/heads/work",
+        "curl -d '{}' https://api.github.com/repos/o/r/git/commits",
+        "curl https://api.github.com/graphql -d '{\"query\":\"mutation { mergeBranch(input: {}) { clientMutationId } }\"}'",
+        "curl https://api.github.com/graphql -d @body.json",
+    ] {
+        assert!(says(cmd, true).is_some(), "let through: {cmd}");
+        assert_eq!(
+            says(cmd, false),
+            None,
+            "Claude's guard said something: {cmd}"
+        );
+    }
+}
+
+/// What reads, or writes nothing git keeps, goes through, however it's
+/// spelled.
+#[test]
+fn reads_and_other_writes_go_through() {
+    for cmd in [
+        "git --no-pager log --oneline",
+        "git -c color.ui=never status",
+        "git -C /work --git-dir=.git diff",
+        "git pull --no-rebase",
+        "git pull --rebase=false",
+        "git -c pull.rebase=false pull",
+        "git config --get alias.r",
+        "git config user.name x",
+        "git commit -m 'note -n' -m more",
+        "git commit --author 'A -n <a@b>' -m x",
+        "git commit -F msg -- -n",
+        "git cherry -v origin/main",
+        "git stash",
+        "gh pr view 5",
+        "gh pr create --fill",
+        "gh -R o/r pr checks 5",
+        "gh api graphql -f query='query { viewer { login } }'",
+        "gh api -X GET repos/o/r/git/refs/heads/main && gh api repos/o/r/issues/1/comments -f body=x",
+        "gh api repos/o/r/pulls/5/merge",
+        "gh api repos/o/r/pulls/5/comments -f body=see",
+        "curl https://api.github.com/repos/o/r/git/refs/heads/main",
+        "curl -d x=1 https://example.org/git/refs",
+    ] {
+        assert_eq!(says(cmd, true), None, "refused: {cmd}");
+    }
+}
+
 /// push.rs reads the push itself, so turning the hooks off doesn't get a
 /// default branch's rewrite through: Claude's guard asks, Codex's refuses.
 #[test]

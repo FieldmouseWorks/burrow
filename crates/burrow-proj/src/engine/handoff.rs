@@ -3,8 +3,9 @@
 //! or the meter moves a job from one to the other, in either direction,
 //! the one taking the turn is first given what it missed: every turn since
 //! its conversation's last (all of them, when it has none), each with what
-//! it was asked (the brief, a reply, a watcher's news) and what it answered.
-//! Its work in the repo is where those turns left it.
+//! it was asked (the brief, a reply, a watcher's news), always whole, and
+//! what it answered. Its work in the repo is where those turns left it, and
+//! each turn's transcript is named, for whatever its answer leaves out.
 
 use std::fs;
 use std::path::PathBuf;
@@ -13,8 +14,9 @@ use super::stream::{answer, resume, stream_names_session};
 use super::{Choice, Engine};
 use crate::{job::Job, read};
 
-/// How much of one prompt or answer is passed on: a long one is cut in its
-/// middle, which keeps how it starts and how it ends.
+/// How much of one answer is passed on: a long one is cut in its middle,
+/// which keeps how it starts and how it ends, and says where all of it is.
+/// What a turn was asked is never cut: it's the task.
 const KEEP: usize = 16_000;
 
 /// The engine turn `m` ran on. One from before engines were chosen ran on
@@ -40,7 +42,9 @@ fn unseen(job: &Job, n: u64, engine: Engine) -> Vec<u64> {
     (from..n).collect()
 }
 
-fn cut(text: &str) -> String {
+/// `text`, cut in its middle past [`KEEP`], with `whole`, how to read all
+/// of it, where it's cut.
+fn cut(text: &str, whole: &str) -> String {
     let chars: Vec<char> = text.trim().chars().collect();
     if chars.len() <= KEEP {
         return chars.into_iter().collect();
@@ -49,7 +53,7 @@ fn cut(text: &str) -> String {
     let head: String = chars[..half].iter().collect();
     let tail: String = chars[chars.len() - half..].iter().collect();
     format!(
-        "{head}\n\n[… {} characters cut …]\n\n{tail}",
+        "{head}\n\n[… {} characters cut; all of it: {whole} …]\n\n{tail}",
         chars.len() - KEEP
     )
 }
@@ -74,16 +78,18 @@ pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathB
     for m in missed {
         let m = m.to_string();
         let asked = read(&job.path(&format!("prompt.{m}"))).unwrap_or_default();
-        let said = answer(&job.turn(&m, "jsonl"));
+        let transcript = job.turn(&m, "jsonl");
+        let said = answer(&transcript);
         let said = if said.trim().is_empty() {
             "(nothing: the turn ended without an answer)".to_owned()
         } else {
-            cut(&said)
+            cut(&said, &format!("`proj log {} --turn {m}`", job.id))
         };
         text.push_str(&format!(
-            "\n\n## Turn {m} ({}), asked\n\n{}\n\n## Turn {m}, answered\n\n{said}",
+            "\n\n## Turn {m} ({}), asked\n\n{}\n\n## Turn {m}, answered\n\n{said}\n\n(Everything turn {m} did: {}.)",
             engine_of(job, m.parse().unwrap_or(0)).name(),
-            cut(&asked),
+            asked.trim(),
+            transcript.display(),
         ));
     }
     let asked = read(&prompt).unwrap_or_default();
@@ -262,10 +268,54 @@ mod tests {
     }
 
     #[test]
-    fn a_long_turn_keeps_its_start_and_end() {
+    fn a_long_answer_keeps_its_start_and_end_and_says_where_the_rest_is() {
         let long = format!("start{}end", "x".repeat(KEEP * 2));
-        let kept = cut(&long);
+        let kept = cut(&long, "`proj log job --turn 1`");
         assert!(kept.starts_with("start") && kept.ends_with("end"));
-        assert!(kept.len() < KEEP + 100);
+        assert!(
+            kept.contains("all of it: `proj log job --turn 1`"),
+            "{kept}"
+        );
+        assert!(kept.len() < KEEP + 200);
+    }
+
+    /// What a turn was asked is the task: never cut, however long, in
+    /// either direction, the brief and every reply since.
+    #[test]
+    fn every_instruction_is_passed_on_whole() {
+        let long = |what: &str| {
+            format!(
+                "{what} begins.\n{}\nIn its middle: {what} must keep the old API.\n{}\n{what} ends.",
+                "context ".repeat(KEEP / 4),
+                "more ".repeat(KEEP / 4),
+            )
+        };
+        for (before, now) in [
+            (Engine::Claude, Engine::Codex),
+            (Engine::Codex, Engine::Claude),
+        ] {
+            let t = Turns::new();
+            let said = format!("began{}done", "y".repeat(KEEP * 2));
+            t.ran(1, Some(before), &long("the brief"), &said);
+            t.ran(2, Some(before), &long("the reply"), "replied");
+            let given = t.starts(3, now, "carry on");
+            for what in ["the brief", "the reply"] {
+                assert!(given.contains(&long(what)), "{what} cut from the handoff");
+            }
+            // The long answer is cut, and says how to read all of it, and
+            // each turn names its transcript.
+            assert!(!given.contains(&said));
+            assert!(given.contains("all of it: `proj log job --turn 1`"));
+            for m in ["1", "2"] {
+                let transcript = t.job().turn(m, "jsonl");
+                assert!(
+                    given.contains(&format!(
+                        "Everything turn {m} did: {}.",
+                        transcript.display()
+                    )),
+                    "turn {m}'s transcript isn't named"
+                );
+            }
+        }
     }
 }

@@ -9,52 +9,8 @@ let
   cfg = config.burrow.claude;
   inherit (config.networking) hostName;
 
-  # How long Claude Code and Codex give the hook; past it, the command runs
-  # unchecked, so the guard answers before then.
-  guardTimeout = 10;
-
-  # The PreToolUse hook (crates/burrow-guard), with this machine's config
-  # (its src/config.rs). A compiled wrapper rather than a script, since it
-  # runs on every Bash call.
-  guardConfig = pkgs.writeText "claude-guard.json" (builtins.toJSON {
-    git = lib.getExe config.programs.git.package;
-    zfs = "${config.boot.zfs.package}/bin/zfs";
-    snapshotDatasets = lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets;
-    askAfterSeconds = guardTimeout - 2;
-  });
-  guardWith = name: flags: pkgs.runCommand name {
-    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
-    meta.mainProgram = name;
-  } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-guard}/bin/burrow-guard \
-      $out/bin/${name} --add-flags ${lib.escapeShellArg flags}
-  '';
-  guard = guardWith "claude-guard" "${guardConfig}";
-  # The same guard is Codex's managed PreToolUse hook, for proj's Codex
-  # jobs (its user's commands): Codex's requirements, which no job can turn
-  # off or skip. It refuses where Claude's asks, since Codex runs a command
-  # its hook asks about, and keeps a job's commits in reach of its git
-  # hooks (crates/burrow-guard's codex.rs).
-  codexGuard = guardWith "codex-guard" "--codex-user ${config.burrow.user} ${guardConfig}";
-  codexRequirements = (pkgs.formats.toml { }).generate "codex-requirements.toml" {
-    # No TTY sessions: the hook sees the command that starts a process,
-    # never what write_stdin types into it afterwards, so a shell kept open
-    # would run anything past the guard. Without a TTY, a process's stdin
-    # is closed. Every Codex here does without them, the reviewer too.
-    features.unified_exec_tty = false;
-    hooks.PreToolUse = [
-      {
-        matcher = "Bash";
-        hooks = [
-          {
-            type = "command";
-            command = lib.getExe codexGuard;
-            timeout = guardTimeout;
-          }
-        ];
-      }
-    ];
-  };
+  # The PreToolUse hook, Claude Code's here; Codex's is proj's.
+  guard = import ./claude/guard.nix { inherit inputs pkgs lib config; };
 
   # One rule per command, with and without sudo.
   both = cmds: lib.concatMap (c: [ "Bash(${c})" "Bash(sudo ${c})" ]) cmds;
@@ -77,8 +33,8 @@ let
         hooks = [
           {
             type = "command";
-            command = lib.getExe guard;
-            timeout = guardTimeout;
+            command = lib.getExe guard.claude;
+            inherit (guard) timeout;
           }
         ];
       }
@@ -146,11 +102,7 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
-    burrow.tools.claude-guard = guard;
-    burrow.tools.codex-guard = codexGuard;
-    environment.etc."codex/requirements.toml" = lib.mkIf (config.burrow.proj.enable or false) {
-      source = codexRequirements;
-    };
+    burrow.tools.claude-guard = guard.claude;
 
     # Copies, not links into the store (claude/etc.nix).
     environment.etc."claude-code/managed-settings.json" = {

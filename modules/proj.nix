@@ -36,6 +36,7 @@ let
     ln -s ${package}/bin/burrow-proj-git-hook $out/pre-push
   '';
   codexHome = "${config.users.users.${user}.home}/.codex";
+  guard = import ./claude/guard.nix { inherit inputs pkgs lib config; };
   policy = import ./claude/codex-rules.nix {
     inherit lib;
     patterns = (import ./claude/r2.nix) ++ config.burrow.claude.extraAsk;
@@ -45,13 +46,14 @@ let
 
     Codex jobs run headless in workspace-write with network access. The sandbox's
     no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
-    them to the owner. The machine's guard checks every command first: what
-    deletes or rewrites files gets an undo snapshot, or is refused without one.
-    Commits carry Engine: codex, and a Claude judge decides whether their PR
+    them to the owner. The machine's guard checks every command and patch first:
+    what deletes or rewrites files gets an undo snapshot, or is refused without
+    one. Commits carry Engine: codex, and a Claude judge decides whether their PR
     lands after the usual Codex review and checks; so the guard refuses what
     would turn off your git hooks or write commits they don't see (revert,
-    cherry-pick, rebase, am, commit-tree, GitHub's API): commit and merge
-    instead. There are no TTY sessions: run each command whole.
+    cherry-pick, rebase, am, commit-tree and other plumbing, git aliases,
+    GitHub's API, gh pr merge): commit and merge instead, and leave merging
+    PRs to the steward. There are no TTY sessions: run each command whole.
   '');
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
@@ -304,6 +306,9 @@ in
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package agents ];
     burrow.tools.proj = proj;
+    # The guard is Codex's managed hook for the jobs, wherever proj runs.
+    burrow.tools.codex-guard = guard.codex;
+    environment.etc."codex/requirements.toml".source = guard.codexRequirements;
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
     users.users.${user}.linger = lib.mkDefault true;

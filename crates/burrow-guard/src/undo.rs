@@ -41,6 +41,25 @@ pub fn destroys(cmd: &str) -> bool {
     any_line(&DESTROYS, cmd)
 }
 
+/// Whether a patch in `text`, as Codex's apply_patch reads one (its own
+/// tool's input, or a command that runs `apply_patch`, which Codex applies
+/// itself), deletes or replaces a file: a `*** Delete File:`, a `*** Move
+/// to:`, which takes the place of whatever is there, or an `*** Add File:`
+/// onto a path that's already there, which it overwrites. Paths are from
+/// `cwd`, where the patch is applied. An `*** Update File:` alone edits in
+/// place, its hunks the undo, as an edit is.
+pub fn patch_destroys(text: &str, cwd: &Path) -> bool {
+    text.lines().map(str::trim_start).any(|line| {
+        if line.starts_with("*** Delete File:") || line.starts_with("*** Move to:") {
+            return true;
+        }
+        line.strip_prefix("*** Add File:").is_some_and(|path| {
+            let path = path.trim();
+            path.is_empty() || cwd.join(path).symlink_metadata().is_ok()
+        })
+    })
+}
+
 /// Takes the undo snapshot, one round per burst: `datasets@pre-STAMP`, all
 /// at once. `None` once it's taken (or one was, this burst); the question
 /// when it couldn't be, since then there'd be no undo.
