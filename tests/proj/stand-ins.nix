@@ -29,9 +29,10 @@
   # was run in /tmp/spent-args, and answers.
   # "scratch" makes a worktree of web, with a file in it, in its scratch and
   # says where that is in /tmp/scratch; "scratch ask" then asks.
-  # As a job, it says what comes next before it answers (proj done; "ask"
-  # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
-  # does, even told to; what it's told is kept in /tmp/told.
+  # As a job, it says what comes next before it answers (proj done, or proj
+  # ask for an issue's job unless told "inbox-done"; "ask" asks, "await"
+  # awaits), but "silent" doesn't, and with /tmp/silent nothing does, even
+  # told to; what it's told is kept in /tmp/told.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
     args=$*
@@ -46,7 +47,14 @@
       sleep 600
     }
     if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
-      case $prompt in silent*|spent*) ;; *) proj done >/dev/null ;; esac
+      # An issue's job (proj-inbox's: its link an issue's) asks, waiting on
+      # a reply, unless its task says "inbox-done": a finished one closes
+      # its issue.
+      ends=done
+      if grep -qs /issues/ "/data/dev/jobs/$PROJ_JOB/link"; then
+        case $prompt in *inbox-done*) ;; *) ends=ask ;; esac
+      fi
+      case $prompt in silent*|spent*) ;; *) proj "$ends" >/dev/null ;; esac
     fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
@@ -158,6 +166,8 @@
   gh = pkgs.writeShellScriptBin "gh" ''
     [ "$1" = api ] || exit 2
     shift
+    # Every call's arguments, once a test makes the log for it.
+    [ -w /tmp/gh/calls ] && echo "$*" >>/tmp/gh/calls
     slurp="" post=""
     while [ $# -gt 0 ]; do
       case $1 in

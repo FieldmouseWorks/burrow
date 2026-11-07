@@ -203,14 +203,16 @@ impl Pass<'_> {
                 .filter_map(|c| c["id"].as_i64())
                 .max()
                 .unwrap_or(seen);
-            // Finished (its last turn ended `proj done`), every answer
-            // posted and no reply since: the issue is closed with it, so
-            // what's open is what's still to do. Reopening it starts a job
-            // afresh from the issue as it stands. The stuck issue isn't the
-            // job's to close: the steward closes it once nothing is stuck.
+            // Finished (its last turn ran to its end and said so with `proj
+            // done`, not `ask` or `await`), every answer posted and no reply
+            // since: the issue is closed with it, so what's open is what's
+            // still to do. Reopening it starts a job afresh from the issue as
+            // it stands. The stuck issue isn't the job's to close: the
+            // steward closes it once nothing is stuck.
             if msg.is_empty()
                 && young.is_none()
                 && st == "done"
+                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                 && k >= turns
                 && !now_open.is_some_and(|i| self.lane(i))
             {

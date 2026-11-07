@@ -95,13 +95,23 @@ impl Box {
         }
     }
 
-    /// A job whose one turn ended as `outcome`, answering `said`.
+    /// A job whose one turn ended as `outcome` ("done" when it ran to its
+    /// end, "error" when it didn't), answering `said`, having said it ends
+    /// with `proj done`.
     fn job(&self, id: &str, outcome: &str, said: &str) {
+        self.job_ending(id, outcome, Some("done"), said);
+    }
+
+    /// A job whose one turn ended as `outcome`, saying it ends with `proj
+    /// END` (None: it said nothing).
+    fn job_ending(&self, id: &str, outcome: &str, end: Option<&str>, said: &str) {
         let d = self.cfg.jobs.join(id);
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("turns"), "1\n").unwrap();
         fs::write(d.join("1.outcome"), format!("{outcome}\n")).unwrap();
-        fs::write(d.join("1.end"), format!("{outcome}\n")).unwrap();
+        if let Some(end) = end {
+            fs::write(d.join("1.end"), format!("{end}\n")).unwrap();
+        }
         fs::write(
             d.join("1.jsonl"),
             format!("{}\n", json!({"type": "result", "result": said})),
@@ -157,15 +167,22 @@ fn a_finished_job_closes_its_issue() {
 // stuck issue, which the steward closes.
 #[test]
 fn an_unfinished_job_keeps_its_issue_open() {
-    // Asked a person.
-    let b = Box::new();
-    b.job("j1", "ask", "Which one?");
-    let d = b.record("j1");
-    b.pass()
-        .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
-        .unwrap();
-    assert!(b.posted().contains("Which one?"));
-    assert!(!b.log().contains("PATCH") && d.exists(), "{}", b.log());
+    // Asked a person, awaits a PR, or said nothing of how it ends: its turn
+    // ran to its end all the same, but the job isn't finished.
+    for end in [Some("ask"), Some("await"), Some("undeclared"), None] {
+        let b = Box::new();
+        b.job_ending("j1", "done", end, "Which one?");
+        let d = b.record("j1");
+        b.pass()
+            .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
+            .unwrap();
+        assert!(b.posted().contains("Which one?"), "{end:?}");
+        assert!(
+            !b.log().contains("PATCH") && d.exists(),
+            "{end:?}: {}",
+            b.log()
+        );
+    }
 
     // Done, but a reply came in that's not a minute old yet: it's handed on
     // next pass, which the pass books.
