@@ -1,7 +1,6 @@
 //! The guard's controls: each would fail on the bug it's for.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -9,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use burrow_guard::config::Config;
 use burrow_guard::{Guard, Hook, Input, Namespace};
 use tempfile::TempDir;
+
+mod common;
 
 /// A machine for the guard: a zfs that writes down what it's asked to do
 /// (and fails, saying `fail`, when that file is there), two undo datasets,
@@ -25,19 +26,9 @@ impl Box {
 
     fn with_datasets(datasets: &[&str]) -> Box {
         let dir = tempfile::tempdir().unwrap();
-        let zfs = dir.path().join("zfs");
-        fs::write(
-            &zfs,
-            format!(
-                "#!/bin/sh\necho \"$@\" >> '{0}/zfs.log'\n[ ! -e '{0}/fail' ] || {{ cat '{0}/fail' >&2; exit 1; }}\n",
-                dir.path().display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&zfs, fs::Permissions::from_mode(0o755)).unwrap();
         let config = Config {
             git: PathBuf::from("git"),
-            zfs,
+            zfs: common::zfs(dir.path()),
             systemd_run: PathBuf::from("/no-such-systemd-run"),
             snapshot_datasets: datasets.iter().map(|d| (*d).to_owned()).collect(),
             ask_after_seconds: 8,
@@ -91,6 +82,7 @@ fn bash(cmd: &str, cwd: &Path) -> Hook {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    common::stand_ins();
     let ok = Command::new("git")
         .args([
             "-c",

@@ -110,7 +110,7 @@ fn posts() {
         .filter_map(|c| c.strip_prefix("body "))
         .map(|b| serde_json::from_str(b).unwrap())
         .collect();
-    assert_eq!(posts.len(), 5, "{calls:#?}");
+    assert_eq!(posts.len(), 6, "{calls:#?}");
     let context = |p: &serde_json::Value| p["context"] == "house/file-size (#7)";
     let size = posts.iter().find(|p| context(p)).unwrap();
     assert_eq!(size["state"], "failure", "{size}");

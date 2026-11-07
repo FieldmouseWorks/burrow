@@ -8,6 +8,7 @@
 //! result.
 
 mod file_size;
+mod guide_size;
 mod model_names;
 mod runs;
 mod rust_first;
@@ -337,7 +338,7 @@ impl Case {
         if self.model_names {
             &RULES
         } else {
-            &RULES[..4]
+            &RULES[..5]
         }
     }
 }
@@ -358,7 +359,14 @@ impl Outcome {
     }
 }
 
-pub const RULES: [&str; 5] = ["title", "rust-first", "timers", "file-size", "model-names"];
+pub const RULES: [&str; 6] = [
+    "title",
+    "rust-first",
+    "timers",
+    "file-size",
+    "guide-size",
+    "model-names",
+];
 
 /// What each rule's error is titled, and the line its body wants.
 pub fn wants(rule: &str) -> (&'static str, &'static str) {
@@ -367,6 +375,7 @@ pub fn wants(rule: &str) -> (&'static str, &'static str) {
         "rust-first" => ("Why not Rust?", "Why not Rust:"),
         "timers" => ("Why a timer?", "Why a timer:"),
         "file-size" => ("Why not split?", "Why not split:"),
+        "guide-size" => ("Why a longer guide?", "Why a longer guide:"),
         "model-names" => ("Why a model name?", "Why a model name:"),
         _ => unreachable!("{rule}"),
     }

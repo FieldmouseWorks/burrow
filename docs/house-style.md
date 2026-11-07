@@ -100,8 +100,9 @@ Every repo with code gets a `flake.nix` from the template
   whenever its title or body is edited. It holds the PR to the house rules a
   machine can read ([which, and how](../crates/burrow-house/src/lib.rs)): its
   title is `area: plain sentence`, and a PR that adds Python or grows Python
-  and shell past a fix, adds a timer, grows a code file past 1,000 lines or
-  names a model has the line in its body that says why, with a reason. Each
+  and shell past a fix, adds a timer, grows a code file past 1,000 lines,
+  grows an AGENTS.md's own part past 100 lines or names a model has the line
+  in its body that says why, with a reason. Each
   rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
   by the next run's, so fixing the title or body clears it; a fork's PR,
   whose token can't post them, gets them as the job's result. A repo can set
@@ -118,11 +119,20 @@ Bringing a repo onto it: keep the checks it already runs, move the ones that
 are hermetic into the flake (its `checks` argument takes more), and delete
 the CI steps the flake now covers, in the same PR.
 
-## CLAUDE.md
+## AGENTS.md and CLAUDE.md
 
-One line, `@AGENTS.md`, then only what Claude alone needs (usually nothing).
-Personal or machine-local notes, model choices included, go in an untracked
-`CLAUDE.local.md`.
+AGENTS.md is a map, read at the start of every session, so every line costs
+every agent every time. Its own part (outside the house blocks) says what the
+repo is, the rules only it has, how to build and check it, what it keeps
+private and its Code Review Rules, and points to where everything else lives:
+a feature map (each feature's owning paths and focused tests) once the repo
+has more than a handful, and the doc that owns each subject. Detail goes in
+that doc, linked, never copied in. The house check asks a PR that grows the
+own part past 100 lines for `Why a longer guide:`.
+
+CLAUDE.md is one line, `@AGENTS.md`, then only what Claude alone needs
+(usually nothing). Personal or machine-local notes, model choices included,
+go in an untracked `CLAUDE.local.md`.
 
 ## Models
 

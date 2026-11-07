@@ -4,13 +4,15 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use burrow_guard::config::{Config, current_user};
 use burrow_guard::{Guard, Hook, Input, Namespace};
+use common::zfs;
+
+mod common;
 
 fn bash(cmd: &str, cwd: &Path) -> Hook {
     Hook {
@@ -24,6 +26,7 @@ fn bash(cmd: &str, cwd: &Path) -> Hook {
 
 /// What the guard says about `cmd`, as Codex's (`codex`) or Claude's.
 fn says(cmd: &str, codex: bool) -> Option<String> {
+    common::stand_ins();
     let dir = tempfile::tempdir().unwrap();
     let config = Config {
         git: PathBuf::from("git"),
@@ -207,6 +210,31 @@ fn githubs_commit_and_ref_writes_are_refused() {
         "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
         "gh api graphql -F query=@mutation.graphql",
         "gh api graphql --input body.json",
+        "ep=repos/o/r/git/refs/heads/main; gh api -X DELETE \"$ep\"",
+        "gh api -X DELETE \"$ENDPOINT\"",
+        "gh api -X DELETE \"$(printf repos/o/r/git/refs/heads/main)\"",
+        "gh api \"$ep\" -f sha=abc",
+        "gh api repos/o/r/git/refs/heads/main -X \"$m\"",
+        "gh api $flags repos/o/r/git/refs/heads/main",
+        "gh api graphql -f query=\"$(cat mutation.graphql)\"",
+        "q=$(cat mutation.graphql); gh api graphql -f query=\"$q\"",
+        "gh api graphql -F \"$field\"",
+        "gh api graphql $args",
+        "args='. repos/o/r/git/refs/heads/main -X DELETE --hostname'; gh api -q $args api.github.com",
+        "gh api -q {.,repos/o/r/git/refs/heads/main,-X,DELETE,--hostname} api.github.com",
+        "gh api -q {{},repos/o/r/git/refs/heads/main,-X,DELETE,--hostname} api.github.com",
+        "gh api -q {.,{repos/o/r/git/refs/heads/main,-X},DELETE,--hostname} api.github.com",
+        "gh api -q {{a..b},repos/o/r/git/refs/heads/main,-X,DELETE,--hostname} api.github.com",
+        "gh api repos/o/r/git/refs/heads/main {-X,'{}'} DELETE",
+        "gh api -q * repos/o/r/git/refs/heads/work",
+        "gh api repos/o/r/git/ref[s]/heads/main -X DELETE",
+        "gh api repos/o/r/git/ref?/heads/main -X DELETE",
+        "gh api repos/o/r/{git/refs/heads/main,issues} -X DELETE",
+        "gh api repos/o/r/issues/1/comments -f body=\"$msg\"",
+        "gh api graphql -f query='query($o: String!) { repository(name: $o) { id } }' -f o=\"$repo\"",
+        "gh api \"$ep\"",
+        "gh api \"repos/$repo/issues\"",
+        "gh api -X GET repos/o/r/git/refs/heads/main -q \"$jq\"",
         "curl -X PATCH -H 'Authorization: token x' https://api.github.com/repos/o/r/git/refs/heads/main -d '{\"sha\":\"x\"}'",
         "curl --request=DELETE https://api.github.com/repos/o/r/git/refs/heads/work",
         "curl -d '{}' https://api.github.com/repos/o/r/git/commits",
@@ -244,6 +272,11 @@ fn reads_and_other_writes_go_through() {
         "gh pr create --fill",
         "gh -R o/r pr checks 5",
         "gh api graphql -f query='query { viewer { login } }'",
+        "gh api 'repos/o/r/issues?state=open'",
+        "gh api 'repos/o/r/git/refs/heads/main?per_page=1' -q '.[0].object'",
+        "gh api repos/o/r/issues\\?state=open",
+        "gh api -X GET 'repos/o/r/git/matching-refs/heads/*'",
+        "gh api repos/o/r/issues -f title='a {b,c}'",
         "gh api -X GET repos/o/r/git/refs/heads/main && gh api repos/o/r/issues/1/comments -f body=x",
         "gh api repos/o/r/pulls/5/merge",
         "gh api repos/o/r/pulls/5/comments -f body=see",
@@ -275,6 +308,7 @@ fn a_default_branch_rewrite_is_caught_whatever_the_hooks() {
 
 /// `burrow-guard --codex-user USER CONFIG`, as Codex runs it, on `command`.
 fn hook(user: &str, config: &str, command: &str) -> String {
+    common::stand_ins();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
     fs::write(&path, config).unwrap();
@@ -302,21 +336,6 @@ fn hook(user: &str, config: &str, command: &str) -> String {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
     String::from_utf8(out.stdout).unwrap()
-}
-
-/// A zfs that logs what it's asked, and fails when `fail` is there.
-fn zfs(dir: &Path) -> PathBuf {
-    let zfs = dir.join("zfs");
-    fs::write(
-        &zfs,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> '{0}/zfs.log'\n[ ! -e '{0}/fail' ] || {{ echo no >&2; exit 1; }}\n",
-            dir.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&zfs, fs::Permissions::from_mode(0o755)).unwrap();
-    zfs
 }
 
 fn decision(out: &str) -> (String, String) {

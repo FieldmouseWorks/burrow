@@ -19,17 +19,21 @@ pub enum Rule {
     /// A PR that grows a code file past the limit, or one already past it,
     /// splits it or says why not.
     FileSize,
+    /// An AGENTS.md is a map: a PR that grows one's own part past GUIDE
+    /// lines says why.
+    GuideSize,
     /// Tracked files never name a model: a PR that adds a line naming one
     /// says why.
     ModelNames,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 5] = [
+    pub const ALL: [Rule; 6] = [
         Rule::Title,
         Rule::RustFirst,
         Rule::Timers,
         Rule::FileSize,
+        Rule::GuideSize,
         Rule::ModelNames,
     ];
 
@@ -40,6 +44,7 @@ impl Rule {
             Rule::RustFirst => "rust-first",
             Rule::Timers => "timers",
             Rule::FileSize => "file-size",
+            Rule::GuideSize => "guide-size",
             Rule::ModelNames => "model-names",
         }
     }
@@ -51,6 +56,7 @@ impl Rule {
             Rule::RustFirst => Some("Why not Rust"),
             Rule::Timers => Some("Why a timer"),
             Rule::FileSize => Some("Why not split"),
+            Rule::GuideSize => Some("Why a longer guide"),
             Rule::ModelNames => Some("Why a model name"),
         }
     }
@@ -218,6 +224,16 @@ pub fn is_code(path: &str, language: Option<Language>) -> bool {
                 | "swift"
         )
     })
+}
+
+/// How many lines of its own an AGENTS.md may have, outside the house
+/// blocks, before a PR that grows it says why: enough for what the repo is,
+/// its own rules and where things live, not for the detail those point to.
+pub const GUIDE: usize = 100;
+
+/// Whether a path is an agents' guide, `AGENTS.md`, wherever it is.
+pub fn is_guide(path: &str) -> bool {
+    path.rsplit('/').next() == Some("AGENTS.md")
 }
 
 /// Whether a line sets up a timer: a systemd timer's keys, `startAt`, a

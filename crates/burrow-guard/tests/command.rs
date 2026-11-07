@@ -3,12 +3,14 @@
 
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod common;
+
 /// What `burrow-guard CONFIG` prints for `input`.
 fn hook(config: &str, input: &str) -> String {
+    common::stand_ins();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
     fs::write(&path, config).unwrap();
@@ -82,10 +84,7 @@ fn a_guard_that_cant_check_asks() {
 /// command run unchecked.
 #[test]
 fn a_guard_that_takes_too_long_asks() {
-    let dir = tempfile::tempdir().unwrap();
-    let git = dir.path().join("git");
-    fs::write(&git, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let git = common::stand_ins().join("hang");
     let config = format!(
         r#"{{"git": "{}", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
         git.display()

@@ -2,7 +2,6 @@
 //! machine's own user namespace, the user's service manager outside it.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -10,30 +9,15 @@ use burrow_guard::config::Config;
 use burrow_guard::{Guard, Hook, Input, Namespace};
 use tempfile::TempDir;
 
+mod common;
+
 /// A zfs that writes down what it's asked to do (and fails, saying `fail`,
 /// when that file is there), and a user's service manager that writes down
 /// what it's asked to run and runs it.
 fn machine() -> (TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
-    let script = |name: &str, body: String| {
-        let path = dir.path().join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    };
-    let d = dir.path().display();
-    let zfs = script(
-        "zfs",
-        format!(
-            "echo \"$@\" >> '{d}/zfs.log'\n[ ! -e '{d}/fail' ] || {{ cat '{d}/fail' >&2; exit 1; }}\n"
-        ),
-    );
-    let systemd_run = script(
-        "systemd-run",
-        format!(
-            "echo \"$@\" >> '{d}/manager.log'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n"
-        ),
-    );
+    let zfs = common::zfs(dir.path());
+    let systemd_run = common::systemd_run(dir.path());
     let config = Config {
         git: PathBuf::from("git"),
         zfs,
