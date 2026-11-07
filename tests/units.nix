@@ -29,6 +29,8 @@ pkgs.testers.runNixOSTest {
       secretFile = "/etc/burrow-webhook";
       handlers.watchdog = {
         events = [ ];
+        repos = [ ];
+        perRepo = false;
         unit = "watchdog-stand-in";
       };
     };

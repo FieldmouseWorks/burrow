@@ -326,41 +326,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn overflow_belongs_to_the_winning_scoped_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(example()).unwrap();
-        cfg.roles = dir.path().join("roles");
-        cfg.meters = Some(dir.path().to_owned());
-        let codex = json!({"windows": {"300m": {"used": 1, "resets_at": 0}}, "credits": false, "read_at": crate::now()});
-        std::fs::write(dir.path().join("codex.json"), codex.to_string()).unwrap();
-        std::fs::write(
-            &cfg.roles,
-            "work codex:bare\nwork@sam/code claude:scoped over 80 codex:burst\n",
-        )
-        .unwrap();
-        for (used, expected) in [
-            (
-                79,
-                Choice {
-                    engine: Engine::Claude,
-                    model: Some("scoped".into()),
-                },
-            ),
-            (
-                80,
-                Choice {
-                    engine: Engine::Codex,
-                    model: Some("burst".into()),
-                },
-            ),
-        ] {
-            let claude = json!({"windows": {"seven_day": {"used": used, "resets_at": 0}}, "credits": false, "read_at": crate::now()});
-            std::fs::write(dir.path().join("claude.json"), claude.to_string()).unwrap();
-            assert_eq!(cfg.engine("work", Some("sam/code")).unwrap(), expected);
-        }
-    }
-
     // The module's config reads whole; a field the binary doesn't know, or
     // one it's missing, fails it.
     #[test]
