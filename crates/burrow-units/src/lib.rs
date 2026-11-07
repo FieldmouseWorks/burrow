@@ -34,10 +34,12 @@ pub struct Core {
     pub at: f64,
 }
 
-/// What a pass found.
+/// What a pass found, and when each program's crashes were last cleared
+/// (`burrow-units clear EXE`, once its cause is fixed), by its path.
 pub struct Found<'a> {
     pub failed: &'a [Failed],
     pub cores: &'a [Core],
+    pub cleared: &'a BTreeMap<String, f64>,
 }
 
 /// The watch file's items for what was FOUND: one a failed unit
@@ -46,7 +48,9 @@ pub struct Found<'a> {
 /// program's path). Each is due GRACE after it was first seen: an item
 /// LAST had (the source's last watch file) keeps its `since` while it's
 /// still there, so a unit failing again on a timer, or a program crashing
-/// again, is still the one stall, not a new one each time.
+/// again, is still the one stall, not a new one each time. A program's
+/// crashes up to when they were cleared don't count, so it leaves once
+/// fixed, and a crash after that is a stall of its own again.
 pub fn items(
     found: &Found,
     ignore: &[String],
@@ -58,16 +62,17 @@ pub fn items(
             .iter()
             .any(|g| burrow_events::glob::matches(g, subject))
     };
-    let since = |key: &str, phase: &str, at: f64| {
+    let since = |key: &str, phase: &str, at: f64, cleared: f64| {
         last.get(key)
-            .filter(|i| i.phase == phase)
+            .filter(|i| i.phase == phase && i.since > cleared)
             .map_or(at, |i| i.since.min(at))
     };
+    let cleared = |exe: &str| found.cleared.get(exe).copied().unwrap_or(f64::NEG_INFINITY);
     let mut out = BTreeMap::new();
     for f in found.failed.iter().filter(|f| !ignored(&f.unit)) {
         let key = format!("unit:{}", f.unit);
         let phase = format!("failed ({})", f.result);
-        let since = since(&key, &phase, f.since);
+        let since = since(&key, &phase, f.since, f64::NEG_INFINITY);
         out.insert(
             key,
             Item {
@@ -80,7 +85,11 @@ pub fn items(
         );
     }
     let mut by_exe: BTreeMap<&str, Vec<&Core>> = BTreeMap::new();
-    for c in found.cores.iter().filter(|c| !ignored(&c.exe)) {
+    for c in found
+        .cores
+        .iter()
+        .filter(|c| !ignored(&c.exe) && c.at > cleared(&c.exe))
+    {
         by_exe.entry(&c.exe).or_default().push(c);
     }
     for (exe, mut cores) in by_exe {
@@ -88,7 +97,7 @@ pub fn items(
         let (first, latest) = (cores[0], cores[cores.len() - 1]);
         let key = format!("core:{exe}");
         let phase = "dumped core".to_owned();
-        let since = since(&key, &phase, first.at);
+        let since = since(&key, &phase, first.at, cleared(exe));
         let times = match cores.len() {
             1 => String::new(),
             n => format!(" {n} times"),
@@ -145,22 +154,24 @@ pub fn shown(text: &str, now: f64) -> Vec<Failed> {
         .collect()
 }
 
-/// The core dumps in `coredumpctl list --json=short` TEXT. Nothing, or a
-/// dump it can't read, is none.
-pub fn cores(text: &str) -> Vec<Core> {
-    let Ok(serde_json::Value::Array(dumps)) = serde_json::from_str(text) else {
-        return Vec::new();
-    };
+/// The core dumps in `coredumpctl list --json=short` TEXT, or why it can't
+/// be read: a dump read wrong could drop a crash that's still there.
+pub fn cores(text: &str) -> Result<Vec<Core>, String> {
+    let dumps: Vec<serde_json::Value> =
+        serde_json::from_str(text).map_err(|e| format!("coredumpctl's list: {e}"))?;
     dumps
         .iter()
-        .filter_map(|d| {
-            Some(Core {
-                exe: d["exe"].as_str()?.to_owned(),
-                pid: d["pid"].as_u64()?,
-                sig: d["sig"].as_u64().unwrap_or(0),
-                // In microseconds.
-                at: d["time"].as_f64()? / 1e6,
-            })
+        .map(|d| {
+            let core = || {
+                Some(Core {
+                    exe: d["exe"].as_str()?.to_owned(),
+                    pid: d["pid"].as_u64()?,
+                    sig: d["sig"].as_u64().unwrap_or(0),
+                    // In microseconds.
+                    at: d["time"].as_f64()? / 1e6,
+                })
+            };
+            core().ok_or_else(|| format!("coredumpctl listed a dump it can't read: {d}"))
         })
         .collect()
 }
@@ -201,6 +212,7 @@ mod tests {
             &Found {
                 failed: &failed,
                 cores: &cores,
+                cleared: &BTreeMap::new(),
             },
             &["noisy.*".to_owned(), "/bin/oth*".to_owned()],
             600.0,
@@ -229,6 +241,7 @@ mod tests {
             &Found {
                 failed: &[failed("backup.service", 100.0)],
                 cores: &[],
+                cleared: &BTreeMap::new(),
             },
             &[],
             600.0,
@@ -239,6 +252,7 @@ mod tests {
             &Found {
                 failed: &[failed("backup.service", 3700.0)],
                 cores: &[],
+                cleared: &BTreeMap::new(),
             },
             &[],
             600.0,
@@ -253,6 +267,7 @@ mod tests {
             &Found {
                 failed: &[other],
                 cores: &[],
+                cleared: &BTreeMap::new(),
             },
             &[],
             600.0,
@@ -264,12 +279,50 @@ mod tests {
             &Found {
                 failed: &[],
                 cores: &[],
+                cleared: &BTreeMap::new(),
             },
             &[],
             600.0,
             &first,
         );
         assert!(fixed.is_empty());
+    }
+
+    #[test]
+    fn a_cleared_crash_leaves_and_a_later_one_is_a_stall_of_its_own() {
+        let cores = [core("/bin/worker", 7, 200.0), core("/bin/worker", 9, 300.0)];
+        fn pass(
+            cleared: &BTreeMap<String, f64>,
+            cores: &[Core],
+            last: &BTreeMap<String, Item>,
+        ) -> BTreeMap<String, Item> {
+            items(
+                &Found {
+                    failed: &[],
+                    cores,
+                    cleared,
+                },
+                &[],
+                600.0,
+                last,
+            )
+        }
+        let first = pass(&BTreeMap::new(), &cores, &BTreeMap::new());
+        assert_eq!(first["core:/bin/worker"].since, 200.0);
+        // Fixed and cleared at 400: both crashes are done with.
+        let cleared = BTreeMap::from([("/bin/worker".to_owned(), 400.0)]);
+        assert!(pass(&cleared, &cores, &first).is_empty());
+        // It crashes again at 500, before a pass saw it go: a new stall,
+        // due from the new crash, its earlier ones not counted.
+        let again = [
+            cores[0].clone(),
+            cores[1].clone(),
+            core("/bin/worker", 11, 500.0),
+        ];
+        let got = pass(&cleared, &again, &first);
+        let worker = &got["core:/bin/worker"];
+        assert_eq!((worker.since, worker.due), (500.0, 1100.0));
+        assert_eq!(worker.what, "/bin/worker crashed (last: signal 11, pid 11)");
     }
 
     #[test]
@@ -299,7 +352,8 @@ mod tests {
         );
         let dumps = cores(
             r#"[{"time":1793000000123456,"pid":42,"uid":1001,"gid":1001,"sig":6,"corefile":"present","exe":"/nix/store/x/bin/worker","size":1}]"#,
-        );
+        )
+        .unwrap();
         assert_eq!(
             dumps,
             [Core {
@@ -309,6 +363,10 @@ mod tests {
                 at: 1_793_000_000.123456,
             }]
         );
-        assert!(cores("No coredumps found.").is_empty());
+        // Anything else than a list of dumps it can read is an error, never
+        // none: that would clear crashes still there.
+        assert_eq!(cores("[]"), Ok(Vec::new()));
+        assert!(cores("No coredumps found.").is_err());
+        assert!(cores(r#"[{"time":1,"pid":2}]"#).is_err());
     }
 }

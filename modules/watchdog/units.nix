@@ -9,9 +9,10 @@
 # top-level service.d drop-in), and every core dump's systemd-coredump@
 # OnSuccess= the same: that unit kicks burrow-units' burrow-events handler,
 # which also passes on the hourly catch-up. No timer of its own. The kick
-# and burrow-units itself take OnFailure= off again: either failing would
-# start the other, for ever. A burrow-units that stops passing goes stale,
-# which the watchdog catches.
+# and burrow-units itself mask that drop-in (one of the same name, linked to
+# /dev/null, in their own .d: an empty OnFailure= can't take a dependency
+# back): either failing would start the other, for ever. A burrow-units
+# that stops passing goes stale, which the watchdog catches.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -44,7 +45,7 @@ let
     printf '[Unit]\nOnFailure=${name}-kick.service\n' >$d/service.d/90-${name}.conf
     printf '[Unit]\nOnSuccess=${name}-kick.service\n' >$d/systemd-coredump@.service.d/90-${name}.conf
     for unit in ${name} ${name}-kick; do
-      printf '[Unit]\nOnFailure=\n' >$d/$unit.service.d/99-${name}.conf
+      ln -s /dev/null $d/$unit.service.d/90-${name}.conf
     done
   '';
 in
@@ -128,7 +129,7 @@ in
     burrow.watchdog.sources.units = {
       inherit file;
       about = "burrow-units, which watches for failed units and crashes";
-      look = "`systemctl status UNIT` and `journalctl -b -u UNIT` say why a unit failed, `coredumpctl info EXE` why a program crashed. Fix the cause in the machine's flake or burrow; once it's live, the unit running again (or `systemctl reset-failed UNIT` for a one-off that's done) clears it, and `${name}` looks again.";
+      look = "`systemctl status UNIT` and `journalctl -b -u UNIT` say why a unit failed, `coredumpctl info EXE` why a program crashed. Fix the cause in the machine's flake or burrow; once it's live, the unit running again (or `systemctl reset-failed UNIT` for a one-off that's done) clears a unit, and `${name} clear EXE` (the path the item names) a program's crashes so far, each looking again as it does (`${name}` alone just looks). A crash after that is back in the watch.";
       kick = "units";
       # It writes on every pass, and has one at least hourly (burrow-events'
       # catch-up).

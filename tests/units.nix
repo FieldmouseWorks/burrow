@@ -3,8 +3,8 @@
 # (either failing would start the other for ever). A unit that fails, and a
 # program that dumps core, land in its watch file and kick the watchdog (a
 # stand-in here, noting each kick); a unit that runs again leaves it once
-# burrow-units looks again. What an item says, and when it's due, are
-# crates/burrow-units' tests.
+# burrow-units looks again, and a crash once it's cleared, until the next.
+# What an item says, and when it's due, are crates/burrow-units' tests.
 #
 #   nix build .#checks.x86_64-linux.units -L
 { self, pkgs }:
@@ -81,6 +81,14 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("grep -q '\"core:' /var/lib/burrow/units/watch.json", timeout=120)
         cores = [k for k in watch() if k.startswith("core:")]
         assert len(cores) == 1 and cores[0].endswith("/bin/bash"), watch()
+
+    with subtest("a crash cleared once fixed leaves it, and a later one is back"):
+        exe = cores[0][len("core:"):]
+        machine.succeed(f"su - dev -c 'burrow-units clear {exe}'")
+        assert cores[0] not in watch(), watch()
+        machine.succeed("sleep 1; su - dev -c 'ulimit -c unlimited; sh -c \"kill -SEGV \\$\\$\"' || true")
+        machine.wait_until_succeeds(f"grep -qF '\"{cores[0]}\"' /var/lib/burrow/units/watch.json", timeout=120)
+        assert "crashed (last:" in watch()[cores[0]]["what"], watch()
 
     with subtest("a unit that runs again leaves it once it looks again"):
         machine.succeed("touch /run/broken-fixed && systemctl start broken.service")

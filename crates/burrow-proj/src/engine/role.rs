@@ -65,7 +65,8 @@ impl Choice {
 /// short by its fresh meter (any window at PCT, and no credits), or, for
 /// Claude, the machine is out of Claude's usage (`held`, usage.rs) before a
 /// meter could say so; and TO's has room by its own fresh meter (credits,
-/// or no window used up). A missing, malformed, future or hour-old reading
+/// or no window used up), which Claude out of usage hasn't, whatever its
+/// last reading said. A missing, malformed, future or hour-old reading
 /// moves nothing: it can't say the move helps.
 fn over(meters: Option<&Path>, held: bool, from: Engine, to: Engine, pct: f64, now: i64) -> bool {
     use burrow_usage_reset::meter::Snapshot;
@@ -73,8 +74,9 @@ fn over(meters: Option<&Path>, held: bool, from: Engine, to: Engine, pct: f64, n
         return false;
     };
     let read = |e: Engine| Snapshot::read(dir, e.name(), now as f64);
-    let short = (held && from == Engine::Claude) || read(from).is_some_and(|m| m.short(pct));
-    short && read(to).is_some_and(|m| m.room())
+    let out = |e: Engine| held && e == Engine::Claude;
+    let short = out(from) || read(from).is_some_and(|m| m.short(pct));
+    short && !out(to) && read(to).is_some_and(|m| m.room())
 }
 
 pub(crate) fn role<'a>(
@@ -206,5 +208,11 @@ mod tests {
             .unwrap()
             .1;
         assert_eq!(back.engine, Engine::Claude);
+        // Nor does it move a turn onto a Claude that's out, whatever its
+        // last reading said.
+        let back = role("work codex over 80 claude", Some(dir), true, 10000)
+            .unwrap()
+            .1;
+        assert_eq!(back.engine, Engine::Codex);
     }
 }
