@@ -1,8 +1,7 @@
 //! A turn of a job: [`start`]ed as the job's systemd unit, which runs it
-//! ([`exec`]): its wait for a slot, then Claude, as many runs as it takes.
+//! ([`exec`]): its wait for a slot, then its engine, as many runs as it takes.
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -12,25 +11,20 @@ use std::time::{Duration, Instant, SystemTime};
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::config::Config;
-use crate::job::{Job, answer, is_error, kick, last_result, result_of};
+use crate::engine::{self, Engine, LONG, NEXT, Said, answer, is_error};
+use crate::job::{Job, USAGE_LIMIT, kick};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
 use crate::{
     Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, swap, systemd, usage,
 };
 
-/// How a job waits on its own long work, which its answer would stop.
-const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
-
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
 
 /// What a run refused for usage is told in the next, once it's back, with
 /// what it was refused saying and the turn's prompt.
-const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
-
-/// How a turn says what comes next: what resumes the job, if anything.
-const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
+const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every Claude job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
 
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
@@ -161,6 +155,18 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             return Err(Fail::quiet(1));
         }
     }
+    let choice = match engine::choice(cfg, &job) {
+        Ok(c) => c,
+        Err(e) => {
+            outcome(&e);
+            return Err(Fail::quiet(1));
+        }
+    };
+    if choice.engine == Engine::Codex && filled(&job.path("agent")) {
+        outcome("codex cannot run a --vm job; agent sandboxes are Claude-only");
+        return Err(Fail::quiet(1));
+    }
+    let _ = fs::write(job.turn(&n, "engine"), choice.engine.name());
     // In the turn's journal too, where its wait would be looked into.
     if let Some(why) = demoted(cfg, &job.dir) {
         eprintln!("proj: {why}");
@@ -175,7 +181,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // waiting again after a refusal) would lose all of. It stays on this one,
     // as a running turn does.
     let take = |hand_over: bool| {
-        slot::take(cfg, id, &n, given, hand_over).map_err(|e| Fail::new(1, format!("proj: {e}")))
+        slot::take_engine(cfg, id, &n, given, hand_over, choice.engine)
+            .map_err(|e| Fail::new(1, format!("proj: {e}")))
     };
     let mut held = Some(take(true)?);
     // It's at work now, which is news to what it was started to kick: a turn
@@ -210,35 +217,21 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let must = !job.path("owned").exists() && agent.is_none();
     let stream = job.turn(&n, "jsonl");
     File::create(&stream).map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
-    let mut prompt = job.path(&format!("prompt.{n}"));
+    // What it's asked, after what its engine's conversation missed of the
+    // job, if it moved here from the other engine (engine/handoff.rs).
+    let first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+        Fail::new(
+            1,
+            format!("proj: {}: {e}", job.turn(&n, "handoff").display()),
+        )
+    })?;
+    let mut prompt = first.clone();
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
         .unwrap_or(0);
     let mut killed = 0;
     let (last, mut rc) = loop {
-        let mut args: Vec<String> = [
-            "-p",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            // No skills or slash commands: a job is handed its task as
-            // text, and in 14 days none of 2,188 jobs called a skill, while
-            // their list rode along in every call.
-            "--disable-slash-commands",
-        ]
-        .map(String::from)
-        .to_vec();
-        if let Some(s) = read(&job.path("session")).filter(|s| !s.is_empty()) {
-            args.extend(["--resume".into(), s]);
-        }
-        // Its role's model, as the machine has it now.
-        if let Some(m) = read(&job.path("role"))
-            .filter(|r| !r.is_empty())
-            .and_then(|r| cfg.model(&r))
-        {
-            args.extend(["--model".into(), m]);
-        }
         // Where this run's stream starts: an earlier run's answer isn't its.
         let from = fs::metadata(&stream).map_or(0, |m| m.len());
         // Its deadline, looked at last thing before the run starts: past,
@@ -251,7 +244,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         let ooms = oom_kills();
         let started = now();
-        let child = match spawn(
+        let child = match engine::spawn(
             cfg,
             &job,
             &n,
@@ -260,11 +253,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             agent.as_deref(),
             must,
             &app_env,
-            args,
+            &choice,
         ) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("proj: couldn't start claude: {e}");
+                eprintln!("proj: couldn't start {}: {e}", choice.engine.name());
                 break (None, 1);
             }
         };
@@ -277,7 +270,20 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         .watch(child, from);
         let rc = code(status);
-        let last = last_result(&stream, from);
+        let oomed = oom_kills() > ooms;
+        let last = engine::ended(
+            choice.engine,
+            &stream,
+            from,
+            exit(
+                rc,
+                cut,
+                job.turn(&n, "quiet").exists(),
+                job.turn(&n, "late").exists(),
+                oomed,
+            ),
+            &read(&job.turn(&n, "stderr")).unwrap_or_default(),
+        );
         // The turn's next run, in the same conversation and slot, is told
         // `text`, kept in its N.KIND.
         let again = |text: &str, kind: &str| -> PathBuf {
@@ -299,8 +305,32 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         let refusal = last.as_ref().and_then(|l| {
             let text = fs::read(&stream).unwrap_or_default();
             let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
-            usage::refused(l, &run, now())
+            engine::refused(choice.engine, l, &run, now())
         });
+        if choice.engine == Engine::Codex {
+            if let Some((Some(due), _)) = &refusal {
+                if let Err(e) = swap(
+                    &job.path("await"),
+                    &format!("{USAGE_LIMIT}\t{}\t{due}\n", now()),
+                ) {
+                    outcome(&format!("couldn't keep Codex's usage wait: {e}"));
+                    return Err(Fail::quiet(1));
+                }
+                let _ = fs::write(job.turn(&n, "result"), format!("{}\n", answer(&stream)));
+                outcome("usage limit; waiting for Codex's reset");
+                return Ok(());
+            }
+            if last.as_ref().is_some_and(|l| {
+                is_error(l) && burrow_codex::logged_out(l["result"].as_str().unwrap_or_default())
+            }) {
+                let _ = fs::write(
+                    job.turn(&n, "result"),
+                    "codex is logged out; run autoland-codex-login job\n",
+                );
+                outcome("codex is logged out; run autoland-codex-login job on the machine");
+                return Err(Fail::quiet(1));
+            }
+        }
         match refusal {
             Some((until, said)) => {
                 // A hold that can't be written holds nothing: this turn
@@ -336,13 +366,15 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         let dl = dl + (now_nanos() - waited);
                         let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
                     }
-                    let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
+                    let asked = read(&first).unwrap_or_default();
                     prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
                     continue;
                 }
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
             }
-            None if last.is_some() => usage::back(cfg, Some(started)),
+            None if last.is_some() && choice.engine == Engine::Claude => {
+                usage::back(cfg, Some(started))
+            }
             None => {}
         }
         // Killed for memory before it answered, Claude itself as a rule (a
@@ -354,8 +386,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             && killed < 2
             && !job.turn(&n, "quiet").exists()
             && agent.is_none()
-            && oom_kills() > ooms
-            && names_session(&stream, from)
+            && oomed
+            && engine::stream_names_session(&stream, from)
             && reap()
         {
             killed += 1;
@@ -469,72 +501,20 @@ fn touch(path: &Path) {
 
 /// An exit status as the shell has it: 128 and the signal for a run a
 /// signal ended.
+/// The exit a run's engine reads how it ended from, when the run ended
+/// itself: not cut, gone quiet, timed out, or killed for memory, which the
+/// turn ends or carries on from, so an engine that turns a failed exit
+/// into an error (Codex's) doesn't make one of it. A memory kill can come
+/// to the engine itself, or to what it ran, which it may exit failed over.
+fn exit(rc: i32, cut: bool, quiet: bool, late: bool, oomed: bool) -> Option<i32> {
+    (!cut && !quiet && !late && !oomed).then_some(rc)
+}
+
 fn code(status: ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
-}
-
-/// One run of Claude, its output appended to the turn's stream. It goes
-/// under timeout(1) with no limit of its own: stopping it through that
-/// stops all of it (TERM, then KILL a minute on), as timeout(1) does at a
-/// limit.
-#[allow(clippy::too_many_arguments)]
-fn spawn(
-    cfg: &Config,
-    job: &Job,
-    n: &str,
-    prompt: &Path,
-    waitdir: &Path,
-    agent: Option<&str>,
-    must: bool,
-    app_env: &str,
-    mut args: Vec<String>,
-) -> std::io::Result<Child> {
-    let out = File::options().append(true).open(job.turn(n, "jsonl"))?;
-    let mut c = Command::new(&cfg.tools.timeout);
-    // No claude.ai connectors (mail, calendar, drive, design tools): one of
-    // 2,188 jobs in 14 days called one, and their tools were a ninth of
-    // every job's context. The machine's own MCP servers stay.
-    c.args(["-k", "1m", "0"])
-        .stdout(out)
-        .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
-    if let Some(agent) = agent {
-        c.args(["agent", "sh", agent, "claude"])
-            .args(&args)
-            .stdin(File::open(prompt)?);
-        return c.spawn();
-    }
-    let id = job.id;
-    let scratch = scratch::dir(cfg, id);
-    // Where its own worktrees go, and how long they last.
-    let keep = format!(
-        "Any worktree, clone or build of your own goes in {} ($PROJ_SCRATCH), yours alone. Push what you mean to keep: it's removed, with everything in it, once this job is over,",
-        scratch.display()
-    );
-    args.push("--append-system-prompt".into());
-    args.push(if must {
-        format!("This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on anything in the background or with sleep. Before you answer, say what comes next, since nothing else ever resumes this job: run {NEXT}. Waiting on anything else (a background run, a notification) is waiting in this turn, in the foreground. {LONG} {keep} when a turn of it ends with `proj done`, or it's stopped.")
-    } else {
-        format!("This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped.")
-    });
-    // A login shell, so the job sees the same PATH and env as an SSH login,
-    // and then its App's env, which nothing the login sets can undo; Claude
-    // starts only once that has.
-    c.arg(&cfg.tools.bash)
-        .args([
-            "-lc",
-            r#"eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0""#,
-        ])
-        .arg(prompt)
-        .args(&args)
-        .env("PROJ_JOB", id)
-        .env("PROJ_WAIT_DIR", waitdir)
-        .env("PROJ_SCRATCH", &scratch)
-        .env("PROJ_APP_ENV", app_env)
-        .stdin(Stdio::null())
-        .spawn()
 }
 
 /// A run being watched.
@@ -694,72 +674,6 @@ fn gone_quiet(now: i64, stream: i64, quiet: i64) -> bool {
     quiet > 0 && now - stream >= quiet
 }
 
-/// What a run has said so far, read as it says it. Its session is kept as
-/// soon as its stream first names it (the first line does), not from its
-/// answer: a run killed before it answers (its unit past its memory cap,
-/// say) can still be continued.
-struct Said<'a> {
-    job: &'a Job<'a>,
-    file: Option<File>,
-    partial: Vec<u8>,
-    /// A line it has said is a result.
-    answered: bool,
-    /// A line it has said names a session.
-    named: bool,
-}
-
-impl<'a> Said<'a> {
-    fn new(job: &'a Job<'a>, n: &str, from: u64) -> Said<'a> {
-        let file = File::open(job.turn(n, "jsonl")).ok().and_then(|mut f| {
-            f.seek(SeekFrom::Start(from)).ok()?;
-            Some(f)
-        });
-        Said {
-            job,
-            file,
-            partial: Vec::new(),
-            answered: false,
-            named: false,
-        }
-    }
-
-    /// Reads the lines it has said since the last look; `last` once it's
-    /// gone, when a line it never ended counts too.
-    fn look(&mut self, last: bool) {
-        let Some(f) = &mut self.file else {
-            return;
-        };
-        let mut more = Vec::new();
-        if f.read_to_end(&mut more).is_err() {
-            return;
-        }
-        self.partial.extend(more);
-        let end = if last {
-            self.partial.len()
-        } else {
-            match self.partial.iter().rposition(|&b| b == b'\n') {
-                Some(end) => end + 1,
-                None => return,
-            }
-        };
-        let whole: Vec<u8> = self.partial.drain(..end).collect();
-        for l in String::from_utf8_lossy(&whole).lines() {
-            if !self.named && l.contains(r#""session_id""#) {
-                self.named = true;
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(l)
-                    && let Some(serde_json::Value::String(s)) = v.get("session_id")
-                    && !s.is_empty()
-                {
-                    let _ = fs::write(self.job.path("session"), format!("{s}\n"));
-                }
-            }
-            if result_of(l).is_some() {
-                self.answered = true;
-            }
-        }
-    }
-}
-
 /// Stop a run: TERM to its timeout(1), which passes it on to all of it.
 fn stop(pid: Pid) {
     let _ = kill_process(pid, Signal::TERM);
@@ -833,14 +747,6 @@ fn oom_kills() -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether a stream from byte `from` on has named its session.
-fn names_session(stream: &Path, from: u64) -> bool {
-    fs::read(stream).is_ok_and(|text| {
-        String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default())
-            .contains(r#""session_id""#)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -886,5 +792,85 @@ mod tests {
     #[test]
     fn no_idle_never_goes_quiet() {
         assert!(!gone_quiet(1000 * SECOND, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+    use crate::config::tests::example;
+
+    /// A run killed for memory before it answered ends with nothing said,
+    /// for either engine, so the turn can carry it on in its session; a
+    /// failed exit of Codex's own is still its error, and an answer is
+    /// still the answer.
+    #[test]
+    fn a_run_killed_for_memory_says_nothing_for_either_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let stream = dir.path().join("1.jsonl");
+        let ended = |engine, text: &str, exit| {
+            fs::write(&stream, text).unwrap();
+            engine::ended(engine, &stream, 0, exit, "out of memory")
+        };
+        let codex =
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n";
+        let claude = "{\"type\":\"system\",\"session_id\":\"s\"}\n";
+        for (engine, text) in [(Engine::Codex, codex), (Engine::Claude, claude)] {
+            fs::write(&stream, text).unwrap();
+            assert!(engine::stream_names_session(&stream, 0), "{text}");
+            assert_eq!(
+                ended(engine, text, exit(137, false, false, false, true)),
+                None
+            );
+            // Cut, quiet or late, likewise.
+            for (cut, quiet, late) in [
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ] {
+                assert_eq!(
+                    ended(engine, text, exit(137, cut, quiet, late, false)),
+                    None
+                );
+            }
+        }
+        // Codex's own failed exit, not killed for memory: its error.
+        let error = ended(Engine::Codex, codex, exit(1, false, false, false, false)).unwrap();
+        assert!(is_error(&error));
+        assert_eq!(error["result"], "out of memory");
+        // An answer it gave before the kill is still its answer.
+        let answered = format!(
+            "{codex}{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}\n{{\"type\":\"turn.completed\"}}\n"
+        );
+        let last = ended(
+            Engine::Codex,
+            &answered,
+            exit(137, false, false, false, true),
+        )
+        .unwrap();
+        assert_eq!(last["result"], "done");
+    }
+
+    #[test]
+    fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        cfg.scratch = dir.path().join("scratch");
+        cfg.roles = dir.path().join("roles");
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("role"), "work").unwrap();
+        fs::write(job.path("agent"), "sandbox").unwrap();
+        for (line, expected) in [
+            ("work unknown", "line 1: work unknown"),
+            ("work codex", "codex cannot run a --vm job"),
+        ] {
+            fs::write(&cfg.roles, line).unwrap();
+            assert!(exec(&cfg, "job", "normal").is_err());
+            assert!(read(&job.turn("1", "outcome")).unwrap().contains(expected));
+            assert!(!job.turn("1", "slot").exists());
+        }
     }
 }

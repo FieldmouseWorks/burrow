@@ -208,10 +208,7 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 };
-                let labelled = now_issue["labels"].as_array().is_some_and(|ls| {
-                    ls.iter()
-                        .any(|l| l["name"].as_str() == Some(self.inbox.label.as_str()))
-                });
+                let labelled = self.engine(&now_issue).is_some();
                 if now_issue["state"] != "open" || !labelled {
                     continue;
                 }

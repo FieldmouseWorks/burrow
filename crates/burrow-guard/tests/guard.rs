@@ -56,6 +56,7 @@ impl Box {
     fn check_at(&self, cmd: &str, cwd: &Path, now: SystemTime) -> Option<String> {
         let guard = Guard {
             config: &self.config,
+            codex: false,
             mark: self.mark(),
         };
         guard.check(&bash(cmd, cwd), now)
@@ -147,6 +148,7 @@ fn only_bash_is_read() {
     hook.tool_name = Some("Write".to_owned());
     let guard = Guard {
         config: &b.config,
+        codex: false,
         mark: b.mark(),
     };
     assert_eq!(guard.check(&hook, SystemTime::now()), None);

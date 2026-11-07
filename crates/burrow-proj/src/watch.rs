@@ -12,15 +12,12 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::github::{changes, fingerprint, target};
-use crate::job::{Job, awaits};
+use crate::job::{Job, USAGE_LIMIT, awaits};
 use crate::turn::start;
 use crate::{Fail, filled, io_fail, now, read, swap, usage};
 
-/// What a proj from before usage.rs (#422's) wrote to a job's await for a
-/// turn that ended on a usage limit: `usage-limit\tSINCE\tRESET`. A look
-/// takes it into the machine's hold (usage.rs), in a look at any repo, and
-/// the job's next turn starts at once, to wait in line for the reset.
-const OLD_LIMIT: &str = "usage-limit";
+// Usage awaits from old Claude turns become its global hold. Codex turns
+// keep the same wire format but wait independently until the reset.
 
 /// Seconds before a repo GitHub couldn't be asked about, or a turn that
 /// couldn't start, is looked at again.
@@ -51,7 +48,19 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             if a.target.is_empty() {
                 continue;
             }
-            if a.target == OLD_LIMIT {
+            if a.target == USAGE_LIMIT {
+                if read(&job.turn(&turn, "engine")).as_deref() == Some("codex") {
+                    let reset = a.was.parse::<i64>().unwrap_or(0);
+                    if reset > now() {
+                        lines.push_str(&a.line());
+                        retry.push((String::new(), reset));
+                    } else {
+                        news.push_str(
+                            "- Codex's usage limit has reset; carry on from the last turn\n",
+                        );
+                    }
+                    continue;
+                }
                 let reset = a.was.parse::<i64>().unwrap_or(0);
                 let written = a.since.parse::<i64>().ok();
                 // Not taken: the job's waits stay as they are, for the next
@@ -152,7 +161,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
 }
 
 /// What a turn's end kicks for a wait on `target`: its repo's look, or
-/// every repo's for one that's no repo's, such as an OLD_LIMIT (which only
+/// every repo's for one that's no repo's, such as an USAGE_LIMIT (which only
 /// that takes in). burrow-events has no look for a repo by any other name.
 pub fn kick_for(target: &str) -> String {
     match crate::github::target(target) {
@@ -214,6 +223,14 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
             else {
                 continue;
             };
+            if a.target == USAGE_LIMIT {
+                if let Ok(due) = a.was.parse::<i64>()
+                    && due > now
+                {
+                    add("", due);
+                }
+                continue;
+            }
             let due = since + hours * 3600 + 1;
             if let Some((repo, _)) = a.target.split_once('#')
                 && !repo.contains('#')
@@ -233,7 +250,7 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OLD_LIMIT, kick_for};
+    use super::{USAGE_LIMIT, kick_for};
 
     // A wait on a PR or issue kicks its repo's look, however it's written; one
     // that's no repo's (an earlier proj's usage limit) kicks every repo's,
@@ -247,10 +264,57 @@ mod tests {
                 "https://github.com/sam/r/issues/7#issuecomment-1",
                 "proj-watch/sam/r",
             ),
-            (OLD_LIMIT, "proj-watch"),
+            (USAGE_LIMIT, "proj-watch"),
             ("not a target", "proj-watch"),
         ] {
             assert_eq!(kick_for(t), kick, "{t}");
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+    #[test]
+    fn a_codex_limit_is_booked_then_resumed_without_holding_claude() {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = d.path().join("jobs");
+        cfg.wake = d.path().join("wake.json");
+        cfg.waits = None;
+        cfg.kick.clear();
+        cfg.tools.systemctl = "false".into();
+        cfg.tools.systemd_run = "true".into();
+        let job = Job::new(&cfg, "code");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(
+            job.turn("1", "outcome"),
+            "usage limit; waiting for Codex's reset",
+        )
+        .unwrap();
+        fs::write(job.turn("1", "engine"), "codex").unwrap();
+        let due = now() + 10000;
+        let await_text = format!("usage-limit\t{}\t{due}\n", now());
+        fs::write(job.path("await"), &await_text).unwrap();
+        look(&cfg, "").unwrap();
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        assert_eq!(fs::read_to_string(job.path("await")).unwrap(), await_text);
+        let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();
+        assert_eq!(wake[""], due);
+        assert!(crate::usage::kept(&cfg).is_none());
+        fs::write(
+            job.path("await"),
+            format!("usage-limit\t1000\t{}\n", now() - 1),
+        )
+        .unwrap();
+        look(&cfg, "").unwrap();
+        assert_eq!(job.turns().as_deref(), Some("2"));
+        assert!(
+            fs::read_to_string(job.path("prompt.2"))
+                .unwrap()
+                .contains("Codex's usage limit has reset")
+        );
+        assert!(crate::usage::kept(&cfg).is_none());
     }
 }

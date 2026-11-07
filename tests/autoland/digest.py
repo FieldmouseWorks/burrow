@@ -15,7 +15,7 @@ GH = {"fail": ""}  # a write that fails: an issue command, or a flag
 def gh(*a, **k):
     CALLS.append(a)
     if a[:2] == ("issue", "list"):
-        label = a[a.index("--label") + 1]
+        label = a[a.index("--label") + 1] if "--label" in a else None
         n = OPEN.get(label)
         return [{"number": n, "body": "", "labels": [{"name": x} for x in LABELS.get(n, [label, "unstick"])]}] if n else []
     # A write that fails: an issue command, or any call with a flag.
@@ -43,14 +43,15 @@ def said(n):
     return [a[a.index("--body") + 1] for a in CALLS if a[:3] == ("issue", "comment", str(n))]
 
 
-def fresh(enable=True, app=True):
+def fresh(enable=True, app=True, labels=None):
     """With app, the steward's App is one of the inbox's authors, as autoland.nix makes it."""
     CALLS.clear()
     OPEN.clear()
     LABELS.clear()
     fresh_pr_state()
     GH.update(fail="")
-    R.CFG["inbox"] = {"enable": enable, "label": "claude", "unstickLabel": "unstick",
+    R.CFG["inbox"] = {"enable": enable, "labels": {"claude": "claude", "codex": "codex"} if labels is None else labels,
+                      "unstickLabel": "unstick",
                       "authors": ["sam"] + (["steward[bot]"] if app else [])}
 
 
@@ -220,6 +221,24 @@ for nrepo in (None, ""):
     assert "--- [autoland] Stuck in the pipeline ---\n(nothing)" in LOGGED, LOGGED
 R.log = log_kept
 R.CFG["notify"]["repo"] = "sam/notes"
+
+# Engine selection follows the map's values, not the spelling of a label.
+fresh(labels={"claude": "codex", "judgment": "claude", "z-judgment": "claude"})
+R.publish(DIGEST)
+assert made("judgment")["--label"] == ["judgment", "unstick"], CALLS
+assert made("claude") is None, CALLS
+
+# Without a Claude label, only the owner gets the work; the old stuck issue
+# is found by title and closed, rather than opened under a Codex label.
+for labels in ({"codex": "codex"}, {}):
+    fresh(labels=labels)
+    OPEN[None] = 9
+    LABELS[9] = ["old-inbox-label", "unstick"]
+    R.publish(DIGEST)
+    owner = made("autoland")
+    assert owner and "no inbox label routes to Claude" in owner["--body"], owner
+    assert all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
+    assert made("codex") is None and ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
 
 C.gh, R.CFG["inbox"], R.CFG["projectsDir"] = kept[0], kept[1], kept[3]
 R.CFG["notify"].clear()

@@ -32,7 +32,7 @@ import waits
 from aside import aside
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
-from touches import automerge_spent, automerges, bot_edited, dep_kind, gate_edit, moved_from, provenance
+from touches import automerge_spent, automerges, bot_edited, codex_written, dep_kind, gate_edit, moved_from, provenance
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, negative, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
@@ -958,8 +958,11 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate() or unseen or ci == "none" or asked or capped:
-        judged(f"it touches {gate()}" if gate() else
+    elif (codex := codex_written(repo, pr, st)) is None:
+        settle("pending", "Settled; couldn't read its commits; next pass")
+    elif codex or gate() or unseen or ci == "none" or asked or capped:
+        judged("a Codex job wrote it" if codex else
+               f"it touches {gate()}" if gate() else
                f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
                else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head" if asked
                else f"it went past the review-round limit ({rounds} rounds with findings)",

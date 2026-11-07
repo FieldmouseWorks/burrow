@@ -100,6 +100,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-codex"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-dispatch"
 version = "0.0.0"
 dependencies = [
@@ -253,7 +261,10 @@ dependencies = [
 name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
+ "burrow-codex",
  "burrow-events",
+ "burrow-github",
+ "burrow-usage-reset",
  "burrow-watchdog",
  "jiff",
  "rustix",
@@ -289,6 +300,7 @@ dependencies = [
 name = "burrow-review"
 version = "0.0.0"
 dependencies = [
+ "burrow-codex",
  "burrow-events",
  "jiff",
  "rustix",
@@ -417,6 +429,13 @@ name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
+
+[[package]]
+name = "codex-stand-in"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "combine"

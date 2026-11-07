@@ -38,11 +38,11 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       assert "ended without an answer" in out and "refused" in out, out
 
   with subtest("a job's role runs it on the model the machine's roles file gives it, and only then"):
-      machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"# kinds of work\\nquick small-1\\n\" >~/.config/proj/roles'")
+      machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"# kinds of work\\nquick claude:chosen\\n\" >~/.config/proj/roles'")
       r = proj('run --role quick web "sleep 1"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       args = machine.succeed("cat /tmp/args").split()
-      assert args[args.index("--model") + 1] == "small-1", args
+      assert args[args.index("--model") + 1] == "chosen", args
       r = proj('run --role other web "sleep 1"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       assert "--model" not in machine.succeed("cat /tmp/args").split(), machine.succeed("cat /tmp/args")

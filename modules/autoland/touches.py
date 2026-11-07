@@ -6,6 +6,7 @@ carries someone else's commits. Whether it's R2 is Conary's class policy's
 
 import codecs
 import re
+import subprocess
 
 import common as C
 from common import CFG, DEP_RE
@@ -108,6 +109,38 @@ def bot_edited(repo, pr, st, rechecked):
     return (not rechecked) if edited is None else edited
 
 
+def commit_pages(repo, pr, st):
+    """One full commit read per head and base, shared with provenance. Failures
+    aren't cached: a head whose authorship is unknown cannot land unchecked."""
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("commitHead") != seen:
+        pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100", check=False)
+        # The PR may have moved during the read, or its commit list may be
+        # truncated. Neither is evidence about the queried head.
+        commits = [c for page in (pages or []) for c in page]
+        if (not commits or commits[-1].get("sha") != pr["headRefOid"]
+                or any(not isinstance(c.get("commit", {}).get("message"), str) for c in commits)):
+            return None
+        st["commitHead"], st["commitPages"] = seen, pages
+    return st["commitPages"]
+
+
+def codex_written(repo, pr, st):
+    """Only actual trailers count, on any commit since the PR's base. Cache
+    either answer per head and base; unreadable commits stay unknown and are
+    retried next pass, so they can neither land nor spend a judge."""
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("codexHead") != seen:
+        pages = commit_pages(repo, pr, st)
+        if pages is None:
+            return None
+        st["codexWritten"] = any("engine: codex" in subprocess.run(["git", "interpret-trailers", "--parse"],
+                                 input=c["commit"]["message"], text=True, capture_output=True, check=True).stdout.casefold().splitlines()
+                                 for page in pages for c in page)
+        st["codexHead"] = seen
+    return st["codexWritten"]
+
+
 def provenance(repo, pr, st):
     """True if a dependency bot's branch has a commit some other author,
     co-author or committer made (bot_edited), False if every one is the bots'
@@ -126,8 +159,7 @@ def provenance(repo, pr, st):
     if st.get("editedHead") != seen:
         got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
         # gh's commits have no committer, and GitHub's REST ones no co-authors.
-        pages = got and C.gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100",
-                             check=False)
+        pages = got and commit_pages(repo, pr, st)
         if not pages:
             return None
         st["edited"] = (any(a.get("email") not in bots for c in got["commits"] for a in c["authors"])

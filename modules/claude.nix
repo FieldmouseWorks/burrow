@@ -1,6 +1,6 @@
 # Claude Code, configured once, system-wide, so no project ever asks about
 # permissions again. Everything runs in bypassPermissions; the only prompts are
-# the one-way doors (R2) listed below. Also writes /etc/claude-code/CLAUDE.md,
+# the one-way doors (R2) in claude/r2.nix. Also writes /etc/claude-code/CLAUDE.md,
 # which every Claude session on the box reads: each burrow module adds its
 # section to burrow.claude.machineMd.
 inputs:
@@ -9,73 +9,13 @@ let
   cfg = config.burrow.claude;
   inherit (config.networking) hostName;
 
-  # How long Claude Code gives the hook; past it, the command runs unchecked,
-  # so the guard asks before then.
-  guardTimeout = 10;
-
-  # The PreToolUse hook (crates/burrow-guard), with this machine's config
-  # (its src/config.rs). A compiled wrapper rather than a script, since it
-  # runs on every Bash call.
-  guardConfig = pkgs.writeText "claude-guard.json" (builtins.toJSON {
-    git = lib.getExe config.programs.git.package;
-    zfs = "${config.boot.zfs.package}/bin/zfs";
-    snapshotDatasets = lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets;
-    askAfterSeconds = guardTimeout - 2;
-  });
-  guard = pkgs.runCommand "claude-guard" {
-    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
-    meta.mainProgram = "claude-guard";
-  } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-guard}/bin/burrow-guard \
-      $out/bin/claude-guard --add-flags ${guardConfig}
-  '';
+  # The PreToolUse hook, Claude Code's here; Codex's is proj's.
+  guard = import ./claude/guard.nix { inherit inputs pkgs lib config; };
 
   # One rule per command, with and without sudo.
   both = cmds: lib.concatMap (c: [ "Bash(${c})" "Bash(sudo ${c})" ]) cmds;
 
-  r2 = both [
-    # Storage: destroys data with no undo.
-    "zfs destroy *"
-    "zfs rollback *"
-    "zpool destroy *"
-    "zpool labelclear *"
-    "wipefs *"
-    "mkfs*"
-    "sgdisk *"
-    "blkdiscard *"
-    "dd *"
-    "nixos-anywhere *"
-    "disko *"
-    # Firmware: a bad flash can brick the board, and there's no console to fix it.
-    "fwupdmgr install *"
-    "fwupdmgr update*"
-    "fwupdmgr upgrade*"
-    "fwupdmgr reinstall *"
-    "fwupdmgr downgrade *"
-    "flashrom *"
-    "nvme fw-download *"
-    "nvme fw-commit *"
-    "nvme fw-activate *"
-    "hdparm --fwdownload*"
-    # Erases a whole drive in firmware, no snapshot can catch it.
-    "nvme format *"
-    "nvme sanitize *"
-    "hdparm --security-erase*"
-    "hdparm --security-erase-enhanced*"
-    # Remote data with no undo.
-    "rclone delete *"
-    "rclone deletefile *"
-    "rclone purge *"
-    "rclone rmdir *"
-    "rclone rmdirs *"
-    "rclone sync *"
-    "gh repo delete *"
-    "gh release delete *"
-    "git push --force origin main*"
-    "git push -f origin main*"
-    "git push --force origin master*"
-    "git push -f origin master*"
-  ] ++ both cfg.extraAsk;
+  r2 = both ((import ./claude/r2.nix) ++ cfg.extraAsk);
 
   managed = lib.recursiveUpdate ({
     permissions = {
@@ -93,8 +33,8 @@ let
         hooks = [
           {
             type = "command";
-            command = lib.getExe guard;
-            timeout = guardTimeout;
+            command = lib.getExe guard.claude;
+            inherit (guard) timeout;
           }
         ];
       }
@@ -115,7 +55,7 @@ let
          `proofRuns` (burrow.autoland.repos), which the steward runs on each settled PR's head
          with no Claude. Never a job, or a `proofJobs` prompt, that only runs one command.''
     ++ lib.optional (config.burrow.proj.enable or false) ''
-      A job, for judgment in a project: `proj run`${lib.optionalString (config.burrow.proj.inbox.enable or false) ", or an issue labelled `${config.burrow.proj.inbox.label}`"}.''
+      A job, for judgment in a project: `proj run`${lib.optionalString (config.burrow.proj.inbox.enable or false) ", or an issue labelled `${lib.concatStringsSep "`, `" (lib.attrNames config.burrow.proj.inbox.labels)}`"}.''
     ++ lib.optional (config.burrow.remoteControl.enable or false) ''
       A session, for work ${config.burrow.owner} steers live: theirs to open, on the project's own
          Remote Control server.'';
@@ -162,7 +102,7 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
-    burrow.tools.claude-guard = guard;
+    burrow.tools.claude-guard = guard.claude;
 
     # Copies, not links into the store (claude/etc.nix).
     environment.etc."claude-code/managed-settings.json" = {
@@ -171,8 +111,12 @@ in
     };
     environment.etc."claude-code/CLAUDE.md" = {
       mode = "0444";
-      text = cfg.machineMd;
+      text = cfg.machineMd + "\n" + cfg.codeMd;
     };
+
+    burrow.claude.codeMd = ''
+      You have sudo with no password in Claude Code. Use it when you need it.
+    '';
 
     # Logins and history live in ~/.claude.
 
@@ -182,7 +126,7 @@ in
 
       '' + lib.concatMapStrings (n: "${n}\n") (cfg.boxNotes ++ [
         ''
-          - You are `${config.burrow.user}`, with sudo and no password. Use it when you need it.''
+          - You are `${config.burrow.user}`.''
       ] ++ lib.optional (config.burrow.remoteControl.enable or false) ''
           - Projects live in ${config.burrow.projectsDir}. Each folder gets its own always-on Remote
             Control session automatically.'')))

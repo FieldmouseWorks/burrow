@@ -8,7 +8,9 @@
 //! (modules/usage-reset.nix).
 
 pub mod claude;
+pub mod meter;
 pub mod pass;
+pub mod store;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

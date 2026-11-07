@@ -1,4 +1,5 @@
-# The snapshot side of "instant undo": the Claude guard (claude.nix) takes an
+# The snapshot side of "instant undo": the guard (claude.nix), Claude Code's
+# hook and Codex's for proj's Codex jobs, takes an
 # `@pre-*` snapshot of burrow.undo.datasets before anything deletes or rewrites
 # files. This lets the user take them without sudo, and prunes them.
 #

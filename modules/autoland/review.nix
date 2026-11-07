@@ -63,16 +63,11 @@ let
     export REVIEW_CONFIG=''${REVIEW_CONFIG:-${reviewConfig}}
     exec ${service}/bin/burrow-review "$@"
   '';
-  codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
-    # Codex reviews on the ChatGPT plan's login: a device code to approve in
-    # a browser. Run again whenever the review digest says it's logged out.
-    exec /run/wrappers/bin/sudo -u ${reviewer} ${pkgs.coreutils}/bin/env HOME=${reviewerHome} CODEX_HOME=${reviewerHome}/.codex \
-      ${agents}/bin/codex login --device-auth "$@"
-  '';
+
 in
 {
+  imports = [ { key = "burrow/codex-login"; imports = [ (import ../codex-login.nix inputs) ]; } ];
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = lib.optional rv.codex.enable codexLogin;
 
     users.users.${reviewer} = {
       isSystemUser = true;

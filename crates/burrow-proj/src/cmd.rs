@@ -5,8 +5,9 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 
 use crate::config::Config;
+use crate::engine::{answer, is_error, last_result};
 use crate::github::{fingerprint, over, target};
-use crate::job::{Job, answer, awaits, is_error, kick, result_of};
+use crate::job::{Job, awaits, kick};
 use crate::pick::demoted;
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
@@ -40,6 +41,7 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
+        Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
             put(&slot::in_line(cfg));
@@ -255,7 +257,7 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     // still there once later ones have started.
     let stream = job.turn(n, "jsonl");
     let text = String::from_utf8_lossy(&fs::read(&stream).unwrap_or_default()).into_owned();
-    let last = text.lines().rev().find_map(result_of);
+    let last = last_result(&stream, 0);
     let said = Some(answer(&stream)).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
         let mut out = format!("{said}\n");
