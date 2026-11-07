@@ -125,8 +125,9 @@ fn reading(word: &str) -> Result<Vec<Vec<String>>, shell::TooDeep> {
 }
 
 /// Whether `word` read again is just itself. Reading a word again marks the
-/// globs and braces it holds as unquoted ones (shell.rs's `bare`), whatever
-/// quoting it had the first time, so the marks don't count.
+/// globs it holds as unquoted ones (shell.rs's `bare`), whatever quoting it
+/// had the first time, so the marks don't count. (A brace list it holds
+/// expands into more words, which aren't just itself.)
 fn reads_as_itself(reading: &[Vec<String>], word: &str) -> bool {
     let bare = |w: &str| w.replace(shell::UNKNOWN, "");
     matches!(reading, [only] if only.len() == 1 && bare(&only[0]) == bare(word))

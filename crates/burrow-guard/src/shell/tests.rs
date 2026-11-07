@@ -15,35 +15,64 @@ fn want(cmds: &[&[&str]]) -> Result<Vec<Vec<String>>, TooDeep> {
 }
 
 #[test]
-fn an_unquoted_glob_or_brace_is_unknown_and_a_quoted_one_is_text() {
-    // `%` is UNKNOWN, placed ahead of the glob character or at the
-    // closing brace of a list.
+fn an_unquoted_glob_is_unknown_and_a_quoted_one_is_text() {
+    // `%` is UNKNOWN, placed ahead of the glob character. A brace list
+    // expands; a quoted one is text.
     assert_eq!(
         commands(r#"a b* c? d[1] {e,f} {g..h} {i} 'j*' k\? "{l,m}" ${n:-*}"#),
         want(&[&[
-            "a", "b%*", "c%?", "d%[1]", "{e,f%}", "{g..h%}", "{i}", "j*", "k?", "{l,m}", "${n:-*}"
+            "a", "b%*", "c%?", "d%[1]", "e", "f", "g", "h", "{i}", "j*", "k?", "{l,m}", "${n:-*}"
         ]])
     );
 }
 
 #[test]
-fn a_brace_list_is_unknown_at_every_depth() {
-    // An inner pair that isn't a list leaves the outer one's open; each
-    // list nested in another is marked, and so is the one holding it.
-    assert_eq!(
-        commands(r"{{},a,b} x{a,{b,c}}y {{a..c},d} {a,{b}} {{}} {a,'{'b} \{a,b} {'a,b'} {a,b\}"),
-        want(&[&[
-            "{{},a,b%}",
-            "x{a,{b,c%}%}y",
-            "{{a..c%},d%}",
-            "{a,{b}%}",
-            "{{}}",
-            "{a,{b%}",
-            "{a,b}",
-            "{a,b}",
-            "{a,b}"
-        ]])
-    );
+fn a_brace_list_expands_as_bash_expands_it() {
+    // Each word beside what bash 5.3 makes of it (`printf '[%s]' WORD`).
+    for (word, made) in [
+        ("{{},a,b}", &["{}", "a", "b"][..]),
+        ("x{a,{b,c}}y", &["xay", "xby", "xcy"]),
+        ("{{a..c},d}", &["a", "b", "c", "d"]),
+        ("{a,{b}}", &["a", "{b}"]),
+        ("{{}}", &["{{}}"]),
+        ("{a,'{'b}", &["a", "{b"]),
+        (r"\{a,b}", &["{a,b}"]),
+        ("{'a,b'}", &["{a,b}"]),
+        (r"{a,b\}", &["{a,b}"]),
+        // A quoted brace is no list's, and a list may make a forced one.
+        (r#"m{"{",ain}"#, &["m{", "main"]),
+        (
+            "{+HEAD:refs/heads/main,HEAD:refs/heads/work}",
+            &["+HEAD:refs/heads/main", "HEAD:refs/heads/work"],
+        ),
+        // A pair that isn't a list is passed over, and a list in it isn't.
+        ("{{a,b}}", &["{a}", "{b}"]),
+        ("{a}{b,c}", &["{a}b", "{a}c"]),
+        ("{a,b{}", &["{a,b{}"]),
+        ("x}{a,b}", &["x}a", "x}b"]),
+        // Empty words go, unless some of the word was quoted.
+        ("{,a}{,b}", &["b", "a", "ab"]),
+        ("{x,{,}}", &["x"]),
+        (r#"""{,a}"#, &["", "a"]),
+        ("a{,}b", &["ab", "ab"]),
+        // Sequences.
+        ("{05..1}", &["05", "04", "03", "02", "01"]),
+        ("{a..c..2}", &["a", "c"]),
+        ("{1..3..-1}", &["1", "2", "3"]),
+        ("{-1..1}", &["-1", "0", "1"]),
+        ("{0..2}", &["0", "1", "2"]),
+        ("{a..c}{1..2}", &["a1", "a2", "b1", "b2", "c1", "c2"]),
+        (r#"{"a"..c}"#, &["{a..c}"]),
+        ("{1..a}", &["{1..a}"]),
+        ("{aa..c}", &["{aa..c}"]),
+        // A substitution's place goes with each word; a parameter's text
+        // isn't expanded; an assignment-like word is a word.
+        ("{a,b}$()", &["a%", "b%"]),
+        ("${x:-{a,b}}", &["${x:-{a,b}}"]),
+        ("echo x={a,b}", &["echo", "x=a", "x=b"]),
+    ] {
+        assert_eq!(commands(word), want(&[made]), "{word}");
+    }
     // In options and their values alike.
     assert_eq!(
         commands(
@@ -53,10 +82,26 @@ fn a_brace_list_is_unknown_at_every_depth() {
             "gh",
             "api",
             "-q",
-            "{{},repos/o/r/git/refs/heads/main,-X,DELETE,--hostname%}",
+            "{}",
+            "repos/o/r/git/refs/heads/main",
+            "-X",
+            "DELETE",
+            "--hostname",
             "api.github.com"
         ]])
     );
+    // A here-string's text isn't brace-expanded; it's a script, read apart.
+    assert_eq!(commands("bash <<< {a,b}"), want(&[&["bash"], &["{a,b}"]]));
+}
+
+#[test]
+fn a_word_that_expands_too_far_is_too_deep() {
+    let lists = "{a,b}".repeat(13);
+    assert_eq!(commands(&lists), Err(TooDeep));
+    assert_eq!(commands(&"{a,b}".repeat(12)).map(|c| c[0].len()), Ok(4096));
+    assert_eq!(commands("{1..5000}"), Err(TooDeep));
+    let nested = format!("{}{}", "{a,".repeat(DEPTH + 2), "}".repeat(DEPTH + 2));
+    assert_eq!(commands(&nested), Err(TooDeep));
 }
 
 #[test]
@@ -75,6 +120,24 @@ fn a_here_documents_end_word_is_its_own_text() {
         ("<<$(x)", "$(x)"),
         ("<<${x:-a}b", "${x:-a}b"),
         ("<<E`x`", "E`x`"),
+        // Quoted, its quotes come off as text, substitutions' insides too,
+        // and nothing in it is a substitution's place.
+        ("<<\"$(x)\"", "$(x)"),
+        ("<<$\"$(x)\"", "$(x)"),
+        ("<<a\"$(x)\"b", "a$(x)b"),
+        ("<<\"`x`\"", "`x`"),
+        ("<<\"`echo \\`x\\``\"", "`echo `x``"),
+        ("<<\\E\"$(x)\"", "E$(x)"),
+        ("<<'a'$(echo \"b\")", "a$(echo b)"),
+        ("<<\"$(echo \")\")\"", "$(echo ))"),
+        ("<<\"${x:-\"a\"}\"", "${x:-a}"),
+        ("<<a${x:-\"a\"}'b'", "a${x:-a}b"),
+        ("<<x$'y'", "xy"),
+        ("<<x$'\\x41'", "xA"),
+        ("<<\"a\\b\\$c\\\"d\"", "a\\b$c\"d"),
+        // Unquoted outside a `${…}`, it's its own text, quotes and all.
+        ("<<${x:-\"a\"}", "${x:-\"a\"}"),
+        ("<<$(echo \"a b\")", "$(echo \"a b\")"),
     ] {
         let text = format!("cat {doc}\nbody\n{end}\ngit push \\\n-f origin main");
         let read = commands(&text).unwrap();
@@ -99,6 +162,21 @@ fn a_here_documents_end_word_is_its_own_text() {
             &["b"],
             &["a", "%", "c"],
             &["git", "push", "-f"],
+            &["e"],
+            &["d", "%", "f"]
+        ])
+    );
+    assert_eq!(
+        commands(
+            "a \"$(cat <<\"$(x)\"\nb\n$(x)\n)\" c\ngit push \\\n-f\nd \"$(e <<a\"$(y)\"\na$(y))\" f"
+        ),
+        want(&[
+            &["x"],
+            &["cat"],
+            &["b"],
+            &["a", "%", "c"],
+            &["git", "push", "-f"],
+            &["y"],
             &["e"],
             &["d", "%", "f"]
         ])

@@ -9,10 +9,14 @@
 //! pattern first, and a comment, a here-document or a `${…}` holds text that
 //! isn't the shell's to read as quotes or parentheses. What a comment or a
 //! here-document says is still read, line by line, since it may be a script
-//! (`bash <<EOF`). An unquoted glob character or brace list marks its word
-//! [`UNKNOWN`] too (a quoted one is text). Nothing else is expanded.
+//! (`bash <<EOF`). An unquoted brace list or sequence expands into the
+//! words it makes, as bash expands it (shell/brace.rs), and an unquoted glob
+//! character marks its word [`UNKNOWN`] (a quoted one is text: see
+//! [`globs`]). Nothing else is expanded.
 
 use crate::ansi_c;
+
+mod brace;
 
 /// What a substitution's output is, in the word that holds it: unknown
 /// until it runs.
@@ -21,9 +25,18 @@ pub const UNKNOWN: char = '\u{FFFC}';
 /// How deeply substitutions may nest before the reading gives up.
 const DEPTH: usize = 64;
 
-/// A command line that nests deeper than the guard reads.
+/// A command line that nests deeper, or a word that expands to more
+/// words, than the guard reads.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TooDeep;
+
+/// Whether `word` holds a glob the shell expands to the names of files that
+/// match it, which the guard can't see: an unquoted `*`, `?` or `[`, marked
+/// [`UNKNOWN`] ahead of it.
+pub fn globs(word: &str) -> bool {
+    word.match_indices(UNKNOWN)
+        .any(|(at, mark)| word[at + mark.len()..].starts_with(['*', '?', '[']))
+}
 
 /// Each command in `text` as its words, a substitution's commands among
 /// them, ahead of the command that holds them.
@@ -197,22 +210,20 @@ struct Command {
     word: String,
     /// A word has begun, even an empty one (`''`).
     in_word: bool,
-    /// Some of the word was quoted or escaped.
+    /// Some of the word was quoted or escaped, outside any `${…}` in it.
     quoted: bool,
+    /// The byte offset in `word` of each of its unquoted characters, which
+    /// may make a brace expansion.
+    bare: Vec<usize>,
     /// The next word is a redirect's target.
     target: bool,
     /// That target is a here-string's text.
     here_string: bool,
     /// Here-strings' texts: a shell given one runs it.
     scripts: Vec<String>,
-    /// Inside a `${…}`, where a glob character is the parameter's text.
+    /// Inside a `${…}`, where a glob or brace character is the
+    /// parameter's text.
     in_parameter: bool,
-    /// A here-document's end word, which the shell doesn't expand: only
-    /// its quotes come off.
-    delimiter: bool,
-    /// Each unquoted `{` open in the word, innermost last: whether a `,` or
-    /// `..` of its own has made it a brace expansion.
-    braces: Vec<bool>,
 }
 
 impl Command {
@@ -221,52 +232,46 @@ impl Command {
         self.in_word = true;
     }
 
-    /// An unquoted character of a word. Where the shell would glob or brace
-    /// -expand it, the word is unknown until it runs, so [`UNKNOWN`] goes in
-    /// ahead of the character (`a*` reads `a￼*`, `{a,b}` reads `{a,b￼}`, and
-    /// `{{},a}` reads `{{},a￼}`: an inner pair closing leaves the outer one's
-    /// list open); a quoted or escaped one is plain text ([`Command::push`]).
+    /// An unquoted character of a word. Where the shell would glob it, the
+    /// word is unknown until it runs, so [`UNKNOWN`] goes in ahead of the
+    /// character (`a*` reads `a￼*`), and where it may make a brace
+    /// expansion, its place is kept for [`Command::end_word`]; a quoted or
+    /// escaped one is plain text ([`Command::push`]).
     fn bare(&mut self, c: char) {
-        if !self.in_parameter && !self.delimiter {
-            match c {
-                '*' | '?' | '[' => self.word.push(UNKNOWN),
-                '{' => self.braces.push(false),
-                // `,`, or the second `.` of a range's `..`, makes the
-                // innermost `{` a list.
-                ',' | '.' if c == ',' || self.word.ends_with('.') => {
-                    if let Some(list) = self.braces.last_mut() {
-                        *list = true;
-                    }
-                }
-                // Every `}` closes the innermost `{`, a list or not.
-                '}' if self.braces.pop() == Some(true) => self.word.push(UNKNOWN),
-                _ => {}
+        if !self.in_parameter {
+            if matches!(c, '*' | '?' | '[') {
+                self.word.push(UNKNOWN);
             }
+            self.bare.push(self.word.len());
         }
         self.push(c);
     }
 
     fn quote(&mut self) {
         self.in_word = true;
-        self.quoted = true;
+        self.quoted |= !self.in_parameter;
     }
 
-    fn end_word(&mut self) {
+    /// The word ends: a command's word is brace-expanded into the words it
+    /// makes; a redirect's target isn't a word, and a here-string's text,
+    /// which bash doesn't brace-expand, is kept as a script.
+    fn end_word(&mut self) -> Result<(), TooDeep> {
+        let bare = std::mem::take(&mut self.bare);
         if self.in_word {
             let word = std::mem::take(&mut self.word);
-            self.braces.clear();
             if !std::mem::take(&mut self.target) {
-                self.words.push(word);
+                self.words.extend(brace::expand(&word, &bare, self.quoted)?);
             } else if std::mem::take(&mut self.here_string) {
                 self.scripts.push(word);
             }
         }
         self.in_word = false;
         self.quoted = false;
+        Ok(())
     }
 
-    fn end(&mut self, commands: &mut Vec<Vec<String>>) {
-        self.end_word();
+    fn end(&mut self, commands: &mut Vec<Vec<String>>) -> Result<(), TooDeep> {
+        self.end_word()?;
         // A redirect with no target before the command ends takes nothing
         // from the next command.
         self.target = false;
@@ -275,6 +280,7 @@ impl Command {
             commands.push(std::mem::take(&mut self.words));
         }
         commands.extend(self.scripts.drain(..).map(|script| vec![script]));
+        Ok(())
     }
 }
 
@@ -395,16 +401,16 @@ impl Lexer {
                 grammar.word(&cmd);
             }
             match c {
-                ' ' | '\t' | '\r' => cmd.end_word(),
+                ' ' | '\t' | '\r' => cmd.end_word()?,
                 '(' => {
                     grammar.opens(in_word);
-                    cmd.end(&mut self.commands);
+                    cmd.end(&mut self.commands)?;
                 }
                 ')' => {
                     if grammar.closes() && closes {
                         break;
                     }
-                    cmd.end(&mut self.commands);
+                    cmd.end(&mut self.commands)?;
                 }
                 '#' if !in_word => self.comment(depth)?,
                 // `&>` and `&>>` send both outputs: a redirect, not the end.
@@ -415,16 +421,16 @@ impl Lexer {
                         self.pos += 1;
                     }
                     grammar.next_pattern();
-                    cmd.end(&mut self.commands);
+                    cmd.end(&mut self.commands)?;
                 }
                 '\n' => {
                     grammar.separator(c);
-                    cmd.end(&mut self.commands);
+                    cmd.end(&mut self.commands)?;
                     self.heredoc_bodies(depth, closes)?;
                 }
                 ';' | '&' | '|' => {
                     grammar.separator(c);
-                    cmd.end(&mut self.commands);
+                    cmd.end(&mut self.commands)?;
                 }
                 '<' | '>' if process => {
                     self.pos += 1;
@@ -435,7 +441,7 @@ impl Lexer {
                 c => self.word(c, &mut cmd, depth)?,
             }
         }
-        cmd.end(&mut self.commands);
+        cmd.end(&mut self.commands)?;
         Ok(())
     }
 
@@ -616,18 +622,7 @@ impl Lexer {
     /// The rest of a `$'…'` string, after its `'`. Its end is found first,
     /// a backslash taking the character after it, then its escapes decoded.
     fn ansi_c(&mut self, cmd: &mut Command) {
-        let mut raw = Vec::new();
-        while let Some(c) = self.next() {
-            match c {
-                '\'' => break,
-                '\\' => {
-                    raw.push(c);
-                    raw.extend(self.next());
-                }
-                c => raw.push(c),
-            }
-        }
-        ansi_c::decode(&raw, &mut cmd.word);
+        ansi_c::decode(&ansi_c_text(|| self.next()), &mut cmd.word);
     }
 
     /// A redirect, after its first `<`, `>` or `&` (`first`): the rest of
@@ -640,7 +635,7 @@ impl Lexer {
             cmd.word.clear();
             cmd.in_word = false;
         }
-        cmd.end_word();
+        cmd.end_word()?;
         let mut operator = String::from(first);
         while let Some(c) = self.next_if(|c| matches!(c, '<' | '>' | '&' | '|')) {
             operator.push(c);
@@ -653,37 +648,85 @@ impl Lexer {
         Ok(())
     }
 
-    /// A here-document's end word, after its `<<`: quotes come off it, and
-    /// nothing in it is expanded, so a glob, a brace list, a `${…}` or a
-    /// substitution is its own text (`<<E?` ends at `E?`, `<<$(x)` at
-    /// `$(x)`). A substitution's commands are still read.
+    /// A here-document's end word, after its `<<`. Nothing in it is
+    /// expanded: it's its own text (`<<E?` ends at `E?`, `<<$(x)` at
+    /// `$(x)`), and where any of it outside a `${…}` is quoted or escaped,
+    /// that text with its quotes taken off as bash takes them
+    /// ([`unquoted`]). Its words are read as any word's are, to find its
+    /// end, and a substitution's commands among them with it.
     fn heredoc(&mut self, depth: usize) -> Result<(), TooDeep> {
         let strip_tabs = self.next_if(|c| c == '-').is_some();
         while self.next_if(|c| matches!(c, ' ' | '\t')).is_some() {}
-        let mut end = Command {
-            delimiter: true,
-            ..Command::default()
-        };
+        let start = self.pos;
+        let mut end = Command::default();
         while let Some(c) = self.next_if(|c| {
             !matches!(
                 c,
                 ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
             )
         }) {
-            let (start, before) = (self.pos - 1, end.word.len());
             self.word(c, &mut end, depth)?;
-            let quoted = c == '$' && matches!(self.chars.get(start + 1), Some('\'' | '"'));
-            if matches!(c, '$' | '`') && !quoted {
-                end.word.truncate(before);
-                end.word.extend(&self.chars[start..self.pos]);
-            }
         }
+        let text = &self.chars[start..self.pos];
         self.heredocs.push(Heredoc {
-            end: end.word,
+            end: if end.quoted {
+                unquoted(text)
+            } else {
+                text.iter().collect()
+            },
             strip_tabs,
         });
         Ok(())
     }
+}
+
+/// The rest of a `$'…'` string, after its `'`, undecoded: up to its `'`,
+/// a backslash taking the character after it.
+fn ansi_c_text(mut next: impl FnMut() -> Option<char>) -> Vec<char> {
+    let mut raw = Vec::new();
+    while let Some(c) = next() {
+        match c {
+            '\'' => break,
+            '\\' => {
+                raw.push(c);
+                raw.extend(next());
+            }
+            c => raw.push(c),
+        }
+    }
+    raw
+}
+
+/// A quoted here-document end word's `text` as bash ends the document at:
+/// its quotes taken off as text, wherever they are, substitutions' insides
+/// too (`"$(echo ")")"` is `$(echo ))`). A backslash outside double quotes
+/// takes the character after it, and inside them only `\`, `"`, `$`, `` ` ``
+/// or a newline; `$'…'` is decoded, and `$"…"` is `"…"`.
+fn unquoted(text: &[char]) -> String {
+    let mut out = String::new();
+    let mut double = false;
+    let mut chars = text.iter().copied().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => double = !double,
+            '\\' if double => match chars.next_if(|c| matches!(c, '\\' | '"' | '$' | '`' | '\n')) {
+                Some('\n') => {}
+                Some(c) => out.push(c),
+                None => out.push('\\'),
+            },
+            '\\' => match chars.next() {
+                Some('\n') | None => {}
+                Some(c) => out.push(c),
+            },
+            '\'' if !double => out.extend(chars.by_ref().take_while(|&c| c != '\'')),
+            '$' if !double && chars.next_if_eq(&'"').is_some() => double = true,
+            '$' if !double && chars.next_if_eq(&'\'').is_some() => {
+                ansi_c::decode(&ansi_c_text(|| chars.next()), &mut out);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

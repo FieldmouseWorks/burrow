@@ -3,6 +3,7 @@
 //! refspecs, or, with none, from the branch checked out where it runs and
 //! that branch's upstream (`git push --force` on main).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -67,14 +68,24 @@ pub fn runs_git(word: &str, next: Option<&String>) -> bool {
 
 /// What follows `git`, if it's a push: git's own options (each `-C DIR`
 /// taken in turn for where it runs), then `push` and its words. An
-/// expansion among them may be an option, or nothing at all.
-fn after_git<'a>(
-    cwd: &Path,
-    mut words: impl Iterator<Item = &'a String>,
-) -> Option<(PathBuf, Push)> {
+/// expansion among them may be an option, or nothing at all; a glob may be
+/// any number of words, `push` and its words among them, so it's read as
+/// a push the guard can't read.
+fn after_git<'a>(cwd: &Path, words: impl Iterator<Item = &'a String>) -> Option<(PathBuf, Push)> {
     let mut at = cwd.to_path_buf();
+    // Every word it reads, an option's value too.
+    let globbed = Cell::new(false);
+    let mut words = words.inspect(|w| globbed.set(globbed.get() || shell::globs(w)));
+    let unread = || {
+        let push = Push {
+            globbed: true,
+            ..Push::default()
+        };
+        Some((cwd.to_path_buf(), push))
+    };
     while let Some(w) = words.next() {
         match w.as_str() {
+            _ if globbed.get() => return unread(),
             "push" => return Some((at, Push::read(words))),
             "-C" => at = at.join(words.next()?),
             // Options whose value is the next word.
@@ -86,7 +97,7 @@ fn after_git<'a>(
             _ => return None,
         }
     }
-    None
+    if globbed.get() { unread() } else { None }
 }
 
 #[derive(Debug, Default)]
@@ -99,11 +110,18 @@ struct Push {
     positional: Vec<String>,
     /// More of its words come from its input, unseen (`xargs`).
     more: bool,
+    /// A glob among its words, which the shell makes into the names of
+    /// whatever files match it: any number of words, which may force
+    /// (`-f`, `+…`) and name any branch.
+    globbed: bool,
 }
 
 impl Push {
-    fn read<'a>(mut words: impl Iterator<Item = &'a String>) -> Push {
+    fn read<'a>(words: impl Iterator<Item = &'a String>) -> Push {
         let mut p = Push::default();
+        // Every word it reads, an option's value too.
+        let globbed = Cell::new(false);
+        let mut words = words.inspect(|w| globbed.set(globbed.get() || shell::globs(w)));
         while let Some(w) = words.next() {
             match w.as_str() {
                 // The rest are the remote and refspecs, whatever they look
@@ -146,6 +164,7 @@ impl Push {
                 w => p.positional(w),
             }
         }
+        p.globbed = globbed.get();
         p
     }
 
@@ -157,6 +176,12 @@ impl Push {
     }
 
     fn ask(&self, at: &Path, places: &mut Places<'_>) -> Result<Option<String>, Unread> {
+        if self.globbed {
+            return Ok(Some(
+                "Push with a glob among its words, which may become any of them, forcing and naming any branch (R2: rewrites history other clones depend on)."
+                    .to_owned(),
+            ));
+        }
         if !self.force {
             return Ok(None);
         }
@@ -218,11 +243,9 @@ impl Places<'_> {
 }
 
 /// What `refspec` updates, if that can be a shared branch: its destination,
-/// or its source where it names no other, by name or by wildcard. `:` alone
-/// is every branch both sides have. A wildcard is git's `*`, or a glob or
-/// brace list the shell expands (marked [`shell::UNKNOWN`]), which may
-/// become any name: an unquoted `refs/heads/*` that matches no file reaches
-/// git as it is.
+/// or its source where it names no other, by name or by git's wildcard `*`
+/// (a glob the shell expands asks before this: see [`Push::globbed`]). `:`
+/// alone is every branch both sides have.
 fn shared_target(refspec: &str) -> Option<String> {
     let spec = refspec.strip_prefix('+').unwrap_or(refspec);
     let (source, dest) = spec.rsplit_once(':').unwrap_or((spec, spec));
@@ -234,8 +257,7 @@ fn shared_target(refspec: &str) -> Option<String> {
         .strip_prefix("refs/heads/")
         .or_else(|| dest.strip_prefix("heads/"))
         .unwrap_or(dest);
-    let pattern = Piece::pattern(name);
-    let shared = if pattern.contains(&Piece::Any) {
+    let shared = if name.contains('*') {
         SHARED.iter().any(|branch| {
             [
                 (*branch).to_owned(),
@@ -243,86 +265,33 @@ fn shared_target(refspec: &str) -> Option<String> {
                 format!("refs/heads/{branch}"),
             ]
             .iter()
-            .any(|full| Piece::matches(&pattern, &full.chars().collect::<Vec<_>>()))
+            .any(|full| wildcard(name, full))
         })
     } else {
         SHARED.contains(&name)
     };
-    shared.then(|| name.replace(shell::UNKNOWN, ""))
+    shared.then(|| name.to_owned())
 }
 
-/// A part of a destination's name, as what it may become.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Piece {
-    /// Itself.
-    Char(char),
-    /// Any text: a wildcard.
-    Any,
-}
-
-impl Piece {
-    /// `name` as pieces: git's `*`, and each shell glob (`*`, `?`, a `[…]`)
-    /// or brace list the shell reading marked, are [`Piece::Any`]. A
-    /// substitution's mark is its own character, which no branch holds.
-    fn pattern(name: &str) -> Vec<Piece> {
-        let mut pieces = Vec::new();
-        let mut chars = name.chars().peekable();
-        while let Some(c) = chars.next() {
-            match (c, chars.peek()) {
-                ('*', _) => pieces.push(Piece::Any),
-                (shell::UNKNOWN, Some('*' | '?')) => {
-                    chars.next();
-                    pieces.push(Piece::Any);
-                }
-                (shell::UNKNOWN, Some('[')) => {
-                    chars.next();
-                    // Up to its `]`, where it has one; the rest is
-                    // itself either way.
-                    let mut class = chars.clone();
-                    if class.by_ref().skip(1).any(|c| c == ']') {
-                        chars = class;
-                    }
-                    pieces.push(Piece::Any);
-                }
-                // A list's mark is ahead of its `}`: back to its `{`, past
-                // the pairs it holds that aren't lists.
-                (shell::UNKNOWN, Some('}')) => {
-                    chars.next();
-                    let mut depth = 0;
-                    while let Some(piece) = pieces.pop() {
-                        match piece {
-                            Piece::Char('}') => depth += 1,
-                            Piece::Char('{') if depth == 0 => break,
-                            Piece::Char('{') => depth -= 1,
-                            _ => {}
-                        }
-                    }
-                    pieces.push(Piece::Any);
-                }
-                (c, _) => pieces.push(Piece::Char(c)),
-            }
+/// Whether `pattern`, whose `*`s may each become any text, can become
+/// `text`.
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let mut parts: Vec<&str> = parts.collect();
+    let Some(last) = parts.pop() else {
+        return rest.is_empty();
+    };
+    for part in parts {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
         }
-        pieces
     }
-
-    /// Whether `pattern` can become `text`: for each piece in turn, the
-    /// lengths of `text` it and those before it can become.
-    fn matches(pattern: &[Piece], text: &[char]) -> bool {
-        let mut reach = vec![false; text.len() + 1];
-        reach[0] = true;
-        for piece in pattern {
-            reach = match piece {
-                Piece::Any => {
-                    let first = reach.iter().position(|&r| r).unwrap_or(reach.len());
-                    (0..reach.len()).map(|at| at >= first).collect()
-                }
-                Piece::Char(c) => (0..reach.len())
-                    .map(|at| at > 0 && reach[at - 1] && text[at - 1] == *c)
-                    .collect(),
-            };
-        }
-        reach[text.len()]
-    }
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 /// What a long option of `git push` means here.
@@ -414,29 +383,31 @@ mod tests {
     }
 
     #[test]
-    fn a_glob_or_brace_list_in_a_destination_is_a_wildcard() {
+    fn a_wildcard_or_a_brace_list_in_a_destination_is_read() {
         for cmd in [
-            // Quoted, git's own wildcard; unquoted, the shell's too, which
-            // reaches git as it is when no file matches.
+            // Git's own wildcard, quoted from the shell.
             "git push -f origin 'refs/heads/*:refs/heads/*'",
-            "git push -f origin refs/heads/*:refs/heads/*",
-            "git push origin +refs/heads/*:refs/heads/*",
-            "git push origin +refs/*:refs/*",
-            "git push -f origin refs/heads/m*:refs/heads/m*",
-            "git push -f origin refs/heads/*",
-            "git push -f origin -- refs/heads/*",
-            "git push origin -- +refs/heads/*:refs/heads/*",
-            "git push --force origin x:*",
-            "git push -f origin ma?n",
-            "git push -f origin [m]ain",
-            "git push -f origin refs/heads/ma[a-z]n",
+            "git push origin '+refs/heads/*:refs/heads/*'",
+            "git push origin '+refs/*:refs/*'",
+            "git push -f origin 'refs/heads/m*:refs/heads/m*'",
+            "git push -f origin 'refs/heads/*'",
+            "git push origin -- '+refs/heads/*:refs/heads/*'",
+            "git push --force origin 'x:*'",
+            "git push --force origin 'x:*a*n'",
+            // A brace list is the words it makes, whichever of them it is.
             "git push -f origin {main,x}",
             "git push -f origin x:m{a,i}in",
             "git push -f origin x:refs/heads/{{},main}",
             "git push -f origin x:{a,{main,b}}",
             "git push -f origin {l..n}ain",
-            "bash -c 'git push -f origin refs/heads/*:refs/heads/*'",
-            "sh -c \"git push -f origin x:ma?n\"",
+            "git push -f origin m{\"{\",ain}",
+            "git push origin {+HEAD:refs/heads/main,HEAD:refs/heads/work}",
+            "git push origin {--force,main}",
+            "git push {-f,origin,main}",
+            "git {push,-f} origin main",
+            "{git,push,-f,origin,main}",
+            "bash -c 'git push -f origin x:{main,y}'",
+            "sh -c \"git push origin {+x:main,y}\"",
         ] {
             assert!(
                 said(cmd)
@@ -447,13 +418,55 @@ mod tests {
             );
         }
         for cmd in [
-            "git push -f origin refs/heads/f*:refs/heads/f*",
-            "git push -f origin +refs/heads/*:refs/tags/*",
+            "git push -f origin 'refs/heads/f*:refs/heads/f*'",
+            "git push -f origin '+refs/heads/*:refs/tags/*'",
+            "git push -f origin 'x:*a'",
+            "git push origin 'refs/heads/*:refs/heads/*'",
             "git push -f origin feature-{a,b}",
-            "git push -f origin feat?re",
-            "git push -f origin x:refs/heads/f[a-z]*",
-            "git push origin refs/heads/*:refs/heads/*",
+            "git push -f origin {x,y}:refs/heads/f{1..3}",
+            "git push origin {main,x}",
+            "git push -f origin 'x:{main,y}'",
             "git push -f origin feature $(echo main)",
+        ] {
+            assert_eq!(said(cmd), Vec::<String>::new(), "{cmd}");
+        }
+    }
+
+    /// A glob the shell expands may become any number of file names, so a
+    /// push that holds one, forced or not, may force and name any branch.
+    #[test]
+    fn a_push_with_a_glob_in_its_words_asks() {
+        for cmd in [
+            "git push -f origin refs/heads/*:refs/heads/*",
+            "git push origin +refs/heads/*:refs/heads/*",
+            "git push origin refs/heads/*:refs/heads/*",
+            "git push -f origin ma?n",
+            "git push -f origin [m]ain",
+            "git push -f origin m[[:alpha:]]in",
+            "git push -f origin x:m[[:alpha:]]in",
+            "git push -f origin feat?re",
+            "git push origin *",
+            "git push origin -- x*",
+            "git push -o ci.skip* origin x",
+            "git pu?h -f origin main",
+            "git -C * push origin x",
+            "bash -c 'git push origin x:ma?n'",
+            "sh -c \"git push -f origin x:refs/heads/f[a-z]*\"",
+        ] {
+            assert!(
+                said(cmd)
+                    .iter()
+                    .any(|s| s.starts_with("Push with a glob among its words")),
+                "{cmd}: {:?}",
+                said(cmd)
+            );
+        }
+        for cmd in [
+            "git push origin 'x:ma?n'",
+            "git push -f origin \"feat?re\"",
+            "git push -f origin feat\\?re",
+            "bash -c \"git push origin 'x:ma?n'\"",
+            "git add *.rs",
         ] {
             assert_eq!(said(cmd), Vec::<String>::new(), "{cmd}");
         }

@@ -324,16 +324,18 @@ fn expands(word: &str) -> bool {
 /// expansion anywhere in the call (unquoted, it may split into words that
 /// change which one is the endpoint, or carry the method or the query; the
 /// shell reading keeps no quotes, so a literal `$` reads as one too, as in
-/// curl.rs), an unquoted glob or brace (the shell reading marks one as an
-/// expansion, so a quoted `?` in a query string reads as plain text), a query
-/// from a file or input.
+/// curl.rs), an unquoted glob (the shell reading marks one as an expansion,
+/// so a quoted `?` in a query string reads as plain text), a query from a
+/// file or input. A brace list comes expanded into the words it makes, and
+/// may make more than one endpoint, so each is read as the endpoint (gh
+/// takes one, and stops on more).
 fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
     let words: Vec<&str> = words.map(String::as_str).collect();
     let unreadable = words.iter().copied().any(expands);
     let mut words = words.into_iter();
     let mut method = None;
     let mut body = false;
-    let mut url = None;
+    let mut urls = Vec::new();
     let mut values = Vec::new();
     let mut unread_query = false;
     while let Some(w) = words.next() {
@@ -370,22 +372,23 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
                 value();
             }
             o if o.starts_with('-') => {}
-            _ if url.is_none() => url = Some(w),
-            _ => {}
+            _ => urls.push(w),
         }
     }
     if unreadable {
         return true;
     }
-    let Some(url) = url else { return false };
-    if endpoint(url).ends_with("graphql") {
-        return unread_query || values.iter().any(|v| MUTATION.is_match(v));
-    }
     let write = match method {
         Some(m) => !(m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD")),
         None => body,
     };
-    write && GIT_DATA.is_match(endpoint(url))
+    urls.into_iter().any(|url| {
+        if endpoint(url).ends_with("graphql") {
+            unread_query || values.iter().any(|v| MUTATION.is_match(v))
+        } else {
+            write && GIT_DATA.is_match(endpoint(url))
+        }
+    })
 }
 
 /// The program a word names, whatever path it's run by.
