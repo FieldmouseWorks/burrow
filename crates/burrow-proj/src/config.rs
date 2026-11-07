@@ -79,6 +79,8 @@ pub struct Config {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tools {
     pub codex: PathBuf,
+    /// Starts a Codex job's Codex over the job's own /tmp.
+    pub bwrap: PathBuf,
     pub bash: PathBuf,
     pub flock: PathBuf,
     pub gh: PathBuf,
@@ -216,7 +218,7 @@ pub(crate) mod tests {
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box",
                       "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
-            "tools": {"codex": "/bin/codex", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
+            "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
     }

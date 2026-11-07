@@ -46,10 +46,14 @@ let
   # (through its symlink, and at its target), and reach what runs things
   # outside the sandbox: the user's D-Bus and the systemd manager's private
   # socket, spoken to directly, and the user's tmux servers: one at a path of
-  # its own (-S), one under a TMUX_TMPDIR the job's env doesn't have, and two
-  # started mid-command, in tmux's default dir and that custom one. No
-  # redirects: the guard wants an undo snapshot for those, and there's no
-  # ZFS here.
+  # its own (-S), one bound by a relative name, one under a TMUX_TMPDIR the
+  # job's env doesn't have, and two started mid-command, in tmux's default
+  # dir and that custom one; a server of the user's in a network namespace
+  # of its own, as the compile cache's is, which the kernel's socket table
+  # here doesn't list; and a Codex daemon's socket, in the dir the CLI masks
+  # itself. The job's /tmp is its own, its user's keys out of sight, and
+  # nix goes through the daemon. No redirects: the guard wants an undo
+  # snapshot for those, and there's no ZFS here.
   connect = path: "python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"${path}\")'";
   calls = cmds: map (cmd: [ "exec_command" { inherit cmd; } ]) cmds;
   firstCalls = calls [
@@ -64,11 +68,17 @@ let
     "${connect "/run/user/1001/systemd/private"} || touch /data/dev/jobs/$PROJ_JOB/manager-refused"
     "tmux -S /tmp/served.sock new-window 'touch /data/dev/elsewhere/by-socket' || touch /data/dev/jobs/$PROJ_JOB/tmux-socket-refused"
     "TMUX_TMPDIR=/data/dev/tmux-custom tmux -L custom new-window 'touch /data/dev/elsewhere/by-custom' || touch /data/dev/jobs/$PROJ_JOB/tmux-custom-refused"
+    "tmux -S /tmp/served-rel.sock new-window 'touch /data/dev/elsewhere/by-relative' || touch /data/dev/jobs/$PROJ_JOB/tmux-relative-refused"
+    "${connect "/run/cache-stand-in/cache.sock"} || touch /data/dev/jobs/$PROJ_JOB/netns-refused"
+    "${connect "/tmp/codex-daemon-1001/app.sock"} || touch /data/dev/jobs/$PROJ_JOB/daemon-refused"
+    "cat ~/.ssh/id_test || touch /data/dev/jobs/$PROJ_JOB/keys-refused"
+    "touch /tmp/job-tmp && test \"$TMPDIR\" = /tmp && touch /data/dev/jobs/$PROJ_JOB/tmp-own"
+    "test \"$NIX_REMOTE\" = daemon && nix-store -q --hash \"$(readlink -f \"$(command -v bash)\")\" && touch /data/dev/jobs/$PROJ_JOB/store-queried"
   ] ++ [
     # Servers the user starts once this command runs, in tmux's default dir
     # (not there when the job started) and in the custom one.
     [ "exec_command" {
-      cmd = "touch /data/dev/jobs/$PROJ_JOB/waiting && timeout 25 sh -c 'until test -e /data/dev/late-started; do sleep 0.2; done' && { tmux -L host new-window 'touch /data/dev/elsewhere/by-tmux' || touch /data/dev/jobs/$PROJ_JOB/tmux-refused; } && { TMUX_TMPDIR=/data/dev/tmux-custom tmux -L late new-window 'touch /data/dev/elsewhere/by-late' || touch /data/dev/jobs/$PROJ_JOB/tmux-late-refused; }";
+      cmd = "touch /data/dev/jobs/$PROJ_JOB/waiting && timeout 25 sh -c 'until test -e /data/dev/jobs/$PROJ_JOB/late-started; do sleep 0.2; done' && { tmux -L host new-window 'touch /data/dev/elsewhere/by-tmux' || touch /data/dev/jobs/$PROJ_JOB/tmux-refused; } && { TMUX_TMPDIR=/data/dev/tmux-custom tmux -L late new-window 'touch /data/dev/elsewhere/by-late' || touch /data/dev/jobs/$PROJ_JOB/tmux-late-refused; }";
       yield_time_ms = 30000;
     } ]
   ] ++ calls [
@@ -80,8 +90,19 @@ let
     "cat \"$CODEX_HOME/auth.json\" || touch /data/dev/jobs/$PROJ_JOB/resumed-login-refused"
     "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/resumed-bus-refused"
     "tmux -L host new-window 'touch /data/dev/elsewhere/resumed-by-tmux' || touch /data/dev/jobs/$PROJ_JOB/resumed-tmux-refused"
+    "tmux -S /tmp/served-rel.sock new-window 'touch /data/dev/elsewhere/resumed-by-relative' || touch /data/dev/jobs/$PROJ_JOB/resumed-tmux-relative-refused"
+    "${connect "/run/cache-stand-in/cache.sock"} || touch /data/dev/jobs/$PROJ_JOB/resumed-netns-refused"
+    "touch /tmp/job-tmp && test \"$TMPDIR\" = /tmp && touch /data/dev/jobs/$PROJ_JOB/resumed-tmp-own"
     "proj done"
   ];
+  # A server that only listens: enough for a connect() to succeed.
+  serve = pkgs.writeText "serve.py" ''
+    import socket, sys, time
+    s = socket.socket(socket.AF_UNIX)
+    s.bind(sys.argv[1])
+    s.listen()
+    time.sleep(10**9)
+  '';
   jobCalls = pkgs.writeText "codex-job-calls.json" (builtins.toJSON firstCalls);
   bothCalls = pkgs.writeText "codex-job-calls-resumed.json" (builtins.toJSON (firstCalls ++ resumedCalls));
   # Configs that would widen a profile proj names: the user's (with its
@@ -120,6 +141,18 @@ pkgs.testers.runNixOSTest {
         users = [ "dev" ];
       };
     };
+    # A server of the user's in a network namespace of its own, as the
+    # compile cache's daemon is.
+    systemd.services.cache-stand-in = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        User = "dev";
+        RuntimeDirectory = "cache-stand-in";
+        RuntimeDirectoryMode = "0700";
+        PrivateNetwork = true;
+        ExecStart = "${pkgs.python3}/bin/python3 ${serve} /run/cache-stand-in/cache.sock";
+      };
+    };
     systemd.services.burrow-events.enable = false;
     systemd.timers.burrow-events-catch-up.enable = false;
     environment.systemPackages = [ pkgs.git pkgs.python3 pkgs.jq pkgs.tmux ];
@@ -147,7 +180,11 @@ pkgs.testers.runNixOSTest {
     jobs.succeed("install -d -o dev -g dev /data/dev/src/web /data/dev/elsewhere /srv/origin.git")
     dev("git config --global user.name Dev && git config --global user.email dev@example.test")
     dev("git init -q -b trunk /data/dev/src/web && git -C /data/dev/src/web commit -q --allow-empty -m initial")
-    dev("git clone -q --bare /data/dev/src/web /srv/origin.git && git -C /data/dev/src/web remote add origin /srv/origin.git")
+    # Its origin is on the network, as GitHub is: the sandbox mounts nothing
+    # of the machine's but what the job is given, /srv included.
+    dev("git clone -q --bare /data/dev/src/web /srv/origin.git && git -C /data/dev/src/web remote add origin git://127.0.0.1/origin.git")
+    dev("setsid -f git daemon --base-path=/srv --export-all --listen=127.0.0.1 /srv >/dev/null 2>&1")
+    jobs.wait_for_open_port(9418)
     # Something new upstream, for the job's fetch to bring.
     dev("git clone -q /srv/origin.git /tmp/upstream && git -C /tmp/upstream commit -q --allow-empty -m upstream && git -C /tmp/upstream push -q origin trunk")
     upstream = dev("git -C /tmp/upstream rev-parse HEAD")
@@ -175,23 +212,40 @@ pkgs.testers.runNixOSTest {
     jobs.succeed("install -d -o dev -g dev /data/dev/tmux-custom")
     dev("tmux -S /tmp/served.sock new-session -d 'sleep infinity'")
     dev("TMUX_TMPDIR=/data/dev/tmux-custom tmux -L custom new-session -d 'sleep infinity'")
-    jobs.succeed("test -S /tmp/served.sock && test -S /data/dev/tmux-custom/tmux-1001/custom")
+    # One bound by a relative name, which the kernel's table keeps as given.
+    dev("cd /tmp && tmux -S served-rel.sock new-session -d 'sleep infinity'")
+    jobs.succeed("test -S /tmp/served.sock && test -S /data/dev/tmux-custom/tmux-1001/custom && test -S /tmp/served-rel.sock")
+    # The cache stand-in listens, though this namespace's socket table
+    # doesn't list it (until a connect from here, whose server end the
+    # kernel puts in the connecting side's namespace: so the user's own
+    # connect, which shows it answers, comes after the job).
+    jobs.wait_for_unit("cache-stand-in.service")
+    jobs.wait_until_succeeds("test -S /run/cache-stand-in/cache.sock")
+    jobs.fail("grep -q /run/cache-stand-in /proc/net/unix")
+    # A Codex daemon of the user's, its socket where the CLI masks the dir.
+    dev("install -d -m 0700 /tmp/codex-daemon-1001 && setsid -f python3 ${serve} /tmp/codex-daemon-1001/app.sock >/dev/null 2>&1")
+    jobs.wait_until_succeeds("test -S /tmp/codex-daemon-1001/app.sock")
+    dev(${builtins.toJSON (connect "/tmp/codex-daemon-1001/app.sock")})
+    # A key the job mustn't read.
+    dev("install -d -m 0700 ~/.ssh && echo secret-key-material >~/.ssh/id_test")
     jobs.fail("test -e /tmp/tmux-1001")
     dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
     j = dev('proj run --role coder --app workers web "go"')
     # Once a command is running, the user starts two more: in tmux's default
     # dir, which must still take a server, and the custom one.
-    jobs.wait_until_succeeds(f"test -e /data/dev/jobs/{j}/waiting", timeout=300)
+    # Or it ended without getting there, and the marks below say why.
+    jobs.wait_until_succeeds(f"test -e /data/dev/jobs/{j}/waiting || su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     dev("tmux -L host new-session -d 'sleep infinity'")
     dev("TMUX_TMPDIR=/data/dev/tmux-custom tmux -L late new-session -d 'sleep infinity'")
     jobs.succeed("test -S /tmp/tmux-1001/host && test -S /data/dev/tmux-custom/tmux-1001/late")
-    jobs.succeed("touch /data/dev/late-started")
+    jobs.succeed(f"touch /data/dev/jobs/{j}/late-started")
     jobs.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
     for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
                  "login-target-refused", "bus-refused", "manager-refused", "tmux-socket-refused",
-                 "tmux-custom-refused", "tmux-refused", "tmux-late-refused"]:
+                 "tmux-custom-refused", "tmux-refused", "tmux-late-refused", "tmux-relative-refused",
+                 "netns-refused", "daemon-refused", "keys-refused", "tmp-own", "store-queried"]:
         assert mark in marks, (mark, marks, said)
     # The job's own state, written by `proj done` inside the sandbox.
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
@@ -199,9 +253,12 @@ pkgs.testers.runNixOSTest {
     # git's common dir, went through proj's hooks.
     assert dev("git -C /data/dev/src/web rev-parse origin/trunk") == upstream
     assert "Engine: codex" in dev("git -C /data/dev/src/web log -1 --format=%B work")
-    for path in ["written", "by-socket", "by-custom", "by-tmux", "by-late"]:
+    for path in ["written", "by-socket", "by-custom", "by-tmux", "by-late", "by-relative"]:
         jobs.fail(f"test -e /data/dev/elsewhere/{path}")
     assert "sk-stand-in-login" not in said, said
+    assert "secret-key-material" not in said, said
+    # Its temp files went to its own /tmp, not the machine's.
+    jobs.fail("test -e /tmp/job-tmp")
     assert "is ignored" not in said and "metadata for `stand-in` not found" not in said, said
 
     # A reply resumes it: a fresh start of Codex, under the same configs.
@@ -211,13 +268,18 @@ pkgs.testers.runNixOSTest {
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/2.jsonl /data/dev/jobs/{j}/2.stderr")[1]
     for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-bus-refused",
-                 "resumed-tmux-refused"]:
+                 "resumed-tmux-refused", "resumed-tmux-relative-refused", "resumed-netns-refused",
+                 "resumed-tmp-own"]:
         assert mark in marks, (mark, marks, said)
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
-    for path in ["resumed", "resumed-by-tmux"]:
+    for path in ["resumed", "resumed-by-tmux", "resumed-by-relative"]:
         jobs.fail(f"test -e /data/dev/elsewhere/{path}")
-    # The user's own servers ran on, all four, untouched.
+    jobs.fail("test -e /tmp/job-tmp")
+    # The user's own servers ran on, all of them, untouched.
     dev("tmux -S /tmp/served.sock has-session")
+    dev("tmux -S /tmp/served-rel.sock has-session")
+    dev(${builtins.toJSON (connect "/run/cache-stand-in/cache.sock")})
+    dev(${builtins.toJSON (connect "/tmp/codex-daemon-1001/app.sock")})
     for label in ["custom", "late"]:
         dev(f"TMUX_TMPDIR=/data/dev/tmux-custom tmux -L {label} has-session")
     dev("tmux -L host has-session")
