@@ -154,10 +154,10 @@ repo, changes nothing, and answers with a verdict the inbox carries out.
 An answer with no verdict is `later`, saying so. A sorting job that ends with no
 answer at all (its engine refused it, say) leaves the issue as it was: it's
 sorted again once it changes, or once another issue's verdict shows sorting
-works again. A verdict on an issue edited or commented on while it was being
-sorted is dropped and the issue sorted again as it stands, and one GitHub took
-only part of is finished on a later pass, from where it stopped, with the
-sorting label last. Only the comments that close an
+works again. A verdict on an issue whose text or authors' comments changed since it
+was sorted, even partway through carrying it out, is dropped and the issue
+sorted again as it stands. One GitHub took only part of is finished on a later
+pass, the same steps from where it stopped, with the sorting label last. Only the comments that close an
 issue or ask the owner something are posted; a label alone says nothing, so a
 backlog being sorted doesn't flood anyone's mail. Sorting jobs wait in line
 behind work someone asked for, `triage.atOnce` at a time across every repo, and
@@ -166,7 +166,8 @@ too. Take a label off to have an issue sorted again.
 
 With `triage.drain` set to an engine, the drain hands `ready` issues to it: each
 pass, if that engine has an idle slot and fewer than `triage.drainJobs` handed-on
-issues have a job, the oldest `ready` issue (the pipeline's repos first) gets
+issues have a job, the oldest `ready` issue in any repo's last-listed open issues
+(the pipeline's repos first), checked with GitHub as it stands, gets
 the engine's inbox label and is a job like any other from there, closed when
 it's done. A handed-on job takes its place in line rather than going first.
 While a `ready` issue waits for a slot, every job turn's end kicks a pass, since
@@ -179,7 +180,8 @@ its players' reports, say, even with an author's token) puts that label on as
 it opens the issue, and no job ever starts from it, engine label or not. That
 text gets to an agent only through an author who opens an issue of their own
 for it. A job whose issue gets the label later, or whose opener
-leaves `inbox.authors`, is let go like one whose issue closed.
+leaves `inbox.authors`, is stopped at once, even while it waits for a slot, and
+the issue hears why.
 
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
 with `ENGINE` either `claude` or `codex`. Scope a key to one repo with

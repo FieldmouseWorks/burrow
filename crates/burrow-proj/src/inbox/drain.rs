@@ -12,6 +12,11 @@
 //! Only an issue opened by one of the inbox's authors is handed on, as only
 //! theirs start a job; one with a label other machinery owns, the owner's
 //! label or an engine's already, is left be.
+//!
+//! What's ready comes from the passes' own lists of each repo's open
+//! issues, every page of them: each repo's pass keeps its ready ones in
+//! [`READY_LISTS`], and the drain picks from all of them, then asks GitHub
+//! for the one it picked before it labels it.
 
 use std::fs;
 
@@ -22,15 +27,16 @@ use super::{Pass, RETRY, dirs, key, raw};
 use crate::config::Triage;
 use crate::engine::Engine;
 use crate::github::api;
-use crate::{Fail, io_fail, mtime, now, slot, usage};
+use crate::{Fail, io_fail, mtime, now, slot, swap, usage};
 
 /// In the inbox's state while a ready issue waits for a slot: the repo it's
 /// in, whose pass every turn's end then kicks (`proj _ended`), since a slot
 /// freed by any job is room for it.
 pub(crate) const WAITING: &str = ".drain-waiting";
 
-/// Search's pages of a hundred: a thousand results are all it gives.
-const SEARCH_PAGES: usize = 10;
+/// In the inbox's state: a file for each repo (its key), its ready issues
+/// as its last pass saw them.
+pub(crate) const READY_LISTS: &str = ".ready";
 
 impl Pass<'_> {
     /// Whether the issue's record says the drain handed it on.
@@ -46,8 +52,8 @@ impl Pass<'_> {
     /// back has an event or a wake-up that brings the drain back: its own
     /// jobs' turns kick their repos' passes as they end; one waiting on a
     /// slot leaves [`WAITING`], and every turn's end then kicks a pass
-    /// (`proj _ended`); a usage hold books a pass for when it resets, and a
-    /// search GitHub didn't answer one for five minutes on.
+    /// (`proj _ended`); a usage hold books a pass for when it resets, and
+    /// GitHub not answering about the issue picked one for five minutes on.
     pub(super) fn drain(&mut self) -> Result<(), Fail> {
         let Some(t) = self.inbox.triage.clone() else {
             return Ok(());
@@ -90,22 +96,15 @@ impl Pass<'_> {
             let _ = fs::remove_file(&waiting);
             return Ok(());
         }
-        let issue = match self.next_ready(&t) {
-            Ok(Some(issue)) => issue,
-            Ok(None) => {
-                let _ = fs::remove_file(&waiting);
-                return Ok(());
-            }
-            Err(()) => {
-                if let Some(repo) = self.wake_repo() {
-                    self.retry(&repo);
-                }
-                return Ok(());
-            }
+        let Some((repo, n)) = self.next_ready(&t) else {
+            let _ = fs::remove_file(&waiting);
+            return Ok(());
         };
-        let (repo, n) = issue;
+        // Said to be waiting before the slots are looked at: a slot freed
+        // after this look has its turn's end find the mark and kick a pass,
+        // and one freed before it is seen free here.
+        fs::write(&waiting, format!("{repo}\n")).map_err(|e| io_fail(&waiting, e))?;
         if !slot::room(self.cfg, engine) {
-            fs::write(&waiting, format!("{repo}\n")).map_err(|e| io_fail(&waiting, e))?;
             if engine == Engine::Claude
                 && let Some(spent) = usage::out(self.cfg)
             {
@@ -114,6 +113,16 @@ impl Pass<'_> {
             return Ok(());
         }
         let _ = fs::remove_file(&waiting);
+        // As it stands now: one closed, sorted otherwise or handed on since
+        // its repo's pass is left, and that pass, booked now, lists afresh.
+        let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+            self.miss(&repo);
+            return Ok(());
+        };
+        if now_issue["state"] != "open" || self.pick_ready(&t, &[now_issue]).is_none() {
+            self.book(&repo, now());
+            return Ok(());
+        }
         let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
         fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
         fs::write(d.join("drained"), "").map_err(|e| io_fail(&d.join("drained"), e))?;
@@ -139,60 +148,56 @@ impl Pass<'_> {
             .cloned()
     }
 
-    /// The ready issue to hand on next, as (OWNER/REPO, N), from every
-    /// project owner's ready issues, each page of them (search gives a
-    /// thousand at most). Err when GitHub didn't answer, which isn't the
-    /// same as none being ready.
-    fn next_ready(&self, t: &Triage) -> Result<Option<(String, String)>, ()> {
-        let mut owners: Vec<String> = self
-            .project
-            .keys()
-            .filter_map(|r| r.split_once('/').map(|(o, _)| o.to_lowercase()))
+    /// A repo's ready issues, from its pass's list of every open one, kept
+    /// for the drain: what [`Pass::pick_ready`] reads of each.
+    pub(super) fn note_ready(&self, repo: &str, all: &[Value]) -> Result<(), Fail> {
+        let dir = self.inbox.state.join(READY_LISTS);
+        let f = dir.join(key(repo));
+        let ready: Vec<Value> = all
+            .iter()
+            .filter(|i| i.get("pull_request").is_none())
+            .filter(|i| {
+                i["labels"]
+                    .as_array()
+                    .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(READY)))
+            })
+            .map(|i| {
+                serde_json::json!({
+                    "number": i["number"],
+                    "created_at": i["created_at"],
+                    "user": {"login": i["user"]["login"]},
+                    "labels": i["labels"],
+                    "repository_url": i["repository_url"],
+                })
+            })
             .collect();
-        owners.sort();
-        owners.dedup();
-        if owners.is_empty() {
-            return Ok(None);
+        if ready.is_empty() {
+            let _ = fs::remove_file(&f);
+            return Ok(());
         }
-        let q = format!(
-            "is:issue is:open label:{READY} {}",
-            owners
-                .iter()
-                .map(|o| format!("user:{o}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let mut items = Vec::new();
-        for page in 1..=SEARCH_PAGES {
-            let found = api(
-                self.cfg,
-                &[
-                    "-X",
-                    "GET",
-                    "search/issues",
-                    "-f",
-                    &format!("q={q}"),
-                    "-f",
-                    "sort=created",
-                    "-f",
-                    "order=asc",
-                    "-f",
-                    "per_page=100",
-                    "-f",
-                    &format!("page={page}"),
-                ],
-            )
-            .ok_or(())?;
-            let got = found["items"].as_array().ok_or(())?;
-            items.extend(got.iter().cloned());
-            if got.len() < 100 {
-                break;
-            }
-        }
-        Ok(self.pick_ready(t, &items))
+        fs::create_dir_all(&dir).map_err(|e| io_fail(&dir, e))?;
+        swap(&f, &Value::from(ready).to_string()).map_err(|e| io_fail(&f, e))
     }
 
-    /// Of a search's ready issues, the one to hand on: a project's, opened by
+    /// The ready issue to hand on next, as (OWNER/REPO, N), of every repo's
+    /// as its last pass listed them.
+    fn next_ready(&self, t: &Triage) -> Option<(String, String)> {
+        let dir = self.inbox.state.join(READY_LISTS);
+        let items: Vec<Value> = fs::read_dir(&dir)
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    // Not one being written (swap's NAME.new).
+                    .filter(|e| !e.file_name().to_string_lossy().ends_with(".new"))
+                    .filter_map(|e| fs::read(e.path()).ok())
+                    .filter_map(|b| serde_json::from_slice::<Vec<Value>>(&b).ok())
+                    .flatten()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.pick_ready(t, &items)
+    }
+
+    /// Of ready issues, the one to hand on: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
     /// pipeline's repos first, then the rest, oldest first.
     pub(super) fn pick_ready(&self, t: &Triage, items: &[Value]) -> Option<(String, String)> {

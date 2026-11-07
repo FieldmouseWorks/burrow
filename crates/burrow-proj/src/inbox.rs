@@ -166,9 +166,11 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
         }
     }
-    for (name, path) in names(&state.join(".unreached")) {
-        if !name.starts_with('.') && name.to_lowercase() == want {
-            fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
+    for dir in [".unreached", drain::READY_LISTS] {
+        for (name, path) in names(&state.join(dir)) {
+            if !name.starts_with('.') && name.to_lowercase() == want {
+                fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
+            }
         }
     }
     Ok(())
@@ -646,6 +648,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                     continue;
                 };
                 self.triage(&repo, &all)?;
+                self.note_ready(&repo, &all)?;
             }
         }
         self.drain()

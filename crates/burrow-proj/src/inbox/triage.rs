@@ -23,10 +23,13 @@
 //! through too, `at_once` at a time across every repo. Each waits its turn in
 //! line behind the work someone asked for, and runs on the engine the
 //! `triage` role names. Their records are `.triage/KEY-N` in the inbox's
-//! state, a folder an issue holding the job's id and the issue's
-//! `updated_at` when it started (a verdict on an issue changed since is
-//! dropped, and the issue sorted again), then how many of its verdict's
-//! steps GitHub has taken. A job that ends with no answer at all (its
+//! state, a folder an issue holding the job's id, the issue's `updated_at`
+//! when it started and what the job read of it (`input`: a verdict on an
+//! issue whose text or authors' comments changed since is dropped, and the
+//! issue sorted again), then the verdict's steps (`plan`) and how many of
+//! them GitHub has taken (`did`). A job whose issue an agent may no longer
+//! read (labelled outside text, or its opener no longer an author) is
+//! stopped wherever it is, queued or running. A job that ends with no answer at all (its
 //! engine refused it, say) leaves `failed` there instead: the issue is
 //! sorted again once it changes, or once another issue's verdict shows
 //! sorting works again, and nothing is said on it meanwhile.
@@ -35,6 +38,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{Pass, dirs, key, raw, say, trimmed};
@@ -204,8 +208,8 @@ impl Pass<'_> {
             if d.exists() {
                 continue;
             }
-            let id = match self.sort(repo, issue) {
-                Ok(id) => id,
+            let (id, input) = match self.sort(repo, issue) {
+                Ok(started) => started,
                 Err(f) => {
                     say(f);
                     self.retry(repo);
@@ -216,21 +220,30 @@ impl Pass<'_> {
             for (f, v) in [("updated", &updated), ("job", &id)] {
                 fs::write(d.join(f), format!("{v}\n")).map_err(|e| io_fail(&d.join(f), e))?;
             }
+            fs::write(d.join("input"), &input).map_err(|e| io_fail(&d.join("input"), e))?;
             room -= 1;
         }
         Ok(())
     }
 
-    /// A sorting job for the issue: its id.
-    fn sort(&self, repo: &str, issue: &Value) -> Result<String, Fail> {
+    /// What a sorting job reads of the issue: its text and its authors'
+    /// comments, as they stand. None when GitHub didn't say.
+    pub(super) fn input(&self, repo: &str, issue: &Value) -> Option<String> {
         let n = raw(&issue["number"]);
-        let comments =
-            every(self.cfg, &format!("repos/{repo}/issues/{n}/comments")).ok_or_else(|| {
-                Fail::new(
-                    1,
-                    format!("proj-inbox: couldn't read {repo}#{n}'s comments"),
-                )
-            })?;
+        let comments = every(self.cfg, &format!("repos/{repo}/issues/{n}/comments"))?;
+        Some(self.issue_text(repo, issue, &comments))
+    }
+
+    /// A sorting job for the issue: its id, and what it was given to read
+    /// ([`Pass::input`]).
+    fn sort(&self, repo: &str, issue: &Value) -> Result<(String, String), Fail> {
+        let n = raw(&issue["number"]);
+        let input = self.input(repo, issue).ok_or_else(|| {
+            Fail::new(
+                1,
+                format!("proj-inbox: couldn't read {repo}#{n}'s comments"),
+            )
+        })?;
         let labels: Vec<String> = issue["labels"]
             .as_array()
             .map(|ls| ls.iter().map(|l| raw(&l["name"])).collect())
@@ -240,10 +253,7 @@ impl Pass<'_> {
         } else {
             labels.join(", ")
         };
-        let task = format!(
-            "{}\n\nIts labels: {labels}.\n\n{SORT}",
-            self.issue_text(repo, issue, &comments)
-        );
+        let task = format!("{input}\n\nIts labels: {labels}.\n\n{SORT}");
         let app = self
             .inbox
             .machinery
@@ -259,7 +269,7 @@ impl Pass<'_> {
             role: Some("triage".into()),
             ..New::default()
         };
-        start_job(self.cfg, &new, &self.project[repo], &task)
+        start_job(self.cfg, &new, &self.project[repo], &task).map(|id| (id, input))
     }
 
     /// Each of the repo's sorting jobs that has ended, carried out: its
@@ -299,23 +309,34 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
-            if matches!(job.state().as_str(), "queued" | "running") {
+            let open = all.iter().find(|i| raw(&i["number"]) == n);
+            // An issue no agent may read now: its job goes, queued or
+            // running, before it reads any more of it.
+            let barred = open.is_some_and(|i| !self.eligible(i));
+            if !barred && matches!(job.state().as_str(), "queued" | "running") {
                 continue;
             }
-            let open = all.iter().find(|i| raw(&i["number"]) == n);
-            // How many of its verdict's steps are on GitHub already.
-            let did: usize = read(&d.join("did"))
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
-            // The issue as the job read it: changed since, before any of its
-            // verdict was carried out, the verdict is of something else.
-            let stale = did == 0
-                && open.is_some_and(|i| read(&d.join("updated")) != Some(raw(&i["updated_at"])));
+            // The issue as the job read it, its text and its authors'
+            // comments (the inbox's own aren't among them): changed since,
+            // even partway through carrying its verdict out, the verdict is
+            // of something else, and the issue is sorted again as it stands.
+            let mut stale = false;
+            if !barred && let Some(i) = open.filter(|i| !self.sorted(t, i)) {
+                let Some(now) = self.input(repo, i) else {
+                    self.miss(repo);
+                    continue;
+                };
+                stale = fs::read_to_string(d.join("input")).ok() != Some(now);
+            }
             let mut failed = false;
-            if !stale && open.is_some_and(|i| !self.sorted(t, i)) {
+            if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i)) {
                 match told(self.cfg, &id, "1") {
                     Ok(answer) => {
-                        if !self.carry_out(repo, n, &d, &self.steps(t, &id, &answer)) {
+                        let Some(plan) = self.plan(&d, t, &id, &answer) else {
+                            self.retry(repo);
+                            continue;
+                        };
+                        if !self.carry_out(repo, n, &d, &plan) {
                             self.miss(repo);
                             continue;
                         }
@@ -382,14 +403,14 @@ impl Pass<'_> {
                     "Sorted: a duplicate of #{m}, so closed. Reopen it if it isn't.\n\n{}",
                     why(answer)
                 )),
-                Step::Close("not_planned"),
+                Step::Close("not_planned".into()),
             ],
             Some(Verdict::Done) => vec![
                 Step::Post(format!(
                     "Sorted: already done, so closed. Reopen it if it isn't.\n\n{}",
                     why(answer)
                 )),
-                Step::Close("completed"),
+                Step::Close("completed".into()),
             ],
             None => vec![
                 Step::Post(format!(
@@ -399,6 +420,23 @@ impl Pass<'_> {
                 Step::Label(LATER.into()),
             ],
         }
+    }
+
+    /// The verdict's steps, as its record keeps them: worked out once, the
+    /// first time it's carried out, so a pass that comes back to it finishes
+    /// the same steps whatever the settings say by then. None when the
+    /// record can't keep them.
+    fn plan(&self, d: &Path, t: &Triage, id: &str, answer: &str) -> Option<Vec<Step>> {
+        let kept = d.join("plan");
+        if let Some(plan) = fs::read(&kept)
+            .ok()
+            .and_then(|p| serde_json::from_slice(&p).ok())
+        {
+            return Some(plan);
+        }
+        let plan = self.steps(t, id, answer);
+        fs::write(&kept, serde_json::to_vec(&plan).ok()?).ok()?;
+        Some(plan)
     }
 
     /// A verdict's steps carried out on the issue, from the first its record
@@ -425,10 +463,10 @@ impl Pass<'_> {
 }
 
 /// One thing a verdict does on its issue.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) enum Step {
     Label(String),
     Assign(String),
     Post(String),
-    Close(&'static str),
+    Close(String),
 }

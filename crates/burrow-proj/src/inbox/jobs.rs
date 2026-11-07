@@ -18,8 +18,13 @@ impl Pass<'_> {
     pub(super) fn jobs(&mut self, repo: &str, p: &str, open: &[Value]) -> Result<(), Fail> {
         // A job carries on only while an agent may still read its issue: one
         // since labelled outside text, or whose opener is no longer one of
-        // the authors, is let go like a closed one, its next look at it
-        // (new_issues) saying why.
+        // the authors, is stopped at once, queued or running, and its record
+        // goes, the next look at the issue (new_issues) saying why.
+        let barred: Vec<String> = open
+            .iter()
+            .filter(|i| !self.eligible(i))
+            .map(|i| raw(&i["number"]))
+            .collect();
         let open: Vec<Value> = open.iter().filter(|i| self.eligible(i)).cloned().collect();
         let open = open.as_slice();
         'jobs: for d in dirs(&self.inbox.state, &format!("{}-", key(repo))) {
@@ -44,6 +49,15 @@ impl Pass<'_> {
             // goes with it, and one still open is taken up afresh next pass.
             let job = Job::new(self.cfg, &id);
             if !job.dir.is_dir() {
+                let _ = fs::remove_dir_all(&d);
+                continue;
+            }
+            if barred.iter().any(|b| b == n) {
+                if let Err(f) = stop(self.cfg, &id, false) {
+                    say(f);
+                    self.retry(repo);
+                    continue;
+                }
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }

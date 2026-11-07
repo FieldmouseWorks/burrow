@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use super::Pass;
 use super::triage::{Verdict, verdict, why};
+use super::{Pass, raw};
 use crate::config::tests::example;
 use crate::config::{Config, Triage};
 use crate::engine::Engine;
@@ -17,9 +17,10 @@ use crate::engine::Engine;
 /// A machine in a temp dir: gh logs each call's arguments to `log` and what
 /// it posts to `posted`, runs `hook` with them first when there is one,
 /// fails a call that has a line of `fail` in it, answers a comment list with
-/// `comments` (none when it's missing), a search's page N with `searchN`
-/// (none), and anything else with `{}`; systemctl says every unit is
-/// inactive.
+/// `comments` (none when it's missing), `repos/O/R/issues/N` with the file
+/// named that with `_` for `/` (`{}`), and anything else with `{}`;
+/// systemctl says every unit is inactive, but a job's is active, waiting
+/// for a slot, while there's an `active` file.
 struct Box {
     tmp: tempfile::TempDir,
     cfg: Config,
@@ -38,19 +39,21 @@ impl Box {
         let gh = script(
             "gh",
             format!(
-                "echo \"$*\" >>'{log}'\n[ -x '{hook}' ] && '{hook}' \"$*\"\n[ -f '{fail}' ] && printf '%s' \"$*\" | grep -qF -f '{fail}' && exit 1\ncase \"$*\" in\n  *--paginate*) cat '{comments}' 2>/dev/null || echo '[[]]' ;;\n  *body=@-*) cat >>'{posted}' ;;\n  *search/issues*) n=${{*##*page=}}; cat '{search}'\"$n\" 2>/dev/null || echo '{{\"items\": []}}' ;;\n  *) echo '{{}}' ;;\nesac\n",
+                "echo \"$*\" >>'{log}'\n[ -x '{hook}' ] && '{hook}' \"$*\"\n[ -f '{fail}' ] && printf '%s' \"$*\" | grep -qF -f '{fail}' && exit 1\ncase \"$*\" in\n  *--paginate*) cat '{comments}' 2>/dev/null || echo '[[]]' ;;\n  *body=@-*) cat >>'{posted}' ;;\n  'api repos/'*) a=\"$*\"; cat '{dir}'/\"$(echo \"${{a#api }}\" | tr / _)\" 2>/dev/null || echo '{{}}' ;;\n  *) echo '{{}}' ;;\nesac\n",
                 log = at("log").display(),
                 hook = at("hook").display(),
                 fail = at("fail").display(),
                 comments = at("comments").display(),
                 posted = at("posted").display(),
-                search = at("search").display(),
+                dir = tmp.path().display(),
             ),
         );
         let systemctl = script(
             "systemctl",
-            "case \"$*\" in\n  *is-active*) exit 3 ;;\n  *show*) echo inactive ;;\nesac\nexit 0\n"
-                .into(),
+            format!(
+                "case \"$*\" in\n  *is-active*) [ -e '{}' ] && exit 0; exit 3 ;;\n  *show*) echo inactive ;;\nesac\nexit 0\n",
+                at("active").display()
+            ),
         );
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.tools.gh = gh;
@@ -273,6 +276,11 @@ fn what_counts_as_sorted() {
     assert!(p.sorted(&t, &pr));
 }
 
+/// What a sorting job for issue N, as the fixtures have it, read of it.
+fn input(b: &Box, n: u64) -> String {
+    b.pass().issue_text("sam/box", &issue(n, "sam", &[]), &[])
+}
+
 /// A sorting job for issue 7 that answered `said`, then what the pass did.
 fn sorted_as(said: &str, still: Value) -> Box {
     let b = Box::new();
@@ -287,6 +295,7 @@ fn sorted_as(said: &str, still: Value) -> Box {
     fs::create_dir_all(&d).unwrap();
     fs::write(d.join("job"), "s1\n").unwrap();
     fs::write(d.join("updated"), format!("{UPDATED}\n")).unwrap();
+    fs::write(d.join("input"), input(&b, 7)).unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     b.pass().verdicts("sam/box", &t, &[still]).unwrap();
     assert!(!d.exists(), "the record goes once it's carried out");
@@ -330,13 +339,18 @@ fn verdicts_are_carried_out() {
     fs::create_dir_all(root.join("sam_box-7")).unwrap();
     fs::write(root.join("sam_box-7/job"), "s1\n").unwrap();
     fs::write(root.join("sam_box-7/updated"), "2026-11-01T00:00:00Z\n").unwrap();
+    fs::write(root.join("sam_box-7/input"), input(&b, 7)).unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let mut seven = issue(7, "sam", &[]);
     seven["updated_at"] = json!("2026-11-01T00:00:00Z");
     let mut p = b.pass();
     p.verdicts("sam/box", &t, std::slice::from_ref(&seven))
         .unwrap();
-    assert!(b.log().is_empty() && b.posted().is_empty(), "{}", b.log());
+    assert!(
+        !b.log().contains("-X") && b.posted().is_empty(),
+        "{}",
+        b.log()
+    );
     assert!(root.join("sam_box-7/failed").exists() && !root.join("sam_box-7/job").exists());
     // Unchanged, it's passed over: no job tried (none can start here, which
     // would book a retry).
@@ -353,6 +367,7 @@ fn verdicts_are_carried_out() {
     fs::create_dir_all(root.join("sam_box-8")).unwrap();
     fs::write(root.join("sam_box-8/job"), "s2\n").unwrap();
     fs::write(root.join("sam_box-8/updated"), format!("{UPDATED}\n")).unwrap();
+    fs::write(root.join("sam_box-8/input"), input(&b, 8)).unwrap();
     b.pass()
         .verdicts("sam/box", &t, &[issue(8, "sam", &[])])
         .unwrap();
@@ -452,7 +467,7 @@ fn room_for_the_drain() {
         .collect();
     assert!(!crate::slot::room(cfg, Engine::Codex));
     drop(held);
-    assert!(crate::slot::room(cfg, Engine::Codex));
+    assert!(soon(|| crate::slot::room(cfg, Engine::Codex)));
 
     assert!(crate::slot::room(cfg, Engine::Claude));
     let slots = cfg.jobs.join(".slots");
@@ -466,7 +481,21 @@ fn room_for_the_drain() {
     // One free, and it's the pipeline's.
     assert!(!crate::slot::room(cfg, Engine::Claude));
     drop(held);
-    assert!(crate::slot::room(cfg, Engine::Claude));
+    assert!(soon(|| crate::slot::room(cfg, Engine::Claude)));
+}
+
+/// Whether `f` holds within a second. A slot's lock dropped here can still
+/// be held a moment by a process another test's thread is starting: it was
+/// forked while the lock was held, and keeps it until it execs.
+fn soon(mut f: impl FnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !f() {
+        if std::time::Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    true
 }
 
 // The module's triage settings, as it writes them, are what proj reads; off
@@ -578,6 +607,7 @@ fn sorting(b: &Box, said: &str) -> PathBuf {
     fs::create_dir_all(&d).unwrap();
     fs::write(d.join("job"), "s1\n").unwrap();
     fs::write(d.join("updated"), format!("{UPDATED}\n")).unwrap();
+    fs::write(d.join("input"), input(b, 7)).unwrap();
     d
 }
 
@@ -626,17 +656,19 @@ fn a_verdict_cut_short_is_finished_later() {
     }
 }
 
-// A verdict on an issue that changed while it was sorted (an edit, a new
-// comment) is of something else: dropped, and the issue sorted again as it
-// stands.
+// A verdict on an issue whose text or authors' comments changed while it
+// was sorted, or between passes carrying it out, is of something else:
+// dropped, and the issue sorted again as it stands. The inbox's own
+// comments aren't a change.
 #[test]
 fn a_verdict_on_a_changed_issue_is_dropped() {
+    let mut edited = issue(7, "sam", &[]);
+    edited["body"] = json!("It's broken, and don't close it until the docs say so.");
+
     let b = Box::new();
     let d = sorting(&b, "done\nmain has it");
-    let mut changed = issue(7, "sam", &[]);
-    changed["updated_at"] = json!("2026-11-02T00:00:00Z");
     let mut p = b.pass();
-    p.triage("sam/box", std::slice::from_ref(&changed)).unwrap();
+    p.triage("sam/box", std::slice::from_ref(&edited)).unwrap();
     assert!(
         !b.log().contains("PATCH") && b.posted().is_empty(),
         "{}",
@@ -645,6 +677,78 @@ fn a_verdict_on_a_changed_issue_is_dropped() {
     assert!(!d.join("job").exists());
     // Sorted again: a job tried (none can start here, which books a retry).
     assert!(p.wake.contains_key("sam/box"));
+
+    // Partway: its comment posted, the close refused; then the author
+    // comments before the next pass.
+    let b = Box::new();
+    let d = sorting(&b, "done\nmain has it");
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    fs::write(b.path("fail"), "state=closed\n").unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "1\n");
+    fs::remove_file(b.path("fail")).unwrap();
+    let said = |who: &str, id: u64, body: &str| json!({"id": id, "user": {"login": who}, "body": body, "created_at": UPDATED});
+    let mark = &b.cfg.inbox_mark;
+    // Its own answer alone isn't a change: the close goes ahead.
+    fs::write(
+        b.path("comments"),
+        json!([[said("sam", 1, &format!("Sorted: already done.\n{mark}"))]]).to_string(),
+    )
+    .unwrap();
+    let before = b.log().matches("PATCH").count();
+    let d2 = d.clone();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert_eq!(b.log().matches("PATCH").count(), before + 1);
+    assert!(!d2.exists());
+    // The author's reply is: the close doesn't.
+    let b = Box::new();
+    let d = sorting(&b, "done\nmain has it");
+    fs::write(b.path("fail"), "state=closed\n").unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    fs::remove_file(b.path("fail")).unwrap();
+    fs::write(
+        b.path("comments"),
+        json!([[said("sam", 2, "Not yet: the docs still say otherwise.")]]).to_string(),
+    )
+    .unwrap();
+    let before = b.log().matches("PATCH").count();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert_eq!(b.log().matches("PATCH").count(), before, "{}", b.log());
+    assert!(!d.exists());
+}
+
+// A verdict partway through finishes the steps it was given, whatever the
+// settings say by the time a pass comes back to it.
+#[test]
+fn a_verdict_keeps_its_plan() {
+    let mut b = Box::new();
+    b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap().owner = None;
+    let d = sorting(&b, "owner\nIt spends money.");
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    fs::write(b.path("fail"), "labels\n").unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "1\n");
+    fs::remove_file(b.path("fail")).unwrap();
+    // An owner set since: not assigned now, and nothing said twice.
+    let mut t = t;
+    t.owner = Some("sam".into());
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert!(!d.exists());
+    assert!(!b.log().contains("assignees"), "{}", b.log());
+    assert_eq!(b.log().matches("body=@-").count(), 1);
+    assert_eq!(b.log().matches("labels[]=needs-owner").count(), 2);
 }
 
 // An issue whose verdict this pass carried out isn't sorted again from the
@@ -669,51 +773,78 @@ fn a_carried_out_verdict_is_not_sorted_again() {
     }
 }
 
-fn found_page(items: &[Value]) -> String {
-    json!({ "items": items }).to_string()
-}
-
-// The drain looks past the first page of ready issues, and puts the
-// pipeline's first across all of them.
-#[test]
-fn the_drain_reads_every_page() {
-    let b = Box::new();
-    let old = "2026-10-01T00:00:00Z";
-    let strangers: Vec<Value> = (100..200)
-        .map(|n| found("sam/game", n, "player", &["ready"], old))
-        .collect();
-    fs::write(b.path("search1"), found_page(&strangers)).unwrap();
+/// An issue as GitHub gives it when asked for it alone, saved for the
+/// stand-in gh.
+fn on_github(b: &Box, i: &Value) {
+    let repo = raw(&i["repository_url"]);
+    let repo = repo.trim_start_matches("https://api.github.com/repos/");
+    let mut i = i.clone();
+    i["state"] = json!("open");
     fs::write(
-        b.path("search2"),
-        found_page(&[
-            found("sam/game", 4, "sam", &["ready"], old),
-            found("sam/box", 8, "sam", &["ready"], "2026-11-01T00:00:00Z"),
-        ]),
+        b.path(&format!(
+            "repos_{}_issues_{}",
+            repo.replace('/', "_"),
+            i["number"]
+        )),
+        i.to_string(),
     )
     .unwrap();
+}
+
+// The drain picks from every repo's ready issues as each one's pass listed
+// them (every page of its open issues), the pipeline's first, and asks
+// GitHub for the one it picked before labelling it.
+#[test]
+fn the_drain_picks_across_every_repo() {
+    let b = Box::new();
+    let old = "2026-10-01T00:00:00Z";
+    let mut game: Vec<Value> = (100..1200)
+        .map(|n| found("sam/game", n, "player", &["ready"], old))
+        .collect();
+    game.push(found("sam/game", 4, "sam", &["ready"], old));
+    let boxed = found("sam/box", 8, "sam", &["ready"], "2026-11-01T00:00:00Z");
+    let p = b.pass();
+    p.note_ready("sam/game", &game).unwrap();
+    p.note_ready(
+        "sam/box",
+        &[boxed.clone(), found("sam/box", 9, "sam", &["later"], old)],
+    )
+    .unwrap();
+    // Not open any more, as GitHub has it now: left, its repo's pass booked.
+    let mut p = b.pass();
+    p.drain().unwrap();
+    assert!(!b.log().contains("labels[]="), "{}", b.log());
+    assert!(p.wake.contains_key("sam/box"));
+    on_github(&b, &boxed);
     b.pass().drain().unwrap();
-    assert!(b.log().contains("page=2"), "{}", b.log());
     assert!(
         b.log()
             .contains("-X POST repos/sam/box/issues/8/labels -f labels[]=codex"),
         "{}",
         b.log()
     );
+    // Its repo's list without it: the next picks from the rest.
+    let b = Box::new();
+    let p = b.pass();
+    p.note_ready("sam/game", &game).unwrap();
+    p.note_ready("sam/box", &[]).unwrap();
+    on_github(&b, &game[game.len() - 1]);
+    b.pass().drain().unwrap();
+    assert!(
+        b.log().contains("issues/4/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
 }
 
-// What holds the drain back brings it back: a search GitHub didn't answer
-// books a pass; a ready issue with no slot for it leaves its repo for every
-// turn's end to kick; one handed on but not yet started books a pass for
-// when it's let go.
+// What holds the drain back brings it back: a ready issue with no slot for
+// it leaves its repo, said before the slots are looked at, for every turn's
+// end to kick; GitHub not answering about the issue books a pass; one handed
+// on but not yet started books a pass for when it's let go.
 #[test]
 fn the_drain_comes_back() {
     let state = |b: &Box| b.cfg.inbox.as_ref().unwrap().state.clone();
-
-    let b = Box::new();
-    fs::write(b.path("fail"), "search/issues\n").unwrap();
-    let mut p = b.pass();
-    p.drain().unwrap();
-    assert!(!p.wake.is_empty(), "a failed search isn't an empty one");
+    let four = found("sam/game", 4, "sam", &["ready"], "2026-10-01T00:00:00Z");
 
     let b = Box::new();
     let mut p = b.pass();
@@ -721,17 +852,20 @@ fn the_drain_comes_back() {
     assert!(p.wake.is_empty(), "nothing ready, nothing booked");
 
     let b = Box::new();
-    fs::write(
-        b.path("search1"),
-        found_page(&[found(
-            "sam/game",
-            4,
-            "sam",
-            &["ready"],
-            "2026-10-01T00:00:00Z",
-        )]),
-    )
-    .unwrap();
+    b.pass()
+        .note_ready("sam/game", std::slice::from_ref(&four))
+        .unwrap();
+    fs::write(b.path("fail"), "repos/sam/game/issues/4\n").unwrap();
+    let mut p = b.pass();
+    p.drain().unwrap();
+    assert!(
+        p.wake.contains_key("sam/game"),
+        "GitHub didn't say: {:?}",
+        p.wake
+    );
+    fs::remove_file(b.path("fail")).unwrap();
+
+    on_github(&b, &four);
     let cfg = &b.cfg;
     let held: Vec<fs::File> = (1..=cfg.codex_slots)
         .map(|i| {
@@ -746,8 +880,13 @@ fn the_drain_comes_back() {
     let waiting = state(&b).join(super::WAITING);
     assert_eq!(fs::read_to_string(&waiting).unwrap(), "sam/game\n");
     drop(held);
-    b.pass().drain().unwrap();
-    assert!(!waiting.exists(), "handed on: no longer waiting");
+    assert!(
+        soon(|| {
+            b.pass().drain().unwrap();
+            !waiting.exists()
+        }),
+        "handed on: no longer waiting"
+    );
     assert!(b.log().contains("issues/4/labels -f labels[]=codex"));
 
     // Handed on, its job not started yet: at its limit (one here), the pass
@@ -755,4 +894,45 @@ fn the_drain_comes_back() {
     let mut p = b.pass();
     p.drain().unwrap();
     assert!(!p.wake.is_empty());
+}
+
+// A job, a sorting job's included, whose issue an agent may no longer read
+// is stopped even while its turn waits for a slot, before it reads any.
+#[test]
+fn a_queued_job_is_stopped_once_its_issue_is_barred() {
+    for barred in [
+        issue(7, "sam", &["claude", "outside text"]),
+        issue(7, "former", &["claude"]),
+    ] {
+        let b = Box::new();
+        b.job("j1", "done", "");
+        fs::remove_file(b.cfg.jobs.join("j1/1.outcome")).unwrap();
+        fs::write(b.path("active"), "").unwrap();
+        let d = b.record("j1");
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&barred))
+            .unwrap();
+        assert!(!d.exists(), "{barred}");
+        assert!(b.cfg.jobs.join("j1/1.stopped").exists(), "{barred}");
+
+        let b = Box::new();
+        let d = sorting(&b, "");
+        fs::remove_file(b.cfg.jobs.join("s1/1.outcome")).unwrap();
+        fs::write(b.path("active"), "").unwrap();
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        let mut unlabelled = barred.clone();
+        unlabelled["labels"] = json!(
+            barred["labels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|l| l["name"] != "claude")
+                .collect::<Vec<_>>()
+        );
+        b.pass()
+            .verdicts("sam/box", &t, std::slice::from_ref(&unlabelled))
+            .unwrap();
+        assert!(!d.exists(), "{unlabelled}");
+        assert!(b.cfg.jobs.join("s1/1.stopped").exists(), "{unlabelled}");
+    }
 }
