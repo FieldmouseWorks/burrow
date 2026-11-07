@@ -310,10 +310,20 @@ impl Pass<'_> {
                 continue;
             }
             let open = all.iter().find(|i| raw(&i["number"]) == n);
+            let busy = matches!(job.state().as_str(), "queued" | "running");
             // An issue no agent may read now: its job goes, queued or
-            // running, before it reads any more of it.
-            let barred = open.is_some_and(|i| !self.eligible(i));
-            if !barred && matches!(job.state().as_str(), "queued" | "running") {
+            // running, before it reads any more of it. One closed meanwhile
+            // is asked about, while its job is still to finish.
+            let barred = if open.is_some() || busy {
+                let Some(barred) = self.barred(repo, n, open) else {
+                    self.miss(repo);
+                    continue;
+                };
+                barred
+            } else {
+                false
+            };
+            if !barred && busy {
                 continue;
             }
             // The issue as the job read it, its text and its authors'

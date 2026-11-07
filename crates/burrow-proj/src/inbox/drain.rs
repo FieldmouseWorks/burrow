@@ -18,6 +18,7 @@
 //! [`READY_LISTS`], and the drain picks from all of them, then asks GitHub
 //! for the one it picked before it labels it.
 
+use std::collections::BTreeSet;
 use std::fs;
 
 use serde_json::Value;
@@ -96,33 +97,51 @@ impl Pass<'_> {
             let _ = fs::remove_file(&waiting);
             return Ok(());
         }
-        let Some((repo, n)) = self.next_ready(&t) else {
+        let ranked = self.next_ready(&t);
+        let Some((first, _)) = ranked.first() else {
             let _ = fs::remove_file(&waiting);
             return Ok(());
         };
         // Said to be waiting before the slots are looked at: a slot freed
         // after this look has its turn's end find the mark and kick a pass,
         // and one freed before it is seen free here.
-        fs::write(&waiting, format!("{repo}\n")).map_err(|e| io_fail(&waiting, e))?;
+        fs::write(&waiting, format!("{first}\n")).map_err(|e| io_fail(&waiting, e))?;
         if !slot::room(self.cfg, engine) {
             if engine == Engine::Claude
                 && let Some(spent) = usage::out(self.cfg)
             {
-                self.book(&repo, spent.until);
+                self.book(first, spent.until);
             }
             return Ok(());
         }
         let _ = fs::remove_file(&waiting);
-        // As it stands now: one closed, sorted otherwise or handed on since
-        // its repo's pass is left, and that pass, booked now, lists afresh.
-        let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
-            self.miss(&repo);
+        // Each as it stands now, in order. One closed, sorted otherwise or
+        // handed on since its repo's pass is passed over, and that pass,
+        // booked now, lists afresh; one GitHub won't say about books a
+        // retry. Either way the rest of that repo's wait for its pass, and
+        // the next repo's go on: one repo can't hold up the others.
+        let mut passed: BTreeSet<String> = BTreeSet::new();
+        let mut picked = None;
+        for (repo, n) in ranked {
+            if passed.contains(&repo) {
+                continue;
+            }
+            let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+                self.miss(&repo);
+                passed.insert(repo);
+                continue;
+            };
+            if now_issue["state"] != "open" || self.pick_ready(&t, &[now_issue]).is_none() {
+                self.book(&repo, now());
+                passed.insert(repo);
+                continue;
+            }
+            picked = Some((repo, n));
+            break;
+        }
+        let Some((repo, n)) = picked else {
             return Ok(());
         };
-        if now_issue["state"] != "open" || self.pick_ready(&t, &[now_issue]).is_none() {
-            self.book(&repo, now());
-            return Ok(());
-        }
         let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
         fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
         fs::write(d.join("drained"), "").map_err(|e| io_fail(&d.join("drained"), e))?;
@@ -179,9 +198,9 @@ impl Pass<'_> {
         swap(&f, &Value::from(ready).to_string()).map_err(|e| io_fail(&f, e))
     }
 
-    /// The ready issue to hand on next, as (OWNER/REPO, N), of every repo's
-    /// as its last pass listed them.
-    fn next_ready(&self, t: &Triage) -> Option<(String, String)> {
+    /// The ready issues to hand on, next first, as (OWNER/REPO, N), of every
+    /// repo's as its last pass listed them.
+    fn next_ready(&self, t: &Triage) -> Vec<(String, String)> {
         let dir = self.inbox.state.join(READY_LISTS);
         let items: Vec<Value> = fs::read_dir(&dir)
             .map(|d| {
@@ -194,13 +213,18 @@ impl Pass<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        self.pick_ready(t, &items)
+        self.ranked(t, &items)
     }
 
-    /// Of ready issues, the one to hand on: a project's, opened by
+    /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
+    pub(super) fn pick_ready(&self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
+        self.ranked(t, items).into_iter().next()
+    }
+
+    /// Of ready issues, the ones to hand on, in order: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
     /// pipeline's repos first, then the rest, oldest first.
-    pub(super) fn pick_ready(&self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
+    fn ranked(&self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
         let rank = |repo: &str| {
             !self
                 .cfg
@@ -242,7 +266,9 @@ impl Pass<'_> {
                 (labels.contains(&READY) && !theirs && !kept)
                     .then(|| (rank(&repo), raw(&i["created_at"]), repo, n))
             })
-            .min()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .map(|(_, _, repo, n)| (repo, n))
+            .collect()
     }
 }

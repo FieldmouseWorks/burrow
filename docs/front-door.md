@@ -180,8 +180,8 @@ its players' reports, say, even with an author's token) puts that label on as
 it opens the issue, and no job ever starts from it, engine label or not. That
 text gets to an agent only through an author who opens an issue of their own
 for it. A job whose issue gets the label later, or whose opener
-leaves `inbox.authors`, is stopped at once, even while it waits for a slot, and
-the issue hears why.
+leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
+as its issue closes, and the issue hears why.
 
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
 with `ENGINE` either `claude` or `codex`. Scope a key to one repo with

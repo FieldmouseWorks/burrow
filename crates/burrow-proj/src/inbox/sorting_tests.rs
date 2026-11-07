@@ -936,3 +936,81 @@ fn a_queued_job_is_stopped_once_its_issue_is_barred() {
         assert!(b.cfg.jobs.join("s1/1.stopped").exists(), "{unlabelled}");
     }
 }
+
+// Barred while its label comes off or it closes, so the pass's list no
+// longer has it: GitHub is asked, and a job still to finish is stopped. One
+// closed that may still be read finishes, as before.
+#[test]
+fn a_barred_issue_off_the_list_stops_its_job() {
+    let seven = |labels: &[&str]| issue(7, "sam", labels);
+    for (now, stopped) in [
+        (seven(&["outside text"]), true),
+        (issue(7, "former", &[]), true),
+        (seven(&[]), false),
+    ] {
+        let mut now = now;
+        now["repository_url"] = json!("https://api.github.com/repos/sam/box");
+        let b = Box::new();
+        b.job("j1", "done", "");
+        fs::remove_file(b.cfg.jobs.join("j1/1.outcome")).unwrap();
+        fs::write(b.path("active"), "").unwrap();
+        on_github(&b, &now);
+        let d = b.record("j1");
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        assert_eq!(!d.exists(), stopped, "{now}");
+        assert_eq!(b.cfg.jobs.join("j1/1.stopped").exists(), stopped, "{now}");
+
+        let b = Box::new();
+        let d = sorting(&b, "");
+        fs::remove_file(b.cfg.jobs.join("s1/1.outcome")).unwrap();
+        fs::write(b.path("active"), "").unwrap();
+        on_github(&b, &now);
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        b.pass().verdicts("sam/box", &t, &[]).unwrap();
+        assert_eq!(!d.exists(), stopped, "{now}");
+    }
+    // GitHub doesn't say: kept, and asked again.
+    let b = Box::new();
+    b.job("j1", "done", "");
+    fs::remove_file(b.cfg.jobs.join("j1/1.outcome")).unwrap();
+    fs::write(b.path("active"), "").unwrap();
+    let d = b.record("j1");
+    fs::write(b.path("fail"), "repos/sam/box/issues/7\n").unwrap();
+    let mut p = b.pass();
+    p.jobs("sam/box", "box", &[]).unwrap();
+    assert!(d.exists() && p.wake.contains_key("sam/box"));
+}
+
+// One repo GitHub won't say about doesn't hold up the drain: its ready
+// issues wait for its retry, and the next repo's is handed on.
+#[test]
+fn one_repo_cannot_hold_up_the_drain() {
+    let b = Box::new();
+    let old = "2026-10-01T00:00:00Z";
+    let boxed = found("sam/box", 8, "sam", &["ready"], old);
+    let game = found("sam/game", 4, "sam", &["ready"], old);
+    let p = b.pass();
+    p.note_ready(
+        "sam/box",
+        &[boxed.clone(), found("sam/box", 9, "sam", &["ready"], old)],
+    )
+    .unwrap();
+    p.note_ready("sam/game", std::slice::from_ref(&game))
+        .unwrap();
+    on_github(&b, &game);
+    fs::write(b.path("fail"), "repos/sam/box/issues\n").unwrap();
+    let mut p = b.pass();
+    p.drain().unwrap();
+    assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
+    assert_eq!(
+        b.log().matches("api repos/sam/box/issues/").count(),
+        1,
+        "{}",
+        b.log()
+    );
+    assert!(
+        b.log().contains("issues/4/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
+}

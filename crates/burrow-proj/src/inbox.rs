@@ -716,6 +716,16 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         self.allowed(&raw(&issue["user"]["login"])) && !self.outside(issue)
     }
 
+    /// Whether an agent may no longer read issue N: as `listed` has it, or
+    /// as GitHub says now when no list has it. None when GitHub didn't say.
+    pub(super) fn barred(&self, repo: &str, n: &str, listed: Option<&Value>) -> Option<bool> {
+        match listed {
+            Some(i) => Some(!self.eligible(i)),
+            None => crate::github::api(self.cfg, &[&format!("repos/{repo}/issues/{n}")])
+                .map(|i| !self.eligible(&i)),
+        }
+    }
+
     /// Whether the issue carries the outside label: text from outside the
     /// authors (a game's players' reports, say), filed with whatever login,
     /// that no agent reads.

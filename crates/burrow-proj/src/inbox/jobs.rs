@@ -20,11 +20,7 @@ impl Pass<'_> {
         // since labelled outside text, or whose opener is no longer one of
         // the authors, is stopped at once, queued or running, and its record
         // goes, the next look at the issue (new_issues) saying why.
-        let barred: Vec<String> = open
-            .iter()
-            .filter(|i| !self.eligible(i))
-            .map(|i| raw(&i["number"]))
-            .collect();
+        let listed = open;
         let open: Vec<Value> = open.iter().filter(|i| self.eligible(i)).cloned().collect();
         let open = open.as_slice();
         'jobs: for d in dirs(&self.inbox.state, &format!("{}-", key(repo))) {
@@ -52,15 +48,6 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
-            if barred.iter().any(|b| b == n) {
-                if let Err(f) = stop(self.cfg, &id, false) {
-                    say(f);
-                    self.retry(repo);
-                    continue;
-                }
-                let _ = fs::remove_dir_all(&d);
-                continue;
-            }
             // The state and the turn count, read together: a turn starts
             // (proj reply, proj _watch) holding the job's lock, and halfway
             // through it the count names the new turn while the state is
@@ -71,6 +58,26 @@ impl Pass<'_> {
                 (job.state(), turns)
             };
             let busy = matches!(st.as_str(), "queued" | "running");
+            // Barred, as the list has it; or, for a turn still to finish whose
+            // issue the list hasn't (closed, or its label taken off), as
+            // GitHub says now: closing it lets the turn finish only while
+            // its issue may still be read.
+            let mine = listed.iter().find(|i| raw(&i["number"]) == n);
+            if (mine.is_some() || busy) && {
+                let Some(barred) = self.barred(repo, n, mine) else {
+                    self.miss(repo);
+                    continue;
+                };
+                barred
+            } {
+                if let Err(f) = stop(self.cfg, &id, false) {
+                    say(f);
+                    self.retry(repo);
+                    continue;
+                }
+                let _ = fs::remove_dir_all(&d);
+                continue;
+            }
 
             // Every turn that has finished gets its answer on the issue, in
             // order: all but the one queued or running now. A job that proj
