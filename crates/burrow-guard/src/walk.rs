@@ -124,8 +124,13 @@ fn reading(word: &str) -> Result<Vec<Vec<String>>, shell::TooDeep> {
     shell::commands(assigned(word).unwrap_or(word))
 }
 
-fn reads_as_itself(reading: &[Vec<String>], word: &String) -> bool {
-    matches!(reading, [only] if only.as_slice() == std::slice::from_ref(word))
+/// Whether `word` read again is just itself. Reading a word again marks the
+/// globs it holds as unquoted ones (shell.rs's `bare`), whatever quoting it
+/// had the first time, so the marks don't count. (A brace list it holds
+/// expands into more words, which aren't just itself.)
+fn reads_as_itself(reading: &[Vec<String>], word: &str) -> bool {
+    let bare = |w: &str| w.replace(shell::UNKNOWN, "");
+    matches!(reading, [only] if only.len() == 1 && bare(&only[0]) == bare(word))
 }
 
 /// A command's words, each `${…}`'s text read in ahead of the word holding

@@ -310,6 +310,14 @@ fn codex_slot(
     fs::create_dir_all(cfg.jobs.join(".slots"))?;
     let job = Job::new(cfg, id);
     fs::write(job.turn(n, "withdrawable"), "")?;
+    // A turn that waited in Claude's line and was handed to this proj brings
+    // its place with it, under this pid. It is Codex's now, and a place left in
+    // Claude's line would count as a live waiter there (waiter_alive) while it
+    // waits for, or runs in, Codex's pool.
+    let queue = cfg.jobs.join(".queue");
+    while let Some((left, _)) = place_left(&queue, id, process::id()) {
+        fs::remove_file(queue.join(left))?;
+    }
     loop {
         if may_hand_over && let Some(to) = successor(cfg) {
             unmark(&job, n)?;

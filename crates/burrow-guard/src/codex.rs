@@ -47,7 +47,7 @@ impl Refusal {
                 "Turns off this Codex job's git hooks, which mark its commits for a Claude judge and keep its pushes off the default branch's history; run it without that."
             }
             Refusal::Api => {
-                "Writes commits or refs through GitHub (its API, or a merge or sync it makes), where this Codex job's git hooks never see them; commit and push with git instead, and leave merging to the steward."
+                "Writes commits or refs through GitHub (its API, or a merge or sync it makes), or calls its API where the guard cannot read the endpoint, method or query (an expansion, a file), where this Codex job's git hooks never see them; commit and push with git instead, spell the call out, and leave merging to the steward."
             }
             Refusal::Unmarked => {
                 "Writes commits this Codex job's commit-msg hook may never mark (Engine: codex), or pushes past its pre-push; commit, merge or push with plain git commit, git merge and git push instead."
@@ -285,13 +285,6 @@ pub(crate) fn endpoint(url: &str) -> &str {
     path.trim_end_matches('/')
 }
 
-/// Whether a REST request at `url` by `method` writes commits or refs.
-fn rest_writes(method: &str, url: &str) -> bool {
-    !method.eq_ignore_ascii_case("GET")
-        && !method.eq_ignore_ascii_case("HEAD")
-        && GIT_DATA.is_match(endpoint(url))
-}
-
 /// What `gh` with these words does that GitHub writes commits or refs for:
 /// `gh api`'s REST writes and GraphQL mutations, and `gh pr merge`,
 /// `update-branch` and `revert`, and `gh repo sync`. Its own options may
@@ -317,18 +310,35 @@ fn gh<'a>(mut words: impl Iterator<Item = &'a String>) -> bool {
     )
 }
 
+/// Whether a word holds an expansion or a substitution, which the guard
+/// can't read to its value (and which, unquoted, may split into several
+/// words, options among them).
+fn expands(word: &str) -> bool {
+    word.contains(['$', shell::UNKNOWN])
+}
+
 /// Whether `gh api`'s words write commits or refs: a REST write (an
 /// explicit method other than GET, or fields or input, which make it a
-/// POST) at git data, or a GraphQL mutation that writes them, or a query
-/// from a file or input, which the guard can't read.
-fn gh_api<'a>(mut words: impl Iterator<Item = &'a String>) -> bool {
+/// POST) at git data, or a GraphQL mutation that writes them. Whatever the
+/// guard can't read to its end is refused, since it could be a write: an
+/// expansion anywhere in the call (unquoted, it may split into words that
+/// change which one is the endpoint, or carry the method or the query; the
+/// shell reading keeps no quotes, so a literal `$` reads as one too, as in
+/// curl.rs), an unquoted glob (the shell reading marks one as an expansion,
+/// so a quoted `?` in a query string reads as plain text), a query from a
+/// file or input. A brace list comes expanded into the words it makes, and
+/// may make more than one endpoint, so each is read as the endpoint (gh
+/// takes one, and stops on more).
+fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
+    let words: Vec<&str> = words.map(String::as_str).collect();
+    let unreadable = words.iter().copied().any(expands);
+    let mut words = words.into_iter();
     let mut method = None;
     let mut body = false;
-    let mut url = None;
+    let mut urls = Vec::new();
     let mut values = Vec::new();
     let mut unread_query = false;
     while let Some(w) = words.next() {
-        let w = w.as_str();
         let (name, joined) = match w.split_once('=') {
             Some((n, v)) if n.starts_with("--") => (n, Some(v)),
             _ => match w.get(..2) {
@@ -338,7 +348,7 @@ fn gh_api<'a>(mut words: impl Iterator<Item = &'a String>) -> bool {
                 _ => (w, None),
             },
         };
-        let mut value = || joined.or_else(|| words.next().map(String::as_str));
+        let mut value = || joined.or_else(|| words.next());
         match name {
             "-X" | "--method" => method = value(),
             "-f" | "--raw-field" => {
@@ -362,16 +372,23 @@ fn gh_api<'a>(mut words: impl Iterator<Item = &'a String>) -> bool {
                 value();
             }
             o if o.starts_with('-') => {}
-            _ if url.is_none() => url = Some(w),
-            _ => {}
+            _ => urls.push(w),
         }
     }
-    let Some(url) = url else { return false };
-    if endpoint(url).ends_with("graphql") {
-        return unread_query || values.iter().any(|v| MUTATION.is_match(v));
+    if unreadable {
+        return true;
     }
-    let method = method.unwrap_or(if body { "POST" } else { "GET" });
-    rest_writes(method, url)
+    let write = match method {
+        Some(m) => !(m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD")),
+        None => body,
+    };
+    urls.into_iter().any(|url| {
+        if endpoint(url).ends_with("graphql") {
+            unread_query || values.iter().any(|v| MUTATION.is_match(v))
+        } else {
+            write && GIT_DATA.is_match(endpoint(url))
+        }
+    })
 }
 
 /// The program a word names, whatever path it's run by.
