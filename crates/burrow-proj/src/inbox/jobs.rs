@@ -203,6 +203,29 @@ impl Pass<'_> {
                 .filter_map(|c| c["id"].as_i64())
                 .max()
                 .unwrap_or(seen);
+            // Finished (its last turn ended `proj done`), every answer
+            // posted and no reply since: the issue is closed with it, so
+            // what's open is what's still to do. Reopening it starts a job
+            // afresh from the issue as it stands. The stuck issue isn't the
+            // job's to close: the steward closes it once nothing is stuck.
+            if msg.is_empty()
+                && young.is_none()
+                && st == "done"
+                && k >= turns
+                && !now_open.is_some_and(|i| self.lane(i))
+            {
+                if !self.close(repo, n, "completed") {
+                    self.miss(repo);
+                    continue;
+                }
+                if let Err(f) = stop(self.cfg, &id, false) {
+                    say(f);
+                    self.retry(repo);
+                    continue;
+                }
+                let _ = fs::remove_dir_all(&d);
+                continue;
+            }
             if !msg.is_empty() {
                 let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
                     self.miss(repo);

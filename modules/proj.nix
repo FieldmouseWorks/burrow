@@ -80,6 +80,9 @@ let
       host = config.networking.hostName;
       wake = inboxWake;
       machinery = if machineApp == null then null else machineApp.name;
+      triage = if cfg.inbox.triage.enable then {
+        inherit (cfg.inbox.triage) ownerLabel owner skip atOnce drain drainJobs;
+      } else null;
     } else null;
     tools = {
       codex = "${agents}/bin/codex";
@@ -295,6 +298,55 @@ in
         default = false;
         description = "Run issue jobs in Claude agent sandboxes (proj run --vm). A Codex selection fails its turn.";
       };
+      triage = {
+        enable = lib.mkEnableOption ''
+          triage: every other open issue one of `inbox.authors` opened in a
+          project's repo is sorted by a job of its own (the `triage` role's
+          engine), which changes nothing and answers with a verdict the inbox
+          carries out: `ready`, `later` or `tracker` as a label, the owner's
+          call as `ownerLabel` and an assignment to `owner`, a duplicate or
+          something already done closed with why. A finished inbox job's issue
+          is closed whether this is on or not
+        '';
+        ownerLabel = lib.mkOption {
+          type = lib.types.str;
+          default = lib.attrByPath [ "burrow" "autoland" "labels" "owner" ] "needs-owner" config;
+          defaultText = lib.literalExpression ''config.burrow.autoland.labels.owner, or "needs-owner"'';
+          description = "The label on an issue only the owner can settle.";
+        };
+        owner = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = lib.attrByPath [ "burrow" "notify" "assignee" ] null config;
+          defaultText = lib.literalExpression "config.burrow.notify.assignee";
+          description = "The GitHub login such an issue is assigned to, so GitHub tells them; null assigns nobody.";
+        };
+        skip = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ "probe" "undo" "flaky" ];
+          description = "Labels whose issues other machinery owns: never sorted or handed on.";
+        };
+        atOnce = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 2;
+          description = "Sorting jobs at once, across every repo. Each waits in line behind work someone asked for.";
+        };
+        drain = lib.mkOption {
+          type = lib.types.nullOr (lib.types.enum [ "claude" "codex" ]);
+          default = null;
+          example = "codex";
+          description = ''
+            Hand `ready` issues to this engine's inbox label whenever it has an
+            idle slot (Codex: one of codex.slots free; Claude: usage left, nobody
+            in line and a slot free beyond pipelineSlots), one a pass, the
+            pipeline's repos first, then the oldest. Null hands none on.
+          '';
+        };
+        drainJobs = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 2;
+          description = "Handed-on issues with a job at once, across every repo.";
+        };
+      };
     };
   };
 
@@ -450,6 +502,7 @@ in
       and closing it or taking the label off ends it. `proj-inbox status` shows
       which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as
       them; a bot's acts as the App ${machineApp.slug}."}
+      A job that ends `proj done` closes its issue; reopen it to pick the work back up.${lib.optionalString cfg.inbox.triage.enable "\nEvery other issue the authors open is sorted on its own (`ready`, `later`, `tracker`, `${cfg.inbox.triage.ownerLabel}`, or closed as a duplicate or done), so file what you find as an issue and leave it: you needn't label it.${lib.optionalString (cfg.inbox.triage.drain != null) " `ready` ones go to ${cfg.inbox.triage.drain} on idle slots."}"}
     '';
   })
   ]);

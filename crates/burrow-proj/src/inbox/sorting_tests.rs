@@ -1,0 +1,458 @@
+//! Closing a finished job's issue, triage and the drain, against stand-ins
+//! for gh and systemctl that log what they're asked.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+use serde_json::{Value, json};
+
+use super::Pass;
+use super::triage::{Verdict, verdict, why};
+use crate::config::tests::example;
+use crate::config::{Config, Triage};
+use crate::engine::Engine;
+
+/// A machine in a temp dir: gh logs each call's arguments to `log` and what
+/// it posts to `posted`, answers a comment list with `comments` (none when
+/// it's missing), and anything else with `{}`; systemctl says every unit is
+/// inactive.
+struct Box {
+    tmp: tempfile::TempDir,
+    cfg: Config,
+}
+
+impl Box {
+    fn new() -> Box {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let at = |f: &str| tmp.path().join(f);
+        let script = |name: &str, body: String| {
+            let p = at(name);
+            fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let gh = script(
+            "gh",
+            format!(
+                "echo \"$*\" >>'{log}'\ncase \"$*\" in\n  *--paginate*) cat '{comments}' 2>/dev/null || echo '[[]]' ;;\n  *body=@-*) cat >>'{posted}' ;;\n  *) echo '{{}}' ;;\nesac\n",
+                log = at("log").display(),
+                comments = at("comments").display(),
+                posted = at("posted").display(),
+            ),
+        );
+        let systemctl = script(
+            "systemctl",
+            "case \"$*\" in\n  *is-active*) exit 3 ;;\n  *show*) echo inactive ;;\nesac\nexit 0\n"
+                .into(),
+        );
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.tools.gh = gh;
+        cfg.tools.systemctl = systemctl;
+        cfg.jobs = at("jobs");
+        cfg.scratch = at("scratch");
+        cfg.waits = None;
+        let inbox = cfg.inbox.as_mut().unwrap();
+        inbox.state = at("state");
+        inbox.triage = Some(Triage {
+            owner_label: "needs-owner".into(),
+            owner: Some("sam".into()),
+            skip: vec!["probe".into()],
+            at_once: 2,
+            drain: Some(Engine::Codex),
+            drain_jobs: 1,
+        });
+        fs::create_dir_all(&inbox.state).unwrap();
+        Box { tmp, cfg }
+    }
+
+    fn path(&self, f: &str) -> PathBuf {
+        self.tmp.path().join(f)
+    }
+
+    fn log(&self) -> String {
+        fs::read_to_string(self.path("log")).unwrap_or_default()
+    }
+
+    fn posted(&self) -> String {
+        fs::read_to_string(self.path("posted")).unwrap_or_default()
+    }
+
+    fn pass(&self) -> Pass<'_> {
+        Pass {
+            cfg: &self.cfg,
+            inbox: self.cfg.inbox.as_ref().unwrap(),
+            project: BTreeMap::from([
+                ("sam/box".to_owned(), "box".to_owned()),
+                ("sam/burrow".to_owned(), "burrow".to_owned()),
+                ("sam/game".to_owned(), "game".to_owned()),
+            ]),
+            wake: BTreeMap::new(),
+            unreached: Vec::new(),
+            looked: Vec::new(),
+        }
+    }
+
+    /// A job whose one turn ended as `outcome`, answering `said`.
+    fn job(&self, id: &str, outcome: &str, said: &str) {
+        let d = self.cfg.jobs.join(id);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("turns"), "1\n").unwrap();
+        fs::write(d.join("1.outcome"), format!("{outcome}\n")).unwrap();
+        fs::write(d.join("1.end"), format!("{outcome}\n")).unwrap();
+        fs::write(
+            d.join("1.jsonl"),
+            format!("{}\n", json!({"type": "result", "result": said})),
+        )
+        .unwrap();
+    }
+
+    /// The inbox's record of issue 7's job, nothing of it answered yet.
+    fn record(&self, id: &str) -> PathBuf {
+        let d = self.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+        fs::create_dir_all(&d).unwrap();
+        for (f, v) in [
+            ("issue", "sam/box#7"),
+            ("job", id),
+            ("answered", "0"),
+            ("seen", "0"),
+        ] {
+            fs::write(d.join(f), format!("{v}\n")).unwrap();
+        }
+        d
+    }
+}
+
+fn issue(n: u64, opener: &str, labels: &[&str]) -> Value {
+    json!({
+        "number": n,
+        "user": {"login": opener},
+        "title": "Fix it",
+        "body": "It's broken.",
+        "html_url": format!("https://github.com/sam/box/issues/{n}"),
+        "labels": labels.iter().map(|l| json!({"name": l})).collect::<Vec<_>>(),
+    })
+}
+
+const CLOSE: &str = "-X PATCH repos/sam/box/issues/7 -f state=closed -f state_reason=completed";
+
+// A job that ended `proj done` gets its answer posted, then its issue closed
+// and its record dropped: what's open is what's still to do.
+#[test]
+fn a_finished_job_closes_its_issue() {
+    let b = Box::new();
+    b.job("j1", "done", "Fixed in #12.");
+    let d = b.record("j1");
+    b.pass()
+        .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
+        .unwrap();
+    assert!(b.posted().contains("Fixed in #12."), "{}", b.posted());
+    assert!(b.log().contains(CLOSE), "{}", b.log());
+    assert!(!d.exists());
+}
+
+// Not when it waits on a person, nor with a reply it hasn't had yet, nor the
+// stuck issue, which the steward closes.
+#[test]
+fn an_unfinished_job_keeps_its_issue_open() {
+    // Asked a person.
+    let b = Box::new();
+    b.job("j1", "ask", "Which one?");
+    let d = b.record("j1");
+    b.pass()
+        .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
+        .unwrap();
+    assert!(b.posted().contains("Which one?"));
+    assert!(!b.log().contains("PATCH") && d.exists(), "{}", b.log());
+
+    // Done, but a reply came in that's not a minute old yet: it's handed on
+    // next pass, which the pass books.
+    let b = Box::new();
+    b.job("j1", "done", "Fixed.");
+    let d = b.record("j1");
+    let now = jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    fs::write(
+        b.path("comments"),
+        json!([[{"id": 9, "user": {"login": "sam"}, "body": "one more thing", "created_at": now}]])
+            .to_string(),
+    )
+    .unwrap();
+    let mut p = b.pass();
+    p.jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
+        .unwrap();
+    assert!(!b.log().contains("PATCH") && d.exists(), "{}", b.log());
+    assert!(p.wake.contains_key("sam/box"));
+
+    // The stuck issue.
+    let b = Box::new();
+    b.job("j1", "done", "Nothing's stuck.");
+    let d = b.record("j1");
+    b.pass()
+        .jobs("sam/box", "box", &[issue(7, "sam", &["claude", "stuck"])])
+        .unwrap();
+    assert!(!b.log().contains("PATCH") && d.exists(), "{}", b.log());
+}
+
+#[test]
+fn verdicts_read() {
+    for (answer, want) in [
+        ("ready\nIt says enough.", Some(Verdict::Ready)),
+        ("`later`: waits on #4", Some(Verdict::Later)),
+        ("**Verdict: tracker**\n", Some(Verdict::Tracker)),
+        ("\n\nOwner.\nIt costs money.", Some(Verdict::Owner)),
+        ("duplicate #31\nsame ask", Some(Verdict::Duplicate(31))),
+        ("Duplicate 31.", Some(Verdict::Duplicate(31))),
+        ("duplicate\n", None),
+        ("duplicate #0", None),
+        ("done\nmain has it", Some(Verdict::Done)),
+        ("I think it's ready", None),
+        ("(turn 1 ended without an answer)", None),
+        ("", None),
+    ] {
+        assert_eq!(verdict(answer), want, "{answer:?}");
+    }
+    assert_eq!(why("ready\n\nIt says enough.\n"), "It says enough.");
+    assert_eq!(why("ready"), "(No reason given.)");
+    assert_eq!(why(&format!("later\n{}", "x".repeat(5000))).len(), 4000);
+}
+
+// Sorted: a sorting label, an engine's, the unstick label or one other
+// machinery owns; a stranger's issue and a pull request are never triage's.
+#[test]
+fn what_counts_as_sorted() {
+    let b = Box::new();
+    let p = b.pass();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    for (i, sorted) in [
+        (issue(1, "sam", &[]), false),
+        (issue(1, "sam", &["bug", "v1.0-blocker"]), false),
+        (issue(1, "sam", &["ready"]), true),
+        (issue(1, "sam", &["later"]), true),
+        (issue(1, "sam", &["tracker"]), true),
+        (issue(1, "sam", &["needs-owner"]), true),
+        (issue(1, "sam", &["codex"]), true),
+        (issue(1, "sam", &["stuck"]), true),
+        (issue(1, "sam", &["probe"]), true),
+        (issue(1, "player", &[]), true),
+    ] {
+        assert_eq!(p.sorted(&t, &i), sorted, "{i}");
+    }
+    let mut pr = issue(1, "sam", &[]);
+    pr["pull_request"] = json!({});
+    assert!(p.sorted(&t, &pr));
+}
+
+/// A sorting job for issue 7 that answered `said`, then what the pass did.
+fn sorted_as(said: &str, still: Value) -> Box {
+    let b = Box::new();
+    b.job("s1", "done", said);
+    let d = b
+        .cfg
+        .inbox
+        .as_ref()
+        .unwrap()
+        .state
+        .join(".triage/sam_box-7");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("job"), "s1\n").unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    b.pass().verdicts("sam/box", &t, &[still]).unwrap();
+    assert!(!d.exists(), "the record goes once it's carried out");
+    b
+}
+
+#[test]
+fn verdicts_are_carried_out() {
+    let label = |l: &str| format!("-X POST repos/sam/box/issues/7/labels -f labels[]={l}");
+
+    let b = sorted_as("ready\nclear enough", issue(7, "sam", &[]));
+    assert!(b.log().contains(&label("ready")), "{}", b.log());
+    assert!(b.posted().is_empty(), "a plain label says nothing");
+
+    let b = sorted_as("owner\nIt spends money.", issue(7, "sam", &[]));
+    assert!(b.log().contains(&label("needs-owner")), "{}", b.log());
+    assert!(
+        b.log()
+            .contains("-X POST repos/sam/box/issues/7/assignees -f assignees[]=sam")
+    );
+    assert!(b.posted().contains("It spends money."));
+
+    let b = sorted_as("duplicate #3\nsame ask", issue(7, "sam", &[]));
+    assert!(b.posted().contains("a duplicate of #3"), "{}", b.posted());
+    assert!(b.log().contains("state_reason=not_planned"));
+
+    let b = sorted_as("done\nmain has it since #9", issue(7, "sam", &[]));
+    assert!(b.posted().contains("main has it since #9"));
+    assert!(b.log().contains(CLOSE));
+
+    let b = sorted_as("Hmm, hard to say.", issue(7, "sam", &[]));
+    assert!(b.log().contains(&label("later")), "{}", b.log());
+    assert!(b.posted().contains("gave no verdict"));
+
+    // No answer at all: nothing said or labelled, and not sorted again until
+    // the issue changes, or another's verdict shows sorting works again.
+    let b = Box::new();
+    b.job("s1", "error", "");
+    fs::write(b.cfg.jobs.join("s1/1.jsonl"), "").unwrap();
+    let root = b.cfg.inbox.as_ref().unwrap().state.join(".triage");
+    fs::create_dir_all(root.join("sam_box-7")).unwrap();
+    fs::write(root.join("sam_box-7/job"), "s1\n").unwrap();
+    fs::write(root.join("sam_box-7/updated"), "2026-11-01T00:00:00Z\n").unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let mut seven = issue(7, "sam", &[]);
+    seven["updated_at"] = json!("2026-11-01T00:00:00Z");
+    let mut p = b.pass();
+    p.verdicts("sam/box", &t, std::slice::from_ref(&seven))
+        .unwrap();
+    assert!(b.log().is_empty() && b.posted().is_empty(), "{}", b.log());
+    assert!(root.join("sam_box-7/failed").exists() && !root.join("sam_box-7/job").exists());
+    // Unchanged, it's passed over: no job tried (none can start here, which
+    // would book a retry).
+    p.triage("sam/box", std::slice::from_ref(&seven)).unwrap();
+    assert!(p.wake.is_empty(), "{:?}", p.wake);
+    // Changed since, it's tried again.
+    seven["updated_at"] = json!("2026-11-02T00:00:00Z");
+    p.triage("sam/box", std::slice::from_ref(&seven)).unwrap();
+    assert!(p.wake.contains_key("sam/box") && !root.join("sam_box-7").exists());
+    // Or another issue's verdict clears it.
+    fs::create_dir_all(root.join("sam_box-7")).unwrap();
+    fs::write(root.join("sam_box-7/failed"), "x\n").unwrap();
+    b.job("s2", "done", "later\nbig");
+    fs::create_dir_all(root.join("sam_box-8")).unwrap();
+    fs::write(root.join("sam_box-8/job"), "s2\n").unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(8, "sam", &[])])
+        .unwrap();
+    assert!(!root.join("sam_box-7").exists() && !root.join("sam_box-8").exists());
+
+    // Sorted by someone meanwhile, or closed: the job's only stopped.
+    let b = sorted_as("ready", issue(7, "sam", &["later"]));
+    assert!(!b.log().contains("labels"), "{}", b.log());
+    let b = Box::new();
+    b.job("s1", "done", "ready");
+    let d = b
+        .cfg
+        .inbox
+        .as_ref()
+        .unwrap()
+        .state
+        .join(".triage/sam_box-7");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("job"), "s1\n").unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    b.pass().verdicts("sam/box", &t, &[]).unwrap();
+    assert!(!d.exists() && !b.log().contains("labels"), "{}", b.log());
+}
+
+fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value {
+    let mut i = issue(n, opener, labels);
+    i["repository_url"] = json!(format!("https://api.github.com/repos/{repo}"));
+    i["created_at"] = json!(made);
+    i
+}
+
+// The drain hands on a project's ready issue opened by an author, nobody
+// else's already: the pipeline's repos first, then the oldest.
+#[test]
+fn the_drain_picks() {
+    let b = Box::new();
+    let p = b.pass();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let old = "2026-10-01T00:00:00Z";
+    let new = "2026-11-01T00:00:00Z";
+    let pick = |items: &[Value]| p.pick_ready(&t, items);
+
+    let game = found("sam/game", 4, "sam", &["ready"], old);
+    let game_newer = found("sam/game", 5, "sam", &["ready"], new);
+    let box_new = found("sam/box", 8, "sam", &["ready"], new);
+    // sam/burrow and sam/box are pipeline repos; sam/game isn't.
+    let burrow_new = found("sam/burrow", 9, "sam", &["ready"], new);
+    assert_eq!(
+        pick(&[game_newer.clone(), game.clone()]),
+        Some(("sam/game".into(), "4".into()))
+    );
+    assert_eq!(
+        pick(&[game.clone(), box_new.clone()]),
+        Some(("sam/box".into(), "8".into()))
+    );
+    assert_eq!(
+        pick(&[game.clone(), burrow_new.clone(), box_new.clone()]),
+        Some(("sam/box".into(), "8".into()))
+    );
+
+    for passed_over in [
+        found("sam/game", 4, "player", &["ready"], old),
+        found("sam/game", 4, "sam", &["ready", "codex"], old),
+        found("sam/game", 4, "sam", &["ready", "needs-owner"], old),
+        found("sam/game", 4, "sam", &["ready", "probe"], old),
+        found("sam/elsewhere", 4, "sam", &["ready"], old),
+        found("sam/game", 4, "sam", &["later"], old),
+    ] {
+        assert_eq!(
+            pick(std::slice::from_ref(&passed_over)),
+            None,
+            "{passed_over}"
+        );
+    }
+    // One with a record already (a job, or one refused) is the inbox's.
+    fs::create_dir_all(b.cfg.inbox.as_ref().unwrap().state.join("sam_game-4")).unwrap();
+    assert_eq!(
+        pick(&[game, game_newer]),
+        Some(("sam/game".into(), "5".into()))
+    );
+}
+
+// Room for the drain: a Codex slot free; for Claude, a slot free beyond the
+// pipeline's and nobody in line.
+#[test]
+fn room_for_the_drain() {
+    let b = Box::new();
+    let cfg = &b.cfg;
+    assert!(crate::slot::room(cfg, Engine::Codex));
+    let held: Vec<fs::File> = (1..=cfg.codex_slots)
+        .map(|i| {
+            let f = fs::File::create(cfg.jobs.join(".codex-slots").join(i.to_string())).unwrap();
+            f.lock().unwrap();
+            f
+        })
+        .collect();
+    assert!(!crate::slot::room(cfg, Engine::Codex));
+    drop(held);
+    assert!(crate::slot::room(cfg, Engine::Codex));
+
+    assert!(crate::slot::room(cfg, Engine::Claude));
+    let slots = cfg.jobs.join(".slots");
+    let held: Vec<fs::File> = (1..cfg.max_jobs)
+        .map(|i| {
+            let f = fs::File::create(slots.join(i.to_string())).unwrap();
+            f.lock().unwrap();
+            f
+        })
+        .collect();
+    // One free, and it's the pipeline's.
+    assert!(!crate::slot::room(cfg, Engine::Claude));
+    drop(held);
+    assert!(crate::slot::room(cfg, Engine::Claude));
+}
+
+// The module's triage settings, as it writes them, are what proj reads; off
+// is null.
+#[test]
+fn triage_settings_read() {
+    let mut cfg = example();
+    cfg["inbox"]["triage"] = json!({"ownerLabel": "needs-owner", "owner": null,
+        "skip": ["probe", "undo", "flaky"], "atOnce": 2, "drain": "codex", "drainJobs": 2});
+    let cfg: Config = serde_json::from_value(cfg).unwrap();
+    let t = cfg.inbox.unwrap().triage.unwrap();
+    assert_eq!(
+        (t.drain, t.at_once, t.owner),
+        (Some(Engine::Codex), 2, None)
+    );
+    let mut off = example();
+    off["inbox"]["triage"] = Value::Null;
+    let off: Config = serde_json::from_value(off).unwrap();
+    assert!(off.inbox.unwrap().triage.is_none());
+}
