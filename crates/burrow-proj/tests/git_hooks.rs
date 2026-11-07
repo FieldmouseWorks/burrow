@@ -328,3 +328,121 @@ fn what_the_remote_has_is_not_checked() {
     let theirs = repo.ok(&["rev-parse", "HEAD"]);
     assert_eq!(repo.push("copy"), Ok(theirs));
 }
+
+/// Nothing the job can write here speaks for the remote or for a commit:
+/// a remote-tracking ref naming its unmarked commit, a replace ref showing
+/// a marked one in its place, trailer settings that read another trailer
+/// as the mark, and settings that send the hook's question about what the
+/// remote has to a remote of the job's that has the commit. Each push is
+/// refused, and the commit isn't on the remote.
+#[test]
+fn nothing_the_job_writes_exempts_or_marks_a_commit() {
+    let repo = Repo::new();
+    let refused = |args: &[&str], commit: &str| {
+        let out = repo.run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} pushed");
+        assert!(stderr.contains(commit), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("no Engine: codex trailer"),
+            "{args:?}: {stderr}"
+        );
+        let on_remote = git(&repo.remote, &repo.hooks, &["cat-file", "-e", commit]);
+        assert!(!on_remote.status.success(), "{args:?}: {commit} is there");
+    };
+    let push = ["push", "origin", "HEAD:refs/heads/work"];
+    repo.ok(&["commit", "--allow-empty", "--no-verify", "-m", "past it"]);
+    let unmarked = repo.ok(&["rev-parse", "HEAD"]);
+
+    // A remote-tracking ref of the job's.
+    repo.ok(&["update-ref", "refs/remotes/origin/unmarked", &unmarked]);
+    refused(&push, &unmarked);
+    repo.ok(&["update-ref", "-d", "refs/remotes/origin/unmarked"]);
+
+    // A marked commit shown in its place.
+    let tree = repo.ok(&["rev-parse", "HEAD^{tree}"]);
+    let parent = repo.ok(&["rev-parse", "HEAD^"]);
+    let object = format!(
+        "tree {tree}\nparent {parent}\nauthor W <w@x> 1 +0000\ncommitter W <w@x> 1 +0000\n\nstand-in\n\nEngine: codex\n"
+    );
+    fs::write(repo.work.join(".git").join("object"), object).unwrap();
+    let stand_in = repo.ok(&["hash-object", "-t", "commit", "-w", ".git/object"]);
+    let replace = format!("refs/replace/{unmarked}");
+    repo.ok(&["update-ref", &replace, &stand_in]);
+    assert!(
+        repo.ok(&["log", "-1", "--format=%B"])
+            .contains("Engine: codex")
+    );
+    refused(&push, &unmarked);
+    repo.ok(&["update-ref", "-d", &replace]);
+
+    // Another trailer read as the mark, by `git -c` or the repo's config.
+    repo.ok(&["reset", "-q", "--hard", &parent]);
+    repo.ok(&[
+        "commit",
+        "--allow-empty",
+        "--no-verify",
+        "-m",
+        "subject\n\nfake: codex",
+    ]);
+    let fake = repo.ok(&["rev-parse", "HEAD"]);
+    let mut with_c = vec!["-c", "trailer.fake.key=Engine"];
+    with_c.extend(push);
+    refused(&with_c, &fake);
+    repo.ok(&["config", "trailer.fake.key", "Engine"]);
+    refused(&push, &fake);
+    repo.ok(&["config", "--unset", "trailer.fake.key"]);
+
+    // The question about what the remote has, sent to the job's own remote
+    // that has the commit, while the push goes to the real one: by the
+    // repo's config, `git -c`, or a moved HOME's.
+    let decoy = repo.work.with_file_name("decoy.git");
+    let none = repo.work.with_file_name("no-hooks");
+    let (decoy_s, remote_s) = (decoy.to_str().unwrap(), repo.remote.to_str().unwrap());
+    succeeds(git(
+        repo.work.parent().unwrap(),
+        &none,
+        &["clone", "-q", "--bare", remote_s, decoy_s],
+    ));
+    succeeds(git(
+        &repo.work,
+        &none,
+        &["push", "-q", decoy_s, "HEAD:refs/heads/x"],
+    ));
+    let fetch = format!("url.{decoy_s}.insteadOf");
+    let send = format!("url.{remote_s}.pushInsteadOf");
+    repo.ok(&["config", &fetch, remote_s]);
+    repo.ok(&["config", &send, remote_s]);
+    refused(&push, &fake);
+    repo.ok(&["config", "--unset", &fetch]);
+    repo.ok(&["config", "--unset", &send]);
+    let (fetch_c, send_c) = (format!("{fetch}={remote_s}"), format!("{send}={remote_s}"));
+    let mut with_c = vec!["-c", &fetch_c, "-c", &send_c];
+    with_c.extend(push);
+    refused(&with_c, &fake);
+    let home = repo.work.with_file_name("home");
+    fs::create_dir(&home).unwrap();
+    fs::write(
+        home.join(".gitconfig"),
+        format!("[url \"{decoy_s}\"]\n\tinsteadOf = {remote_s}\n[url \"{remote_s}\"]\n\tpushInsteadOf = {remote_s}\n"),
+    )
+    .unwrap();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo.work)
+        .args(push)
+        .env("HOME", &home)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", &repo.hooks)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains(&fake), "{stderr}");
+
+    // Unchanged, the same commit marked properly pushes.
+    repo.ok(&["reset", "-q", "--hard", &parent]);
+    repo.ok(&["commit", "--allow-empty", "-m", "marked"]);
+    let marked = repo.ok(&["rev-parse", "HEAD"]);
+    assert_eq!(repo.push("work"), Ok(marked));
+}

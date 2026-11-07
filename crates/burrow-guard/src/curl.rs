@@ -5,9 +5,11 @@
 //! operation after `--next` (`-:`) with options of its own. Every request
 //! is read with its own operation's method and body, so a harmless one
 //! never speaks for another. An option's value (a header, a body) is never
-//! taken for a URL. What curl would read that the guard can't (a config
-//! file, URLs from a file, a URL or body only an expansion gives, a glob)
-//! counts as the write it may be.
+//! taken for a URL. A switch is read as curl leaves it, last word winning
+//! (`-G` then `--no-get` sends the body as a POST). What curl would read
+//! that the guard can't (a config file, URLs from a file, a URL, method,
+//! header or body only an expansion gives, the shell's or curl's own
+//! `--expand-…` variables, a glob) counts as the write it may be.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -175,6 +177,10 @@ const LONG_VALUE: &[&str] = &[
     "write-out",
 ];
 
+/// What an option's value is, to the guard, once curl expands variables
+/// in it (`--expand-NAME` with `{{var}}`): unknown, whatever globbing.
+const EXPANDED: &str = "\u{FFFC}";
+
 /// One request's worth of options: an operation, up to `--next`.
 #[derive(Default)]
 struct Operation<'a> {
@@ -222,21 +228,27 @@ impl<'a> Operation<'a> {
             "upload-file" => self.upload = true,
             "connect-to" | "resolve" => self.rerouted = true,
             "header" => {
-                self.rerouted |= value
-                    .trim_start()
-                    .get(..5)
-                    .is_some_and(|h| h.eq_ignore_ascii_case("host:"))
+                // A Host header, or one whose name the guard can't read.
+                let name = value.split_once(':').map_or(value, |(n, _)| n);
+                self.rerouted |= name.trim().eq_ignore_ascii_case("host")
+                    || !value.contains(':')
+                    || name.contains(['$', shell::UNKNOWN])
                     || value.starts_with('@');
             }
             _ => {}
         }
     }
 
+    /// A boolean switch, on as `--name` (or its short letter), off as
+    /// `--no-name`: the last one given wins.
     fn switch(&mut self, name: &str) {
+        let (name, on) = name
+            .strip_prefix("no-")
+            .map_or((name, true), |n| (n, false));
         match name {
-            "get" => self.get = true,
-            "head" => self.head = true,
-            "globoff" => self.globoff = true,
+            "get" => self.get = on,
+            "head" => self.head = on,
+            "globoff" => self.globoff = on,
             _ => {}
         }
     }
@@ -382,12 +394,19 @@ pub fn read(words: &[&str]) -> Curl {
                 continue;
             }
             variables |= name == "variable" || name.starts_with("expand-");
+            let expands = name.starts_with("expand-");
             let name = name.strip_prefix("expand-").unwrap_or(name);
             if name == "config" {
                 return Curl::Config;
             }
             if LONG_VALUE.contains(&name) {
                 if let Some(value) = joined.or_else(|| words.next()) {
+                    // What curl's variables make of it is unknown here.
+                    let value = if expands && value.contains("{{") {
+                        EXPANDED
+                    } else {
+                        value
+                    };
                     op.take(name, value);
                 }
             } else {

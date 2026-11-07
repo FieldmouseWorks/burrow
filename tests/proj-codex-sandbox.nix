@@ -9,7 +9,7 @@
 { self, pkgs }:
 let
   example = self.nixosConfigurations.example.config;
-  model = ./proj-codex-sandbox/model.py;
+  model = "${self.packages.${pkgs.stdenv.hostPlatform.system}.codex-stand-in}/bin/codex-stand-in";
   modelConfig = pkgs.writeText "codex-model.toml" ''
     model = "stand-in"
     model_provider = "stand-in"
@@ -77,7 +77,7 @@ pkgs.testers.runNixOSTest {
     # The guard, as Codex's managed hook, on what the stand-in model asks for.
     import json
     machine.succeed("echo '[]' > /work/calls && chmod 0644 /work/calls")
-    machine.succeed("${pkgs.python3}/bin/python3 ${model} 18555 /work/calls >/dev/null 2>&1 &")
+    machine.succeed("${model} 18555 /work/calls >/dev/null 2>&1 &")
     machine.wait_for_open_port(18555)
     # The stand-in, as a model with Codex's own apply_patch: the CLI's own
     # catalog entry for one, renamed.

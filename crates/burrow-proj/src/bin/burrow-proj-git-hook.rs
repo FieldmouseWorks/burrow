@@ -8,14 +8,92 @@ use std::{
 };
 
 fn git(args: &[&str]) -> Result<String, String> {
-    git_in(Path::new("."), args, None)
+    git_in(Some(Path::new(".")), Settings::Job, args, None)
 }
 
-/// git, run in `dir`, with `input` on its stdin.
-fn git_in(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, String> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+/// Whose settings a git command the hook runs reads.
+#[derive(Clone, Copy)]
+enum Settings {
+    /// The job's, as its own git command has them: what git commit will
+    /// do to the message once commit-msg is done.
+    Job,
+    /// The machine's, for reading what a push publishes and where to. Not
+    /// the job's `git -c` (GIT_CONFIG_PARAMETERS), nor a config home it
+    /// moved (`HOME`, `XDG_CONFIG_HOME`): the home is the one /etc/passwd
+    /// gives. The environment proj and the App give (GIT_CONFIG_COUNT,
+    /// which the guard keeps the job from changing) stays, for the App's
+    /// login. Nor a view of the history the job can make up: replace refs,
+    /// grafts and the commit-graph are off, so what's read is the commits
+    /// themselves.
+    Push,
+    /// git's own defaults alone: how the steward reads a message
+    /// (modules/autoland/touches.py).
+    Defaults,
+}
+
+/// The environment git gives a hook about its repository: gone when a
+/// command runs outside it.
+const REPO_ENV: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+];
+
+/// The home /etc/passwd gives this user, which the job can't move.
+fn home() -> Result<String, String> {
+    let uid = rustix::process::getuid().as_raw().to_string();
+    let passwd = std::fs::read_to_string("/etc/passwd").map_err(|e| format!("/etc/passwd: {e}"))?;
+    passwd
+        .lines()
+        .map(|l| l.split(':').collect::<Vec<_>>())
+        .find(|f| f.len() >= 7 && f[2] == uid)
+        .map(|f| f[5].to_owned())
+        .ok_or_else(|| format!("/etc/passwd has no user {uid}"))
+}
+
+/// git with `settings`, run in `dir`, or outside any repository (None:
+/// in `/`, with no repository's environment, so no repository's config,
+/// the job's to write, applies), with `input` on its stdin.
+fn git_in(
+    dir: Option<&Path>,
+    settings: Settings,
+    args: &[&str],
+    input: Option<&str>,
+) -> Result<String, String> {
+    let mut command = Command::new("git");
+    match settings {
+        Settings::Job => {}
+        Settings::Push => {
+            command
+                .env_remove("GIT_CONFIG_PARAMETERS")
+                .env_remove("XDG_CONFIG_HOME")
+                .env("HOME", home()?)
+                .env("GIT_NO_REPLACE_OBJECTS", "1")
+                .env("GIT_GRAFT_FILE", "/dev/null")
+                .args(["-c", "core.commitGraph=false"]);
+        }
+        Settings::Defaults => {
+            command
+                .env_clear()
+                .env("PATH", env::var_os("PATH").unwrap_or_default())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        }
+    }
+    match dir {
+        Some(dir) => command.arg("-C").arg(dir),
+        None => {
+            for var in REPO_ENV {
+                command.env_remove(var);
+            }
+            command.current_dir("/")
+        }
+    };
+    let mut child = command
         .args(args)
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -36,17 +114,24 @@ fn git_in(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, Stri
     if !output.status.success() {
         return Err(format!("git {} failed", args.join(" ")));
     }
-    String::from_utf8(output.stdout).map_err(|e| e.to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// The trailer that sends a Codex job's PR to a Claude judge.
 const MARK: &str = "Engine: codex";
 
 /// Whether `message` carries [`MARK`] as the steward reads it: a line of
-/// `git interpret-trailers --parse`, compared case-blind
-/// (modules/autoland/touches.py).
-fn marked(dir: &Path, message: &str) -> Result<bool, String> {
-    let parsed = git_in(dir, &["interpret-trailers", "--parse"], Some(message))?;
+/// `git interpret-trailers --parse` with git's defaults, compared
+/// case-blind (modules/autoland/touches.py). The job's trailer settings
+/// (`trailer.*.key`, which could make `fake: codex` read as the mark)
+/// don't apply.
+fn marked(message: &str) -> Result<bool, String> {
+    let parsed = git_in(
+        None,
+        Settings::Defaults,
+        &["interpret-trailers", "--parse"],
+        Some(message),
+    )?;
     let mark = MARK.to_lowercase();
     Ok(parsed.lines().any(|l| l.to_lowercase() == mark))
 }
@@ -60,16 +145,21 @@ const SCISSORS: &str = " ------------------------ >8 ------------------------";
 /// (`whitespace`, the default with `-m`), with comments stripped too
 /// (`strip`, the default with an editor), or cut at the scissors line
 /// (`scissors`).
-fn cleanups(dir: &Path, message: &str) -> Result<Vec<String>, String> {
+fn cleanups(dir: Option<&Path>, message: &str) -> Result<Vec<String>, String> {
     let cut: String = message
         .split_inclusive('\n')
         .take_while(|l| !l.trim_end_matches('\n').ends_with(SCISSORS))
         .collect();
     Ok(vec![
         message.to_owned(),
-        git_in(dir, &["stripspace"], Some(message))?,
-        git_in(dir, &["stripspace", "--strip-comments"], Some(message))?,
-        git_in(dir, &["stripspace"], Some(&cut))?,
+        git_in(dir, Settings::Job, &["stripspace"], Some(message))?,
+        git_in(
+            dir,
+            Settings::Job,
+            &["stripspace", "--strip-comments"],
+            Some(message),
+        )?,
+        git_in(dir, Settings::Job, &["stripspace"], Some(&cut))?,
     ])
 }
 
@@ -88,9 +178,8 @@ fn commit_msg(file: &str) -> Result<(), String> {
         file,
     ])?;
     let message = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
-    let dir = Path::new(".");
-    for stored in cleanups(dir, &message)? {
-        if !marked(dir, &stored)? {
+    for stored in cleanups(Some(Path::new(".")), &message)? {
+        if !marked(&stored)? {
             return Err(format!(
                 "a Codex job's commit needs a subject line before its {MARK} trailer, which marks it for a Claude judge; give the commit a message"
             ));
@@ -143,10 +232,25 @@ fn updates(
 /// The pre-push check, in the repository at `dir`, for a push to `remote`
 /// (its URL) of `input`, git's lines on the hook's stdin: no default
 /// branch rewritten, and no commit new to the remote without the mark.
+/// What the remote has is asked of the remote itself, from outside the
+/// repository and with the machine's settings, so neither the
+/// repository's config nor the job's `git -c` or HOME can reroute the
+/// question to a remote of the job's that has what it wants to hide.
 fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
-    let advertisement = git_in(dir, &["ls-remote", "--symref", remote], None)?;
+    let url = match dir.join(remote) {
+        local if Path::new(remote).is_relative() && local.exists() => local,
+        _ => remote.into(),
+    };
+    let url = url.to_str().ok_or("the remote's path isn't UTF-8")?;
+    let advertisement = git_in(None, Settings::Push, &["ls-remote", "--symref", url], None)?;
     updates(input, default_branch(&advertisement), |old, new| {
-        git_in(dir, &["merge-base", "--is-ancestor", old, new], None).is_ok()
+        git_in(
+            Some(dir),
+            Settings::Push,
+            &["merge-base", "--is-ancestor", old, new],
+            None,
+        )
+        .is_ok()
     })?;
     match unmarked(dir, input, &advertisement)?.first() {
         None => Ok(()),
@@ -159,10 +263,13 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
 /// The commits this push publishes that don't carry [`MARK`]. Published
 /// means new to the remote: reachable from what's pushed, and from none of
 /// what the remote has (each ref it advertises, and the old value of each
-/// ref pushed), nor any remote-tracking ref here. What's already there is
-/// history this job didn't write. However a commit was made (plumbing,
-/// `git stash`, an alias, a rewrite, or commit-msg turned off), this is
-/// where it leaves, so this is where its mark is checked.
+/// ref pushed). What's already there is history this job didn't write.
+/// Nothing here speaks for the remote: a remote-tracking ref is the job's
+/// to write (`git update-ref`), so one naming a commit doesn't exempt it.
+/// However a commit was made (plumbing, `git stash`, an alias, a rewrite,
+/// or commit-msg turned off), this is where it leaves, so this is where
+/// its mark is checked, on the commit object as stored (no replace ref
+/// shows another in its place) and as the steward reads it.
 fn unmarked(dir: &Path, input: &str, advertisement: &str) -> Result<Vec<String>, String> {
     let zero = |s: &str| s.bytes().all(|b| b == b'0');
     let mut revs = String::new();
@@ -180,7 +287,7 @@ fn unmarked(dir: &Path, input: &str, advertisement: &str) -> Result<Vec<String>,
     if revs.is_empty() {
         return Ok(Vec::new());
     }
-    revs.push_str("--not\n--remotes\n");
+    revs.push_str("--not\n");
     revs.push_str(&olds);
     for line in advertisement.lines() {
         if let Some((oid, _)) = line.split_once('\t')
@@ -190,14 +297,22 @@ fn unmarked(dir: &Path, input: &str, advertisement: &str) -> Result<Vec<String>,
         }
     }
     let new = git_in(
-        dir,
+        Some(dir),
+        Settings::Push,
         &["rev-list", "--ignore-missing", "--stdin"],
         Some(&revs),
     )?;
     let mut found = Vec::new();
     for commit in new.lines() {
-        let message = git_in(dir, &["log", "-1", "--format=%B", commit], None)?;
-        if !marked(dir, &message)? {
+        let object = git_in(
+            Some(dir),
+            Settings::Push,
+            &["cat-file", "commit", commit],
+            None,
+        )?;
+        // The message is all after the headers' first blank line.
+        let message = object.split_once("\n\n").map_or("", |(_, m)| m);
+        if !marked(message)? {
             found.push(commit.to_owned());
         }
     }
@@ -259,8 +374,8 @@ mod tests {
             std::fs::write(path, text).unwrap();
             commit_msg(path).unwrap();
             let stored = std::fs::read_to_string(path).unwrap();
-            for each in cleanups(Path::new("."), &stored).unwrap() {
-                assert!(marked(Path::new("."), &each).unwrap(), "{each:?}");
+            for each in cleanups(Some(Path::new(".")), &stored).unwrap() {
+                assert!(marked(&each).unwrap(), "{each:?}");
             }
         }
     }

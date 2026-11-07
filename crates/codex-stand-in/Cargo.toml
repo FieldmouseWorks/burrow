@@ -1,0 +1,13 @@
+[package]
+name = "codex-stand-in"
+description = "A Responses API stand-in for the pinned Codex CLI, for VM tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

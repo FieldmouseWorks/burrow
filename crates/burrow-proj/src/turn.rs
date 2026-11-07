@@ -270,13 +270,18 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         .watch(child, from);
         let rc = code(status);
-        let ended_itself =
-            !cut && !job.turn(&n, "quiet").exists() && !job.turn(&n, "late").exists();
+        let oomed = oom_kills() > ooms;
         let last = engine::ended(
             choice.engine,
             &stream,
             from,
-            ended_itself.then_some(rc),
+            exit(
+                rc,
+                cut,
+                job.turn(&n, "quiet").exists(),
+                job.turn(&n, "late").exists(),
+                oomed,
+            ),
             &read(&job.turn(&n, "stderr")).unwrap_or_default(),
         );
         // The turn's next run, in the same conversation and slot, is told
@@ -381,7 +386,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             && killed < 2
             && !job.turn(&n, "quiet").exists()
             && agent.is_none()
-            && oom_kills() > ooms
+            && oomed
             && engine::stream_names_session(&stream, from)
             && reap()
         {
@@ -496,6 +501,15 @@ fn touch(path: &Path) {
 
 /// An exit status as the shell has it: 128 and the signal for a run a
 /// signal ended.
+/// The exit a run's engine reads how it ended from, when the run ended
+/// itself: not cut, gone quiet, timed out, or killed for memory, which the
+/// turn ends or carries on from, so an engine that turns a failed exit
+/// into an error (Codex's) doesn't make one of it. A memory kill can come
+/// to the engine itself, or to what it ran, which it may exit failed over.
+fn exit(rc: i32, cut: bool, quiet: bool, late: bool, oomed: bool) -> Option<i32> {
+    (!cut && !quiet && !late && !oomed).then_some(rc)
+}
+
 fn code(status: ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status
@@ -785,6 +799,57 @@ mod tests {
 mod engine_tests {
     use super::*;
     use crate::config::tests::example;
+
+    /// A run killed for memory before it answered ends with nothing said,
+    /// for either engine, so the turn can carry it on in its session; a
+    /// failed exit of Codex's own is still its error, and an answer is
+    /// still the answer.
+    #[test]
+    fn a_run_killed_for_memory_says_nothing_for_either_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let stream = dir.path().join("1.jsonl");
+        let ended = |engine, text: &str, exit| {
+            fs::write(&stream, text).unwrap();
+            engine::ended(engine, &stream, 0, exit, "out of memory")
+        };
+        let codex =
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n";
+        let claude = "{\"type\":\"system\",\"session_id\":\"s\"}\n";
+        for (engine, text) in [(Engine::Codex, codex), (Engine::Claude, claude)] {
+            fs::write(&stream, text).unwrap();
+            assert!(engine::stream_names_session(&stream, 0), "{text}");
+            assert_eq!(
+                ended(engine, text, exit(137, false, false, false, true)),
+                None
+            );
+            // Cut, quiet or late, likewise.
+            for (cut, quiet, late) in [
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ] {
+                assert_eq!(
+                    ended(engine, text, exit(137, cut, quiet, late, false)),
+                    None
+                );
+            }
+        }
+        // Codex's own failed exit, not killed for memory: its error.
+        let error = ended(Engine::Codex, codex, exit(1, false, false, false, false)).unwrap();
+        assert!(is_error(&error));
+        assert_eq!(error["result"], "out of memory");
+        // An answer it gave before the kill is still its answer.
+        let answered = format!(
+            "{codex}{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}\n{{\"type\":\"turn.completed\"}}\n"
+        );
+        let last = ended(
+            Engine::Codex,
+            &answered,
+            exit(137, false, false, false, true),
+        )
+        .unwrap();
+        assert_eq!(last["result"], "done");
+    }
 
     #[test]
     fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
