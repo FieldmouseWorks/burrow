@@ -446,3 +446,89 @@ fn nothing_the_job_writes_exempts_or_marks_a_commit() {
     let marked = repo.ok(&["rev-parse", "HEAD"]);
     assert_eq!(repo.push("work"), Ok(marked));
 }
+
+/// A remote given as a relative path, configured or on the command line,
+/// is the one git pushes to: from a checkout, a subdirectory of it and a
+/// worktree, a first push to an empty remote, a fast-forward, a rewrite
+/// and a delete go through, and the default branch's rewrite and delete
+/// are refused because the hook read that remote's HEAD.
+#[test]
+fn a_relative_remote_is_the_one_pushed_to() {
+    let repo = Repo::new();
+    let base = repo.work.parent().unwrap();
+    let none = base.join("no-hooks");
+    succeeds(git(
+        &repo.remote,
+        &none,
+        &["config", "receive.denyDeleteCurrent", "false"],
+    ));
+    succeeds(git(
+        base,
+        &none,
+        &["init", "-q", "--bare", "-b", "main", "empty"],
+    ));
+    repo.ok(&["remote", "set-url", "origin", "../remote"]);
+    repo.ok(&["remote", "add", "empty", "../empty"]);
+    fs::create_dir(repo.work.join("sub")).unwrap();
+    let tree = base.join("tree");
+    repo.ok(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "tree",
+        tree.to_str().unwrap(),
+    ]);
+    let initial = repo.ok(&["rev-parse", "HEAD"]);
+    let refused = |dir: &Path, args: &[&str], what: &str| {
+        let out = git(dir, &repo.hooks, args);
+        assert!(!out.status.success(), "{args:?} went through");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(what), "{args:?}: {stderr}");
+    };
+    // An empty remote's first push (of the job's own history alone), then
+    // its default kept.
+    repo.ok(&["checkout", "-q", "--orphan", "fresh"]);
+    repo.ok(&["commit", "--allow-empty", "-m", "first"]);
+    repo.ok(&["push", "-q", "empty", "HEAD:main"]);
+    repo.ok(&["tag", "orphan"]);
+    repo.ok(&["checkout", "-q", "main"]);
+    refused(
+        &repo.work,
+        &["push", "empty", ":main"],
+        "cannot delete or force-push refs/heads/main",
+    );
+    let sub = repo.work.join("sub");
+    for (dir, remote) in [
+        (&repo.work, "origin"),
+        (&repo.work, "../remote"),
+        (&sub, "origin"),
+        (&tree, "origin"),
+        (&tree, "../remote"),
+    ] {
+        let run = |args: &[&str]| succeeds(git(dir, &repo.hooks, args));
+        run(&["reset", "-q", "--hard", &initial]);
+        run(&["commit", "--allow-empty", "-m", "one"]);
+        let one = run(&["rev-parse", "HEAD"]);
+        run(&["push", "-q", remote, "HEAD:refs/heads/a"]);
+        run(&["commit", "--allow-empty", "-m", "two"]);
+        run(&["push", "-q", remote, "HEAD:refs/heads/a"]);
+        run(&["reset", "-q", "--hard", &one]);
+        run(&["push", "-q", "--force", remote, "HEAD:refs/heads/a"]);
+        run(&["push", "-q", remote, ":refs/heads/a"]);
+        refused(
+            dir,
+            &["push", "--force", remote, "orphan:main"],
+            "cannot delete or force-push refs/heads/main",
+        );
+        refused(
+            dir,
+            &["push", remote, ":main"],
+            "cannot delete or force-push refs/heads/main",
+        );
+    }
+    assert_eq!(
+        succeeds(git(&repo.remote, &none, &["rev-parse", "main"])),
+        initial
+    );
+}

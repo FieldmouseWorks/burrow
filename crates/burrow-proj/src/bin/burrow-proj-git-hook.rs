@@ -112,7 +112,14 @@ fn git_in(
     }
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if !output.status.success() {
-        return Err(format!("git {} failed", args.join(" ")));
+        // The operation alone, never its arguments or git's stderr: a
+        // remote's URL (as given, configured or rewritten) may carry
+        // credentials, and what the hook says lands in the job's output.
+        return Err(format!(
+            "git {} failed ({})",
+            args.first().copied().unwrap_or_default(),
+            output.status
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -237,10 +244,10 @@ fn updates(
 /// repository's config nor the job's `git -c` or HOME can reroute the
 /// question to a remote of the job's that has what it wants to hide.
 fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
-    let url = match dir.join(remote) {
-        local if Path::new(remote).is_relative() && local.exists() => local,
-        _ => remote.into(),
-    };
+    let dir = &env::current_dir()
+        .map_err(|e| format!("the hook's directory: {e}"))?
+        .join(dir);
+    let url = destination(dir, remote);
     let url = url.to_str().ok_or("the remote's path isn't UTF-8")?;
     let advertisement = git_in(None, Settings::Push, &["ls-remote", "--symref", url], None)?;
     updates(input, default_branch(&advertisement), |old, new| {
@@ -257,6 +264,31 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
         Some(commit) => Err(format!(
             "commit {commit} has no {MARK} trailer, so its PR wouldn't go to a Claude judge: it was made past this Codex job's commit-msg hook (plumbing, a stash, a rewrite or hooks turned off). Make it again with git commit (git reset --soft past it, then commit), and push that"
         )),
+    }
+}
+
+/// Where `remote`, as git hands it to pre-push, points from a query run
+/// outside the repository at `dir`. A local path git reads from the top of
+/// the working tree (or the git directory, for a bare one), where it runs
+/// the hook: a relative one is joined to `dir`, absolute here. A URL
+/// (`scheme://`), an scp-like `host:path` or a remote helper's
+/// `transport::address` stays as it is, by git's own rule: it's local when
+/// it has no colon, or a slash before its first one.
+fn destination(dir: &Path, remote: &str) -> std::path::PathBuf {
+    let url = remote.split_once("://").is_some_and(|(scheme, _)| {
+        !scheme.is_empty()
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+    });
+    let local = match remote.find(':') {
+        None => true,
+        Some(colon) => remote[..colon].contains('/'),
+    };
+    if url || !local {
+        remote.into()
+    } else {
+        dir.join(remote)
     }
 }
 
@@ -433,6 +465,54 @@ mod tests {
         );
         let delete = format!("(delete) {} refs/heads/work ccdd", "0".repeat(40));
         assert!(updates(&delete, None, |_, _| true).is_err());
+    }
+
+    /// Local paths, relative or not, resolve from the repository; URLs,
+    /// scp-like addresses and remote helpers' are left as they are.
+    #[test]
+    fn a_local_remote_resolves_from_the_repository() {
+        let dir = Path::new("/r/work");
+        for (remote, expected) in [
+            ("../remote.git", "/r/work/../remote.git"),
+            ("remote.git", "/r/work/remote.git"),
+            ("./a:b", "/r/work/./a:b"),
+            ("sub/a:b", "/r/work/sub/a:b"),
+            ("/srv/remote.git", "/srv/remote.git"),
+            (
+                "https://example.test/o/r.git",
+                "https://example.test/o/r.git",
+            ),
+            ("ssh://git@example.test/o/r", "ssh://git@example.test/o/r"),
+            ("file:///srv/remote.git", "file:///srv/remote.git"),
+            ("git@example.test:o/r.git", "git@example.test:o/r.git"),
+            ("host:path", "host:path"),
+            ("ext::git %s", "ext::git %s"),
+        ] {
+            assert_eq!(destination(dir, remote), Path::new(expected), "{remote}");
+        }
+    }
+
+    /// No diagnostic of the hook's carries the remote's URL, so no
+    /// credentials in it: not when the remote can't be reached, nor when
+    /// what it's asked can't be answered.
+    #[test]
+    fn a_failing_remote_query_names_no_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let zero = "0".repeat(40);
+        let input = format!(
+            "refs/heads/main {} refs/heads/main {zero}\n",
+            "a".repeat(40)
+        );
+        for url in [
+            "https://user:SECRET-TOKEN@127.0.0.1:1/o/r.git",
+            "http://SECRET-TOKEN@127.0.0.1:1/o/r.git",
+            "file:///nonexistent/SECRET-TOKEN.git",
+            "/nonexistent/SECRET-TOKEN.git",
+        ] {
+            let error = pre_push(dir.path(), url, &input).unwrap_err();
+            assert!(error.starts_with("git ls-remote failed"), "{error}");
+            assert!(!error.contains("SECRET-TOKEN"), "{error}");
+        }
     }
 
     /// The real thing: a bare remote that advertises no HEAD (as GitHub's
