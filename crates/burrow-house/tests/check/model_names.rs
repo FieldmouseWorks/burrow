@@ -31,10 +31,10 @@ fn names() {
         "o3-mini",
         "Fable 5 thinks",
     ] {
-        fails(&case(adding("AGENTS.md", line)), "model-names");
-        passes(&case(adding("AGENTS.md", line)).body(REASON));
+        fails(&case(adding("README.md", line)), "model-names");
+        passes(&case(adding("README.md", line)).body(REASON));
         passes(&case(vec![patched(
-            change("modified", "AGENTS.md", 0, 1),
+            change("modified", "README.md", 0, 1),
             adds(&[], &[], &[line]),
         )]));
     }
@@ -61,17 +61,17 @@ fn look_alikes() {
 // A file GitHub gives no patch for is read whole, Markdown included.
 #[test]
 fn no_patch() {
-    let c = case(vec![unpatched(change("modified", "AGENTS.md", 1, 0))]).tree(
+    let c = case(vec![unpatched(change("modified", "README.md", 1, 0))]).tree(
         "3e7b",
-        "AGENTS.md",
-        "# Agents\n",
+        "README.md",
+        "# Readme\n",
     );
     fails(
         &c.clone()
-            .tree("4ead", "AGENTS.md", "# Agents\nRoute it to Opus 5.5.\n"),
+            .tree("4ead", "README.md", "# Readme\nRoute it to Opus 5.5.\n"),
         "model-names",
     );
-    passes(&c.tree("4ead", "AGENTS.md", "# Agents\nRoute it to the reviewer.\n"));
+    passes(&c.tree("4ead", "README.md", "# Readme\nRoute it to the reviewer.\n"));
     // A copy is read whole, whatever its patch shows.
     let copy = case(vec![from(change("copied", "docs/b.md", 0, 0), "docs/a.md")]);
     fails(

@@ -27,6 +27,10 @@ pub struct Diff {
     /// Code files the PR leaves longer than it found them and past the limit
     /// at its head, with their length there.
     pub big: Vec<(String, usize)>,
+    /// AGENTS.md files whose own part (outside the house blocks) the PR
+    /// leaves longer than it found it and past `rules::GUIDE` lines at its
+    /// head, with their own lines there.
+    pub guides: Vec<(String, usize)>,
     /// Files with a line the PR adds that sets up a timer, outside Markdown
     /// and comments. A file GitHub gives no patch for is read whole.
     pub timers: Vec<String>,
@@ -56,6 +60,11 @@ impl Contents<'_> {
         let content = self.get(path, at)?;
         let ends = content.last().is_some_and(|b| *b != b'\n');
         Ok(content.iter().filter(|b| **b == b'\n').count() + usize::from(ends))
+    }
+
+    /// An AGENTS.md's own lines at a commit.
+    fn own_lines(&mut self, path: &str, at: &str) -> Result<usize, String> {
+        Ok(house_sync::blocks::own_lines(self.get(path, at)?))
     }
 
     /// A file's text at a commit, or None for a binary one: one with a NUL
@@ -133,6 +142,16 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
             let length = contents.length(file, head)?;
             if length > lines {
                 diff.big.push((file.to_owned(), length));
+            }
+        }
+        if status != "removed" && (new_file || added > removed) && rules::is_guide(file) {
+            let own = contents.own_lines(file, head)?;
+            let had = match (new_file, rules::is_guide(previous)) {
+                (false, true) => contents.own_lines(previous, origin)?,
+                _ => 0,
+            };
+            if own > rules::GUIDE && own > had {
+                diff.guides.push((file.to_owned(), own));
             }
         }
         let old = (!new_file).then_some((previous, origin));

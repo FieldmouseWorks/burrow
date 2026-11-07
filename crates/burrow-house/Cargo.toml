@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 base64.workspace = true
 burrow-github = { path = "../burrow-github" }
+house-sync = { path = "../house-sync" }
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde_json.workspace = true
 
