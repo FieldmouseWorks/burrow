@@ -321,8 +321,11 @@ fn expands(word: &str) -> bool {
 /// explicit method other than GET, or fields or input, which make it a
 /// POST) at git data, or a GraphQL mutation that writes them. Whatever the
 /// guard can't read to its end is refused, since it could be a write: an
-/// endpoint from an expansion, any expansion beside git data or GraphQL
-/// (it may carry the method or the query), a query from a file or input.
+/// expansion anywhere in the call (unquoted, it may split into words that
+/// change which one is the endpoint, or carry the method or the query; the
+/// shell reading keeps no quotes, so a literal `$` reads as one too, as in
+/// curl.rs), an endpoint a glob or brace may turn into another, a query
+/// from a file or input.
 fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
     let words: Vec<&str> = words.map(String::as_str).collect();
     let unreadable = words.iter().copied().any(expands);
@@ -370,18 +373,21 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
             _ => {}
         }
     }
-    let Some(url) = url else { return unreadable };
-    if expands(url) {
+    if unreadable {
+        return true;
+    }
+    let Some(url) = url else { return false };
+    if url.contains(['*', '?', '[', '{']) {
         return true;
     }
     if endpoint(url).ends_with("graphql") {
-        return unread_query || unreadable || values.iter().any(|v| MUTATION.is_match(v));
+        return unread_query || values.iter().any(|v| MUTATION.is_match(v));
     }
     let write = match method {
         Some(m) => !(m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD")),
         None => body,
     };
-    GIT_DATA.is_match(endpoint(url)) && (write || unreadable)
+    write && GIT_DATA.is_match(endpoint(url))
 }
 
 /// The program a word names, whatever path it's run by.
