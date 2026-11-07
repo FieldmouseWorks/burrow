@@ -1,23 +1,56 @@
-//! burrow-units, as modules/watchdog/units.nix runs it: one pass, with
-//! UNITS_CONFIG naming its config. It reads what's failed and what's
-//! crashed, rewrites its watch file, and kicks the watchdog when what's in
-//! it changed. `burrow-units clear EXE...` first marks those programs'
-//! crashes so far as dealt with (their cause fixed), so they leave the
-//! watch. One pass at a time, however it was started: each holds the lock
-//! beside the watch file from what it reads to what it writes.
+//! burrow-units, as modules/watchdog/units.nix runs it, UNITS_CONFIG
+//! naming its config:
+//!
+//! ```text
+//! burrow-units pass        read what's failed and crashed, rewrite the
+//!                          watch file, and kick the watchdog when what's in
+//!                          it changed (the service, burrow-units.service)
+//! burrow-units watch       follow the journal, asking for a pass each time a
+//!                          unit fails or a program dumps core
+//!                          (burrow-units-watch.service)
+//! burrow-units             ask for a pass
+//! burrow-units clear EXE.. mark those programs' crashes so far dealt with
+//!                          (their cause fixed), then ask for a pass
+//! ```
+//!
+//! Only the service passes, so every pass reads the whole journal, whoever
+//! asked for it, and passes never overlap: each holds the lock beside the
+//! watch file from what it reads to what it writes, as `clear` does for
+//! its own write.
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
-use std::{env, fs};
+use std::{env, fs, thread};
 
 use serde::Deserialize;
 
 use burrow_units::{Found, cores, failed_names, items, shown};
 use burrow_watchdog::now;
 use burrow_watchdog::watch::{File as Watch, read};
+
+/// The journal entries that start a pass: systemd's own (pid 1's) word that
+/// a service or socket failed, or that a start job failed (any unit); and
+/// systemd-coredump's that a program dumped core. A user's manager says
+/// the same of its own units, which aren't the machine's.
+const FOLLOW: [&str; 5] = [
+    "MESSAGE_ID=d9b373ed55a64feb8242e02dbe79a49c",
+    "MESSAGE_ID=be02cf6855d2428ba40df7e9d022f03d",
+    "_PID=1",
+    "+",
+    "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+];
+/// Units whose failures start no pass: its own, since a pass that keeps
+/// failing would otherwise ask for another for ever. The hourly catch-up
+/// still sees them failed.
+const OWN: [&str; 2] = ["burrow-units.service", "burrow-units-watch.service"];
+/// How long a burst of entries (a unit failing takes its dependents with
+/// it) is gathered into one ask.
+const SETTLE: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -32,6 +65,9 @@ struct Config {
     window: f64,
     systemctl: PathBuf,
     coredumpctl: PathBuf,
+    journalctl: PathBuf,
+    /// Where to ask for a pass: burrow-units' own burrow-events handler.
+    own: String,
     /// Where to kick the watchdog's pass, or null for none.
     kick: Option<String>,
 }
@@ -51,48 +87,151 @@ fn run() -> Result<(), String> {
     let text = fs::read(&path).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
     let cfg: Config =
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
-    let lock = cfg.file.with_file_name("lock");
-    let held = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock)
-        .and_then(|f| f.lock().map(|()| f))
-        .map_err(|e| format!("{}: {e}", lock.display()))?;
-    let now = now();
-
-    // Crashes cleared longer ago than the window are long gone anyway.
-    let cleared_at = cfg.file.with_file_name("cleared.json");
-    let mut cleared: BTreeMap<String, f64> = match fs::read(&cleared_at) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", cleared_at.display()))?
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(e) => return Err(format!("{}: {e}", cleared_at.display())),
-    };
-    cleared.retain(|_, at| *at > now - cfg.window);
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        None => {}
+        Some("pass") => pass(&cfg),
+        Some("watch") => watch(&cfg),
+        None => ask(&cfg),
         Some("clear") => {
             let exes: Vec<String> = args.collect();
             if exes.is_empty() {
                 return Err("clear takes the programs' paths, as the watch names them".into());
             }
-            for exe in exes {
-                cleared.insert(exe, now);
-            }
+            clear(&cfg, &exes)?;
+            ask(&cfg)
         }
-        Some(other) => {
-            return Err(format!(
-                "unknown command {other}: it takes none, or clear EXE..."
-            ));
+        Some(other) => Err(format!(
+            "unknown command {other}: it takes pass, watch, clear EXE..., or none"
+        )),
+    }
+}
+
+/// The lock beside the watch file, held until it's dropped.
+fn hold(cfg: &Config) -> Result<File, String> {
+    let lock = cfg.file.with_file_name("lock");
+    File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)
+        .and_then(|f| f.lock().map(|()| f))
+        .map_err(|e| format!("{}: {e}", lock.display()))
+}
+
+/// When each program's crashes were last cleared, those longer ago than
+/// the window (whose crashes are gone anyway) left out; and where it's kept.
+fn cleared(cfg: &Config, now: f64) -> Result<(PathBuf, BTreeMap<String, f64>), String> {
+    let at = cfg.file.with_file_name("cleared.json");
+    let mut cleared: BTreeMap<String, f64> = match fs::read(&at) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", at.display()))?
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(format!("{}: {e}", at.display())),
+    };
+    cleared.retain(|_, t| *t > now - cfg.window);
+    Ok((at, cleared))
+}
+
+/// EXES' crashes so far marked dealt with.
+fn clear(cfg: &Config, exes: &[String]) -> Result<(), String> {
+    let _held = hold(cfg)?;
+    let now = now();
+    let (at, mut cleared) = cleared(cfg, now)?;
+    for exe in exes {
+        cleared.insert(exe.clone(), now);
     }
     write(
-        &cleared_at,
+        &at,
         &serde_json::to_vec(&cleared).map_err(|e| e.to_string())?,
-    )?;
+    )
+}
+
+/// A pass asked of the service.
+fn ask(cfg: &Config) -> Result<(), String> {
+    burrow_events::kick::kick(&cfg.own, Duration::from_secs(10))
+        .map_err(|e| format!("couldn't ask for a pass: {e}"))?;
+    println!("asked for a pass: the watch file has it in a moment");
+    Ok(())
+}
+
+/// Follow the journal for good, asking for a pass after each burst of
+/// entries that could change what's failed or crashed, and once as it
+/// starts, for what came while it wasn't following. It ends only when
+/// journalctl does, which its service restarts.
+fn watch(cfg: &Config) -> Result<(), String> {
+    let mut child = Command::new(&cfg.journalctl)
+        .args(["--follow", "--lines=0", "--quiet", "--output=json"])
+        .args(FOLLOW)
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", cfg.journalctl.display()))?;
+    let stdout = child.stdout.take().ok_or("journalctl gave no stdout")?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if starts_a_pass(&line) && tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    if let Err(e) = ask(cfg) {
+        eprintln!("burrow-units: {e}");
+    }
+    while rx.recv().is_ok() {
+        while rx.recv_timeout(SETTLE).is_ok() {}
+        if let Err(e) = ask(cfg) {
+            eprintln!("burrow-units: {e}");
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    Err(format!("journalctl stopped following: {status}"))
+}
+
+/// Whether a journal entry (journalctl's JSON) asks for a pass: any but
+/// one about burrow-units' own units.
+fn starts_a_pass(entry: &str) -> bool {
+    let unit = serde_json::from_str::<serde_json::Value>(entry)
+        .ok()
+        .and_then(|e| e.get("UNIT")?.as_str().map(str::to_owned));
+    !unit.is_some_and(|u| OWN.contains(&u.as_str()))
+}
+
+/// Where the system journal is kept, on disk and before it's flushed there.
+const JOURNALS: [&str; 2] = ["/var/log/journal", "/run/log/journal"];
+
+/// Whether this process can read the system journal under ROOTS: one that
+/// can't sees only its own user's crashes, and a pass from it would drop
+/// everyone else's.
+fn sees_the_journal(roots: &[&Path]) -> Result<(), String> {
+    let mut denied = None;
+    for root in roots {
+        let Ok(machines) = fs::read_dir(root) else {
+            continue;
+        };
+        for machine in machines.flatten() {
+            let system = machine.path().join("system.journal");
+            match File::open(&system) {
+                Ok(_) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => denied = Some(format!("{}: {e}", system.display())),
+            }
+        }
+    }
+    Err(format!(
+        "can't read the system journal ({}), so a pass would miss other users' crashes: \
+         run `burrow-units` to ask the service for one",
+        denied.unwrap_or_else(|| "none found".into())
+    ))
+}
+
+/// One pass: what's failed and what's crashed, into the watch file.
+fn pass(cfg: &Config) -> Result<(), String> {
+    sees_the_journal(&JOURNALS.map(Path::new))?;
+    let _held = hold(cfg)?;
+    let now = now();
+    let (_, cleared) = cleared(cfg, now)?;
 
     let names = failed_names(&output(
         &cfg.systemctl,
@@ -155,7 +294,6 @@ fn run() -> Result<(), String> {
     {
         eprintln!("burrow-units: couldn't kick the watchdog: {e}");
     }
-    drop(held);
     Ok(())
 }
 
@@ -188,6 +326,31 @@ fn write(file: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     use burrow_watchdog::watch::Item;
+
+    #[test]
+    fn a_pass_needs_the_system_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(sees_the_journal(&[root]).is_err());
+        let machine = root.join("0123456789abcdef");
+        fs::create_dir(&machine).unwrap();
+        fs::write(machine.join("user-1000.journal"), "").unwrap();
+        assert!(sees_the_journal(&[root]).is_err());
+        fs::write(machine.join("system.journal"), "").unwrap();
+        assert!(sees_the_journal(&[Path::new("/nonexistent"), root]).is_ok());
+    }
+
+    #[test]
+    fn its_own_units_failing_start_no_pass() {
+        assert!(starts_a_pass(
+            r#"{"UNIT":"backup.service","MESSAGE_ID":"d9b373ed55a64feb8242e02dbe79a49c"}"#
+        ));
+        assert!(starts_a_pass(r#"{"COREDUMP_EXE":"/bin/bash"}"#));
+        assert!(starts_a_pass("not json"));
+        for own in OWN {
+            assert!(!starts_a_pass(&format!(r#"{{"UNIT":"{own}"}}"#)), "{own}");
+        }
+    }
 
     #[test]
     fn the_watch_file_reads_back_as_the_watchdog_reads_it() {

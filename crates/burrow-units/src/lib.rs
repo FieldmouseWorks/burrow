@@ -7,9 +7,10 @@
 //! runs again, or is reset, and a crash older than the window, leave the
 //! file, and the stall clears with them.
 //!
-//! A pass starts when a unit fails or a program dumps core (systemd's
-//! OnFailure and OnSuccess, kicking its burrow-events handler), and on the
-//! hourly catch-up: no timer of its own.
+//! A pass starts when a unit fails or a program dumps core (its watcher
+//! follows the journal for systemd's and systemd-coredump's word of it,
+//! and asks its burrow-events handler), and on the hourly catch-up: no
+//! timer of its own, and no unit's own settings touched.
 
 use std::collections::BTreeMap;
 

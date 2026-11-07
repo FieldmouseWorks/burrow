@@ -226,7 +226,15 @@ Each has an entry below, and each can be imported on its own.
   can take it, you hear of it by the deadline a job's would have had. It
   books its own next pass for the next deadline: no timer,
   and no GitHub calls of its own. `burrow-watchdog status` shows what it
-  watches.
+  watches. With `units.enable` (on with the watchdog), what's broken on the
+  machine itself is a source too (`burrow-units`): a failed unit, and a
+  program that dumped core, whoever ran it, is a stall `units.graceMinutes`
+  after it's seen, and a crash counts for `units.crashHours`; `units.ignore`
+  takes globs of the units and programs that fail by design. A watcher
+  follows the journal for systemd's word of a failure and systemd-coredump's
+  of a dump and asks for a pass, touching no unit's own settings. The
+  watchdog's job clears a crash whose cause it fixed with
+  `burrow-units clear EXE`, and a later one is back.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
   on together, the machine's Actions runners and its deploy, keeps moving. A
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that

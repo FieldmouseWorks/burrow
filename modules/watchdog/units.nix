@@ -5,14 +5,14 @@
 # cause, then to the stuck issue, then to the owner. A unit that runs again,
 # or is reset, and a crash older than crashHours, leave the file.
 #
-# Every system service carries OnFailure=burrow-units-kick.service (a
-# top-level service.d drop-in), and every core dump's systemd-coredump@
-# OnSuccess= the same: that unit kicks burrow-units' burrow-events handler,
-# which also passes on the hourly catch-up. No timer of its own. The kick
-# and burrow-units itself mask that drop-in (one of the same name, linked to
-# /dev/null, in their own .d: an empty OnFailure= can't take a dependency
-# back): either failing would start the other, for ever. A burrow-units
-# that stops passing goes stale, which the watchdog catches.
+# burrow-units-watch follows the journal for systemd's word that a unit
+# failed and systemd-coredump's that a program dumped core, and asks for a
+# pass: it kicks burrow-units' burrow-events handler, which also passes on
+# the hourly catch-up. No timer of its own, and no unit's OnFailure= or
+# OnSuccess= touched, so whatever a service says of its own failures holds.
+# Only burrow-units.service passes, with the whole journal: `burrow-units`
+# run by hand, and its `clear`, ask it to. A burrow-units that stops
+# passing goes stale, which the watchdog catches.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -32,21 +32,15 @@ let
     window = cfg.crashHours * 3600;
     systemctl = "${config.systemd.package}/bin/systemctl";
     coredumpctl = "${config.systemd.package}/bin/coredumpctl";
+    journalctl = "${config.systemd.package}/bin/journalctl";
+    own = "${kick}/units";
     kick = if config.burrow.events.handlers ? watchdog then "${kick}/watchdog" else null;
   });
-  # Anyone can look again: the watchdog's job, once it's fixed what it found.
+  # Anyone can ask for a pass: the watchdog's job, once it's fixed what it
+  # found.
   units = pkgs.writeShellScriptBin name ''
     export UNITS_CONFIG=''${UNITS_CONFIG:-${configFile}}
     exec ${package}/bin/${name} "$@"
-  '';
-  dropIns = pkgs.runCommand "${name}-drop-ins" { } ''
-    d=$out/lib/systemd/system
-    mkdir -p $d/service.d $d/systemd-coredump@.service.d $d/${name}.service.d $d/${name}-kick.service.d
-    printf '[Unit]\nOnFailure=${name}-kick.service\n' >$d/service.d/90-${name}.conf
-    printf '[Unit]\nOnSuccess=${name}-kick.service\n' >$d/systemd-coredump@.service.d/90-${name}.conf
-    for unit in ${name} ${name}-kick; do
-      ln -s /dev/null $d/$unit.service.d/90-${name}.conf
-    done
   '';
 in
 {
@@ -92,7 +86,6 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ units ];
-    systemd.packages = [ dropIns ];
 
     burrow.events.handlers.units = {
       # Nothing on GitHub: its kicks, and the hourly catch-up.
@@ -112,16 +105,29 @@ in
         # Every user's core dumps are in the journal.
         SupplementaryGroups = [ "systemd-journal" ];
         Environment = "UNITS_CONFIG=${configFile}";
-        ExecStart = "${package}/bin/${name}";
+        ExecStart = "${package}/bin/${name} pass";
         TimeoutStartSec = "2min";
       };
     };
-    systemd.services."${name}-kick" = {
-      description = "Kick burrow-units: a unit failed, or a program dumped core";
+    systemd.services."${name}-watch" = {
+      description = "burrow-units' watcher: a pass each time a unit fails or a program dumps core";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "burrow-events.service" ];
+      # A watcher that can't keep going fails for good, which the hourly
+      # catch-up's pass then sees, like any other failed unit.
+      startLimitIntervalSec = 300;
+      startLimitBurst = 5;
       serviceConfig = {
-        Type = "oneshot";
         DynamicUser = true;
-        ExecStart = "${lib.getExe pkgs.curl} -fsS -m 10 -d \"\" ${kick}/units";
+        SupplementaryGroups = [ "systemd-journal" ];
+        Environment = "UNITS_CONFIG=${configFile}";
+        ExecStart = "${package}/bin/${name} watch";
+        Restart = "always";
+        RestartSec = 5;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        NoNewPrivileges = true;
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
       };
     };
     systemd.tmpfiles.settings.burrow.${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
@@ -129,7 +135,7 @@ in
     burrow.watchdog.sources.units = {
       inherit file;
       about = "burrow-units, which watches for failed units and crashes";
-      look = "`systemctl status UNIT` and `journalctl -b -u UNIT` say why a unit failed, `coredumpctl info EXE` why a program crashed. Fix the cause in the machine's flake or burrow; once it's live, the unit running again (or `systemctl reset-failed UNIT` for a one-off that's done) clears a unit, and `${name} clear EXE` (the path the item names) a program's crashes so far, each looking again as it does (`${name}` alone just looks). A crash after that is back in the watch.";
+      look = "`systemctl status UNIT` and `journalctl -b -u UNIT` say why a unit failed, `coredumpctl info EXE` why a program crashed. Fix the cause in the machine's flake or burrow; once it's live, the unit running again (or `systemctl reset-failed UNIT` for a one-off that's done) clears a unit, and `${name} clear EXE` (the path the item names) a program's crashes so far. `${name}` alone asks for a pass, as `clear` does, and the watch file has it a moment later. A crash after that is back in the watch.";
       kick = "units";
       # It writes on every pass, and has one at least hourly (burrow-events'
       # catch-up).
