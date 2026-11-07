@@ -60,8 +60,8 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(8788)
 
     with subtest("every service kicks it when it fails, but not the kick or itself"):
-        for unit in ("broken", "sshd", "burrow-events"):
-            machine.succeed(f"systemctl show -p OnFailure --value {unit}.service | grep -x burrow-units-kick.service")
+        for unit in ("broken", "systemd-journald", "burrow-events"):
+            machine.succeed(f"systemctl show -p OnFailure --value {unit}.service | tr ' ' '\\n' | grep -x burrow-units-kick.service")
         for unit in ("burrow-units", "burrow-units-kick"):
             assert machine.succeed(f"systemctl show -p OnFailure --value {unit}.service").strip() == "", unit
 
