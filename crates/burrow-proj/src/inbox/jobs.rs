@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{CUT_OFF, Pass, dirs, key, raw, say, seconds, trimmed};
-use crate::cmd::{reply, stop, told, unstick};
+use crate::cmd::{halt, reply, stop, told, unstick};
 use crate::github::{api, every};
 use crate::job::Job;
 use crate::{Fail, filled, io_fail, now, read};
@@ -16,6 +16,12 @@ use crate::{Fail, filled, io_fail, now, read};
 impl Pass<'_> {
     /// Jobs already running for this repo's issues.
     pub(super) fn jobs(&mut self, repo: &str, p: &str, open: &[Value]) -> Result<(), Fail> {
+        // A job carries on only while an agent may still read its issue: one
+        // since labelled outside text, or whose opener is no longer one of
+        // the authors, is let go like a closed one, its next look at it
+        // (new_issues) saying why.
+        let open: Vec<Value> = open.iter().filter(|i| self.eligible(i)).cloned().collect();
+        let open = open.as_slice();
         'jobs: for d in dirs(&self.inbox.state, &format!("{}-", key(repo))) {
             let Some(mut id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
                 continue;
@@ -209,24 +215,36 @@ impl Pass<'_> {
             // still to do. Reopening it starts a job afresh from the issue as
             // it stands. The stuck issue isn't the job's to close: the
             // steward closes it once nothing is stuck.
+            // Looked at again, closed and stopped under the lock turns start
+            // under: a reply (proj reply, proj _watch) that started a turn
+            // since the look above leaves the issue open, and none starts
+            // between the close and the stop.
             if msg.is_empty()
                 && young.is_none()
-                && st == "done"
-                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                 && k >= turns
                 && !now_open.is_some_and(|i| self.lane(i))
             {
-                if !self.close(repo, n, "completed") {
-                    self.miss(repo);
+                let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                let still: i64 = job.turns().and_then(|t| t.parse().ok()).unwrap_or(0);
+                if still == turns
+                    && job.state() == "done"
+                    && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
+                {
+                    if !self.close(repo, n, "completed") {
+                        drop(held);
+                        self.miss(repo);
+                        continue;
+                    }
+                    if let Err(f) = halt(self.cfg, &job, false) {
+                        drop(held);
+                        say(f);
+                        self.retry(repo);
+                        continue;
+                    }
+                    drop(held);
+                    let _ = fs::remove_dir_all(&d);
                     continue;
                 }
-                if let Err(f) = stop(self.cfg, &id, false) {
-                    say(f);
-                    self.retry(repo);
-                    continue;
-                }
-                let _ = fs::remove_dir_all(&d);
-                continue;
             }
             if !msg.is_empty() {
                 let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
@@ -234,7 +252,7 @@ impl Pass<'_> {
                     continue;
                 };
                 let labelled = self.engine(&now_issue).is_some();
-                if now_issue["state"] != "open" || !labelled {
+                if now_issue["state"] != "open" || !labelled || !self.eligible(&now_issue) {
                     continue;
                 }
                 if reply(self.cfg, &id, &msg, true, None).is_err() {

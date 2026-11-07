@@ -20,8 +20,17 @@ use serde_json::Value;
 use super::triage::READY;
 use super::{Pass, RETRY, dirs, key, raw};
 use crate::config::Triage;
+use crate::engine::Engine;
 use crate::github::api;
-use crate::{Fail, io_fail, mtime, now, slot};
+use crate::{Fail, io_fail, mtime, now, slot, usage};
+
+/// In the inbox's state while a ready issue waits for a slot: the repo it's
+/// in, whose pass every turn's end then kicks (`proj _ended`), since a slot
+/// freed by any job is room for it.
+pub(crate) const WAITING: &str = ".drain-waiting";
+
+/// Search's pages of a hundred: a thousand results are all it gives.
+const SEARCH_PAGES: usize = 10;
 
 impl Pass<'_> {
     /// Whether the issue's record says the drain handed it on.
@@ -33,7 +42,12 @@ impl Pass<'_> {
             .exists()
     }
 
-    /// One ready issue handed on, if there's room for it.
+    /// One ready issue handed on, if there's room for it. Whatever holds it
+    /// back has an event or a wake-up that brings the drain back: its own
+    /// jobs' turns kick their repos' passes as they end; one waiting on a
+    /// slot leaves [`WAITING`], and every turn's end then kicks a pass
+    /// (`proj _ended`); a usage hold books a pass for when it resets, and a
+    /// search GitHub didn't answer one for five minutes on.
     pub(super) fn drain(&mut self) -> Result<(), Fail> {
         let Some(t) = self.inbox.triage.clone() else {
             return Ok(());
@@ -50,29 +64,56 @@ impl Pass<'_> {
         else {
             return Ok(());
         };
+        let waiting = self.inbox.state.join(WAITING);
         // Its own still going: a record with the mark and a job, or a mark
         // whose job hasn't started yet. One that hasn't after ten minutes
-        // (the label didn't take, or someone took it off) is let go.
+        // (the label didn't take, or someone took it off) is let go, and a
+        // pass is booked for then.
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
             if !mark.exists() {
                 continue;
             }
-            if d.join("job").exists() || mtime(&mark).is_some_and(|m| now() - m < 2 * RETRY) {
+            if d.join("job").exists() {
                 going += 1;
+            } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
+                going += 1;
+                if let Some(repo) = self.wake_repo() {
+                    self.book(&repo, m + 2 * RETRY);
+                }
             } else {
                 let _ = fs::remove_dir_all(&d);
             }
         }
-        if going >= t.drain_jobs || !slot::room(self.cfg, engine) {
+        if going >= t.drain_jobs {
+            let _ = fs::remove_file(&waiting);
             return Ok(());
         }
-        let Some(issue) = self.next_ready(&t) else {
-            return Ok(());
+        let issue = match self.next_ready(&t) {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                let _ = fs::remove_file(&waiting);
+                return Ok(());
+            }
+            Err(()) => {
+                if let Some(repo) = self.wake_repo() {
+                    self.retry(&repo);
+                }
+                return Ok(());
+            }
         };
-        let repo = issue.0;
-        let n = issue.1;
+        let (repo, n) = issue;
+        if !slot::room(self.cfg, engine) {
+            fs::write(&waiting, format!("{repo}\n")).map_err(|e| io_fail(&waiting, e))?;
+            if engine == Engine::Claude
+                && let Some(spent) = usage::out(self.cfg)
+            {
+                self.book(&repo, spent.until);
+            }
+            return Ok(());
+        }
+        let _ = fs::remove_file(&waiting);
         let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
         fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
         fs::write(d.join("drained"), "").map_err(|e| io_fail(&d.join("drained"), e))?;
@@ -87,9 +128,22 @@ impl Pass<'_> {
         Ok(())
     }
 
-    /// The ready issue to hand on next, as (OWNER/REPO, N): one search for
-    /// every project's owner, oldest first.
-    fn next_ready(&self, t: &Triage) -> Option<(String, String)> {
+    /// The repo a pass is booked on for the drain's own sake (any pass ends
+    /// with it): the pipeline's first, or else the first project.
+    fn wake_repo(&self) -> Option<String> {
+        self.cfg
+            .pipeline_repos
+            .iter()
+            .find_map(|r| self.project.keys().find(|k| k.eq_ignore_ascii_case(r)))
+            .or_else(|| self.project.keys().next())
+            .cloned()
+    }
+
+    /// The ready issue to hand on next, as (OWNER/REPO, N), from every
+    /// project owner's ready issues, each page of them (search gives a
+    /// thousand at most). Err when GitHub didn't answer, which isn't the
+    /// same as none being ready.
+    fn next_ready(&self, t: &Triage) -> Result<Option<(String, String)>, ()> {
         let mut owners: Vec<String> = self
             .project
             .keys()
@@ -98,7 +152,7 @@ impl Pass<'_> {
         owners.sort();
         owners.dedup();
         if owners.is_empty() {
-            return None;
+            return Ok(None);
         }
         let q = format!(
             "is:issue is:open label:{READY} {}",
@@ -108,24 +162,34 @@ impl Pass<'_> {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let found = api(
-            self.cfg,
-            &[
-                "-X",
-                "GET",
-                "search/issues",
-                "-f",
-                &format!("q={q}"),
-                "-f",
-                "sort=created",
-                "-f",
-                "order=asc",
-                "-f",
-                "per_page=100",
-            ],
-        )?;
-        let items = found["items"].as_array()?;
-        self.pick_ready(t, items)
+        let mut items = Vec::new();
+        for page in 1..=SEARCH_PAGES {
+            let found = api(
+                self.cfg,
+                &[
+                    "-X",
+                    "GET",
+                    "search/issues",
+                    "-f",
+                    &format!("q={q}"),
+                    "-f",
+                    "sort=created",
+                    "-f",
+                    "order=asc",
+                    "-f",
+                    "per_page=100",
+                    "-f",
+                    &format!("page={page}"),
+                ],
+            )
+            .ok_or(())?;
+            let got = found["items"].as_array().ok_or(())?;
+            items.extend(got.iter().cloned());
+            if got.len() < 100 {
+                break;
+            }
+        }
+        Ok(self.pick_ready(t, &items))
     }
 
     /// Of a search's ready issues, the one to hand on: a project's, opened by
@@ -142,7 +206,7 @@ impl Pass<'_> {
         items
             .iter()
             .filter(|i| i.get("pull_request").is_none())
-            .filter(|i| self.allowed(&raw(&i["user"]["login"])) && !self.outside(i))
+            .filter(|i| self.eligible(i))
             .filter_map(|i| {
                 let url = raw(&i["repository_url"]);
                 let named = url.rsplit('/').take(2).collect::<Vec<_>>();

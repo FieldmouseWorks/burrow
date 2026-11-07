@@ -707,6 +707,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         Ok(())
     }
 
+    /// Whether an agent may read the issue: one of the authors opened it,
+    /// and it isn't labelled outside text.
+    pub(super) fn eligible(&self, issue: &Value) -> bool {
+        self.allowed(&raw(&issue["user"]["login"])) && !self.outside(issue)
+    }
+
     /// Whether the issue carries the outside label: text from outside the
     /// authors (a game's players' reports, say), filed with whatever login,
     /// that no agent reads.
@@ -850,6 +856,8 @@ fn say(f: Fail) {
 
 mod drain;
 mod jobs;
+
+pub(crate) use drain::WAITING;
 mod triage;
 mod write;
 

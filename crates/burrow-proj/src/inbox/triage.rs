@@ -24,13 +24,16 @@
 //! line behind the work someone asked for, and runs on the engine the
 //! `triage` role names. Their records are `.triage/KEY-N` in the inbox's
 //! state, a folder an issue holding the job's id and the issue's
-//! `updated_at` when it started. A job that ends with no answer at all (its
+//! `updated_at` when it started (a verdict on an issue changed since is
+//! dropped, and the issue sorted again), then how many of its verdict's
+//! steps GitHub has taken. A job that ends with no answer at all (its
 //! engine refused it, say) leaves `failed` there instead: the issue is
 //! sorted again once it changes, or once another issue's verdict shows
 //! sorting works again, and nothing is said on it meanwhile.
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -149,10 +152,7 @@ impl Pass<'_> {
 
     /// Whether an issue is sorted already, or isn't triage's to sort.
     pub(super) fn sorted(&self, t: &Triage, issue: &Value) -> bool {
-        if issue.get("pull_request").is_some()
-            || !self.allowed(&raw(&issue["user"]["login"]))
-            || self.outside(issue)
-        {
+        if issue.get("pull_request").is_some() || !self.eligible(issue) {
             return true;
         }
         let labels: Vec<&str> = issue["labels"]
@@ -176,7 +176,7 @@ impl Pass<'_> {
         };
         let root = self.sorting_dir();
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
-        self.verdicts(repo, &t, all)?;
+        let handled = self.verdicts(repo, &t, all)?;
         let going = dirs(&root, "")
             .iter()
             .filter(|d| d.join("job").exists())
@@ -186,10 +186,10 @@ impl Pass<'_> {
             if room == 0 {
                 break;
             }
-            if self.sorted(&t, issue) {
+            let n = raw(&issue["number"]);
+            if self.sorted(&t, issue) || handled.contains(&n) {
                 continue;
             }
-            let n = raw(&issue["number"]);
             let d = root.join(format!("{}-{n}", key(repo)));
             let updated = raw(&issue["updated_at"]);
             // Its last sorting ended without an answer: sorted again once
@@ -264,8 +264,18 @@ impl Pass<'_> {
 
     /// Each of the repo's sorting jobs that has ended, carried out: its
     /// verdict, then the job stopped and its record gone. One whose issue was
-    /// closed or sorted meanwhile is only stopped.
-    pub(super) fn verdicts(&mut self, repo: &str, t: &Triage, all: &[Value]) -> Result<(), Fail> {
+    /// closed or sorted meanwhile is only stopped, and one whose issue
+    /// changed while it ran (an edit, a comment) is stopped and its issue
+    /// sorted again as it stands. The issues whose verdicts were carried
+    /// out, which the rest of this pass leaves be: its list of them is from
+    /// before.
+    pub(super) fn verdicts(
+        &mut self,
+        repo: &str,
+        t: &Triage,
+        all: &[Value],
+    ) -> Result<BTreeSet<String>, Fail> {
+        let mut handled = BTreeSet::new();
         let prefix = format!("{}-", key(repo));
         for d in dirs(&self.sorting_dir(), &prefix) {
             let name = d
@@ -293,14 +303,23 @@ impl Pass<'_> {
                 continue;
             }
             let open = all.iter().find(|i| raw(&i["number"]) == n);
+            // How many of its verdict's steps are on GitHub already.
+            let did: usize = read(&d.join("did"))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            // The issue as the job read it: changed since, before any of its
+            // verdict was carried out, the verdict is of something else.
+            let stale = did == 0
+                && open.is_some_and(|i| read(&d.join("updated")) != Some(raw(&i["updated_at"])));
             let mut failed = false;
-            if open.is_some_and(|i| !self.sorted(t, i)) {
+            if !stale && open.is_some_and(|i| !self.sorted(t, i)) {
                 match told(self.cfg, &id, "1") {
                     Ok(answer) => {
-                        if !self.carry_out(repo, n, t, &id, &answer) {
+                        if !self.carry_out(repo, n, &d, &self.steps(t, &id, &answer)) {
                             self.miss(repo);
                             continue;
                         }
+                        handled.insert(n.to_owned());
                         if verdict(&answer).is_some() {
                             self.sorting_works();
                         }
@@ -324,7 +343,7 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
         }
-        Ok(())
+        Ok(handled)
     }
 
     /// A verdict came back, so sorting works: every issue whose sorting
@@ -337,55 +356,79 @@ impl Pass<'_> {
         }
     }
 
-    /// A sorting job's answer, carried out on its issue: whether GitHub took
-    /// all of it. An answer without a verdict is `later`, saying so, so the
-    /// issue isn't sorted over and over.
-    fn carry_out(&self, repo: &str, n: &str, t: &Triage, id: &str, answer: &str) -> bool {
-        let answer = answer.to_owned();
-        match verdict(&answer) {
-            Some(Verdict::Ready) => self.add_label(repo, n, READY),
-            Some(Verdict::Later) => self.add_label(repo, n, LATER),
-            Some(Verdict::Tracker) => self.add_label(repo, n, TRACKER),
-            Some(Verdict::Owner) => {
-                self.add_label(repo, n, &t.owner_label)
-                    && t.owner.as_deref().is_none_or(|o| self.assign(repo, n, o))
-                    && self.post(
-                        repo,
-                        n,
-                        &format!("Sorted: this waits on your call.\n\n{}", why(&answer)),
-                    )
-            }
-            Some(Verdict::Duplicate(m)) => {
-                self.post(
-                    repo,
-                    n,
-                    &format!(
-                        "Sorted: a duplicate of #{m}, so closed. Reopen it if it isn't.\n\n{}",
-                        why(&answer)
-                    ),
-                ) && self.close(repo, n, "not_planned")
-            }
-            Some(Verdict::Done) => {
-                self.post(
-                    repo,
-                    n,
-                    &format!(
-                        "Sorted: already done, so closed. Reopen it if it isn't.\n\n{}",
-                        why(&answer)
-                    ),
-                ) && self.close(repo, n, "completed")
-            }
-            None => {
-                self.add_label(repo, n, LATER)
-                    && self.post(
-                        repo,
-                        n,
-                        &format!(
-                            "Couldn't sort this one, so it's `{LATER}`: its sorting job (`{id}` on {}) gave no verdict.",
-                            self.inbox.host
-                        ),
-                    )
-            }
+    /// What a sorting job's answer comes to on its issue, in order. A label
+    /// that sorts the issue always goes last, so the issue reads as unsorted
+    /// until every step before it is done. An answer without a verdict is
+    /// `later`, saying so, so the issue isn't sorted over and over.
+    pub(super) fn steps(&self, t: &Triage, id: &str, answer: &str) -> Vec<Step> {
+        match verdict(answer) {
+            Some(Verdict::Ready) => vec![Step::Label(READY.into())],
+            Some(Verdict::Later) => vec![Step::Label(LATER.into())],
+            Some(Verdict::Tracker) => vec![Step::Label(TRACKER.into())],
+            Some(Verdict::Owner) => t
+                .owner
+                .iter()
+                .map(|o| Step::Assign(o.clone()))
+                .chain([
+                    Step::Post(format!(
+                        "Sorted: this waits on your call.\n\n{}",
+                        why(answer)
+                    )),
+                    Step::Label(t.owner_label.clone()),
+                ])
+                .collect(),
+            Some(Verdict::Duplicate(m)) => vec![
+                Step::Post(format!(
+                    "Sorted: a duplicate of #{m}, so closed. Reopen it if it isn't.\n\n{}",
+                    why(answer)
+                )),
+                Step::Close("not_planned"),
+            ],
+            Some(Verdict::Done) => vec![
+                Step::Post(format!(
+                    "Sorted: already done, so closed. Reopen it if it isn't.\n\n{}",
+                    why(answer)
+                )),
+                Step::Close("completed"),
+            ],
+            None => vec![
+                Step::Post(format!(
+                    "Couldn't sort this one, so it's `{LATER}`: its sorting job (`{id}` on {}) gave no verdict.",
+                    self.inbox.host
+                )),
+                Step::Label(LATER.into()),
+            ],
         }
     }
+
+    /// A verdict's steps carried out on the issue, from the first its record
+    /// (`did`, in `d`) doesn't have done: whether GitHub took all of them.
+    /// Each one GitHub takes is counted there, so a pass that comes back to
+    /// it carries on from the next and says nothing twice.
+    fn carry_out(&self, repo: &str, n: &str, d: &Path, steps: &[Step]) -> bool {
+        let did: usize = read(&d.join("did"))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        for (i, step) in steps.iter().enumerate().skip(did) {
+            let took = match step {
+                Step::Label(l) => self.add_label(repo, n, l),
+                Step::Assign(o) => self.assign(repo, n, o),
+                Step::Post(body) => self.post(repo, n, body),
+                Step::Close(reason) => self.close(repo, n, reason),
+            };
+            if !took || fs::write(d.join("did"), format!("{}\n", i + 1)).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// One thing a verdict does on its issue.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Step {
+    Label(String),
+    Assign(String),
+    Post(String),
+    Close(&'static str),
 }

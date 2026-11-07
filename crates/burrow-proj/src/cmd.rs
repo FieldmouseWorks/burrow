@@ -337,11 +337,18 @@ pub fn stop(cfg: &Config, id: &str, withdraw: bool) -> Result<(), Fail> {
     // Under the lock turns start under, so none starts between looking and
     // stopping. A stopped job is over: nothing it waited on resumes it.
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    halt(cfg, &job, withdraw)
+}
+
+/// [`stop`]'s work, with the job's lock (the one turns start under) held by
+/// the caller, who may have looked at the job under it first.
+pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
+    let id = job.id;
     let unit = job.unit();
     let n = job.turns();
     if withdraw
         && let Some(said) = left_be(
-            &job,
+            job,
             n.as_deref().unwrap_or_default(),
             &systemd::show(cfg, &unit, "ActiveState"),
         )?
@@ -483,7 +490,8 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
 /// and OnFailure): its wait is the stall watchdog's to know, what the job was started to kick (proj run
 /// --kick) gets a pass now, and so does proj-watch for each repo the turn
 /// awaits, which then sees at once anything that changed since the turn
-/// took its baseline.
+/// took its baseline, and proj-inbox for a ready issue its drain holds
+/// for a slot.
 fn ended(cfg: &Config) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_ENDED",
@@ -495,6 +503,13 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     let mut names = lines(&job.path("kick"));
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
         names.push(watch::kick_for(&a.target));
+    }
+    // A ready issue waiting for a slot (proj-inbox's drain): whatever turn
+    // this was, its slot is room now, and the issue's repo's pass looks.
+    if let Some(inbox) = &cfg.inbox
+        && let Some(repo) = read(&inbox.state.join(crate::inbox::WAITING))
+    {
+        names.push(format!("proj-inbox/{repo}"));
     }
     kick(cfg, names);
     // A job this turn left over has its scratch cleared, after the kicks so
