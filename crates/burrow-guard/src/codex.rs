@@ -324,7 +324,8 @@ fn expands(word: &str) -> bool {
 /// expansion anywhere in the call (unquoted, it may split into words that
 /// change which one is the endpoint, or carry the method or the query; the
 /// shell reading keeps no quotes, so a literal `$` reads as one too, as in
-/// curl.rs), an endpoint a glob or brace may turn into another, a query
+/// curl.rs), an unquoted glob or brace (the shell reading marks one as an
+/// expansion, so a quoted `?` in a query string reads as plain text), a query
 /// from a file or input.
 fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
     let words: Vec<&str> = words.map(String::as_str).collect();
@@ -377,9 +378,6 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a String>) -> bool {
         return true;
     }
     let Some(url) = url else { return false };
-    if url.contains(['*', '?', '[', '{']) {
-        return true;
-    }
     if endpoint(url).ends_with("graphql") {
         return unread_query || values.iter().any(|v| MUTATION.is_match(v));
     }

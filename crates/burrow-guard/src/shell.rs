@@ -9,7 +9,8 @@
 //! pattern first, and a comment, a here-document or a `${…}` holds text that
 //! isn't the shell's to read as quotes or parentheses. What a comment or a
 //! here-document says is still read, line by line, since it may be a script
-//! (`bash <<EOF`). Nothing else is expanded.
+//! (`bash <<EOF`). An unquoted glob character or brace list marks its word
+//! [`UNKNOWN`] too (a quoted one is text). Nothing else is expanded.
 
 use crate::ansi_c;
 
@@ -204,12 +205,42 @@ struct Command {
     here_string: bool,
     /// Here-strings' texts: a shell given one runs it.
     scripts: Vec<String>,
+    /// Inside a `${…}`, where a glob character is the parameter's text.
+    in_parameter: bool,
+    /// An unquoted `{` is open in the word, and a `,` or `..` has made it a
+    /// brace expansion.
+    brace_open: bool,
+    brace_list: bool,
 }
 
 impl Command {
     fn push(&mut self, c: char) {
         self.word.push(c);
         self.in_word = true;
+    }
+
+    /// An unquoted character of a word. Where the shell would glob or brace
+    /// -expand it, the word is unknown until it runs, so [`UNKNOWN`] goes in
+    /// ahead of the character (`a*` reads `a￼*`, `{a,b}` reads `{a,b￼}`);
+    /// a quoted or escaped one is plain text ([`Command::push`]).
+    fn bare(&mut self, c: char) {
+        if !self.in_parameter {
+            match c {
+                '*' | '?' | '[' => self.word.push(UNKNOWN),
+                '{' => self.brace_open = true,
+                ',' if self.brace_open => self.brace_list = true,
+                '.' if self.brace_open && self.word.ends_with('.') => self.brace_list = true,
+                '}' if self.brace_open => {
+                    if self.brace_list {
+                        self.word.push(UNKNOWN);
+                    }
+                    self.brace_open = false;
+                    self.brace_list = false;
+                }
+                _ => {}
+            }
+        }
+        self.push(c);
     }
 
     fn quote(&mut self) {
@@ -220,6 +251,8 @@ impl Command {
     fn end_word(&mut self) {
         if self.in_word {
             let word = std::mem::take(&mut self.word);
+            self.brace_open = false;
+            self.brace_list = false;
             if !std::mem::take(&mut self.target) {
                 self.words.push(word);
             } else if std::mem::take(&mut self.here_string) {
@@ -503,11 +536,14 @@ impl Lexer {
                 Some('{') => {
                     self.pos += 1;
                     cmd.word.push_str("${");
-                    self.parameter(cmd, depth + 1)?;
+                    let outer = std::mem::replace(&mut cmd.in_parameter, true);
+                    let read = self.parameter(cmd, depth + 1);
+                    cmd.in_parameter = outer;
+                    read?;
                 }
                 _ => cmd.push('$'),
             },
-            c => cmd.push(c),
+            c => cmd.bare(c),
         }
         Ok(())
     }
@@ -650,6 +686,19 @@ mod tests {
                     .collect()
             })
             .collect())
+    }
+
+    #[test]
+    fn an_unquoted_glob_or_brace_is_unknown_and_a_quoted_one_is_text() {
+        // `%` is UNKNOWN, placed ahead of the glob character or at the
+        // closing brace of a list.
+        assert_eq!(
+            commands(r#"a b* c? d[1] {e,f} {g..h} {i} 'j*' k\? "{l,m}" ${n:-*}"#),
+            want(&[&[
+                "a", "b%*", "c%?", "d%[1]", "{e,f%}", "{g..h%}", "{i}", "j*", "k?", "{l,m}",
+                "${n:-*}"
+            ]])
+        );
     }
 
     #[test]
