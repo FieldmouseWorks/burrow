@@ -5,28 +5,15 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use burrow_guard::config::{Config, current_user};
 use burrow_guard::{Guard, Hook, Input};
+use common::zfs;
 
-/// A zfs that logs what it's asked, and fails when `fail` is there.
-fn zfs(dir: &Path) -> PathBuf {
-    let zfs = dir.join("zfs");
-    fs::write(
-        &zfs,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> '{0}/zfs.log'\n[ ! -e '{0}/fail' ] || {{ echo no >&2; exit 1; }}\n",
-            dir.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&zfs, fs::Permissions::from_mode(0o755)).unwrap();
-    zfs
-}
+mod common;
 
 fn hook(tool: &str, command: &str, cwd: &Path) -> Hook {
     Hook {
@@ -103,6 +90,7 @@ fn a_patch_that_only_adds_or_edits_isnt() {
 
 /// `burrow-guard --codex-user ME CONFIG` on an apply_patch, as Codex runs it.
 fn codex_hook(config: &str, patch: &str, cwd: &Path) -> String {
+    common::stand_ins();
     let me = current_user().expect("this user has a name");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
