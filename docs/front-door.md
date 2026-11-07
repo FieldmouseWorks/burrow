@@ -124,8 +124,9 @@ into project jobs.
   someone else opened gets one comment saying no job will start. Claude jobs
   have the box user's permissions. Codex jobs write
   only their project, scratch, job dir and git metadata, with network access
-  (the App's token socket included) but not the user's runtime dir (D-Bus,
-  the systemd manager) or tmux; sudo cannot elevate there.
+  (the App's token socket included) but not any server of the user's own
+  (the runtime dir's D-Bus and systemd manager, tmux, every socket the user
+  serves); sudo cannot elevate there.
 - Jobs are headless (`claude -p` or `codex exec --json`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.

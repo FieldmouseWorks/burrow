@@ -154,14 +154,14 @@ pub fn codex_args(
     cfg: &Config,
     args: &[String],
     env: Env,
-    uid: u32,
+    host: &sandbox::Host,
 ) -> Result<Vec<String>, String> {
     let id = env("PROJ_JOB")
         .and_then(|v| v.into_string().ok())
         .filter(|v| !v.is_empty())
         .ok_or("PROJ_JOB: proj _codex starts a proj job's Codex")?;
     let job = Job::new(cfg, &id);
-    let flags = sandbox::flags(cfg, &job, &scratch::dir(cfg, &id), env, uid)
+    let flags = sandbox::flags(cfg, &job, &scratch::dir(cfg, &id), env, host)
         .map_err(|e| format!("couldn't make the job's sandbox: {e}"))?;
     let mut args = args.to_vec();
     exec_flags(&mut args, flags);
@@ -189,8 +189,8 @@ pub fn codex_command(
 pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let count = std::env::var("GIT_CONFIG_COUNT").ok();
-    let uid = rustix::process::getuid().as_raw();
-    let args = codex_args(cfg, args, &|name| std::env::var_os(name), uid)
+    let host = sandbox::Host::real();
+    let args = codex_args(cfg, args, &|name| std::env::var_os(name), &host)
         .map_err(|e| crate::Fail::new(1, e))?;
     let mut command =
         codex_command(cfg, &args, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
@@ -247,6 +247,7 @@ mod tests {
         let project = dir.path().join("plain");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
+        let host = sandbox::tests::host_in(dir.path(), u32::MAX);
         let home = dir.path().join("home");
         // Where the login shell's profile moved Codex's home to.
         let moved = dir.path().join("moved");
@@ -263,7 +264,7 @@ mod tests {
         };
         let mut given = args(&c, Some("thread".into()));
         given.push("-".into());
-        let args = codex_args(&cfg, &given, &env, u32::MAX).unwrap();
+        let args = codex_args(&cfg, &given, &env, &host).unwrap();
         let auth = |dir: &Path| format!("\"{}\"=\"deny\"", dir.join("auth.json").display());
         let config = args.join("\n");
         assert!(
@@ -278,7 +279,7 @@ mod tests {
         // All of it is exec's, before resume; the prompt still comes last.
         assert_eq!(args[..3], ["--no-daemon", "exec", "--skip-git-repo-check"]);
         assert_eq!(args[args.len() - 4..], ["resume", "--json", "thread", "-"]);
-        assert!(codex_args(&cfg, &given, &|_| None, u32::MAX).is_err());
+        assert!(codex_args(&cfg, &given, &|_| None, &host).is_err());
     }
 
     #[test]

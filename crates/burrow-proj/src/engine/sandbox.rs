@@ -47,41 +47,145 @@ fn codex_home(env: Env) -> io::Result<PathBuf> {
     }
 }
 
+/// Where the host keeps what [`denied`] looks for, and whose it is: the
+/// user, tmux's default base dir (tmux puts its servers in `tmux-UID` there
+/// unless TMUX_TMPDIR says elsewhere), and the kernel's table of bound unix
+/// sockets.
+pub struct Host {
+    pub uid: u32,
+    pub tmp: PathBuf,
+    pub sockets: PathBuf,
+}
+
+impl Host {
+    /// This machine, as the user proj runs as.
+    pub fn real() -> Self {
+        Self {
+            uid: rustix::process::getuid().as_raw(),
+            tmp: "/tmp".into(),
+            sockets: "/proc/net/unix".into(),
+        }
+    }
+}
+
 /// What the job's commands may not read, though the rest of the machine is
 /// theirs to: Codex's login, which they have no use for, and the doors to
 /// running something outside the sandbox, where neither its filesystem
-/// grants nor no_new_privs reach. Those are the user's runtime dir (its
-/// D-Bus, the systemd manager's private and varlink sockets, podman's) and
-/// tmux's servers. Each goes in as named and as it resolves, since a
-/// symlink's own path and its target are two entries to the CLI.
+/// grants nor no_new_privs reach. With the network on, a command may
+/// connect() to any unix socket it can see, so every server of the user's
+/// own is a door, and each is hidden: the user's runtime dir (its D-Bus,
+/// the systemd manager's private and varlink sockets, podman's), tmux's
+/// socket dirs ([`tmux_dir`]) and every other socket a process of the
+/// user's has bound ([`own_sockets`]). Each goes in as named and as it
+/// resolves, since a symlink's own path and its target are two entries to
+/// the CLI, and none under another: the CLI masks a denied dir read-only
+/// first, and couldn't mount over a path inside it.
 ///
-/// Only the login is denied whether or not it's there yet. The CLI masks a
-/// denied path that doesn't exist by making an empty file in its place when
-/// that place is writable, as /tmp is, and an empty `tmux-UID` there would
-/// keep tmux from starting at all, sandbox or not. What isn't there has no
-/// server behind it to reach.
-fn denied(env: Env, uid: u32) -> io::Result<Vec<PathBuf>> {
-    let runtime = [
+/// The CLI masks each path afresh for every command, a dir by mounting an
+/// empty one over it, so a server started in a denied dir after this, mid
+/// command even, stays out of sight. A path that isn't there when a command
+/// starts gets an empty file in its place for that command, when that place
+/// is writable, as /tmp is. So only the login is denied whether or not it's
+/// there yet; tmux's dirs are made first, as tmux makes them, and every
+/// other door is one that's there now.
+fn denied(env: Env, host: &Host) -> io::Result<Vec<PathBuf>> {
+    let uid = host.uid;
+    let mut paths = vec![codex_home(env)?.join("auth.json")];
+    for path in [
         var(env, "XDG_RUNTIME_DIR"),
         Some(PathBuf::from(format!("/run/user/{uid}"))),
-        Some(
-            var(env, "TMUX_TMPDIR")
-                .unwrap_or_else(|| "/tmp".into())
-                .join(format!("tmux-{uid}")),
-        ),
-    ];
-    let mut paths = vec![codex_home(env)?.join("auth.json")];
-    for path in runtime.into_iter().flatten() {
+    ]
+    .into_iter()
+    .flatten()
+    {
         let path = std::path::absolute(path)?;
         if path.exists() {
             paths.push(path);
         }
     }
+    for base in [Some(host.tmp.clone()), var(env, "TMUX_TMPDIR")]
+        .into_iter()
+        .flatten()
+    {
+        paths.extend(tmux_dir(&base, uid));
+    }
+    // A server tmux started with -S, or under a TMUX_TMPDIR the job's env
+    // doesn't share, is found where it's bound; so is the one $TMUX names.
+    let attached = var(env, "TMUX").and_then(|v| {
+        let v = v.into_os_string().into_string().ok()?;
+        Some(PathBuf::from(v.split(',').next()?))
+    });
+    let sockets = own_sockets(&host.sockets, uid)?
+        .into_iter()
+        .chain(attached.into_iter().filter(|p| is_own_socket(p, uid)));
+    for socket in sockets {
+        paths.extend(door(&socket, uid));
+    }
     let resolved: Vec<PathBuf> = paths.iter().filter_map(|p| p.canonicalize().ok()).collect();
     paths.extend(resolved);
     paths.sort();
     paths.dedup();
+    let outer = paths.clone();
+    paths.retain(|p| !outer.iter().any(|o| o != p && p.starts_with(o)));
     Ok(paths)
+}
+
+/// The dir tmux keeps a user's servers in under BASE, made as tmux makes it
+/// (its base resolved, `tmux-UID`, the user's alone) if it isn't there yet,
+/// so it's there to deny for the whole turn: a server tmux starts there
+/// later goes into a dir the job can't see. A base that isn't there, or a
+/// `tmux-UID` that isn't a dir (tmux won't use a symlink), holds none.
+fn tmux_dir(base: &Path, uid: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = base.canonicalize().ok()?.join(format!("tmux-{uid}"));
+    // Made or not (a base the user can't write), what's there decides.
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&dir);
+    dir.symlink_metadata().ok()?.is_dir().then_some(dir)
+}
+
+/// Every socket bound to a path by a process of the user's, from the
+/// kernel's table (one line per socket after the header: seven fields, then
+/// the path a socket is bound to, if any, after one space). It is the
+/// user's when the socket file there is theirs. Unreadable, the job doesn't
+/// start, rather than run with doors open.
+fn own_sockets(table: &Path, uid: u32) -> io::Result<Vec<PathBuf>> {
+    let text = std::fs::read_to_string(table)?;
+    Ok(text
+        .lines()
+        .skip(1)
+        .filter_map(bound_path)
+        .map(PathBuf::from)
+        .filter(|p| is_own_socket(p, uid))
+        .collect())
+}
+
+/// The path a line of /proc/net/unix says its socket is bound to; abstract
+/// ones (`@`) have none on the filesystem.
+fn bound_path(line: &str) -> Option<&str> {
+    let mut rest = line;
+    for _ in 0..7 {
+        rest = rest.trim_start();
+        rest = &rest[rest.find(char::is_whitespace)?..];
+    }
+    rest.strip_prefix(' ').filter(|p| p.starts_with('/'))
+}
+
+fn is_own_socket(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    path.symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
+}
+
+/// What to deny for a server's socket: tmux's dir, if that's where it is,
+/// so its other servers and those to come are hidden too; else the socket.
+fn door(socket: &Path, uid: u32) -> Option<PathBuf> {
+    let socket = socket.canonicalize().ok()?;
+    match socket.parent() {
+        Some(dir) if dir.file_name() == Some(format!("tmux-{uid}").as_ref()) => {
+            Some(dir.to_owned())
+        }
+        _ => Some(socket),
+    }
 }
 
 /// A name no config of the user's or a project's can know beforehand, so
@@ -107,7 +211,7 @@ pub fn flags(
     job: &Job,
     scratch: &Path,
     env: Env,
-    uid: u32,
+    host: &Host,
 ) -> io::Result<Vec<String>> {
     let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
     // proj await/done and commands' wait files write only this job's state.
@@ -148,7 +252,7 @@ pub fn flags(
         .iter()
         .map(|p| format!("{}=\"write\"", quoted(p)))
         .chain(
-            denied(env, uid)?
+            denied(env, host)?
                 .iter()
                 .map(|p| format!("{}=\"deny\"", quoted(p))),
         )
@@ -172,7 +276,7 @@ pub fn flags(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -196,6 +300,18 @@ mod tests {
         cfg
     }
 
+    /// A host in DIR, as UID: its own /tmp, and a socket table that lists
+    /// nothing.
+    pub(crate) fn host_in(dir: &Path, uid: u32) -> Host {
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let sockets = dir.join("unix");
+        std::fs::write(&sockets, TABLE_HEADER).unwrap();
+        Host { uid, tmp, sockets }
+    }
+
+    const TABLE_HEADER: &str = "Num       RefCount Protocol Flags    Type St Inode Path\n";
+
     fn deny(path: &Path) -> String {
         format!("\"{}\"=\"deny\"", path.display())
     }
@@ -216,7 +332,14 @@ mod tests {
         let job = Job::new(&cfg, "job");
         let home = dir.path().join("home");
         let env = env_of(&[("HOME", &home)]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, u32::MAX).unwrap();
+        let flags = flags(
+            &cfg,
+            &job,
+            &dir.path().join("scratch"),
+            &env,
+            &host_in(dir.path(), u32::MAX),
+        )
+        .unwrap();
         assert_eq!(flags[0], "-c", "no exec flags for a repository");
         let config = flags.join("\n");
         assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
@@ -254,8 +377,10 @@ mod tests {
             selected
         };
         let scratch = dir.path().join("scratch");
-        let first = profile(&flags(&cfg, &job, &scratch, &env, u32::MAX).unwrap());
-        let again = profile(&flags(&cfg, &job, &scratch, &env, u32::MAX).unwrap());
+        let first =
+            profile(&flags(&cfg, &job, &scratch, &env, &host_in(dir.path(), u32::MAX)).unwrap());
+        let again =
+            profile(&flags(&cfg, &job, &scratch, &env, &host_in(dir.path(), u32::MAX)).unwrap());
         assert_ne!(first, "proj");
         assert!(
             first.starts_with("proj-") && first.len() == "proj-".len() + 32,
@@ -272,7 +397,14 @@ mod tests {
         let cfg = job_in(dir.path(), &project);
         let job = Job::new(&cfg, "job");
         let env = env_of(&[("HOME", &dir.path().join("home"))]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, u32::MAX).unwrap();
+        let flags = flags(
+            &cfg,
+            &job,
+            &dir.path().join("scratch"),
+            &env,
+            &host_in(dir.path(), u32::MAX),
+        )
+        .unwrap();
         assert_eq!(flags[0], "--skip-git-repo-check");
         // Its .git is granted, for a `git init`, but not made: an empty one
         // would read as a broken repository.
@@ -330,13 +462,13 @@ mod tests {
         std::fs::write(real.join("elsewhere.json"), "{}").unwrap();
         std::os::unix::fs::symlink(real.join("elsewhere.json"), real.join("auth.json")).unwrap();
         let env = env_of(&[("HOME", &dir.path().join("home")), ("CODEX_HOME", &link)]);
-        let paths = denied(&env, u32::MAX).unwrap();
+        let paths = denied(&env, &host_in(dir.path(), u32::MAX)).unwrap();
         let real = real.canonicalize().unwrap();
         assert!(paths.contains(&real.join("auth.json")), "{paths:?}");
         assert!(paths.contains(&real.join("elsewhere.json")), "{paths:?}");
         // Not yet there, it's denied all the same.
         let env = env_of(&[("HOME", &dir.path().join("home"))]);
-        let paths = denied(&env, u32::MAX).unwrap();
+        let paths = denied(&env, &host_in(dir.path(), u32::MAX)).unwrap();
         assert!(
             paths.contains(&dir.path().join("home/.codex/auth.json")),
             "{paths:?}"
@@ -344,43 +476,164 @@ mod tests {
     }
 
     #[test]
-    fn the_user_manager_and_tmux_are_out_of_reach() {
+    fn the_user_manager_is_out_of_reach() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let runtime = dir.path().join("runtime");
-        let tmux = dir.path().join("tmux");
         std::fs::create_dir_all(&runtime).unwrap();
-        std::fs::create_dir_all(tmux.join("tmux-4242")).unwrap();
-        let env = env_of(&[
-            ("HOME", &home),
-            ("XDG_RUNTIME_DIR", &runtime),
-            ("TMUX_TMPDIR", &tmux),
-        ]);
-        let paths = denied(&env, 4242).unwrap();
+        let host = host_in(dir.path(), 4242);
+        let env = env_of(&[("HOME", &home), ("XDG_RUNTIME_DIR", &runtime)]);
         // The runtime dir holds the user's D-Bus and the systemd manager's
         // private socket.
+        let paths = denied(&env, &host).unwrap();
         assert!(paths.contains(&runtime), "{paths:?}");
-        assert!(paths.contains(&tmux.join("tmux-4242")), "{paths:?}");
-        // What isn't there isn't masked: that would make an empty file in a
-        // writable /tmp, where tmux's own dir goes.
-        let paths = denied(&env_of(&[("HOME", &home), ("TMUX_TMPDIR", &tmux)]), 4343).unwrap();
-        assert_eq!(paths, [home.join(".codex/auth.json")]);
         // The manager's own runtime dir counts, whatever XDG_RUNTIME_DIR says.
         let uid = rustix::process::getuid().as_raw();
         let mine = PathBuf::from(format!("/run/user/{uid}"));
         if mine.exists() {
-            let paths = denied(&env_of(&[("HOME", &home)]), uid).unwrap();
+            let paths = denied(&env_of(&[("HOME", &home)]), &host_in(dir.path(), uid)).unwrap();
             assert!(paths.contains(&mine), "{paths:?}");
         }
+    }
+
+    #[test]
+    fn tmux_dirs_are_made_as_tmux_makes_them_and_hidden_before_any_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let custom = dir.path().join("custom");
+        std::fs::create_dir_all(&custom).unwrap();
+        let host = host_in(dir.path(), 4242);
+        let env = env_of(&[("HOME", &home), ("TMUX_TMPDIR", &custom)]);
+        let paths = denied(&env, &host).unwrap();
+        // Neither dir was there: both are now, the user's alone, as tmux
+        // would make them, and a server tmux starts there later is hidden.
+        for base in [&host.tmp, &custom] {
+            let made = base.canonicalize().unwrap().join("tmux-4242");
+            assert!(paths.contains(&made), "{paths:?}");
+            let meta = made.symlink_metadata().unwrap();
+            assert!(meta.is_dir());
+            assert_eq!(meta.permissions().mode() & 0o077, 0, "{made:?}");
+        }
+        // Made already, it's kept as it is.
+        std::fs::write(custom.join("tmux-4242/default"), "").unwrap();
+        assert!(
+            denied(&env, &host)
+                .unwrap()
+                .contains(&custom.join("tmux-4242").canonicalize().unwrap())
+        );
+        assert!(custom.join("tmux-4242/default").exists());
+        // A base that isn't there has no server; tmux won't use a tmux-UID
+        // that isn't a dir, and none is put in its place.
+        let missing = dir.path().join("missing");
+        let paths = denied(
+            &env_of(&[("HOME", &home), ("TMUX_TMPDIR", &missing)]),
+            &host,
+        )
+        .unwrap();
+        assert!(
+            !missing.exists() && !paths.iter().any(|p| p.starts_with(&missing)),
+            "{paths:?}"
+        );
+        let odd = host_in(&dir.path().join("odd"), 4343);
+        std::fs::write(odd.tmp.join("tmux-4343"), "").unwrap();
+        let paths = denied(&env_of(&[("HOME", &home)]), &odd).unwrap();
+        assert_eq!(paths, [home.join(".codex/auth.json")]);
+        assert!(odd.tmp.join("tmux-4343").is_file());
+    }
+
+    #[test]
+    fn the_kernels_table_says_where_each_socket_is_bound() {
+        let table = format!(
+            "{TABLE_HEADER}\
+             0000000000000000: 00000002 00000000 00010000 0001 01 12345 /run/a socket\n\
+             0000000000000000: 00000002 00000000 00010000 0001 01    77 /tmp/b\n\
+             0000000000000000: 00000002 00000000 00000000 0002 01 23456 @abstract/bus\n\
+             0000000000000000: 00000003 00000000 00000000 0001 03 34567\n"
+        );
+        let paths: Vec<&str> = table.lines().skip(1).filter_map(bound_path).collect();
+        assert_eq!(paths, ["/run/a socket", "/tmp/b"]);
+    }
+
+    #[test]
+    fn every_server_of_the_users_own_is_hidden_wherever_it_is_bound() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        let home = dir.join("home");
+        let runtime = dir.join("runtime");
+        // tmux -S, at a path of its own.
+        let socket = dir.join("served.sock");
+        // A tmux server under a TMUX_TMPDIR the job's env doesn't have.
+        let elsewhere = dir.join("elsewhere/tmux-".to_owned() + &uid.to_string());
+        // The one a job inside tmux would find in $TMUX.
+        let attached = dir.join("attached.sock");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let _served = UnixListener::bind(&socket).unwrap();
+        let _custom = UnixListener::bind(elsewhere.join("custom")).unwrap();
+        let _nested = UnixListener::bind(runtime.join("bus")).unwrap();
+        // A socket file nobody serves any more, and one served by no one in
+        // this table: neither is a door.
+        drop(UnixListener::bind(dir.join("gone.sock")).unwrap());
+        let host = Host {
+            sockets: "/proc/net/unix".into(),
+            ..host_in(&dir, uid)
+        };
+        let tmux = format!("{},4242,0", attached.display());
+        let env = |name: &str| match name {
+            "HOME" => Some(home.clone().into()),
+            "XDG_RUNTIME_DIR" => Some(runtime.clone().into()),
+            "TMUX" => Some(tmux.clone().into()),
+            _ => None,
+        };
+        // $TMUX only counts once its socket is the user's.
+        assert!(!denied(&env, &host).unwrap().contains(&attached));
+        let _attached = UnixListener::bind(&attached).unwrap();
+        let paths = denied(&env, &host).unwrap();
+        assert!(paths.contains(&socket), "{paths:?}");
+        assert!(paths.contains(&attached), "{paths:?}");
+        // tmux's whole dir, for the servers it starts there later.
+        assert!(paths.contains(&elsewhere), "{paths:?}");
+        assert!(!paths.contains(&elsewhere.join("custom")), "{paths:?}");
+        assert!(!paths.contains(&dir.join("gone.sock")), "{paths:?}");
+        // One under a denied dir isn't a path of its own: the dir is masked
+        // read-only first.
+        assert!(paths.contains(&runtime), "{paths:?}");
+        assert!(!paths.contains(&runtime.join("bus")), "{paths:?}");
+        // Another user's sockets aren't the user's doors.
+        let other = Host {
+            sockets: "/proc/net/unix".into(),
+            ..host_in(&dir.join("other"), uid.wrapping_add(1))
+        };
+        assert!(!denied(&env, &other).unwrap().contains(&socket));
         // And all of them reach the profile.
-        let project = dir.path().join("plain");
+        let project = dir.join("plain");
         std::fs::create_dir_all(&project).unwrap();
-        let cfg = job_in(dir.path(), &project);
+        let cfg = job_in(&dir, &project);
         let job = Job::new(&cfg, "job");
-        let config = flags(&cfg, &job, &dir.path().join("scratch"), &env, 4242)
+        let config = flags(&cfg, &job, &dir.join("scratch"), &env, &host)
             .unwrap()
             .join("\n");
-        assert!(config.contains(&deny(&runtime)), "{config}");
-        assert!(config.contains(&deny(&tmux.join("tmux-4242"))), "{config}");
+        for path in [
+            &socket,
+            &attached,
+            &elsewhere,
+            &runtime,
+            &host.tmp.join(format!("tmux-{uid}")),
+        ] {
+            assert!(config.contains(&deny(path)), "{path:?}: {config}");
+        }
+    }
+
+    #[test]
+    fn no_socket_table_no_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host {
+            sockets: dir.path().join("missing"),
+            ..host_in(dir.path(), 4242)
+        };
+        assert!(denied(&env_of(&[("HOME", &dir.path().join("home"))]), &host).is_err());
     }
 }

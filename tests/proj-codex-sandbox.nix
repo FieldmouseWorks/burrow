@@ -45,8 +45,11 @@ let
   # outside its roots, read Codex's login where the login shell moved it
   # (through its symlink, and at its target), and reach what runs things
   # outside the sandbox: the user's D-Bus and the systemd manager's private
-  # socket, spoken to directly, and a tmux server of the user's. No redirects: the guard wants an undo
-  # snapshot for those, and there's no ZFS here.
+  # socket, spoken to directly, and the user's tmux servers: one at a path of
+  # its own (-S), one under a TMUX_TMPDIR the job's env doesn't have, and two
+  # started mid-command, in tmux's default dir and that custom one. No
+  # redirects: the guard wants an undo snapshot for those, and there's no
+  # ZFS here.
   connect = path: "python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"${path}\")'";
   calls = cmds: map (cmd: [ "exec_command" { inherit cmd; } ]) cmds;
   firstCalls = calls [
@@ -59,7 +62,16 @@ let
     "cat /data/dev/codex-home/auth.json || touch /data/dev/jobs/$PROJ_JOB/login-target-refused"
     "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/bus-refused"
     "${connect "/run/user/1001/systemd/private"} || touch /data/dev/jobs/$PROJ_JOB/manager-refused"
-    "tmux -L host new-window 'touch /data/dev/elsewhere/by-tmux' || touch /data/dev/jobs/$PROJ_JOB/tmux-refused"
+    "tmux -S /tmp/served.sock new-window 'touch /data/dev/elsewhere/by-socket' || touch /data/dev/jobs/$PROJ_JOB/tmux-socket-refused"
+    "TMUX_TMPDIR=/data/dev/tmux-custom tmux -L custom new-window 'touch /data/dev/elsewhere/by-custom' || touch /data/dev/jobs/$PROJ_JOB/tmux-custom-refused"
+  ] ++ [
+    # Servers the user starts once this command runs, in tmux's default dir
+    # (not there when the job started) and in the custom one.
+    [ "exec_command" {
+      cmd = "touch /data/dev/jobs/$PROJ_JOB/waiting && timeout 25 sh -c 'until test -e /data/dev/late-started; do sleep 0.2; done' && { tmux -L host new-window 'touch /data/dev/elsewhere/by-tmux' || touch /data/dev/jobs/$PROJ_JOB/tmux-refused; } && { TMUX_TMPDIR=/data/dev/tmux-custom tmux -L late new-window 'touch /data/dev/elsewhere/by-late' || touch /data/dev/jobs/$PROJ_JOB/tmux-late-refused; }";
+      yield_time_ms = 30000;
+    } ]
+  ] ++ calls [
     "proj done"
   ];
   # Its next turn, a resumed Codex with a fresh profile, held to the same.
@@ -67,6 +79,7 @@ let
     "touch /data/dev/elsewhere/resumed || touch /data/dev/jobs/$PROJ_JOB/resumed-elsewhere-refused"
     "cat \"$CODEX_HOME/auth.json\" || touch /data/dev/jobs/$PROJ_JOB/resumed-login-refused"
     "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/resumed-bus-refused"
+    "tmux -L host new-window 'touch /data/dev/elsewhere/resumed-by-tmux' || touch /data/dev/jobs/$PROJ_JOB/resumed-tmux-refused"
     "proj done"
   ];
   jobCalls = pkgs.writeText "codex-job-calls.json" (builtins.toJSON firstCalls);
@@ -155,15 +168,30 @@ pkgs.testers.runNixOSTest {
     dev("""echo '{"OPENAI_API_KEY": "sk-stand-in-login"}' >$CODEX_HOME/auth.json && chmod 0600 $CODEX_HOME/auth.json""")
     # Untracked, as a job's own write there would be.
     dev("mkdir /data/dev/src/web/.codex && cp ${projectWidening} /data/dev/src/web/.codex/config.toml")
-    # A tmux server of the user's, outside any sandbox.
-    dev("tmux -L host new-session -d 'sleep infinity'")
+    # tmux servers of the user's, outside any sandbox, where the job's env
+    # wouldn't say: at a path of its own, and under a TMUX_TMPDIR of their
+    # own (tmux falls back to /tmp for one that isn't there). tmux's default
+    # dir isn't there yet.
+    jobs.succeed("install -d -o dev -g dev /data/dev/tmux-custom")
+    dev("tmux -S /tmp/served.sock new-session -d 'sleep infinity'")
+    dev("TMUX_TMPDIR=/data/dev/tmux-custom tmux -L custom new-session -d 'sleep infinity'")
+    jobs.succeed("test -S /tmp/served.sock && test -S /data/dev/tmux-custom/tmux-1001/custom")
+    jobs.fail("test -e /tmp/tmux-1001")
     dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
     j = dev('proj run --role coder --app workers web "go"')
+    # Once a command is running, the user starts two more: in tmux's default
+    # dir, which must still take a server, and the custom one.
+    jobs.wait_until_succeeds(f"test -e /data/dev/jobs/{j}/waiting", timeout=300)
+    dev("tmux -L host new-session -d 'sleep infinity'")
+    dev("TMUX_TMPDIR=/data/dev/tmux-custom tmux -L late new-session -d 'sleep infinity'")
+    jobs.succeed("test -S /tmp/tmux-1001/host && test -S /data/dev/tmux-custom/tmux-1001/late")
+    jobs.succeed("touch /data/dev/late-started")
     jobs.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
     for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
-                 "login-target-refused", "bus-refused", "manager-refused", "tmux-refused"]:
+                 "login-target-refused", "bus-refused", "manager-refused", "tmux-socket-refused",
+                 "tmux-custom-refused", "tmux-refused", "tmux-late-refused"]:
         assert mark in marks, (mark, marks, said)
     # The job's own state, written by `proj done` inside the sandbox.
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
@@ -171,7 +199,7 @@ pkgs.testers.runNixOSTest {
     # git's common dir, went through proj's hooks.
     assert dev("git -C /data/dev/src/web rev-parse origin/trunk") == upstream
     assert "Engine: codex" in dev("git -C /data/dev/src/web log -1 --format=%B work")
-    for path in ["written", "by-tmux"]:
+    for path in ["written", "by-socket", "by-custom", "by-tmux", "by-late"]:
         jobs.fail(f"test -e /data/dev/elsewhere/{path}")
     assert "sk-stand-in-login" not in said, said
     assert "is ignored" not in said and "metadata for `stand-in` not found" not in said, said
@@ -182,10 +210,17 @@ pkgs.testers.runNixOSTest {
     jobs.wait_until_succeeds(f"test -e /data/dev/jobs/{j}/2.jsonl && su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/2.jsonl /data/dev/jobs/{j}/2.stderr")[1]
-    for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-bus-refused"]:
+    for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-bus-refused",
+                 "resumed-tmux-refused"]:
         assert mark in marks, (mark, marks, said)
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
-    jobs.fail("test -e /data/dev/elsewhere/resumed")
+    for path in ["resumed", "resumed-by-tmux"]:
+        jobs.fail(f"test -e /data/dev/elsewhere/{path}")
+    # The user's own servers ran on, all four, untouched.
+    dev("tmux -S /tmp/served.sock has-session")
+    for label in ["custom", "late"]:
+        dev(f"TMUX_TMPDIR=/data/dev/tmux-custom tmux -L {label} has-session")
+    dev("tmux -L host has-session")
     assert "sk-stand-in-login" not in said, said
 
     machine.wait_for_unit("multi-user.target")
