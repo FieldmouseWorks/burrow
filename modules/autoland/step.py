@@ -958,8 +958,10 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif (codex := codex_written(repo, pr, st)) is not False or gate() or unseen or ci == "none" or asked or capped:
-        judged("a Codex job wrote it" if codex else "its commit trailers couldn't be read" if codex is None else
+    elif (codex := codex_written(repo, pr, st)) is None:
+        settle("pending", "Settled; couldn't read its commits; next pass")
+    elif codex or gate() or unseen or ci == "none" or asked or capped:
+        judged("a Codex job wrote it" if codex else
                f"it touches {gate()}" if gate() else
                f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
                else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head" if asked

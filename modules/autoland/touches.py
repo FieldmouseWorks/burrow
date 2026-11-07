@@ -126,13 +126,19 @@ def commit_pages(repo, pr, st):
 
 
 def codex_written(repo, pr, st):
-    """Only actual trailers count, on any commit since the PR's base."""
-    pages = commit_pages(repo, pr, st)
-    if pages is None:
-        return None
-    return any("engine: codex" in subprocess.run(["git", "interpret-trailers", "--parse"],
-               input=c["commit"]["message"], text=True, capture_output=True, check=True).stdout.casefold().splitlines()
-               for page in pages for c in page)
+    """Only actual trailers count, on any commit since the PR's base. Cache
+    either answer per head and base; unreadable commits stay unknown and are
+    retried next pass, so they can neither land nor spend a judge."""
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("codexHead") != seen:
+        pages = commit_pages(repo, pr, st)
+        if pages is None:
+            return None
+        st["codexWritten"] = any("engine: codex" in subprocess.run(["git", "interpret-trailers", "--parse"],
+                                 input=c["commit"]["message"], text=True, capture_output=True, check=True).stdout.casefold().splitlines()
+                                 for page in pages for c in page)
+        st["codexHead"] = seen
+    return st["codexWritten"]
 
 
 def provenance(repo, pr, st):
