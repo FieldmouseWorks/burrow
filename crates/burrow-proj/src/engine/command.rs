@@ -53,8 +53,19 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
     args
 }
 
+/// Puts `flags` of exec's own right after `exec`, so they come before
+/// `resume`, whose subcommand doesn't take them.
+fn exec_flags(args: &mut Vec<String>, flags: Vec<String>) {
+    let at = args.iter().position(|a| a == "exec").map_or(0, |i| i + 1);
+    args.splice(at..at, flags);
+}
+
 /// Explicit git metadata roots override workspace-write's automatic .git
 /// protection; the common dir is needed by worktrees created in scratch.
+/// A project that isn't a repository yet gets its own `.git` granted
+/// without making it, so the job can `git init` there (the pinned CLI
+/// grants a path that doesn't exist yet), and Codex is told to start
+/// outside one. Returns the exec flags that go before `resume`.
 fn configure_codex(
     cfg: &Config,
     job: &Job,
@@ -62,7 +73,7 @@ fn configure_codex(
     instructions: &str,
     home: &Path,
     args: &mut Vec<String>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<String>> {
     let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
     // proj await/done and commands' wait files write only this job's state.
     let mut roots = vec![project.clone(), scratch.to_owned(), job.dir.clone()];
@@ -71,12 +82,15 @@ fn configure_codex(
         .arg(&project)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()?;
-    if !git.status.success() {
-        return Err(std::io::Error::other(
-            "cannot find the repository's git metadata",
-        ));
-    }
-    roots.push(PathBuf::from(String::from_utf8_lossy(&git.stdout).trim()));
+    let (metadata, exec) = if git.status.success() {
+        let common = String::from_utf8_lossy(&git.stdout).trim().to_owned();
+        (PathBuf::from(common), Vec::new())
+    } else {
+        (
+            project.join(".git"),
+            vec!["--skip-git-repo-check".to_owned()],
+        )
+    };
     for (var, default) in [
         ("CARGO_HOME", home.join(".cargo")),
         ("XDG_CACHE_HOME", home.join(".cache")),
@@ -92,6 +106,7 @@ fn configure_codex(
     for root in &roots {
         std::fs::create_dir_all(root)?;
     }
+    roots.push(metadata);
     let quoted = |s: &str| serde_json::to_string(s).expect("string");
     let roots = roots
         .iter()
@@ -113,7 +128,7 @@ fn configure_codex(
     ] {
         args.extend(["-c".into(), config]);
     }
-    Ok(())
+    Ok(exec)
 }
 
 /// One run of Claude, its output appended to the turn's stream. It goes
@@ -173,7 +188,8 @@ pub fn spawn(
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| std::io::Error::other("HOME isn't set"))?;
-        configure_codex(cfg, job, &scratch, &instructions, &home, &mut args)?;
+        let exec = configure_codex(cfg, job, &scratch, &instructions, &home, &mut args)?;
+        exec_flags(&mut args, exec);
         args.push("-".into());
     }
     // A login shell, so the job sees the same PATH and env as an SSH login,
@@ -300,7 +316,7 @@ mod tests {
         std::fs::create_dir_all(&job.dir).unwrap();
         std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
         let mut args = Vec::new();
-        configure_codex(
+        let exec = configure_codex(
             &cfg,
             &job,
             &dir.path().join("scratch"),
@@ -309,11 +325,64 @@ mod tests {
             &mut args,
         )
         .unwrap();
+        assert!(exec.is_empty());
         let config = args.join("\n");
         assert!(config.contains("default_permissions=\"proj\""));
         assert!(config.contains("permissions.proj.network.enabled=true"));
         assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
         assert!(config.contains("developer_instructions=\"This is proj job job\""));
         assert!(config.contains(&format!("\"{}\"=\"write\"", job.dir.display())));
+    }
+
+    #[test]
+    fn a_project_with_no_repository_starts_and_may_make_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        cfg.tools.git = "git".into();
+        let project = dir.path().join("plain");
+        std::fs::create_dir_all(&project).unwrap();
+        let job = Job::new(&cfg, "job");
+        std::fs::create_dir_all(&job.dir).unwrap();
+        std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
+        let mut args = Vec::new();
+        let exec = configure_codex(
+            &cfg,
+            &job,
+            &dir.path().join("scratch"),
+            "This is proj job job",
+            &dir.path().join("home"),
+            &mut args,
+        )
+        .unwrap();
+        assert_eq!(exec, ["--skip-git-repo-check"]);
+        // Its .git is granted, for a `git init`, but not made: an empty one
+        // would read as a broken repository.
+        let config = args.join("\n");
+        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
+        assert!(!project.join(".git").exists());
+    }
+
+    #[test]
+    fn exec_flags_go_before_resume() {
+        let c = Choice {
+            engine: Engine::Codex,
+            model: None,
+        };
+        let mut args = args(&c, Some("thread".into()));
+        exec_flags(&mut args, vec!["--skip-git-repo-check".to_owned()]);
+        assert_eq!(
+            args,
+            [
+                "--no-daemon",
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "resume",
+                "--json",
+                "thread"
+            ]
+        );
     }
 }

@@ -12,8 +12,14 @@
 //!
 //! The command is read as text, line by line, so one nested in quotes
 //! (`ssh host '…'`, `sh -c "…"`) counts the same as one typed bare.
+//!
+//! The same guard is Codex's managed PreToolUse hook for proj's Codex jobs
+//! (`--codex-user`, modules/claude.nix). There no one is asked: the pinned
+//! Codex runs a command whose hook asks, so every question is a refusal,
+//! and it refuses what would hide a commit from the job's hooks (codex.rs).
 
 mod ansi_c;
+mod codex;
 pub mod config;
 mod doors;
 mod push;
@@ -46,6 +52,8 @@ pub struct Input {
 
 pub struct Guard<'a> {
     pub config: &'a Config,
+    /// Whether it guards a Codex job, which gets codex.rs's refusals too.
+    pub codex: bool,
     /// When the last undo snapshot was taken, as its mtime: one round per
     /// five seconds is plenty for a burst of commands.
     pub mark: PathBuf,
@@ -78,6 +86,9 @@ impl Guard<'_> {
         }
         asks.extend(push::asks(cmd, cwd, &self.config.git));
         asks.extend(doors::asks(cmd));
+        if self.codex {
+            asks.extend(codex::refusals(cmd));
+        }
         asks.dedup();
         (!asks.is_empty()).then(|| asks.join(" "))
     }
@@ -91,6 +102,19 @@ pub fn ask(question: &str) -> Value {
             "hookEventName": "PreToolUse",
             "permissionDecision": "ask",
             "permissionDecisionReason": question,
+        }
+    })
+}
+
+/// The hook's answer that refuses the command for `reason`: Codex's, whose
+/// job has no one to ask.
+#[must_use]
+pub fn deny(reason: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
         }
     })
 }

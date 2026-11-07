@@ -10,9 +10,11 @@ use std::path::Path;
 pub(crate) mod claude;
 mod claude_limit;
 mod command;
+mod handoff;
 mod role;
 mod stream;
 pub use command::{LONG, NEXT, exec_codex, spawn};
+pub use handoff::first_prompt;
 pub(crate) use role::role;
 pub use stream::{Said, answer, last_result, names_session, stream_names_session};
 

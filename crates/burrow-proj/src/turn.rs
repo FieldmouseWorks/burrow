@@ -217,7 +217,15 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let must = !job.path("owned").exists() && agent.is_none();
     let stream = job.turn(&n, "jsonl");
     File::create(&stream).map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
-    let mut prompt = job.path(&format!("prompt.{n}"));
+    // What it's asked, after what its engine's conversation missed of the
+    // job, if it moved here from the other engine (engine/handoff.rs).
+    let first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
+        Fail::new(
+            1,
+            format!("proj: {}: {e}", job.turn(&n, "handoff").display()),
+        )
+    })?;
+    let mut prompt = first.clone();
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
@@ -353,7 +361,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         let dl = dl + (now_nanos() - waited);
                         let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
                     }
-                    let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
+                    let asked = read(&first).unwrap_or_default();
                     prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
                     continue;
                 }

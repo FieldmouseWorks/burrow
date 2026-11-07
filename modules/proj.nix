@@ -45,8 +45,13 @@ let
 
     Codex jobs run headless in workspace-write with network access. The sandbox's
     no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
-    them to the owner. Commits carry Engine: codex, and a Claude judge decides
-    whether their PR lands after the usual Codex review and checks.
+    them to the owner. The machine's guard checks every command first: what
+    deletes or rewrites files gets an undo snapshot, or is refused without one.
+    Commits carry Engine: codex, and a Claude judge decides whether their PR
+    lands after the usual Codex review and checks; so the guard refuses what
+    would turn off your git hooks or write commits they don't see (revert,
+    cherry-pick, rebase, am, commit-tree, GitHub's API): commit and merge
+    instead. There are no TTY sessions: run each command whole.
   '');
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {

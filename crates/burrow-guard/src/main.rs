@@ -1,30 +1,49 @@
-//! burrow-guard CONFIG, as modules/claude.nix's PreToolUse hook runs it:
-//! the hook's JSON on stdin, and nothing (allow) or a decision on stdout.
+//! burrow-guard [--codex-user USER] CONFIG, as modules/claude.nix's hooks
+//! run it: the hook's JSON on stdin, and nothing (allow) or a decision on
+//! stdout. Claude Code's asks the owner; Codex's (`--codex-user`) refuses,
+//! since a Codex job has no one to ask and Codex runs what its hook asks
+//! about.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use burrow_guard::config::Config;
-use burrow_guard::{Guard, Hook, ask};
+use burrow_guard::config::{Config, current_user};
+use burrow_guard::{Guard, Hook, ask, deny};
+use serde_json::Value;
 
 /// The one answer, whichever comes first: the guard's, or its deadline's.
 static ANSWER: Once = Once::new();
 
+/// Whether this is Codex's hook, read before anything else: a guard that
+/// can't read its config must still answer as its engine needs.
+static CODEX: OnceLock<bool> = OnceLock::new();
+
 fn main() {
-    // A guard that can't read what it guards asks, rather than let the
-    // command through with no undo and no question.
-    let question = check().unwrap_or_else(|e| {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let _ = CODEX.set(args.first().is_some_and(|a| a == "--codex-user"));
+    // A guard that can't read what it guards asks (or, Codex's, refuses),
+    // rather than let the command through with no undo and no question.
+    let question = check(&args).unwrap_or_else(|e| {
         Some(format!(
             "The guard couldn't check this command ({e}), so it asks."
         ))
     });
     ANSWER.call_once(|| {
         if let Some(q) = question {
-            println!("{}", ask(&q));
+            println!("{}", answer(&q));
         }
     });
+}
+
+/// The decision that `question` is, for this guard's engine.
+fn answer(question: &str) -> Value {
+    if CODEX.get().copied().unwrap_or(true) {
+        deny(question)
+    } else {
+        ask(question)
+    }
 }
 
 /// Past `seconds`, the answer is a question, whatever the guard is stuck on
@@ -37,19 +56,28 @@ fn ask_after(seconds: u64) {
             let q = format!(
                 "The guard couldn't check this command (no answer after {seconds} s), so it asks."
             );
-            println!("{}", ask(&q));
+            println!("{}", answer(&q));
             std::process::exit(0);
         });
     });
 }
 
-fn check() -> Result<Option<String>, String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let [path] = args.as_slice() else {
-        return Err("usage: burrow-guard CONFIG < HOOK-JSON".to_owned());
+fn check(args: &[String]) -> Result<Option<String>, String> {
+    let (user, path) = match args {
+        [path] => (None, path),
+        [flag, user, path] if flag == "--codex-user" => (Some(user), path),
+        _ => return Err("usage: burrow-guard [--codex-user USER] CONFIG < HOOK-JSON".to_owned()),
     };
     let config = Config::load(Path::new(path))?;
     ask_after(config.ask_after_seconds);
+    // Codex's hook is every Codex's on the machine; only the jobs' user's
+    // commands are guarded (the reviewer's run read-only, and the undo
+    // snapshot isn't theirs to take). A user it can't name is guarded.
+    if let Some(user) = user
+        && current_user().is_some_and(|me| me != *user)
+    {
+        return Ok(None);
+    }
     let mut input = Vec::new();
     std::io::stdin()
         .read_to_end(&mut input)
@@ -61,6 +89,7 @@ fn check() -> Result<Option<String>, String> {
         .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     let guard = Guard {
         config: &config,
+        codex: user.is_some(),
         mark: runtime.join("claude-guard-last-snapshot"),
     };
     Ok(guard.check(&hook, SystemTime::now()))

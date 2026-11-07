@@ -56,7 +56,8 @@ Each has an entry below, and each can be imported on its own.
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
   deleting remote data, force-pushing `main`). A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
-  branch. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
+  branch; with `proj`, the same guard is Codex's managed hook for proj's Codex
+  jobs (`/etc/codex/requirements.toml`), refusing where it would ask. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.
@@ -148,8 +149,10 @@ Each has an entry below, and each can be imported on its own.
   model and overflow above a fresh weekly meter reading. A `ROLE@OWNER/REPO`
   key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
   small slot pool (`codex.slots`, two), workspace-write with network, the
-  shared one-way command list, and git hooks that mark its commits and
-  refuse rewrites or deletes of the remote default branch. Log it in with
+  shared one-way command list, the guard as its managed hook, and git hooks
+  that mark its commits and refuse rewrites or deletes of the remote default
+  branch, which the guard keeps on. A turn on the engine that didn't run the
+  turns before it is handed what they were asked and answered. Log it in with
   `autoland-codex-login job`, separately from `autoland-codex-login review`.
   Codex-written heads still get a Codex review and need a Claude judge.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)

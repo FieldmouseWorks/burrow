@@ -20,6 +20,22 @@ pub struct Config {
     pub ask_after_seconds: u64,
 }
 
+/// The user the guard runs as, by the name /etc/passwd gives its uid; None
+/// when that can't be read.
+#[must_use]
+pub fn current_user() -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata("/proc/self").ok()?.uid().to_string();
+    std::fs::read_to_string("/etc/passwd")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            (fields.nth(1)? == uid).then(|| name.to_owned())
+        })
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Config, String> {
         let text = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
