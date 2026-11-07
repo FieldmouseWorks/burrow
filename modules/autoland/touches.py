@@ -109,46 +109,94 @@ def bot_edited(repo, pr, st, rechecked):
     return (not rechecked) if edited is None else edited
 
 
-def commit_pages(repo, pr, st):
-    """One full commit read per head and base, shared with provenance. Failures
-    aren't cached: a head whose authorship is unknown cannot land unchecked."""
+def whole(pages, head):
+    """The commits a paged compare of head with the PR's base holds, each
+    {sha, author, committer, trailers}, with the head among them; None if the
+    read doesn't hold together (a page that isn't the compare's, pages that
+    disagree on the merge base or the count because the base moved between
+    them, a commit with no message), which is no evidence about this head.
+    A str, why, if GitHub held together fewer commits than its own count:
+    with the head and merge base fixed the range can't change, so that's
+    GitHub's cap and no later read says more."""
+    if not (isinstance(pages, list) and pages and all(isinstance(p, dict) for p in pages)):
+        return None
+    totals = {p.get("total_commits") for p in pages}
+    forks = {(p.get("merge_base_commit") or {}).get("sha") for p in pages}
+    commits = [c for p in pages for c in (p.get("commits") if isinstance(p.get("commits"), list) else [None])]
+    if (len(totals) != 1 or len(forks) != 1 or None in forks
+            or not all(isinstance(c, dict) and isinstance(c.get("sha"), str)
+                       and isinstance((c.get("commit") or {}).get("message"), str) for c in commits)):
+        return None
+    total, shas = totals.pop(), {c["sha"] for c in commits}
+    if not isinstance(total, int) or len(shas) != len(commits) or len(commits) > total:
+        return None
+    if len(commits) < total:
+        return f"GitHub lists {len(commits)} of its {total} commits, so who wrote the rest can't be read"
+    if head not in shas:
+        return None
+    return [{"sha": c["sha"],
+             "author": (c["commit"].get("author") or {}).get("email"),
+             "committer": (c["commit"].get("committer") or {}).get("email"),
+             "trailers": subprocess.run(["git", "interpret-trailers", "--parse"], input=c["commit"]["message"],
+                                        text=True, capture_output=True, check=True).stdout.splitlines()}
+            for c in commits]
+
+
+def pr_commits(repo, pr, st):
+    """Every commit on the PR's head since it left its base, as whole() reads
+    them, from GitHub's compare in pages: the PR's own commit list, and the
+    compare unpaged, stop at 250. One read per head and base, shared by
+    codex_written and provenance. The head goes in as its sha, so the read
+    is of that head even if the PR moves meanwhile. A read that doesn't hold
+    together isn't cached and is asked again next pass: a head whose
+    authorship is unknown cannot land unchecked. GitHub's cap is cached."""
     seen = [pr["headRefOid"], pr["baseRefName"]]
-    if st.get("commitHead") != seen:
-        pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100", check=False)
-        # The PR may have moved during the read, or its commit list may be
-        # truncated. Neither is evidence about the queried head.
-        commits = [c for page in (pages or []) for c in page]
-        if (not commits or commits[-1].get("sha") != pr["headRefOid"]
-                or any(not isinstance(c.get("commit", {}).get("message"), str) for c in commits)):
+    if st.get("commitsHead") != seen:
+        pages = C.gh("api", "--paginate", "--slurp",
+                     C.compare(repo, pr["baseRefName"], pr["headRefOid"]) + "?per_page=100", check=False)
+        got = whole(pages, pr["headRefOid"])
+        if got is None:
             return None
-        st["commitHead"], st["commitPages"] = seen, pages
-    return st["commitPages"]
+        for old in ("commitHead", "commitPages"):  # the PR commit list's pages, as read before
+            st.pop(old, None)
+        st["commitsHead"], st["commits"] = seen, got
+    return st["commits"]
 
 
 def codex_written(repo, pr, st):
-    """Only actual trailers count, on any commit since the PR's base. Cache
-    either answer per head and base; unreadable commits stay unknown and are
-    retried next pass, so they can neither land nor spend a judge."""
+    """Only actual trailers count, on any commit since the PR's base: True
+    or False, cached per head and base. None if its commits couldn't be read
+    this pass, retried next pass, so it can neither land nor spend a judge.
+    Past GitHub's cap, why (a str): no one can say a Codex job didn't write
+    it, so it's judged as if one did, never landed on its reviews alone."""
     seen = [pr["headRefOid"], pr["baseRefName"]]
     if st.get("codexHead") != seen:
-        pages = commit_pages(repo, pr, st)
-        if pages is None:
-            return None
-        st["codexWritten"] = any("engine: codex" in subprocess.run(["git", "interpret-trailers", "--parse"],
-                                 input=c["commit"]["message"], text=True, capture_output=True, check=True).stdout.casefold().splitlines()
-                                 for page in pages for c in page)
+        commits = pr_commits(repo, pr, st)
+        if not isinstance(commits, list):
+            return commits
+        st["codexWritten"] = any("engine: codex" in t.casefold() for c in commits for t in c["trailers"])
         st["codexHead"] = seen
     return st["codexWritten"]
+
+
+CO_AUTHOR_RE = re.compile(r"^co-authored-by:.*<([^<>]*)>\s*$", re.I)
+
+
+def co_authors(trailers):
+    """The addresses a commit's Co-authored-by trailers name, as GitHub reads
+    them; None for one that names none, which is no bot's either."""
+    return [m.group(1) if m else None for m in (CO_AUTHOR_RE.match(t) for t in trailers
+                                                 if t.casefold().startswith("co-authored-by:"))]
 
 
 def provenance(repo, pr, st):
     """True if a dependency bot's branch has a commit some other author,
     co-author or committer made (bot_edited), False if every one is the bots'
-    alone, None if that's unknown: its commits couldn't be read, or a Renovate
-    branch on a machine with no Renovate address to check them against.
-    Asked once per head, base and bots' addresses, since retargeting changes
-    which commits are the PR's, and setting Renovate's address right changes
-    whose they are. A failed ask is asked again."""
+    alone, None if that's unknown: its commits couldn't be read whole, or a
+    Renovate branch on a machine with no Renovate address to check them
+    against. Asked once per head, base and bots' addresses, since retargeting
+    changes which commits are the PR's, and setting Renovate's address right
+    changes whose they are. A failed ask is asked again."""
     renovate = pr["headRefName"].startswith("renovate/")
     if renovate and not CFG["renovateEmail"]:
         return None
@@ -157,14 +205,11 @@ def provenance(repo, pr, st):
     # that said nothing of them, so the same head is read again.
     seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL, GITHUB_EMAIL]
     if st.get("editedHead") != seen:
-        got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
-        # gh's commits have no committer, and GitHub's REST ones no co-authors.
-        pages = got and commit_pages(repo, pr, st)
-        if not pages:
+        commits = pr_commits(repo, pr, st)
+        if not isinstance(commits, list):
             return None
-        st["edited"] = (any(a.get("email") not in bots for c in got["commits"] for a in c["authors"])
-                        or any(c["commit"]["committer"]["email"] not in bots | {GITHUB_EMAIL}
-                               for page in pages for c in page))
+        st["edited"] = any(c["author"] not in bots or c["committer"] not in bots | {GITHUB_EMAIL}
+                           or any(a not in bots for a in co_authors(c["trailers"])) for c in commits)
         st["editedHead"] = seen
     return st["edited"]
 

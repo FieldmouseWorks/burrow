@@ -117,7 +117,7 @@ def review_service():
 # raises it by the PR's labels there, with the raises CN says the ledger
 # kept from before ("kept"), as Conary does: `r2` makes it R2, `review` asks
 # for a review round, and `raised` names them, sorted.
-REST_HEADS = {}  # the head the PR commits endpoint is answering about
+HANDLING = {"number": None}  # the PR a pass handles, whose commits a compare lists
 CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -185,7 +185,6 @@ def cn_classed():
 
 def touching(number, sha, files, labels=()):
     """What `cn class` reads a PR at a head touches, and its labels."""
-    REST_HEADS[number] = sha
     touched = json.load(open(TOUCHED)) if os.path.exists(TOUCHED) else {}
     touched[f"{number}@{sha}"] = {"files": list(files), "labels": list(labels)}
     with open(TOUCHED, "w") as f:
@@ -307,8 +306,8 @@ SINCE = []  # each job's place in line (C.job's since), in the order they starte
 ROLES = []  # and the kind of work each is (C.job's role), which picks its model
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 CARRY = {}  # what V.carry says of a head: nothing carries unless set
-COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
-COMMITTERS = {}  # a PR's commits' committer emails, by number, as the REST API gives them (None: the ask fails)
+COMMITS = {}  # a PR's commits' author emails, by number, as GitHub's compare gives them (None: the ask fails)
+COMMITTERS = {}  # and their committers' (None: the ask fails too)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
 
@@ -355,13 +354,19 @@ def gh_stub(*a, **k):
             raise got
         msgs = [{"message": m} for m in got]
         return [msgs[i:i + 100] for i in range(0, len(msgs), 100)] or [[]]  # --slurp: the pages
-    if a[:2] == ("pr", "view") and "commits" in a:
-        got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
-        return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}
-    if a[:1] == ("api",) and "--paginate" in a and a[-1].endswith("/commits?per_page=100"):
-        got = COMMITTERS.get(int(a[-1].split("/")[-2]), ["noreply@github.com"])
-        return None if got is None else [[{"sha": REST_HEADS.get(int(a[-1].split("/")[-2]), head),
-                                           "commit": {"message": "change: fixture", "committer": {"email": e}}} for e in got]]  # --slurp: the pages
+    if a[:3] == ("api", "--paginate", "--slurp") and a[3].startswith("repos/sam/r/compare/") \
+            and a[3].endswith("?per_page=100"):
+        # The PR's commits, the last at the head asked for: one for each
+        # author and committer set, the first author and GitHub filling in.
+        sha = urllib.parse.unquote(a[3].removesuffix("?per_page=100").rpartition("...")[2])
+        authors = COMMITS.get(HANDLING["number"], ["bot@renovateapp.com"])
+        committers = COMMITTERS.get(HANDLING["number"], ["noreply@github.com"])
+        if authors is None or committers is None:
+            return None
+        n = max(len(authors), len(committers))
+        return compare_pages([commit(sha if i == n - 1 else f"{i:040x}", "change: fixture",
+                                     (authors + authors[:1] * n)[i], (committers + ["noreply@github.com"] * n)[i])
+                              for i in range(n)])
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
@@ -374,6 +379,20 @@ def gh_stub(*a, **k):
         fork = FORKS.pop(0) if FORKS else FORK.get(urllib.parse.unquote(base), FORK["v"]) if dots else None
         return {"fork": fork} if fork else None
     return ""
+
+
+def commit(sha, message, author="bot@renovateapp.com", committer="noreply@github.com"):
+    """One commit as GitHub's REST API gives it."""
+    return {"sha": sha, "commit": {"message": message, "author": {"email": author}, "committer": {"email": committer}}}
+
+
+def compare_pages(commits, total=None, fork="f" * 40, shown=None):
+    """A compare of a head with its base, paged 100 at a time as gh's
+    --paginate --slurp gives it: total_commits is the whole range's count,
+    and GitHub may page through only the first `shown` of them."""
+    listed = commits[:shown]
+    return [{"total_commits": len(commits) if total is None else total, "merge_base_commit": {"sha": fork},
+             "commits": listed[i:i + 100]} for i in range(0, max(len(listed), 1), 100)]
 
 
 FAIL = []  # writes that fail, by a piece of their arguments: gh's None, or with check what gh() raises
@@ -523,6 +542,7 @@ def run(pr, after, held=None, below=None):
     C.LIMITED.clear()
     POSTED.clear()
     digest = []
+    HANDLING["number"] = pr["number"]
     touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]], [x["name"] for x in pr["labels"]["nodes"]])
     H.T.CLASSES.clear()
     with C.acting_for("sam/r"):

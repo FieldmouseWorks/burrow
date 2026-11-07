@@ -961,7 +961,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
     elif (codex := codex_written(repo, pr, st)) is None:
         settle("pending", "Settled; couldn't read its commits; next pass")
     elif codex or gate() or unseen or ci == "none" or asked or capped:
-        judged("a Codex job wrote it" if codex else
+        judged("a Codex job wrote it" if codex is True else codex if codex else
                f"it touches {gate()}" if gate() else
                f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
                else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head" if asked
