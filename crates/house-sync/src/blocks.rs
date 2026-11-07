@@ -131,18 +131,49 @@ fn ends(line: &[u8], name: &str) -> bool {
     line == format!("<!-- house:{name} end -->").as_bytes()
 }
 
+/// What follows `<!-- house:NAME ` on a line, for any NAME.
+fn after_name(line: &[u8]) -> Option<&[u8]> {
+    let rest = line.strip_prefix(b"<!-- house:")?;
+    let space = rest.iter().position(|&b| b == b' ').filter(|&s| s > 0)?;
+    Some(&rest[space + 1..])
+}
+
 /// Any block's begin or end marker.
 fn marker(line: &[u8]) -> bool {
-    let Some(rest) = line.strip_prefix(b"<!-- house:") else {
-        return false;
-    };
-    match rest.iter().position(|&b| b == b' ') {
-        Some(space) if space > 0 => {
-            let after = &rest[space + 1..];
-            after.starts_with(b"end -->") || version_begin(after)
+    after_name(line).is_some_and(|after| after.starts_with(b"end -->") || version_begin(after))
+}
+
+/// The NAME of `<!-- house:NAME vN begin ...`, or None for any other line.
+fn begin_name(line: &[u8]) -> Option<&[u8]> {
+    let rest = line.strip_prefix(b"<!-- house:")?;
+    let space = rest.iter().position(|&b| b == b' ').filter(|&s| s > 0)?;
+    version_begin(&rest[space + 1..]).then_some(&rest[..space])
+}
+
+/// How many of an AGENTS.md's lines are the repo's own: every line but the
+/// house blocks', markers included. A block is what `rewrite` takes for one:
+/// a begin marker whose next marker, of any block, is its own name's end.
+/// Anything else (a begin with no end, a mismatched or nested marker) opens
+/// no block, so its lines stay the repo's.
+pub fn own_lines(agents: &[u8]) -> usize {
+    let lines: Vec<&[u8]> = agents.split_inclusive(|&b| b == b'\n').map(bare).collect();
+    let mut own = 0;
+    let mut i = 0;
+    while i < lines.len() {
+        let closes = begin_name(lines[i]).and_then(|name| {
+            let name = String::from_utf8_lossy(name);
+            let next = (i + 1..lines.len()).find(|&j| marker(lines[j]))?;
+            ends(lines[next], &name).then_some(next)
+        });
+        match closes {
+            Some(end) => i = end + 1,
+            None => {
+                own += 1;
+                i += 1;
+            }
         }
-        _ => false,
     }
+    own
 }
 
 /// Whether two directories hold the same files, as `diff -rq` finds them:
