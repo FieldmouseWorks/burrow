@@ -1,0 +1,19 @@
+[package]
+name = "burrow-units"
+description = "Failed units and crashed programs, as a source for the stall watchdog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-events = { path = "../burrow-events" }
+burrow-watchdog = { path = "../burrow-watchdog" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

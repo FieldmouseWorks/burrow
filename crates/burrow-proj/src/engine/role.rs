@@ -61,22 +61,26 @@ impl Choice {
     }
 }
 
-/// A missing, malformed, future or hour-old reading cannot move a turn.
-fn over(meter: Option<&Path>, pct: f64, now: i64) -> bool {
-    let reading = meter
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice::<burrow_usage_reset::meter::Snapshot>(&b).ok());
-    reading.is_some_and(|r| {
-        r.read_at <= now as f64
-            && (now as f64) - r.read_at < 3600.0
-            && (0.0..=100.0).contains(&r.utilization)
-            && r.utilization >= pct
-    })
+/// Whether a turn moves from FROM's engine to TO's at PCT: FROM's is
+/// short by its fresh meter (any window at PCT, and no credits), or, for
+/// Claude, the machine is out of Claude's usage (`held`, usage.rs) before a
+/// meter could say so; and TO's has room by its own fresh meter (credits,
+/// or no window used up). A missing, malformed, future or hour-old reading
+/// moves nothing: it can't say the move helps.
+fn over(meters: Option<&Path>, held: bool, from: Engine, to: Engine, pct: f64, now: i64) -> bool {
+    use burrow_usage_reset::meter::Snapshot;
+    let Some(dir) = meters else {
+        return false;
+    };
+    let read = |e: Engine| Snapshot::read(dir, e.name(), now as f64);
+    let short = (held && from == Engine::Claude) || read(from).is_some_and(|m| m.short(pct));
+    short && read(to).is_some_and(|m| m.room())
 }
 
 pub(crate) fn role<'a>(
     line: &'a str,
-    meter: Option<&Path>,
+    meters: Option<&Path>,
+    held: bool,
     now: i64,
 ) -> Result<(RoleKey<'a>, Choice), String> {
     let words: Vec<_> = line.split_whitespace().collect();
@@ -99,7 +103,9 @@ pub(crate) fn role<'a>(
     Ok((
         RoleKey::parse(name)?,
         match overflow {
-            Some((pct, other)) if over(meter, pct, now) => other,
+            Some((pct, other)) if over(meters, held, primary.engine, other.engine, pct, now) => {
+                other
+            }
             _ => primary,
         },
     ))
@@ -108,32 +114,97 @@ pub(crate) fn role<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn meter(dir: &Path, engine: &str, windows: &[(&str, f64)], credits: bool, at: i64) {
+        let windows: serde_json::Map<_, _> = windows
+            .iter()
+            .map(|(n, u)| ((*n).to_owned(), json!({"used": u, "resets_at": 20000})))
+            .collect();
+        std::fs::write(
+            dir.join(format!("{engine}.json")),
+            json!({"windows": windows, "credits": credits, "read_at": at}).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn pick(dir: &Path, held: bool) -> Engine {
+        role("work claude over 80 codex", Some(dir), held, 10000)
+            .unwrap()
+            .1
+            .engine
+    }
+
     #[test]
-    fn overflow_requires_the_line_and_a_fresh_reading_at_the_threshold() {
+    fn overflow_needs_its_engine_short_and_the_other_with_room() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("meter.json");
-        let pick = |at| {
-            role("work claude over 80 codex", Some(&path), at)
-                .unwrap()
-                .1
-                .engine
-        };
-        assert_eq!(pick(10000), Engine::Claude); // missing
-        for (used, at, expected) in [
-            (79, 9999, Engine::Claude),
-            (80, 6401, Engine::Codex),
-            (100, 6400, Engine::Claude),
-            (100, 10001, Engine::Claude),
+        let dir = dir.path();
+        assert_eq!(pick(dir, false), Engine::Claude); // no meters
+        meter(dir, "codex", &[("300m", 10.0)], false, 9999);
+        for (windows, at, expected) in [
+            (
+                &[("seven_day", 79.0), ("five_hour", 50.0)][..],
+                9999,
+                Engine::Claude,
+            ),
+            (&[("seven_day", 80.0)][..], 6401, Engine::Codex),
+            // The five-hour session counts as much as the week.
+            (
+                &[("seven_day", 20.0), ("five_hour", 95.0)][..],
+                9999,
+                Engine::Codex,
+            ),
+            // An hour old, or from the future: it moves nothing.
+            (&[("seven_day", 100.0)][..], 6400, Engine::Claude),
+            (&[("seven_day", 100.0)][..], 10001, Engine::Claude),
         ] {
-            std::fs::write(
-                &path,
-                serde_json::json!({"utilization": used, "resets_at": "2026-11-07T12:00:00Z", "read_at": at})
-                    .to_string(),
-            )
-            .unwrap();
-            assert_eq!(pick(10000), expected);
+            meter(dir, "claude", windows, false, at);
+            assert_eq!(pick(dir, false), expected, "{windows:?} at {at}");
         }
-        std::fs::write(&path, "broken").unwrap();
-        assert_eq!(pick(10000), Engine::Claude);
+        std::fs::write(dir.join("claude.json"), "broken").unwrap();
+        assert_eq!(pick(dir, false), Engine::Claude);
+    }
+
+    #[test]
+    fn credits_are_room_and_a_hold_is_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        meter(dir, "claude", &[("seven_day", 99.0)], false, 9999);
+        // Codex's week used up: no room, unless it has credits to spend.
+        meter(
+            dir,
+            "codex",
+            &[("300m", 3.0), ("10080m", 100.0)],
+            false,
+            9999,
+        );
+        assert_eq!(pick(dir, false), Engine::Claude);
+        meter(
+            dir,
+            "codex",
+            &[("300m", 3.0), ("10080m", 100.0)],
+            true,
+            9999,
+        );
+        assert_eq!(pick(dir, false), Engine::Codex);
+        // Out of Claude's usage before its meter says so: moved too.
+        meter(dir, "claude", &[("seven_day", 10.0)], false, 9999);
+        assert_eq!(pick(dir, false), Engine::Claude);
+        assert_eq!(pick(dir, true), Engine::Codex);
+        // But never to an engine whose meter can't be read.
+        std::fs::remove_file(dir.join("codex.json")).unwrap();
+        assert_eq!(pick(dir, true), Engine::Claude);
+        // A hold is Claude's: it doesn't make Codex short.
+        meter(dir, "claude", &[("seven_day", 10.0)], false, 9999);
+        meter(dir, "codex", &[("300m", 10.0)], false, 9999);
+        let back = role("work codex over 80 claude", Some(dir), true, 10000)
+            .unwrap()
+            .1;
+        assert_eq!(back.engine, Engine::Codex);
+        meter(dir, "codex", &[("300m", 90.0)], false, 9999);
+        let back = role("work codex over 80 claude", Some(dir), false, 10000)
+            .unwrap()
+            .1;
+        assert_eq!(back.engine, Engine::Claude);
     }
 }

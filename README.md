@@ -147,7 +147,8 @@ Each has an entry below, and each can be imported on its own.
   once you've raised the limit, and keeps any older proj's or watchdog's
   limit from holding it again).
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
-  model and overflow above a fresh weekly meter reading. A `ROLE@OWNER/REPO`
+  model and an overflow to the other engine when its own is short and the
+  other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
   key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
   small slot pool (`codex.slots`, two), workspace-write with network, the
   shared one-way command list, the guard as its managed hook, and git hooks
@@ -326,9 +327,12 @@ Each has an entry below, and each can be imported on its own.
   Claude Code of its own in a tmux and confirms it, at most once a week; a
   reset that only works at the limit waits for it, and with nothing banked it
   does nothing. `HOST-notify` tells you when it used one, or when it couldn't.
-  It books its own next look, sooner the faster the week is going: no timer.
-  Each fresh weekly reading replaces `meter.json` and appends to `meter.log`
-  in its state dir, for proj's overflow and the meter's history.
+  It books its own next look, sooner the faster the week is going, and never
+  more than 15 minutes on: no timer. Each pass also keeps the engines' meters
+  for proj's role overflow: Claude's five-hour session and week, and, with
+  proj's Codex, Codex's windows and whether it has credits (read through its
+  app-server's `account/rateLimits/read`). Each fresh reading replaces
+  `meters/ENGINE.json` and appends to `meters/log` in its state dir.
 
 - **`ops`** (`burrow.ops`): perf, bpftrace, bcc, strace, gdb, tcpdump,
   nvme-cli, smartctl, fwupd and friends, a systemd hardware watchdog (with

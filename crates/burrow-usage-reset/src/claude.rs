@@ -18,6 +18,7 @@ use std::{env, thread};
 
 use serde_json::Value;
 
+use crate::meter::Window;
 use crate::pass::{Account, Reading, Reset};
 
 /// How long Claude Code has to answer, or to show the next screen.
@@ -329,7 +330,29 @@ pub fn usage(answer: &Value, copied: Option<f64>, now: f64) -> Result<Reading, S
         used,
         week: resets.chars().take(16).collect(),
         ends: ends.as_second() as f64,
+        session: session(&answer["rate_limits"]["five_hour"])?,
     })
+}
+
+/// The five-hour window in a `get_usage` answer: null while no session
+/// runs, and an error when it's there but can't be read.
+fn session(window: &Value) -> Result<Option<Window>, String> {
+    if window.is_null() {
+        return Ok(None);
+    }
+    let used = window["utilization"]
+        .as_f64()
+        .ok_or("get_usage's five_hour has no utilization")?;
+    let resets = window["resets_at"]
+        .as_str()
+        .ok_or("get_usage's five_hour has no resets_at")?;
+    let at = resets
+        .parse::<jiff::Timestamp>()
+        .map_err(|e| format!("get_usage's five_hour resets_at {resets}: {e}"))?;
+    Ok(Some(Window {
+        used,
+        resets_at: at.as_second() as f64,
+    }))
 }
 
 /// What it types.
@@ -790,8 +813,19 @@ mod tests {
                 used: 71.4,
                 week: "2026-11-04T19:00".to_owned(),
                 ends: 1_793_818_800.0,
+                session: Some(Window {
+                    used: 35.0,
+                    resets_at: 1_793_342_400.0,
+                }),
             })
         );
+        // No session running: no five-hour window, and still a reading.
+        let mut idle = fetched(71.4);
+        idle["rate_limits"]["five_hour"] = Value::Null;
+        assert_eq!(usage(&idle, None, NOW).unwrap().session, None);
+        let mut broken = fetched(71.4);
+        broken["rate_limits"]["five_hour"] = json!({"utilization": "lots"});
+        assert!(usage(&broken, None, NOW).is_err());
         // A copy too old to answer from: its endpoint was asked.
         assert!(usage(&fetched(71.4), Some(NOW - SNAPSHOT), NOW).is_ok());
         // Logged in with an API key, or not at all.

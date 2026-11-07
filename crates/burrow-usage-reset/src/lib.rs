@@ -5,9 +5,12 @@
 //! left and a reset is banked, tells the owner it did, and books its next
 //! look by how fast the week is going. Nothing here runs on a timer:
 //! burrow-events starts each pass at the time the last one booked
-//! (modules/usage-reset.nix).
+//! (modules/usage-reset.nix). Each pass also keeps the engines' meters,
+//! Claude's and Codex's, for proj's role overflow (meter.rs), and books its
+//! next soon enough to keep them fresh.
 
 pub mod claude;
+pub mod codex;
 pub mod meter;
 pub mod pass;
 pub mod store;
