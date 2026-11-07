@@ -131,18 +131,34 @@ fn ends(line: &[u8], name: &str) -> bool {
     line == format!("<!-- house:{name} end -->").as_bytes()
 }
 
+/// What follows `<!-- house:NAME ` on a line, for any NAME.
+fn after_name(line: &[u8]) -> Option<&[u8]> {
+    let rest = line.strip_prefix(b"<!-- house:")?;
+    let space = rest.iter().position(|&b| b == b' ').filter(|&s| s > 0)?;
+    Some(&rest[space + 1..])
+}
+
 /// Any block's begin or end marker.
 fn marker(line: &[u8]) -> bool {
-    let Some(rest) = line.strip_prefix(b"<!-- house:") else {
-        return false;
-    };
-    match rest.iter().position(|&b| b == b' ') {
-        Some(space) if space > 0 => {
-            let after = &rest[space + 1..];
-            after.starts_with(b"end -->") || version_begin(after)
+    after_name(line).is_some_and(|after| after.starts_with(b"end -->") || version_begin(after))
+}
+
+/// How many of an AGENTS.md's lines are the repo's own: every line but the
+/// house blocks', markers included. A begin marker with no end after it
+/// opens no block, so the lines after it stay the repo's.
+pub fn own_lines(agents: &[u8]) -> usize {
+    let mut own = 0;
+    let mut inside: Option<usize> = None;
+    for line in agents.split_inclusive(|&b| b == b'\n') {
+        let line = bare(line);
+        match inside {
+            None if after_name(line).is_some_and(version_begin) => inside = Some(1),
+            None => own += 1,
+            Some(_) if after_name(line) == Some(b"end -->") => inside = None,
+            Some(n) => inside = Some(n + 1),
         }
-        _ => false,
     }
+    own + inside.unwrap_or(0)
 }
 
 /// Whether two directories hold the same files, as `diff -rq` finds them:

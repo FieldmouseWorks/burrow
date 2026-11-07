@@ -88,6 +88,15 @@ fn judge(rule: Rule, title: &str, body: &str, diff: &Diff, event: &Event) -> Ver
             format!("grows {} code file(s) past {} lines", diff.big.len(), event.lines),
             format!("The house rules split a code file before it passes {} lines. Split it in this PR, or add a line to the PR body starting 'Why not split:' with the reason", event.lines),
         ),
+        Rule::GuideSize => (
+            !diff.guides.is_empty(),
+            format!(
+                "grows {} AGENTS.md past {} lines of its own",
+                diff.guides.len(),
+                rules::GUIDE
+            ),
+            format!("The house rules keep AGENTS.md a map: what the repo is, its own rules, and where things live, with the detail in the docs that own it, linked. Move the detail out in this PR, or add a line to the PR body starting 'Why a longer guide:' with the reason. Lines inside the house blocks don't count toward the {}", rules::GUIDE),
+        ),
         Rule::ModelNames => (
             !diff.models.is_empty(),
             format!("names a model in {} file(s)", diff.models.len()),
@@ -150,6 +159,15 @@ fn found(out: &mut dyn Write, diff: &Diff, event: &Event) -> Result<(), String> 
         say(
             out,
             &format!("grown past {} lines: {file:?}, {length} lines", event.lines),
+        )?;
+    }
+    for (file, own) in &diff.guides {
+        say(
+            out,
+            &format!(
+                "AGENTS.md grown past {} lines of its own: {file:?}, {own} lines",
+                rules::GUIDE
+            ),
         )?;
     }
     for file in &diff.timers {
