@@ -147,6 +147,14 @@ pub fn spawn(
         .spawn()
 }
 
+/// Codex's argv, the job's own /tmp it runs over, and the machine's paths
+/// under /tmp kept there.
+pub struct Start {
+    pub args: Vec<String>,
+    pub tmp: PathBuf,
+    pub kept: Vec<PathBuf>,
+}
+
 /// The login shell has applied the App's env, so this is the environment
 /// Codex starts in: the job's sandbox goes into its exec flags now
 /// ([`sandbox`]), naming the paths Codex and the job's commands will find,
@@ -156,7 +164,7 @@ pub fn codex_args(
     args: &[String],
     env: Env,
     machine: &sandbox::Machine,
-) -> Result<(Vec<String>, PathBuf), String> {
+) -> Result<Start, String> {
     let id = env("PROJ_JOB")
         .and_then(|v| v.into_string().ok())
         .filter(|v| !v.is_empty())
@@ -164,29 +172,29 @@ pub fn codex_args(
     let job = Job::new(cfg, &id);
     let scratch = scratch::dir(cfg, &id);
     let made = |e: std::io::Error| format!("couldn't make the job's sandbox: {e}");
-    let flags = sandbox::flags(cfg, &job, &scratch, env, machine).map_err(made)?;
+    let sandbox = sandbox::flags(cfg, &job, &scratch, env, machine).map_err(made)?;
     let tmp = sandbox::private_tmp(&scratch).map_err(made)?;
+    sandbox::check_kept(&tmp, machine, &sandbox.kept).map_err(made)?;
     let mut args = args.to_vec();
-    exec_flags(&mut args, flags);
-    Ok((args, tmp))
+    exec_flags(&mut args, sandbox.flags);
+    Ok(Start {
+        args,
+        tmp,
+        kept: sandbox.kept,
+    })
 }
 
 /// The login shell has applied the App's env. Append this job's hooks to
 /// its git configuration now, preserving the App's credentials and rewrites,
 /// and start Codex over the job's own /tmp.
-pub fn codex_command(
-    cfg: &Config,
-    args: &[String],
-    tmp: &Path,
-    count: Option<&str>,
-) -> Result<Command, String> {
+pub fn codex_command(cfg: &Config, start: &Start, count: Option<&str>) -> Result<Command, String> {
     let count: usize = count
         .unwrap_or("0")
         .parse()
         .map_err(|_| "GIT_CONFIG_COUNT isn't a number")?;
     let mut c = Command::new(&cfg.tools.bwrap);
-    c.args(sandbox::wrap(tmp, &cfg.tools.codex))
-        .args(args)
+    c.args(sandbox::wrap(&start.tmp, &start.kept, &cfg.tools.codex))
+        .args(&start.args)
         .env("GIT_CONFIG_COUNT", (count + 1).to_string())
         .env(format!("GIT_CONFIG_KEY_{count}"), "core.hooksPath")
         .env(format!("GIT_CONFIG_VALUE_{count}"), &cfg.codex_hooks);
@@ -196,10 +204,10 @@ pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let count = std::env::var("GIT_CONFIG_COUNT").ok();
     let machine = sandbox::Machine::real();
-    let (args, tmp) = codex_args(cfg, args, &|name| std::env::var_os(name), &machine)
+    let start = codex_args(cfg, args, &|name| std::env::var_os(name), &machine)
         .map_err(|e| crate::Fail::new(1, e))?;
     let mut command =
-        codex_command(cfg, &args, &tmp, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
+        codex_command(cfg, &start, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
     Err(crate::Fail::new(
         1,
         format!("couldn't start codex: {}", command.exec()),
@@ -229,13 +237,20 @@ mod tests {
     #[test]
     fn app_git_configuration_is_extended_after_the_login_shell() {
         let cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        let tmp = Path::new("/scratch/tmp");
-        let command =
-            codex_command(&cfg, &["exec".into(), "--json".into()], tmp, Some("9")).unwrap();
-        // Codex, over the job's own /tmp, with its args after.
+        let start = Start {
+            args: vec!["exec".into(), "--json".into()],
+            tmp: "/scratch/tmp".into(),
+            kept: vec!["/tmp/codex".into()],
+        };
+        let command = codex_command(&cfg, &start, Some("9")).unwrap();
+        // Codex, over the job's own /tmp with what it keeps of the
+        // machine's, with its args after.
         assert_eq!(command.get_program(), "/bin/bwrap");
         let argv: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(argv[4..6], ["/scratch/tmp", "/tmp"]);
+        assert_eq!(
+            argv[4..9],
+            ["/scratch/tmp", "/tmp", "--bind", "/tmp/codex", "/tmp/codex"]
+        );
         assert_eq!(
             argv[argv.len() - 4..],
             ["--", "/bin/codex", "exec", "--json"]
@@ -248,7 +263,7 @@ mod tests {
         assert_eq!(env["GIT_CONFIG_KEY_9"], "core.hooksPath");
         assert_eq!(env["GIT_CONFIG_VALUE_9"], "/hooks");
         assert!(!env.contains_key("GIT_CONFIG_KEY_0"));
-        assert!(codex_command(&cfg, &[], tmp, Some("bad")).is_err());
+        assert!(codex_command(&cfg, &start, Some("bad")).is_err());
     }
 
     #[test]
@@ -280,15 +295,16 @@ mod tests {
         };
         let mut given = args(&c, Some("thread".into()));
         given.push("-".into());
-        let (args, tmp) = codex_args(&cfg, &given, &env, &machine).unwrap();
+        let Start { args, tmp, kept } = codex_args(&cfg, &given, &env, &machine).unwrap();
         assert_eq!(tmp, cfg.scratch.join("jobs/job/tmp"));
-        let auth = |dir: &Path| format!("\"{}\"=\"deny\"", dir.join("auth.json").display());
+        assert!(kept.is_empty(), "{kept:?}");
+        let denied = |dir: &Path| format!("\"{}\"=\"deny\"", dir.display());
         let config = args.join("\n");
         assert!(
-            config.contains(&auth(&moved.canonicalize().unwrap())),
+            config.contains(&denied(&moved.canonicalize().unwrap())),
             "{config}"
         );
-        assert!(!config.contains(&auth(&home.join(".codex"))), "{config}");
+        assert!(!config.contains(&denied(&home.join(".codex"))), "{config}");
         assert!(config.contains(&format!(
             "\"{}\"=\"write\"",
             cfg.scratch.join("jobs/job").display()

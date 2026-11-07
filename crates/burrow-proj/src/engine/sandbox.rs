@@ -6,16 +6,19 @@
 //! The project, scratch, the job's own dir and git's common dir (worktrees
 //! made in scratch write there; an explicit grant also lifts the automatic
 //! .git protection) are writable, and so is /tmp, which is the job's own
-//! ([`private_tmp`]). Of the rest, commands see only what [`readable`]
-//! lists, read-only: the profile has no `:root`, so the CLI starts each
-//! command's mounts from an empty root. The network is on, which is also
-//! what lets a command connect() to the gh-token socket under /run/gh-token:
-//! the pinned CLI's seccomp has no finer switch for unix sockets, so which
-//! sockets a command can reach is decided by which paths it can see, never
-//! by a list of sockets to hide. Commands keep no_new_privs, since the
-//! filesystem isn't all writable, so sudo can't elevate.
+//! ([`private_tmp`]) but for the machine's paths under it that Codex or the
+//! job uses, which it keeps ([`Sandbox::kept`]). Of the rest, commands see
+//! only what [`readable`] lists, read-only: the profile has no `:root`, so
+//! the CLI starts each command's mounts from an empty root. The network is
+//! on, which is also what lets a command connect() to the gh-token socket
+//! under /run/gh-token: the pinned CLI's seccomp has no finer switch for
+//! unix sockets, so which sockets a command can reach is decided by which
+//! paths it can see, never by a list of sockets to hide. Commands keep
+//! no_new_privs, since the filesystem isn't all writable, so sudo can't
+//! elevate.
 
 use crate::{config::Config, job::Job, read};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -85,12 +88,16 @@ const PLATFORM: &[&str] = &[
     "/run/current-system/sw",
 ];
 
+/// Where the job's own /tmp goes, over the machine's.
+pub const TMP: &str = "/tmp";
+
 /// What [`readable`] reads of the machine: its own paths, and the resolver
 /// config, whose file (systemd-resolved's stub, under /run) is a
-/// symlink's target outside them.
+/// symlink's target outside them; and its /tmp, which the job's replaces.
 pub struct Machine {
     pub system: Vec<PathBuf>,
     pub resolver: PathBuf,
+    pub tmp: PathBuf,
 }
 
 impl Machine {
@@ -98,6 +105,26 @@ impl Machine {
         Self {
             system: SYSTEM.iter().map(PathBuf::from).collect(),
             resolver: "/etc/resolv.conf".into(),
+            tmp: TMP.into(),
+        }
+    }
+}
+
+/// What a command may do with a path. Ordered as the pinned CLI settles
+/// two entries for the same path: deny over write over read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Access {
+    Read,
+    Write,
+    Deny,
+}
+
+impl Access {
+    fn name(self) -> &'static str {
+        match self {
+            Access::Read => "read",
+            Access::Write => "write",
+            Access::Deny => "deny",
         }
     }
 }
@@ -143,13 +170,82 @@ fn readable(env: Env, machine: &Machine) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Codex's login, which the job's commands have no use for: denied as named
-/// and where a symlink there leads, in case a grant reaches either.
+/// Codex's home and its login, which the job's commands have no use for:
+/// denied as named and where a symlink there leads, in case a grant reaches
+/// either (/tmp's does, when Codex's home is kept there). Its config would
+/// otherwise let a job change what Codex runs outside the sandbox.
 fn denied(env: Env) -> io::Result<Vec<PathBuf>> {
-    let auth = codex_home(env)?.join("auth.json");
-    let mut paths = vec![auth.clone()];
-    paths.extend(auth.canonicalize().ok().filter(|p| *p != auth));
+    let home = codex_home(env)?;
+    let auth = home.join("auth.json");
+    let mut paths = Vec::new();
+    for path in [home, auth] {
+        paths.extend(path.canonicalize().ok().filter(|p| *p != path));
+        paths.push(path);
+    }
     Ok(paths)
+}
+
+/// The machine's paths under its /tmp that the job's sandbox names, as
+/// named and where a symlink leads, each with the access its entry gives:
+/// Codex starts over the job's own /tmp, so these are kept there, bound
+/// from the machine's, or Codex's home, the project, its git metadata, the
+/// job's state and the tools' config there would be gone or other files.
+/// Nothing else of the machine's /tmp is. One that isn't there has nothing
+/// to keep; /tmp itself can't be kept, as the job's own is there.
+fn under_tmp(
+    entries: &BTreeMap<PathBuf, Access>,
+    tmp: &Path,
+) -> io::Result<Vec<(PathBuf, Access)>> {
+    let mut kept = Vec::new();
+    for (path, access) in entries {
+        let canonical = path.canonicalize().ok();
+        for place in [Some(path), canonical.as_ref()].into_iter().flatten() {
+            if place == tmp {
+                return Err(io::Error::other(format!(
+                    "{} is {}, which is the job's own",
+                    path.display(),
+                    tmp.display()
+                )));
+            }
+            if place.starts_with(tmp) && place.exists() {
+                kept.push((place.clone(), *access));
+            }
+        }
+    }
+    Ok(kept)
+}
+
+/// The paths of LIST that no other of LIST holds.
+fn outermost(mut list: Vec<PathBuf>) -> Vec<PathBuf> {
+    list.sort();
+    list.dedup();
+    let all = list.clone();
+    list.retain(|p| !all.iter().any(|q| q != p && p.starts_with(q)));
+    list
+}
+
+/// Each path the machine's /tmp keeps in the job's own goes where it is on
+/// the machine, through dirs of the job's /tmp: none may be a symlink the
+/// job left there, which would put the machine's path somewhere else.
+pub fn check_kept(private: &Path, machine: &Machine, kept: &[PathBuf]) -> io::Result<()> {
+    for path in kept {
+        let below = path.strip_prefix(&machine.tmp).map_err(io::Error::other)?;
+        let mut at = private.to_owned();
+        for part in below.components() {
+            at.push(part);
+            match at.symlink_metadata() {
+                Ok(meta) if meta.is_symlink() => {
+                    return Err(io::Error::other(format!(
+                        "{} is a symlink, where the job's /tmp keeps {}",
+                        at.display(),
+                        path.display()
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The job's own /tmp, a dir in its scratch, the user's alone: proj starts
@@ -174,14 +270,22 @@ pub fn private_tmp(scratch: &Path) -> io::Result<PathBuf> {
 }
 
 /// bwrap's argv to run Codex with TMP as its /tmp, and TMPDIR saying so,
-/// the rest of the machine as it is: Codex's own sandbox for each command
-/// then nests in it.
-pub fn wrap(tmp: &Path, codex: &Path) -> Vec<OsString> {
+/// the machine's paths KEPT there bound over it from the machine's (bwrap
+/// takes a bind's source from the machine's own root), and the rest of the
+/// machine as it is: Codex's own sandbox for each command then nests in it.
+pub fn wrap(tmp: &Path, kept: &[PathBuf], codex: &Path) -> Vec<OsString> {
     let mut argv: Vec<OsString> = ["--dev-bind", "/", "/", "--bind"]
         .iter()
         .map(OsString::from)
         .collect();
-    argv.extend([tmp.as_os_str().to_owned(), "/tmp".into()]);
+    argv.extend([tmp.as_os_str().to_owned(), TMP.into()]);
+    for path in kept {
+        argv.extend([
+            "--bind".into(),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]);
+    }
     argv.extend(
         ["--setenv", "TMPDIR", "/tmp", "--die-with-parent", "--"]
             .iter()
@@ -204,8 +308,16 @@ fn profile_name() -> io::Result<String> {
     }))
 }
 
-/// The flags that give Codex the job's sandbox, all of them `exec`'s, to go
-/// before `resume`. A project that isn't a repository yet gets its own
+/// The job's sandbox.
+pub struct Sandbox {
+    /// Codex's flags for it, all of them `exec`'s, to go before `resume`.
+    pub flags: Vec<String>,
+    /// The machine's paths under its /tmp that Codex or the job uses, kept
+    /// in the job's own ([`under_tmp`]).
+    pub kept: Vec<PathBuf>,
+}
+
+/// The job's sandbox. A project that isn't a repository yet gets its own
 /// `.git` granted without making it, so the job can `git init` there (the
 /// pinned CLI grants a path that doesn't exist yet), and Codex is told to
 /// start outside one.
@@ -215,7 +327,7 @@ pub fn flags(
     scratch: &Path,
     env: Env,
     machine: &Machine,
-) -> io::Result<Vec<String>> {
+) -> io::Result<Sandbox> {
     let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
     // proj await/done and commands' wait files write only this job's state.
     let mut roots = vec![project.clone(), scratch.to_owned(), job.dir.clone()];
@@ -250,21 +362,42 @@ pub fn flags(
         std::fs::create_dir_all(root)?;
     }
     roots.push(metadata);
-    let quoted = |p: &Path| serde_json::to_string(&p.to_string_lossy()).expect("string");
-    let grant = |paths: Vec<PathBuf>, how: &str| {
-        paths
-            .iter()
-            .map(|p| format!("{}=\"{how}\"", quoted(p)))
-            .collect::<Vec<_>>()
+    let mut entries = BTreeMap::new();
+    let grant = |entries: &mut BTreeMap<PathBuf, Access>, path: PathBuf, access: Access| {
+        let given = entries.entry(path).or_insert(access);
+        *given = access.max(*given);
     };
-    let entries = [
-        grant(readable(env, machine)?, "read"),
-        grant(vec!["/tmp".into()], "write"),
-        grant(roots, "write"),
-        grant(denied(env)?, "deny"),
-    ]
-    .concat()
-    .join(",");
+    for path in readable(env, machine)? {
+        grant(&mut entries, path, Access::Read);
+    }
+    for path in roots {
+        grant(&mut entries, path, Access::Write);
+    }
+    for path in denied(env)? {
+        grant(&mut entries, path, Access::Deny);
+    }
+    // What's kept in the job's /tmp gets its own entry there, so /tmp's
+    // write grant, which is broader, doesn't reach it: read stays read, and
+    // Codex's home stays denied.
+    let kept = under_tmp(&entries, &machine.tmp)?;
+    for (path, access) in &kept {
+        grant(&mut entries, path.clone(), *access);
+    }
+    grant(&mut entries, machine.tmp.clone(), Access::Write);
+    // A deny under another the CLI would mount in a mask already made.
+    let denies: Vec<PathBuf> = entries
+        .iter()
+        .filter(|(_, a)| **a == Access::Deny)
+        .map(|(p, _)| p.clone())
+        .collect();
+    let kept = outermost(kept.into_iter().map(|(p, _)| p).collect());
+    let quoted = |p: &Path| serde_json::to_string(&p.to_string_lossy()).expect("string");
+    let entries = entries
+        .iter()
+        .filter(|(p, a)| **a != Access::Deny || !denies.iter().any(|d| d != *p && p.starts_with(d)))
+        .map(|(p, a)| format!("{}=\"{}\"", quoted(p), a.name()))
+        .collect::<Vec<_>>()
+        .join(",");
     let name = profile_name()?;
     for config in [
         r#"approval_policy="never""#.to_owned(),
@@ -279,7 +412,7 @@ pub fn flags(
     ] {
         flags.extend(["-c".into(), config]);
     }
-    Ok(flags)
+    Ok(Sandbox { flags, kept })
 }
 
 #[cfg(test)]
@@ -308,7 +441,8 @@ pub(crate) mod tests {
     }
 
     /// A machine in DIR: its own paths are `system`, which is there, and
-    /// `gone`, which isn't; its resolver config links to `resolved/stub`.
+    /// `gone`, which isn't; its resolver config links to `resolved/stub`;
+    /// its /tmp is `tmp`.
     pub(crate) fn machine_in(dir: &Path) -> Machine {
         std::fs::create_dir_all(dir.join("system")).unwrap();
         std::fs::create_dir_all(dir.join("resolved")).unwrap();
@@ -317,6 +451,7 @@ pub(crate) mod tests {
         Machine {
             system: vec![dir.join("system"), dir.join("gone")],
             resolver: dir.join("resolv.conf"),
+            tmp: dir.join("tmp"),
         }
     }
 
@@ -341,13 +476,17 @@ pub(crate) mod tests {
         let machine = machine_in(dir.path());
         let home = dir.path().join("home");
         let env = env_of(&[("HOME", &home)]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
+        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
+            .unwrap()
+            .flags;
         assert_eq!(flags[0], "-c", "no exec flags for a repository");
         let config = flags.join("\n");
         assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
         assert!(config.contains(&format!("\"{}\"=\"write\"", job.dir.display())));
         assert!(config.contains(&format!("\"{}\"=\"write\"", home.join(".cargo").display())));
-        assert!(config.contains(&deny(&home.join(".codex/auth.json"))));
+        // Codex's home, its login in it, is denied whole.
+        assert!(config.contains(&deny(&home.join(".codex"))));
+        assert!(!config.contains(&deny(&home.join(".codex/auth.json"))));
         // A sandbox mode anywhere would put the legacy policy in its place.
         assert!(!config.contains("sandbox_mode"));
     }
@@ -380,8 +519,8 @@ pub(crate) mod tests {
             selected
         };
         let scratch = dir.path().join("scratch");
-        let first = profile(&flags(&cfg, &job, &scratch, &env, &machine).unwrap());
-        let again = profile(&flags(&cfg, &job, &scratch, &env, &machine).unwrap());
+        let first = profile(&flags(&cfg, &job, &scratch, &env, &machine).unwrap().flags);
+        let again = profile(&flags(&cfg, &job, &scratch, &env, &machine).unwrap().flags);
         assert_ne!(first, "proj");
         assert!(
             first.starts_with("proj-") && first.len() == "proj-".len() + 32,
@@ -399,7 +538,9 @@ pub(crate) mod tests {
         let job = Job::new(&cfg, "job");
         let machine = machine_in(dir.path());
         let env = env_of(&[("HOME", &dir.path().join("home"))]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
+        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
+            .unwrap()
+            .flags;
         assert_eq!(flags[0], "--skip-git-repo-check");
         // Its .git is granted, for a `git init`, but not made: an empty one
         // would read as a broken repository.
@@ -555,7 +696,9 @@ pub(crate) mod tests {
         let machine = machine_in(dir.path());
         let home = dir.path().join("home");
         let env = env_of(&[("HOME", &home)]);
-        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
+        let flags = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
+            .unwrap()
+            .flags;
         let filesystem = flags
             .iter()
             .find(|f| f.contains(".filesystem="))
@@ -567,11 +710,161 @@ pub(crate) mod tests {
             dir.path().join("system").display()
         )));
         assert!(!filesystem.contains(&dir.path().join("gone").display().to_string()));
-        assert!(filesystem.contains(r#""/tmp"="write""#), "{filesystem}");
+        assert!(
+            filesystem.contains(&format!("\"{}\"=\"write\"", machine.tmp.display())),
+            "{filesystem}"
+        );
         // Nothing of home is there but its grants: not home itself.
         assert!(!filesystem.contains(&format!("\"{}\"=", home.display())));
         // Commands build through the daemon, the store being read-only.
         assert!(flags.contains(&r#"shell_environment_policy.set.NIX_REMOTE="daemon""#.to_owned()));
+    }
+
+    /// The filesystem table's entry for PATH, if it has one.
+    fn entry(flags: &[String], path: &Path) -> Option<String> {
+        let filesystem = flags.iter().find(|f| f.contains(".filesystem="))?;
+        let key = format!("\"{}\"=\"", path.display());
+        let at = filesystem.find(&key)? + key.len();
+        Some(filesystem[at..].split('"').next()?.to_owned())
+    }
+
+    #[test]
+    fn what_codex_and_the_job_use_under_tmp_is_kept_with_its_own_access() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let machine = machine_in(dir.path());
+        let tmp = machine.tmp.clone();
+        // The project a worktree under /tmp, its repository's git metadata
+        // there too; the job's state and scratch there.
+        let repo = tmp.join("repo");
+        let project = tmp.join("project");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").args(args).status().unwrap().success());
+        };
+        git(&["init", "-q", repo.to_str().unwrap()]);
+        git(&[
+            "-C",
+            repo.to_str().unwrap(),
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ]);
+        git(&[
+            "-C",
+            repo.to_str().unwrap(),
+            "worktree",
+            "add",
+            "-q",
+            project.to_str().unwrap(),
+        ]);
+        let mut cfg = job_in(&tmp, &project);
+        cfg.scratch = tmp.join("scratch");
+        let job = Job::new(&cfg, "job");
+        let scratch = cfg.scratch.join("job");
+        // HOME there, so cargo's and nix's caches are; Codex's home there
+        // through a symlink from outside; git's config a file right in
+        // /tmp; rustup's toolchains through a symlink in /tmp to outside;
+        // the token's socket in a dir there.
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(tmp.join("codex-home")).unwrap();
+        std::fs::write(tmp.join("codex-home/auth.json"), "{}").unwrap();
+        let link = dir.path().join("codex-link");
+        symlink(tmp.join("codex-home"), &link).unwrap();
+        let global = tmp.join("gitconfig");
+        std::fs::write(&global, "[user]\n").unwrap();
+        let toolchains = dir.path().join("toolchains");
+        std::fs::create_dir_all(&toolchains).unwrap();
+        let rustup = tmp.join("rustup");
+        symlink(&toolchains, &rustup).unwrap();
+        std::fs::create_dir_all(tmp.join("gh-token")).unwrap();
+        let token = tmp.join("gh-token/workers.sock");
+        // What else is in the machine's /tmp: none of the job's.
+        std::fs::create_dir_all(tmp.join("tmux-1001")).unwrap();
+        let env = env_of(&[
+            ("HOME", &home),
+            ("CODEX_HOME", &link),
+            ("GIT_CONFIG_GLOBAL", &global),
+            ("RUSTUP_HOME", &rustup),
+            ("GH_TOKEN_SOCKET", &token),
+        ]);
+        let first = flags(&cfg, &job, &scratch, &env, &machine).unwrap();
+        let kept = [
+            tmp.join("codex-home"),
+            tmp.join("gh-token"),
+            global.clone(),
+            home.join(".cache/nix"),
+            home.join(".cargo"),
+            tmp.join("jobs/job"),
+            project.clone(),
+            repo.join(".git"),
+            rustup.clone(),
+            scratch.clone(),
+        ];
+        let mut sorted = kept.to_vec();
+        sorted.sort();
+        assert_eq!(first.kept, sorted);
+        // Each has its own entry, as it would outside /tmp, so the job's
+        // /tmp grant doesn't reach it: Codex's home stays denied (its
+        // login with it), and what's read stays read.
+        let access = |path: &Path| entry(&first.flags, path);
+        assert_eq!(access(&tmp).as_deref(), Some("write"));
+        assert_eq!(access(&tmp.join("codex-home")).as_deref(), Some("deny"));
+        assert_eq!(access(&tmp.join("codex-home/auth.json")), None);
+        for read in [&global, &rustup, &tmp.join("gh-token")] {
+            assert_eq!(access(read).as_deref(), Some("read"), "{}", read.display());
+        }
+        for write in [
+            &project,
+            &repo.join(".git"),
+            &scratch,
+            &tmp.join("jobs/job"),
+            &home.join(".cargo"),
+        ] {
+            assert_eq!(
+                access(write).as_deref(),
+                Some("write"),
+                "{}",
+                write.display()
+            );
+        }
+        // Not HOME, nor anything else of the machine's /tmp.
+        assert_eq!(access(&home), None);
+        assert_eq!(access(&tmp.join("tmux-1001")), None);
+        // The next start keeps the same.
+        let again = flags(&cfg, &job, &scratch, &env, &machine).unwrap();
+        assert_eq!(again.kept, first.kept);
+        // /tmp itself can't be kept: the job's own is there.
+        let env = env_of(&[("HOME", &home), ("CARGO_HOME", &tmp)]);
+        let error = flags(&cfg, &job, &scratch, &env, &machine).err().unwrap();
+        assert!(error.to_string().contains("the job's own"), "{error}");
+    }
+
+    #[test]
+    fn nothing_the_job_left_in_its_tmp_moves_what_it_keeps() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let machine = machine_in(dir.path());
+        let private = private_tmp(&dir.path().join("scratch")).unwrap();
+        let kept = [machine.tmp.join("codex-home"), machine.tmp.join("a/b")];
+        // Not there yet, or a dir bwrap made: kept where it is.
+        check_kept(&private, &machine, &kept).unwrap();
+        std::fs::create_dir_all(private.join("codex-home")).unwrap();
+        std::fs::create_dir_all(private.join("a/b")).unwrap();
+        check_kept(&private, &machine, &kept).unwrap();
+        // A symlink where it goes, or above it, and Codex doesn't start.
+        std::fs::remove_dir(private.join("codex-home")).unwrap();
+        symlink(dir.path(), private.join("codex-home")).unwrap();
+        assert!(check_kept(&private, &machine, &kept[..1]).is_err());
+        std::fs::remove_dir_all(private.join("a")).unwrap();
+        symlink(dir.path(), private.join("a")).unwrap();
+        assert!(check_kept(&private, &machine, &kept[1..]).is_err());
     }
 
     #[test]
@@ -594,7 +887,7 @@ pub(crate) mod tests {
         std::os::unix::fs::symlink(other.join("tmp-target"), other.join("tmp")).unwrap();
         assert!(private_tmp(&other).is_err());
         // Codex runs with it over /tmp, TMPDIR saying so.
-        let argv: Vec<String> = wrap(&tmp, Path::new("/bin/codex"))
+        let argv: Vec<String> = wrap(&tmp, &[], Path::new("/bin/codex"))
             .into_iter()
             .map(|a| a.into_string().unwrap())
             .collect();

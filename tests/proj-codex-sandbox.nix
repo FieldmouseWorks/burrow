@@ -43,7 +43,9 @@ let
   # make a worktree in its scratch and commit there, reach its App's token
   # socket, write its job's state (`proj done`), and, to be refused, write
   # outside its roots, read Codex's login where the login shell moved it
-  # (through its symlink, and at its target), and reach what runs things
+  # (through its symlink, and at its target in the machine's /tmp, which
+  # Codex's own start keeps, as it does git's global config there: commits
+  # read it, nothing writes it), change Codex's config, and reach what runs things
   # outside the sandbox: the user's D-Bus and the systemd manager's private
   # socket, spoken to directly, and the user's tmux servers: one at a path of
   # its own (-S), one bound by a relative name, one under a TMUX_TMPDIR the
@@ -63,7 +65,9 @@ let
     "grep -qx 'NoNewPrivs:[[:space:]]1' /proc/self/status && touch /data/dev/jobs/$PROJ_JOB/no-new-privs"
     "touch /data/dev/elsewhere/written || touch /data/dev/jobs/$PROJ_JOB/elsewhere-refused"
     "cat \"$CODEX_HOME/auth.json\" || touch /data/dev/jobs/$PROJ_JOB/login-refused"
-    "cat /data/dev/codex-home/auth.json || touch /data/dev/jobs/$PROJ_JOB/login-target-refused"
+    "cat /tmp/codex-home/auth.json || touch /data/dev/jobs/$PROJ_JOB/login-target-refused"
+    "touch \"$CODEX_HOME/config.toml\" || touch /data/dev/jobs/$PROJ_JOB/codex-config-refused"
+    "test \"$(git config --global --show-origin user.email)\" = \"$(printf 'file:/tmp/dev-gitconfig\\tdev@example.test')\" && ! touch /tmp/dev-gitconfig && touch /data/dev/jobs/$PROJ_JOB/gitconfig-read-only"
     "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/bus-refused"
     "${connect "/run/user/1001/systemd/private"} || touch /data/dev/jobs/$PROJ_JOB/manager-refused"
     "tmux -S /tmp/served.sock new-window 'touch /data/dev/elsewhere/by-socket' || touch /data/dev/jobs/$PROJ_JOB/tmux-socket-refused"
@@ -88,6 +92,9 @@ let
   resumedCalls = calls [
     "touch /data/dev/elsewhere/resumed || touch /data/dev/jobs/$PROJ_JOB/resumed-elsewhere-refused"
     "cat \"$CODEX_HOME/auth.json\" || touch /data/dev/jobs/$PROJ_JOB/resumed-login-refused"
+    "touch \"$CODEX_HOME/config.toml\" || touch /data/dev/jobs/$PROJ_JOB/resumed-codex-config-refused"
+    # `proj done` took the last turn's scratch with it.
+    "git worktree add -q --detach \"$PROJ_SCRATCH/again\" origin/trunk && git -C \"$PROJ_SCRATCH/again\" commit -q --allow-empty -m again && ! touch /tmp/dev-gitconfig && touch /data/dev/jobs/$PROJ_JOB/resumed-committed"
     "${connect "/run/user/1001/bus"} || touch /data/dev/jobs/$PROJ_JOB/resumed-bus-refused"
     "tmux -L host new-window 'touch /data/dev/elsewhere/resumed-by-tmux' || touch /data/dev/jobs/$PROJ_JOB/resumed-tmux-refused"
     "tmux -S /tmp/served-rel.sock new-window 'touch /data/dev/elsewhere/resumed-by-relative' || touch /data/dev/jobs/$PROJ_JOB/resumed-tmux-relative-refused"
@@ -178,7 +185,11 @@ pkgs.testers.runNixOSTest {
     def dev(command):
         return jobs.succeed("su - dev -c " + shlex.quote(command)).strip()
     jobs.succeed("install -d -o dev -g dev /data/dev/src/web /data/dev/elsewhere /srv/origin.git")
+    # Git's global config is a file in the machine's /tmp, which the job's
+    # commits need and the job's own /tmp would hide.
+    dev("echo 'export GIT_CONFIG_GLOBAL=/tmp/dev-gitconfig' >>~/.bash_profile")
     dev("git config --global user.name Dev && git config --global user.email dev@example.test")
+    jobs.succeed("grep -q dev@example.test /tmp/dev-gitconfig")
     dev("git init -q -b trunk /data/dev/src/web && git -C /data/dev/src/web commit -q --allow-empty -m initial")
     # Its origin is on the network, as GitHub is: the sandbox mounts nothing
     # of the machine's but what the job is given, /srv included.
@@ -194,9 +205,11 @@ pkgs.testers.runNixOSTest {
     jobs.succeed("${model} 18555 /tmp/calls.json >/tmp/model.log 2>&1 &")
     jobs.wait_for_open_port(18555)
     # The login shell moves Codex's home, through a symlink, after proj has
-    # started the turn's unit: the deny must follow it there.
-    jobs.succeed("install -d -o dev -g dev -m 0700 /data/dev/codex-home")
-    dev("ln -s /data/dev/codex-home ~/codex-link && echo 'export CODEX_HOME=$HOME/codex-link' >>~/.bash_profile")
+    # started the turn's unit: the deny must follow it there. It's in the
+    # machine's /tmp, which Codex's own start keeps, or Codex would find no
+    # config, login or session there.
+    jobs.succeed("install -d -o dev -g dev -m 0700 /tmp/codex-home")
+    dev("ln -s /tmp/codex-home ~/codex-link && echo 'export CODEX_HOME=$HOME/codex-link' >>~/.bash_profile")
     assert dev("echo $CODEX_HOME") == "/home/dev/codex-link"
     catalog = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
     dev("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(catalog) + " >~/catalog.json && jq -e '.models | length == 1' ~/catalog.json")
@@ -243,7 +256,7 @@ pkgs.testers.runNixOSTest {
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
     for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
-                 "login-target-refused", "bus-refused", "manager-refused", "tmux-socket-refused",
+                 "login-target-refused", "codex-config-refused", "gitconfig-read-only", "bus-refused", "manager-refused", "tmux-socket-refused",
                  "tmux-custom-refused", "tmux-refused", "tmux-late-refused", "tmux-relative-refused",
                  "netns-refused", "daemon-refused", "keys-refused", "tmp-own", "store-queried"]:
         assert mark in marks, (mark, marks, said)
@@ -267,7 +280,8 @@ pkgs.testers.runNixOSTest {
     jobs.wait_until_succeeds(f"test -e /data/dev/jobs/{j}/2.jsonl && su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/2.jsonl /data/dev/jobs/{j}/2.stderr")[1]
-    for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-bus-refused",
+    for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-codex-config-refused",
+                 "resumed-committed", "resumed-bus-refused",
                  "resumed-tmux-refused", "resumed-tmux-relative-refused", "resumed-netns-refused",
                  "resumed-tmp-own"]:
         assert mark in marks, (mark, marks, said)
