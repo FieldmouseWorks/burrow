@@ -122,8 +122,9 @@ into project jobs.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
-  have the box user's permissions. Codex jobs use
-  workspace-write with network access; sudo cannot elevate there.
+  have the box user's permissions. Codex jobs write
+  only their project, scratch, job dir and git metadata, with network access
+  (the App's token socket included); sudo cannot elevate there.
 - Jobs are headless (`claude -p` or `codex exec --json`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.

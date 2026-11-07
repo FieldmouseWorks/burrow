@@ -149,7 +149,8 @@ Each has an entry below, and each can be imported on its own.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
   model and overflow above a fresh weekly meter reading. A `ROLE@OWNER/REPO`
   key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
-  small slot pool (`codex.slots`, two), workspace-write with network, the
+  small slot pool (`codex.slots`, two), a sandbox that writes only the
+  project, its scratch, its job's dir and git's metadata, with network, the
   shared one-way command list, the guard as its managed hook, and git hooks
   that mark its commits and refuse rewrites or deletes of the remote default
   branch, which the guard keeps on. A turn on the engine that didn't run the

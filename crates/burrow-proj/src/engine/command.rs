@@ -13,7 +13,7 @@ pub const LONG: &str = "A command that can outlast one Bash call (ten minutes), 
 pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
 
 /// Parent exec flags precede resume: its subcommand accepts model and JSON,
-/// but not --sandbox or --add-dir (pinned CLI's exec/resume help).
+/// but not the parent's own flags (pinned CLI's exec/resume help).
 fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
     let mut args: Vec<String> = match choice.engine {
         Engine::Claude => [
@@ -26,10 +26,12 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
         .map(String::from)
         .to_vec(),
         // Stay in the turn's unit, rather than a shared background daemon.
-        // no_new_privs in Codex's sandbox prevents sudo from elevating.
-        Engine::Codex => ["--no-daemon", "exec", "--sandbox", "workspace-write"]
-            .map(String::from)
-            .to_vec(),
+        // No --sandbox: the pinned CLI reads that flag as the legacy policy
+        // and drops the named profile configure_codex gives (its
+        // resolve_permission_config_syntax), leaving only the cwd and /tmp
+        // writable, .git read-only and the network, unix sockets included,
+        // refused. The profile is the whole sandbox.
+        Engine::Codex => ["--no-daemon", "exec"].map(String::from).to_vec(),
     };
     if let Some(s) = session {
         match choice.engine {
@@ -60,8 +62,15 @@ fn exec_flags(args: &mut Vec<String>, flags: Vec<String>) {
     args.splice(at..at, flags);
 }
 
-/// Explicit git metadata roots override workspace-write's automatic .git
-/// protection; the common dir is needed by worktrees created in scratch.
+/// The job's sandbox, as Codex's named permissions profile `proj`: the
+/// project, scratch, the job's own dir and git's common dir (worktrees made
+/// in scratch write there; an explicit grant also lifts the automatic .git
+/// protection) are writable, the rest of the machine is read-only but
+/// Codex's own login, and the network is on. The network grant is also what
+/// lets a command connect() to the gh-token socket under /run/gh-token: the
+/// pinned CLI's seccomp has no finer switch for unix sockets. Commands keep
+/// no_new_privs, since the filesystem isn't all writable, so sudo can't
+/// elevate.
 /// A project that isn't a repository yet gets its own `.git` granted
 /// without making it, so the job can `git init` there (the pinned CLI
 /// grants a path that doesn't exist yet), and Codex is told to start
@@ -72,6 +81,7 @@ fn configure_codex(
     scratch: &Path,
     instructions: &str,
     home: &Path,
+    codex_home: &Path,
     args: &mut Vec<String>,
 ) -> std::io::Result<Vec<String>> {
     let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
@@ -108,16 +118,16 @@ fn configure_codex(
     }
     roots.push(metadata);
     let quoted = |s: &str| serde_json::to_string(s).expect("string");
+    // Its login, which the job's commands have no use for, isn't theirs to read.
+    let auth = codex_home.join("auth.json");
     let roots = roots
         .iter()
         .map(|p| format!("{}=\"write\"", quoted(&p.to_string_lossy())))
+        .chain([format!("{}=\"deny\"", quoted(&auth.to_string_lossy()))])
         .collect::<Vec<_>>()
         .join(",");
     for config in [
         r#"approval_policy="never""#.to_owned(),
-        // Named permissions allow an explicit .git write grant; the legacy
-        // workspace roots also insert protected metadata paths. Keep the
-        // workspace-write mode, but name every grant in this profile.
         r#"default_permissions="proj""#.to_owned(),
         format!("permissions.proj.filesystem={{\":root\"=\"read\",\"/tmp\"=\"write\",{roots}}}"),
         "permissions.proj.network.enabled=true".to_owned(),
@@ -188,7 +198,18 @@ pub fn spawn(
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| std::io::Error::other("HOME isn't set"))?;
-        let exec = configure_codex(cfg, job, &scratch, &instructions, &home, &mut args)?;
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let exec = configure_codex(
+            cfg,
+            job,
+            &scratch,
+            &instructions,
+            &home,
+            &codex_home,
+            &mut args,
+        )?;
         exec_flags(&mut args, exec);
         args.push("-".into());
     }
@@ -249,32 +270,15 @@ pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
 mod tests {
     use super::*;
     #[test]
-    fn sandbox_and_resume_flags_are_in_the_parent_command() {
+    fn the_profile_alone_is_the_sandbox_and_resume_flags_are_in_the_parent_command() {
         let c = Choice {
             engine: Engine::Codex,
             model: None,
         };
-        assert_eq!(
-            args(&c, None),
-            [
-                "--no-daemon",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "--json"
-            ]
-        );
+        assert_eq!(args(&c, None), ["--no-daemon", "exec", "--json"]);
         assert_eq!(
             args(&c, Some("thread".into())),
-            [
-                "--no-daemon",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "resume",
-                "--json",
-                "thread"
-            ]
+            ["--no-daemon", "exec", "resume", "--json", "thread"]
         );
         let c = Choice {
             model: Some("chosen".into()),
@@ -322,6 +326,7 @@ mod tests {
             &dir.path().join("scratch"),
             "This is proj job job",
             &dir.path().join("home"),
+            &dir.path().join("home/.codex"),
             &mut args,
         )
         .unwrap();
@@ -332,6 +337,10 @@ mod tests {
         assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
         assert!(config.contains("developer_instructions=\"This is proj job job\""));
         assert!(config.contains(&format!("\"{}\"=\"write\"", job.dir.display())));
+        let auth = dir.path().join("home/.codex/auth.json");
+        assert!(config.contains(&format!("\"{}\"=\"deny\"", auth.display())));
+        // A sandbox mode anywhere would put the legacy policy in its place.
+        assert!(!config.contains("sandbox_mode"));
     }
 
     #[test]
@@ -352,6 +361,7 @@ mod tests {
             &dir.path().join("scratch"),
             "This is proj job job",
             &dir.path().join("home"),
+            &dir.path().join("home/.codex"),
             &mut args,
         )
         .unwrap();
@@ -377,8 +387,6 @@ mod tests {
                 "--no-daemon",
                 "exec",
                 "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
                 "resume",
                 "--json",
                 "thread"

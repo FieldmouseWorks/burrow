@@ -1,5 +1,8 @@
 # Exercise the pinned CLI's actual filesystem policy, without an API call:
 # worktree commits need an explicit grant to the clone's git metadata. Then
+# a proj job on Codex, for real (the `jobs` machine): proj's own argv to the
+# pinned CLI, with a stand-in model that asks for what a job does, and what
+# the job's sandbox let through. Then
 # its hooks, with a stand-in model that asks for one command: the example
 # machine's /etc/codex/requirements.toml runs the guard on every command a
 # Codex job (as the machine's user) runs, and refuses what has no undo here
@@ -34,9 +37,48 @@ let
     filesystem = { ":root" = "read", "/tmp" = "write", "/work/project" = "read", "/work/scratch" = "write"${pkgs.lib.optionalString git ", \"/work/project/.git\" = \"write\""} }
     network.enabled = true
   '';
+  inherit (import ./proj/stand-ins.nix { inherit pkgs; }) claude;
+  # What a job does, each command leaving a mark in the job's own dir that
+  # only its success writes, so a sandbox that refuses one shows: fetch,
+  # make a worktree in its scratch and commit there, reach its App's token
+  # socket, write its job's state (`proj done`), and, to be refused, write
+  # outside its roots and read Codex's login. No redirects: the guard wants
+  # an undo snapshot for those, and there's no ZFS here.
+  jobCalls = pkgs.writeText "codex-job-calls.json" (builtins.toJSON (map (cmd: [ "exec_command" { inherit cmd; } ]) [
+    "git fetch -q origin && touch /data/dev/jobs/$PROJ_JOB/fetched"
+    "git worktree add -q -b work \"$PROJ_SCRATCH/tree\" origin/trunk && git -C \"$PROJ_SCRATCH/tree\" commit -q --allow-empty -m changed && touch /data/dev/jobs/$PROJ_JOB/committed"
+    "python3 -c 'import os, socket; socket.socket(socket.AF_UNIX).connect(os.environ[\"GH_TOKEN_SOCKET\"])' && touch /data/dev/jobs/$PROJ_JOB/connected"
+    "grep -qx 'NoNewPrivs:[[:space:]]1' /proc/self/status && touch /data/dev/jobs/$PROJ_JOB/no-new-privs"
+    "touch /data/dev/elsewhere/written || touch /data/dev/jobs/$PROJ_JOB/elsewhere-refused"
+    "cat ~/.codex/auth.json || touch /data/dev/jobs/$PROJ_JOB/login-refused"
+    "proj done"
+  ]));
 in
 pkgs.testers.runNixOSTest {
   name = "proj-codex-sandbox";
+  # proj, its Codex role and the workers App, as a machine runs them.
+  nodes.jobs = {
+    imports = [ self.nixosModules.proj ];
+    burrow = {
+      claude.package = claude;
+      proj = {
+        enable = true;
+        minFreeMemory = 0;
+      };
+      github.apps.workers = {
+        id = 7;
+        slug = "sam-workers";
+        keyFile = "/run/keys/workers.pem";
+        users = [ "dev" ];
+      };
+    };
+    systemd.services.burrow-events.enable = false;
+    systemd.timers.burrow-events-catch-up.enable = false;
+    environment.systemPackages = [ pkgs.git pkgs.python3 pkgs.jq ];
+    users.users.dev = { isNormalUser = true; uid = 1001; group = "dev"; };
+    users.groups.dev.gid = 1001;
+    virtualisation.memorySize = 2048;
+  };
   nodes.machine = {
     environment.systemPackages = [ agents pkgs.git pkgs.bash pkgs.jq ];
     users.users.worker = { isNormalUser = true; uid = 1000; extraGroups = [ "wheel" ]; };
@@ -47,6 +89,46 @@ pkgs.testers.runNixOSTest {
   };
   testScript = ''
     import shlex
+    start_all()
+
+    # A proj job on Codex, through proj's own argv to the pinned CLI.
+    jobs.wait_for_unit("user@1001.service")
+    jobs.wait_for_unit("gh-token-workers.socket")
+    def dev(command):
+        return jobs.succeed("su - dev -c " + shlex.quote(command)).strip()
+    jobs.succeed("install -d -o dev -g dev /data/dev/src/web /data/dev/elsewhere /srv/origin.git")
+    dev("git config --global user.name Dev && git config --global user.email dev@example.test")
+    dev("git init -q -b trunk /data/dev/src/web && git -C /data/dev/src/web commit -q --allow-empty -m initial")
+    dev("git clone -q --bare /data/dev/src/web /srv/origin.git && git -C /data/dev/src/web remote add origin /srv/origin.git")
+    # Something new upstream, for the job's fetch to bring.
+    dev("git clone -q /srv/origin.git /tmp/upstream && git -C /tmp/upstream commit -q --allow-empty -m upstream && git -C /tmp/upstream push -q origin trunk")
+    upstream = dev("git -C /tmp/upstream rev-parse HEAD")
+    # The stand-in model, the CLI's own catalog entry for one, and a login
+    # the job mustn't read.
+    jobs.succeed("${model} 18555 ${jobCalls} >/tmp/model.log 2>&1 &")
+    jobs.wait_for_open_port(18555)
+    catalog = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
+    dev("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(catalog) + " >~/catalog.json && jq -e '.models | length == 1' ~/catalog.json")
+    # Top-level, so before the config's provider table.
+    dev("(echo 'model_catalog_json = \"'$HOME'/catalog.json\"' && cat ${modelConfig}) >~/.codex/config.toml && chmod 0600 ~/.codex/config.toml")
+    dev("""echo '{"OPENAI_API_KEY": "sk-stand-in-login"}' >~/.codex/auth.json && chmod 0600 ~/.codex/auth.json""")
+    dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
+    j = dev('proj run --role coder --app workers web "go"')
+    jobs.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
+    marks = dev(f"ls /data/dev/jobs/{j}").split()
+    said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
+    for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused"]:
+        assert mark in marks, (mark, marks, said)
+    # The job's own state, written by `proj done` inside the sandbox.
+    assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
+    # The fetch landed in the project's .git, and the worktree's commit, in
+    # git's common dir, went through proj's hooks.
+    assert dev("git -C /data/dev/src/web rev-parse origin/trunk") == upstream
+    assert "Engine: codex" in dev("git -C /data/dev/src/web log -1 --format=%B work")
+    jobs.fail("test -e /data/dev/elsewhere/written")
+    assert "sk-stand-in-login" not in said, said
+    assert "is ignored" not in said and "metadata for `stand-in` not found" not in said, said
+
     machine.wait_for_unit("multi-user.target")
     def worker(command):
         return machine.succeed("su - worker -c " + shlex.quote(command))

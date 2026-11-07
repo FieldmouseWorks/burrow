@@ -70,7 +70,7 @@
 //! ```
 //!
 //! Jobs run headless in their project: Claude under the managed settings,
-//! Codex in workspace-write with its generated forbidden command rules. Neither
+//! Codex in its sandbox (`engine::command`) with its generated forbidden command rules. Neither
 //! asks mid-turn: an R2 command is refused, so the job reports it and the operator brings it to the owner.
 //! Everything a job said is kept in its folder in jobs ([`job`] has what's
 //! in it); what it builds goes in a scratch dir of its own, PROJ_SCRATCH,
