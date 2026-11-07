@@ -174,19 +174,20 @@ def codex_written(repo, pr, st):
         commits = pr_commits(repo, pr, st)
         if not isinstance(commits, list):
             return commits
-        st["codexWritten"] = any("engine: codex" in t.casefold() for c in commits for t in c["trailers"])
+        st["codexWritten"] = any(t.casefold() == "engine: codex" for c in commits for t in c["trailers"])
         st["codexHead"] = seen
     return st["codexWritten"]
 
 
+BOTS_NAMED = "bots named"
 CO_AUTHOR_RE = re.compile(r"^co-authored-by:.*<([^<>]*)>\s*$", re.I)
 
 
 def co_authors(trailers):
     """The addresses a commit's Co-authored-by trailers name, as GitHub reads
     them; None for one that names none, which is no bot's either."""
-    return [m.group(1) if m else None for m in (CO_AUTHOR_RE.match(t) for t in trailers
-                                                 if t.casefold().startswith("co-authored-by:"))]
+    named = (CO_AUTHOR_RE.match(t) for t in trailers if t.casefold().startswith("co-authored-by:"))
+    return [m.group(1) if m else None for m in named]
 
 
 def provenance(repo, pr, st):
@@ -200,10 +201,13 @@ def provenance(repo, pr, st):
     renovate = pr["headRefName"].startswith("renovate/")
     if renovate and not CFG["renovateEmail"]:
         return None
-    bots = {CFG["renovateEmail"], DEPENDABOT_EMAIL}
-    # GITHUB_EMAIL marks a read that looked at committers too: one from before
-    # that said nothing of them, so the same head is read again.
-    seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL, GITHUB_EMAIL]
+    # A missing or empty address is no bot's: no commit is the bots' alone
+    # for naming none, on a machine with no Renovate address least of all.
+    bots = {e for e in (CFG["renovateEmail"], DEPENDABOT_EMAIL) if e}
+    # GITHUB_EMAIL marks a read that looked at committers too, and BOTS_NAMED
+    # one where an address no one gave counted as no bot's: a head read
+    # before either is read again.
+    seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL, GITHUB_EMAIL, BOTS_NAMED]
     if st.get("editedHead") != seen:
         commits = pr_commits(repo, pr, st)
         if not isinstance(commits, list):

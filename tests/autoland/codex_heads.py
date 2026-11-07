@@ -4,7 +4,7 @@ import json
 import subprocess
 from unittest.mock import patch
 
-from harness import C, JOBS, clean, commit, compare_pages, fresh_pr_state, head, merged, mkpr, pr_state, queued, run, worker
+from harness import C, JOBS, S, clean, commit, compare_pages, fresh_pr_state, head, merged, mkpr, pr_state, queued, run, worker
 from touches import DEPENDABOT_EMAIL, codex_written, provenance
 
 
@@ -18,6 +18,9 @@ def paged(a):
 real_commit_gh = C.gh
 for message, judge in [("change: code\n\nEngine: codex\n", True),
                        ("change: code\n\neNgInE: codex\n", True),
+                       ("change: code\n\nOriginal-engine: codex\n", False),
+                       ("change: code\n\nNote: Engine: codex is an example\n", False),
+                       ("change: code\n\nEngine: codex, once\n", False),
                        ("change: prose\n\nEngine: codex\n\nThat was a quoted line.\n", False),
                        ("change: code\n", False)]:
     fresh_pr_state()
@@ -127,6 +130,23 @@ for trailer, edited in [("", False), ("\n\nCo-authored-by: Claude <claude@remi>\
     last = commit(head, "deps: bump" + trailer, DEPENDABOT_EMAIL, "noreply@github.com")
     with patch.object(C, "gh", side_effect=github(bot + [last])):
         assert provenance("sam/r", dependabot, {}) is edited
+
+# A missing or empty address is never a bot's, on a machine with no Renovate
+# address too: an addressless co-author line, or a commit with no author or
+# committer address, is an edit; the bots' own commits still aren't.
+email = S.CFG["renovateEmail"]
+S.CFG["renovateEmail"] = None
+for author, committer, trailer, edited in [
+        (DEPENDABOT_EMAIL, "noreply@github.com", "", False),
+        (DEPENDABOT_EMAIL, "noreply@github.com", "\n\nCo-authored-by: Claude\n", True),
+        (DEPENDABOT_EMAIL, "noreply@github.com", "\n\nCo-authored-by: Claude <>\n", True),
+        (None, "noreply@github.com", "", True),
+        ("", "noreply@github.com", "", True),
+        (DEPENDABOT_EMAIL, None, "", True)]:
+    last = commit(head, "deps: bump" + trailer, author, committer)
+    with patch.object(C, "gh", side_effect=github(bot + [last])):
+        assert provenance("sam/r", dependabot, {}) is edited, (author, committer, trailer)
+S.CFG["renovateEmail"] = email
 
 # Where GitHub stops short of its own count for good (the head and merge
 # base fixed, the range can't change), no one can say a Codex job didn't
