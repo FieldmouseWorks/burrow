@@ -109,6 +109,10 @@ pub struct Inbox {
     pub wake: PathBuf,
     /// The machine's own GitHub App, which a bot's issue's job acts as.
     pub machinery: Option<String>,
+    /// The label on an issue carrying text from outside the authors, whoever
+    /// filed it: never a job, never sorted or handed on. "" is none.
+    #[serde(default)]
+    pub outside_label: String,
     /// Sorting every other open issue, and handing the ready ones to idle
     /// slots; None when it's off.
     #[serde(default)]

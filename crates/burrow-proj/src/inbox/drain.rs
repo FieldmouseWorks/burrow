@@ -142,7 +142,7 @@ impl Pass<'_> {
         items
             .iter()
             .filter(|i| i.get("pull_request").is_none())
-            .filter(|i| self.allowed(&raw(&i["user"]["login"])))
+            .filter(|i| self.allowed(&raw(&i["user"]["login"])) && !self.outside(i))
             .filter_map(|i| {
                 let url = raw(&i["repository_url"]);
                 let named = url.rsplit('/').take(2).collect::<Vec<_>>();

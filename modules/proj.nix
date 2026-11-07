@@ -76,7 +76,7 @@ let
     roles = "${config.users.users.${user}.home}/.config/proj/roles";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels unstickLabel authors vm;
+      inherit (cfg.inbox) labels unstickLabel authors vm outsideLabel;
       host = config.networking.hostName;
       wake = inboxWake;
       machinery = if machineApp == null then null else machineApp.name;
@@ -297,6 +297,17 @@ in
         type = lib.types.bool;
         default = false;
         description = "Run issue jobs in Claude agent sandboxes (proj run --vm). A Codex selection fails its turn.";
+      };
+      outsideLabel = lib.mkOption {
+        type = lib.types.str;
+        default = "outside text";
+        description = ''
+          The label on an issue carrying text from outside `authors`, whoever
+          filed it: a game server filing its players' reports with an author's
+          token, say. It never becomes a job, and is never sorted or handed on.
+          Whatever files such issues puts this label on as it opens them.
+          Created in each repo; "" turns it off.
+        '';
       };
       triage = {
         enable = lib.mkEnableOption ''

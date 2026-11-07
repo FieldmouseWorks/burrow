@@ -14,7 +14,9 @@
 //! handed it on), or one other machinery owns (`skip`: a probe, an undo, a
 //! flaky test's issue). Only an issue one of the inbox's authors opened is
 //! sorted, since the job reads it with the machine's logins: anyone else's is
-//! text from a stranger. A pull request is never an issue here.
+//! text from a stranger, and so is one with the outside label, whoever filed
+//! it (a game server filing its players' reports with an author's token,
+//! say). A pull request is never an issue here.
 //!
 //! The jobs are `--owned`: the pass acts on their end, which kicks a full
 //! pass (proj-inbox with no repo), so a backlog in a quiet repo is worked
@@ -147,7 +149,10 @@ impl Pass<'_> {
 
     /// Whether an issue is sorted already, or isn't triage's to sort.
     pub(super) fn sorted(&self, t: &Triage, issue: &Value) -> bool {
-        if issue.get("pull_request").is_some() || !self.allowed(&raw(&issue["user"]["login"])) {
+        if issue.get("pull_request").is_some()
+            || !self.allowed(&raw(&issue["user"]["login"]))
+            || self.outside(issue)
+        {
             return true;
         }
         let labels: Vec<&str> = issue["labels"]

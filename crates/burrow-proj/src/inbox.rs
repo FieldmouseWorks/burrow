@@ -529,7 +529,14 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// The label, so it's there to pick on the phone. Once per repo.
     fn label(&self, repo: &str) {
         let done = self.inbox.state.join(format!(".label-{}", key(repo)));
-        let sorting = self.triage_labels();
+        let mut sorting = self.triage_labels();
+        if !self.inbox.outside_label.is_empty() {
+            sorting.push((
+                self.inbox.outside_label.clone(),
+                "fbca04",
+                "Carries text from outside the authors: no agent reads it",
+            ));
+        }
         // Triage's too, when it's on: a change to either makes them again.
         let wanted = if sorting.is_empty() {
             serde_json::to_string(&self.inbox.labels)
@@ -654,7 +661,20 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
             let opener = raw(&issue["user"]["login"]);
             if !self.allowed(&opener) {
-                self.refuse(repo, &n, &opener, &d)?;
+                let said = format!(
+                    "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
+                    self.inbox.host,
+                    self.inbox.authors.join(", "),
+                );
+                self.refuse(repo, &n, &said, &d)?;
+                continue;
+            }
+            if self.outside(issue) {
+                let said = format!(
+                    "No job for this issue: it's labelled `{}`, so it carries text from outside {}'s authors, whoever opened it, and no agent reads it. To hand the work on, open an issue of your own that says what to do.",
+                    self.inbox.outside_label, self.inbox.host,
+                );
+                self.refuse(repo, &n, &said, &d)?;
                 continue;
             }
             // Comments already there are part of the task; replies after
@@ -687,19 +707,25 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         Ok(())
     }
 
-    /// An issue passed over, its opener not one of the authors: said on the
-    /// issue once, or tried again next pass.
-    fn refuse(&mut self, repo: &str, n: &str, opener: &str, d: &Path) -> Result<(), Fail> {
+    /// Whether the issue carries the outside label: text from outside the
+    /// authors (a game's players' reports, say), filed with whatever login,
+    /// that no agent reads.
+    pub(super) fn outside(&self, issue: &Value) -> bool {
+        let want = &self.inbox.outside_label;
+        !want.is_empty()
+            && issue["labels"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(want)))
+    }
+
+    /// An issue passed over (its opener not one of the authors, or its text
+    /// from outside them): said on the issue once, or tried again next pass.
+    fn refuse(&mut self, repo: &str, n: &str, said: &str, d: &Path) -> Result<(), Fail> {
         let refused = d.join("refused");
         if refused.exists() {
             return Ok(());
         }
-        let said = format!(
-            "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
-            self.inbox.host,
-            self.inbox.authors.join(", "),
-        );
-        if !self.post(repo, n, &said) {
+        if !self.post(repo, n, said) {
             self.miss(repo);
             return Ok(());
         }

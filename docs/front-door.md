@@ -168,8 +168,12 @@ the engine's inbox label and is a job like any other from there, closed when
 it's done. A handed-on job takes its place in line rather than going first.
 
 Strangers' issues are never sorted or handed on: an agent reads them with the
-box's logins. Text from outside (a game's players filing reports, say) gets to
-an agent only through an author who opens an issue of their own for it.
+box's logins. Nor is one labelled `inbox.outsideLabel` (`outside text`), whoever
+filed it: whatever files text from outside the authors (a game server filing
+its players' reports, say, even with an author's token) puts that label on as
+it opens the issue, and no job ever starts from it, engine label or not. That
+text gets to an agent only through an author who opens an issue of their own
+for it.
 
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
 with `ENGINE` either `claude` or `codex`. Scope a key to one repo with

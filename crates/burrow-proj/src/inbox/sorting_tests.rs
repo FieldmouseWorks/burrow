@@ -55,6 +55,7 @@ impl Box {
         cfg.waits = None;
         let inbox = cfg.inbox.as_mut().unwrap();
         inbox.state = at("state");
+        inbox.outside_label = "outside text".into();
         inbox.triage = Some(Triage {
             owner_label: "needs-owner".into(),
             owner: Some("sam".into()),
@@ -237,6 +238,7 @@ fn what_counts_as_sorted() {
         (issue(1, "sam", &["stuck"]), true),
         (issue(1, "sam", &["probe"]), true),
         (issue(1, "player", &[]), true),
+        (issue(1, "sam", &["outside text"]), true),
     ] {
         assert_eq!(p.sorted(&t, &i), sorted, "{i}");
     }
@@ -390,6 +392,7 @@ fn the_drain_picks() {
         found("sam/game", 4, "sam", &["ready", "probe"], old),
         found("sam/elsewhere", 4, "sam", &["ready"], old),
         found("sam/game", 4, "sam", &["later"], old),
+        found("sam/game", 4, "sam", &["ready", "outside text"], old),
     ] {
         assert_eq!(
             pick(std::slice::from_ref(&passed_over)),
@@ -455,4 +458,22 @@ fn triage_settings_read() {
     off["inbox"]["triage"] = Value::Null;
     let off: Config = serde_json::from_value(off).unwrap();
     assert!(off.inbox.unwrap().triage.is_none());
+}
+
+// An engine-labelled issue with the outside label starts no job, whoever
+// opened it, and says so once.
+#[test]
+fn outside_text_starts_no_job() {
+    let b = Box::new();
+    let mut p = b.pass();
+    let report = issue(7, "sam", &["claude", "outside text"]);
+    for _ in 0..2 {
+        p.new_issues("sam/box", std::slice::from_ref(&report))
+            .unwrap();
+    }
+    let said = b.posted();
+    assert_eq!(said.matches("labelled `outside text`").count(), 1, "{said}");
+    assert!(!said.contains("It's broken."), "{said}");
+    let d = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+    assert!(d.join("refused").exists() && !d.join("job").exists());
 }
