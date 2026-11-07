@@ -875,6 +875,8 @@ mod triage;
 mod write;
 
 #[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]
 mod tests;

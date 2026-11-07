@@ -1,5 +1,6 @@
-//! Closing a finished job's issue, triage and the drain, against stand-ins
-//! for gh and systemctl that log what they're asked.
+//! Closing a finished job's issue and triage, against stand-ins for gh and
+//! systemctl that log what they're asked; the drain's are in
+//! [`super::drain_tests`].
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,13 +22,13 @@ use crate::engine::Engine;
 /// named that with `_` for `/` (`{}`), and anything else with `{}`;
 /// systemctl says every unit is inactive, but a job's is active, waiting
 /// for a slot, while there's an `active` file.
-struct Box {
+pub(super) struct Box {
     tmp: tempfile::TempDir,
-    cfg: Config,
+    pub(super) cfg: Config,
 }
 
 impl Box {
-    fn new() -> Box {
+    pub(super) fn new() -> Box {
         let tmp = tempfile::TempDir::new().unwrap();
         let at = |f: &str| tmp.path().join(f);
         let script = |name: &str, body: String| {
@@ -76,11 +77,11 @@ impl Box {
         Box { tmp, cfg }
     }
 
-    fn path(&self, f: &str) -> PathBuf {
+    pub(super) fn path(&self, f: &str) -> PathBuf {
         self.tmp.path().join(f)
     }
 
-    fn log(&self) -> String {
+    pub(super) fn log(&self) -> String {
         fs::read_to_string(self.path("log")).unwrap_or_default()
     }
 
@@ -88,7 +89,7 @@ impl Box {
         fs::read_to_string(self.path("posted")).unwrap_or_default()
     }
 
-    fn pass(&self) -> Pass<'_> {
+    pub(super) fn pass(&self) -> Pass<'_> {
         Pass {
             cfg: &self.cfg,
             inbox: self.cfg.inbox.as_ref().unwrap(),
@@ -106,7 +107,7 @@ impl Box {
     /// A job whose one turn ended as `outcome` ("done" when it ran to its
     /// end, "error" when it didn't), answering `said`, having said it ends
     /// with `proj done`.
-    fn job(&self, id: &str, outcome: &str, said: &str) {
+    pub(super) fn job(&self, id: &str, outcome: &str, said: &str) {
         self.job_ending(id, outcome, Some("done"), said);
     }
 
@@ -128,7 +129,7 @@ impl Box {
     }
 
     /// The inbox's record of issue 7's job, nothing of it answered yet.
-    fn record(&self, id: &str) -> PathBuf {
+    pub(super) fn record(&self, id: &str) -> PathBuf {
         let d = self.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&d).unwrap();
         for (f, v) in [
@@ -146,7 +147,7 @@ impl Box {
 /// When an issue was last changed, as the fixtures have it.
 const UPDATED: &str = "2026-11-01T00:00:00Z";
 
-fn issue(n: u64, opener: &str, labels: &[&str]) -> Value {
+pub(super) fn issue(n: u64, opener: &str, labels: &[&str]) -> Value {
     json!({
         "number": n,
         "user": {"login": opener},
@@ -390,112 +391,6 @@ fn verdicts_are_carried_out() {
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     b.pass().verdicts("sam/box", &t, &[]).unwrap();
     assert!(!d.exists() && !b.log().contains("labels"), "{}", b.log());
-}
-
-fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value {
-    let mut i = issue(n, opener, labels);
-    i["repository_url"] = json!(format!("https://api.github.com/repos/{repo}"));
-    i["created_at"] = json!(made);
-    i
-}
-
-// The drain hands on a project's ready issue opened by an author, nobody
-// else's already: the pipeline's repos first, then the oldest.
-#[test]
-fn the_drain_picks() {
-    let b = Box::new();
-    let p = b.pass();
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-    let old = "2026-10-01T00:00:00Z";
-    let new = "2026-11-01T00:00:00Z";
-    let pick = |items: &[Value]| p.pick_ready(&t, items);
-
-    let game = found("sam/game", 4, "sam", &["ready"], old);
-    let game_newer = found("sam/game", 5, "sam", &["ready"], new);
-    let box_new = found("sam/box", 8, "sam", &["ready"], new);
-    // sam/burrow and sam/box are pipeline repos; sam/game isn't.
-    let burrow_new = found("sam/burrow", 9, "sam", &["ready"], new);
-    assert_eq!(
-        pick(&[game_newer.clone(), game.clone()]),
-        Some(("sam/game".into(), "4".into()))
-    );
-    assert_eq!(
-        pick(&[game.clone(), box_new.clone()]),
-        Some(("sam/box".into(), "8".into()))
-    );
-    assert_eq!(
-        pick(&[game.clone(), burrow_new.clone(), box_new.clone()]),
-        Some(("sam/box".into(), "8".into()))
-    );
-
-    for passed_over in [
-        found("sam/game", 4, "player", &["ready"], old),
-        found("sam/game", 4, "sam", &["ready", "codex"], old),
-        found("sam/game", 4, "sam", &["ready", "needs-owner"], old),
-        found("sam/game", 4, "sam", &["ready", "probe"], old),
-        found("sam/elsewhere", 4, "sam", &["ready"], old),
-        found("sam/game", 4, "sam", &["later"], old),
-        found("sam/game", 4, "sam", &["ready", "outside text"], old),
-    ] {
-        assert_eq!(
-            pick(std::slice::from_ref(&passed_over)),
-            None,
-            "{passed_over}"
-        );
-    }
-    // One with a record already (a job, or one refused) is the inbox's.
-    fs::create_dir_all(b.cfg.inbox.as_ref().unwrap().state.join("sam_game-4")).unwrap();
-    assert_eq!(
-        pick(&[game, game_newer]),
-        Some(("sam/game".into(), "5".into()))
-    );
-}
-
-// Room for the drain: a Codex slot free; for Claude, a slot free beyond the
-// pipeline's and nobody in line.
-#[test]
-fn room_for_the_drain() {
-    let b = Box::new();
-    let cfg = &b.cfg;
-    assert!(crate::slot::room(cfg, Engine::Codex));
-    let held: Vec<fs::File> = (1..=cfg.codex_slots)
-        .map(|i| {
-            let f = fs::File::create(cfg.jobs.join(".codex-slots").join(i.to_string())).unwrap();
-            f.lock().unwrap();
-            f
-        })
-        .collect();
-    assert!(!crate::slot::room(cfg, Engine::Codex));
-    drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Codex)));
-
-    assert!(crate::slot::room(cfg, Engine::Claude));
-    let slots = cfg.jobs.join(".slots");
-    let held: Vec<fs::File> = (1..cfg.max_jobs)
-        .map(|i| {
-            let f = fs::File::create(slots.join(i.to_string())).unwrap();
-            f.lock().unwrap();
-            f
-        })
-        .collect();
-    // One free, and it's the pipeline's.
-    assert!(!crate::slot::room(cfg, Engine::Claude));
-    drop(held);
-    assert!(soon(|| crate::slot::room(cfg, Engine::Claude)));
-}
-
-/// Whether `f` holds within a second. A slot's lock dropped here can still
-/// be held a moment by a process another test's thread is starting: it was
-/// forked while the lock was held, and keeps it until it execs.
-fn soon(mut f: impl FnMut() -> bool) -> bool {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while !f() {
-        if std::time::Instant::now() > until {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    true
 }
 
 // The module's triage settings, as it writes them, are what proj reads; off
@@ -775,7 +670,7 @@ fn a_carried_out_verdict_is_not_sorted_again() {
 
 /// An issue as GitHub gives it when asked for it alone, saved for the
 /// stand-in gh.
-fn on_github(b: &Box, i: &Value) {
+pub(super) fn on_github(b: &Box, i: &Value) {
     let repo = raw(&i["repository_url"]);
     let repo = repo.trim_start_matches("https://api.github.com/repos/");
     let mut i = i.clone();
@@ -789,111 +684,6 @@ fn on_github(b: &Box, i: &Value) {
         i.to_string(),
     )
     .unwrap();
-}
-
-// The drain picks from every repo's ready issues as each one's pass listed
-// them (every page of its open issues), the pipeline's first, and asks
-// GitHub for the one it picked before labelling it.
-#[test]
-fn the_drain_picks_across_every_repo() {
-    let b = Box::new();
-    let old = "2026-10-01T00:00:00Z";
-    let mut game: Vec<Value> = (100..1200)
-        .map(|n| found("sam/game", n, "player", &["ready"], old))
-        .collect();
-    game.push(found("sam/game", 4, "sam", &["ready"], old));
-    let boxed = found("sam/box", 8, "sam", &["ready"], "2026-11-01T00:00:00Z");
-    let p = b.pass();
-    p.note_ready("sam/game", &game).unwrap();
-    p.note_ready(
-        "sam/box",
-        &[boxed.clone(), found("sam/box", 9, "sam", &["later"], old)],
-    )
-    .unwrap();
-    // Not open any more, as GitHub has it now: left, its repo's pass booked.
-    let mut p = b.pass();
-    p.drain().unwrap();
-    assert!(!b.log().contains("labels[]="), "{}", b.log());
-    assert!(p.wake.contains_key("sam/box"));
-    on_github(&b, &boxed);
-    b.pass().drain().unwrap();
-    assert!(
-        b.log()
-            .contains("-X POST repos/sam/box/issues/8/labels -f labels[]=codex"),
-        "{}",
-        b.log()
-    );
-    // Its repo's list without it: the next picks from the rest.
-    let b = Box::new();
-    let p = b.pass();
-    p.note_ready("sam/game", &game).unwrap();
-    p.note_ready("sam/box", &[]).unwrap();
-    on_github(&b, &game[game.len() - 1]);
-    b.pass().drain().unwrap();
-    assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
-        "{}",
-        b.log()
-    );
-}
-
-// What holds the drain back brings it back: a ready issue with no slot for
-// it leaves its repo, said before the slots are looked at, for every turn's
-// end to kick; GitHub not answering about the issue books a pass; one handed
-// on but not yet started books a pass for when it's let go.
-#[test]
-fn the_drain_comes_back() {
-    let state = |b: &Box| b.cfg.inbox.as_ref().unwrap().state.clone();
-    let four = found("sam/game", 4, "sam", &["ready"], "2026-10-01T00:00:00Z");
-
-    let b = Box::new();
-    let mut p = b.pass();
-    p.drain().unwrap();
-    assert!(p.wake.is_empty(), "nothing ready, nothing booked");
-
-    let b = Box::new();
-    b.pass()
-        .note_ready("sam/game", std::slice::from_ref(&four))
-        .unwrap();
-    fs::write(b.path("fail"), "repos/sam/game/issues/4\n").unwrap();
-    let mut p = b.pass();
-    p.drain().unwrap();
-    assert!(
-        p.wake.contains_key("sam/game"),
-        "GitHub didn't say: {:?}",
-        p.wake
-    );
-    fs::remove_file(b.path("fail")).unwrap();
-
-    on_github(&b, &four);
-    let cfg = &b.cfg;
-    let held: Vec<fs::File> = (1..=cfg.codex_slots)
-        .map(|i| {
-            let dir = cfg.jobs.join(".codex-slots");
-            fs::create_dir_all(&dir).unwrap();
-            let f = fs::File::create(dir.join(i.to_string())).unwrap();
-            f.lock().unwrap();
-            f
-        })
-        .collect();
-    b.pass().drain().unwrap();
-    let waiting = state(&b).join(super::WAITING);
-    assert_eq!(fs::read_to_string(&waiting).unwrap(), "sam/game\n");
-    drop(held);
-    assert!(
-        soon(|| {
-            b.pass().drain().unwrap();
-            !waiting.exists()
-        }),
-        "handed on: no longer waiting"
-    );
-    assert!(b.log().contains("issues/4/labels -f labels[]=codex"));
-
-    // Handed on, its job not started yet: at its limit (one here), the pass
-    // books another for when the mark is let go.
-    let mut p = b.pass();
-    p.drain().unwrap();
-    assert!(!p.wake.is_empty());
 }
 
 // A job, a sorting job's included, whose issue an agent may no longer read
@@ -979,38 +769,4 @@ fn a_barred_issue_off_the_list_stops_its_job() {
     let mut p = b.pass();
     p.jobs("sam/box", "box", &[]).unwrap();
     assert!(d.exists() && p.wake.contains_key("sam/box"));
-}
-
-// One repo GitHub won't say about doesn't hold up the drain: its ready
-// issues wait for its retry, and the next repo's is handed on.
-#[test]
-fn one_repo_cannot_hold_up_the_drain() {
-    let b = Box::new();
-    let old = "2026-10-01T00:00:00Z";
-    let boxed = found("sam/box", 8, "sam", &["ready"], old);
-    let game = found("sam/game", 4, "sam", &["ready"], old);
-    let p = b.pass();
-    p.note_ready(
-        "sam/box",
-        &[boxed.clone(), found("sam/box", 9, "sam", &["ready"], old)],
-    )
-    .unwrap();
-    p.note_ready("sam/game", std::slice::from_ref(&game))
-        .unwrap();
-    on_github(&b, &game);
-    fs::write(b.path("fail"), "repos/sam/box/issues\n").unwrap();
-    let mut p = b.pass();
-    p.drain().unwrap();
-    assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
-    assert_eq!(
-        b.log().matches("api repos/sam/box/issues/").count(),
-        1,
-        "{}",
-        b.log()
-    );
-    assert!(
-        b.log().contains("issues/4/labels -f labels[]=codex"),
-        "{}",
-        b.log()
-    );
 }

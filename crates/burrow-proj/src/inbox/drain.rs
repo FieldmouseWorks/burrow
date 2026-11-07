@@ -54,7 +54,8 @@ impl Pass<'_> {
     /// jobs' turns kick their repos' passes as they end; one waiting on a
     /// slot leaves [`WAITING`], and every turn's end then kicks a pass
     /// (`proj _ended`); a usage hold books a pass for when it resets, and
-    /// GitHub not answering about the issue picked one for five minutes on.
+    /// GitHub not answering about the issue picked, or not taking its label,
+    /// one for five minutes on.
     pub(super) fn drain(&mut self) -> Result<(), Fail> {
         let Some(t) = self.inbox.triage.clone() else {
             return Ok(());
@@ -115,13 +116,13 @@ impl Pass<'_> {
             return Ok(());
         }
         let _ = fs::remove_file(&waiting);
-        // Each as it stands now, in order. One closed, sorted otherwise or
-        // handed on since its repo's pass is passed over, and that pass,
-        // booked now, lists afresh; one GitHub won't say about books a
-        // retry. Either way the rest of that repo's wait for its pass, and
-        // the next repo's go on: one repo can't hold up the others.
+        // Each as it stands now, in order, and handed on. One closed,
+        // sorted otherwise or handed on since its repo's pass is passed
+        // over, and that pass, booked now, lists afresh; one GitHub won't
+        // say about, or won't take the label on, books a retry. Either way
+        // the rest of that repo's wait for its pass, and the next repo's go
+        // on: one repo can't hold up the others. One is handed on at most.
         let mut passed: BTreeSet<String> = BTreeSet::new();
-        let mut picked = None;
         for (repo, n) in ranked {
             if passed.contains(&repo) {
                 continue;
@@ -136,23 +137,20 @@ impl Pass<'_> {
                 passed.insert(repo);
                 continue;
             }
-            picked = Some((repo, n));
+            let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
+            fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
+            fs::write(d.join("drained"), "").map_err(|e| io_fail(&d.join("drained"), e))?;
+            if !self.add_label(&repo, &n, &label) {
+                let _ = fs::remove_dir_all(&d);
+                self.miss(&repo);
+                passed.insert(repo);
+                continue;
+            }
+            // Its labelled event starts the repo's pass; so does this, if
+            // that never comes.
+            self.book(&repo, now() + 60);
             break;
         }
-        let Some((repo, n)) = picked else {
-            return Ok(());
-        };
-        let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
-        fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
-        fs::write(d.join("drained"), "").map_err(|e| io_fail(&d.join("drained"), e))?;
-        if !self.add_label(&repo, &n, &label) {
-            let _ = fs::remove_dir_all(&d);
-            self.miss(&repo);
-            return Ok(());
-        }
-        // Its labelled event starts the repo's pass; so does this, if that
-        // never comes.
-        self.book(&repo, now() + 60);
         Ok(())
     }
 
