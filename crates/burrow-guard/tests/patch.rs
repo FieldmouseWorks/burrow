@@ -160,3 +160,52 @@ fn no_snapshot_no_patch() {
     let edit = patch("*** Update File: kept.txt\n@@\n-work\n+play");
     assert_eq!(codex_hook(&config, &edit, work.path()), "");
 }
+
+/// A patch a command hands Codex lands where the command has moved to:
+/// the guard reads `cd DIR && apply_patch` as Codex does, and any other
+/// move (or one it can't read) as anywhere, so an Add File there counts.
+#[test]
+fn a_commands_patch_is_read_where_it_lands() {
+    let work = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    fs::create_dir(work.path().join("sub")).unwrap();
+    fs::write(work.path().join("sub").join("kept.txt"), "work\n").unwrap();
+    fs::write(tree.path().join("kept.txt"), "work\n").unwrap();
+    let p = patch("*** Add File: kept.txt\n+new");
+    let heredoc = format!("apply_patch <<'EOF'\n{p}EOF");
+    let t = tree.path().display();
+    // Nothing at kept.txt in the starting directory: each of these
+    // replaces a file only because of where it moved first.
+    for command in [
+        format!("cd sub && {heredoc}"),
+        format!("cd 'sub' && {heredoc}"),
+        format!("cd {t} && {heredoc}"),
+        format!("cd \"{t}\" && {heredoc}"),
+        format!("cd \"$PROJ_SCRATCH/tree\" && {heredoc}"),
+        format!("cd ~/tree && {heredoc}"),
+        format!("cd sub; {heredoc}"),
+        format!("pushd sub && {heredoc}"),
+        format!("(cd sub && {heredoc})"),
+        format!("bash -c \"cd sub && {heredoc}\""),
+        format!("sh -c 'cd sub; apply_patch' <<'EOF'\n{p}EOF"),
+        format!("env -C sub apply_patch <<'EOF'\n{p}EOF"),
+        format!("{heredoc}\ncd sub && {heredoc}"),
+        format!("cd sub && apply_patch <<'EOF' && true\n{p}EOF"),
+    ] {
+        let (taken, said) = snapshotted("Bash", &command, work.path());
+        assert!(taken, "no snapshot before: {command}");
+        assert_eq!(said, None, "{command}");
+    }
+    // Where it's known and nothing is there, an Add File only adds.
+    for command in [
+        heredoc.clone(),
+        format!("cd {t}/new && {heredoc}"),
+        format!("apply_patch <<EOF\n{p}EOF\n"),
+        format!("  cd sub/.. && apply_patch << \"PATCH\"\n{p}PATCH\n"),
+    ] {
+        fs::create_dir_all(tree.path().join("new")).unwrap();
+        let (taken, said) = snapshotted("Bash", &command, work.path());
+        assert!(!taken, "a snapshot before: {command}");
+        assert_eq!(said, None, "{command}");
+    }
+}

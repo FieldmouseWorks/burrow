@@ -1,0 +1,520 @@
+//! curl, read as curl reads its command line, for codex.rs: whether any
+//! request it makes writes a repo's commits or refs through GitHub's API.
+//!
+//! One curl may make many requests: each URL, `--url`'s too, and each
+//! operation after `--next` (`-:`) with options of its own. Every request
+//! is read with its own operation's method and body, so a harmless one
+//! never speaks for another. An option's value (a header, a body) is never
+//! taken for a URL. What curl would read that the guard can't (a config
+//! file, URLs from a file, a URL or body only an expansion gives, a glob)
+//! counts as the write it may be.
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+use crate::codex::{GIT_DATA, MUTATION, endpoint};
+use crate::{pattern, shell};
+
+/// curl's short options that take a value: the rest of their word, or the
+/// next word (`curl --help all`).
+const SHORT_VALUE: &str = "EKCbcdDFPHhmoxUQreXYytzTuAw";
+
+/// curl's long options that take a value, as `--name value` or
+/// `--name=value` (`curl --help all`). Any other is a switch, so its
+/// following word reads as a URL: a mistake there refuses, never lets
+/// through.
+const LONG_VALUE: &[&str] = &[
+    "abstract-unix-socket",
+    "alt-svc",
+    "aws-sigv4",
+    "cacert",
+    "capath",
+    "cert",
+    "cert-type",
+    "ciphers",
+    "config",
+    "connect-timeout",
+    "connect-to",
+    "continue-at",
+    "cookie",
+    "cookie-jar",
+    "create-file-mode",
+    "crlfile",
+    "curves",
+    "data",
+    "data-ascii",
+    "data-binary",
+    "data-raw",
+    "data-urlencode",
+    "delegation",
+    "dns-interface",
+    "dns-ipv4-addr",
+    "dns-ipv6-addr",
+    "dns-servers",
+    "doh-url",
+    "dump-header",
+    "ech",
+    "egd-file",
+    "engine",
+    "etag-compare",
+    "etag-save",
+    "expect100-timeout",
+    "form",
+    "form-string",
+    "ftp-account",
+    "ftp-alternative-to-user",
+    "ftp-method",
+    "ftp-port",
+    "ftp-ssl-ccc-mode",
+    "happy-eyeballs-timeout-ms",
+    "haproxy-clientip",
+    "header",
+    "help",
+    "hostpubmd5",
+    "hostpubsha256",
+    "hsts",
+    "interface",
+    "ip-tos",
+    "ipfs-gateway",
+    "json",
+    "keepalive-cnt",
+    "keepalive-time",
+    "key",
+    "key-type",
+    "knownhosts",
+    "krb",
+    "libcurl",
+    "limit-rate",
+    "local-port",
+    "login-options",
+    "mail-auth",
+    "mail-from",
+    "mail-rcpt",
+    "max-filesize",
+    "max-redirs",
+    "max-time",
+    "netrc-file",
+    "noproxy",
+    "oauth2-bearer",
+    "output",
+    "output-dir",
+    "parallel-max",
+    "parallel-max-host",
+    "pass",
+    "pinnedpubkey",
+    "preproxy",
+    "proto",
+    "proto-default",
+    "proto-redir",
+    "proxy",
+    "proxy-cacert",
+    "proxy-capath",
+    "proxy-cert",
+    "proxy-cert-type",
+    "proxy-ciphers",
+    "proxy-crlfile",
+    "proxy-header",
+    "proxy-key",
+    "proxy-key-type",
+    "proxy-pass",
+    "proxy-pinnedpubkey",
+    "proxy-service-name",
+    "proxy-tls13-ciphers",
+    "proxy-tlsauthtype",
+    "proxy-tlspassword",
+    "proxy-tlsuser",
+    "proxy-user",
+    "proxy1.0",
+    "pubkey",
+    "quote",
+    "random-file",
+    "range",
+    "rate",
+    "referer",
+    "request",
+    "request-target",
+    "resolve",
+    "retry",
+    "retry-delay",
+    "retry-max-time",
+    "sasl-authzid",
+    "service-name",
+    "sigalgs",
+    "socks4",
+    "socks4a",
+    "socks5",
+    "socks5-gssapi-service",
+    "socks5-hostname",
+    "speed-limit",
+    "speed-time",
+    "ssl-sessions",
+    "stderr",
+    "telnet-option",
+    "tftp-blksize",
+    "time-cond",
+    "tls-max",
+    "tls13-ciphers",
+    "tlsauthtype",
+    "tlspassword",
+    "tlsuser",
+    "trace",
+    "trace-ascii",
+    "trace-config",
+    "unix-socket",
+    "upload-file",
+    "upload-flags",
+    "url",
+    "url-query",
+    "user",
+    "user-agent",
+    "variable",
+    "vlan-priority",
+    "write-out",
+];
+
+/// One request's worth of options: an operation, up to `--next`.
+#[derive(Default)]
+struct Operation<'a> {
+    urls: Vec<&'a str>,
+    method: Option<&'a str>,
+    /// `--request-target`: the path sent, whatever the URL's.
+    target: Option<&'a str>,
+    body: Vec<&'a str>,
+    /// A body from a file or input, or built from variables.
+    body_unread: bool,
+    upload: bool,
+    get: bool,
+    head: bool,
+    globoff: bool,
+    /// It connects somewhere other than its URL's host names
+    /// (`--connect-to`, `--resolve`, a `Host` header).
+    rerouted: bool,
+}
+
+/// Whether a value comes from where the guard can't read it: a file or
+/// input (`@file`, `name=@file`, `name=<file`), or an expansion.
+fn unread(value: &str) -> bool {
+    value.starts_with('@')
+        || value.contains("=@")
+        || value.contains("=<")
+        || value.contains(['$', shell::UNKNOWN])
+}
+
+impl<'a> Operation<'a> {
+    fn take(&mut self, name: &str, value: &'a str) {
+        match name {
+            "url" => self.urls.push(value),
+            "request" => self.method = Some(value),
+            "request-target" => self.target = Some(value),
+            "data" | "data-ascii" | "data-binary" | "data-raw" | "json" | "form"
+            | "form-string" => {
+                self.body_unread |= name != "data-raw" && name != "form-string" && unread(value)
+                    || value.contains(['$', shell::UNKNOWN]);
+                self.body.push(value);
+            }
+            "data-urlencode" => {
+                self.body_unread |= value.contains(['@', '$', shell::UNKNOWN]);
+                self.body.push(value);
+            }
+            "upload-file" => self.upload = true,
+            "connect-to" | "resolve" => self.rerouted = true,
+            "header" => {
+                self.rerouted |= value
+                    .trim_start()
+                    .get(..5)
+                    .is_some_and(|h| h.eq_ignore_ascii_case("host:"))
+                    || value.starts_with('@');
+            }
+            _ => {}
+        }
+    }
+
+    fn switch(&mut self, name: &str) {
+        match name {
+            "get" => self.get = true,
+            "head" => self.head = true,
+            "globoff" => self.globoff = true,
+            _ => {}
+        }
+    }
+
+    fn method(&self) -> &str {
+        self.method.unwrap_or(if self.head {
+            "HEAD"
+        } else if self.get {
+            "GET"
+        } else if self.upload {
+            "PUT"
+        } else if self.body.is_empty() {
+            "GET"
+        } else {
+            "POST"
+        })
+    }
+
+    /// Whether this operation's requests write commits or refs on GitHub.
+    fn writes(&self, unread_everywhere: bool) -> bool {
+        let method = self.method();
+        let write = !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD");
+        if !write {
+            return false;
+        }
+        let unread_body = self.body_unread || self.upload || unread_everywhere;
+        let mut paths: Vec<String> = Vec::new();
+        for url in &self.urls {
+            // Where an expansion or a glob may send it, or a file of URLs.
+            if url.contains(['$', shell::UNKNOWN])
+                || url.starts_with('@')
+                || (!self.globoff && url.contains(['{', '[']))
+            {
+                return true;
+            }
+            let (host, path) = split(url);
+            if host == "api.github.com"
+                || path.starts_with("/api/v3/")
+                || path == "/api/graphql"
+                || self.rerouted
+            {
+                paths.push(path);
+            }
+        }
+        if paths.is_empty() {
+            return false;
+        }
+        if let Some(target) = self.target {
+            if target.contains(['$', shell::UNKNOWN]) {
+                return true;
+            }
+            paths = vec![squash(target)];
+        }
+        paths.iter().any(|path| {
+            let path = endpoint(path);
+            if path.ends_with("graphql") {
+                unread_body || self.body.iter().any(|b| MUTATION.is_match(b))
+            } else {
+                GIT_DATA.is_match(path)
+            }
+        })
+    }
+}
+
+/// A URL's host, lowercased, without its user or port, and its path, dot
+/// segments squashed as curl does: what the request is sent to.
+fn split(url: &str) -> (String, String) {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let (authority, path) = rest
+        .find(['/', '?', '#'])
+        .map_or((rest, "/"), |at| rest.split_at(at));
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    (host, squash(path))
+}
+
+/// A path with its `.` and `..` segments resolved, before its query.
+fn squash(path: &str) -> String {
+    let (path, query) = path
+        .find(['?', '#'])
+        .map_or((path, ""), |at| path.split_at(at));
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').collect();
+    let last = segments.len() - 1;
+    for (i, segment) in segments.into_iter().enumerate() {
+        match segment {
+            "." => {
+                if i == last {
+                    out.push("");
+                }
+            }
+            ".." => {
+                if out.len() > 1 {
+                    out.pop();
+                }
+                if i == last {
+                    out.push("");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    format!("{}{query}", out.join("/"))
+}
+
+/// What curl with some words does, as far as codex.rs cares.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Curl {
+    /// Nothing that writes commits or refs.
+    Fine,
+    /// Writes commits or refs through GitHub's API, or may: a request
+    /// whose destination or body the guard can't read.
+    Writes,
+    /// Reads options from a file (`--config`), which may be any of them.
+    Config,
+}
+
+/// What curl with these `words` does: each of its requests read with its
+/// own operation's options.
+pub fn read(words: &[&str]) -> Curl {
+    let mut ops = vec![Operation::default()];
+    // Variables (`--variable`, `--expand-…`) build values the guard can't
+    // read, in any operation.
+    let mut variables = false;
+    let mut words = words.iter().copied();
+    let mut options_end = false;
+    while let Some(w) = words.next() {
+        let op = ops.last_mut().expect("there's always one");
+        if options_end || !w.starts_with('-') || w == "-" {
+            op.urls.push(w);
+            continue;
+        }
+        if w == "--" {
+            options_end = true;
+            continue;
+        }
+        if let Some(long) = w.strip_prefix("--") {
+            let (name, joined) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            if name == "next" {
+                ops.push(Operation::default());
+                continue;
+            }
+            variables |= name == "variable" || name.starts_with("expand-");
+            let name = name.strip_prefix("expand-").unwrap_or(name);
+            if name == "config" {
+                return Curl::Config;
+            }
+            if LONG_VALUE.contains(&name) {
+                if let Some(value) = joined.or_else(|| words.next()) {
+                    op.take(name, value);
+                }
+            } else {
+                op.switch(name);
+            }
+            continue;
+        }
+        // Short options, run together: one that takes a value takes the
+        // rest of the word, or the next word.
+        let short = &w[1..];
+        for (i, c) in short.char_indices() {
+            if c == ':' {
+                ops.push(Operation::default());
+                continue;
+            }
+            let op = ops.last_mut().expect("there's always one");
+            if SHORT_VALUE.contains(c) {
+                let rest = &short[i + c.len_utf8()..];
+                let value = if rest.is_empty() {
+                    words.next()
+                } else {
+                    Some(rest)
+                };
+                if c == 'K' {
+                    return Curl::Config;
+                }
+                if let Some(value) = value {
+                    op.take(long_name(c), value);
+                }
+                break;
+            }
+            op.switch(match c {
+                'G' => "get",
+                'I' => "head",
+                'g' => "globoff",
+                _ => "",
+            });
+        }
+    }
+    if ops.iter().any(|op| op.writes(variables)) {
+        Curl::Writes
+    } else {
+        Curl::Fine
+    }
+}
+
+/// The long name of a short option that takes a value, where it matters.
+fn long_name(c: char) -> &'static str {
+    match c {
+        'd' => "data",
+        'F' => "form",
+        'H' => "header",
+        'X' => "request",
+        'T' => "upload-file",
+        _ => "",
+    }
+}
+
+/// Whether curl's first word keeps it off its default config (`-q`).
+pub fn skips_default_config(first: Option<&str>) -> bool {
+    matches!(first, Some("-q" | "--disable"))
+}
+
+/// What a command line sets that moves curl's default config: `CURL_HOME`,
+/// `XDG_CONFIG_HOME`, or `HOME` named as itself (an assignment, `export`,
+/// `read`), not expanded.
+static MOVES_CONFIG: LazyLock<Regex> = LazyLock::new(|| {
+    pattern(r"CURL_HOME|XDG_CONFIG_HOME|(^|[^A-Za-z0-9_${])HOME([^A-Za-z0-9_]|$)")
+});
+
+pub fn moves_default_config(cmd: &str) -> bool {
+    MOVES_CONFIG.is_match(cmd)
+}
+
+/// Whether a default curl config is there to read, in `env` (curl's
+/// `.curlrc` or `curlrc` under `CURL_HOME`, `XDG_CONFIG_HOME` or `HOME`):
+/// what it holds may add requests or options to any curl.
+pub fn default_config(env: impl Fn(&str) -> Option<OsString>) -> bool {
+    let mut places: Vec<PathBuf> = Vec::new();
+    for var in ["CURL_HOME", "XDG_CONFIG_HOME", "HOME"] {
+        if let Some(dir) = env(var).filter(|d| !d.is_empty()) {
+            let dir = PathBuf::from(dir);
+            places.push(dir.join(".config"));
+            places.push(dir);
+        }
+    }
+    places
+        .iter()
+        .any(|dir| ["curlrc", ".curlrc"].iter().any(|f| dir.join(f).exists()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_default_config_anywhere_curl_looks_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().to_owned();
+        let env = |var: &'static str| {
+            let at = at.clone();
+            move |k: &str| (k == var).then(|| at.clone().into_os_string())
+        };
+        for var in ["CURL_HOME", "XDG_CONFIG_HOME", "HOME"] {
+            assert!(!default_config(env(var)), "{var}");
+        }
+        for file in [".curlrc", "curlrc", ".config/curlrc"] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "request = PATCH\n").unwrap();
+            for var in ["CURL_HOME", "XDG_CONFIG_HOME", "HOME"] {
+                assert!(default_config(env(var)), "{var}/{file}");
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn paths_are_squashed_as_curl_sends_them() {
+        assert_eq!(
+            split("https://u:p@API.github.com:443/repos/o/r/pulls/5/x/../merge?a=1"),
+            (
+                "api.github.com".to_owned(),
+                "/repos/o/r/pulls/5/merge?a=1".to_owned()
+            )
+        );
+        assert_eq!(split("api.github.com").1, "/");
+        assert_eq!(squash("/a/./b/../c/."), "/a/c/");
+    }
+}

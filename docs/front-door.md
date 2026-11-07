@@ -157,8 +157,8 @@ pool (`burrow.proj.codex.slots`, two by default), leaving the reviewer first
 claim on the plan. Usage refusals wait for the reset and resume themselves.
 The job user's `.codex/config.toml` picks the default model. Machine
 instructions and one-way command rules are generated alongside Claude's.
-Codex commits carry `Engine: codex`; after the usual review, a Claude job
-judges whether their PR lands. A steward judge always uses Claude.
+Codex commits carry `Engine: codex` (a push of a commit without it is
+refused); after the usual review, a Claude job judges whether their PR lands. A steward judge always uses Claude.
 
 ### For the Claude in the chat (coordinator and threads)
 

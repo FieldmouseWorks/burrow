@@ -1,15 +1,18 @@
 //! Codex jobs (proj's codex engine). Their git hooks come in through the
 //! GIT_CONFIG_* environment proj gives Codex: commit-msg marks each commit
 //! `Engine: codex`, which sends its PR to a Claude judge rather than land
-//! on Codex's own review, and pre-push refuses a default branch's
-//! rewrite. Codex runs this guard as its managed hook, outside the job's
+//! on Codex's own review (and refuses a message whose cleanup would lose
+//! the mark), and pre-push refuses a default branch's rewrite and any
+//! commit new to the remote without the mark, however it was made. Codex
+//! runs this guard as its managed hook, outside the job's
 //! reach, so here it refuses what would make a commit those hooks never
 //! see or push past them: turning them off (`--no-verify`, `commit -n`,
 //! `core.hooksPath`), changing or clearing the environment that carries
 //! them, git's commands that write commits without commit-msg (revert
 //! does, and cherry-pick and rebase do by case), a git alias, which could
 //! be any of those, and writes to a repo's commits, refs or contents
-//! through GitHub's API, which GitHub makes itself. A default branch's
+//! through GitHub's API, which GitHub makes itself (curl's every request
+//! read on its own: curl.rs). A default branch's
 //! force-push or delete is push.rs's, for both engines, whatever the
 //! hooks.
 //!
@@ -22,6 +25,7 @@ use std::sync::LazyLock;
 
 use regex::{Regex, RegexBuilder};
 
+use crate::curl::{self, Curl};
 use crate::push::runs_git;
 use crate::walk;
 use crate::{any_line, pattern, shell};
@@ -33,6 +37,7 @@ enum Refusal {
     Api,
     Unmarked,
     Alias,
+    CurlConfig,
 }
 
 impl Refusal {
@@ -46,6 +51,9 @@ impl Refusal {
             }
             Refusal::Unmarked => {
                 "Writes commits this Codex job's commit-msg hook may never mark (Engine: codex), or pushes past its pre-push; commit, merge or push with plain git commit, git merge and git push instead."
+            }
+            Refusal::CurlConfig => {
+                "Runs curl with options from a file (--config, or a curlrc it would read), which may write commits or refs through GitHub's API where this Codex job's git hooks never see them; run it with -q first and its options on the line."
             }
             Refusal::Alias => {
                 "Defines a git alias, which could run what this Codex job's hooks never see; run the git command itself instead."
@@ -258,21 +266,21 @@ fn sets_alias(words: &[&String]) -> bool {
 /// What GitHub's REST API writes commits or refs at: a repo's git data,
 /// contents, merges, a pull request's merge or branch update, a branch's
 /// rename.
-static GIT_DATA: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static GIT_DATA: LazyLock<Regex> = LazyLock::new(|| {
     pattern(
         r"/git/(commits|trees|blobs|refs|tags)|/contents(/|$)|/merges$|/merge-upstream$|/pulls/[^/]+/(merge|update-branch)$|/branches/[^/]+/rename$",
     )
 });
 
 /// GitHub's GraphQL mutations that write commits or refs, or merge.
-static MUTATION: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static MUTATION: LazyLock<Regex> = LazyLock::new(|| {
     pattern(
         r"createCommitOnBranch|createRef|updateRefs?([^a-zA-Z]|$)|deleteRef|mergeBranch|mergePullRequest|updatePullRequestBranch|revertPullRequest|enablePullRequestAutoMerge|enqueuePullRequest",
     )
 });
 
 /// An endpoint, as the API matches it: no query, no trailing slash.
-fn endpoint(url: &str) -> &str {
+pub(crate) fn endpoint(url: &str) -> &str {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     path.trim_end_matches('/')
 }
@@ -366,41 +374,6 @@ fn gh_api<'a>(mut words: impl Iterator<Item = &'a String>) -> bool {
     rest_writes(method, url)
 }
 
-/// Whether `curl` with these words writes commits or refs through GitHub's
-/// API, as `gh api` would.
-fn curl<'a>(words: impl Iterator<Item = &'a String>) -> bool {
-    let words: Vec<&str> = words.map(String::as_str).collect();
-    let Some(url) = words
-        .iter()
-        .find(|w| w.contains("api.github.com") || w.contains("/api/v3/"))
-    else {
-        return false;
-    };
-    if endpoint(url).ends_with("graphql") {
-        return words
-            .iter()
-            .any(|w| MUTATION.is_match(w) || (w.starts_with('@') && w.len() > 1));
-    }
-    let mut method = None;
-    let mut body = false;
-    let mut words = words.iter();
-    while let Some(w) = words.next() {
-        match *w {
-            "-X" | "--request" => method = words.next().copied(),
-            o if o.starts_with("--request=") => method = o.strip_prefix("--request="),
-            o if o.starts_with("-X") => method = o.strip_prefix("-X"),
-            "-T" | "--upload-file" => method = method.or(Some("PUT")),
-            o if o.starts_with("--data") || o == "--json" || o.starts_with("--form") => {
-                body = true;
-            }
-            o if o.starts_with("-d") || o.starts_with("-F") => body = true,
-            _ => {}
-        }
-    }
-    let method = method.unwrap_or(if body { "POST" } else { "GET" });
-    rest_writes(method, url)
-}
-
 /// The program a word names, whatever path it's run by.
 fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
@@ -418,7 +391,17 @@ pub fn refusals(cmd: &str) -> Vec<String> {
         } else {
             match program(word) {
                 "gh" => gh(rest.iter(budget)).then_some(Refusal::Api),
-                "curl" => curl(rest.iter(budget)).then_some(Refusal::Api),
+                "curl" => {
+                    let words: Vec<&str> = rest.iter(budget).map(String::as_str).collect();
+                    match curl::read(&words) {
+                        Curl::Writes => Some(Refusal::Api),
+                        Curl::Config => Some(Refusal::CurlConfig),
+                        Curl::Fine => (!curl::skips_default_config(words.first().copied())
+                            && (curl::moves_default_config(cmd)
+                                || curl::default_config(|k| std::env::var_os(k))))
+                        .then_some(Refusal::CurlConfig),
+                    }
+                }
                 _ => None,
             }
         };

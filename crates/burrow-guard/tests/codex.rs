@@ -370,3 +370,69 @@ fn codexs_hook_that_cant_check_refuses() {
         "{reason}"
     );
 }
+
+/// One curl may make many requests: each is read with its own operation's
+/// options, so a harmless one never speaks for a write, and a header or
+/// body naming GitHub is never taken for where a request goes.
+#[test]
+fn every_request_of_a_curl_is_read() {
+    let refs = "https://api.github.com/repos/o/r/git/refs/heads/main";
+    let read = "https://api.github.com/repos/o/r";
+    let auth = "-H 'Authorization: token x'";
+    let force = "-d '{\"sha\":\"abc\",\"force\":true}'";
+    for cmd in [
+        format!("curl {read} --next -X PATCH {auth} {refs} {force}"),
+        format!("curl {read} -: -X PATCH {refs} {force}"),
+        format!("curl -s {read} -:XPATCH {refs} {force}"),
+        format!("curl -X PATCH {read} {refs} {force}"),
+        format!("curl -X PATCH {force} {read} --url {refs}"),
+        format!("curl -X PATCH {force} --url={refs}"),
+        format!("curl -sSX PATCH {force} {refs}"),
+        format!("curl -sSXPATCH {force} {refs}"),
+        format!("curl {force} -- {refs}"),
+        format!("curl -X PATCH {force} https://api.github.com/repos/o/r/issues/../git/refs/heads/main"),
+        "curl -X PUT https://api.github.com/repos/o/r/pulls/5/merge/x/..".to_owned(),
+        format!("curl -X PATCH {force} 'https://api.github.com/repos/o/r/git/refs/heads/{{main,x}}'"),
+        format!("curl -X PATCH {force} \"$URL\""),
+        format!("curl -X PATCH {force} --url @urls.txt"),
+        format!("curl -X PATCH {force} --request-target /repos/o/r/git/refs/heads/main https://api.github.com/"),
+        format!("curl -X PATCH {force} --connect-to example.org:443:api.github.com:443 -k https://example.org/repos/o/r/git/refs/heads/main"),
+        format!("curl -X PATCH {force} -H 'Host: api.github.com' https://140.82.112.6/repos/o/r/git/refs/heads/main"),
+        "curl https://api.github.com/graphql --next https://api.github.com/graphql -d '{\"query\":\"mutation { mergeBranch(input: {}) { clientMutationId } }\"}'".to_owned(),
+        "curl https://api.github.com/graphql --data-binary @body.json".to_owned(),
+        "curl https://api.github.com/graphql --json @-".to_owned(),
+        "curl https://api.github.com/graphql -d \"$BODY\"".to_owned(),
+        "curl --variable q@q.txt --expand-data '{{q}}' https://api.github.com/graphql".to_owned(),
+        "curl https://ghe.example/api/graphql -d '{\"query\":\"mutation { createRef(input: {}) { clientMutationId } }\"}'".to_owned(),
+        "curl -T body.json https://api.github.com/repos/o/r/contents/a.txt".to_owned(),
+        format!("curl -K curl.cfg {read}"),
+        format!("curl --config=curl.cfg {read}"),
+        format!("curl -sK curl.cfg {read}"),
+        format!("CURL_HOME=/tmp/c curl {read}"),
+        format!("XDG_CONFIG_HOME=/tmp/c curl {read}"),
+        format!("export HOME=/tmp/c; curl {read}"),
+    ] {
+        assert!(says(&cmd, true).is_some(), "let through: {cmd}");
+        assert_eq!(says(&cmd, false), None, "Claude's guard said something: {cmd}");
+    }
+}
+
+/// What curl reads, or writes anywhere but GitHub's git data, goes
+/// through, whatever its headers and bodies name.
+#[test]
+fn curls_reads_and_other_writes_go_through() {
+    for cmd in [
+        "curl -H 'Referer: https://api.github.com/repos/o/r/git/refs/heads/main' -d x=1 https://example.org/hook",
+        "curl -d 'see https://api.github.com/repos/o/r/git/refs/heads/main' https://example.org/hook",
+        "curl -e https://api.github.com/repos/o/r/git/refs https://example.org/ -X POST",
+        "curl https://api.github.com/repos/o/r/git/refs/heads/main --next https://api.github.com/repos/o/r",
+        "curl -X PATCH https://example.org/repos/o/r/git/refs/heads/main --next https://api.github.com/repos/o/r/git/refs/heads/main",
+        "curl -G -d per_page=1 https://api.github.com/repos/o/r/git/commits",
+        "curl -I https://api.github.com/repos/o/r/git/refs/heads/main -d x",
+        "curl -o \"$HOME/out\" https://api.github.com/repos/o/r",
+        "curl -q --url https://api.github.com/repos/o/r/issues/1/comments -d '{\"body\":\"x\"}'",
+        "curl https://api.github.com/graphql -d '{\"query\":\"query { viewer { login } }\"}'",
+    ] {
+        assert_eq!(says(cmd, true), None, "refused: {cmd}");
+    }
+}

@@ -94,3 +94,237 @@ fn worktree_commits_are_marked_and_default_branch_rewrites_and_deletes_are_refus
         assert_eq!(succeeds(run(&remote, &["rev-parse", "trunk"])), tip);
     }
 }
+
+/// A scratch repo with the hooks on, its remote with one commit of
+/// someone else's on its default branch (unmarked, made with no hooks),
+/// fetched: the job's history to build on.
+struct Repo {
+    _dir: tempfile::TempDir,
+    hooks: std::path::PathBuf,
+    work: std::path::PathBuf,
+    remote: std::path::PathBuf,
+}
+
+impl Repo {
+    fn new() -> Repo {
+        let d = tempfile::tempdir().unwrap();
+        let hooks = d.path().join("hooks");
+        fs::create_dir(&hooks).unwrap();
+        for name in ["commit-msg", "pre-push"] {
+            symlink(env!("CARGO_BIN_EXE_burrow-proj-git-hook"), hooks.join(name)).unwrap();
+        }
+        let none = d.path().join("no-hooks");
+        fs::create_dir(&none).unwrap();
+        let theirs = d.path().join("theirs");
+        let remote = d.path().join("remote");
+        let work = d.path().join("work");
+        succeeds(git(
+            d.path(),
+            &none,
+            &["init", "-q", "-b", "main", "theirs"],
+        ));
+        succeeds(git(
+            &theirs,
+            &none,
+            &["commit", "--allow-empty", "-m", "theirs"],
+        ));
+        let (theirs, remote_s) = (theirs.to_str().unwrap(), remote.to_str().unwrap());
+        succeeds(git(
+            d.path(),
+            &none,
+            &["clone", "-q", "--bare", theirs, remote_s],
+        ));
+        succeeds(git(d.path(), &none, &["clone", "-q", remote_s, "work"]));
+        Repo {
+            hooks,
+            work,
+            remote,
+            _dir: d,
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        git(&self.work, &self.hooks, args)
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        succeeds(self.run(args))
+    }
+
+    /// Pushes HEAD to `branch`: the remote's branch after, or what refused.
+    fn push(&self, branch: &str) -> Result<String, String> {
+        let out = self.run(&["push", "origin", &format!("HEAD:refs/heads/{branch}")]);
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        Ok(succeeds(git(
+            &self.remote,
+            &self.hooks,
+            &["rev-parse", branch],
+        )))
+    }
+}
+
+/// The steward's reading of a stored commit message: `git
+/// interpret-trailers --parse`, case-blind (modules/autoland/touches.py).
+fn steward_sees_mark(repo: &Repo, commit: &str) -> bool {
+    let message = repo.ok(&["log", "-1", "--format=%B", commit]);
+    let mut child = Command::new("git")
+        .args(["interpret-trailers", "--parse"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), message.as_bytes()).unwrap();
+    let out = succeeds(child.wait_with_output().unwrap());
+    out.to_lowercase().lines().any(|l| l == "engine: codex")
+}
+
+/// Whatever message and cleanup a commit is made with, the one stored
+/// carries the mark where the steward reads it, or there's no commit.
+#[test]
+fn every_stored_message_carries_the_mark_or_there_is_no_commit() {
+    let repo = Repo::new();
+    let file = repo.work.join(".git").join("message");
+    fs::write(&file, "subject\n\nbody\n# a comment\n").unwrap();
+    let file = file.to_str().unwrap();
+    for args in [
+        ["commit", "--allow-empty", "-m", ""].as_slice(),
+        &["commit", "--allow-empty", "--allow-empty-message", "-m", ""],
+        &["commit", "--allow-empty", "-m", "   \n\t"],
+        &["commit", "--allow-empty", "--cleanup=strip", "-m", "# c"],
+        &["commit", "--allow-empty", "--cleanup=verbatim", "-m", ""],
+        &[
+            "commit",
+            "--allow-empty",
+            "--cleanup=whitespace",
+            "-m",
+            "\n\n",
+        ],
+        &["commit", "--allow-empty", "--cleanup=scissors", "-m", ""],
+        &[
+            "-c",
+            "core.commentChar=E",
+            "commit",
+            "--allow-empty",
+            "--cleanup=strip",
+            "-m",
+            "x",
+        ],
+        &["commit", "--allow-empty", "-m", "subject"],
+        &["commit", "--allow-empty", "--cleanup=verbatim", "-m", "# c"],
+        &["commit", "--allow-empty", "--cleanup=strip", "-F", file],
+        &["commit", "--allow-empty", "--cleanup=verbatim", "-F", file],
+        &[
+            "commit",
+            "--allow-empty",
+            "--cleanup=whitespace",
+            "-F",
+            file,
+        ],
+        &["commit", "--allow-empty", "--cleanup=scissors", "-F", file],
+    ] {
+        let before = repo.ok(&["rev-parse", "HEAD"]);
+        let made = repo.run(args).status.success();
+        let head = repo.ok(&["rev-parse", "HEAD"]);
+        assert_eq!(made, head != before, "{args:?}");
+        if made {
+            assert!(steward_sees_mark(&repo, &head), "{args:?}: unmarked");
+        }
+    }
+}
+
+/// However a commit is made past commit-msg, it doesn't leave unmarked:
+/// pre-push reads each commit new to the remote.
+#[test]
+fn a_commit_made_past_commit_msg_isnt_pushed() {
+    let repo = Repo::new();
+    let base = repo.ok(&["rev-parse", "HEAD"]);
+    // Plumbing: a commit object and a ref, no commit-msg.
+    let tree = repo.ok(&["rev-parse", "HEAD^{tree}"]);
+    let object = format!(
+        "tree {tree}\nparent {base}\nauthor W <w@x> 1 +0000\ncommitter W <w@x> 1 +0000\n\nplumbed\n"
+    );
+    fs::write(repo.work.join(".git").join("object"), object).unwrap();
+    let plumbed = repo.ok(&["hash-object", "-t", "commit", "-w", ".git/object"]);
+    let stashed = {
+        fs::write(repo.work.join("file"), "x").unwrap();
+        repo.ok(&["add", "file"]);
+        repo.ok(&["stash"]);
+        repo.ok(&["rev-parse", "stash@{0}"])
+    };
+    let hooks_off = {
+        repo.ok(&["commit", "--allow-empty", "--no-verify", "-m", "past it"]);
+        repo.ok(&["rev-parse", "HEAD"])
+    };
+    let aliased = {
+        repo.ok(&["reset", "-q", "--hard", &base]);
+        repo.ok(&[
+            "-c",
+            "alias.c=commit --no-verify",
+            "c",
+            "--allow-empty",
+            "-m",
+            "alias",
+        ]);
+        repo.ok(&["rev-parse", "HEAD"])
+    };
+    let configured = {
+        repo.ok(&["reset", "-q", "--hard", &base]);
+        repo.ok(&[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "cfg",
+        ]);
+        repo.ok(&["rev-parse", "HEAD"])
+    };
+    // Under a marked commit, or alone.
+    for commit in [plumbed, stashed, hooks_off, aliased, configured] {
+        for on_top in [false, true] {
+            repo.ok(&["update-ref", "HEAD", &commit]);
+            if on_top {
+                repo.ok(&["commit", "--allow-empty", "-m", "marked"]);
+            }
+            let refused = repo.push("work").unwrap_err();
+            assert!(refused.contains(&commit), "{refused}");
+            assert!(refused.contains("no Engine: codex trailer"), "{refused}");
+        }
+    }
+}
+
+/// History the remote already has isn't the job's to mark: a marked
+/// commit on it, and a merge with the remote's own, push.
+#[test]
+fn what_the_remote_has_is_not_checked() {
+    let repo = Repo::new();
+    repo.ok(&["commit", "--allow-empty", "-m", "mine"]);
+    let mine = repo.ok(&["rev-parse", "HEAD"]);
+    assert_eq!(repo.push("work"), Ok(mine.clone()));
+    // Someone else's unmarked commit lands on main.
+    let other = repo.work.with_file_name("other");
+    let none = repo.work.with_file_name("no-hooks");
+    let remote = repo.remote.to_str().unwrap();
+    succeeds(git(
+        repo.work.parent().unwrap(),
+        &none,
+        &["clone", "-q", remote, "other"],
+    ));
+    succeeds(git(
+        &other,
+        &none,
+        &["commit", "--allow-empty", "-m", "theirs too"],
+    ));
+    succeeds(git(&other, &none, &["push", "-q", "origin", "main"]));
+    repo.ok(&["fetch", "-q", "origin"]);
+    repo.ok(&["merge", "--no-ff", "--no-edit", "origin/main"]);
+    let merge = repo.ok(&["rev-parse", "HEAD"]);
+    assert!(steward_sees_mark(&repo, &merge));
+    assert_eq!(repo.push("work"), Ok(merge));
+    // Their commit, already there, onto a new branch.
+    repo.ok(&["reset", "-q", "--hard", "origin/main"]);
+    let theirs = repo.ok(&["rev-parse", "HEAD"]);
+    assert_eq!(repo.push("copy"), Ok(theirs));
+}

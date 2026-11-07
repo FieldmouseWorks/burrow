@@ -23,6 +23,7 @@
 mod ansi_c;
 mod codex;
 pub mod config;
+mod curl;
 mod doors;
 mod push;
 mod shell;
@@ -82,8 +83,13 @@ impl Guard<'_> {
         // The undo first, so a command the owner lets through at a question
         // has its snapshot too. A patch, Codex's own tool's or one a command
         // hands Codex, is read for the files it deletes or replaces.
-        let destroys =
-            undo::patch_destroys(cmd, cwd) || (tool == Some("Bash") && undo::destroys(cmd));
+        // Codex's own tool applies it where Codex runs; a command, wherever
+        // it's moved to, when that's known.
+        let destroys = if tool == Some("Bash") {
+            undo::patch_destroys(cmd, undo::patch_dir(cmd, cwd).as_deref()) || undo::destroys(cmd)
+        } else {
+            undo::patch_destroys(cmd, Some(cwd))
+        };
         if !self.config.snapshot_datasets.is_empty() && destroys {
             asks.extend(undo::snapshot(
                 &self.config.zfs,
