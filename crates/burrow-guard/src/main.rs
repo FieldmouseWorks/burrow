@@ -10,7 +10,7 @@ use std::sync::{Once, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use burrow_guard::config::{Config, current_user};
-use burrow_guard::{Guard, Hook, ask, deny};
+use burrow_guard::{Guard, Hook, Namespace, ask, deny};
 use serde_json::Value;
 
 /// The one answer, whichever comes first: the guard's, or its deadline's.
@@ -91,6 +91,7 @@ fn check(args: &[String]) -> Result<Option<String>, String> {
         config: &config,
         codex: user.is_some(),
         mark: runtime.join("claude-guard-last-snapshot"),
+        namespace: Namespace::here(),
     };
     Ok(guard.check(&hook, SystemTime::now()))
 }

@@ -29,8 +29,7 @@ fn hook(config: &str, input: &str) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-const CONFIG: &str =
-    r#"{"git": "git", "zfs": "/no-such-zfs", "snapshotDatasets": [], "askAfterSeconds": 8}"#;
+const CONFIG: &str = r#"{"git": "git", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 8}"#;
 
 #[test]
 fn a_command_it_lets_through_gets_no_answer() {
@@ -63,7 +62,7 @@ fn a_guard_that_cant_check_asks() {
         (CONFIG, "not json"),
         (r#"{"git": "git"}"#, ls),
         (
-            r#"{"git": "git", "zfs": "zfs", "snapshotDatasets": [], "askAfterSeconds": 8, "extra": 1}"#,
+            r#"{"git": "git", "zfs": "zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 8, "extra": 1}"#,
             ls,
         ),
     ] {
@@ -88,7 +87,7 @@ fn a_guard_that_takes_too_long_asks() {
     fs::write(&git, "#!/bin/sh\nexec sleep 30\n").unwrap();
     fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
     let config = format!(
-        r#"{{"git": "{}", "zfs": "/no-such-zfs", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
+        r#"{{"git": "{}", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
         git.display()
     );
     let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push -f"}, "cwd": "/"}"#;

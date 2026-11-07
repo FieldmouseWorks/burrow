@@ -54,8 +54,10 @@ let
   # of its own, as the compile cache's is, which the kernel's socket table
   # here doesn't list; and a Codex daemon's socket, in the dir the CLI masks
   # itself. The job's /tmp is its own, its user's keys out of sight, and
-  # nix goes through the daemon. No redirects: the guard wants an undo
-  # snapshot for those, and there's no ZFS here.
+  # nix goes through the daemon. And it deletes a file of the project's,
+  # which the guard lets through only once its undo snapshot is taken: the
+  # project is on a ZFS dataset the guard snapshots, from outside the user
+  # namespace Codex runs in.
   connect = path: "python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"${path}\")'";
   calls = cmds: map (cmd: [ "exec_command" { inherit cmd; } ]) cmds;
   firstCalls = calls [
@@ -78,6 +80,7 @@ let
     "cat ~/.ssh/id_test || touch /data/dev/jobs/$PROJ_JOB/keys-refused"
     "touch /tmp/job-tmp && test \"$TMPDIR\" = /tmp && touch /data/dev/jobs/$PROJ_JOB/tmp-own"
     "test \"$NIX_REMOTE\" = daemon && nix-store -q --hash \"$(readlink -f \"$(command -v bash)\")\" && touch /data/dev/jobs/$PROJ_JOB/store-queried"
+    "rm victim && touch /data/dev/jobs/$PROJ_JOB/removed"
   ] ++ [
     # Servers the user starts once this command runs, in tmux's default dir
     # (not there when the job started) and in the custom one.
@@ -100,6 +103,7 @@ let
     "tmux -S /tmp/served-rel.sock new-window 'touch /data/dev/elsewhere/resumed-by-relative' || touch /data/dev/jobs/$PROJ_JOB/resumed-tmux-relative-refused"
     "${connect "/run/cache-stand-in/cache.sock"} || touch /data/dev/jobs/$PROJ_JOB/resumed-netns-refused"
     "touch /tmp/job-tmp && test \"$TMPDIR\" = /tmp && touch /data/dev/jobs/$PROJ_JOB/resumed-tmp-own"
+    "rm victim-again && touch /data/dev/jobs/$PROJ_JOB/resumed-removed"
     "proj done"
   ];
   # A server that only listens: enough for a connect() to succeed.
@@ -132,10 +136,19 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "proj-codex-sandbox";
-  # proj, its Codex role and the workers App, as a machine runs them.
+  # proj, its Codex role and the workers App, as a machine runs them, with
+  # the guard's undo snapshots on a ZFS pool of its own.
   nodes.jobs = {
-    imports = [ self.nixosModules.proj ];
+    imports = [ self.nixosModules.proj self.nixosModules.undo ];
+    virtualisation.emptyDiskImages = [ 512 ];
+    boot.supportedFilesystems = [ "zfs" ];
+    boot.zfs.forceImportRoot = false;
+    networking.hostId = "8425e349";
     burrow = {
+      undo = {
+        enable = true;
+        datasets = [ "tank/web" ];
+      };
       claude.package = claude;
       proj = {
         enable = true;
@@ -184,6 +197,10 @@ pkgs.testers.runNixOSTest {
     jobs.wait_for_unit("gh-token-workers.socket")
     def dev(command):
         return jobs.succeed("su - dev -c " + shlex.quote(command)).strip()
+    # The project is on a dataset the guard snapshots, which the user may
+    # snapshot (burrow.undo's delegation, once the pool is there).
+    jobs.succeed("zpool create -O mountpoint=none tank /dev/vdb && zfs create -o mountpoint=/data/dev/src/web tank/web")
+    jobs.succeed("systemctl restart zfs-delegate-dev.service")
     jobs.succeed("install -d -o dev -g dev /data/dev/src/web /data/dev/elsewhere /srv/origin.git")
     # Git's global config is a file in the machine's /tmp, which the job's
     # commits need and the job's own /tmp would hide.
@@ -220,6 +237,9 @@ pkgs.testers.runNixOSTest {
     dev("""echo '{"OPENAI_API_KEY": "sk-stand-in-login"}' >$CODEX_HOME/auth.json && chmod 0600 $CODEX_HOME/auth.json""")
     # Untracked, as a job's own write there would be.
     dev("mkdir /data/dev/src/web/.codex && cp ${projectWidening} /data/dev/src/web/.codex/config.toml")
+    # What each turn deletes, with no snapshot of its dataset yet.
+    dev("touch /data/dev/src/web/victim /data/dev/src/web/victim-again")
+    jobs.fail("zfs list -H -t snapshot -o name tank/web | grep -q .")
     # tmux servers of the user's, outside any sandbox, where the job's env
     # wouldn't say: at a path of its own, and under a TMUX_TMPDIR of their
     # own (tmux falls back to /tmp for one that isn't there). tmux's default
@@ -260,8 +280,19 @@ pkgs.testers.runNixOSTest {
     for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
                  "login-target-refused", "codex-config-refused", "gitconfig-read-only", "bus-refused", "manager-refused", "tmux-socket-refused",
                  "tmux-custom-refused", "tmux-refused", "tmux-late-refused", "tmux-relative-refused",
-                 "netns-refused", "daemon-refused", "keys-refused", "tmp-own", "store-queried"]:
+                 "netns-refused", "daemon-refused", "keys-refused", "tmp-own", "store-queried", "removed"]:
         assert mark in marks, (mark, marks, said)
+    # The file went, after the guard's undo snapshot of its dataset, which
+    # still has it.
+    def snapshots():
+        return jobs.succeed("zfs list -H -t snapshot -s creation -o name tank/web").split()
+    def kept(snapshot, name):
+        assert snapshot.startswith("tank/web@pre-"), snapshot
+        jobs.succeed(f"test -e /data/dev/src/web/.zfs/snapshot/{snapshot.split('@')[1]}/{name}")
+    jobs.fail("test -e /data/dev/src/web/victim")
+    first = snapshots()
+    assert first, said
+    kept(first[-1], "victim")
     # The job's own state, written by `proj done` inside the sandbox.
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
     # The fetch landed in the project's .git, and the worktree's commit, in
@@ -285,8 +316,12 @@ pkgs.testers.runNixOSTest {
     for mark in ["resumed-elsewhere-refused", "resumed-login-refused", "resumed-codex-config-refused",
                  "resumed-committed", "resumed-bus-refused",
                  "resumed-tmux-refused", "resumed-tmux-relative-refused", "resumed-netns-refused",
-                 "resumed-tmp-own"]:
+                 "resumed-tmp-own", "resumed-removed"]:
         assert mark in marks, (mark, marks, said)
+    jobs.fail("test -e /data/dev/src/web/victim-again")
+    again = snapshots()
+    assert len(again) > len(first), (first, again, said)
+    kept(again[-1], "victim-again")
     assert dev(f"proj state {j}") == "done", (dev(f"proj state {j}"), said)
     for path in ["resumed", "resumed-by-tmux", "resumed-by-relative"]:
         jobs.fail(f"test -e /data/dev/elsewhere/{path}")

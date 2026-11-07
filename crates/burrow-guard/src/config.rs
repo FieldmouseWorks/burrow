@@ -12,6 +12,10 @@ pub struct Config {
     pub git: PathBuf,
     /// zfs, which takes the undo snapshots.
     pub zfs: PathBuf,
+    /// systemd-run, through which the user's service manager takes them for
+    /// a guard outside the machine's own user namespace (undo.rs's
+    /// [`Namespace`](crate::Namespace)).
+    pub systemd_run: PathBuf,
     /// What gets an undo snapshot before a command that deletes or rewrites
     /// files (burrow.undo.datasets); none, and nothing is snapshotted.
     pub snapshot_datasets: Vec<String>,

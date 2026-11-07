@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use burrow_guard::config::Config;
-use burrow_guard::{Guard, Hook, Input};
+use burrow_guard::{Guard, Hook, Input, Namespace};
 use tempfile::TempDir;
 
 /// A machine for the guard: a zfs that writes down what it's asked to do
@@ -38,6 +38,7 @@ impl Box {
         let config = Config {
             git: PathBuf::from("git"),
             zfs,
+            systemd_run: PathBuf::from("/no-such-systemd-run"),
             snapshot_datasets: datasets.iter().map(|d| (*d).to_owned()).collect(),
             ask_after_seconds: 8,
         };
@@ -58,6 +59,7 @@ impl Box {
             config: &self.config,
             codex: false,
             mark: self.mark(),
+            namespace: Namespace::Machine,
         };
         guard.check(&bash(cmd, cwd), now)
     }
@@ -150,6 +152,7 @@ fn only_bash_is_read() {
         config: &b.config,
         codex: false,
         mark: b.mark(),
+        namespace: Namespace::Machine,
     };
     assert_eq!(guard.check(&hook, SystemTime::now()), None);
     assert!(b.snapshots().is_empty());

@@ -342,7 +342,10 @@ pub fn private_tmp(scratch: &Path) -> io::Result<PathBuf> {
 /// takes a bind's source from the machine's own root), and the rest of the
 /// machine as it is: Codex's own sandbox for each command then nests in it.
 /// A CODEX_HOME that was set is set again to where it leads
-/// ([`Sandbox::codex_home`]).
+/// ([`Sandbox::codex_home`]). The bwrap is unprivileged, so Codex and its
+/// hooks run in a user namespace of its own, where zfs sees none of the
+/// machine's datasets: the guard takes its undo snapshot through the user's
+/// service manager there (burrow-guard's `Namespace`).
 pub fn wrap(
     tmp: &Path,
     kept: &[PathBuf],
