@@ -55,6 +55,18 @@ fn a_brace_list_expands_as_bash_expands_it() {
         ("{x,{,}}", &["x"]),
         (r#"""{,a}"#, &["", "a"]),
         ("a{,}b", &["ab", "ab"]),
+        // Each word made, read on its own: an empty one stays only if it
+        // holds a quote, nested and in products too.
+        (r#"{,p""ush}"#, &["push"]),
+        (r#"{a,{,""}}"#, &["a", ""]),
+        (r#"{"",}{,}"#, &["", ""]),
+        ("{,''}{,}", &["", ""]),
+        (r#"{x,{,""}}{,}"#, &["x", "x", "", ""]),
+        (r#"{,a""}{,b}"#, &["b", "a", "ab"]),
+        (r"{,\x}", &["x"]),
+        (r#"{,$"a"}"#, &["a"]),
+        ("{,$''}", &[""]),
+        ("a{,}\"\"", &["a", "a"]),
         // Sequences.
         ("{05..1}", &["05", "04", "03", "02", "01"]),
         ("{a..c..2}", &["a", "c"]),
@@ -62,6 +74,24 @@ fn a_brace_list_expands_as_bash_expands_it() {
         ("{-1..1}", &["-1", "0", "1"]),
         ("{0..2}", &["0", "1", "2"]),
         ("{a..c}{1..2}", &["a1", "a2", "b1", "b2", "c1", "c2"]),
+        ("{+1..3}", &["1", "2", "3"]),
+        ("{00..-2}", &["00", "-1", "-2"]),
+        ("{-00..2}", &["000", "001", "002"]),
+        (
+            "{1000000000000000000..1000000000000000000..1000000000000000000}",
+            &["1000000000000000000"],
+        ),
+        (
+            "{0..9223372036854775807..9223372036854775807}",
+            &["0", "9223372036854775807"],
+        ),
+        (
+            "{-9223372036854775808..-9223372036854775807}",
+            &["-9223372036854775808", "-9223372036854775807"],
+        ),
+        // A `[` a run of letters makes is a glob, as an unquoted one is.
+        ("{A..z..26}", &["A", "%[", "u"]),
+        ("ma{A..z..26}in]n", &["maAin]n", "ma%[in]n", "mauin]n"]),
         (r#"{"a"..c}"#, &["{a..c}"]),
         ("{1..a}", &["{1..a}"]),
         ("{aa..c}", &["{aa..c}"]),
@@ -100,6 +130,21 @@ fn a_word_that_expands_too_far_is_too_deep() {
     assert_eq!(commands(&lists), Err(TooDeep));
     assert_eq!(commands(&"{a,b}".repeat(12)).map(|c| c[0].len()), Ok(4096));
     assert_eq!(commands("{1..5000}"), Err(TooDeep));
+    // A sequence bash would read, but whose integers or span don't fit 64
+    // bits, or whose letters run through `\` or `` ` ``, which bash then
+    // reads as a quote or a substitution: never text.
+    for word in [
+        "{1..99999999999999999999}",
+        "{1..2..99999999999999999999}",
+        "{-9223372036854775807..9223372036854775807..9223372036854775807}",
+        "{-9223372036854775808..9223372036854775807}",
+        "{1..3..-9223372036854775808}",
+        "{Z..a}",
+        "{a..W..5}-f",
+        "{a..Z}",
+    ] {
+        assert_eq!(commands(word), Err(TooDeep), "{word}");
+    }
     let nested = format!("{}{}", "{a,".repeat(DEPTH + 2), "}".repeat(DEPTH + 2));
     assert_eq!(commands(&nested), Err(TooDeep));
 }
@@ -138,6 +183,14 @@ fn a_here_documents_end_word_is_its_own_text() {
         // Unquoted outside a `${…}`, it's its own text, quotes and all.
         ("<<${x:-\"a\"}", "${x:-\"a\"}"),
         ("<<$(echo \"a b\")", "$(echo \"a b\")"),
+        // A backslash and newline join its lines, quoted or not, inside a
+        // substitution or a parameter too.
+        ("<<EO\\\nF", "EOF"),
+        ("<<-EO\\\nF", "\tEOF"),
+        ("<<\"E\\\nOF\"", "EOF"),
+        ("<<E\\\n'OF'", "EOF"),
+        ("<<$(echo a\\\nb)", "$(echo ab)"),
+        ("<<${x:-a\\\nb}", "${x:-ab}"),
     ] {
         let text = format!("cat {doc}\nbody\n{end}\ngit push \\\n-f origin main");
         let read = commands(&text).unwrap();
@@ -179,6 +232,42 @@ fn a_here_documents_end_word_is_its_own_text() {
             &["y"],
             &["e"],
             &["d", "%", "f"]
+        ])
+    );
+}
+
+#[test]
+fn a_here_documents_continued_lines_are_joined_as_bash_joins_them() {
+    let push = ["git", "push", "-f", "origin", "main"]
+        .map(String::from)
+        .to_vec();
+    for text in [
+        // Its end word unquoted, a line ending in a backslash goes on into
+        // the next before it's matched: the first `EOF` here is body.
+        "cat <<EOF\nx\\\nEOF\n'\nEOF\ngit push -f origin main\n'",
+        "cat <<-EOF\n\tx\\\n\tEOF\n'\nEOF\ngit push -f origin main\n'",
+        "cat <<EOF\nx\\\\\\\nEOF\n'\nEOF\ngit push -f origin main\n'",
+        "cat <<E\\\nOF\nx\\\nEOF\n'\nEOF\ngit push -f origin main\n'",
+        // An escaped backslash joins nothing, and nor does a backslash in
+        // the body of a quoted end word.
+        "cat <<EOF\nx\\\\\nEOF\ngit push -f origin main",
+        "cat <<'EOF'\nx\\\nEOF\ngit push -f origin main",
+        // A script's command continued onto the next line is one command.
+        "bash <<'EOF'\ngit push \\\n-f origin main\nEOF",
+        "bash <<EOF\ngit push \\\n-f origin main\nEOF",
+        "bash <<'EOF'\ngit push \\\n\\\n-f origin main\nEOF",
+    ] {
+        let read = commands(text).unwrap();
+        assert!(read.contains(&push), "{text:?}: {read:?}");
+    }
+    // In a substitution, a joined line ends it only where bash's does.
+    assert_eq!(
+        commands("a \"$(cat <<EOF\nb\\\nEOF)\nEOF)\" c\ngit push -f"),
+        want(&[
+            &["cat"],
+            &["bEOF"],
+            &["a", "%", "c"],
+            &["git", "push", "-f"]
         ])
     );
 }

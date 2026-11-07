@@ -60,6 +60,9 @@ struct Heredoc {
     end: String,
     /// `<<-`: tabs before that line don't count.
     strip_tabs: bool,
+    /// Its end word was quoted: its body is its own text, a line that ends
+    /// in a backslash included.
+    quoted: bool,
 }
 
 /// What a scope of the reading is inside, innermost last.
@@ -100,7 +103,7 @@ impl Grammar {
         if !cmd.in_word || cmd.target {
             return;
         }
-        let word = if cmd.quoted { "" } else { cmd.word.as_str() };
+        let word = if cmd.quoted() { "" } else { cmd.word.as_str() };
         match self.open.last_mut() {
             Some(Open::CaseHead { subject: false }) => {
                 self.open.pop();
@@ -210,8 +213,10 @@ struct Command {
     word: String,
     /// A word has begun, even an empty one (`''`).
     in_word: bool,
-    /// Some of the word was quoted or escaped, outside any `${…}` in it.
-    quoted: bool,
+    /// The byte offset in `word` where each of its quotes or escapes
+    /// began, outside any `${…}` in it: a word holding one stays a word
+    /// when it's empty.
+    quotes: Vec<usize>,
     /// The byte offset in `word` of each of its unquoted characters, which
     /// may make a brace expansion.
     bare: Vec<usize>,
@@ -249,7 +254,14 @@ impl Command {
 
     fn quote(&mut self) {
         self.in_word = true;
-        self.quoted |= !self.in_parameter;
+        if !self.in_parameter {
+            self.quotes.push(self.word.len());
+        }
+    }
+
+    /// Some of the word was quoted or escaped, outside any `${…}` in it.
+    fn quoted(&self) -> bool {
+        !self.quotes.is_empty()
     }
 
     /// The word ends: a command's word is brace-expanded into the words it
@@ -257,16 +269,16 @@ impl Command {
     /// which bash doesn't brace-expand, is kept as a script.
     fn end_word(&mut self) -> Result<(), TooDeep> {
         let bare = std::mem::take(&mut self.bare);
+        let quotes = std::mem::take(&mut self.quotes);
         if self.in_word {
             let word = std::mem::take(&mut self.word);
             if !std::mem::take(&mut self.target) {
-                self.words.extend(brace::expand(&word, &bare, self.quoted)?);
+                self.words.extend(brace::expand(&word, &bare, &quotes)?);
             } else if std::mem::take(&mut self.here_string) {
                 self.scripts.push(word);
             }
         }
         self.in_word = false;
-        self.quoted = false;
         Ok(())
     }
 
@@ -465,14 +477,29 @@ impl Lexer {
     /// The bodies of the here-documents waiting on this newline, each line
     /// read on its own: a quote in one doesn't reach the next. In a
     /// substitution (`closes`), the end word with the substitution's `)`
-    /// straight after it ends the body too, as it does in bash.
+    /// straight after it ends the body too, as it does in bash. Where the
+    /// end word was unquoted, a line that ends in a backslash goes on into
+    /// the next, as bash joins them, before it's matched against the end
+    /// word; either way, a script's command continued onto the next line is
+    /// read as one.
     fn heredoc_bodies(&mut self, depth: usize, closes: bool) -> Result<(), TooDeep> {
         for doc in std::mem::take(&mut self.heredocs) {
+            let mut script = String::new();
             while self.peek().is_some() {
-                let start = self.pos;
+                // The line, and where each of its characters is.
                 let mut line = String::new();
-                while let Some(c) = self.next_if(|c| c != '\n') {
-                    line.push(c);
+                let mut at = Vec::new();
+                loop {
+                    while let Some(c) = self.next_if(|c| c != '\n') {
+                        at.push(self.pos - 1);
+                        line.push(c);
+                    }
+                    if doc.quoted || !continued(&line) || self.peek().is_none() {
+                        break;
+                    }
+                    line.pop();
+                    at.pop();
+                    self.pos += 1;
                 }
                 let last = if doc.strip_tabs {
                     line.trim_start_matches('\t')
@@ -485,15 +512,21 @@ impl Lexer {
                         .is_some_and(|rest| rest.starts_with(')'))
                 {
                     // Back to the `)`, for the substitution to end at.
-                    self.pos = start + (line.len() - last.len()) + doc.end.chars().count();
+                    self.pos = at[line.len() - last.len() + doc.end.chars().count()];
                     break;
                 }
                 self.pos += 1;
                 if last == doc.end {
                     break;
                 }
-                self.read_apart(&line, depth)?;
+                script.push_str(&line);
+                if continued(&script) {
+                    script.pop();
+                    continue;
+                }
+                self.read_apart(&std::mem::take(&mut script), depth)?;
             }
+            self.read_apart(&script, depth)?;
         }
         Ok(())
     }
@@ -631,7 +664,7 @@ impl Lexer {
     /// descriptor's number before it (`2>`) isn't a word either. `<<` and
     /// `<<-` take a here-document's end word for a target.
     fn redirect(&mut self, first: char, cmd: &mut Command, depth: usize) -> Result<(), TooDeep> {
-        if cmd.in_word && !cmd.quoted && cmd.word.bytes().all(|b| b.is_ascii_digit()) {
+        if cmd.in_word && !cmd.quoted() && cmd.word.bytes().all(|b| b.is_ascii_digit()) {
             cmd.word.clear();
             cmd.in_word = false;
         }
@@ -650,10 +683,10 @@ impl Lexer {
 
     /// A here-document's end word, after its `<<`. Nothing in it is
     /// expanded: it's its own text (`<<E?` ends at `E?`, `<<$(x)` at
-    /// `$(x)`), and where any of it outside a `${…}` is quoted or escaped,
-    /// that text with its quotes taken off as bash takes them
-    /// ([`unquoted`]). Its words are read as any word's are, to find its
-    /// end, and a substitution's commands among them with it.
+    /// `$(x)`), its continued lines joined, and where any of it outside a
+    /// `${…}` is quoted or escaped, that text with its quotes taken off as
+    /// bash takes them ([`end_text`]). Its words are read as any word's are,
+    /// to find its end, and a substitution's commands among them with it.
     fn heredoc(&mut self, depth: usize) -> Result<(), TooDeep> {
         let strip_tabs = self.next_if(|c| c == '-').is_some();
         while self.next_if(|c| matches!(c, ' ' | '\t')).is_some() {}
@@ -669,12 +702,9 @@ impl Lexer {
         }
         let text = &self.chars[start..self.pos];
         self.heredocs.push(Heredoc {
-            end: if end.quoted {
-                unquoted(text)
-            } else {
-                text.iter().collect()
-            },
+            end: end_text(text, end.quoted()),
             strip_tabs,
+            quoted: end.quoted(),
         });
         Ok(())
     }
@@ -697,31 +727,75 @@ fn ansi_c_text(mut next: impl FnMut() -> Option<char>) -> Vec<char> {
     raw
 }
 
-/// A quoted here-document end word's `text` as bash ends the document at:
-/// its quotes taken off as text, wherever they are, substitutions' insides
-/// too (`"$(echo ")")"` is `$(echo ))`). A backslash outside double quotes
-/// takes the character after it, and inside them only `\`, `"`, `$`, `` ` ``
-/// or a newline; `$'…'` is decoded, and `$"…"` is `"…"`.
-fn unquoted(text: &[char]) -> String {
+/// Whether `line` ends in a backslash that isn't itself escaped, which
+/// joins the next line onto it.
+fn continued(line: &str) -> bool {
+    line.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
+}
+
+/// A here-document end word's `text` as bash ends the document at. A
+/// backslash and newline outside single quotes or `$'…'` join the lines
+/// around them, quoted or not (`EO\` and a newline, then `F`, is `EOF`).
+/// Quoted (`quoted`), its quotes come off as text, wherever they are,
+/// substitutions' insides too (`"$(echo ")")"` is `$(echo ))`): a backslash
+/// outside double quotes takes the character after it, and inside them
+/// only `\`, `"`, `$`, `` ` `` or a newline; `$'…'` is decoded, and `$"…"`
+/// is `"…"`. Unquoted, its quotes are its text.
+fn end_text(text: &[char], quoted: bool) -> String {
     let mut out = String::new();
+    // What a quoted end word takes off, an unquoted one keeps.
+    let keep = |out: &mut String, s: &str| {
+        if !quoted {
+            out.push_str(s);
+        }
+    };
     let mut double = false;
     let mut chars = text.iter().copied().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '"' => double = !double,
+            '"' => {
+                double = !double;
+                keep(&mut out, "\"");
+            }
             '\\' if double => match chars.next_if(|c| matches!(c, '\\' | '"' | '$' | '`' | '\n')) {
                 Some('\n') => {}
-                Some(c) => out.push(c),
+                Some(c) => {
+                    keep(&mut out, "\\");
+                    out.push(c);
+                }
                 None => out.push('\\'),
             },
             '\\' => match chars.next() {
-                Some('\n') | None => {}
-                Some(c) => out.push(c),
+                Some('\n') => {}
+                Some(c) => {
+                    keep(&mut out, "\\");
+                    out.push(c);
+                }
+                None => keep(&mut out, "\\"),
             },
-            '\'' if !double => out.extend(chars.by_ref().take_while(|&c| c != '\'')),
-            '$' if !double && chars.next_if_eq(&'"').is_some() => double = true,
+            '\'' if !double => {
+                keep(&mut out, "'");
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        keep(&mut out, "'");
+                        break;
+                    }
+                    out.push(c);
+                }
+            }
+            '$' if !double && chars.next_if_eq(&'"').is_some() => {
+                double = true;
+                keep(&mut out, "$\"");
+            }
             '$' if !double && chars.next_if_eq(&'\'').is_some() => {
-                ansi_c::decode(&ansi_c_text(|| chars.next()), &mut out);
+                let raw = ansi_c_text(|| chars.next());
+                if quoted {
+                    ansi_c::decode(&raw, &mut out);
+                } else {
+                    out.push_str("$'");
+                    out.extend(raw);
+                    out.push('\'');
+                }
             }
             c => out.push(c),
         }

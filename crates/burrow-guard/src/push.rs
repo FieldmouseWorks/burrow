@@ -406,6 +406,7 @@ mod tests {
             "git push {-f,origin,main}",
             "git {push,-f} origin main",
             "{git,push,-f,origin,main}",
+            "git {,p\"\"ush} -f origin main",
             "bash -c 'git push -f origin x:{main,y}'",
             "sh -c \"git push origin {+x:main,y}\"",
         ] {
@@ -450,6 +451,7 @@ mod tests {
             "git push -o ci.skip* origin x",
             "git pu?h -f origin main",
             "git -C * push origin x",
+            "git push -f origin HEAD:refs/heads/ma{A..z..26}in]n",
             "bash -c 'git push origin x:ma?n'",
             "sh -c \"git push -f origin x:refs/heads/f[a-z]*\"",
         ] {
