@@ -167,7 +167,9 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         the label of its stage (stages.py), which every status names. False
         if GitHub didn't take the status."""
         ok = post_status(repo, pr, state, desc)
-        show_waiting(repo, pr, labels, stage)
+        # A draft or a held PR is out of the pipeline, and GitHub's draft
+        # mark or the hold label says so: no stage's label, whatever said it.
+        show_waiting(repo, pr, labels, S.NONE if pr["isDraft"] or CFG["labels"]["hold"] in labels else stage)
         if why:
             digest.append((why, line, desc))
         waits.note(repo, pr, desc, wait, jobs=looked, **refresh)

@@ -128,6 +128,18 @@ assert "On hold" in status and edits() == ["pr edit 5 -R sam/r --remove-label wa
 status, _ = run(clean(labels=[AGE, REVIEWER], draft=True), 600)
 assert "Draft" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: reviewer --remove-label waiting: release age"], \
     (status, WROTE)
+# Whatever path posts its status, a held PR's isn't a stage's: one with more
+# than a page to read is the owner's, but on hold it carries no label.
+def long(**kw):
+    pr = mkpr(**kw)
+    pr["comments"]["pageInfo"]["hasPreviousPage"] = True
+    return pr
+
+
+status, _ = run(long(labels=["hold", REVIEW]), 650)
+assert "Too many comments" in status and edits() == [f"pr edit 5 -R sam/r --remove-label {REVIEW}"], (status, WROTE)
+status, _ = run(long(), 660)
+assert "Too many comments" in status and edits() == [on(5, "waiting: Sam")], (status, WROTE)
 # Labels that aren't the steward's stage labels are left alone.
 status, _ = run(clean(labels=["first", "bug"]), 700)
 assert edits() == [on(5, MERGE)], WROTE

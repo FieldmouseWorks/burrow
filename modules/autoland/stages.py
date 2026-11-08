@@ -5,8 +5,9 @@ show_waiting puts it on). A PR carries its stage's label and none of the
 others, so the PR itself and its repo's list say where it is, and its status
 says the rest: who has it, until when, how many are ahead.
 
-NONE is for a PR that's out of the pipeline and marked so already: a draft
-(GitHub's draft mark) or one on hold (the hold label)."""
+A PR that's out of the pipeline and marked so already, a draft (GitHub's
+draft mark) or one on hold (the hold label), carries NONE's, which is none,
+whatever stage its status names (settle sees to that)."""
 
 REVIEW = "review"  # its reviewers, or a judge, look at this head
 REVIEWER = "reviewer"  # a reviewer it waits on is out of service
