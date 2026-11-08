@@ -6,7 +6,6 @@
 // clears at once both succeed.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice::from_ref;
@@ -157,7 +156,7 @@ fn clearing_takes_its_worktrees_off_their_repos() {
     let ro = a.join("web/target/debug/ro");
     fs::create_dir_all(&ro).unwrap();
     fs::write(ro.join("lib.rlib"), vec![0; 1024]).unwrap();
-    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    burrow_test::permissions(&ro, 0o555);
 
     clear(cfg, "a");
     assert!(!a.exists(), "job a's scratch is still there");

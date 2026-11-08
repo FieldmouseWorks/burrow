@@ -108,8 +108,8 @@ assert "old enough until" in waiting["sam/r#9"]["phase"] and waiting["sam/r#9"][
 # refreshed or hand it to a job itself: every request standing as long as it
 # may, one taken back, and the longest Renovate run that read it. Past that
 # the job the watchdog hands it to is told to take a request back itself.
-# A pass is an hour apart at best, and the hour and a run behind it at worst.
-every = 3600 + 7200
+# A bounded wake also allows the event queue gap and a run ahead of it.
+every = 3600 + 20 + 7200
 drain = 4 * every + 7200
 recovery = 3 * (6 * 3600 + every) + drain
 assert waiting["sam/r#9"]["since"] == T + 260 and waiting["sam/r#9"]["due"] == ripe + recovery + 120 * MIN, waiting

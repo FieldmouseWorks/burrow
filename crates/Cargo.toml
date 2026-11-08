@@ -32,6 +32,7 @@ members = [
     "burrow-robot",
     "burrow-rustc-wrapper",
     "burrow-switch",
+    "burrow-test",
     "burrow-units",
     "burrow-update",
     "burrow-upkeep",

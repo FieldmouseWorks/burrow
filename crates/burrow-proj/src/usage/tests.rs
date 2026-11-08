@@ -4,7 +4,6 @@
 // isn't refused.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use serde_json::json;
 
@@ -21,14 +20,12 @@ fn rig() -> (tempfile::TempDir, Config) {
     let d = tempfile::tempdir().unwrap();
     let notify = d.path().join("notify");
     let dir = d.path().display();
-    fs::write(
+    burrow_test::executable(
         &notify,
         format!(
             "#!/bin/sh\nif [ \"$1\" = pending ]; then\n  [ -e {dir}/pending-killed ] && kill -9 $$\n  [ -e {dir}/pending-code ] && exit \"$(cat {dir}/pending-code)\"\n  [ -e {dir}/pending ]; exit\nfi\necho \"$1 $2 $3\" >>{dir}/told\n"
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&notify, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let kicks = d.path().join("kicks");
     let (port, _) = burrow_events::http::listen(
         0,
@@ -451,11 +448,11 @@ fn a_hold_that_cant_be_written_takes_nothing() {
     fs::write(dir.join("1.resets"), format!("{}\n", t + 3600)).unwrap();
     // The lock exists already; the record can't be: the jobs dir is shut.
     fs::write(cfg.jobs.join(".usage.lock"), "").unwrap();
-    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
+    burrow_test::permissions(&cfg.jobs, 0o555);
     let adopted = adopt(&cfg);
     let held = earlier(&cfg, "the stall watchdog", t + 3600, Some(t));
     let recorded = record(&cfg, "web-2", Some(t + 3600), SAID, t);
-    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::permissions(&cfg.jobs, 0o755);
     assert!(adopted.is_err() && held.is_err() && recorded.is_err());
     assert!(dir.join("1.resets").exists());
     assert_eq!(kept(&cfg), None);
@@ -554,9 +551,9 @@ fn a_look_that_cant_tend_books_another() {
     let before = told(&d).len();
     // No lock to be had: the jobs dir is shut, and the lock not there yet.
     let _ = fs::remove_file(cfg.jobs.join(".usage.lock"));
-    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
+    burrow_test::permissions(&cfg.jobs, 0o555);
     let next = tend(&cfg);
-    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::permissions(&cfg.jobs, 0o755);
     assert!(next.is_some_and(|n| n >= t + RETRY), "{next:?}");
     assert_eq!(told(&d).len(), before);
     tend(&cfg);
@@ -568,9 +565,9 @@ fn a_look_that_cant_tend_books_another() {
     s.told = t - RETELL;
     keep(&cfg, &s).unwrap();
     let _ = fs::remove_file(cfg.jobs.join(".usage.lock"));
-    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
+    burrow_test::permissions(&cfg.jobs, 0o555);
     let next = tend(&cfg);
-    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::permissions(&cfg.jobs, 0o755);
     assert!(next.is_some_and(|n| n >= t + RETRY), "{next:?}");
     // An unreadable record: looked at again too.
     fs::write(cfg.jobs.join(FILE), "{").unwrap();

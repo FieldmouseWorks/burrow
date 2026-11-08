@@ -10,7 +10,6 @@ mod common;
 
 /// What `burrow-guard CONFIG` prints for `input`.
 fn hook(config: &str, input: &str) -> String {
-    common::stand_ins();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
     fs::write(&path, config).unwrap();

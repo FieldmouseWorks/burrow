@@ -621,9 +621,7 @@ mod tests {
         let script = format!(
             "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo {load} ;; esac\n"
         );
-        std::fs::write(&ctl, script).unwrap();
-        std::fs::set_permissions(&ctl, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        burrow_test::executable(&ctl, script);
         let mut v = crate::config::tests::example();
         v["jobs"] = tmp.join("jobs").to_str().unwrap().into();
         v["projects"] = tmp.join("projects").to_str().unwrap().into();

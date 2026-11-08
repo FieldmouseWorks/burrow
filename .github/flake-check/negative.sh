@@ -21,8 +21,10 @@ source "${BASH_SOURCE[0]%/*}/build.sh"
 # Test files, as git's glob pathspecs (`*` within a directory, `**/` any
 # depth, none included). Here and not an input: the caller's workflow comes
 # from the PR, and a PR mustn't choose its own judge.
+# Match the _test suffix globally for Go. Other suffix-named files
+# (such as tools/load_test.py) count when kept under a tests directory.
 tests_specs=(':(glob)tests/**' ':(glob)**/tests.rs' ':(glob)**/tests/**' ':(glob)**/test_*.py'
-  ':(glob)**/*_test.*' ':(glob)**/*.test.ts' ':(glob)src/test/**')
+  ':(glob)**/*_test.go' ':(glob)**/*.test.ts' ':(glob)src/test/**')
 # What it found, as negative.json and the step's outputs: the result, the
 # tree it built on (none for none), the PR's test files, the checks it
 # built and those it would have but SKIP names, and the new tests no check

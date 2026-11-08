@@ -82,7 +82,6 @@ fn bash(cmd: &str, cwd: &Path) -> Hook {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    common::stand_ins();
     let ok = Command::new("git")
         .args([
             "-c",

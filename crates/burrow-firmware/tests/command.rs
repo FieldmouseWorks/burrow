@@ -6,7 +6,6 @@
 //! as root), so it goes through sudo wherever the tests run.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -14,10 +13,7 @@ use std::sync::OnceLock;
 
 const BIN: &str = env!("CARGO_BIN_EXE_burrow-firmware");
 
-/// Written once for every test: a file being written while another test
-/// starts a process is open for writing in that process until it execs,
-/// and running the file then fails with "Text file busy". Each fails when
-/// FAKE has a file saying so.
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
@@ -61,11 +57,10 @@ fn bin() -> &'static Path {
             ),
         ] {
             let path = bin.path().join(name);
-            fs::write(&path, text).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&path, text);
         }
         // For a run as nobody, too.
-        fs::set_permissions(bin.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::permissions(bin.path(), 0o755);
         bin
     })
     .path()

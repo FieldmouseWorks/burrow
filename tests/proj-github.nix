@@ -288,6 +288,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       acts_as_workers(jobs["o/b#3"])
       machine.fail(f"test -e /data/dev/jobs/{jobs['o/b#4']}/app")
       assert "socket=none" in proj(f"log {jobs['o/b#4']}")
+      github(f"repos/o/b/issues/{bot['number']}", json.dumps({**bot, "state": "closed"}))
+      github(f"repos/o/b/issues/{person['number']}", json.dumps({**person, "state": "closed"}))
       github("repos/o/b/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/b'")
 
@@ -327,6 +329,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       assert list(jobs) == ["o/x#2"], jobs
       machine.wait_until_succeeds(f"su - dev -c 'proj state {jobs['o/x#2']}' | grep -x done", timeout=120)
       machine.fail("grep -rl from-outside /data/dev/jobs")
+      github(f"repos/o/x/issues/{inside['number']}", json.dumps({**inside, "state": "closed"}))
       github("repos/o/x/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/x'")
 
@@ -436,10 +439,15 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {uj}' | grep -x done", timeout=120)
       for j in (ua, ub, uq):
           proj(f"stop {j}")
+      github(f"repos/o/u/issues/{ui['number']}", json.dumps({**ui, "state": "closed"}))
+      github(f"repos/o/u/issues/{ui2['number']}", json.dumps({**ui2, "state": "closed"}))
       github("repos/o/u/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/u'")
 
   with subtest("a reply under a minute old waits, and the inbox books when it's old enough"):
+      # Earlier closed issues have complete individual snapshots: retirement
+      # must have drained, rather than leaving unrelated retry wake-ups.
+      machine.fail("find /var/lib/burrow/proj-inbox/.retired -name job | grep .")
       now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
       github("repos/o/r/issues/7", json.dumps(issue))
       github("repos/o/r/issues/7/comments", json.dumps([{"id": 50, "user": {"login": "sam"}, "body": "and the tests", "created_at": now}]))
@@ -587,16 +595,27 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
               machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
       # 8 closed, 9's answer still to post; systemd can't be asked, so 8's
       # job can't be stopped.
+      closed = {**issues[0], "state": "closed"}
+      github("repos/o/r/issues/8", json.dumps(closed))
+      github("repos/o/r/issues/8/comments", json.dumps([
+          {"id": 80, "user": {"login": "sam"}, "body": "one more run", "created_at": "2026-01-01T00:00:00Z"}]))
       github("repos/o/r/issues", json.dumps(issues[1:]))
       before = int(machine.succeed("date +%s"))
       machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox'")
       assert "did This task comes from GitHub issue o/r#9" in machine.succeed("cat /tmp/gh/posted")
-      assert "o/r#8" in machine.succeed("su - dev -c 'proj-inbox status'")
+      assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
+      retired = "/var/lib/burrow/proj-inbox/.retired/o_r/8"
+      machine.succeed(f"test $(find {retired} -name job | wc -l) -eq 1")
+      machine.succeed(f"test $(find {retired} -name reported | wc -l) -eq 1")
+      link = "https://github.com/o/r/issues/8#issuecomment-80"
+      assert machine.succeed("cat /tmp/gh/posted").count(link) == 1
       # Nothing else may come for o/r, so the stop is tried again in five minutes.
       wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
       assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
       machine.succeed("su - dev -c proj-inbox")
       assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
+      machine.fail(f"find {retired} -name job | grep .")
+      assert machine.succeed("cat /tmp/gh/posted").count(link) == 1
 
   with subtest("an issue whose job dir was removed is taken up afresh"):
       listed = machine.succeed("su - dev -c 'proj-inbox status'")

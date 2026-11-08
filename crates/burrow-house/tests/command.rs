@@ -2,7 +2,6 @@
 //! in for by a script that answers from files and logs every call.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -30,8 +29,7 @@ esac
 fn setup(d: &Path, fork: bool) {
     let gh = d.join("bin/gh");
     fs::create_dir(d.join("bin")).unwrap();
-    fs::write(&gh, GH).unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&gh, GH);
     let repo = if fork { "fork/r" } else { "sam/r" };
     let pr = json!({
         "title": "tools: a plain sentence", "body": "",

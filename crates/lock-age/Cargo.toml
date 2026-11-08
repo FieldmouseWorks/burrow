@@ -15,6 +15,7 @@ toml = { version = "1.0", default-features = false, features = ["parse", "serde"
 ureq.workspace = true
 
 [dev-dependencies]
+burrow-test = { path = "../burrow-test" }
 tempfile.workspace = true
 
 [lints]

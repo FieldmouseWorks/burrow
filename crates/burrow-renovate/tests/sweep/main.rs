@@ -19,6 +19,7 @@
 mod handing;
 mod passes;
 mod refreshes;
+mod wakes;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -34,17 +35,14 @@ const SWEEP: &str = env!("CARGO_BIN_EXE_burrow-renovate-sweep");
 const REPO: &str = "sam/r";
 const LOCK: &str = "Lock file maintenance (cargo)";
 
-/// Written once for every test: a file being written while another test
-/// starts a process is open for writing in that process until it execs,
-/// and running the file then fails with "Text file busy".
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
         for (name, text) in STAND_INS {
             let path = bin.path().join(name);
-            fs::write(&path, format!("#!/bin/sh\n{text}")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&path, format!("#!/bin/sh\n{text}"));
         }
         bin
     })
@@ -65,7 +63,7 @@ const STAND_INS: [(&str, &str); 6] = [
         r#"echo "gh $*" >>"$FAKE/log"
 case "$1 $2" in
   "api user") [ ! -e "$FAKE/user-fails" ] || exit 1; echo me ;;
-  "pr list") cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
+  "pr list") [ ! -e "$FAKE/list-fails" ] || { echo []; exit 1; }; cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
   "pr view")
     if [ "$(cat "$FAKE/gh-blocks" 2>/dev/null)" = "$3" ] && mv "$FAKE/gh-blocks" "$FAKE/gh-blocked" 2>/dev/null; then
       while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done
@@ -100,7 +98,7 @@ cat "$2/.origin"
         // Its limits (FAKE/limits, or the steward's own), or the time on the
         // line of the comments it reads that names whom it's asked about.
         "lock-wait",
-        r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600; exit; fi
+        r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600 3600; exit; fi
 echo "lock-wait $1" >>"$FAKE/log"
 while read -r who when; do [ "$who" != "$1" ] || echo "$when"; done
 "#,

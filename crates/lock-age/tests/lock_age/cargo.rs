@@ -283,9 +283,8 @@ fn it_skips_older_ones_still_too_new() {
 /// say) has nothing to wait for: that fails it.
 #[test]
 fn the_bases_text_with_nothing_too_young_fails_it() {
-    use std::os::unix::fs::PermissionsExt;
     let mut rig = Rig::repo(&[("Cargo.lock", &crates(&[("b", "2.0.0")]))]);
     let file = rig.path().join("Cargo.lock");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&file, std::fs::read(&file).unwrap());
     assert_eq!(rig.waiting(&policy()), (1, None));
 }

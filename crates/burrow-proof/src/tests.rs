@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -104,15 +103,13 @@ fn its_unit_is_bounded_divided_and_ended_by_systemd() {
 /// A stand-in systemd-run that keeps its arguments and exits RC.
 fn systemd_run(dir: &Path, rc: i32) -> PathBuf {
     let path = dir.join("systemd-run");
-    fs::write(
+    burrow_test::executable(
         &path,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" >{}/args\nexit {rc}\n",
             dir.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 

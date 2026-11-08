@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -236,16 +235,14 @@ fn refuses_once() {
     let posted = tmp.path().join("posted");
     let closed = tmp.path().join("closed");
     let gh = tmp.path().join("gh");
-    fs::write(
+    burrow_test::executable(
         &gh,
         format!(
             "#!/bin/sh\n[ ! -e '{}' ] || exit 1\ncat >>'{}'\n",
             closed.display(),
             posted.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.tools.gh = gh;
     let inbox = cfg.inbox.as_mut().unwrap();
@@ -337,4 +334,43 @@ fn an_old_label_marker_is_replaced_for_the_new_engine_map() {
         fs::read_to_string(&marker).unwrap(),
         serde_json::to_string(&cfg.inbox.as_ref().unwrap().labels).unwrap()
     );
+}
+
+#[test]
+fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identity() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let state = tmp.path();
+    for (repo, issue, job, progress) in [
+        ("O_R", "7", "j1", "seen"),
+        ("o_r", "7", "j2", "reported"),
+        ("O_r", "8", "j3", "job"),
+        ("o_rx", "7", "j1", "seen"),
+        ("o_r-x", "7", "j1", "reported"),
+        ("p_r", "7", "j1", "job"),
+    ] {
+        let d = state.join(".retired").join(repo).join(issue).join(job);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(progress), "progress").unwrap();
+    }
+    forget(state, "o/R").unwrap();
+    let mut remaining: Vec<String> = fs::read_dir(state.join(".retired"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    remaining.sort();
+    assert_eq!(remaining, ["o_r-x", "o_rx", "p_r"]);
+    for (repo, progress) in [("o_rx", "seen"), ("o_r-x", "reported"), ("p_r", "job")] {
+        assert_eq!(
+            fs::read_to_string(
+                state
+                    .join(".retired")
+                    .join(repo)
+                    .join("7/j1")
+                    .join(progress)
+            )
+            .unwrap(),
+            "progress"
+        );
+    }
+    forget(state, "O/r").unwrap();
 }
