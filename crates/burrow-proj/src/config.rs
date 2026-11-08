@@ -53,6 +53,10 @@ pub struct Config {
     pub deployed: PathBuf,
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
+    /// The machine's own GitHub App (burrow.github.machinery), one of
+    /// `apps`: what a bot's issue's job, and every Codex turn with no App
+    /// of its own, acts as ([`crate::turn::github_app`]). None for none.
+    pub machinery: Option<String>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
@@ -110,8 +114,6 @@ pub struct Inbox {
     pub host: String,
     /// Where it books its next look at each repo.
     pub wake: PathBuf,
-    /// The machine's own GitHub App, which a bot's issue's job acts as.
-    pub machinery: Option<String>,
     /// The label on an issue carrying text from outside the authors, whoever
     /// filed it: never a job, never sorted or handed on. "" is none.
     #[serde(default)]
@@ -245,12 +247,13 @@ pub(crate) mod tests {
             "flake": "/data/dev/src/box",
             "deployed": "/nowhere/proj",
             "apps": {"workers": "/run/workers.env"},
+            "machinery": "workers",
             "notify": "/bin/notify",
             "roles": "/nowhere/roles",
             "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box",
-                      "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
+                      "wake": "/var/lib/burrow/proj-inbox/wake.json"},
             "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })

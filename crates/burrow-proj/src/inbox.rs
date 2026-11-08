@@ -24,7 +24,8 @@
 //! isn't left waiting. A person's issue is work they asked for, so its job
 //! acts as them; a bot's (the steward's, say) is
 //! the machine's own, so its job acts as the machine's App, where there is
-//! one.
+//! one. A Codex turn, whoever's issue it is, acts as an App all the same
+//! (`turn::github_app`).
 //!
 //! Everything goes through GitHub's REST API: its GraphQL budget is shared
 //! with whatever else runs under the same login, and runs out first.
@@ -376,7 +377,7 @@ impl Pass<'_> {
             .iter()
             .any(|r| r.to_lowercase() == repo.to_lowercase());
         let app = self
-            .inbox
+            .cfg
             .machinery
             .clone()
             .filter(|m| !m.is_empty() && !self.inbox.vm)

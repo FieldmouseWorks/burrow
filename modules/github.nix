@@ -234,7 +234,9 @@ in
       null: they act as burrow.user's own gh login. HOST-update's own push
       to the flake's origin is the user's git login either way.
       Work the owner asks for (an issue of theirs in the inbox, a session of
-      theirs) acts as them either way.
+      theirs) acts as them either way, but for a Codex job's: its sandbox
+      keeps their logins out, so a Codex job with no App of its own acts as
+      this one, and with none here doesn't start.
     '';
   };
 

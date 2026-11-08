@@ -125,26 +125,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     for f in ["await", "await.next", "end.next"] {
         let _ = fs::remove_file(job.path(f));
     }
-    // As its App, or not at all. Its env, read now, is what every run of the
-    // turn starts in, so none starts as the user if the App goes while the
-    // turn waits for a slot: it acts as an App that's gone, and reaches no
-    // GitHub at all. A switch while it waits brings it back here (slot::take),
-    // to read it again: an App that switch took away fails the turn.
-    let mut app_env = String::new();
-    if filled(&job.path("app")) {
-        let app = read(&job.path("app")).unwrap_or_default();
-        match cfg
-            .app_env(&app)
-            .and_then(|f| read(f))
-            .filter(|e| !e.is_empty())
-        {
-            Some(e) => app_env = e,
-            None => {
-                outcome(&format!("no GitHub App {app} on this machine to act as"));
-                return Err(Fail::quiet(1));
-            }
-        }
-    }
     // Its scratch, made before it takes a slot: one that can't be made fails
     // the turn rather than leave its work nowhere to go. A sandbox's job works
     // in the VM's own clone.
@@ -167,6 +147,31 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         return Err(Fail::quiet(1));
     }
     let _ = fs::write(job.turn(&n, "engine"), choice.engine.name());
+    // As its App, or not at all ([`github_app`]). Its env, read now, is what
+    // every run of the turn starts in, so none starts as the user if the App
+    // goes while the turn waits for a slot: it acts as an App that's gone,
+    // and reaches no GitHub at all. A switch while it waits brings it back
+    // here (slot::take), to read it again: an App that switch took away
+    // fails the turn.
+    let mut app_env = String::new();
+    match github_app(cfg, read(&job.path("app")), choice.engine) {
+        Ok(None) => {}
+        Ok(Some(app)) => match cfg
+            .app_env(&app)
+            .and_then(|f| read(f))
+            .filter(|e| !e.is_empty())
+        {
+            Some(e) => app_env = e,
+            None => {
+                outcome(&format!("no GitHub App {app} on this machine to act as"));
+                return Err(Fail::quiet(1));
+            }
+        },
+        Err(why) => {
+            outcome(&why);
+            return Err(Fail::quiet(1));
+        }
+    }
     // In the turn's journal too, where its wait would be looked into.
     if let Some(why) = demoted(cfg, &job.dir) {
         eprintln!("proj: {why}");
@@ -480,6 +485,28 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     }
 }
 
+/// The GitHub App a turn on ENGINE acts as: the job's own (--app, its
+/// `app`), else, on Codex, the machine's (`machinery`), else none, and the
+/// turn acts as the user. A Codex turn's sandbox keeps the user's own logins
+/// out (engine/sandbox.rs: gh's config, the keyring, a GH_TOKEN from their
+/// profile), so as the user it would reach no GitHub at all, and find that
+/// out only once its work was done: on a machine with no App of its own it
+/// doesn't start.
+pub fn github_app(
+    cfg: &Config,
+    own: Option<String>,
+    engine: Engine,
+) -> Result<Option<String>, String> {
+    let named = |a: &Option<String>| a.clone().filter(|a| !a.is_empty());
+    match (named(&own), engine) {
+        (Some(app), _) => Ok(Some(app)),
+        (None, Engine::Claude) => Ok(None),
+        (None, Engine::Codex) => named(&cfg.machinery).map(Some).ok_or_else(|| {
+            "a Codex job reaches GitHub only as a GitHub App (proj run --app, or burrow.github.machinery), since its sandbox keeps your own logins out, and this job and machine have none".to_owned()
+        }),
+    }
+}
+
 /// A file's lines, none when it can't be read.
 pub fn lines(path: &Path) -> Vec<String> {
     read(path)
@@ -752,7 +779,31 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    use super::{gone_quiet, stopped};
+    use super::{github_app, gone_quiet, stopped};
+    use crate::config::Config;
+    use crate::engine::Engine;
+
+    // A Codex turn reaches GitHub as an App, its job's own or the machine's,
+    // never as the user, whose logins its sandbox hides; with neither it
+    // doesn't start. Claude's acts as the user unless its job names an App.
+    #[test]
+    fn a_codex_turn_acts_as_an_app_or_not_at_all() {
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
+        assert_eq!(app(None, Engine::Codex), Ok(Some("workers".into())));
+        assert_eq!(app(Some(""), Engine::Codex), Ok(Some("workers".into())));
+        assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
+        assert_eq!(app(None, Engine::Claude), Ok(None));
+        assert_eq!(app(Some("other"), Engine::Claude), Ok(Some("other".into())));
+        for none in [None, Some(String::new())] {
+            cfg.machinery = none;
+            let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
+            let refused = app(None, Engine::Codex).unwrap_err();
+            assert!(refused.contains("only as a GitHub App"), "{refused}");
+            assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
+            assert_eq!(app(None, Engine::Claude), Ok(None));
+        }
+    }
 
     // A sandbox's VM counts as stopped, everything a refused run left in it
     // with it, only once `agent stop` says so: one that fails, or can't run,
