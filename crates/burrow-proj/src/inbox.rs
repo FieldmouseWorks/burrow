@@ -887,6 +887,7 @@ fn say(f: Fail) {
     }
 }
 
+mod claims;
 mod drain;
 mod jobs;
 mod written;
