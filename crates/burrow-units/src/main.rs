@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use serde::Deserialize;
@@ -180,7 +180,7 @@ fn watch(cfg: &Config) -> Result<(), String> {
         eprintln!("burrow-units: {e}");
     }
     while rx.recv().is_ok() {
-        while rx.recv_timeout(SETTLE).is_ok() {}
+        gather(&rx, SETTLE);
         if let Err(e) = ask(cfg) {
             eprintln!("burrow-units: {e}");
         }
@@ -189,13 +189,32 @@ fn watch(cfg: &Config) -> Result<(), String> {
     Err(format!("journalctl stopped following: {status}"))
 }
 
+/// The rest of a burst whose first entry just came: whatever else RX has
+/// by WITHIN from now, however busy the journal stays, so a stream of
+/// entries holds an ask back no longer than that.
+fn gather(rx: &mpsc::Receiver<()>, within: Duration) {
+    let by = Instant::now() + within;
+    while let Some(left) = by.checked_duration_since(Instant::now()) {
+        if rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+}
+
 /// Whether a journal entry (journalctl's JSON) asks for a pass: any but
-/// one about burrow-units' own units.
+/// one about burrow-units' own units, the unit that failed (`UNIT`) or
+/// the one a program that dumped core ran in (`COREDUMP_UNIT`, a pass's
+/// own tools included).
 fn starts_a_pass(entry: &str) -> bool {
-    let unit = serde_json::from_str::<serde_json::Value>(entry)
-        .ok()
-        .and_then(|e| e.get("UNIT")?.as_str().map(str::to_owned));
-    !unit.is_some_and(|u| OWN.contains(&u.as_str()))
+    let Ok(entry) = serde_json::from_str::<serde_json::Value>(entry) else {
+        return true;
+    };
+    !["UNIT", "COREDUMP_UNIT"].iter().any(|field| {
+        entry
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|u| OWN.contains(&u))
+    })
 }
 
 /// Where the system journal is kept, on disk and before it's flushed there.
@@ -346,10 +365,40 @@ mod tests {
             r#"{"UNIT":"backup.service","MESSAGE_ID":"d9b373ed55a64feb8242e02dbe79a49c"}"#
         ));
         assert!(starts_a_pass(r#"{"COREDUMP_EXE":"/bin/bash"}"#));
+        assert!(starts_a_pass(
+            r#"{"COREDUMP_EXE":"/bin/bash","COREDUMP_UNIT":"backup.service"}"#
+        ));
+        // systemd-coredump itself failing is anyone's to know.
+        assert!(starts_a_pass(
+            r#"{"UNIT":"systemd-coredump@0-1-2_3-0.service"}"#
+        ));
         assert!(starts_a_pass("not json"));
         for own in OWN {
             assert!(!starts_a_pass(&format!(r#"{{"UNIT":"{own}"}}"#)), "{own}");
+            let dumped =
+                format!(r#"{{"COREDUMP_EXE":"/bin/coredumpctl","COREDUMP_UNIT":"{own}"}}"#);
+            assert!(!starts_a_pass(&dumped), "{own}");
         }
+    }
+
+    #[test]
+    fn a_stream_of_entries_holds_an_ask_back_no_longer_than_a_burst() {
+        let (tx, rx) = mpsc::channel();
+        let feed = thread::spawn(move || {
+            for _ in 0..40 {
+                if tx.send(()).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let start = Instant::now();
+        gather(&rx, Duration::from_millis(300));
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        drop(rx);
+        feed.join().unwrap();
     }
 
     #[test]
