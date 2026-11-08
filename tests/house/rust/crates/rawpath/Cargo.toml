@@ -1,0 +1,7 @@
+# A module whose #[path] is a raw string, which lib/project.nix doesn't
+# read, and a #[cfg(test)] module reading the same file: cargoTests keeps
+# the package whole.
+[package]
+name = "house-fixture-rawpath"
+version = "0.1.0"
+edition = "2024"

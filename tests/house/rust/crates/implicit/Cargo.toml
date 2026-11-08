@@ -1,0 +1,7 @@
+# A program at Cargo's default path that a #[cfg(test)] module reads too,
+# and that includes a test module's file: lib/project.nix's cargoTests keeps
+# both.
+[package]
+name = "house-fixture-implicit"
+version = "0.1.0"
+edition = "2024"

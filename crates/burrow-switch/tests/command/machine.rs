@@ -8,7 +8,7 @@
 //! A file in FAKE makes one fail or answer otherwise.
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -17,9 +17,7 @@ use std::sync::OnceLock;
 pub const SWITCH: &str = env!("CARGO_BIN_EXE_burrow-switch");
 pub const CONFIRM: &str = env!("CARGO_BIN_EXE_burrow-confirm");
 
-/// Written once for every test: a file being written while another test
-/// starts a process is open for writing in that process until it execs,
-/// and running the file then fails with "Text file busy".
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 pub fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
@@ -29,8 +27,7 @@ pub fn bin() -> &'static Path {
         let path = std::env::var("PATH").unwrap();
         for (name, text) in STAND_INS {
             let file = bin.path().join(name);
-            fs::write(&file, text.replace("@PATH@", &path)).unwrap();
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&file, text.replace("@PATH@", &path));
         }
         // The PATH the config gives units and systemd-cat: cat, and
         // nothing else.
@@ -41,7 +38,7 @@ pub fn bin() -> &'static Path {
             .unwrap();
         symlink(cat, bin.path().join("path/cat")).unwrap();
         // For a run as nobody, too.
-        fs::set_permissions(bin.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::permissions(bin.path(), 0o755);
         bin
     })
     .path()

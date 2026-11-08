@@ -1,0 +1,7 @@
+# A block comment with one nested in it, holding a quote and a
+# #[cfg(test)] declaration, above a module that isn't one: lib/project.nix
+# doesn't lex nested comments, so cargoTests keeps the package whole.
+[package]
+name = "house-fixture-deep"
+version = "0.1.0"
+edition = "2024"

@@ -2,7 +2,6 @@
 //! stand-in that keeps what it was asked, and as whom) and the notifier.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
@@ -11,10 +10,7 @@ fn house() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../house")
 }
 
-fn script(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
+use burrow_test::executable as script;
 
 /// A gh that answers `gh api -i` for one repo, sam/a, with no AGENTS.md,
 /// and logs each call with the account it was told it's about.
@@ -41,18 +37,15 @@ case "$*" in
 esac
 "#;
 
-/// gh and the notifier, written once for every test: each keeps what it
-/// was asked in the file its variable names. A file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy". No test
-/// starts one before these are written, and none is written after.
+/// gh and the notifier, cached for the test binary. Each records calls in the
+/// file its environment variable names; installation uses burrow_test.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
-        script(&bin.path().join("gh"), GH);
+        script(bin.path().join("gh"), GH);
         script(
-            &bin.path().join("notify"),
+            bin.path().join("notify"),
             "#!/bin/sh\necho \"$1 $2\" >>\"$NOTICES\"\n",
         );
         bin

@@ -2,7 +2,6 @@
 //! burrow-events' kick port for real processes and sockets.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
@@ -11,8 +10,7 @@ use burrow_events::http::listen;
 use serde_json::json;
 
 fn script(path: &Path, body: &str) {
-    fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(path, format!("#!/bin/sh\n{body}"));
 }
 
 fn watchdog(config: &Path, args: &[&str]) -> Output {

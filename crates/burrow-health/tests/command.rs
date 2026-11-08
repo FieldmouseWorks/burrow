@@ -4,29 +4,22 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-fn script(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
+use burrow_test::executable as script;
 
-/// The stand-ins, written once for every test: a file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy". No test
-/// starts one before these are written, and none is written after; a test's
-/// checks are links to them.
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
         let b = bin.path();
         script(
-            &b.join("systemctl"),
+            b.join("systemctl"),
             r#"#!/bin/sh
 echo "$*" >>"$SYSTEMCTL_LOG"
 case "$*" in
@@ -35,37 +28,37 @@ case "$*" in
 esac
 "#,
         );
-        script(&b.join("pass"), "#!/bin/sh\nexit 0\n");
-        script(&b.join("fail"), "#!/bin/sh\nexit 1\n");
-        script(&b.join("noisy"), "#!/bin/sh\necho out\necho err >&2\n");
-        script(&b.join("bad-config"), "#!/bin/sh\necho private-stdout\necho 'roles line 2: unknown engine old-model' >&2\nexit 1\n");
+        script(b.join("pass"), "#!/bin/sh\nexit 0\n");
+        script(b.join("fail"), "#!/bin/sh\nexit 1\n");
+        script(b.join("noisy"), "#!/bin/sh\necho out\necho err >&2\n");
+        script(b.join("bad-config"), "#!/bin/sh\necho private-stdout\necho 'roles line 2: unknown engine old-model' >&2\nexit 1\n");
         // More than the capture bound and pipe capacity; the checker must
         // drain the excess to let the script reach its exit status.
-        script(&b.join("flood"), "#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\000' x >&2\nexit \"${CHECK_EXIT:-0}\"\n");
-        script(&b.join("flood-timeout"), "#!/bin/sh\nwhile :; do head -c 65536 /dev/zero >&2; done\n");
-        script(&b.join("stderr-descendant"), "#!/bin/sh\nsleep 30 >&2 &\necho $! >>\"$PIDS\"\necho diagnostic >&2\nexit 1\n");
+        script(b.join("flood"), "#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\000' x >&2\nexit \"${CHECK_EXIT:-0}\"\n");
+        script(b.join("flood-timeout"), "#!/bin/sh\nwhile :; do head -c 65536 /dev/zero >&2; done\n");
+        script(b.join("stderr-descendant"), "#!/bin/sh\nsleep 30 >&2 &\necho $! >>\"$PIDS\"\necho diagnostic >&2\nexit 1\n");
         // Passes only when it's given what HOST-health was.
         script(
-            &b.join("stdin"),
+            b.join("stdin"),
             "#!/bin/sh\nread -r line && [ \"$line\" = hello ]\n",
         );
         // Fails twice, then passes.
         script(
-            &b.join("counted"),
+            b.join("counted"),
             "#!/bin/sh\nn=$(cat \"$COUNT\" 2>/dev/null || echo 0)\necho $((n + 1)) >\"$COUNT\"\n[ \"$n\" -ge 2 ]\n",
         );
         // Run out of time, with a child of their own: one dies of its TERM,
         // one exits 0 on it, and one ignores it.
         script(
-            &b.join("slow"),
+            b.join("slow"),
             "#!/bin/sh\nsleep 30 &\necho $! >>\"$PIDS\"\nwait\n",
         );
         script(
-            &b.join("polite"),
+            b.join("polite"),
             "#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30 &\necho $! >>\"$PIDS\"\nwait\n",
         );
         script(
-            &b.join("stubborn"),
+            b.join("stubborn"),
             "#!/bin/sh\ntrap '' TERM\nsleep 30 &\necho $! >>\"$PIDS\"\nwait\nwait\n",
         );
         bin
@@ -84,8 +77,6 @@ impl Machine {
     }
 
     fn with(checks: &[(&str, &str)], systemctl: &Path) -> Machine {
-        // Before anything here can start a process.
-        stand_ins();
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         fs::create_dir(d.join("health.d")).unwrap();

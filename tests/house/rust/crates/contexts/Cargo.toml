@@ -1,0 +1,8 @@
+# Modules whose files are found from where they're loaded: beside a file a
+# #[path] loads, and inside a module file named main.rs that isn't a crate
+# root. #[cfg(test)] modules read the same files: lib/project.nix's
+# cargoTests keeps them.
+[package]
+name = "house-fixture-contexts"
+version = "0.1.0"
+edition = "2024"

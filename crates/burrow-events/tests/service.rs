@@ -4,7 +4,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -150,15 +149,13 @@ fn catches_up() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("systemctl.log");
     let systemctl = dir.path().join("systemctl");
-    fs::write(
+    burrow_test::executable(
         &systemctl,
         format!(
             "#!/bin/sh\necho \"$*\" >>'{}'\n[ \"$1\" = show ] && echo inactive\nexit 0\n",
             log.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let creds = dir.path().join("creds");
     fs::create_dir(&creds).unwrap();
     fs::write(creds.join("webhook"), "hook-secret\n").unwrap();

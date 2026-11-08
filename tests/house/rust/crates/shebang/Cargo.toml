@@ -1,0 +1,7 @@
+# A program whose shebang line ends in #[cfg(test)], above a module that
+# isn't one: Rust drops the line before lexing, and cargoTests keeps the
+# package whole.
+[package]
+name = "house-fixture-shebang"
+version = "0.1.0"
+edition = "2024"

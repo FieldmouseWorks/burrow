@@ -38,11 +38,8 @@ impl Unit {
         }
     }
 
-    /// Every process this binary's tests start is started here, and only
-    /// once the stand-in HOST-health is written: a child started while it's
-    /// being written would hold it open for writing ("Text file busy").
+    /// A watch command with its credential and runtime directories.
     fn command(&self, args: &[&str]) -> Command {
-        health();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_burrow-heartbeat"));
         cmd.args(args)
             .env("CREDENTIALS_DIRECTORY", &self.creds)

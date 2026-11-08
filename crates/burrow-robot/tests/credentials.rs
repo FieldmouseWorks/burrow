@@ -4,7 +4,6 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -19,20 +18,16 @@ fn config() -> Config {
 
 /// A sudo that, asked to `cat FILE`, keeps its arguments in `sudo.log`,
 /// says what `sudo.says` holds and exits with `sudo.exit`'s status, all
-/// beside it. Written once for every test: a file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy".
+/// beside it. Installed by burrow_test and cached for the test binary.
 fn sudo() -> &'static Path {
     static SUDO: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
     let (_, path) = SUDO.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sudo");
-        fs::write(
+        burrow_test::executable(
             &path,
             "#!/bin/sh\necho \"$*\" >>\"$0.log\"\ncat \"$0.says\"\nexit \"$(cat \"$0.exit\")\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         (dir, path)
     });
     path
