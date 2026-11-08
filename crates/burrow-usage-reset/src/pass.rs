@@ -37,6 +37,9 @@ pub struct Reading {
     pub week: String,
     /// The same moment, in seconds since the epoch.
     pub ends: f64,
+    /// The five-hour session's window, while one runs: routing's, not the
+    /// reset's.
+    pub session: Option<crate::meter::Window>,
 }
 
 /// What asking for the banked reset came to.
@@ -426,6 +429,7 @@ mod tests {
             used,
             week: WEEK.to_owned(),
             ends: ENDS,
+            session: None,
         }
     }
 
@@ -435,6 +439,7 @@ mod tests {
             used,
             week: week.to_owned(),
             ends,
+            session: None,
         }
     }
 

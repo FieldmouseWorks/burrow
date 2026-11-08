@@ -72,7 +72,7 @@ let
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
-    meter = cfg.meter;
+    inherit (cfg) meters;
     roles = "${config.users.users.${user}.home}/.config/proj/roles";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
@@ -130,10 +130,10 @@ in
       default = 2;
       description = "How many Codex jobs may run at once, in a pool of their own. Keep it small: the plan's PR reviewer comes first.";
     };
-    meter = lib.mkOption {
+    meters = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Claude's weekly meter.json from usage-reset. Role overflow uses readings under an hour old; null disables it.";
+      description = "The engines' meters from usage-reset (claude.json, codex.json). Role overflow uses readings under an hour old; null disables it.";
     };
     jobsDir = lib.mkOption {
       type = lib.types.str;
@@ -468,8 +468,10 @@ in
       `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
       other repos and jobs with no repo use the bare role. Duplicate keys fail
       the turn with both lines named. Engines are claude and codex; unlisted
-      roles use Claude. Either kind of line may end with `over PCT ENGINE[:MODEL]`
-      for a fresh weekly meter at that percent.
+      roles use Claude. Either kind of line may end with `over PCT ENGINE[:MODEL]`:
+      the turn moves when its engine's fresh meter has any window (five-hour or
+      weekly) at PCT and no credits, or Claude is out of usage, and the other
+      engine's fresh meter has room (credits, or no window used up).
       Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
       `autoland-codex-login job`, separately from the reviewer's login. Codex
       jobs cannot run in agent VMs. The steward's judge always uses Claude.

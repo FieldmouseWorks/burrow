@@ -342,6 +342,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-units"
+version = "0.0.0"
+dependencies = [
+ "burrow-events",
+ "burrow-watchdog",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-update"
 version = "0.0.0"
 dependencies = [
@@ -378,6 +389,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

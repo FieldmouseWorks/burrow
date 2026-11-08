@@ -197,9 +197,14 @@ match case-insensitively. Other repos, and jobs with no repo, use the bare
 role. With neither, the role uses Claude's default. Duplicate keys fail the
 turn and name both lines, including scopes spelled in different cases.
 Other invalid lines fail the turn and name the line. Add
-`over PCT ENGINE[:MODEL]` to move a turn to that engine when Claude's weekly
-meter reaches PCT. Missing readings, or readings an hour old, move nothing.
-`burrow.usageReset` supplies the meter and keeps its history in `meter.log`.
+`over PCT ENGINE[:MODEL]` to move a turn to that engine when its own engine
+is short: any window on its meter (the five-hour session or the week) at
+PCT with no credits to carry on, or, for Claude, the machine already out of
+Claude's usage. It moves only when the other engine's meter has room:
+credits, or no window used up, so Codex's credits count once its plan's
+windows are spent. Missing readings, or readings an hour old, move nothing.
+`burrow.usageReset` supplies both meters and keeps their history in
+`meters/log`.
 Each engine keeps its own conversation when a role moves between them.
 
 Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
