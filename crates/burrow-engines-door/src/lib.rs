@@ -2,7 +2,9 @@
 use burrow_door::{Door, asked, fenced};
 use burrow_github::Api;
 use burrow_proj::setups::{Store, valid_name};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Deserialize)]
@@ -12,6 +14,20 @@ pub struct Config {
     pub label: String,
     pub authors: Vec<String>,
     pub roles: PathBuf,
+    pub state: PathBuf,
+}
+
+/// A completed request whose GitHub answer is still pending. Keeping it until
+/// the close succeeds makes a retry of `use back` a reply, never another switch.
+#[derive(Serialize, Deserialize)]
+struct Pending {
+    request: serde_json::Value,
+    body: String,
+    reason: String,
+}
+
+fn stored<T>(path: &Path, result: std::io::Result<T>) -> Result<T, String> {
+    result.map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
@@ -21,12 +37,46 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
         authors: &cfg.authors,
         what: "this machine's engines",
     };
+    // A pass is serialized separately from the switch's CLI/door lock.
+    // No issue text is used in these paths: the configured repo and GitHub's
+    // numeric issue number alone name a pending result.
+    if !burrow_github::repo_name(&cfg.repo) {
+        return Err("engines repo must be OWNER/NAME".into());
+    }
+    let state = cfg
+        .state
+        .join(cfg.repo.to_ascii_lowercase().replace('/', "--"));
+    stored(&state, fs::create_dir_all(&state))?;
+    let lock_path = state.join("lock");
+    let lock = stored(
+        &lock_path,
+        File::options()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path),
+    )?;
+    stored(&lock_path, lock.lock())?;
     for issue in door.issues(api)? {
         // A non-author's text is ignored, including edits by outsiders.
         let text = match door.written(api, &issue)? {
             Ok(t) => t,
             Err(_) => continue,
         };
+        let receipt = state.join(format!("{}.json", issue.number));
+        let pending = match fs::read(&receipt) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<Pending>(&bytes)
+                    .map_err(|e| format!("{}: {e}", receipt.display()))?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", receipt.display())),
+        };
+        if let Some(pending) = pending.filter(|p| p.request == text) {
+            door.reply(api, issue.number, &pending.body, &pending.reason)?;
+            stored(&receipt, fs::remove_file(&receipt))?;
+            continue;
+        }
         let lines = asked(&text);
         let args = match lines.as_slice() {
             [line] if line == "list" => Some(vec!["list".into()]),
@@ -67,7 +117,17 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
                 )
             }
         };
-        door.reply(api, issue.number, &body, reason)?;
+        let pending = Pending {
+            request: text,
+            body,
+            reason: reason.into(),
+        };
+        let tmp = receipt.with_extension("next");
+        let bytes = serde_json::to_vec(&pending).map_err(|e| e.to_string())?;
+        stored(&tmp, fs::write(&tmp, bytes))?;
+        stored(&receipt, fs::rename(&tmp, &receipt))?;
+        door.reply(api, issue.number, &pending.body, reason)?;
+        stored(&receipt, fs::remove_file(&receipt))?;
     }
     Ok(())
 }

@@ -41,3 +41,30 @@ pub(crate) fn parse<'a>(
         .map(|(key, (_, _, choice))| (key, choice))
         .collect())
 }
+
+/// A validated policy with both primary and overflow engines, without models.
+pub(crate) fn engines(path: &Path, text: &str) -> Result<String, String> {
+    parse(path, text, None, false, crate::now())?;
+    let mut out = String::new();
+    for line in text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+    {
+        // The shared parser established the grammar. Only the two engine
+        // positions can contain model choices; no raw line is ever printed.
+        let words: Vec<_> = line
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, word)| {
+                if i == 1 || i == 4 {
+                    word.split(':').next().unwrap_or("")
+                } else {
+                    word
+                }
+            })
+            .collect();
+        out += &words.join(" ");
+        out.push('\n');
+    }
+    Ok(out)
+}

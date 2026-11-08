@@ -215,11 +215,7 @@ impl<'a> Store<'a> {
             );
         }
         let text = crate::roles::read(self.roles)?;
-        let entries = crate::roles::parse(self.roles, &text, None, false, crate::now())?;
-        for (key, choice) in entries {
-            let scope = key.repo.map(|r| format!("@{r}")).unwrap_or_default();
-            out += &format!("{}{scope} {}\n", key.name, choice.engine.name());
-        }
+        out += &crate::roles::engines(self.roles, &text)?;
         Ok(out)
     }
 }

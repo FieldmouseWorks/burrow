@@ -61,6 +61,7 @@ fn switch_bad_setup_and_non_authors() {
         label: "engines".into(),
         authors: vec!["sam".into()],
         roles,
+        state: d.path().join("state"),
     };
     let mut gh = github("sam", "use next", None);
     pass(&mut gh, &cfg).unwrap();
@@ -109,4 +110,38 @@ fn switch_bad_setup_and_non_authors() {
         assert_eq!(fs::read_link(&cfg.roles).unwrap(), link);
         assert!(gh.asked("PATCH").is_empty());
     }
+}
+
+#[test]
+fn a_failed_reply_does_not_repeat_back() {
+    let d = tempfile::tempdir().unwrap();
+    let roles = d.path().join("roles");
+    fs::create_dir(d.path().join("roles.d")).unwrap();
+    fs::write(&roles, "work claude\n").unwrap();
+    fs::write(d.path().join("roles.d/first"), "work claude\n").unwrap();
+    fs::write(d.path().join("roles.d/second"), "work codex\n").unwrap();
+    let store = Store::new(&roles);
+    store.command(&["use".into(), "second".into()]).unwrap();
+    let cfg = Config {
+        repo: "sam/box".into(),
+        label: "engines".into(),
+        authors: vec!["sam".into()],
+        roles,
+        state: d.path().join("state"),
+    };
+    let mut gh = github("sam", "use back", None);
+    // Comment succeeds, close fails. The next pass must only repeat the reply.
+    gh.answers
+        .iter_mut()
+        .find(|(method, _, _)| method == "PATCH")
+        .unwrap()
+        .2 = vec![ok(403, json!({"message":"refused"}), &[])].into();
+    assert!(pass(&mut gh, &cfg).is_err());
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    let mut gh = github("sam", "use back", None);
+    pass(&mut gh, &cfg).unwrap();
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    // Once closed successfully a reopened issue really does ask again.
+    pass(&mut gh, &cfg).unwrap();
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
 }

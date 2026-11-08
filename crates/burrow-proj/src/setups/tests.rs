@@ -11,12 +11,16 @@ fn switches_back_and_refuses_bad_or_unknown_without_changing_link() {
     run(&store, &["save", "first"]).unwrap();
     fs::write(
         store.dir.join("second"),
-        "work codex:chosen\nwork@sam/code claude\n",
+        "work codex:chosen over 80 claude:other\nwork@sam/code claude\n",
     )
     .unwrap();
     let said = run(&store, &["use", "second"]).unwrap();
     assert!(said.contains("Was active: first\nActive: second\nPrevious: first"));
-    assert!(said.contains("work codex") && !said.contains("chosen"));
+    assert!(
+        said.contains("work codex over 80 claude")
+            && !said.contains("chosen")
+            && !said.contains("other")
+    );
     assert!(roles.is_symlink());
     run(&store, &["use", "back"]).unwrap();
     assert_eq!(fs::read_to_string(&roles).unwrap(), "work claude\n");
@@ -58,7 +62,9 @@ fn config_check_rejects_old_format_with_file_and_line() {
         serde_json::from_value(crate::config::tests::example()).unwrap();
     cfg.roles = d.path().join("roles");
     fs::write(&cfg.roles, "# old file\njudge old-format\n").unwrap();
-    let error = cfg.check().unwrap_err();
+    let failure = crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap_err();
+    assert_eq!(failure.code, 1);
+    let error = failure.say.unwrap();
     assert!(
         error.contains("roles line 2") && error.contains("unknown engine"),
         "{error}"

@@ -64,6 +64,7 @@ let
   roles = "${config.users.users.${user}.home}/.config/proj/roles";
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
     inherit (cfg.engines.door) repo label authors;
+    state = "${stateDir}/proj-engines";
     inherit roles;
   });
 
@@ -533,6 +534,7 @@ in
       repos = [ cfg.engines.door.repo ];
       gap = 2;
     };
+    systemd.tmpfiles.rules = [ "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -" ];
     systemd.services.burrow-engines-door = {
       description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
       restartIfChanged = false;
