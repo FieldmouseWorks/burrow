@@ -89,11 +89,13 @@ let
       }.${lib.elemAt m 1} or null;
       # Strip leading zeros before conversion; reject huge integers before
       # lib.toInt can overflow. systemd stores microseconds in uint64_t, with
-      # UINT64_MAX reserved for infinity. Divide before multiplying in Nix.
+      # UINT64_MAX reserved for infinity. parse_time rejects equality with
+      # floor(UINT64_MAX / microseconds-per-unit), too. Divide before
+      # multiplying in Nix, preserving that strict bound for every unit.
       digits = if m == null then null else builtins.match "0*([1-9][0-9]*)" (lib.head m);
       n = if digits == null || builtins.stringLength (lib.head digits) > 14
         then null else lib.toInt (lib.head digits);
-    in if unit == null || n == null || n > builtins.div 18446744073709 unit then null
+    in if unit == null || n == null || n >= builtins.div 18446744073709 unit then null
       else n * unit;
 
   # Stops can belong to an earlier activation or to the revert itself. There
