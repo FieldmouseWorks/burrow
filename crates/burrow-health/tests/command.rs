@@ -39,6 +39,11 @@ esac
         script(&b.join("fail"), "#!/bin/sh\nexit 1\n");
         script(&b.join("noisy"), "#!/bin/sh\necho out\necho err >&2\n");
         script(&b.join("bad-config"), "#!/bin/sh\necho private-stdout\necho 'roles line 2: unknown engine old-model' >&2\nexit 1\n");
+        // More than the capture bound and pipe capacity; the checker must
+        // drain the excess to let the script reach its exit status.
+        script(&b.join("flood"), "#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\000' x >&2\nexit \"${CHECK_EXIT:-0}\"\n");
+        script(&b.join("flood-timeout"), "#!/bin/sh\nwhile :; do head -c 65536 /dev/zero >&2; done\n");
+        script(&b.join("stderr-descendant"), "#!/bin/sh\nsleep 30 >&2 &\necho $! >>\"$PIDS\"\necho diagnostic >&2\nexit 1\n");
         // Passes only when it's given what HOST-health was.
         script(
             &b.join("stdin"),
@@ -484,4 +489,65 @@ fn failed_compare_keeps_config_diagnostics_for_the_update_notice() {
     let ran = m.run(&[], &["compare", m.path("before").to_str().unwrap(), "0"]);
     assert!(ran.status.success());
     assert_eq!(stdout(&ran), "healthy\n");
+}
+
+#[test]
+fn noisy_checks_are_drained_with_bounded_capture_without_temp_storage() {
+    let m = Machine::new(&[("noisy", "flood")]);
+    let before = m.path("before");
+    fs::write(&before, "check:noisy ok\n").unwrap();
+    // The capture cannot use disk, even if TMPDIR cannot be opened.
+    let missing = m.path("no-temp-storage");
+    let env = [("TMPDIR", missing.to_str().unwrap()), ("CHECK_EXIT", "1")];
+    let ran = m.run(&env, &["compare", before.to_str().unwrap(), "0"]);
+    assert_eq!(ran.status.code(), Some(1));
+    assert_eq!(
+        stdout(&ran),
+        format!(
+            "check:noisy is failing\ncheck:noisy: {}\n",
+            "x".repeat(4096)
+        )
+    );
+    for exit in ["0", "1"] {
+        let env = [("TMPDIR", missing.to_str().unwrap()), ("CHECK_EXIT", exit)];
+        let ran = m.run(&env, &[]);
+        assert!(ran.status.success());
+        assert_eq!(
+            stdout(&ran),
+            if exit == "0" {
+                "check:noisy ok\n"
+            } else {
+                "check:noisy fail\n"
+            }
+        );
+        let ran = m.run(&env, &["snapshot", before.to_str().unwrap()]);
+        assert!(ran.status.success());
+    }
+}
+
+#[test]
+fn continuously_noisy_checks_still_time_out() {
+    let m = Machine::new(&[("noisy", "flood-timeout")]);
+    let start = Instant::now();
+    let ran = m.run(&[], &[]);
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(stdout(&ran), "check:noisy fail\n");
+}
+
+#[test]
+fn a_descendant_holding_stderr_does_not_delay_the_verdict() {
+    let m = Machine::new(&[("descendant", "stderr-descendant")]);
+    fs::write(m.path("before"), "check:descendant ok\n").unwrap();
+    let start = Instant::now();
+    let ran = m.run(&[], &["compare", m.path("before").to_str().unwrap(), "0"]);
+    let elapsed = start.elapsed();
+    for pid in m.read("pids").lines() {
+        let pid = rustix::process::Pid::from_raw(pid.parse().unwrap()).unwrap();
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    assert!(elapsed < Duration::from_secs(5));
+    assert_eq!(
+        stdout(&ran),
+        "check:descendant is failing\ncheck:descendant: diagnostic\n"
+    );
 }

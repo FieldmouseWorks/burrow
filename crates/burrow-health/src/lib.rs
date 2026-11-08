@@ -21,7 +21,6 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -30,6 +29,9 @@ use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use serde::Deserialize;
+
+mod diagnostic;
+use diagnostic::Diagnostic;
 
 /// What modules/updates.nix tells HOST-health, as JSON.
 #[derive(Debug, Deserialize)]
@@ -188,19 +190,9 @@ fn checks(dir: &Path, within: Duration) -> (Vec<Line>, Vec<(String, String)>) {
                 "{CHECK}{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
-            // A file avoids pipe backpressure and descendants holding a pipe
-            // open after exit. Stdout may be data, so keep only stderr.
-            let mut diagnostic = tempfile::tempfile().ok();
-            let stderr = diagnostic.as_ref().and_then(|f| f.try_clone().ok());
-            let passed = run_check(&path, within, stderr);
-            if !passed && let Some(file) = diagnostic.as_mut() {
-                let _ = file.seek(SeekFrom::Start(0));
-                let mut text = Vec::new();
-                let _ = file.take(4096).read_to_end(&mut text);
-                let text = String::from_utf8_lossy(&text);
-                if !text.trim().is_empty() {
-                    details.push((key.clone(), text.trim().to_owned()));
-                }
+            let (passed, text) = run_check(&path, within);
+            if !passed && !text.is_empty() {
+                details.push((key.clone(), text));
             }
             Line {
                 key,
@@ -257,37 +249,50 @@ const POLL: Duration = Duration::from_millis(10);
 /// TERM, as timeout(1) sends it, then after GRACE a KILL for whatever is
 /// left, so a check that ignores its TERM doesn't hold HOST-health up.
 pub fn passes(path: &Path, within: Duration) -> bool {
-    run_check(path, within, None)
+    run_check(path, within).0
 }
 
-fn run_check(path: &Path, within: Duration, stderr: Option<fs::File>) -> bool {
+fn run_check(path: &Path, within: Duration) -> (bool, String) {
     let Ok(mut child) = Command::new(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr.map_or_else(Stdio::null, Stdio::from))
+        .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
     else {
-        return false;
+        return (false, String::new());
     };
-    let finished = exits(&child, within);
+    let mut diagnostic = match Diagnostic::new(child.stderr.take().unwrap()) {
+        Ok(diagnostic) => diagnostic,
+        Err(_) => {
+            let _ = rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
+            let _ = child.wait();
+            return (false, "could not capture check stderr".into());
+        }
+    };
+    let finished = exits(&child, within, &mut diagnostic);
     if !finished {
         // Until it's waited for, the check's process ID, and so its group's,
         // can't be anyone else's.
         let group = Pid::from_child(&child);
         let _ = rustix::process::kill_process_group(group, Signal::TERM);
-        exits(&child, GRACE);
+        exits(&child, GRACE, &mut diagnostic);
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
     }
     let status = child.wait();
-    finished && status.is_ok_and(|s| s.success())
+    diagnostic.drain();
+    (
+        finished && status.is_ok_and(|s| s.success()),
+        diagnostic.text(),
+    )
 }
 
 /// Whether `child` exits within `within`, leaving it to be waited for.
-fn exits(child: &Child, within: Duration) -> bool {
+fn exits(child: &Child, within: Duration, diagnostic: &mut Diagnostic) -> bool {
     let pid = Pid::from_child(child);
     let deadline = Instant::now().checked_add(within);
     loop {
+        diagnostic.drain();
         match rustix::process::waitid(
             WaitId::Pid(pid),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
