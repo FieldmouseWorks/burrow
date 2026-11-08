@@ -6,7 +6,8 @@
     inbox = self.nixosConfigurations.example.extendModules {
       modules = [ {
         burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; };
-        burrow.proj.engines.door = { enable = true; repo = "sam/homelab"; };
+        burrow.proj.engines.door = { enable = true; repo = "sam/homelab"; label = "switch-engines"; };
+        burrow.proj.inbox.triage.skip = [ "custom" ];
       } ];
     };
   in
@@ -14,6 +15,8 @@
   assert inbox.config.burrow.events.handlers.engines.events == [ "issues" ];
   assert inbox.config.burrow.events.handlers.engines.repos == [ "sam/homelab" ];
   assert builtins.elem "proj-config" inbox.config.burrow.updates.requiredHealth;
+  assert builtins.elem "switch-engines" inbox.config.burrow.proj.inbox.triage.skip;
+  assert builtins.elem "custom" inbox.config.burrow.proj.inbox.triage.skip;
   pkgs.runCommand "proj-config-check" { } ''
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }

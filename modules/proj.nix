@@ -271,7 +271,7 @@ in
       default = config.burrow.github.machineGh;
       defaultText = lib.literalExpression "config.burrow.github.machineGh";
       internal = true;
-      description = "The gh proj-watch and proj-inbox ask GitHub with (the test's is a stand-in).";
+      description = "The gh proj-watch, proj-inbox and the engines door ask GitHub with (the test's is a stand-in).";
     };
 
     engines.door = {
@@ -367,8 +367,9 @@ in
         };
         skip = lib.mkOption {
           type = lib.types.listOf lib.types.str;
-          default = [ "probe" "undo" "engines" "flaky" ];
-          description = "Labels whose issues other machinery owns: never sorted or handed on.";
+          default = [ "probe" "undo" "flaky" ];
+          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label);
+          description = "Labels whose issues other machinery owns: never sorted or handed on. The engines door's configured label always joins them while the door is on.";
         };
         atOnce = lib.mkOption {
           type = lib.types.ints.positive;
