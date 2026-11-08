@@ -10,16 +10,9 @@ pkgs.testers.runNixOSTest {
   nodes.host = { lib, pkgs, ... }: let
     inherit (import ./proj/stand-ins.nix { inherit pkgs; }) gh;
     # No login or network: exercise the actual guest proj and host lifecycle.
-    vmClaude = pkgs.writeShellScriptBin "claude" ''
-      prompt=$(cat)
-      case "$prompt" in
-        silent*|"Your answer didn't say what comes next"*) ;;
-        ask) proj ask >/dev/null ;;
-        await*) proj await "''${prompt#await }" >/dev/null ;;
-        *) proj done >/dev/null ;;
-      esac
-      echo '{"type":"system","subtype":"init","session_id":"vm-test"}'
-      echo '{"type":"result","session_id":"vm-test","result":"answered","is_error":false}'
+    vmClaude = pkgs.runCommand "vm-claude" { nativeBuildInputs = [ pkgs.rustc ]; } ''
+      mkdir -p $out/bin
+      rustc --edition=2024 ${./agents/claude.rs} -o $out/bin/claude
     '';
     # The test commits, on the host and in the sandboxes.
     identity.programs.git.config.user = {

@@ -4,7 +4,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -725,11 +725,11 @@ fn stop(pid: Pid) {
 /// Whether sandbox `id`'s VM, and so everything a run left in it, is
 /// stopped: `agent stop` (as `agent`, the command) said so.
 fn stopped(agent: &str, id: &str) -> bool {
-    let ok = Command::new(agent)
-        .args(["stop", id])
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|st| st.success());
+    let ok = crate::guest::bounded(
+        Command::new(agent).args(["stop", id]),
+        Duration::from_secs(60),
+    )
+    .is_ok();
     if !ok {
         eprintln!("proj: agent stop {id} didn't say the sandbox stopped");
     }
