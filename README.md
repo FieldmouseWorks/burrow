@@ -91,9 +91,12 @@ Each has an entry below, and each can be imported on its own.
   stops can still delay the revert; existing generations and hand-written
   unit files need the same discipline. `--abort` reverts at once; with `flakeInputs` it refuses a system
   built from an older nixpkgs. With `trialBoot` (GRUB), `HOST-boot` boots a
-  new kernel, initrd or command line once at a quiet hour and makes it the
+  new kernel, initrd or command line once when idle and makes it the
   default only after it came up; one that panics or hangs resets into the last
-  good one and is never tried again.
+  good one and is never tried again. Trials wait for project jobs, sandboxes,
+  runner jobs, updates and steward passes. Completion events retry promptly;
+  `trialBoot.at` is the daily backstop, overriding busy work after two days.
+  An unconfirmed switch always blocks a trial.
 - **`updates`** (`burrow.updates`): Everything current, unattended.
   `HOST-update` (on each push to the flake's main or a watched input, and
   hourly for nixpkgs and Claude Code) bumps the flake's inputs and Claude
