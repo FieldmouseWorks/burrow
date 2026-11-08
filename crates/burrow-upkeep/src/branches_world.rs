@@ -31,6 +31,7 @@ pub struct Pr {
     pub repo: String,
     pub closed: f64,
     pub updated: f64,
+    pub labels: Vec<String>,
 }
 
 /// What GitHub answers instead of what it has: a status, and its message.
@@ -52,6 +53,8 @@ pub struct World {
     pub closes: BTreeMap<String, No>,
     pub compares: BTreeMap<String, No>,
     pub archiving: BTreeMap<String, No>,
+    /// By PR, what it answers to taking a label off.
+    pub unlabeling: BTreeMap<u64, No>,
     /// The branches whose deletes git turns away, and what it says then.
     pub undeletable: BTreeSet<String>,
     /// What a look did: the deletes it asked git for, the branches whose
@@ -60,6 +63,8 @@ pub struct World {
     pub looked: BTreeSet<String>,
     pub fresh: Vec<u16>,
     pub fed: Vec<u16>,
+    /// The labels it took off, by PR.
+    pub unlabeled: Vec<(u64, String)>,
     /// Whether anything asked it to change anything.
     pub asked_to_change: bool,
 }
@@ -178,7 +183,8 @@ impl World {
                 let page: Vec<Value> = feed[..feed.len().min(100)]
                     .iter()
                     .map(|p| {
-                        json!({"number": p.number, "updated_at": iso(p.updated),
+                        let labels: Vec<Value> = p.labels.iter().map(|l| json!({"name": l})).collect();
+                        json!({"number": p.number, "updated_at": iso(p.updated), "labels": labels,
                                "head": {"ref": p.branch, "sha": p.sha, "repo": {"full_name": p.repo}}})
                     })
                     .collect();
@@ -219,6 +225,21 @@ impl World {
                     json!({"ahead_by": b.ahead, "commits": commits}),
                     vec![],
                 )
+            }
+            ("DELETE", q) if q.starts_with("issues/") => {
+                self.asked_to_change = true;
+                let (n, label) = q["issues/".len()..].split_once("/labels/").unwrap();
+                let (n, label) = (n.parse::<u64>().unwrap(), decode(label));
+                if let Some(no_) = self.unlabeling.get(&n) {
+                    return no(no_);
+                }
+                let pr = self.closed.iter_mut().find(|p| p.number == n).unwrap();
+                let Some(i) = pr.labels.iter().position(|l| *l == label) else {
+                    return no(&(404, "Label does not exist"));
+                };
+                pr.labels.remove(i);
+                self.unlabeled.push((n, label));
+                reply(200, json!([]), vec![])
             }
             ("POST", "git/refs") => {
                 self.asked_to_change = true;
@@ -336,6 +357,7 @@ impl SamR {
             repo: repo.into(),
             closed: at.floor(),
             updated: at.floor(),
+            labels: vec![],
         });
     }
 
@@ -353,6 +375,7 @@ impl SamR {
             w.looked.clear();
             w.fresh.clear();
             w.fed.clear();
+            w.unlabeled.clear();
         }
         let mut api = Hub(self.world.clone());
         let mut git = Hands(self.world.clone());
