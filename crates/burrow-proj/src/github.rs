@@ -114,7 +114,21 @@ pub fn over(fp: &Value) -> Option<&'static str> {
 /// What GitHub's REST API answers (`gh api ARGS`), or None when it can't be
 /// asked or doesn't answer with JSON.
 pub fn api(cfg: &Config, args: &[&str]) -> Option<Value> {
-    let out = Command::new(&cfg.tools.gh)
+    api_command(cfg, args, None)
+}
+
+/// GraphQL fields are data, not authentication routing. Select the target
+/// repository explicitly, overriding the caller's checkout and GH_REPO.
+pub fn api_for(cfg: &Config, repo: &str, args: &[&str]) -> Option<Value> {
+    api_command(cfg, args, Some(repo))
+}
+
+fn api_command(cfg: &Config, args: &[&str], repo: Option<&str>) -> Option<Value> {
+    let mut command = Command::new(&cfg.tools.gh);
+    if let Some(repo) = repo {
+        command.env("GH_REPO", repo);
+    }
+    let out = command
         .arg("api")
         .args(args)
         .stdin(Stdio::null())
