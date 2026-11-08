@@ -5,30 +5,22 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
-/// The stand-in HOST-health, written once for every test: it says what
-/// $HEALTH_REPORT holds and exits $HEALTH_EXIT. A file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy". No test
-/// starts one before this is written, and none is written after.
+/// Shared HOST-health: says what $HEALTH_REPORT holds and exits $HEALTH_EXIT.
 pub fn health() -> &'static Path {
     static HEALTH: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
     let (_, path) = HEALTH.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("burrow-health");
-        fs::write(
+        burrow_test::executable(
             &path,
             "#!/bin/sh\ncat \"$HEALTH_REPORT\"\nexit \"${HEALTH_EXIT:-0}\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         (dir, path)
     });
     path

@@ -50,11 +50,7 @@ fn left(w: &World, id: &str, i: usize) {
     // One its command made read-only goes too.
     fs::create_dir(tree.join("ro")).unwrap();
     fs::write(tree.join("ro/x"), "x").unwrap();
-    fs::set_permissions(
-        tree.join("ro"),
-        std::os::unix::fs::PermissionsExt::from_mode(0o555),
-    )
-    .unwrap();
+    burrow_test::permissions(tree.join("ro"), 0o555);
 }
 
 #[test]

@@ -2,7 +2,6 @@
 //! it, its settings, submodules and uncommitted changes included, purely.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use super::{Gate, Run};
@@ -28,7 +27,7 @@ fn repository_settings_hold_in_the_snapshot() {
             }
             "included" => {
                 // Relative to the config file that includes it.
-                fs::copy(&filemode, d.join(".git/filemode.inc")).unwrap();
+                burrow_test::copy_file(&filemode, d.join(".git/filemode.inc"));
                 g.s.git(&d, &["config", "include.path", "filemode.inc"]);
             }
             "included if" => {
@@ -48,7 +47,8 @@ fn repository_settings_hold_in_the_snapshot() {
                 );
             }
         }
-        fs::set_permissions(d.join("flake.nix"), fs::Permissions::from_mode(0o755)).unwrap();
+        let file = d.join("flake.nix");
+        burrow_test::executable(&file, fs::read(&file).unwrap());
         let r = g.apart(&d);
         let _ = fs::remove_file(&user);
         assert_eq!(r.code, 0, "{how}: {}", r.out);
