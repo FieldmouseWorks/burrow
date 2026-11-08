@@ -361,14 +361,14 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       github("repos/o/d/issues/2", json.dumps(first))
       github("repos/o/d/issues/2/comments", "[]")
       # Its first turn waits for the edit, however quickly the pass looks.
-      machine.succeed("touch /tmp/hold")
+      machine.succeed("touch /tmp/inbox-hold")
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       ej = machine.succeed("grep -l 'issue o/d#2 ' /data/dev/jobs/*/prompt.1").split()[0].split("/")[-2]
       # Edited after the job was handed it, before it was done.
       edited = {**first, "body": "inbox-done, and also the edit"}
       github("repos/o/d/issues", json.dumps([edited]))
       github("repos/o/d/issues/2", json.dumps(edited))
-      machine.succeed("rm /tmp/hold")
+      machine.succeed("rm /tmp/inbox-hold")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {ej}' | grep -x done", timeout=120)
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       calls = machine.succeed("cat /tmp/gh/calls")
