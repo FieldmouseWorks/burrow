@@ -157,10 +157,15 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       w = waits(lambda w: "nothing resumed it" in w.get(k, {}).get("phase", ""))[k]
       assert w["since"] >= before and w["due"] == w["since"] + 120, w
       machine.succeed(f"test -e /data/dev/jobs/{k}/1.ended")
-      # And the next turn, running, has no end yet.
+      # And the next turn, running, has no end yet. Turn 1 named no session,
+      # so this one is handed it first, and still runs what it's asked: a
+      # turn that answered at once would have been running only by luck.
       machine.succeed(f"su - dev -c 'echo s >/data/dev/jobs/{k}/session'")
       proj(f'reply {k} "sleep 600"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
+      machine.succeed(f"test -e /data/dev/jobs/{k}/2.handoff")
+      time.sleep(3)
+      assert state(k) == "running", state(k)
       machine.fail(f"test -e /data/dev/jobs/{k}/2.ended")
       proj(f"stop {k}")
 

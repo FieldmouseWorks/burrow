@@ -33,8 +33,14 @@
   # ask for an inbox job unless told "inbox-done"; "ask" asks, "await"
   # awaits), but "silent" doesn't, and with /tmp/silent nothing does, even
   # told to; what it's told is kept in /tmp/told.
+  # Handed what its conversation missed first (proj's engine/handoff.rs:
+  # a turn before this one named no session, as a run killed before it
+  # said anything doesn't), it does what this turn asks, as Claude would.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
+    case $prompt in
+      *$'\n## This turn, asked\n'*) prompt=''${prompt##*$'\n## This turn, asked\n\n'} ;;
+    esac
     args=$*
     echo "$args" >/tmp/args
     echo "''${ENABLE_CLAUDEAI_MCP_SERVERS-unset}" >/tmp/connectors
