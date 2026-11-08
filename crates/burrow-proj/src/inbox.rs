@@ -166,6 +166,11 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
         }
     }
+    for (name, path) in names(&state.join(".retired")) {
+        if name.eq_ignore_ascii_case(&want) {
+            fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+        }
+    }
     for dir in [".unreached", drain::READY_LISTS] {
         for (name, path) in names(&state.join(dir)) {
             if !name.starts_with('.') && name.to_lowercase() == want {
@@ -517,13 +522,17 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         )
     }
 
-    /// A comment on the issue, signed as the inbox's own. The body goes on
-    /// stdin: an answer can be longer than an argument may be.
-    fn post(&self, repo: &str, n: &str, body: &str) -> bool {
-        let text = format!(
+    /// The shared signature, also counted when batching notices.
+    fn signed(&self, body: &str) -> String {
+        format!(
             "{body}\n\n---\n{}\n_proj-inbox on {}_\n",
             self.cfg.inbox_mark, self.inbox.host
-        );
+        )
+    }
+
+    /// Post on stdin: an answer can be longer than an argument may be.
+    fn post(&self, repo: &str, n: &str, body: &str) -> bool {
+        let text = self.signed(body);
         let Ok(mut child) = Command::new(&self.cfg.tools.gh)
             .args(["api", &format!("repos/{repo}/issues/{n}/comments")])
             .args(["-F", "body=@-"])
@@ -889,6 +898,7 @@ fn say(f: Fail) {
 
 mod drain;
 mod jobs;
+mod retirement;
 mod written;
 
 pub(crate) use drain::WAITING;
