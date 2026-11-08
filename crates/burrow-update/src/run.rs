@@ -61,10 +61,10 @@ pub struct Run<'a> {
     /// What the machine ran when it began.
     pub(crate) running: Running,
     pub(crate) inputs: Vec<String>,
-    /// Its PR, in a train repo, when it rides it, and when its head is red
-    /// and a fresh bump may replace it.
+    /// Its PR, in a train repo, when it rides it, and when its head is
+    /// stuck (and why) and a fresh bump may replace it.
     pub(crate) riding: Option<u64>,
-    pub(crate) replacing: Option<Pr>,
+    pub(crate) replacing: Option<(Pr, train::Stuck)>,
     /// Its open PR's number, while it holds off for that to land.
     pub(crate) behind: Option<u64>,
     /// HEAD is a commit of this run's: a bump, or the merge that rides its
@@ -232,8 +232,8 @@ impl Run<'_> {
     /// has since moved past: then it's this run's to update. If it runs
     /// changes that aren't on main, someone is mid-work: it holds. In a
     /// train repo, its PR, when it's open: main with that on top, and
-    /// nothing fresh, unless it's red on a head of its own, which a fresh
-    /// bump replaces.
+    /// nothing fresh, unless it's stuck on a head of its own (red, or held
+    /// by an open finding), which a fresh bump replaces.
     fn begin(&mut self) -> Step {
         let cfg = self.cfg;
         if cfg.switch_state.join("pending").exists() {
@@ -338,13 +338,13 @@ impl Run<'_> {
             }
         };
         let Some(pr) = pr else { return Ok(()) };
-        match train::red(cfg, t, self.api, &pr) {
+        match train::stuck(cfg, t, self.api, &pr) {
             Err(why) => Err(self.end(Outcome::Held, &format!("{why}; trying again next run"))),
-            Ok(true) => {
-                self.replacing = Some(pr);
+            Ok(Some(why)) => {
+                self.replacing = Some((pr, why));
                 Ok(())
             }
-            Ok(false) => {
+            Ok(None) => {
                 self.behind = Some(pr.number);
                 if let Err(why) = train::ride(cfg, t, &pr) {
                     return Err(self.end(Outcome::Held, &why));
@@ -519,10 +519,10 @@ impl Run<'_> {
         }
     }
 
-    /// Its red PR's head stays, unless a whole fresh bump other than it
+    /// Its stuck PR's head stays, unless a whole fresh bump other than it
     /// replaces it.
     fn replaces(&mut self) -> Step {
-        let Some(pr) = &self.replacing else {
+        let Some((pr, stuck)) = &self.replacing else {
             return Ok(());
         };
         let short: Vec<String> = self.unfetched.iter().chain(&self.failed).cloned().collect();
@@ -531,7 +531,7 @@ impl Run<'_> {
             Err(why) => Err(self.end(
                 Outcome::Held,
                 &format!(
-                    "its PR #{} is red, and {why}; holding for the Claude jobs on it",
+                    "its PR #{} is {stuck}, and {why}; holding for the Claude jobs on it",
                     pr.number
                 ),
             )),
@@ -638,7 +638,7 @@ impl Run<'_> {
         if let Some(t) = &cfg.train {
             if self.riding.is_some() || !self.changed {
                 // Riding, or nothing new on main: nothing to put up.
-            } else if let Some(pr) = &self.replacing {
+            } else if let Some((pr, _)) = &self.replacing {
                 // Up already, before its confirm, unless it was live before
                 // this run: then it goes up now, and a refusal leaves the
                 // box as this run found it.

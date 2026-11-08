@@ -132,11 +132,12 @@ impl Run<'_> {
             self.warn("warning: the new Claude Code didn't answer a one-line prompt");
         }
 
-        // A fresh bump for its red PR goes up as that PR's head before it's
-        // confirmed: refused (a fix or a rerun got there first), it goes
-        // straight back, so the box never stays on what nothing will land,
-        // and the next run rides or holds for that PR as usual.
-        if let (Some(t), Some(pr)) = (&cfg.train, &self.replacing) {
+        // A fresh bump for its stuck PR goes up as that PR's head before
+        // it's confirmed: refused (a fix, a rerun or a resolve got there
+        // first), it goes straight back, so the box never stays on what
+        // nothing will land, and the next run rides or holds for that PR as
+        // usual.
+        if let (Some(t), Some((pr, _))) = (&cfg.train, &self.replacing) {
             match train::replace(cfg, t, self.api, pr) {
                 Ok(url) => self.url = Some(url),
                 Err(why) => {

@@ -130,7 +130,7 @@ fn its_pr_says_what_the_commit_passed_and_that_its_live() {
         body,
         "Pushed by box-update after the build, the VM tests and the health check passed.\n\n\
          It is live on box. The steward settles this PR and the merge train lands it; until then \
-         box-update brings in nothing newer, unless a check fails on it: then a fresh bump replaces it."
+         box-update brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it."
     );
 }
 
@@ -283,8 +283,8 @@ fn red_is_ci_as_the_steward_reads_it_on_its_own_head() {
         vec![status_by("conary/train", "FAILURE", "other-app", "Bot")],
         vec![suite("SUCCESS"), run("COMPLETED", Some("SUCCESS"))],
     ] {
-        let said = red(&m.cfg, m.t(), &mut github(&pr.head, &green), &pr);
-        assert_eq!(said, Ok(false), "{green:?}");
+        let said = stuck(&m.cfg, m.t(), &mut github(&pr.head, &green), &pr);
+        assert_eq!(said, Ok(None), "{green:?}");
     }
     assert!(!m.has(&pr.head), "fetched a head that isn't red");
     // Red: a check on its own head failed, a workflow failed to start, a
@@ -311,15 +311,15 @@ fn red_is_ci_as_the_steward_reads_it_on_its_own_head() {
     .into_iter()
     .enumerate()
     {
-        let said = red(&m.cfg, m.t(), &mut github(&pr.head, &failed), &pr);
-        assert_eq!(said, Ok(true), "{failed:?}");
+        let said = stuck(&m.cfg, m.t(), &mut github(&pr.head, &failed), &pr);
+        assert_eq!(said, Ok(Some(Stuck::Red)), "{failed:?}");
         if i == 0 {
             assert!(m.has(&pr.head), "didn't fetch the red head");
         }
     }
     // What it asked, of the account it's about.
     let mut gh = github(&pr.head, &[]);
-    red(&m.cfg, m.t(), &mut gh, &pr).unwrap();
+    stuck(&m.cfg, m.t(), &mut gh, &pr).unwrap();
     assert_eq!(
         gh.asked[0].2,
         Some(json!({"query": CHECKS, "variables": {"owner": "sam", "name": "homelab", "n": 7}}))
@@ -328,7 +328,7 @@ fn red_is_ci_as_the_steward_reads_it_on_its_own_head() {
     let mut gh = Fake::default();
     let more = checked(&pr.head, &[run("COMPLETED", Some("FAILURE"))], true);
     gh.on("POST", "graphql", vec![ok(200, more, &[])]);
-    assert_eq!(red(&m.cfg, m.t(), &mut gh, &pr), Ok(false));
+    assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(None));
 }
 
 #[test]
@@ -342,13 +342,13 @@ fn red_says_nothing_of_a_head_it_didnt_push_and_fails_when_it_cant_tell() {
         head: m.main(),
     };
     let mut gh = github(&theirs.head, &failed);
-    assert_eq!(red(&m.cfg, m.t(), &mut gh, &theirs), Ok(false));
+    assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &theirs), Ok(None));
     assert!(gh.asked.is_empty());
     // GitHub down: a failure, never "not red".
     let mut gh = Fake::default();
     gh.on("POST", "graphql", vec![down()]);
     assert_eq!(
-        red(&m.cfg, m.t(), &mut gh, &pr),
+        stuck(&m.cfg, m.t(), &mut gh, &pr),
         Err("GitHub didn't say how its PR #7's checks stand".into())
     );
     // GitHub's head moved on after the listing: a failure.
@@ -356,16 +356,93 @@ fn red_says_nothing_of_a_head_it_didnt_push_and_fails_when_it_cant_tell() {
     m.propose_was(&pr.head);
     let mut gh = github(&now.head, &failed);
     assert_eq!(
-        red(&m.cfg, m.t(), &mut gh, &pr),
+        stuck(&m.cfg, m.t(), &mut gh, &pr),
         Err(format!("its PR #7's head isn't {} any more", pr.head))
     );
     // Red as GitHub read it, but the branch moved before it could be
     // fetched: a failure, and nothing to tell it apart from.
     let mut gh = github(&pr.head, &failed);
     assert_eq!(
-        red(&m.cfg, m.t(), &mut gh, &pr),
+        stuck(&m.cfg, m.t(), &mut gh, &pr),
         Err(format!("couldn't fetch its PR #7's head ({})", pr.head))
     );
+}
+
+/// A review thread, resolved or not, whose finding was left on `on`.
+fn thread(resolved: bool, on: &str) -> Value {
+    json!({"isResolved": resolved,
+           "comments": {"nodes": [{"originalCommit": {"oid": on}}]}})
+}
+
+/// A GitHub that says `head`'s checks are these and its PR's review threads
+/// are `threads`.
+fn reviewed(head: &str, checks: &[Value], threads: &[Value]) -> Fake {
+    let mut said = checked(head, checks, false);
+    said["data"]["repository"]["pullRequest"]["reviewThreads"] = json!({"nodes": threads});
+    let mut gh = Fake::default();
+    gh.on("POST", "graphql", vec![ok(200, said, &[])]);
+    gh
+}
+
+#[test]
+fn a_finding_left_open_on_its_own_head_holds_it_as_red_does() {
+    let m = Machine::new();
+    let pr = m.pushed_before("v2");
+    let older = m.main();
+    // Resolved, left on an older head (the steward's job settles that one
+    // against this head), or none: it lands as it is, so it's ridden.
+    for threads in [
+        vec![],
+        vec![thread(true, &pr.head)],
+        vec![thread(false, &older)],
+        vec![thread(true, &pr.head), thread(false, &older)],
+    ] {
+        let mut gh = reviewed(&pr.head, &[], &threads);
+        assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(None), "{threads:?}");
+    }
+    assert!(!m.has(&pr.head), "fetched a head that isn't stuck");
+    // Open on this head: held by it, and fetched, for `replaces`.
+    let open = [thread(true, &older), thread(false, &pr.head)];
+    let mut gh = reviewed(&pr.head, &[], &open);
+    assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(Some(Stuck::Finding)));
+    assert!(m.has(&pr.head), "didn't fetch the held head");
+    // Red as well: red is what it says.
+    let failed = [run("COMPLETED", Some("FAILURE"))];
+    let mut gh = reviewed(&pr.head, &failed, &open);
+    assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(Some(Stuck::Red)));
+    // Someone else's head with a finding open: theirs, and GitHub isn't
+    // asked.
+    let theirs = Pr {
+        number: 7,
+        head: older.clone(),
+    };
+    let mut gh = reviewed(&older, &[], &[thread(false, &older)]);
+    assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &theirs), Ok(None));
+    assert!(gh.asked.is_empty());
+    // Replaced, it says why it was.
+    let (m, pr) = red_with_a_fresh_bump();
+    let mut gh = reviewed(&pr.head, &[], &[thread(false, &pr.head)]);
+    let url = "https://github.com/sam/homelab/pull/7";
+    gh.on(
+        "PATCH",
+        "repos/sam/homelab/pulls/7",
+        vec![ok(200, json!({"html_url": url}), &[])],
+    );
+    assert_eq!(
+        replace(&m.cfg, m.t(), &mut gh, &pr),
+        Ok(format!(
+            "{url}, in place of its head {}, which was held by an open finding on it",
+            &pr.head[..7]
+        ))
+    );
+    // Resolved by the time it's up: the steward's to land, so it stays.
+    let (m, pr) = red_with_a_fresh_bump();
+    let mut gh = reviewed(&pr.head, &[], &[thread(true, &pr.head)]);
+    assert_eq!(
+        replace(&m.cfg, m.t(), &mut gh, &pr),
+        Err("its PR #7 isn't stuck any more, so it stays as it is".into())
+    );
+    assert_eq!(m.branch(), pr.head);
 }
 
 #[test]
@@ -381,7 +458,7 @@ fn a_fresh_bump_replaces_a_red_head_only_whole_and_other_than_it() {
         "{e}"
     );
     let mut gh = github(&pr.head, &[run("COMPLETED", Some("FAILURE"))]);
-    assert_eq!(red(&m.cfg, m.t(), &mut gh, &pr), Ok(true));
+    assert_eq!(stuck(&m.cfg, m.t(), &mut gh, &pr), Ok(Some(Stuck::Red)));
     // Not the red head's very tree (nothing moved), nor main itself with
     // nothing new on it (all its inputs failed, or none could be fetched, or
     // none moved), nor one short of an input; once main moved, a whole one
@@ -431,7 +508,10 @@ fn replacing_puts_the_fresh_bump_up_as_the_same_prs_new_head() {
     );
     assert_eq!(
         replace(&m.cfg, m.t(), &mut gh, &pr),
-        Ok(format!("{url}, in place of its red head {}", &pr.head[..7]))
+        Ok(format!(
+            "{url}, in place of its head {}, which was red",
+            &pr.head[..7]
+        ))
     );
     let fresh = m.head();
     assert_eq!(m.branch(), fresh);
@@ -454,7 +534,7 @@ fn replacing_puts_the_fresh_bump_up_as_the_same_prs_new_head() {
     assert_eq!(
         replace(&m.cfg, m.t(), &mut gh, &pr),
         Ok(format!(
-            "https://github.com/sam/homelab/pull/7 (its title still says the red head's: GitHub didn't take the new one), in place of its red head {}",
+            "https://github.com/sam/homelab/pull/7 (its title still says the old head's: GitHub didn't take the new one), in place of its head {}, which was red",
             &pr.head[..7]
         ))
     );
@@ -468,7 +548,7 @@ fn replacing_leaves_a_head_gone_green_or_fixed_or_unread() {
     let mut gh = github(&pr.head, &[run("IN_PROGRESS", None)]);
     assert_eq!(
         replace(&m.cfg, m.t(), &mut gh, &pr),
-        Err("its PR #7 isn't red any more, so it stays as it is".into())
+        Err("its PR #7 isn't stuck any more, so it stays as it is".into())
     );
     assert_eq!(
         (m.branch(), m.proposed()),
