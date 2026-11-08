@@ -595,16 +595,27 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
               machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
       # 8 closed, 9's answer still to post; systemd can't be asked, so 8's
       # job can't be stopped.
+      closed = {**issues[0], "state": "closed"}
+      github("repos/o/r/issues/8", json.dumps(closed))
+      github("repos/o/r/issues/8/comments", json.dumps([
+          {"id": 80, "user": {"login": "sam"}, "body": "one more run", "created_at": "2026-01-01T00:00:00Z"}]))
       github("repos/o/r/issues", json.dumps(issues[1:]))
       before = int(machine.succeed("date +%s"))
       machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox'")
       assert "did This task comes from GitHub issue o/r#9" in machine.succeed("cat /tmp/gh/posted")
-      assert "o/r#8" in machine.succeed("su - dev -c 'proj-inbox status'")
+      assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
+      retired = "/var/lib/burrow/proj-inbox/.retired/o_r/8"
+      machine.succeed(f"test $(find {retired} -name job | wc -l) -eq 1")
+      machine.succeed(f"test $(find {retired} -name reported | wc -l) -eq 1")
+      link = "https://github.com/o/r/issues/8#issuecomment-80"
+      assert machine.succeed("cat /tmp/gh/posted").count(link) == 1
       # Nothing else may come for o/r, so the stop is tried again in five minutes.
       wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
       assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
       machine.succeed("su - dev -c proj-inbox")
       assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
+      machine.fail(f"find {retired} -name job | grep .")
+      assert machine.succeed("cat /tmp/gh/posted").count(link) == 1
 
   with subtest("an issue whose job dir was removed is taken up afresh"):
       listed = machine.succeed("su - dev -c 'proj-inbox status'")

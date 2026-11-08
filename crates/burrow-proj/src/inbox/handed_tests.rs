@@ -388,7 +388,6 @@ fn retirement_does_not_repeat_a_delivered_notice_when_stopping_failed() {
 
 #[test]
 fn retirement_notices_resume_after_a_partial_delivery_with_bounded_bodies() {
-    use std::os::unix::fs::PermissionsExt;
     let now = issue(7, "sam", &["claude"]);
     let mut b = Box::new();
     let comments: Vec<Value> = (1..=1400).map(|id| said(id, "one more")).collect();
@@ -396,7 +395,7 @@ fn retirement_notices_resume_after_a_partial_delivery_with_bounded_bodies() {
     b.cfg.tools.systemctl = b.path("systemctl");
     // Reject the second batch; the first must never be sent again.
     let hook = b.path("hook");
-    fs::write(
+    burrow_test::executable(
         &hook,
         format!(
             r#"#!/bin/sh
@@ -407,9 +406,7 @@ esac
             first = b.path("first").display(),
             fail = b.path("fail").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     b.pass().jobs("sam/box", "box", &[]).unwrap();
     let first = b.posted();
     assert!(first.contains("#issuecomment-1\n"));
