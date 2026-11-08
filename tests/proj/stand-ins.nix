@@ -172,39 +172,39 @@
   # as gh does. What's posted (-F body=@-) is added to /tmp/gh/posted, or with
   # /tmp/gh/nopost fails.
   gh = pkgs.writeShellScriptBin "gh" ''
-    [ "$1" = api ] || exit 2
-    shift
-    # Every call's arguments, once a test makes the log for it.
-    [ -w /tmp/gh/calls ] && echo "$*" >>/tmp/gh/calls
-    if [ "$1" = graphql ]; then
-      for arg in "$@"; do
-        case "$arg" in
-          owner=*) owner=''${arg#owner=} ;;
-          name=*) name=''${arg#name=} ;;
-          n=*) n=''${arg#n=} ;;
-        esac
-      done
+    [ "$1 $2 $3" = 'api -i -X' ] || exit 2
+    method=$4 ep=$5
+    body='{}'
+    [ "''${6-}" != --input ] || body=$(cat)
+    [ ! -w /tmp/gh/calls ] || echo "$method $ep $body" >>/tmp/gh/calls
+    if [ "$ep" = graphql ]; then
+      owner=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r .variables.owner)
+      name=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r .variables.name)
+      n=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r .variables.n)
       issue="/tmp/gh/repos_''${owner}_''${name}_issues_''${n}"
       comments="''${issue}_comments"
       [ -e "$issue" ] || issue="/tmp/gh/repos_''${owner}_''${name}_issues"
       [ -e "$comments" ] || comments=${pkgs.writeText "no-comments.json" "[]"}
-      exec ${pkgs.jq}/bin/jq -n --argjson n "$n" --slurpfile i "$issue" --slurpfile c "$comments" -f ${../../crates/burrow-proj/src/inbox/written.jq}
+      answer=$(${pkgs.jq}/bin/jq -n --argjson n "$n" --slurpfile i "$issue" --slurpfile c "$comments" -f ${../../crates/burrow-proj/src/inbox/written.jq}) || exit 1
+      printf 'HTTP/2.0 200 OK\n\n%s' "$answer"; exit 0
     fi
-    slurp="" post=""
-    while [ $# -gt 0 ]; do
-      case $1 in
-        --slurp) slurp=1 ;;
-        -F | -f) post=1; shift ;;
-        -*) ;;
-        *) ep=''${1%%\?*} ;;
-      esac
-      shift
-    done
-    if [ -n "$post" ]; then [ ! -e /tmp/gh/nopost ] || exit 1; cat >>/tmp/gh/posted; echo '{}'; exit 0; fi
-    # /tmp/gh/slow: GitHub takes its time, as it does.
-    [ -e /tmp/gh/slow ] && sleep 2
+    if [ "$method" != GET ]; then
+      [ ! -e /tmp/gh/nopost ] || exit 1
+      printf '%s' "$body" | ${pkgs.jq}/bin/jq -r '.body // empty' >>/tmp/gh/posted
+      printf 'HTTP/2.0 200 OK\n\n{}'; exit 0
+    fi
+    [ ! -e /tmp/gh/slow ] || sleep 2
+    page=1; case "$ep" in *\?page=*|*\&page=*) page=''${ep##*page=} ;; esac
+    ep=''${ep%%\?*}
     f="/tmp/gh/''${ep//\//_}"
     [ -e "$f" ] || exit 1
-    if [ -n "$slurp" ]; then ${pkgs.jq}/bin/jq -cs . "$f"; else cat "$f"; fi
+    count=$(${pkgs.jq}/bin/jq -s length "$f") || exit 1
+    printf 'HTTP/2.0 200 OK\n'
+    if [ "$page" -lt "$count" ]; then
+      # Preserve per_page, selecting the next page explicitly.
+      printf 'Link: <https://api.github.com/%s?per_page=100&page=%s>; rel="next"\n' "$ep" "$((page+1))"
+    fi
+    printf '\n'
+    ${pkgs.jq}/bin/jq -s ".[$((page-1))]" "$f"
   '';
 }

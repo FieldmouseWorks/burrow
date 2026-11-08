@@ -183,6 +183,7 @@ version = "0.0.0"
 name = "burrow-github"
 version = "0.0.0"
 dependencies = [
+ "burrow-process",
  "serde_json",
  "tempfile",
 ]
@@ -294,12 +295,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-process"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+]
+
+[[package]]
 name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
  "burrow-codex",
  "burrow-events",
  "burrow-github",
+ "burrow-process",
  "burrow-test",
  "burrow-usage-reset",
  "burrow-watchdog",
@@ -327,6 +336,7 @@ dependencies = [
 name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
+ "burrow-github",
  "burrow-test",
  "jiff",
  "md-5",

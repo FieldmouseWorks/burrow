@@ -348,10 +348,10 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {dj}' | grep -x done", timeout=120)
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       calls = machine.succeed("cat /tmp/gh/calls")
-      assert "-X PATCH repos/o/d/issues/1 -f state=closed -f state_reason=completed" in calls, calls
+      assert 'PATCH repos/o/d/issues/1 {"state":"closed","state_reason":"completed"}' in calls, calls
       assert "did This task comes from GitHub issue o/d#1" in machine.succeed("cat /tmp/gh/posted")
       # Only it: every other issue's job here asked, and is waiting on a reply.
-      assert [c for c in calls.splitlines() if "state=closed" in c and "repos/o/d/" not in c] == [], calls
+      assert [c for c in calls.splitlines() if '"state":"closed"' in c and "repos/o/d/" not in c] == [], calls
       github("repos/o/d/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       machine.succeed("rm /tmp/gh/calls")
@@ -375,7 +375,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {ej}' | grep -x done", timeout=120)
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       calls = machine.succeed("cat /tmp/gh/calls")
-      assert "repos/o/d/issues/2 -f state=closed" not in calls, calls
+      assert 'PATCH repos/o/d/issues/2 {"state":"closed"' not in calls, calls
       machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{ej}/turns", timeout=30)
       prompt = machine.succeed(f"cat /data/dev/jobs/{ej}/prompt.2")
       assert "has changed since you were handed it" in prompt and "and also the edit" in prompt, prompt
@@ -383,7 +383,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.wait_until_succeeds(f"su - dev -c 'proj state {ej}' | grep -x done", timeout=120)
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       calls = machine.succeed("cat /tmp/gh/calls")
-      assert "-X PATCH repos/o/d/issues/2 -f state=closed -f state_reason=completed" in calls, calls
+      assert 'PATCH repos/o/d/issues/2 {"state":"closed","state_reason":"completed"}' in calls, calls
       github("repos/o/d/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       machine.succeed("rm /tmp/gh/calls")

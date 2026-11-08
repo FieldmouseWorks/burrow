@@ -107,12 +107,13 @@ impl Config {
     /// a /regex/ filter can mind case). Then its own autodiscovery, narrowed
     /// to this repo, applies the rest (topics, forks, archived, mirrors).
     fn one(&self, repo: &str) -> u8 {
-        let Some(repo) = self.said(self.command(&self.tools.gh).args([
-            "api",
-            &format!("repos/{repo}"),
-            "--jq",
-            ".full_name",
-        ])) else {
+        let mut gh = self.github();
+        let Some(repo) = burrow_github::call(&mut gh, "GET", &format!("repos/{repo}"), None, None)
+            .map_err(|e| complain(&e.to_string()))
+            .ok()
+            .and_then(|r| r.json().ok())
+            .and_then(|v| v["full_name"].as_str().map(str::to_owned))
+        else {
             return 1;
         };
         match self.command(&self.tools.covers).arg(&repo).status() {
@@ -134,17 +135,20 @@ impl Config {
 
     /// The repos `owner`'s installation reaches, archived ones aside.
     fn reached(&self, owner: &str) -> Option<String> {
-        self.said(
-            self.command(&self.tools.gh)
-                .env("GH_TOKEN_OWNER", owner)
-                .args([
-                    "api",
-                    "installation/repositories",
-                    "--paginate",
-                    "--jq",
-                    ".repositories[] | select(.archived | not) | .full_name",
-                ]),
-        )
+        let mut gh = self.github();
+        gh.env.push(("GH_TOKEN_OWNER".into(), owner.into()));
+        let pages = burrow_github::pages(&mut gh, "installation/repositories")
+            .map_err(|e| complain(&e.to_string()))
+            .ok()?;
+        let mut repos = Vec::new();
+        for page in pages {
+            for repo in page["repositories"].as_array()? {
+                if repo["archived"] != true {
+                    repos.push(repo["full_name"].as_str()?.to_owned());
+                }
+            }
+        }
+        Some(repos.join("\n"))
     }
 
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
@@ -243,6 +247,18 @@ impl Config {
         fs::rename(&tmp, &file).map_err(|e| (file, e))
     }
 
+    fn github(&self) -> burrow_github::Gh {
+        burrow_github::Gh {
+            program: Some(self.tools.gh.clone().into_os_string()),
+            env: self
+                .app
+                .as_ref()
+                .map(|a| a.env.iter().map(|(k, v)| (k.into(), v.into())).collect())
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
     /// `program`, as the App when there's one.
     fn command(&self, program: &Path) -> Command {
         let mut c = Command::new(program);
@@ -251,23 +267,6 @@ impl Config {
             c.envs(&app.env);
         }
         c
-    }
-
-    /// What `c` printed, its trailing newlines gone, if it worked. What it
-    /// says on stderr goes to ours.
-    fn said(&self, c: &mut Command) -> Option<String> {
-        match c.stderr(Stdio::inherit()).output() {
-            Ok(out) if out.status.success() => Some(trimmed(out.stdout)),
-            Ok(_) => None,
-            Err(e) => {
-                complain(&format!(
-                    "{}: {}: {e}",
-                    self.name,
-                    c.get_program().display()
-                ));
-                None
-            }
-        }
     }
 
     fn broke(&self, path: &Path, e: io::Error) -> u8 {

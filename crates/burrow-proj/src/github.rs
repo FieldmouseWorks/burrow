@@ -1,8 +1,8 @@
 //! What a job awaits on GitHub: a PR or issue ([`target`]), and what about
 //! it is news ([`fingerprint`]).
 
+use burrow_github::{Gh, call};
 use std::collections::BTreeMap;
-use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use serde_json::{Map, Value, json};
@@ -45,10 +45,10 @@ pub(crate) fn fingerprint_until(
     n: &str,
     until: Option<Instant>,
 ) -> Option<Value> {
-    let gh = |args: &[&str]| api_until(cfg, args, until);
+    let gh = |path: &str| api_until(cfg, path, until);
     // A comment, review or check past the first hundred is news too.
     let pages = |path: String| every_until(cfg, &path, until);
-    let issue = gh(&[&format!("repos/{repo}/issues/{n}")])?;
+    let issue = gh(&format!("repos/{repo}/issues/{n}"))?;
     // Comments on the issue or PR, but not proj-inbox's own: a job awaiting
     // its own issue would wake on every answer the inbox posts there.
     let comments = pages(format!("repos/{repo}/issues/{n}/comments?per_page=100"))?
@@ -63,7 +63,7 @@ pub(crate) fn fingerprint_until(
     if issue.get("pull_request").is_none() {
         return Some(json!({"state": issue["state"], "comments": comments}));
     }
-    let pr = gh(&[&format!("repos/{repo}/pulls/{n}")])?;
+    let pr = gh(&format!("repos/{repo}/pulls/{n}"))?;
     let sha = pr["head"]["sha"].as_str().unwrap_or_default().to_owned();
     // Reviews are counted by state, so a dismissed one is news as well as a
     // new one.
@@ -71,14 +71,13 @@ pub(crate) fn fingerprint_until(
     for r in pages(format!("repos/{repo}/pulls/{n}/reviews?per_page=100"))? {
         *reviews.entry(text(&r["state"])).or_default() += 1;
     }
-    let status = gh(&[&format!("repos/{repo}/commits/{sha}/status")])?;
+    let status = gh(&format!("repos/{repo}/commits/{sha}/status"))?;
     let statuses = status["total_count"].as_u64().unwrap_or(0) > 0;
-    let runs: Vec<Value> = gh(&[
-        "--paginate",
-        "--slurp",
+    let runs: Vec<Value> = pages_until(
+        cfg,
         &format!("repos/{repo}/commits/{sha}/check-runs?per_page=100"),
-    ])?
-    .as_array()?
+        until,
+    )?
     .iter()
     .flat_map(|page| page["check_runs"].as_array().cloned().unwrap_or_default())
     .collect();
@@ -122,52 +121,67 @@ pub fn over(fp: &Value) -> Option<&'static str> {
     }
 }
 
-/// What GitHub's REST API answers (`gh api ARGS`), or None when it can't be
-/// asked or doesn't answer with JSON.
-pub fn api(cfg: &Config, args: &[&str]) -> Option<Value> {
-    api_until(cfg, args, None)
-}
-
-fn api_until(cfg: &Config, args: &[&str], until: Option<Instant>) -> Option<Value> {
-    api_command(cfg, args, None, until)
-}
-
-/// GraphQL fields are data, not authentication routing. Select the target
-/// repository explicitly, overriding the caller's checkout and GH_REPO.
-pub fn api_for(cfg: &Config, repo: &str, args: &[&str]) -> Option<Value> {
-    api_command(cfg, args, Some(repo), None)
-}
-
-fn api_command(
-    cfg: &Config,
-    args: &[&str],
-    repo: Option<&str>,
-    until: Option<Instant>,
-) -> Option<Value> {
-    let mut command = Command::new(&cfg.tools.gh);
-    if let Some(repo) = repo {
-        command.env("GH_REPO", repo);
+/// The configured GitHub client, with the caller's authentication routing.
+pub(crate) fn client(cfg: &Config) -> Gh {
+    Gh {
+        program: Some(cfg.tools.gh.clone().into_os_string()),
+        ..Default::default()
     }
-    command
-        .arg("api")
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::inherit());
-    let bytes = if let Some(until) = until {
-        // Paginated responses can exceed a declaration's size, but must
-        // still fit a bounded host allocation. The same deadline is passed
-        // unchanged across every request and target.
-        crate::subprocess::output(&mut command, until, 16 * 1024 * 1024)
-            .map_err(|e| eprintln!("proj: GitHub request failed: {e}"))
-            .ok()?
+}
+
+/// Keep the final diagnostic when a caller represents failure as None.
+/// Retries remain quiet until the shared client has given up.
+pub(crate) fn reported<T>(result: Result<T, burrow_github::Error>) -> Option<T> {
+    result
+        .map_err(|e| eprintln!("proj: GitHub request failed: {e}"))
+        .ok()
+}
+
+/// One REST answer, or None when GitHub cannot be read.
+pub fn api(cfg: &Config, path: &str) -> Option<Value> {
+    api_until(cfg, path, None)
+}
+
+fn api_until(cfg: &Config, path: &str, until: Option<Instant>) -> Option<Value> {
+    let mut gh = client(cfg);
+    gh.until = until;
+    reported(reported(call(&mut gh, "GET", path, None, None))?.json())
+}
+
+/// GraphQL fields are data, not authentication routing. Pin the repository.
+pub fn query_for(cfg: &Config, repo: &str, query: &str, variables: Value) -> Option<Value> {
+    let mut gh = client(cfg);
+    gh.env.push(("GH_REPO".into(), repo.into()));
+    // REST's repository routing takes precedence over the account default.
+    // Use call_repeating for this read-only POST, preserving that routing.
+    let body = json!({"query": query, "variables": variables});
+    let got = reported(
+        reported(burrow_github::call_repeating(
+            &mut gh,
+            "POST",
+            "graphql",
+            Some(&body),
+        ))?
+        .json(),
+    )?;
+    if got.get("errors").is_some() {
+        return reported(Err(burrow_github::Error::said(format!(
+            "GraphQL: {}",
+            got["errors"]
+        ))));
+    }
+    Some(got["data"].clone())
+}
+
+fn pages_until(cfg: &Config, path: &str, until: Option<Instant>) -> Option<Vec<Value>> {
+    let mut gh = client(cfg);
+    gh.until = until;
+    let max_bytes = if until.is_some() {
+        burrow_github::MAX_RESPONSE_BYTES
     } else {
-        let out = command.output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        out.stdout
+        usize::MAX
     };
-    serde_json::from_slice(&bytes).ok()
+    reported(burrow_github::pages_with_limit(&mut gh, path, max_bytes))
 }
 
 /// Every page of a list, as one list.
@@ -176,13 +190,11 @@ pub fn every(cfg: &Config, path: &str) -> Option<Vec<Value>> {
 }
 
 fn every_until(cfg: &Config, path: &str, until: Option<Instant>) -> Option<Vec<Value>> {
-    let got = api_until(cfg, &["--paginate", "--slurp", path], until)?;
-    Some(
-        got.as_array()?
-            .iter()
-            .flat_map(|page| page.as_array().cloned().unwrap_or_default())
-            .collect(),
-    )
+    let mut all = Vec::new();
+    for page in pages_until(cfg, path, until)? {
+        all.extend(page.as_array()?.iter().cloned());
+    }
+    Some(all)
 }
 
 /// A value as a string sits in text: null as "null".
@@ -210,8 +222,92 @@ pub fn changes(was: &Map<String, Value>, now: &Map<String, Value>) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::fs;
 
     use super::{changes, over, target};
+
+    #[test]
+    fn review_final_diagnostics_are_visible() {
+        if std::env::var_os("PROJ_TEST_DIAGNOSTICS").is_some() {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = dir.path().join("gh");
+            burrow_test::executable(
+                &gh,
+                "#!/bin/sh\ncat >/dev/null\nprintf 'HTTP/2.0 403 Forbidden\\n\\n{\"message\":\"installation access denied\"}'\nexit 1\n",
+            );
+            let mut config = crate::config::tests::example();
+            config["tools"]["gh"] = json!(gh);
+            let cfg = serde_json::from_value(config).unwrap();
+            assert!(super::api(&cfg, "repos/sam/r").is_none());
+            assert!(super::query_for(&cfg, "sam/r", "query {viewer{login}}", json!({})).is_none());
+            assert!(super::pages_until(&cfg, "repos/sam/r/issues", None).is_none());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "github::tests::review_final_diagnostics_are_visible",
+                "--nocapture",
+            ])
+            .env("PROJ_TEST_DIAGNOSTICS", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for path in [
+            "GET repos/sam/r:",
+            "POST graphql:",
+            "GET repos/sam/r/issues:",
+        ] {
+            assert!(stderr.contains(path), "{stderr}");
+        }
+        assert_eq!(
+            stderr.matches("installation access denied").count(),
+            3,
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn github_recovers_after_502() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        burrow_test::executable(
+            &gh,
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+# Both CLI shapes let this test run against the unported client too.
+headers=0; [ "$2" != -i ] || headers=1
+case "$*" in
+  */comments*)
+    echo asked >> attempts
+    if [ ! -e failed ]; then
+      touch failed
+      printf 'HTTP/2.0 502 Bad Gateway\n\n{}'; exit 1
+    fi
+    [ "$headers" = 0 ] || printf 'HTTP/2.0 200 OK\n\n'
+    if [ "$headers" = 1 ]; then echo '[{"body":"reply"}]'; else echo '[[{"body":"reply"}]]'; fi ;;
+  *)
+    [ "$headers" = 0 ] || printf 'HTTP/2.0 200 OK\n\n'
+    echo '{"state":"open"}' ;;
+esac
+"#,
+        );
+        let mut config = crate::config::tests::example();
+        config["tools"]["gh"] = json!(gh);
+        let cfg = serde_json::from_value(config).unwrap();
+        assert_eq!(
+            super::fingerprint(&cfg, "sam/r", "1"),
+            Some(json!({"state":"open","comments":1}))
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("attempts"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+    }
 
     #[test]
     fn targets() {

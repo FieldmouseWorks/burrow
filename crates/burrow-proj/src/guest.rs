@@ -160,6 +160,55 @@ mod tests {
         (d, serde_json::from_value(value).unwrap())
     }
 
+    #[test]
+    fn review_pagination_keeps_one_aggregate_limit_without_publishing() {
+        for kind in ["comments", "reviews", "check-runs"] {
+            let script = format!(
+                r#"cd "$(dirname "$0")"
+path=$5
+printf 'HTTP/2.0 200 OK\n'
+case "$path" in
+  */{kind}*)
+    case "$path" in *page=2*) ;; *) printf 'Link: <https://api.github.com/%s&page=2>; rel="next"\n' "$path" ;; esac
+    printf '\n'; cat page.json ;;
+  */comments*|*/reviews*) printf '\n[]' ;;
+  */check-runs*) printf '\n{{"check_runs":[]}}' ;;
+  */status) printf '\n{{"total_count":0}}' ;;
+  */pulls/*) printf '\n{{"head":{{"sha":"abc"}},"state":"open"}}' ;;
+  *) printf '\n{{"pull_request":{{}},"state":"open"}}' ;;
+esac
+"#
+            );
+            let (dir, cfg) = registration_fixture(&script);
+            let large = "x".repeat(9 * 1024 * 1024);
+            let page = if kind == "check-runs" {
+                serde_json::json!({"check_runs":[{"name":large,"status":"completed","conclusion":"success"}]})
+            } else {
+                serde_json::json!([{"body":large}])
+            };
+            fs::write(dir.path().join("page.json"), page.to_string()).unwrap();
+            let job = Job::new(&cfg, "vm");
+            fs::create_dir_all(&job.dir).unwrap();
+            fs::write(job.path("await.next"), "previous wait\n").unwrap();
+            fs::write(job.path("end.next"), "ask\n").unwrap();
+            assert!(
+                register(
+                    &cfg,
+                    &job,
+                    br#"{"end":"await","targets":["o/r#1"]}"#,
+                    Instant::now() + Duration::from_secs(45)
+                )
+                .is_err(),
+                "{kind}"
+            );
+            assert_eq!(
+                fs::read_to_string(job.path("await.next")).unwrap(),
+                "previous wait\n"
+            );
+            assert_eq!(fs::read_to_string(job.path("end.next")).unwrap(), "ask\n");
+        }
+    }
+
     fn registration_failure(cfg: &Config, declaration: &[u8], budget: Duration) {
         let job = Job::new(cfg, "vm");
         fs::create_dir_all(&job.dir).unwrap();
@@ -190,7 +239,7 @@ mod tests {
     fn registration_bounds_stalled_github_and_pagination_without_publishing() {
         for script in [
             "exec sleep 60",
-            "case \"$*\" in *--paginate*) printf '['; sleep 60 ;; *) echo '{\"state\":\"open\"}' ;; esac",
+            "printf 'HTTP/2.0 200 OK\\n\\n'\ncase \"$*\" in */comments*) printf '['; sleep 60 ;; *) echo '{\"state\":\"open\"}' ;; esac",
         ] {
             let (_dir, cfg) = registration_fixture(script);
             registration_failure(
@@ -204,7 +253,7 @@ mod tests {
     #[test]
     fn registration_uses_one_deadline_across_slow_requests_and_targets() {
         let (dir, cfg) = registration_fixture(
-            "sleep 0.15\ncase \"$*\" in *--paginate*) echo '[[]]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
+            "sleep 0.15\nprintf 'HTTP/2.0 200 OK\\n\\n'\ncase \"$*\" in */comments*) echo '[]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
         );
         registration_failure(
             &cfg,
@@ -219,7 +268,7 @@ mod tests {
     #[test]
     fn registration_commits_complete_baselines_before_the_deadline() {
         let (_dir, cfg) = registration_fixture(
-            "case \"$*\" in *--paginate*) echo '[[]]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
+            "printf 'HTTP/2.0 200 OK\\n\\n'\ncase \"$*\" in */comments*) echo '[]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
         );
         let job = Job::new(&cfg, "vm");
         fs::create_dir_all(&job.dir).unwrap();

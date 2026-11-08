@@ -663,10 +663,11 @@ mod tests {
             &gh,
             r#"#!/bin/sh
 for a; do ep=${a%%\?*}; done
+printf 'HTTP/2.0 200 OK\n\n'
 case $ep in
-  */comments | */reviews) echo '[[]]' ;;
+  */comments | */reviews) echo '[]' ;;
   */status) echo '{"total_count": 0, "state": "pending"}' ;;
-  */check-runs) echo '[{"check_runs": []}]' ;;
+  */check-runs) echo '{"check_runs": []}' ;;
   repos/o/r/issues/7) echo '{"state": "closed"}' ;;
   repos/o/r/issues/8) echo '{"pull_request": {}, "state": "open"}' ;;
   repos/o/r/issues/*) echo '{"pull_request": {}, "state": "closed"}' ;;

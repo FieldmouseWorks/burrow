@@ -3,12 +3,12 @@
 //! programs that talk to GitHub share it; with the `fake` feature, their
 //! tests get a GitHub that answers from a script.
 
-use std::ffi::OsString;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::{fmt, thread, time::Duration};
 
 use serde_json::Value;
+
+/// Allocation bound for deadline-bound GitHub reads, including pagination.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Response {
@@ -132,6 +132,41 @@ pub fn call(
     etag: Option<&str>,
 ) -> Result<Response, Error> {
     call_allowing(api, method, path, body, etag, &[])
+}
+
+/// Every JSON page of a REST read, following GitHub's Link header. Each
+/// page goes through the same retries; a failed page fails the whole read.
+pub fn pages(api: &mut dyn Api, path: &str) -> Result<Vec<Value>, Error> {
+    pages_with_limit(api, path, usize::MAX)
+}
+
+/// As `pages`, with a cumulative byte limit on the JSON pages and their
+/// enclosing array. Reject the whole read before retaining an excess page.
+pub fn pages_with_limit(
+    api: &mut dyn Api,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Vec<Value>, Error> {
+    let mut path = path.to_owned();
+    let mut pages = Vec::new();
+    let mut bytes = 2usize;
+    loop {
+        let response = call(api, "GET", &path, None, None)?;
+        bytes = bytes
+            .checked_add(response.body.len())
+            .and_then(|n| n.checked_add(usize::from(!pages.is_empty())))
+            .filter(|n| *n <= max_bytes)
+            .ok_or_else(|| {
+                Error::said(format!(
+                    "GET {path}: paginated response exceeded {max_bytes} bytes"
+                ))
+            })?;
+        pages.push(response.json()?);
+        match response.next() {
+            Some(next) => path = next,
+            None => return Ok(pages),
+        }
+    }
 }
 
 /// call, where the statuses in `allowed` are answers too, for the caller to
@@ -319,170 +354,8 @@ pub fn encode(value: &str) -> String {
         .collect()
 }
 
-/// gh api, with -i so the status and headers come back too: as the login
-/// it's run with, or with `token` when it's given one.
-#[derive(Default)]
-pub struct Gh {
-    /// An explicit CLI transport, independent of login wrappers on PATH.
-    pub program: Option<OsString>,
-    /// What every call goes with (GH_TOKEN) in place of that login: an
-    /// App's installation token a program minted itself.
-    pub token: Option<String>,
-    /// The command gh is run under, when it's to run as another user than
-    /// this program (`runuser -u USER --`, for one root runs that acts as
-    /// the machine's user): it runs `gh ...` itself, in this program's
-    /// environment. Empty, gh is run as this program runs.
-    pub via: Vec<OsString>,
-}
-
-impl Api for Gh {
-    fn request(
-        &mut self,
-        method: &str,
-        path: &str,
-        body: Option<&Value>,
-        etag: Option<&str>,
-    ) -> Result<Response, Failed> {
-        gh_api(self, method, path, body, etag, None)
-    }
-
-    fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
-        gh_api(self, "POST", "graphql", Some(body), None, Some(owner))
-    }
-}
-
-/// `gh api -i` under gh's `via`, with its `token` when there is one, else
-/// as `owner`'s account when the call names none.
-fn gh_api(
-    gh: &Gh,
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-    etag: Option<&str>,
-    owner: Option<&str>,
-) -> Result<Response, Failed> {
-    let program = gh
-        .program
-        .as_deref()
-        .unwrap_or_else(|| std::ffi::OsStr::new("gh"));
-    let mut cmd = match gh.via.split_first() {
-        Some((under, args)) => {
-            let mut c = Command::new(under);
-            c.args(args).arg(program);
-            c
-        }
-        None => Command::new(program),
-    };
-    cmd.args(["api", "-i", "-X", method, path]);
-    if let Some(t) = &gh.token {
-        cmd.env("GH_TOKEN", t);
-    } else if let Some(owner) = owner {
-        // gh-token goes by GH_REPO and the checkout's remotes before this
-        // (account.rs), and they're not what the call is about.
-        cmd.env("GH_TOKEN_OWNER", owner)
-            .env_remove("GH_REPO")
-            .env_remove("GIT_DIR")
-            .current_dir("/");
-    }
-    if let Some(tag) = etag {
-        cmd.args(["-H", &format!("If-None-Match: {tag}")]);
-    }
-    if body.is_some() {
-        cmd.args(["--input", "-"]);
-    }
-    cmd.stdin(if body.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    })
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| Failed {
-        why: format!("gh: {e}"),
-        transient: false,
-    })?;
-    if let Some(b) = body {
-        let mut stdin = child.stdin.take().expect("piped");
-        stdin
-            .write_all(b.to_string().as_bytes())
-            .map_err(|e| Failed {
-                why: format!("gh: {e}"),
-                transient: true,
-            })?;
-    }
-    let out = child.wait_with_output().map_err(|e| Failed {
-        why: format!("gh: {e}"),
-        transient: true,
-    })?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    match parse(&stdout) {
-        Some(r) => Ok(r),
-        None => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Failed::from_gh(err)
-        }
-    }
-}
-
-impl Failed {
-    fn from_gh(err: String) -> Result<Response, Failed> {
-        // Less the URL gh quotes (`Get "https://...": dial tcp ...`), whose
-        // path names whatever the call was about.
-        let lower = unquoted(&err).to_lowercase();
-        let transient = [
-            "connect",
-            "timeout",
-            "timed out",
-            "eof",
-            "reset",
-            "tls",
-            "no such host",
-            "unreachable",
-            "temporary",
-        ]
-        .iter()
-        .any(|w| lower.contains(w));
-        Err(Failed {
-            why: format!("gh: {err}"),
-            transient,
-        })
-    }
-}
-
-/// `said`, less what's between double quotes.
-fn unquoted(said: &str) -> String {
-    said.split('"').step_by(2).collect::<Vec<_>>().join(" ")
-}
-
-/// gh api -i's output: the status line, headers, a blank line, the body.
-/// None when it printed no response (it never got one).
-pub fn parse(out: &str) -> Option<Response> {
-    // gh ends the status line with \n and GitHub's headers with \r\n, so the
-    // head ends at whichever blank line comes first.
-    let end = [
-        out.find("\r\n\r\n").map(|i| (i, 4)),
-        out.find("\n\n").map(|i| (i, 2)),
-    ]
-    .into_iter()
-    .flatten()
-    .min();
-    let (head, body) = end.map_or((out, ""), |(i, n)| (&out[..i], &out[i + n..]));
-    let mut lines = head.lines().map(|l| l.trim_end_matches('\r'));
-    let status_line = lines.next()?;
-    if !status_line.starts_with("HTTP/") {
-        return None;
-    }
-    let status = status_line.split_whitespace().nth(1)?.parse().ok()?;
-    let headers = lines
-        .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect();
-    Some(Response {
-        status,
-        headers,
-        body: body.to_string(),
-    })
-}
+mod transport;
+pub use transport::{Gh, parse};
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;

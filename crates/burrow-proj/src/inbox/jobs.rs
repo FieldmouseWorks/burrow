@@ -263,7 +263,7 @@ impl Pass<'_> {
             if closable || !msg.is_empty() || listed_changed {
                 // Decided on the issue as GitHub has it now, not as the list
                 // read before this pass started jobs had it.
-                let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+                let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
                     self.miss(repo);
                     continue;
                 };

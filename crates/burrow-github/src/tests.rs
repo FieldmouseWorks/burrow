@@ -1,6 +1,7 @@
 use super::fake::{Fake, ok};
 use super::*;
 use serde_json::json;
+use std::ffi::OsString;
 
 #[test]
 fn encodes_a_query_value() {
@@ -64,6 +65,30 @@ fn tries_again_on_what_passes() {
         "GET a: HTTP 503, 3 times"
     );
     assert_eq!(gh.asked.len(), 3);
+}
+
+#[test]
+fn a_later_page_is_retried_without_losing_the_earlier_one() {
+    let mut gh = Fake::default();
+    gh.on(
+        "GET",
+        "list?page=2",
+        vec![ok(502, Value::Null, &[]), ok(200, json!([2]), &[])],
+    );
+    gh.on(
+        "GET",
+        "list",
+        vec![ok(
+            200,
+            json!([1]),
+            &[("Link", "<https://api.github.com/list?page=2>; rel=\"next\"")],
+        )],
+    );
+    assert_eq!(
+        pages(&mut gh, "list").unwrap(),
+        vec![json!([1]), json!([2])]
+    );
+    assert_eq!(gh.paused, vec![2]);
 }
 
 #[test]
@@ -479,11 +504,11 @@ fn under(shows: &str) -> Gh {
     let answer =
         format!(r#"cat >/dev/null; printf 'HTTP/1.1 200 OK\n\n%s|%s' "$*" "${{{shows}-}}""#);
     Gh {
-        program: None,
         token: None,
         via: ["/bin/sh", "-c", &answer, "runuser"]
             .map(OsString::from)
             .to_vec(),
+        ..Default::default()
     }
 }
 
@@ -501,4 +526,11 @@ fn runs_gh_under_its_via() {
     };
     let r = gh.request("GET", "a", None, Some("e")).unwrap();
     assert_eq!(r.body, "gh api -i -X GET a -H If-None-Match: e|ghs_x");
+    let mut gh = Gh {
+        program: Some("/configured/gh".into()),
+        env: vec![("GH_TOKEN_SOCKET".into(), "/configured/socket".into())],
+        ..under("GH_TOKEN_SOCKET")
+    };
+    let r = gh.request("GET", "a", None, None).unwrap();
+    assert_eq!(r.body, "/configured/gh api -i -X GET a|/configured/socket");
 }

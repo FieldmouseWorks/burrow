@@ -49,7 +49,7 @@ impl Pass<'_> {
             self.retry(repo);
         }
         if !d.join("reported").exists() {
-            let Some(issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+            let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
                 self.miss(repo);
                 return Ok(());
             };

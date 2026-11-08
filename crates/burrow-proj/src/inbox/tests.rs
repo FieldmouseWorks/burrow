@@ -238,7 +238,7 @@ fn refuses_once() {
     burrow_test::executable(
         &gh,
         format!(
-            "#!/bin/sh\n[ ! -e '{}' ] || exit 1\ncat >>'{}'\n",
+            "#!/bin/sh\n[ ! -e '{}' ] || exit 1\njq -r .body >>'{}'\nprintf 'HTTP/2.0 201 Created\\n\\n{{}}'\n",
             closed.display(),
             posted.display()
         ),

@@ -45,25 +45,22 @@ fn main() {
             std::process::exit(status.code().unwrap_or(1));
         }
         Some("api") => {
-            println!("{}", json!({"token":std::env::var("GH_TOKEN").unwrap()}));
+            println!(
+                "HTTP/2.0 200 OK\n\n{}",
+                json!({"data":{"token":std::env::var("GH_TOKEN").unwrap()}})
+            );
             return;
         }
         Some("case") => {
             let cfg = config(Path::new(&args[2]));
             for cursor in [None, Some("next-page")] {
-                let mut query = vec![
-                    "graphql",
-                    "-f",
-                    "query=query($owner:String!){viewer{login}}",
-                    "-f",
-                    "owner=unrelated",
-                ];
-                let field;
-                if let Some(cursor) = cursor {
-                    field = format!("cursor={cursor}");
-                    query.extend(["-f", &field]);
-                }
-                let got = github::api_for(&cfg, &args[1], &query).expect("authenticated GraphQL");
+                let got = github::query_for(
+                    &cfg,
+                    &args[1],
+                    "query($owner:String!){viewer{login}}",
+                    json!({"owner":"unrelated","cursor":cursor}),
+                )
+                .expect("authenticated GraphQL");
                 assert_eq!(got["token"], "test-installation-token");
             }
             return;

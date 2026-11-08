@@ -26,6 +26,41 @@ pub(super) struct Box {
     pub(super) cfg: Config,
 }
 
+#[test]
+fn review_closing_never_replays_a_stale_decision() {
+    for reason in ["completed", "not_planned"] {
+        for response in [
+            "HTTP/2.0 502 Bad Gateway",
+            "HTTP/2.0 429 Too Many Requests",
+            "reset",
+        ] {
+            let b = Box::new();
+            let attempts = b.path("attempts");
+            burrow_test::executable(
+                &b.cfg.tools.gh,
+                format!(
+                    r#"#!/bin/sh
+cat >/dev/null
+if [ ! -e '{attempts}' ]; then
+  echo asked >'{attempts}'
+  if [ '{response}' = reset ]; then echo 'connection reset by peer' >&2; else printf '{response}\n\n{{}}'; fi
+  exit 1
+fi
+echo asked >>'{attempts}'
+printf 'HTTP/2.0 200 OK\n\n{{}}'
+"#,
+                    attempts = attempts.display()
+                ),
+            );
+            assert!(
+                !b.pass().close("sam/box", "7", reason),
+                "{reason}: {response}"
+            );
+            assert_eq!(fs::read_to_string(attempts).unwrap(), "asked\n");
+        }
+    }
+}
+
 impl Box {
     pub(super) fn new() -> Box {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -38,18 +73,14 @@ impl Box {
         let gh = script(
             "gh",
             format!(
-                "echo \"$*\" >>'{log}'\n[ -x '{hook}' ] && '{hook}' \"$*\"\n[ -f '{fail}' ] && printf '%s' \"$*\" | grep -qF -f '{fail}' && exit 1\ncase \"$*\" in\n  *--paginate*) cat '{comments}' 2>/dev/null || echo '[[]]' ;;\n  *body=@-*) cat >>'{posted}' ;;\n  'api repos/'*) a=\"$*\"; cat '{dir}'/\"$(echo \"${{a#api }}\" | tr / _)\" 2>/dev/null || echo '{{}}' ;;\n  *) echo '{{}}' ;;\nesac\n",
-                log = at("log").display(),
-                hook = at("hook").display(),
-                fail = at("fail").display(),
-                comments = at("comments").display(),
-                posted = at("posted").display(),
-                dir = tmp.path().display(),
+                "export TEST='{}'\n{}",
+                tmp.path().display(),
+                include_str!("github-test.sh")
             ),
         );
         // GraphQL reads the same fixture text as REST, with known authorship.
         fs::write(at("written.jq"), include_str!("written.jq")).unwrap();
-        let graphql = script(
+        let _graphql = script(
             "graphql",
             format!(
                 r#"
@@ -66,18 +97,6 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         );
         fs::write(at("default-issue"), issue(7, "sam", &[]).to_string()).unwrap();
         fs::write(at("comments"), "[[]]").unwrap();
-        let original = fs::read_to_string(&gh).unwrap();
-        fs::write(
-            &gh,
-            original.replace(
-                "case \"$*\" in",
-                &format!(
-                    "case \"$*\" in\n  'api graphql'*) exec '{}' \"$@\" ;;",
-                    graphql.display()
-                ),
-            ),
-        )
-        .unwrap();
         let systemctl = script(
             "systemctl",
             format!(

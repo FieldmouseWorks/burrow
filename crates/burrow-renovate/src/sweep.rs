@@ -131,6 +131,18 @@ impl Config {
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    fn github(&self) -> burrow_github::Gh {
+        burrow_github::Gh {
+            program: Some(self.tools.gh.clone().into_os_string()),
+            ..Default::default()
+        }
+    }
+
+    fn pages(&self, path: &str) -> Option<Vec<Value>> {
+        let pages = burrow_github::pages(&mut self.github(), path).ok()?;
+        pages.iter().all(Value::is_array).then_some(pages)
+    }
+
     /// The sweep over `only`, or over every repo and the notices: what it
     /// exits with.
     pub fn run(&self, only: Option<&str>) -> u8 {
@@ -167,7 +179,11 @@ impl Config {
         let (me, renovate) = match &self.app {
             Some(app) => (app.bot.clone(), format!("{}[bot]", app.bot)),
             None => {
-                let me = trimmed(self.said(&self.tools.gh, &["api", "user", "--jq", ".login"]));
+                let me = burrow_github::call(&mut self.github(), "GET", "user", None, None)
+                    .ok()
+                    .and_then(|r| r.json().ok())
+                    .and_then(|v| v["login"].as_str().map(str::to_owned))
+                    .unwrap_or_default();
                 (me.clone(), me)
             }
         };
@@ -685,15 +701,10 @@ impl Sweep<'_> {
             && seen != format!("{sha} red")
             && rel_sha != sha
         {
-            let comments = cfg.said(
-                &cfg.tools.gh,
-                &[
-                    "api",
-                    "--paginate",
-                    "--slurp",
-                    &format!("repos/{repo}/issues/{n}/comments"),
-                ],
-            );
+            let comments = cfg
+                .pages(&format!("repos/{repo}/issues/{n}/comments"))
+                .and_then(|v| serde_json::to_vec(&v).ok())
+                .unwrap_or_default();
             let ripe = self.ripe(&comments);
             if !ripe.is_empty() {
                 let now = now();
