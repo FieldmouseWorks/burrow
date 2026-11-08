@@ -41,7 +41,12 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
-        Some("check-config") if args.len() == 1 => cfg.check().map_err(|e| Fail::new(1, e)),
+        Some("check-config") => {
+            if args.len() != 1 {
+                return Err(Fail::new(2, "usage: proj check-config"));
+            }
+            cfg.check_config().map_err(|e| Fail::new(1, e))
+        }
         Some("engines") => {
             let said = crate::setups::Store::new(&cfg.roles)
                 .command(&args[1..])
@@ -137,7 +142,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|usage|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done",
         )),
     }
 }

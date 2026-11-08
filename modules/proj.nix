@@ -49,7 +49,8 @@ let
     the job's own, and reads nothing else but the machine's system paths, rustup's
     toolchains and git's config: not home, the runtime dir (no systemctl --user or
     systemd-run --user), other projects, or any server of the user's (tmux's, the
-    compile cache's), and not Codex's login. The
+    compile cache's), and not Codex's login or the user's own GitHub login: git and
+    gh reach GitHub as a GitHub App, through its token socket. The
     sandbox's no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
     them to the owner. The machine's guard checks every command and patch first:
     what deletes or rewrites files gets an undo snapshot, or is refused without
@@ -81,6 +82,7 @@ let
     inherit (config.burrow) flake;
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
+    machinery = if machineApp == null then null else machineApp.name;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
@@ -91,7 +93,6 @@ let
       inherit (cfg.inbox) labels unstickLabel authors vm outsideLabel;
       host = config.networking.hostName;
       wake = inboxWake;
-      machinery = if machineApp == null then null else machineApp.name;
       triage = if cfg.inbox.triage.enable then {
         inherit (cfg.inbox.triage) ownerLabel owner skip atOnce drain drainJobs;
       } else null;
@@ -517,7 +518,10 @@ in
       engine's fresh meter has room (credits, or no window used up).
       Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
       `autoland-codex-login job`, separately from the reviewer's login. Codex
-      jobs cannot run in agent VMs. The steward's judge always uses Claude.
+      jobs cannot run in agent VMs. ${if machineApp == null
+        then "A Codex job reaches GitHub only as the App it's given (`--app`): its sandbox keeps your own logins out, so without one its turn fails at once."
+        else "A Codex job acts on GitHub as its `--app`, else as the App ${machineApp.slug}, never as you: its sandbox keeps your own logins out."}
+      The steward's judge always uses Claude.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
       them. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
@@ -589,7 +593,7 @@ in
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows
       which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as
-      them; a bot's acts as the App ${machineApp.slug}."}
+      them; a bot's acts as the App ${machineApp.slug}, as a Codex job does."}
       A job that ends `proj done` closes its issue; reopen it to pick the work back up.${lib.optionalString cfg.inbox.triage.enable "\nEvery other issue the authors open is sorted on its own (`ready`, `later`, `tracker`, `${cfg.inbox.triage.ownerLabel}`, or closed as a duplicate or done), so file what you find as an issue and leave it: you needn't label it.${lib.optionalString (cfg.inbox.triage.drain != null) " `ready` ones go to ${cfg.inbox.triage.drain} on idle slots."}"}
     '';
   })

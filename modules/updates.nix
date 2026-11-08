@@ -647,6 +647,10 @@ in
       burrow.notify.enable = true;
 
       burrow.updates.health = lib.mapAttrs (_: lib.mkDefault) ({
+        proj-config = let proj = "${config.burrow.tools.proj}/bin/proj"; in ''
+          if [ "$(id -un)" = ${user} ]; then ${proj} check-config
+          else runuser -u ${user} -- env HOME=${account.home} ${proj} check-config; fi
+        '';
         nix-daemon = "systemctl -q is-active nix-daemon.socket";
         user-manager = "systemctl -q is-active user@${vars.USER_UID}.service";
         dns = "getent hosts github.com";

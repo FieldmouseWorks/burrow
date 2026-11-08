@@ -255,7 +255,7 @@ impl Pass<'_> {
         };
         let task = format!("{input}\n\nIts labels: {labels}.\n\n{SORT}");
         let app = self
-            .inbox
+            .cfg
             .machinery
             .clone()
             .filter(|m| !m.is_empty() && !self.inbox.vm)

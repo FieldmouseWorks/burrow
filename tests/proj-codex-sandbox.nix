@@ -2,7 +2,8 @@
 # worktree commits need an explicit grant to the clone's git metadata. Then
 # a proj job on Codex, for real (the `jobs` machine): proj's own argv to the
 # pinned CLI, with a stand-in model that asks for what a job does, and what
-# the job's sandbox let through. Then
+# the job's sandbox let through, and a person's job, with no App of its own,
+# acting as the machine's App to push its work. Then
 # its hooks, with a stand-in model that asks for one command: the example
 # machine's /etc/codex/requirements.toml runs the guard on every command a
 # Codex job (as the machine's user) runs, and refuses what has no undo here
@@ -91,6 +92,18 @@ let
   ] ++ calls [
     "proj done"
   ];
+  # A person's job, started as proj-inbox starts one for a person's issue: with
+  # no App of its own. Its sandbox hides the person's own logins, so it acts
+  # as the machine's App: that App's token socket and credential helper, not
+  # the person's gh login or the GH_TOKEN of their profile. And it publishes
+  # its work: a branch pushed to origin.
+  personCalls = calls [
+    "test -z \"$GH_TOKEN\" && test \"$GH_TOKEN_SOCKET\" = /run/gh-token/workers.sock && python3 -c 'import os, socket; socket.socket(socket.AF_UNIX).connect(os.environ[\"GH_TOKEN_SOCKET\"])' && touch /data/dev/jobs/$PROJ_JOB/person-connected"
+    "git config --get-all credential.helper | tail -n 1 | grep -q 'gh-token git-credential' && touch /data/dev/jobs/$PROJ_JOB/person-helper"
+    "cat ~/.config/gh/hosts.yml || touch /data/dev/jobs/$PROJ_JOB/person-login-refused"
+    "git fetch -q origin && git worktree add -q -b person \"$PROJ_SCRATCH/person\" origin/trunk && git -C \"$PROJ_SCRATCH/person\" commit -q --allow-empty -m person && git -C \"$PROJ_SCRATCH/person\" push -q origin person && touch /data/dev/jobs/$PROJ_JOB/person-pushed"
+    "proj done"
+  ];
   # Its next turn, a resumed Codex with a fresh profile, held to the same.
   resumedCalls = calls [
     "touch /data/dev/elsewhere/resumed || touch /data/dev/jobs/$PROJ_JOB/resumed-elsewhere-refused"
@@ -116,6 +129,7 @@ let
   '';
   jobCalls = pkgs.writeText "codex-job-calls.json" (builtins.toJSON firstCalls);
   bothCalls = pkgs.writeText "codex-job-calls-resumed.json" (builtins.toJSON (firstCalls ++ resumedCalls));
+  personJobCalls = pkgs.writeText "codex-person-calls.json" (builtins.toJSON personCalls);
   # Configs that would widen a profile proj names: the user's (with its
   # default selection, an inherited parent and an extra grant) and the
   # trusted project's. Neither may reach the job's sandbox.
@@ -136,8 +150,9 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "proj-codex-sandbox";
-  # proj, its Codex role and the workers App, as a machine runs them, with
-  # the guard's undo snapshots on a ZFS pool of its own.
+  # proj, its Codex role and the workers App, the machine's own, as a
+  # machine runs them, with the guard's undo snapshots on a ZFS pool of its
+  # own.
   nodes.jobs = {
     imports = [ self.nixosModules.proj self.nixosModules.undo ];
     virtualisation.emptyDiskImages = [ 512 ];
@@ -160,6 +175,7 @@ pkgs.testers.runNixOSTest {
         keyFile = "/run/keys/workers.pem";
         users = [ "dev" ];
       };
+      github.machinery = "workers";
     };
     # A server of the user's in a network namespace of its own, as the
     # compile cache's daemon is.
@@ -211,7 +227,7 @@ pkgs.testers.runNixOSTest {
     # Its origin is on the network, as GitHub is: the sandbox mounts nothing
     # of the machine's but what the job is given, /srv included.
     dev("git clone -q --bare /data/dev/src/web /srv/origin.git && git -C /data/dev/src/web remote add origin git://127.0.0.1/origin.git")
-    dev("setsid -f git daemon --base-path=/srv --export-all --listen=127.0.0.1 /srv >/dev/null 2>&1")
+    dev("setsid -f git daemon --base-path=/srv --export-all --enable=receive-pack --listen=127.0.0.1 /srv >/dev/null 2>&1")
     jobs.wait_for_open_port(9418)
     # Something new upstream, for the job's fetch to bring.
     dev("git clone -q /srv/origin.git /tmp/upstream && git -C /tmp/upstream commit -q --allow-empty -m upstream && git -C /tmp/upstream push -q origin trunk")
@@ -335,6 +351,25 @@ pkgs.testers.runNixOSTest {
         dev(f"TMUX_TMPDIR=/data/dev/tmux-custom tmux -L {label} has-session")
     dev("tmux -L host has-session")
     assert "sk-stand-in-login" not in said, said
+
+    # A person's job, as proj-inbox starts one for a person's issue: no
+    # --app. Their own gh login, and a token their profile exports, which
+    # its sandbox must not reach.
+    dev("install -d -m 0700 ~/.config/gh && printf 'github.com:\\n    oauth_token: gho_person-login\\n' >~/.config/gh/hosts.yml")
+    dev("echo 'export GH_TOKEN=gho_person-profile' >>~/.bash_profile")
+    assert dev("echo $GH_TOKEN") == "gho_person-profile"
+    jobs.succeed("cp ${personJobCalls} /tmp/calls.json")
+    p = dev('proj run --first --role coder --link https://github.com/sam/web/issues/1 web "go"')
+    jobs.fail(f"test -e /data/dev/jobs/{p}/app")
+    jobs.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -Evx 'queued|running'", timeout=300)
+    marks = dev(f"ls /data/dev/jobs/{p}").split()
+    said = jobs.execute(f"cat /data/dev/jobs/{p}/1.jsonl /data/dev/jobs/{p}/1.stderr /data/dev/jobs/{p}/1.outcome")[1]
+    for mark in ["person-connected", "person-helper", "person-login-refused", "person-pushed"]:
+        assert mark in marks, (mark, marks, said)
+    assert dev(f"proj state {p}") == "done", (dev(f"proj state {p}"), said)
+    # Its branch is on origin, a commit its hooks marked.
+    assert "Engine: codex" in dev("git -C /srv/origin.git log -1 --format=%B person")
+    assert "gho_person" not in said, said
 
     machine.wait_for_unit("multi-user.target")
     def worker(command):

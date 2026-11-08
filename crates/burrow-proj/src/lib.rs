@@ -58,7 +58,7 @@
 //! proj engines                list saved engine setups, active and previous
 //! proj engines save NAME [--replace]  check and save the current roles
 //! proj engines use NAME       check and atomically switch roles (back returns)
-//! proj check-config           check the config and roles with the turn's parser
+//! proj check-config           validate machine config and every roles line
 //! proj list                   projects you can run jobs in
 //! proj await TARGET...        from inside a job: resume it once a PR or
 //!                             issue (URL or OWNER/REPO#N) changes; one
@@ -138,6 +138,8 @@
 //! With --app every turn runs in that App's env (modules/github.nix), its
 //! file from apps, so git and gh act as the App: the machine's own work, not
 //! the user's. A turn whose App is gone fails rather than run as the user.
+//! A Codex turn with no --app runs in the machine's App's env (machinery),
+//! or not at all: its sandbox keeps the user's logins out ([`turn::github_app`]).
 
 use std::fs;
 use std::io;

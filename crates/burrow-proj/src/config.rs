@@ -53,6 +53,10 @@ pub struct Config {
     pub deployed: PathBuf,
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
+    /// The machine's own GitHub App (burrow.github.machinery), one of
+    /// `apps`: what a bot's issue's job, and every Codex turn with no App
+    /// of its own, acts as ([`crate::turn::github_app`]). None for none.
+    pub machinery: Option<String>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
@@ -110,8 +114,6 @@ pub struct Inbox {
     pub host: String,
     /// Where it books its next look at each repo.
     pub wake: PathBuf,
-    /// The machine's own GitHub App, which a bot's issue's job acts as.
-    pub machinery: Option<String>,
     /// The label on an issue carrying text from outside the authors, whoever
     /// filed it: never a job, never sorted or handed on. "" is none.
     #[serde(default)]
@@ -190,8 +192,11 @@ impl Config {
             .unwrap_or_default())
     }
 
-    /// Everything a turn reads as configuration, with the same roles parser.
-    pub fn check(&self) -> Result<(), String> {
+    /// Validate the turn-start configuration without starting a job. Config::load
+    /// already parses the module's JSON; engine validates every external role,
+    /// including unused scopes and overflow choices. Runtime state (meters,
+    /// usage holds and individual jobs) is not machine configuration.
+    pub fn check_config(&self) -> Result<(), String> {
         self.engine("", None).map(|_| ())
     }
 
@@ -232,15 +237,43 @@ pub(crate) mod tests {
             "flake": "/data/dev/src/box",
             "deployed": "/nowhere/proj",
             "apps": {"workers": "/run/workers.env"},
+            "machinery": "workers",
             "notify": "/bin/notify",
             "roles": "/nowhere/roles",
             "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box",
-                      "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
+                      "wake": "/var/lib/burrow/proj-inbox/wake.json"},
             "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
+    }
+
+    #[test]
+    fn check_config_rejects_legacy_roles_and_checks_unused_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        cfg.check_config().unwrap(); // An absent file means default engines.
+        std::fs::write(&cfg.roles, "# roles\nunused old-model\n").unwrap();
+        let err = crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap_err();
+        let said = err.say.unwrap();
+        assert_eq!(err.code, 1);
+        assert!(
+            said.contains(&format!("{} line 2", cfg.roles.display())),
+            "{said}"
+        );
+        assert!(said.contains("unknown engine old-model"), "{said}");
+        std::fs::write(&cfg.roles, "unused claude\nother codex over 80 claude\n").unwrap();
+        crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
+        // An existing but unreadable roles path must not mean defaults.
+        std::fs::remove_file(&cfg.roles).unwrap();
+        std::fs::create_dir(&cfg.roles).unwrap();
+        assert!(
+            cfg.check_config()
+                .unwrap_err()
+                .contains(&cfg.roles.display().to_string())
+        );
     }
 
     #[test]
