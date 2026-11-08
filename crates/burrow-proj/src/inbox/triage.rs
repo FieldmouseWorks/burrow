@@ -112,7 +112,7 @@ const SORT: &str = "Sort this issue for the machine's queue of open issues. Read
 Answer with the verdict alone on its first line, then a short paragraph on why:
 
 - `ready`: a clear task an agent can finish now and prove with the repo's own checks, with nothing in it only the owner can decide. It will be handed to an agent as it stands, so the issue has to say enough.
-- `owner`: it waits on a call only the owner can make (money, something that can't be undone, the product's direction, their own accounts). Say exactly what the call is: they're asked it.
+- `owner`: it waits on a call only the owner can make: spending money, a step that can't be undone, their own accounts or person, or a call the repo's own rules (its AGENTS.md) leave to them. Say exactly what the call is: they're asked it. A technical, design or stack choice is not one of these, even when the issue says it's the owner's: the agent that takes the issue makes it by the repo's rules, so on its own it doesn't keep an issue from `ready`.
 - `later`: real, but too big, vague, or waiting on other work to hand an agent now. Say what it waits on.
 - `tracker`: it tracks other work (a checklist, a milestone, a dashboard) rather than being work itself.
 - `duplicate #M`: it asks for the same as open issue #M in this repo.
