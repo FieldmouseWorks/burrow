@@ -15,7 +15,10 @@ let
   '';
   tool = name: pkgs.lib.getExe burrow.tools.${name};
   p = burrow.prefix;
-in pkgs.runCommand "tool-configs-check" { } (
+in
+assert burrow.events.handlers.renovate-sweep.wake == "${burrow.stateDir}/renovate-sweep/wake.json";
+assert burrow.events.handlers.renovate-sweep.gap <= 20;
+pkgs.runCommand "tool-configs-check" { } (
   usage (tool "update") "${p}-update [--force | status]"
   + usage (tool "switch") "${p}-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]"
   + usage (tool "confirm") "${p}-confirm"

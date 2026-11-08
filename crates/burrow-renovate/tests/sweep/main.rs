@@ -19,6 +19,7 @@
 mod handing;
 mod passes;
 mod refreshes;
+mod wakes;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -100,7 +101,7 @@ const STAND_INS: [(&str, &str); 6] = [
 fi
 echo "gh $*" >>"$FAKE/log"
 case "$1 $2" in
-  "pr list") cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
+  "pr list") [ ! -e "$FAKE/list-fails" ] || { echo []; exit 1; }; cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
   "pr view")
     if [ "$(cat "$FAKE/gh-blocks" 2>/dev/null)" = "$3" ] && mv "$FAKE/gh-blocks" "$FAKE/gh-blocked" 2>/dev/null; then
       while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done
@@ -128,7 +129,7 @@ cat "$2/.origin"
         // Its limits (FAKE/limits, or the steward's own), or the time on the
         // line of the comments it reads that names whom it's asked about.
         "lock-wait",
-        r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600; exit; fi
+        r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600 3600; exit; fi
 echo "lock-wait $1" >>"$FAKE/log"
 jq -r --arg who "$1" '.[][] | select(.user.login == $who) | .body'
 "#,

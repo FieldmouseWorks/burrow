@@ -841,6 +841,7 @@ in
         renovate-sweep = {
           events = [ "pull_request" "check_suite" "status" ];
           unit = "renovate-sweep";
+          wake = "${stateDir}/renovate-sweep/wake.json";
           branches = [ "renovate/*" ];
         };
       };

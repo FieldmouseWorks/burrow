@@ -47,8 +47,10 @@ use crate::{complain, say, trimmed};
 
 mod pr;
 mod request;
+mod scan;
 mod steward;
 mod task;
+mod wake;
 
 use pr::{Pr, State};
 use request::{REQUEST, TITLE};
@@ -221,24 +223,13 @@ impl Config {
     /// would fix it several times over, side by side.
     fn repo(&self, project: &str, repo: &str, who: &Who, steward: &Steward, pass: &mut Pass) {
         let info = steward.repo(repo, now());
-        let listed = self.said(
-            &self.tools.gh,
-            &[
-                "pr",
-                "list",
-                "-R",
-                repo,
-                "--state",
-                "open",
-                "--search",
-                "head:renovate/",
-                "--json",
-                "number,title,headRefName,headRefOid,baseRefName,labels,createdAt,statusCheckRollup",
-            ],
-        );
-        let prs = match serde_json::from_slice::<Value>(&listed) {
-            Ok(Value::Array(prs)) => prs,
-            _ => Vec::new(),
+        let prs = match self.list(repo) {
+            Ok(prs) => prs,
+            Err(Broke(why)) => {
+                complain(&why);
+                pass.failed = true;
+                return;
+            }
         };
         let mut sweep = Sweep {
             cfg: self,
@@ -246,6 +237,7 @@ impl Config {
             who,
             info: &info,
             labelled: false,
+            next: None,
         };
         let mut handed = Vec::new();
         for pr in &prs {
@@ -255,9 +247,14 @@ impl Config {
                 Err(Broke(why)) => {
                     complain(&format!("{}: {why}", self.name));
                     pass.failed = true;
-                    break;
+                    return;
                 }
             }
+        }
+        if let Err(Broke(why)) = self.book(repo, sweep.next) {
+            complain(&why);
+            pass.failed = true;
+            return;
         }
         // Each one's key is kept before its job starts, so a key that can't
         // be kept hands nothing over pass after pass; a job that doesn't
@@ -428,12 +425,15 @@ impl Config {
             .map_while(|w| w.parse().ok())
             .collect();
         match n[..] {
-            [asks, standing, releases, release_gap] if out.status.success() => Ok(Limits {
-                asks,
-                standing,
-                releases,
-                release_gap,
-            }),
+            [asks, standing, releases, release_gap, pass] if out.status.success() && pass > 0 => {
+                Ok(Limits {
+                    asks,
+                    standing,
+                    releases,
+                    release_gap,
+                    pass,
+                })
+            }
             _ => Err(Broke(format!(
                 "{} --limits: {}, saying {:?}",
                 lock_wait.display(),
@@ -532,6 +532,8 @@ struct Limits {
     releases: i64,
     /// How far apart, in seconds.
     release_gap: i64,
+    /// Maximum wait before revisiting a refresh.
+    pass: i64,
 }
 
 /// What a whole pass tells the owner, and whether all of it worked.
@@ -564,9 +566,15 @@ struct Sweep<'a> {
     info: &'a steward::Repo,
     /// Whether the labels a job puts on a major are there yet.
     labelled: bool,
+    /// Earliest refresh deadline in this repo.
+    next: Option<i64>,
 }
 
 impl Sweep<'_> {
+    fn wake(&mut self, at: i64) {
+        self.next = Some(self.next.map_or(at, |was| was.min(at)));
+    }
+
     /// One of its Renovate PRs: what it's handed over for, if it is.
     fn pr(&mut self, pr: Pr, pass: &mut Pass) -> Result<Option<Handed>, Broke> {
         let (cfg, repo, who) = (self.cfg, self.repo, self.who);
@@ -654,6 +662,7 @@ impl Sweep<'_> {
         // the sweep does, and leaves the PR for a pass after, which waits out
         // a run that read it (handing over, below).
         if let Some(rest) = title.strip_prefix(TITLE) {
+            self.wake(now() + who.limits.pass);
             self.retitle(&n, rest.trim_start());
             return Ok(None);
         }
@@ -683,6 +692,10 @@ impl Sweep<'_> {
             .map(|c| &c.name)
             .collect();
         let standing = pr.labelled(REQUEST);
+        // Keep retrying requests and their release without another delivery.
+        if standing || reds == [&Value::from("renovate/artifacts")] {
+            self.wake(now() + who.limits.pass);
+        }
         if reds == [&Value::from("renovate/artifacts")]
             && !who.renovate.is_empty()
             && seen != format!("{sha} red")
@@ -695,6 +708,11 @@ impl Sweep<'_> {
             let ripe = self.ripe(&comments);
             if !ripe.is_empty() {
                 let now = now();
+                if let Ok(at) = ripe.parse::<i64>()
+                    && at > now
+                {
+                    self.wake(at);
+                }
                 let was: Vec<&str> = seen
                     .lines()
                     .next()
@@ -768,6 +786,7 @@ impl Sweep<'_> {
                 cfg.renovate_run / 60
             );
         } else if rel_sha == sha && now - rel_at < cfg.renovate_run as i64 {
+            self.wake(now + limits.pass);
             return Ok(None);
         }
         // Nor while a run that read a request that came off since (Renovate
@@ -778,6 +797,7 @@ impl Sweep<'_> {
                 .request_gone(&n)
                 .is_none_or(|at| at.is_some_and(|at| now - at < cfg.renovate_run as i64))
         {
+            self.wake(now + limits.pass);
             return Ok(None);
         }
         if major {
