@@ -1,18 +1,11 @@
 //! A guest declares intent only. The host owns job state and GitHub access.
 
 use crate::{config::Config, github::target, job::Job};
-use rustix::{
-    fs::{OFlags, fcntl_getfl, fcntl_setfl},
-    process::{Pid, Signal, kill_process_group},
-};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{self, Read},
-    os::unix::process::CommandExt,
     path::Path,
     process::{Command, Stdio},
-    thread::sleep,
     time::{Duration, Instant},
 };
 
@@ -72,7 +65,7 @@ pub(crate) fn collect(cfg: &Config, job: &Job, n: &str, agent: &str) -> Result<(
         .and_then(|s| s.parse::<i64>().ok())
         .map(|d| Duration::from_nanos(d.saturating_sub(crate::now_nanos()).max(0) as u64))
         .unwrap_or(COLLECTION_TIME);
-    collect_with(cfg, job, n, agent, "agent", remaining.min(COLLECTION_TIME))
+    collect_with(cfg, job, n, agent, "agent", remaining)
 }
 
 fn collect_with(
@@ -93,7 +86,8 @@ fn collect_with(
         "sh",
         &path(job, n),
     ]);
-    let declaration = bounded(&mut command, budget);
+    let until = Instant::now() + budget;
+    let declaration = bounded(&mut command, budget.min(COLLECTION_TIME));
     // Stop even if SSH blocked, the output was malformed or too large, or
     // there was no declaration. Nothing in the guest survives collection.
     let stopped = bounded(
@@ -105,10 +99,10 @@ fn collect_with(
             "couldn't stop sandbox after collecting its next step: {e}"
         ));
     }
-    register(cfg, job, &declaration?)
+    register(cfg, job, &declaration?, until)
 }
 
-fn register(cfg: &Config, job: &Job, bytes: &[u8]) -> Result<(), String> {
+fn register(cfg: &Config, job: &Job, bytes: &[u8], until: Instant) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -124,72 +118,130 @@ fn register(cfg: &Config, job: &Job, bytes: &[u8]) -> Result<(), String> {
                 .iter()
                 .map(|s| target(s).ok_or("invalid GitHub target"))
                 .collect::<Result<Vec<_>, _>>()?;
-            crate::cmd::record_wait(cfg, job, &found, &declaration.targets).map_err(|e| {
-                e.say
-                    .unwrap_or_else(|| "couldn't register sandbox wait".into())
-            })
+            crate::cmd::record_wait(cfg, job, &found, &declaration.targets, Some(until)).map_err(
+                |e| {
+                    e.say
+                        .unwrap_or_else(|| "couldn't register sandbox wait".into())
+                },
+            )
         }
         _ => Err("invalid sandbox next step".into()),
     }
 }
 
-/// Poll a nonblocking pipe: neither an SSH login profile nor a descendant
-/// holding stdout open can hide the deadline. Only a fixed buffer is read,
-/// and stdout is capped before appending. Kill the local process group on
-/// every exit, including successful reads that left descendants behind.
+/// The guest transport has a smaller output cap than GitHub pagination.
 pub(crate) fn bounded(command: &mut Command, budget: Duration) -> Result<Vec<u8>, String> {
-    let until = Instant::now() + budget;
-    let mut child = command
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let pid = Pid::from_child(&child);
-    let result = (|| {
-        let mut stdout = child.stdout.take().ok_or("missing collection stdout")?;
-        let flags = fcntl_getfl(&stdout).map_err(|e| e.to_string())?;
-        fcntl_setfl(&stdout, flags | OFlags::NONBLOCK).map_err(|e| e.to_string())?;
-        let mut bytes = Vec::new();
-        let mut buffer = [0u8; 8192];
-        let mut eof = false;
-        loop {
-            if Instant::now() >= until {
-                return Err("sandbox next-step command exceeded its time limit".into());
-            }
-            if !eof {
-                match stdout.read(&mut buffer) {
-                    Ok(0) => eof = true,
-                    Ok(n) => {
-                        if bytes.len() + n > MAX_DECLARATION {
-                            return Err("sandbox next-step output exceeded 64 KiB".into());
-                        }
-                        bytes.extend_from_slice(&buffer[..n]);
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.to_string()),
-                }
-            }
-            if eof && let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                return if status.success() {
-                    Ok(bytes)
-                } else {
-                    Err(format!("sandbox next-step command failed: {status}"))
-                };
-            }
-            sleep(Duration::from_millis(5).min(until.saturating_duration_since(Instant::now())));
-        }
-    })();
-    let _ = kill_process_group(pid, Signal::KILL);
-    let _ = child.wait();
-    result
+    crate::subprocess::output(
+        command.stderr(Stdio::null()),
+        Instant::now() + budget,
+        MAX_DECLARATION,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // A local gh fixture, so the deadline is exercised through baseline
+    // registration and the real API/pagination path, not a mocked timer.
+    fn registration_fixture(script: &str) -> (tempfile::TempDir, Config) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let gh = d.path().join("gh");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\necho $$ >>{}/pids\necho \"$*\" >>{}/calls\n{script}\n",
+                d.path().display(),
+                d.path().display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut value = crate::config::tests::example();
+        value["jobs"] = serde_json::json!(d.path().join("jobs"));
+        value["tools"]["gh"] = serde_json::json!(gh);
+        (d, serde_json::from_value(value).unwrap())
+    }
+
+    fn registration_failure(cfg: &Config, declaration: &[u8], budget: Duration) {
+        let job = Job::new(cfg, "vm");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(job.path("await.next"), "previous wait\n").unwrap();
+        fs::write(job.path("end.next"), "ask\n").unwrap();
+        let from = Instant::now();
+        assert!(register(cfg, &job, declaration, from + budget).is_err());
+        assert!(from.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            fs::read_to_string(job.path("await.next")).unwrap(),
+            "previous wait\n"
+        );
+        assert_eq!(fs::read_to_string(job.path("end.next")).unwrap(), "ask\n");
+        // Each outstanding gh process was killed and reaped before returning.
+        let dir = cfg.tools.gh.parent().unwrap();
+        for pid in fs::read_to_string(dir.join("pids")).unwrap().lines() {
+            assert!(
+                !Command::new("sh")
+                    .args(["-c", "kill -0 \"$1\" 2>/dev/null", "sh", pid])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
+    #[test]
+    fn registration_bounds_stalled_github_and_pagination_without_publishing() {
+        for script in [
+            "exec sleep 60",
+            "case \"$*\" in *--paginate*) printf '['; sleep 60 ;; *) echo '{\"state\":\"open\"}' ;; esac",
+        ] {
+            let (_dir, cfg) = registration_fixture(script);
+            registration_failure(
+                &cfg,
+                br#"{"end":"await","targets":["o/r#1"]}"#,
+                Duration::from_millis(80),
+            );
+        }
+    }
+
+    #[test]
+    fn registration_uses_one_deadline_across_slow_requests_and_targets() {
+        let (dir, cfg) = registration_fixture(
+            "sleep 0.15\ncase \"$*\" in *--paginate*) echo '[[]]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
+        );
+        registration_failure(
+            &cfg,
+            br#"{"end":"await","targets":["o/r#1","o/r#2","o/r#3","o/r#4"]}"#,
+            Duration::from_millis(650),
+        );
+        let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert!(calls.lines().count() >= 3, "{calls}");
+        assert!(calls.contains("repos/o/r/issues/2"), "{calls}");
+    }
+
+    #[test]
+    fn registration_commits_complete_baselines_before_the_deadline() {
+        let (_dir, cfg) = registration_fixture(
+            "case \"$*\" in *--paginate*) echo '[[]]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
+        );
+        let job = Job::new(&cfg, "vm");
+        fs::create_dir_all(&job.dir).unwrap();
+        register(
+            &cfg,
+            &job,
+            br#"{"end":"await","targets":["o/r#1","o/r#2"]}"#,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        let waits = fs::read_to_string(job.path("await.next")).unwrap();
+        assert_eq!(waits.lines().count(), 2);
+        assert!(
+            waits.contains("o/r#1\t") && waits.contains("o/r#2\t"),
+            "{waits}"
+        );
+        assert_eq!(fs::read_to_string(job.path("end.next")).unwrap(), "await\n");
+    }
+
     #[test]
     fn concurrent_declarations_preserve_every_target() {
         let d = tempfile::tempdir().unwrap();
@@ -264,7 +316,7 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap_err();
-        assert!(error.contains("64 KiB"), "{error}");
+        assert!(error.contains("65536 bytes"), "{error}");
     }
 
     #[test]

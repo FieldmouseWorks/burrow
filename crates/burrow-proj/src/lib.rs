@@ -135,9 +135,9 @@
 //! nothing is refused at all; the work comes back with `agent fetch` (the
 //! sandbox id is in the job's `agent` and in `proj status`). The guest's
 //! `proj await`, `ask` and `done` write a local declaration. After each run
-//! the host reads it through `agent sh`, takes any GitHub baselines then,
-//! and stops the VM before a nudge or the turn's end. No host job path or
-//! GitHub credential enters the guest. Silent turns get the same single
+//! the host reads it through `agent sh`, stops the VM, then takes any
+//! GitHub baselines under the same turn deadline across all targets and
+//! requests. No host job path or GitHub credential enters the guest. Silent turns get the same single
 //! nudge and undeclared stall as host turns.
 //!
 //! With --app every turn runs in that App's env (modules/github.nix), its
@@ -163,6 +163,7 @@ mod roles;
 pub mod scratch;
 pub mod setups;
 pub mod slot;
+mod subprocess;
 pub mod systemd;
 pub mod turn;
 pub mod usage;

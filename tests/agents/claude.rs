@@ -19,6 +19,12 @@ fn declaration(prompt: &str) -> Option<Vec<&str>> {
 }
 
 fn main() -> ExitCode {
+    // agent's pre-job smoke probe has no PROJ_VM_NEXT and must not touch
+    // stdin or try to declare a job step.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("Claude test fixture");
+        return ExitCode::SUCCESS;
+    }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt).unwrap();
     if let Some(args) = declaration(&prompt) {

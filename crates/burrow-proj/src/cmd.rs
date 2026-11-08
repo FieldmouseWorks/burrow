@@ -3,10 +3,11 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::time::Instant;
 
 use crate::config::Config;
 use crate::engine::{answer, is_error, last_result};
-use crate::github::{fingerprint, over, target};
+use crate::github::{fingerprint_until, over, target};
 use crate::job::{Job, awaits, kick};
 use crate::pick::demoted;
 use crate::turn::{exec, lines};
@@ -432,7 +433,7 @@ fn wait_on(cfg: &Config, targets: &[String]) -> Result<(), Fail> {
         found
             .push(target(t).ok_or_else(|| Fail::new(2, format!("not a GitHub PR or issue: {t}")))?);
     }
-    record_wait(cfg, &Job::new(cfg, &id), &found, targets)
+    record_wait(cfg, &Job::new(cfg, &id), &found, targets, None)
 }
 
 pub(crate) fn record_wait(
@@ -440,8 +441,15 @@ pub(crate) fn record_wait(
     job: &Job,
     found: &[(String, String)],
     targets: &[String],
+    until: Option<Instant>,
 ) -> Result<(), Fail> {
-    let text = baselines(cfg, found, targets)?;
+    let text = baselines(cfg, found, targets, until)?;
+    if until.is_some_and(|d| Instant::now() >= d) {
+        return Err(Fail::new(
+            1,
+            "proj: turn deadline expired while registering waits; nothing is awaited",
+        ));
+    }
     let next = job.path("await.next");
     File::options()
         .append(true)
@@ -462,10 +470,15 @@ pub(crate) fn record_wait(
 /// words, rather than leaving the job waiting on something proj never read.
 /// So does one that's already merged or closed ([`over`]): the job checked it
 /// before it merged, as a rule, and goes on to what comes after.
-fn baselines(cfg: &Config, found: &[(String, String)], targets: &[String]) -> Result<String, Fail> {
+fn baselines(
+    cfg: &Config,
+    found: &[(String, String)],
+    targets: &[String],
+    until: Option<Instant>,
+) -> Result<String, Fail> {
     let mut text = String::new();
     for ((repo, n), t) in found.iter().zip(targets) {
-        let fp = fingerprint(cfg, repo, n).ok_or_else(|| {
+        let fp = fingerprint_until(cfg, repo, n, until).ok_or_else(|| {
             Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask"))
         })?;
         if let Some(how) = over(&fp) {
@@ -594,7 +607,7 @@ mod tests {
         v["tools"]["gh"] = "/nowhere/gh".into();
         let cfg: Config = serde_json::from_value(v).unwrap();
         let found = [("o/r".to_owned(), "5".to_owned())];
-        let fail = baselines(&cfg, &found, &["o/r#5".to_owned()]).unwrap_err();
+        let fail = baselines(&cfg, &found, &["o/r#5".to_owned()], None).unwrap_err();
         assert_eq!(fail.code, 1);
         assert!(
             fail.say
@@ -663,7 +676,7 @@ esac
                 .map(|n| ("o/r".to_owned(), (*n).to_owned()))
                 .collect();
             let targets: Vec<String> = ns.iter().map(|n| format!("o/r#{n}")).collect();
-            baselines(&cfg, &found, &targets).map_err(|f| (f.code, f.say.unwrap_or_default()))
+            baselines(&cfg, &found, &targets, None).map_err(|f| (f.code, f.say.unwrap_or_default()))
         };
 
         let open = await_on(&["8"]).unwrap();
