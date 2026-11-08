@@ -69,7 +69,7 @@ in
           divided by this in HEAVY_JOBS, CARGO_BUILD_JOBS and
           RUST_TEST_THREADS. NIX_CONFIG defaults to max-jobs = 1 and cores =
           that share, before any caller settings so those win. These bound
-          build concurrency and advertised cores, not a CPU quota.
+          per-client build concurrency and advertised cores, not a CPU quota.
         '';
       };
       grace = lib.mkOption {
@@ -116,7 +116,7 @@ in
         It waits for a free slot, then runs the command with HEAVY_JOBS (its
         share of the threads), CARGO_BUILD_JOBS and RUST_TEST_THREADS set.
         NIX_CONFIG defaults to max-jobs = 1 and cores = that share, before
-        any caller settings so those win (build limits, not a CPU quota):
+        any caller settings so those win (per-client build limits, not a CPU quota):
         size your own parallelism (browser workers, `-j`) from HEAVY_JOBS.
         Calls inside a slot don't take another. `--all` is for a run that
         has a deadline and must not share the machine (a nightly gate), and

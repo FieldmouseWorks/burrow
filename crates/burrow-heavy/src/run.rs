@@ -41,8 +41,8 @@ pub fn run(config: &Config, slot: &str, share: u64, command: &[OsString]) -> u8 
             cmd.env(var, share.to_string());
         }
     }
-    // One derivation at a time gives parallel builders the whole share without
-    // starting several VM tests together. max-jobs * cores equals the share.
+    // One derivation per Nix client gives parallel builders the whole share
+    // without concurrent VM tests in that client. max-jobs * cores = share.
     // Later assignments win in Nix, so keep the caller's overrides last.
     let mut nix_config = OsString::from(format!("max-jobs = 1\ncores = {share}\n"));
     if let Some(caller) = std::env::var_os("NIX_CONFIG") {
