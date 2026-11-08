@@ -28,7 +28,8 @@ alone. Three fresh direct builds on the development machine took 1.161,
 0.792 and 0.794 seconds (the resulting binary was 5,573,448 bytes). These are
 local measurements, not hosted-runner measurements. The cost is paid once
 per invocation, including paths-only; correctness and a source-bound executable
-are worth that smaller cost. CI's step timing will show the hosted cost.
+are worth that smaller cost. The bootstrap reports compilation seconds
+separately in CI logs so hosted timings can be compared.
 No binary is reused between invocations: a preceding caller step must not be
 able to supply the executable that judges its tests.
 
