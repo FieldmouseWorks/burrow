@@ -34,7 +34,7 @@ from aside import aside
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerge_spent, automerges, bot_edited, codex_written, dep_kind, gate_edit, moved_from, provenance
-from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, negative, owed, proof_task, red_fix, red_undos
+from tasks import DEP_SEEN, FAILURES, MISDESCRIBED, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, negative, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
@@ -374,7 +374,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
                 return k
         return None
 
-    def hand_off(why, desc, kind="handed", at=head, wait=True, ours=True):
+    def hand_off(why, desc, kind="handed", at=head, wait=True, ours=True, describe=False):
         """Pending on desc while a Claude job fixes why, one of each kind a
         head (at), and the status says who has it: that job and since when,
         the Claude session that opened the PR and until when, or when a job
@@ -386,7 +386,8 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         broke (it crashed, timed out or went quiet) is handed again once its
         retry is due, and doesn't count toward the two (retry_at). Never
         while another fix job is still working on this head: two on one
-        branch push over each other."""
+        branch push over each other. describe: only its description is to
+        fix, with no push (tasks.describe_task)."""
         ours = ours and not requested  # Renovate would redo its branch
         retry = st.get(kind) == at
         state = retry and running(kind, at)
@@ -418,7 +419,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
             train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
             before = claims.unposted(st, kind, at)
             red_negative = negative(ci_names) if ci == "red" and not conflict else None
-            if started(kind, fix_task(repo, pr, why, proofs, train, tested, before, red_negative), at, bool(how)):
+            if started(kind, fix_task(repo, pr, why, proofs, train, tested, before, red_negative, describe), at, bool(how)):
                 if retry:
                     if not how:
                         st[kind + "Again"] = at
@@ -595,13 +596,11 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
                    stage=S.OWNER)
             if C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False) is not None:
                 st["ownerSaw"] = judged_at
-        elif verdict == "failed":
-            # The judge's own build or tests failed on this head: a fix job
-            # has it, and its push is judged again. Its own once a head: a
-            # job that answered a finding here without pushing didn't fix this.
-            hand_off("the Claude job that judged it found something failing on this head, its build or tests, a finding "
-                     "left unfixed or a reason in its description that doesn't hold (its comment on the PR says what)",
-                     "Settled, but its build or tests fail", "failFixed", judged_at, wait=False)
+        elif verdict in FAILURES:
+            # The judge found this head failing: a fix job has it, and its push
+            # (its edited description, if only that failed) is judged again. Its own
+            # once a head: a job that answered a finding here unpushed didn't fix this.
+            hand_off(*FAILURES[verdict], "failFixed", judged_at, wait=False, describe=verdict == MISDESCRIBED)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again", stage=S.REVIEW)
         elif lost("judged", judged_at):
@@ -835,12 +834,12 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
     # answers go up only on its own push (claims).
     # A judge asked for on this head and base (the repo had no CI then, say)
     # still decides once CI shows up, or the description is edited (then on
-    # the new one): its owner or failed verdict isn't dropped for either.
+    # the new one): its owner or failing verdict isn't dropped for either.
     judge_said = judgment(pr, head, repo)
     asked = owed(pr, head, repo, st.get("judged"))
-    # Its owner or failed verdict holds it whatever CI is still doing; only
+    # Its owner or failing verdict holds it whatever CI is still doing; only
     # a land waits for CI.
-    held = asked and judge_said in ("owner", "failed")
+    held = asked and judge_said in ("owner", *FAILURES)
     # Renovate merges its own once they're green, but none in a repo with its
     # train on (updates.nix), so it reads their commits for itself first.
     rechecked = renovate and not T.on(repo)

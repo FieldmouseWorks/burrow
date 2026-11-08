@@ -1,6 +1,6 @@
 """The steward, with gh, Claude jobs, GitHub's git remote and the review
 agent stood in for: the App it acts as, the reviewers (the snapshot they read, the brief
-they're queued with, the reviewers' service taking it, what gets posted), handle() end to end, past the review-round limit,
+they're queued with, the reviewers' service taking it, what gets posted), handle() end to end, a judge that fails a head on its code or its description alone, past the review-round limit,
 a clean look carried to a head that only merged its base in,
 on a conflict with its base and on dependency updates too, and the reviewers'
 answers through it, a PR whose merge would change nothing, one stacked on another's branch, Claude jobs that end without their answer, a fix job's answers (posted only on its own push), what a pass
@@ -26,5 +26,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: E402,F401 (the steward, set up from argv)
 
-for part in ("app", "review", "post", "handle", "codex_heads", "rounds", "carried", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "stacked", "legs", "lost", "unpushed", "superseded", "deps", "answers", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting"):
+for part in ("app", "review", "post", "handle", "misdescribed", "codex_heads", "rounds", "carried", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "stacked", "legs", "lost", "unpushed", "superseded", "deps", "answers", "upkeep", "undos", "alone", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting"):
     importlib.import_module(part)
