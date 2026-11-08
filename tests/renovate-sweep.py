@@ -122,6 +122,14 @@ for login, comments in (("me", [said("mallory", refusal(ripe))]), ("sam-workers[
 # How far the sweep asks and takes a request back, which the steward
 # counts into its deadlines too.
 p = subprocess.run([sys.executable, "-I", sys.argv[3], "--limits"], capture_output=True, text=True, check=True)
-assert p.stdout == "3 21600 3 600\n", p.stdout
+assert p.stdout == "3 21600 3 600 3600\n", p.stdout
+
+# The watchdog uses the same wake bound exported to the sweep, with the
+# event queue's spacing and the Renovate run ahead of it accounted for.
+spec = importlib.util.spec_from_file_location("lock_wait", sys.argv[3])
+lock_wait = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lock_wait)
+assert lock_wait.interval(7200) == int(p.stdout.split()[-1]) + 20 + 7200
+assert lock_wait.recovery(7200) == 3 * (21600 + lock_wait.interval(7200)) + lock_wait.drain(7200)
 
 print("renovate-sweep: ok")

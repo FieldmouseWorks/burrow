@@ -16,7 +16,7 @@ name no person's can be. Nothing when the PR isn't such a refresh.
     lock-wait --limits
 
 prints how far renovate-sweep goes asking for that refresh and taking a
-request back: ASKS STANDING RELEASES RELEASE_GAP. The steward counts the same
+request back: ASKS STANDING RELEASES RELEASE_GAP PASS. The steward counts the same
 limits into the watchdog's deadline (recovery, drain), so no stall reaches a
 job while the sweep is still at it."""
 
@@ -34,7 +34,7 @@ REQUEST = "rebase"  # the label that has Renovate redo the branch on its next ru
 TITLE = "rebase!"  # the title prefix that has it redo the branch on every run, until someone takes it off
 ASKS, STANDING = 3, 6 * 3600  # requests on a head, and how long each may stand
 RELEASES, RELEASE_GAP = 3, 600  # tries to take one back, and how far apart
-PASS = 3600  # how often the sweep's timer fires
+PASS = 3600  # maximum refresh wake-up delay, booked by the sweep
 
 
 def stamp(s):
@@ -42,9 +42,9 @@ def stamp(s):
 
 
 def interval(run):
-    """The longest between the sweep's passes: its timer's, and it waits for
-    a full Renovate run (`run` seconds) started with it."""
-    return PASS + run
+    """The sweep books a wake-up at most PASS seconds away. Allow the
+    event queue's default 20-second gap and a full Renovate run ahead of it."""
+    return PASS + 20 + run
 
 
 def drain(run):
@@ -122,7 +122,7 @@ def refresh(pr, red, names, renovate, asked):
 
 if __name__ == "__main__":
     if sys.argv[1] == "--limits":
-        print(ASKS, STANDING, RELEASES, RELEASE_GAP)
+        print(ASKS, STANDING, RELEASES, RELEASE_GAP, PASS)
         sys.exit()
     login = sys.argv[1]
     comments = [{"author": c.get("user"), "body": c.get("body")} for page in json.load(sys.stdin) for c in page]

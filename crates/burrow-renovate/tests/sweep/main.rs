@@ -100,7 +100,7 @@ cat "$2/.origin"
         // Its limits (FAKE/limits, or the steward's own), or the time on the
         // line of the comments it reads that names whom it's asked about.
         "lock-wait",
-        r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600; exit; fi
+        r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600 3600; exit; fi
 echo "lock-wait $1" >>"$FAKE/log"
 while read -r who when; do [ "$who" != "$1" ] || echo "$when"; done
 "#,
