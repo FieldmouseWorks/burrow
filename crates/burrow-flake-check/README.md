@@ -38,7 +38,10 @@ reported 1 second per gate compilation using the host toolchain; that excludes
 the new Nix provisioning and is not an end-to-end timing of this bootstrap.
 
 A cold store must fetch compiler inputs and their closure (about 1.1 GiB
-uncompressed on x86_64 Linux); hosted cold timing remains to be measured.
+uncompressed on x86_64 Linux). The first completed hosted leg of the
+[new bootstrap run](https://github.com/FieldmouseWorks/burrow/actions/runs/42517486906/job/128843615710)
+reported 720.6 MiB of compiler fetches, 11 seconds of provisioning and
+1 second of compilation. This is one observed cold run, not a timing bound.
 Using the minimal pinned toolchain reduces that from about 1.9 GiB with
 Nixpkgs' general rustc package. The store shares those inputs with Rust gates
 and subsequent runs, but a non-Rust caller still pays that cold setup cost.
