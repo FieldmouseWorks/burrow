@@ -50,11 +50,7 @@ impl Box {
             ),
         );
         // GraphQL reads the same fixture text as REST, with known authorship.
-        fs::write(
-            at("written.jq"),
-            include_str!("../../../../tests/proj/written.jq"),
-        )
-        .unwrap();
+        fs::write(at("written.jq"), include_str!("written.jq")).unwrap();
         let graphql = script(
             "graphql",
             format!(
@@ -64,7 +60,7 @@ for arg in "$@"; do
 done
 f='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"
 [ -e "$f" ] || f='{dir}/default-issue'
-jq -n --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{dir}/written.jq'
+jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{dir}/written.jq'
 "#,
                 dir = tmp.path().display()
             ),

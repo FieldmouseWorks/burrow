@@ -226,3 +226,41 @@ fn a_reply_cannot_smuggle_outside_edits_into_a_running_job() {
         assert!(!prompt.contains("MALICIOUS INPUT"), "{field}: {prompt}");
     }
 }
+
+#[test]
+fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
+    use std::os::unix::fs::PermissionsExt;
+    for field in ["title", "body"] {
+        for outsider in [false, true] {
+            let had = issue(7, "sam", &["claude"]);
+            let mut edited = had.clone();
+            edited[field] = json!("NEW REQUEST AFTER SNAPSHOT");
+            edited["state"] = json!("open");
+            if outsider {
+                let history = if field == "title" {
+                    "timelineItems"
+                } else {
+                    "userContentEdits"
+                };
+                edited[history] = json!({"totalCount":1,"nodes":[{"actor":{"login":"mallory"},"editor":{"login":"mallory"}}]});
+            }
+            let mut b = Box::new();
+            let d = finished(&mut b, &had, 0, &[], &had);
+            let input = fs::read_to_string(d.join("input")).unwrap();
+            fs::write(b.path("new-issue"), edited.to_string()).unwrap();
+            fs::write(b.path("hook"), format!("#!/bin/sh\nif [ \"$1\" = 'api repos/sam/box/issues/7' ]; then cp '{}' '{}'; fi\n", b.path("new-issue").display(), b.path("repos_sam_box_issues_7").display())).unwrap();
+            fs::set_permissions(b.path("hook"), fs::Permissions::from_mode(0o755)).unwrap();
+            let mut p = b.pass();
+            p.jobs("sam/box", "box", std::slice::from_ref(&had))
+                .unwrap();
+            assert!(!b.log().contains("state=closed"));
+            assert!(!b.cfg.jobs.join("j1/prompt.2").exists());
+            assert_eq!(fs::read_to_string(d.join("input")).unwrap(), input);
+            assert!(p.wake.contains_key("sam/box"));
+            b.pass().jobs("sam/box", "box", &[edited]).unwrap();
+            let prompt = fs::read_to_string(b.cfg.jobs.join("j1/prompt.2")).unwrap();
+            assert_eq!(prompt.contains("NEW REQUEST AFTER SNAPSHOT"), !outsider);
+            assert!(!b.log().contains("state=closed"));
+        }
+    }
+}

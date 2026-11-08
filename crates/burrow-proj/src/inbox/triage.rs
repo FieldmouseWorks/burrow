@@ -228,7 +228,9 @@ impl Pass<'_> {
     /// What a sorting job reads of the issue: its text and its authors'
     /// comments, as they stand. None when GitHub didn't say.
     pub(super) fn input(&self, repo: &str, issue: &Value) -> Option<String> {
-        let (issue, comments) = self.written(repo, issue)?;
+        let super::written::Written {
+            issue, comments, ..
+        } = self.written(repo, issue)?;
         Some(self.issue_text(repo, &issue, &comments))
     }
 

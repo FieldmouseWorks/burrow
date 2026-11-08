@@ -694,7 +694,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
             // Comments already there are part of the task; replies after
             // this are turns.
-            let Some((safe, comments)) = self.written(repo, issue) else {
+            let Some(written::Written {
+                issue: safe,
+                comments,
+                ..
+            }) = self.written(repo, issue)
+            else {
                 self.miss(repo);
                 continue;
             };

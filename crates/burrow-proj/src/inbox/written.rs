@@ -3,6 +3,21 @@ use super::{Pass, raw};
 use serde_json::{Value, json};
 
 const QUERY: &str = "query($owner:String!,$name:String!,$n:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$n){author{login __typename} title body userContentEdits(first:100){totalCount nodes{editor{login __typename} deletedBy{login __typename}}} timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){totalCount nodes{... on RenamedTitleEvent{actor{login __typename}}}} comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} totalCount nodes{databaseId author{login __typename} body createdAt userContentEdits(first:100){totalCount nodes{editor{login __typename} deletedBy{login __typename}}}}}}}}";
+/// Verified text plus the original snapshot, retained only for refresh comparisons.
+pub(super) struct Written {
+    pub issue: Value,
+    pub comments: Vec<Value>,
+    original: [Value; 2],
+}
+impl Written {
+    pub fn matches(&self, issue: &Value) -> bool {
+        self.original
+            .iter()
+            .zip([&issue["title"], &issue["body"]])
+            .all(|(a, b)| a.as_str().unwrap_or_default() == b.as_str().unwrap_or_default())
+    }
+}
+
 impl Pass<'_> {
     fn writer(&self, actor: &Value) -> bool {
         actor["login"].as_str().is_some_and(|login| {
@@ -16,7 +31,10 @@ impl Pass<'_> {
     }
     fn writers(&self, list: &Value, field: &str) -> bool {
         list["nodes"].as_array().is_some_and(|nodes| {
-            list["totalCount"].as_u64() == Some(nodes.len() as u64)
+            // GitHub prunes intermediate body edits once 100 are retained.
+            // Equality at that limit no longer proves that every editor is known.
+            nodes.len() < 100
+                && list["totalCount"].as_u64() == Some(nodes.len() as u64)
                 && nodes.iter().all(|e| {
                     self.writer(&e[field])
                         && (e["deletedBy"].is_null() || self.writer(&e["deletedBy"]))
@@ -26,7 +44,7 @@ impl Pass<'_> {
     fn authored(&self, text: &Value) -> bool {
         self.writer(&text["author"]) && self.writers(&text["userContentEdits"], "editor")
     }
-    pub(super) fn written(&self, repo: &str, rest: &Value) -> Option<(Value, Vec<Value>)> {
+    pub(super) fn written(&self, repo: &str, rest: &Value) -> Option<Written> {
         let (owner, name) = repo.split_once('/')?;
         let mut cursor = None;
         let mut comments = Vec::new();
@@ -68,7 +86,7 @@ impl Pass<'_> {
         }
     }
 
-    fn checked(&self, rest: &Value, issue: &Value) -> Option<(Value, Vec<Value>)> {
+    fn checked(&self, rest: &Value, issue: &Value) -> Option<Written> {
         let nodes = issue["comments"]["nodes"].as_array()?;
         // Fail closed if pagination did not establish the complete history.
         if issue["comments"]["totalCount"].as_u64() != Some(nodes.len() as u64) {
@@ -85,7 +103,11 @@ impl Pass<'_> {
             );
         }
         let comments = nodes.iter().filter(|c| self.authored(c)).map(|c| json!({"id":c["databaseId"], "user":{"login": if c["author"]["__typename"] == "Bot" { json!(format!("{}[bot]", c["author"]["login"].as_str().unwrap_or_default().trim_end_matches("[bot]"))) } else { c["author"]["login"].clone() }}, "body":c["body"], "created_at":c["createdAt"]})).collect();
-        Some((safe, comments))
+        Some(Written {
+            issue: safe,
+            comments,
+            original: [issue["title"].clone(), issue["body"].clone()],
+        })
     }
 }
 
@@ -105,14 +127,22 @@ mod tests {
         for field in ["userContentEdits", "timelineItems"] {
             let mut edited = text();
             edited[field] = bad.clone();
-            let (safe, comments) = b.pass().checked(&rest, &edited).unwrap();
+            let Written {
+                issue: safe,
+                comments,
+                ..
+            } = b.pass().checked(&rest, &edited).unwrap();
             let prompt = b.pass().task("sam/box", &safe, &comments);
             assert!(!prompt.contains("trusted title"), "{field}: {prompt}");
             assert!(!prompt.contains("trusted body"), "{field}: {prompt}");
         }
         let mut edited = text();
         edited["comments"]["nodes"][0]["userContentEdits"] = bad;
-        let (safe, comments) = b.pass().checked(&rest, &edited).unwrap();
+        let Written {
+            issue: safe,
+            comments,
+            ..
+        } = b.pass().checked(&rest, &edited).unwrap();
         assert!(
             !b.pass()
                 .task("sam/box", &safe, &comments)
@@ -122,7 +152,11 @@ mod tests {
     #[test]
     fn authorized_snapshot_reaches_the_job() {
         let b = Box::new();
-        let (safe, comments) = b.pass().checked(&issue(7, "sam", &[]), &text()).unwrap();
+        let Written {
+            issue: safe,
+            comments,
+            ..
+        } = b.pass().checked(&issue(7, "sam", &[]), &text()).unwrap();
         let prompt = b.pass().task("sam/box", &safe, &comments);
         for s in ["trusted title", "trusted body", "trusted reply"] {
             assert!(prompt.contains(s));
@@ -141,7 +175,7 @@ mod tests {
             let mut t = text();
             t["userContentEdits"] = history;
             assert_eq!(
-                b.pass().checked(&rest, &t).unwrap().0["title"],
+                b.pass().checked(&rest, &t).unwrap().issue["title"],
                 "Issue text withheld"
             );
         }
@@ -164,8 +198,42 @@ mod tests {
         t["author"] = bot.clone();
         t["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":bot}]});
         t["comments"]["nodes"][0]["author"] = bot;
-        let (safe, comments) = b.pass().checked(&issue(7, "worker[bot]", &[]), &t).unwrap();
+        let Written {
+            issue: safe,
+            comments,
+            ..
+        } = b.pass().checked(&issue(7, "worker[bot]", &[]), &t).unwrap();
         assert_eq!(safe["title"], "trusted title");
         assert!(b.pass().heard(&comments[0]));
+    }
+    #[test]
+    fn retained_authorized_edits_cannot_hide_a_pruned_outsider() {
+        let b = Box::new();
+        for count in [99, 100] {
+            let history =
+                json!({"totalCount":count,"nodes":vec![json!({"editor":{"login":"sam"}}); count]});
+            for comment in [false, true] {
+                let mut t = text();
+                if comment {
+                    t["comments"]["nodes"][0]["userContentEdits"] = history.clone();
+                } else {
+                    t["userContentEdits"] = history.clone();
+                }
+                let Written {
+                    issue, comments, ..
+                } = b.pass().checked(&issue(7, "sam", &[]), &t).unwrap();
+                let prompt = b.pass().task("sam/box", &issue, &comments);
+                let retained = if comment {
+                    "trusted reply"
+                } else {
+                    "trusted body"
+                };
+                assert_eq!(
+                    prompt.contains(retained),
+                    count < 100,
+                    "{count} edits, comment={comment}"
+                );
+            }
+        }
     }
 }

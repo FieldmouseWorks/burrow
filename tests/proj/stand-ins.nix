@@ -186,8 +186,9 @@
       done
       issue="/tmp/gh/repos_''${owner}_''${name}_issues_''${n}"
       comments="''${issue}_comments"
+      [ -e "$issue" ] || issue="/tmp/gh/repos_''${owner}_''${name}_issues"
       [ -e "$comments" ] || comments=${pkgs.writeText "no-comments.json" "[]"}
-      exec ${pkgs.jq}/bin/jq -n --slurpfile i "$issue" --slurpfile c "$comments" -f ${./written.jq}
+      exec ${pkgs.jq}/bin/jq -n --argjson n "$n" --slurpfile i "$issue" --slurpfile c "$comments" -f ${../../crates/burrow-proj/src/inbox/written.jq}
     fi
     slurp="" post=""
     while [ $# -gt 0 ]; do
