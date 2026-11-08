@@ -27,27 +27,25 @@ import subprocess
 import sys
 
 import common as C
+import stages as S
 import waits
 from common import CFG, DRY, log, repo_cfg
 
 CONARY = CFG["conary"]
 CONTEXT = CFG["trainContext"]
-# Why the train holds a PR out, as cn says it, and until what, in words.
-HELD = {"red": "it was red alone in it, until a new head",
-        "conflict": "it won't merge after the PRs ahead of it, until they've landed or left",
+# Why the train holds a PR out, as cn says it: until what, in words, and
+# the stage that leaves it at (stages.py). Never the train's own, whose label
+# is Renovate's stop label: one held out is free for its bot to rebase.
+HELD = {"red": ("it was red alone in it, until a new head", S.FIX),
+        "conflict": ("it won't merge after the PRs ahead of it, until they've landed or left", S.BASE),
         # Its merge changes nothing after them: once they've landed, it's
         # closed (step.py's mergeable), or left to its dependency bot.
-        "empty": "it changes nothing after the PRs ahead of it, until they've landed or left",
-        "refused": "{}, until the default branch moves or a new head",
-        "elsewhere": "it was just retargeted off the default branch, so it's seen to again",
+        "empty": ("it changes nothing after the PRs ahead of it, until they've landed or left", S.BASE),
+        "refused": ("{}, until the default branch moves or a new head", S.BASE),
+        "elsewhere": ("it was just retargeted off the default branch, so it's seen to again", S.REVIEW),
         # Why its negative (the repo's trainNegative) doesn't count, as cn
-        # says it, its head's id cut short.
-        "unproven": "{}, until a run of it on this head counts"}
-# The PR's waiting label while it's in the train (labels.waiting.train,
-# prs.show_waiting), put on and taken off with its status. Renovate's
-# stopUpdatingLabel is the same label: a new head on a PR in a candidate
-# throws the candidate away, gate and all, and one behind it would be next.
-LABEL = "train"
+        # says it, its head's id cut short: its CI runs it.
+        "unproven": ("{}, until a run of it on this head counts", S.CI)}
 TRAINS = {}  # each train repo's train, as this pass read it (begin)
 # The train repos this pass mustn't step, and why: a PR in the train it
 # couldn't take out, or wasn't sure was still settled.
@@ -140,18 +138,21 @@ def seat(repo, n):
     if not t or not any(m["pr"] == n for m in t["joined"]):
         return None
     flight = next((c for c in t["candidates"] if c["candidate"] == t["in_flight"]), None)
+    # The PRs that joined before it, in flight or not: the train takes them
+    # in the order they joined.
+    ahead = next(i for i, m in enumerate(t["joined"]) if m["pr"] == n)
     if flight is None:
-        return "next in line"
+        return f"{ahead} ahead of it" if ahead else "next in line"
     with_ = " ".join(f"#{p}" for p in flight["prs"] if p != n)
     if n not in flight["prs"]:
-        return f"behind candidate {short(flight['candidate'])}"
+        return f"behind candidate {short(flight['candidate'])}, {ahead} ahead of it"
     doing = "landing" if flight["state"]["state"] == "green" else "gating"
     return f"{doing} in candidate {short(flight['candidate'])}" + (f" with {with_}" if with_ else "")
 
 
 def join(repo, pr, reviewed):
     """Put the PR in the train at its head. None once it's in, else why the
-    train holds it out (HELD's) and what cn said of it, if anything. cn
+    train holds it out (a key of HELD) and what cn said of it, if anything. cn
     classes it by the machine's policy, as `cn class` does: an R2 one rides
     in a candidate of its own, which lands only while the default branch is
     still its base. It names the raise labels this pass settled it with
@@ -195,19 +196,23 @@ def ride(repo, pr, st, desc, settle, strike, said, reviewed):
     n, head = pr["number"], pr["headRefOid"]
     if C.queued(pr) and not C.unland(repo, pr):
         strike("status")
-        settle("pending", "Settled, but GitHub didn't take its queued merge off; trying again")
+        settle("pending", "Settled, but GitHub didn't take its queued merge off; trying again", stage=S.MERGE)
         return
     where = seat(repo, n) if st.get("joined") == head else None
     if where is None:
         held = join(repo, pr, reviewed)
         if held:
             held, why = held
-            said = HELD.get(held, held).format(why or said or "GitHub refused its merge")
-            settle("pending", f"Settled, but held out of the train: {said}", wait=waits.TRAIN)
+            until, stage = HELD.get(held, (held, S.BASE))
+            said = until.format(why or said or "GitHub refused its merge")
+            settle("pending", f"Settled, but held out of the train: {said}", stage=stage, wait=waits.TRAIN)
             return
         st["joined"] = head
         where = seat(repo, n)
-    if not settle("success", f"In the train, {where}. {desc}"[:140], wait=waits.TRAIN, label=LABEL) and not DRY:
+    # Its stage's label is Renovate's stopUpdatingLabel too (updates.nix): a
+    # new head on a PR in a candidate throws the candidate away, gate and
+    # all, and one behind it would be next.
+    if not settle("success", f"In the train, {where}. {desc}"[:140], stage=S.TRAIN, wait=waits.TRAIN) and not DRY:
         # Without its status cn wouldn't land it (Conary#55): out until
         # GitHub takes it (settle strikes it).
         leave(repo, pr)

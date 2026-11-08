@@ -219,23 +219,19 @@ fn keep(
     p.save(name, st)
 }
 
-/// The labels, each with its colour and what it says: the waiting ones say
-/// what a PR waits on, and that its status says more.
-pub(crate) fn labels(cfg: &Config) -> Vec<(String, &'static str, String)> {
-    let (l, w, says) = (
-        &cfg.settle.labels,
-        &cfg.settle.labels.waiting,
-        &cfg.settle.context,
-    );
-    vec![
+/// The labels, each with its colour and what it says: then one for each
+/// stage of the pipeline a PR can be at, as labels.nix says them.
+pub(crate) fn labels(cfg: &Config) -> Vec<(String, String, String)> {
+    let l = &cfg.settle.labels;
+    let mut all = vec![
         (
             l.hold.clone(),
-            "fbca04",
+            "fbca04".into(),
             "The steward leaves this PR alone".into(),
         ),
         (
             l.owner.clone(),
-            "b60205",
+            "b60205".into(),
             format!(
                 "Waits for {}; take the label off to let the steward carry on",
                 cfg.owner
@@ -243,39 +239,21 @@ pub(crate) fn labels(cfg: &Config) -> Vec<(String, &'static str, String)> {
         ),
         (
             l.first.clone(),
-            "0e8a16",
+            "0e8a16".into(),
             "Goes ahead of the PRs without it in the line for proofs that take the machine".into(),
         ),
         (
             l.batch.clone(),
-            "0366d6",
+            "0366d6".into(),
             "Renovate's batch of a trusted owner's branch pins, which the steward lands once settled".into(),
         ),
-        (
-            w.release_age.clone(),
-            "c5def5",
-            format!(
-                "Its updates are too new to take yet (the minimum release age); {says} says until when"
-            ),
-        ),
-        (
-            w.proof_slot.clone(),
-            "c5def5",
-            format!(
-                "Waits its turn for a proof slot on the machine; {says} says how many are ahead"
-            ),
-        ),
-        (
-            w.reviewer.clone(),
-            "c5def5",
-            format!("Waits for a reviewer to be back in service; {says} says which and why"),
-        ),
-        (
-            w.train.clone(),
-            "c5def5",
-            format!("In its merge train, which lands it; {says} says where. Renovate leaves it be"),
-        ),
-    ]
+    ];
+    all.extend(
+        l.waiting
+            .values()
+            .map(|w| (w.name.clone(), w.color.clone(), w.description.clone())),
+    );
+    all
 }
 
 /// One label, made or brought in line: whether that went through.
