@@ -6,6 +6,7 @@
 #
 #   nix build .#checks.x86_64-linux.switch -L
 { self, pkgs }:
+assert import ./switch-timeouts.nix { inherit self pkgs; nixpkgs = self.inputs.nixpkgs; };
 pkgs.testers.runNixOSTest {
   name = "switch";
 

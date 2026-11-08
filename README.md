@@ -83,7 +83,11 @@ Each has an entry below, and each can be imported on its own.
   revert run. Enabled services must have bounded stop timeouts (including the
   manager default and `TimeoutSec`): the module rejects zero, infinity and
   time spans it cannot establish as positive integer seconds, minutes, hours
-  or days. This also bounds stopping a start that ignores SIGTERM. Finite
+  or days within systemd's microsecond range. Boolean and list values are
+  rejected. Abort failure modes also require a bounded effective
+  `TimeoutAbortSec`, inheriting the manager default or falling back to the
+  stop timeout when empty. This also covers stopping a start that ignores
+  SIGTERM. Finite
   stops can still delay the revert; existing generations and hand-written
   unit files need the same discipline. `--abort` reverts at once; with `flakeInputs` it refuses a system
   built from an older nixpkgs. With `trialBoot` (GRUB), `HOST-boot` boots a

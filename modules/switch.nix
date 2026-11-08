@@ -79,24 +79,42 @@ let
   # else count as unbounded (null), so the check below errs towards flagging.
   seconds = span:
     let
-      m = builtins.match "([0-9]+) *([a-z]*)" (toString span);
-      unit = {
+      m = if builtins.isString span || builtins.isInt span
+        then builtins.match "([0-9]+) *([a-z]*)" (toString span) else null;
+      unit = if m == null then null else {
         "" = 1; s = 1; sec = 1; second = 1; seconds = 1;
         m = 60; min = 60; minute = 60; minutes = 60;
         h = 3600; hr = 3600; hour = 3600; hours = 3600;
         d = 86400; day = 86400; days = 86400;
       }.${lib.elemAt m 1} or null;
-    in if m == null || unit == null || lib.toInt (lib.head m) == 0 then null
-      else lib.toInt (lib.head m) * unit;
+      # Strip leading zeros before conversion; reject huge integers before
+      # lib.toInt can overflow. systemd stores microseconds in uint64_t, with
+      # UINT64_MAX reserved for infinity. Divide before multiplying in Nix.
+      digits = if m == null then null else builtins.match "0*([1-9][0-9]*)" (lib.head m);
+      n = if digits == null || builtins.stringLength (lib.head digits) > 14
+        then null else lib.toInt (lib.head digits);
+    in if unit == null || n == null || n > builtins.div 18446744073709 unit then null
+      else n * unit;
 
   # Stops can belong to an earlier activation or to the revert itself. There
   # is no safe way to attribute PID 1's jobs to a killed activation, so require
   # bounded stops on every enabled service, even ones not restarted on change.
   # TimeoutSec supplies both timeouts unless the stop timeout overrides it.
   defaultStop = config.systemd.settings.Manager.DefaultTimeoutStopSec or "90s";
+  stopTimeout = sc: sc.TimeoutStopSec or (sc.TimeoutSec or defaultStop);
+  defaultAbort = config.systemd.settings.Manager.DefaultTimeoutAbortSec or "";
+  abortTimeout = sc:
+    let t = sc.TimeoutAbortSec or defaultAbort;
+    in if t == "" then stopTimeout sc else t;
   unboundedStops = lib.attrNames (lib.filterAttrs (_: s:
-    s.enable && seconds (s.serviceConfig.TimeoutStopSec or
-      (s.serviceConfig.TimeoutSec or defaultStop)) == null
+    s.enable && (seconds (stopTimeout s.serviceConfig) == null
+      || (let sc = s.serviceConfig; in
+        !builtins.elem (sc.TimeoutStopFailureMode or "terminate") [ "terminate" "abort" "kill" ]
+        || !builtins.elem (sc.TimeoutStartFailureMode or "terminate") [ "terminate" "abort" "kill" ]
+        ||
+        ((sc.TimeoutStopFailureMode or "terminate") == "abort"
+          || (sc.TimeoutStartFailureMode or "terminate") == "abort")
+        && seconds (abortTimeout sc) == null))
   ) config.systemd.services);
 
   # RemainAfterExit as systemd reads it: free-form, so a Nix bool or any of
@@ -192,6 +210,9 @@ in
           Set systemd.settings.Manager.DefaultTimeoutStopSec and each enabled
           service's effective TimeoutStopSec (including TimeoutSec) to a positive
           integer with a seconds, minutes, hours or days unit, never 0 or infinity.
+          Values must be strings or integers within systemd's microsecond range.
+          Abort failure modes also need a bounded TimeoutAbortSec (inheriting
+          DefaultTimeoutAbortSec, or falling back to TimeoutStopSec when empty).
           Unbounded or unrecognised service timeouts: ${lib.concatStringsSep ", " unboundedStops}.
           restartIfChanged = false does not exempt a service: dependencies and
           removing a unit can still stop it during a switch or revert.'';
