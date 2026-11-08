@@ -1,5 +1,5 @@
 # lib/project.nix's package leaves the workspace's tests out of its source
-# (its testPath): the same workspace without them makes the same package,
+# (its cargoTests): the same workspace without them makes the same package,
 # but not the same rust-test, which runs them. So a PR that changes only
 # tests rebuilds the checks that run tests, not every check built from the
 # programs, and the negative run (flake-check.yml) builds just those.

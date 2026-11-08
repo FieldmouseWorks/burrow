@@ -5,7 +5,18 @@ version = 4
 [[package]]
 name = "house-fixture"
 version = "0.1.0"
+dependencies = [
+ "house-fixture-support",
+]
 
 [[package]]
 name = "house-fixture-member"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-support"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-tests-crate"
 version = "0.1.0"

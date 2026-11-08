@@ -1,0 +1,5 @@
+# A member named tests, found by a glob, which the package builds.
+[package]
+name = "house-fixture-tests-crate"
+version = "0.1.0"
+edition = "2024"

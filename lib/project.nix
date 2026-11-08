@@ -106,7 +106,7 @@ let
     src = lib.cleanSourceWith {
       src = (craneFor pkgs).cleanCargoSource rustDir;
       name = "source";
-      filter = path: type: !(testPath (rootToml.workspace.members or [ ]) (lib.removePrefix "${toString rustDir}/" (toString path)) type);
+      filter = path: type: !(cargoTests (toString path) type);
     };
     strictDeps = true;
     nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
@@ -192,20 +192,52 @@ let
       kept = lib.genAttrs (map (x: x.key) reached) (_: true);
     in
     lockToml // { package = builtins.filter (p: kept ? ${lockKey p}) lockToml.package; };
-  # A crate's tests, as Cargo lays them out: a `tests` directory (integration
-  # tests, or a module's `mod tests;` as tests/mod.rs) or a `tests.rs` file,
-  # at REL in the workspace, unless it's one of the workspace's MEMBERS or
-  # holds one. Cargo builds a package's library and programs without them
-  # (`#[cfg(test)] mod tests;` drops the module before its file is read),
-  # and a package runs no test (doCheck = false), so its source leaves them
-  # out, and a change to a test alone leaves the package, and every check
-  # built from it, as it was. The checks that run tests (rustChecks) take
-  # the whole directory. The negative run (flake-check.yml) builds only the
-  # checks a PR's tests change, so it builds those, not every machine test
-  # that runs the programs.
-  testPath = members: rel: type:
-    ((type == "directory" && baseNameOf rel == "tests") || (type == "regular" && baseNameOf rel == "tests.rs"))
-    && !(lib.any (d: rel == d || lib.hasPrefix "${rel}/" d) members);
+  # Whether PATH (a source file's absolute path) of TYPE is tests that
+  # Cargo builds a package's library and programs without, which a package
+  # leaves out of its source: it runs no test (doCheck = false), so a change
+  # to a test alone leaves the package, and every check built from it, as it
+  # was. The checks that run tests (rustChecks) take the whole directory,
+  # and the negative run (flake-check.yml) builds only the checks a PR's
+  # tests change, so it builds those, not every machine test that runs the
+  # programs. Only what Cargo itself says is tests, and nothing a build
+  # could need:
+  # - a package's integration tests: the `tests` directory beside a
+  #   manifest with a [package], when the manifest declares no [[test]]
+  #   (Cargo checks a declared target's file is there) and no target or
+  #   build script under it, and nothing in it is a crate of its own;
+  # - a module named tests (`tests.rs` or `tests/`) that the module beside
+  #   it declares only as `#[cfg(test)] mod tests;`, which Cargo drops
+  #   before reading its file. One declared any other way, or by no module
+  #   found beside it (a program in src/bin named tests), stays.
+  cargoTests = path: type:
+    let
+      name = baseNameOf path;
+      dir = dirOf path;
+      at = p: /. + p;
+      manifest = "${dir}/Cargo.toml";
+      toml = readToml (at manifest);
+      targets = lib.concatMap (k: toml.${k} or [ ]) [ "bin" "example" "bench" ]
+        ++ lib.optional (toml ? lib) toml.lib;
+      paths = map (t: t.path or "") targets ++ [ (toString (toml.package.build or "")) ];
+      underTests = p: lib.hasPrefix "tests/" (lib.removePrefix "./" p);
+      integration = type == "directory" && name == "tests"
+        && builtins.pathExists (at manifest) && toml ? package && !(toml ? test)
+        && !(lib.any underTests paths)
+        && !(lib.any (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive (at path)));
+      # The modules that could declare this one: the directory's own (mod.rs,
+      # or DIR.rs beside it) and a crate root in it.
+      declaring = builtins.filter (f: builtins.pathExists (at f))
+        (map (f: "${dir}/${f}") [ "mod.rs" "lib.rs" "main.rs" ] ++ [ "${dir}.rs" ]);
+      # Each `mod tests;` in them, as whether `#[cfg(test)]` is just before it.
+      declarations = lib.concatMap
+        (f: map (m: builtins.elemAt m 0 != null) (builtins.filter builtins.isList
+          (builtins.split "(#[[]cfg[(]test[)][]][[:space:]]*)?(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+tests[[:space:]]*;"
+            (builtins.readFile (at f)))))
+        declaring;
+      module = ((type == "regular" && name == "tests.rs") || (type == "directory" && name == "tests"))
+        && declarations != [ ] && lib.all (x: x) declarations;
+    in
+    (name == "tests" || name == "tests.rs") && (integration || module);
   hasBinary = dir:
     (memberToml dir).bin or [ ] != [ ]
     || builtins.pathExists (rustDir + "/${dir}/src/main.rs")
@@ -227,7 +259,7 @@ let
         filter = path: type:
           let rel = lib.removePrefix "${toString rustDir}/" (toString path); in
           lib.any (d: rel == d || lib.hasPrefix "${d}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" d)) dirs
-          && !(testPath dirs rel type);
+          && !(cargoTests (toString path) type);
       };
       cargoLockParsed = lockFor dirs;
       postPatch = "cp ${cargoToml} Cargo.toml";
