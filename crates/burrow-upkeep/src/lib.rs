@@ -8,7 +8,8 @@
 //! as their verdicts (verdict.rs), carried to a head that only merged its
 //! base in (carry.rs), and what they leave, swept once nothing
 //! needs it (sweep.rs); and for its Claude jobs that settle a PR (claims.rs),
-//! their answers, posted only once the PR's head is their push (answer.rs). A
+//! their answers, posted only once the PR's head is their push (answer.rs);
+//! and a PR's commits, read whole for who made them (commits.rs). A
 //! pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
 //! `watch`, on each repo it sees to, with the App's token for the repo's
@@ -24,6 +25,7 @@ pub mod branches;
 pub mod brief;
 pub mod carry;
 pub mod claims;
+pub mod commits;
 pub mod config;
 pub mod dashboard;
 pub mod flaky;
