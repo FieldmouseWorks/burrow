@@ -318,3 +318,32 @@ fn asking_job_resumes_on_steward_entry_without_posting_the_question_again() {
     assert!(posted.contains("Handled the steward entry."));
     assert!(!b.log().contains("state=closed"));
 }
+
+#[test]
+fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
+    let had = issue(7, "sam", &["claude"]);
+    let comments = [said(1, "The owner answered the question.")];
+    let mut b = Box::new();
+    let d = finished(&mut b, &had, 0, &comments, &had);
+    let job = b.cfg.jobs.join("j1");
+    fs::write(job.join("1.end"), "ask\n").unwrap();
+    fs::write(job.join("open-question"), "ask\n").unwrap();
+    b.cfg.tools.systemd_run = "false".into();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&had))
+        .unwrap();
+    assert!(job.join("open-question").exists());
+    assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "0\n");
+    b.cfg.tools.systemd_run = "true".into();
+    b.pass().jobs("sam/box", "box", &[had]).unwrap();
+    assert!(!job.join("open-question").exists());
+    assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
+    assert!(
+        !fs::read_to_string(job.join("prompt.2"))
+            .unwrap()
+            .contains("Do not repeat")
+    );
+    assert!(
+        crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask").contains("with your question")
+    );
+}

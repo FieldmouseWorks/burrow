@@ -29,6 +29,21 @@ const SPENT: &str = "Your last run was refused before it finished: Claude was ou
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
+    start_with(cfg, id, msg, first, false)
+}
+
+/// An explicit operator or authorized human issue reply answers the question.
+pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
+    start_with(cfg, id, msg, first, true)
+}
+
+fn start_with(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    first: bool,
+    answered: bool,
+) -> Result<(), String> {
     let job = Job::new(cfg, id);
     let unit = job.unit();
     let end = job.end_unit();
@@ -56,6 +71,8 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
             .parse()
             .map_err(|_| format!("proj: {id}'s turns isn't a number: {t}"))?,
     };
+    let question = crate::question::Resume::prepare(&job, answered)?;
+    let msg = question.prompt(msg);
     let n = last + 1;
     // The last turn's waits are the new turn's to clear (exec), so a turn
     // that can't start, or a start killed partway, leaves the job as it was.
@@ -105,6 +122,7 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
         undo();
         return Err(couldnt());
     }
+    question.commit();
     rewatch(cfg, &[id]);
     Ok(())
 }

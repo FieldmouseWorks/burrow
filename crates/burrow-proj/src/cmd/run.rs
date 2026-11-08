@@ -308,7 +308,11 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
         let usage = "usage: proj reply [--first] [--cut-off N] ID \"message\"";
         let id = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
-        self::reply(cfg, id, &args[i + 1], new.first, cutoff.as_deref())?;
+        if let Some(n) = cutoff.as_deref() {
+            self::reply(cfg, id, &args[i + 1], new.first, Some(n))?;
+        } else {
+            reply_answer(cfg, id, &args[i + 1], new.first)?;
+        }
         id.to_owned()
     } else {
         let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
@@ -447,6 +451,22 @@ pub fn reply(
     first: bool,
     cutoff: Option<&str>,
 ) -> Result<(), Fail> {
+    resume(cfg, id, msg, first, cutoff, false)
+}
+
+/// A person's explicit answer, rather than a machinery update or retry.
+pub(crate) fn reply_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Fail> {
+    resume(cfg, id, msg, first, None, true)
+}
+
+fn resume(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    first: bool,
+    cutoff: Option<&str>,
+    answered: bool,
+) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     let no = if cutoff.is_some() { 3 } else { 1 };
     if !filled(&job.path("session")) {
@@ -467,7 +487,12 @@ pub fn reply(
     {
         return Err(Fail::new(3, format!("{id}'s turn {n} wasn't cut off")));
     }
-    start(cfg, id, msg, first).map_err(|e| Fail::new(1, e))
+    if answered {
+        crate::turn::start_answer(cfg, id, msg, first)
+    } else {
+        start(cfg, id, msg, first)
+    }
+    .map_err(|e| Fail::new(1, e))
 }
 
 /// A new job's dir, named for its project and when it started, unique even
@@ -514,7 +539,10 @@ fn id_name(project: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{New, find, id_name, key_lock, key_name, kick_name, since_time, start_job};
+    use super::{
+        Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer,
+        since_time, start, start_job,
+    };
 
     #[test]
     fn id_names() {
@@ -749,5 +777,75 @@ mod tests {
         assert!(start_job(&cfg, &new, "p", "task").is_err());
         let held = std::fs::read_link(tmp.path().join("jobs/.keys/j")).unwrap();
         assert!(held.to_str() != Some("p-2") && held.to_str().unwrap().starts_with("p-"));
+    }
+
+    #[test]
+    fn question_state_follows_resume_source_and_only_successful_starts() {
+        for source in ["operator", "issue-author", "update", "watcher", "cutoff"] {
+            for succeeds in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut cfg = keyed(tmp.path(), "not-found");
+                cfg.tools.systemd_run = if succeeds { "true" } else { "false" }.into();
+                let job = Job::new(&cfg, "j1");
+                fs::create_dir_all(&job.dir).unwrap();
+                job.set_turns(1).unwrap();
+                fs::write(job.path("session"), "s1\n").unwrap();
+                fs::write(job.turn("1", "end"), "ask\n").unwrap();
+                fs::write(job.path("open-question"), "ask\n").unwrap();
+                if source == "cutoff" {
+                    fs::write(
+                        job.turn("1", "jsonl"),
+                        "{\"type\":\"system\",\"session_id\":\"s1\"}\n",
+                    )
+                    .unwrap();
+                } else {
+                    fs::write(job.turn("1", "outcome"), "done\n").unwrap();
+                }
+                let result = match source {
+                    "operator" => {
+                        crate::cmd::dispatch(&cfg, &["reply".into(), "j1".into(), "answer".into()])
+                    }
+                    "issue-author" => reply_answer(&cfg, "j1", "answer", true),
+                    "update" => reply(&cfg, "j1", "update", true, None),
+                    "cutoff" => reply(&cfg, "j1", "retry", true, Some("1")),
+                    "watcher" => {
+                        let _held = job.lock().unwrap();
+                        start(&cfg, "j1", "watcher update", false).map_err(|e| Fail::new(1, e))
+                    }
+                    _ => unreachable!(),
+                };
+                assert_eq!(result.is_ok(), succeeds, "{source}: {result:?}");
+                let answered = matches!(source, "operator" | "issue-author") && succeeds;
+                assert_eq!(
+                    job.path("open-question").exists(),
+                    !answered,
+                    "{source}, succeeds={succeeds}"
+                );
+                assert_eq!(
+                    job.turns().as_deref(),
+                    Some(if succeeds { "2" } else { "1" })
+                );
+                let response = crate::cmd::declaration_tests::response(&cfg, "j1", "ask");
+                assert_eq!(
+                    response.contains("with your question"),
+                    answered,
+                    "{source}: {response}"
+                );
+                if succeeds {
+                    let prompt = fs::read_to_string(job.path("prompt.2")).unwrap();
+                    assert_eq!(
+                        prompt.contains("Do not repeat the question"),
+                        !answered,
+                        "{source}: {prompt}"
+                    );
+                } else {
+                    assert_eq!(
+                        fs::read_to_string(job.path("open-question")).unwrap(),
+                        "ask\n"
+                    );
+                    assert!(!job.path("prompt.2").exists());
+                }
+            }
+        }
     }
 }

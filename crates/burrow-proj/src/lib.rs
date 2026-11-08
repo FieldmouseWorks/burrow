@@ -159,6 +159,7 @@ pub mod guest;
 pub mod inbox;
 pub mod job;
 pub mod pick;
+mod question;
 mod roles;
 pub mod scratch;
 pub mod setups;

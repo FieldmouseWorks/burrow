@@ -16,6 +16,7 @@ use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
 mod run;
 
+pub(crate) use run::reply_answer;
 pub use run::{New, reply, start_job};
 
 /// What a command prints: a reader that's gone (`proj status | head`) is no
@@ -509,6 +510,7 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
         ));
     }
     let job = Job::new(cfg, &id);
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     put(declare_end(&job, how)?);
     Ok(())
 }
