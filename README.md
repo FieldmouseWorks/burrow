@@ -422,7 +422,8 @@ Each has an entry below, and each can be imported on its own.
   can't be had. LFS uses the same broker for GitHub HTTP requests, ignoring
   user headers, netrc, cookies and client certificates in the App's env.
   Object storage uses only the signed URLs and headers the batch API returns.
-  Custom transfer programs are refused in the App's environment.
+  Action URLs cannot change origin through rewrites or redirects. Custom
+  transfer programs are refused in the App's environment.
 
 ## Assumptions
 

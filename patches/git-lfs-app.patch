@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/lfshttp/app.go
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,109 @@
 +package lfshttp
 +
 +import (
@@ -67,13 +67,14 @@
 +	}
 +	action, hasAction := req.Context().Value(appActionKey{}).(appAction)
 +	if hasAction {
++		if action.origin != originOf(req.URL) {
++			return nil, fmt.Errorf("acting as the App, LFS action cannot change origin")
++		}
 +		for key := range action.headers {
 +			req.Header.Del(key)
 +		}
-+		if action.origin == originOf(req.URL) {
-+			for key, values := range action.headers {
-+				req.Header[key] = append([]string(nil), values...)
-+			}
++		for key, values := range action.headers {
++			req.Header[key] = append([]string(nil), values...)
 +		}
 +	}
 +	host := strings.ToLower(req.URL.Hostname())
@@ -111,7 +112,7 @@
 +}
 --- /dev/null
 +++ b/lfshttp/app_test.go
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,165 @@
 +package lfshttp
 +
 +import (
@@ -120,7 +121,6 @@
 +	"net/http"
 +	"os"
 +	"path/filepath"
-+	"strings"
 +	"testing"
 +)
 +
@@ -178,8 +178,8 @@
 +			t.Fatal("mutated original request")
 +		}
 +	}
-+	// Both href rewriting and a redirect from storage to GitHub must drop
-+	// every batch credential, including headers other than Authorization.
++	// Both href rewriting and redirects must reject origin changes, since
++	// the path and query may contain credentials as well as the headers.
 +	for _, redirect := range []bool{false, true} {
 +		req, _ := http.NewRequest("GET", "https://storage.example/object", nil)
 +		req.Header.Set("X-Storage-Token", "batch")
@@ -190,11 +190,11 @@
 +			u, _ := http.NewRequest("GET", "https://github.com/sam/r.git/info/lfs/object", nil)
 +			req.URL = u.URL
 +		}
-+		if _, err := transport.RoundTrip(req); err != nil {
-+			t.Fatal(err)
++		if _, err := transport.RoundTrip(req); err == nil {
++			t.Fatal("accepted action origin change")
 +		}
 +	}
-+	if sent != 4 {
++	if sent != 2 {
 +		t.Fatal(sent)
 +	}
 +	for _, url := range []string{"http://github.com/sam/r", "https://other.example/sam/r", "https://github.com/eve/r", "https://github.com/sam/r%0apath=eve/r"} {
@@ -208,7 +208,7 @@
 +	if _, err := transport.RoundTrip(req); err == nil {
 +		t.Fatal("accepted missing broker")
 +	}
-+	if sent != 4 {
++	if sent != 2 {
 +		t.Fatal("sent a request without broker authorization")
 +	}
 +}
@@ -242,13 +242,40 @@
 +		t.Fatal(err)
 +	}
 +	transport.next = appSend(func(r *http.Request) (*http.Response, error) {
-+		if strings.Contains(r.Header.Get("Authorization"), "Basic") || r.Header.Get("Cookie") != "" || r.Header.Get("X-Storage-Token") != "" {
-+			t.Error("forwarded credentials across origins")
-+		}
-+		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
++		t.Fatal("sent action credentials across origins")
++		return nil, nil
 +	})
-+	if _, err := transport.RoundTrip(redirected); err != nil {
-+		t.Fatal(err)
++	if _, err := transport.RoundTrip(redirected); err == nil {
++		t.Fatal("accepted cross-origin redirect")
++	}
++}
++
++func TestAppSignedActionOrigins(t *testing.T) {
++	// All action constructors ultimately send through this boundary. A token
++	// may be in any path component or query, so origin changes fail entirely.
++	transport := appTransport{next: appSend(func(r *http.Request) (*http.Response, error) {
++		t.Fatal("sent signed action to a rewritten or redirected origin")
++		return nil, nil
++	})}
++	for _, method := range []string{"GET", "PUT", "HEAD", "PATCH", "POST"} {
++		for _, original := range []string{"https://storage.example/capability-secret/object", "https://storage.example/object?token=batch-secret"} {
++			for _, target := range []string{"https://mirror.example/", "https://github.com/sam/r/", "https://storage.example:444/"} {
++				req, _ := http.NewRequest(method, original, nil)
++				req, _ = AppAction(req, original, nil)
++				redirected, err := newRequestForRetry(req, target+"capability-secret/object?token=batch-secret")
++				if err != nil {
++					t.Fatal(err)
++				}
++				if _, err := transport.RoundTrip(redirected); err == nil {
++					t.Fatal("accepted signed redirect")
++				}
++				rewritten, _ := http.NewRequest(method, target+"capability-secret/object?token=batch-secret", nil)
++				rewritten, _ = AppAction(rewritten, original, nil)
++				if _, err := transport.RoundTrip(rewritten); err == nil {
++					t.Fatal("accepted signed rewrite")
++				}
++			}
++		}
 +	}
 +}
 --- a/lfshttp/client.go

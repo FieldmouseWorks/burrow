@@ -60,6 +60,12 @@ let
         def do_POST(self):
             auth = self.record()
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "/verify-redirect/" in self.path:
+                self.send_response(307)
+                self.send_header("Location", "https://github.com" + self.path.replace("/verify-redirect/", "/verify/"))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if "/verify/" in self.path:
                 self.send_response(200)
                 self.send_header("Content-Length", "0")
@@ -71,20 +77,36 @@ let
             href = "https://github.com/sam/r.git/info/lfs/" + ("redirect/" if operation == "download" else "objects/") + oid
             action = {"href": href}
             if "/storage" in self.path:
-                action = {"href": "https://storage.example/sam/r.git/info/lfs/objects/" + oid, "header": {"Authorization": "Basic " + base64.b64encode(b"storage:batch").decode(), "X-Storage-Token": "batch"}}
+                action = {"href": "https://storage.example/sam/r.git/info/lfs/objects/capability-secret/" + oid + "?token=batch-secret", "header": {"Authorization": "Basic " + base64.b64encode(b"storage:batch").decode(), "X-Storage-Token": "batch"}}
             if "/storage-redirect.git/" in self.path:
                 action["href"] = action["href"].replace("/objects/", "/to-github/")
             if "/reject" in self.path:
                 action = {"href": "https://" + ("storage.example" if "storage" in self.path else "github.com") + "/sam/r.git/info/lfs/" + ("redirect/" if operation == "download" else "objects/") + "reject/" + oid}
             actions = {operation: action}
-            if "/storage.git/" in self.path and operation == "upload":
-                actions["verify"] = {"href": "https://storage.example/sam/r.git/info/lfs/verify/" + oid, "header": {"Authorization": "Basic " + base64.b64encode(b"storage:verify").decode()}}
-            response = json.dumps({"transfer": "test" if "/custom.git/" in self.path else "basic", "objects": [{"oid": oid, "size": len(data), "authenticated": "/reject-authenticated" in self.path, "actions": actions}]}).encode()
+            if "/storage" in self.path and operation == "upload":
+                actions["verify"] = {"href": "https://storage.example/sam/r.git/info/lfs/" + ("verify-redirect/" if "/storage-verify-redirect.git/" in self.path else "verify/") + "capability-secret/" + oid + "?token=verify-secret", "header": {"Authorization": "Basic " + base64.b64encode(b"storage:verify").decode()}}
+            response = json.dumps({"transfer": "test" if "/custom.git/" in self.path else ("tus" if "/storage-tus" in self.path and operation == "upload" else "basic"), "objects": [{"oid": oid, "size": len(data), "authenticated": "/reject-authenticated" in self.path, "actions": actions}]}).encode()
             self.send_response(200 if auth else 401)
             self.send_header("Content-Type", "application/vnd.git-lfs+json")
             self.send_header("Content-Length", str(len(response)))
             self.end_headers()
             self.wfile.write(response)
+
+        def do_HEAD(self):
+            self.record()
+            self.send_response(200)
+            self.send_header("Upload-Offset", "0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_PATCH(self):
+            self.record()
+            data = self.rfile.read(int(self.headers["Content-Length"]))
+            assert data == b"LFS object\n"
+            self.send_response(204)
+            self.send_header("Upload-Offset", str(len(data)))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def do_PUT(self):
             self.record()
@@ -539,7 +561,7 @@ pkgs.testers.runNixOSTest {
               f"git config http.extraHeader '{header}'",
               f"git config http.https://github.com/sam/r.git/info/lfs.extraHeader '{header}'",
               f"git config http.https://github.com/sam/r.git/info/lfs/objects/batch.extraHeader '{header}'",
-              "git config lfs.transfer.maxretries 0",
+              "git config lfs.transfer.maxretries 1",
               "git config lfs.locksverify false",
               "git config filter.lfs.process '${pkgs.git-lfs}/bin/git-lfs filter-process'",
               f"git config http.sslCert {peter}.pem",
@@ -604,11 +626,15 @@ pkgs.testers.runNixOSTest {
               machine.succeed(": > /tmp/logins")
               repo = "storage" if rewritten else "storage-redirect"
               rewrite = "-c lfs.transfer.enablehrefrewrite=true -c url.https://github.com/sam/r.git/info/lfs/objects/.insteadOf=https://storage.example/sam/r.git/info/lfs/objects/ " if rewritten else ""
-              out = machine.succeed(dev(f"git {rewrite}-c lfs.url=https://github.com/sam/{repo}.git/info/lfs lfs smudge < pointer", at="~/lfs"))
-              assert out == data.decode(), out
+              status, out = machine.execute(dev(f"git {rewrite}-c lfs.url=https://github.com/sam/{repo}.git/info/lfs lfs smudge < pointer", at="~/lfs"))
               got = machine.succeed("cat /tmp/logins").splitlines()
-              objects = [line for line in got if "/objects/" in line]
-              assert objects and all("x-access-token:ghs_" in line and "storage-token:" not in line and "storage:batch" not in line for line in objects), got
+              assert status != 0, (out, got)
+              assert not any("/objects/" in line and "/objects/batch" not in line for line in got), got
+          # A rewrite within the action's origin still retains signed paths,
+          # queries and headers, and completes the transfer.
+          machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+          same = "-c lfs.transfer.enablehrefrewrite=true -c url.https://storage.example/sam/r.git/info/lfs/objects/renamed/.insteadOf=https://storage.example/sam/r.git/info/lfs/objects/ "
+          assert machine.succeed(dev("git " + same + "-c lfs.url=https://github.com/sam/storage.git/info/lfs lfs smudge < pointer", at="~/lfs")) == data.decode()
           # An unpatched LFS shows the regression with the same credentials.
           machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
           machine.succeed(": > /tmp/logins")
@@ -629,6 +655,23 @@ pkgs.testers.runNixOSTest {
           got = machine.succeed("cat /tmp/logins").splitlines()
           assert any("/verify/" in line and "storage:verify" in line for line in got), got
           assert not any("peter" in line for line in got), got
+          for resumable in [False, True]:
+              repo = "storage-tus" if resumable else "storage"
+              options = f"-c lfs.tustransfers=true -c lfs.url=https://github.com/sam/{repo}.git/info/lfs "
+              machine.succeed(": > /tmp/logins")
+              machine.succeed(dev("git " + options + "lfs push --object-id origin " + oid, at="~/lfs"))
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert any("capability-secret" in line and "token=batch-secret" in line and "storage:batch" in line for line in got), got
+              machine.succeed(": > /tmp/logins")
+              rewrite = "-c lfs.transfer.enablehrefrewrite=true -c url.https://github.com/sam/r.git/info/lfs/objects/.insteadOf=https://storage.example/sam/r.git/info/lfs/objects/ "
+              machine.fail(dev("git " + options + rewrite + "lfs push --object-id origin " + oid, at="~/lfs"))
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert not any("capability-secret" in line or "token=batch-secret" in line for line in got), got
+          machine.succeed(": > /tmp/logins")
+          machine.fail(dev("git -c lfs.url=https://github.com/sam/storage-verify-redirect.git/info/lfs lfs push --object-id origin " + oid, at="~/lfs"))
+          got = machine.succeed("cat /tmp/logins").splitlines()
+          assert any("/verify-redirect/" in line and "token=verify-secret" in line for line in got), got
+          assert not any("/verify/" in line for line in got), got
           # Both values of authenticated must return a bounded failure for
           # uploads and downloads instead of recursively retrying a 401.
           for repo in ["reject", "reject-authenticated", "reject-storage", "reject-authenticated-storage"]:
