@@ -57,7 +57,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     Move::Cancel { repo, run, .. } => {
                         state.cancels.insert(format!("{repo}#{run}"), now);
                     }
-                    Move::Fresh { .. } | Move::Retire { .. } => {}
+                    Move::PrivateFresh { .. } | Move::Fresh { .. } | Move::Retire { .. } => {}
                 }
                 save(dir, "state.json", &state)?;
                 let done = match &m {
@@ -67,6 +67,16 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                         Some(f) => world.fresh(f, instance),
                         None => Err("the machine has no fresh runners".into()),
                     },
+                    Move::PrivateFresh { repo, instance, .. } => {
+                        match snap
+                            .private
+                            .iter()
+                            .find(|(f, _)| f.repository.as_ref() == Some(repo))
+                        {
+                            Some((f, _)) => world.fresh(f, instance),
+                            None => Err("private repository was not discovered".into()),
+                        }
+                    }
                     Move::Retire { unit, .. } => world.restart(unit, "stop"),
                 };
                 done.map_or_else(|e| e, |()| "ok".to_owned())
@@ -84,14 +94,36 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     state.log.drain(..keep);
     save(dir, "state.json", &state)?;
     let changed = items != was;
-    save(dir, "watch.json", &File { at: now, items })?;
+    save(
+        dir,
+        "watch.json",
+        &File {
+            at: now,
+            items: items.clone(),
+        },
+    )?;
     // What's new may fall due before the watchdog's booked pass, and what
     // has moved on is no stall.
     if let (true, Some(w)) = (changed, &cfg.watchdog) {
         world.kick(w);
     }
     let wake: BTreeMap<&str, f64> = wake.into_iter().map(|t| ("", t)).collect();
-    save(dir, "wake.json", &wake)
+    save(dir, "wake.json", &wake)?;
+    if cfg.private.is_some() {
+        let current = Decision {
+            items,
+            ..Decision::default()
+        };
+        save(
+            dir,
+            "status.json",
+            &SavedStatus {
+                at: now,
+                report: render(cfg, &snap, &state, &current, false),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Whether the move is still called for, looked at again just before it's
@@ -114,7 +146,7 @@ fn still(world: &dyn World, m: &Move) -> Result<(), String> {
         }
         // A start that turns out to be one too many is a runner stopped
         // `quiet` later.
-        Move::Fresh { .. } => Ok(()),
+        Move::Fresh { .. } | Move::PrivateFresh { .. } => Ok(()),
         Move::Retire { unit, .. } => {
             let now = world.unit(unit);
             if now.busy {
@@ -139,9 +171,26 @@ fn still(world: &dyn World, m: &Move) -> Result<(), String> {
     }
 }
 
-/// What it sees, what it waits on and what it would do now, with the moves
-/// it has made: changing nothing.
+/// What it sees and waits on, with the moves it has made: changing nothing.
+/// Private discovery needs the service's credential, so shell status reads
+/// its timestamped report instead of trying to mint an installation token.
 pub fn status(cfg: &Config, world: &dyn World, now: f64) -> String {
+    if cfg.private.is_some() {
+        return match std::fs::read(cfg.state_dir.join("status.json"))
+            .map_err(|e| e.to_string())
+            .and_then(|b| serde_json::from_slice::<SavedStatus>(&b).map_err(|e| e.to_string()))
+        {
+            Ok(saved) => format!(
+                "dispatch snapshot at {} ({} seconds ago):\n{}",
+                clock(saved.at),
+                (now - saved.at).max(0.0) as u64,
+                saved.report
+            ),
+            Err(e) => format!(
+                "no saved dispatch status; the service has not published a readable snapshot: {e}"
+            ),
+        };
+    }
     let dir = &cfg.state_dir;
     let st: State = load(dir, "state.json");
     let was = watch::read(&dir.join("watch.json"))
@@ -149,8 +198,18 @@ pub fn status(cfg: &Config, world: &dyn World, now: f64) -> String {
         .unwrap_or_default();
     let snap = snapshot::take(cfg, world);
     let d = decide(cfg, &snap, &st, &was, now);
+    render(cfg, &snap, &st, &d, true)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedStatus {
+    at: f64,
+    report: String,
+}
+
+fn render(cfg: &Config, snap: &Snapshot, st: &State, d: &Decision, planned: bool) -> String {
     let mut out = String::new();
-    seen(&mut out, cfg, &snap);
+    seen(&mut out, cfg, snap);
     for it in d.items.values() {
         let _ = writeln!(
             out,
@@ -160,7 +219,7 @@ pub fn status(cfg: &Config, world: &dyn World, now: f64) -> String {
             clock(it.due)
         );
     }
-    for m in &d.moves {
+    for m in d.moves.iter().filter(|_| planned) {
         let _ = writeln!(out, "would {}: {}", m.what(), m.why());
     }
     for done in &st.log {
@@ -198,6 +257,22 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             if s.unit.busy { "at a job" } else { "idle" },
             s.queued.len()
         );
+    }
+    for (f, pool) in &snap.private {
+        match pool {
+            Ok(p) => {
+                let _ = writeln!(
+                    out,
+                    "private runners ({}): {} up; {} queued",
+                    f.owner,
+                    p.units.len(),
+                    p.queued.len()
+                );
+            }
+            Err(e) => {
+                let _ = writeln!(out, "private runners ({}): {e}", f.owner);
+            }
+        }
     }
     if let (Some(f), Some(Err(e))) = (&cfg.fresh, &snap.fresh) {
         let _ = writeln!(out, "fresh runners ({}): {e}", f.label);

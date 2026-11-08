@@ -217,6 +217,7 @@ fn a_testfiles_that_isnt_paths_cant_tell() {
         r#"[ "../x" ]"#,
         r#"[ "/tests" ]"#,
         r#""tests/**""#,
+        r#""null""#,
         r#"[ "tests/\n" ]"#,
     ] {
         let r = Repo::declaring(&format!("{{ testFiles = {runs}; }}"));

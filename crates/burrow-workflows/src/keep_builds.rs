@@ -197,13 +197,17 @@ fn a_negative_restores_every_legs_kept_builds() {
         .collect();
     assert_eq!(restores.len(), 8, "one a leg, up to eight");
     let first = at(&|s| uses(s, "actions/cache/restore@"));
-    let made = &all[first - 1];
+    let made = &all[at(&|s| s.get("run").is_some_and(|r| r == script(gate_made)))];
     let install = &all[at(&|s| uses(s, "cachix/install-nix-action@"))];
-    // After the paths step says whether there's a negative, the directory
-    // nix's config names first, then the restores, then nix, then the run.
-    assert!(at(&|s| s["id"] == "paths") < first - 1);
-    assert!(first + 8 <= at(&|s| uses(s, "cachix/install-nix-action@")));
-    assert!(at(&|s| uses(s, "cachix/install-nix-action@")) < at(&|s| s["id"] == "negative"));
+    // Provision Nix before the Rust paths step. Restore kept builds only
+    // after it says a negative is needed, and before that negative runs.
+    let install_at = at(&|s| uses(s, "cachix/install-nix-action@"));
+    let paths_at = at(&|s| s["id"] == "paths");
+    assert!(at(&|s| s.get("run").is_some_and(|r| r == script(gate_made))) < install_at);
+    assert!(install_at < paths_at);
+    assert!(paths_at < first);
+    assert!(first + 8 <= at(&|s| s["id"] == "negative"));
+    assert_eq!(install["if"], "inputs.install-nix");
     assert_eq!(script(made), script(gate_made));
     let base = |legs: u64| {
         ctx(&[
@@ -262,8 +266,11 @@ fn a_negative_restores_every_legs_kept_builds() {
         for r in &restores {
             assert!(!value(text(&r["if"]), &c).truthy(), "{key} {off:?}");
         }
-        if key != "github.event.pull_request.head.repo.full_name" {
+        if key.starts_with("inputs.") {
             assert!(!condition(text(&made["if"]), &c), "{key} {off:?}");
+        } else if key == "steps.paths.outputs.needs" {
+            // The compiler needs Nix even when the path filter finds none.
+            assert!(condition(text(&made["if"]), &c));
         }
     }
     assert!(condition(text(&made["if"]), &base(1)));

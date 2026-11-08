@@ -28,10 +28,10 @@ fn command(args: &[String]) -> Result<(), String> {
             let lock = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             lock.lock()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
-            run(&cfg, &Real(&cfg), now())
+            run(&cfg, &Real::new(&cfg), now())
         }
         [s] if s == "status" => {
-            println!("{}", status(&cfg, &Real(&cfg), now()));
+            println!("{}", status(&cfg, &Real::new(&cfg), now()));
             Ok(())
         }
         _ => Err("usage: burrow-dispatch [status]".into()),

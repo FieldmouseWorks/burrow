@@ -237,3 +237,72 @@ fn an_uncommitted_checkout_is_evaluated_as_it_is() {
     });
     assert!(meta, "{b}");
 }
+
+/// Rustup consults the working directory's toolchain file. A caller must
+/// not choose the compiler of the source-pinned runner that judges it.
+#[test]
+fn the_runner_compiles_outside_the_callers_checkout() {
+    let g = Gate::new();
+    let d = g.flake(r#"{ checks.${system}.a = drv "a"; }"#);
+    // Keep the real compiler Gate::new selected, but reject invocation in
+    // the caller tree, where rustup could read its rust-toolchain.toml.
+    let compiler = read(&g.s.join("compiler/bin/rustc"));
+    crate::harness::executable(
+        &g.s.join("compiler/bin/rustc"),
+        &format!(
+            "[ ! -e flake.nix ] || {{ echo 'compiler ran in caller checkout' >&2; exit 1; }}\n{compiler}"
+        ),
+    );
+    let r = g.apart(&d);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.build().contains("-a.drv^*"), "{}", r.out);
+}
+
+/// Only Git's output terminator may be removed: trimming the caller path
+/// can silently select a different repository, for root and nested flakes.
+#[test]
+fn checkout_path_whitespace_never_selects_a_sibling() {
+    for suffix in [" ", "\t", "\r"] {
+        let g = Gate::new();
+        let sibling = g.flake(r#"{ checks.${system}.sibling = drv "sibling"; }"#);
+        let caller = g.flake(r#"{ checks.${system}.caller = drv "caller"; }"#);
+        let parent = g.dir();
+        let caller_path = parent.join(format!("project{suffix}"));
+        fs::rename(&sibling, parent.join("project")).unwrap();
+        fs::rename(&caller, &caller_path).unwrap();
+        // A nested flake with whitespace in its directory tests Git's
+        // prefix as well as its top-level checkout path.
+        for root in [&parent.join("project"), &caller_path] {
+            let nested = root.join(format!("nested{suffix}"));
+            fs::create_dir(&nested).unwrap();
+            burrow_test::copy_file(root.join("flake.nix"), nested.join("flake.nix"));
+            g.s.git(root, &["add", "."]);
+            g.s.git(root, &["commit", "-qm", "nested flake"]);
+        }
+        for dir in [
+            caller_path.clone(),
+            caller_path.join(format!("nested{suffix}")),
+        ] {
+            let r = g.apart(&dir);
+            assert_eq!(r.code, 0, "{dir:?}: {}", r.out);
+            assert!(r.build().contains("-caller.drv^*"), "{dir:?}: {}", r.out);
+            assert!(!r.build().contains("-sibling.drv^*"), "{dir:?}: {}", r.out);
+        }
+    }
+}
+
+/// Self-hosted CI can expose rustup's proxy without a default toolchain.
+/// Provision the compiler with Nix instead of depending on that user state.
+#[test]
+fn a_rustup_proxy_with_no_default_is_not_used() {
+    let g = Gate::new();
+    let d = g.flake(r#"{ checks.${system}.a = drv "a"; }"#);
+    g.s.stub(
+        "rustc",
+        "echo 'rustup could not choose a version: no default is configured' >&2\nexit 1\n",
+    );
+    g.s.stub("cc", "echo no caller linker >&2; exit 1\n");
+    let r = g.apart(&d);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.build().contains("-a.drv^*"), "{}", r.out);
+}

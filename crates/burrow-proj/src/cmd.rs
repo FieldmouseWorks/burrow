@@ -16,6 +16,7 @@ use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
 mod run;
 
+pub(crate) use run::reply_answer;
 pub use run::{New, reply, start_job};
 
 /// What a command prints: a reader that's gone (`proj status | head`) is no
@@ -509,15 +510,26 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
         ));
     }
     let job = Job::new(cfg, &id);
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    put(declare_end(&job, how)?);
+    Ok(())
+}
+
+/// Record the declaration and return the instruction the engine receives.
+fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
     let _ = fs::remove_file(job.path("await.next"));
     fs::write(job.path("end.next"), format!("{how}\n"))
         .map_err(|e| io_fail(&job.path("end.next"), e))?;
-    put(if how == "ask" {
+    if how == "done" {
+        let _ = fs::remove_file(job.path("open-question"));
+    }
+    Ok(if how == "ask" && job.path("open-question").exists() {
+        "Noted. End your turn now without repeating the question already posted or pinging the owner again. The job is still waiting for their answer.\n"
+    } else if how == "ask" {
         "Noted. End your turn now with your question: the job is resumed when someone answers it.\n"
     } else {
         "Noted. End your turn now with your answer.\n"
-    });
-    Ok(())
+    })
 }
 
 /// After each turn, however it ended (proj-ended@ID, its unit's OnSuccess
@@ -692,5 +704,42 @@ esac
         // One that's over fails the lot, open ones with it.
         let (_, say) = await_on(&["8", "5"]).unwrap_err();
         assert!(say.contains("o/r#5 is merged already"), "{say}");
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod declaration_tests {
+    use super::*;
+
+    // Exercise the command dispatcher in a child so its job environment and
+    // stdout are the real ones, without mutating the test runner's environment.
+    pub(crate) fn response(cfg: &Config, id: &str, how: &str) -> String {
+        let output = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cmd::declaration_tests::command_child",
+                "--nocapture",
+            ])
+            .env("PROJ_TEST_END_JOBS", &cfg.jobs)
+            .env("PROJ_TEST_END_HOW", how)
+            .env("PROJ_JOB", id)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn command_child() {
+        let Some(jobs) = env::var_os("PROJ_TEST_END_JOBS") else {
+            return;
+        };
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = jobs.into();
+        dispatch(&cfg, &[env::var("PROJ_TEST_END_HOW").unwrap()]).unwrap();
     }
 }

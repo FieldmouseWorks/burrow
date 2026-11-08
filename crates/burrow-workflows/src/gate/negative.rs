@@ -272,7 +272,7 @@ fn every_pr_gets_one_from_the_workflows_own_files() {
         st[1]["with"],
         yaml(
             "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
-             path: .flake-check, persist-credentials: false, sparse-checkout: .github/flake-check}"
+             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates/burrow-flake-check\\n\"}"
         )
     );
     for (id, paths_only) in [("paths", "true"), ("negative", "false")] {
@@ -363,7 +363,7 @@ fn tests_that_dont_evaluate_on_the_old_code_fail_there() {
 }
 
 /// Tests alone, code alone, or tests only deleted: none needed, and nothing
-/// evaluated, nix not even installed for it.
+/// evaluated (Nix is used only to provision the bootstrap compiler).
 #[test]
 fn a_pr_that_adds_no_test_to_code_needs_none() {
     let r = Repo::new();

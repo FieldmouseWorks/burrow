@@ -86,6 +86,7 @@ dependencies = [
 name = "burrow-boot"
 version = "0.0.0"
 dependencies = [
+ "burrow-systemd",
  "burrow-test",
  "rustix",
  "serde",
@@ -117,12 +118,15 @@ version = "0.0.0"
 dependencies = [
  "burrow-events",
  "burrow-github",
+ "burrow-systemd",
  "burrow-test",
  "burrow-watchdog",
+ "gh-token",
  "jiff",
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]
@@ -170,6 +174,10 @@ dependencies = [
  "serde_json",
  "tempfile",
 ]
+
+[[package]]
+name = "burrow-flake-check"
+version = "0.0.0"
 
 [[package]]
 name = "burrow-github"
@@ -383,6 +391,13 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-systemd"
+version = "0.0.0"
+dependencies = [
  "tempfile",
 ]
 

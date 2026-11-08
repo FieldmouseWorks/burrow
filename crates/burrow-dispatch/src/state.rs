@@ -12,6 +12,7 @@ pub struct State {
     pub idle: BTreeMap<String, f64>,
     /// Since when jobs have waited for a fresh runner with room for more.
     pub fresh: Option<f64>,
+    pub private: BTreeMap<String, f64>,
     /// When a pass restarted (or started) each runner, the latest few.
     pub restarts: BTreeMap<String, Vec<f64>>,
     /// Each repo GitHub couldn't be read for, since when.

@@ -33,6 +33,7 @@ pub struct Config {
     pub switch: Option<Switch>,
     /// Runners started fresh for one job each, when the machine has them.
     pub fresh: Option<Fresh>,
+    pub private: Option<Private>,
 }
 
 /// Runners started fresh for one job each: registered just in time for it
@@ -43,6 +44,11 @@ pub struct Config {
 pub struct Fresh {
     /// The organization they're registered with.
     pub owner: String,
+    /// Repo registration and numeric instance namespace, for discovered repos.
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub scope: String,
     /// Its runner group's id.
     pub group: u64,
     /// OWNER/REPO, whose jobs they take.
@@ -117,5 +123,27 @@ impl Config {
         let path = std::env::var_os("DISPATCH_CONFIG").ok_or("DISPATCH_CONFIG isn't set")?;
         let text = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.to_string_lossy()))
+    }
+}
+
+/// Private repositories discovered through the steward App.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Private {
+    /// Unwrapped CLI: explicitly supplied steward tokens must survive.
+    pub gh: PathBuf,
+    pub owners: Vec<String>,
+    pub app: u64,
+}
+
+impl Fresh {
+    /// Org instances are TIME-INDEX; repo instances are REPO_ID-TIME-INDEX.
+    /// Every scope holds shared capacity, but only its own units can take jobs.
+    pub fn owns(&self, instance: &str) -> bool {
+        if self.scope.is_empty() {
+            instance.split('-').count() != 3
+        } else {
+            instance.split('-').count() == 3 && instance.starts_with(&self.scope)
+        }
     }
 }

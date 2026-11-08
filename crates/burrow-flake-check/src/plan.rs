@@ -1,4 +1,5 @@
-# The gate's plan, which gate.sh splices into each evaluation. With
+//! The expression spliced into each Nix evaluation.
+pub const PLAN: &str = r#"# The gate's plan, which gate.rs splices into each evaluation. With
 # eval-apart, what `nix flake check` checks of the outputs it knows,
 # given the flake's outputs as `nix eval` evaluates the checkout's
 # snapshot (purely, with the same source and self as nix flake
@@ -108,3 +109,4 @@ else
   if e.nixos or false then
     (if isDerivation v then { } else throw "'config.system.build.toplevel' of ${e.what} is not a derivation")
   else { drv = drvPath e v; }
+"#;

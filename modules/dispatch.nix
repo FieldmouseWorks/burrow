@@ -132,6 +132,13 @@ in
       });
     };
 
+    privateOwners = mkOption {
+      type = types.listOf types.str;
+      default = if config.burrow.autoland.enable or false then config.burrow.autoland.owners else [ ];
+      defaultText = lib.literalExpression "burrow.autoland.owners, when autoland is enabled";
+      description = "Owners whose private repositories get repo-scoped one-job runners automatically, using the steward App's Administration: write permission. Requires fresh.enable.";
+    };
+
     settings = mkOption {
       type = types.attrs;
       internal = true;
@@ -160,6 +167,11 @@ in
         };
         switch = if config.burrow.switch.enable or false
           then { state = "/run/${prefix}-switch"; revert = "${prefix}-revert"; } else null;
+        private = if !cfg.fresh.enable || cfg.privateOwners == [ ] then null else {
+          owners = cfg.privateOwners;
+          gh = "${pkgs.gh}/bin/gh";
+          app = config.burrow.autoland.app.id;
+        };
         fresh = if !cfg.fresh.enable then null else {
           inherit (cfg.fresh) owner group repos label prefix most idle template configs;
         };
@@ -210,8 +222,8 @@ in
     burrow.events.handlers.dispatch = {
       # A runner repo's jobs queued, started and done; a watched repo's main
       # moving.
-      events = [ "workflow_job" "push" ];
-      repos = lib.unique (lib.mapAttrsToList (_: r: r.repo) cfg.runners
+      events = [ "workflow_job" "push" "repository" ];
+      repos = if cfg.fresh.enable && cfg.privateOwners != [ ] then null else lib.unique (lib.mapAttrsToList (_: r: r.repo) cfg.runners
         ++ lib.optionals cfg.fresh.enable cfg.fresh.repos ++ lib.optionals deploying watched);
       pushes = "default";
       perRepo = false;
@@ -233,6 +245,9 @@ in
         User = user;
         ExecStart = "${dispatch}/bin/burrow-dispatch";
         TimeoutStartSec = "5min";
+        LoadCredential = lib.optionals (cfg.fresh.enable && cfg.privateOwners != [ ]) [
+          "app-key:${config.burrow.autoland.app.keyFile}"
+        ];
       };
     };
     systemd.tmpfiles.settings.burrow.${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
@@ -270,6 +285,9 @@ in
       For each job queued that asks for `${cfg.fresh.label}`, it starts a runner registered for that one job,
       `${cfg.fresh.template}INSTANCE` (named `${cfg.fresh.prefix}INSTANCE`, ${toString cfg.fresh.most} at most), keeps ${toString cfg.fresh.idle}
       started and waiting for jobs to come, and stops any other left idle.
+    '' + lib.optionalString (cfg.fresh.enable && cfg.privateOwners != [ ]) ''
+      Private repos of ${lib.concatStringsSep ", " cfg.privateOwners} are discovered automatically.
+      `burrow-dispatch status` reads the service's last timestamped snapshot; the App key stays in the service.
     '');
   } (lib.mkIf deploying {
     # HOST-update starting and ending moves what the deploy waits on.

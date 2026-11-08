@@ -4,7 +4,7 @@ use super::{claude_limit, is_error};
 use serde_json::Value;
 
 /// Whether a run ended refused for usage, and if so when Claude Code says
-/// the limit resets (None when it doesn't) and its words. `last` is the
+/// the limit resets (None when it doesn't) and a normalized limit name. `last` is the
 /// run's result; `stream` its lines, where the reset time is as a
 /// timestamp; failing that, its words say it ([`crate::limit`]), read at
 /// `now`.
@@ -17,6 +17,7 @@ pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, Str
         return None;
     }
     let mut until = None;
+    let mut named = None;
     for v in stream
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -25,10 +26,17 @@ pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, Str
             &v["api_error_params"]["rate_limit_info"],
             &v["rate_limit_info"],
         ] {
-            if info["status"] == "rejected"
-                && let Some(t) = info["resetsAt"].as_i64()
-            {
-                until = until.max(Some(t));
+            if info["status"] == "rejected" {
+                let name = match info["rateLimitType"].as_str() {
+                    Some("seven_day") => "weekly allowance",
+                    Some("five_hour") => "five-hour allowance",
+                    _ if info["overageStatus"] == "rejected" => "extra-usage cap",
+                    _ => "usage allowance",
+                };
+                if named.is_none() || info["resetsAt"].as_i64() > until {
+                    named = Some(name);
+                }
+                until = until.max(info["resetsAt"].as_i64());
             }
         }
     }
@@ -41,7 +49,10 @@ pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, Str
     }
     Some((
         until.or_else(|| claude_limit::resets(said, now)),
-        said.to_owned(),
+        format!(
+            "Claude reached its {}",
+            named.unwrap_or_else(|| limit_name(said))
+        ),
     ))
 }
 
@@ -58,3 +69,27 @@ fn limit_words(said: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// Older streams have only words; never pass their billing instructions on.
+fn limit_name(said: &str) -> &'static str {
+    let s = said.to_lowercase();
+    if s.contains("weekly") {
+        "weekly allowance"
+    } else if s.contains("5-hour") || s.contains("session limit") {
+        "five-hour allowance"
+    } else if s.contains("spend limit") {
+        "extra-usage cap"
+    } else {
+        "usage allowance"
+    }
+}
+
+/// Old holds contain the refusal verbatim. Preserve unrelated migration
+/// descriptions, but remove billing instructions from recognized refusals.
+pub(crate) fn normalize_refusal(said: &str) -> String {
+    if limit_words(said) {
+        format!("Claude reached its {}", limit_name(said))
+    } else {
+        said.to_owned()
+    }
+}

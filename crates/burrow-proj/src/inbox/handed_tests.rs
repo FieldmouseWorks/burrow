@@ -271,6 +271,89 @@ fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
 }
 
 #[test]
+fn asking_job_resumes_on_steward_entry_without_posting_the_question_again() {
+    let had = issue(7, "sam", &["claude"]);
+    let mut now = had.clone();
+    now["body"] = json!("A new steward entry needs handling.");
+    let mut b = Box::new();
+    let d = finished(&mut b, &had, 0, &[], &now);
+    let job = b.cfg.jobs.join("j1");
+    fs::write(job.join("1.end"), "ask\n").unwrap();
+    fs::write(
+        job.join("1.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"result", "result":"Which release should ship?"})
+        ),
+    )
+    .unwrap();
+    fs::write(d.join("answered"), "0\n").unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&now))
+        .unwrap();
+    let prompt = fs::read_to_string(job.join("prompt.2")).unwrap();
+    assert!(prompt.contains("Do not repeat the question"), "{prompt}");
+    assert!(prompt.contains("`proj ask` again without restating"));
+    let job_state = crate::job::Job::new(&b.cfg, "j1");
+    let response = crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask");
+    assert!(
+        response.contains("without repeating the question already posted"),
+        "{response}"
+    );
+    assert!(!response.contains("with your question"));
+    assert_eq!(
+        crate::read(&job_state.path("end.next")).as_deref(),
+        Some("ask")
+    );
+    // The resumed engine follows both the prompt and command response, handles the entry and asks
+    // again through the declaration, without repeating its posted question.
+    fs::write(
+        job.join("2.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"result", "result":"Handled the steward entry."})
+        ),
+    )
+    .unwrap();
+    fs::write(job.join("2.outcome"), "done\n").unwrap();
+    fs::write(job.join("2.end"), "ask\n").unwrap();
+    b.pass().jobs("sam/box", "box", &[now]).unwrap();
+    let posted = fs::read_to_string(b.path("posted")).unwrap();
+    assert_eq!(posted.matches("Which release should ship?").count(), 1);
+    assert!(posted.contains("Handled the steward entry."));
+    assert!(!b.log().contains("state=closed"));
+}
+
+#[test]
+fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
+    let had = issue(7, "sam", &["claude"]);
+    let comments = [said(1, "The owner answered the question.")];
+    let mut b = Box::new();
+    let d = finished(&mut b, &had, 0, &comments, &had);
+    let job = b.cfg.jobs.join("j1");
+    fs::write(job.join("1.end"), "ask\n").unwrap();
+    fs::write(job.join("open-question"), "ask\n").unwrap();
+    b.cfg.tools.systemd_run = "false".into();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&had))
+        .unwrap();
+    assert!(job.join("open-question").exists());
+    assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "0\n");
+    b.cfg.tools.systemd_run = "true".into();
+    b.pass().jobs("sam/box", "box", &[had]).unwrap();
+    assert!(!job.join("open-question").exists());
+    assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
+    assert!(
+        !fs::read_to_string(job.join("prompt.2"))
+            .unwrap()
+            .contains("Do not repeat")
+    );
+    assert!(
+        crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask").contains("with your question")
+    );
+}
+
+#[test]
 fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() {
     for state in ["closed", "open"] {
         let now = issue(7, "sam", &["claude"]);

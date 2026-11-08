@@ -188,7 +188,10 @@ let
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
       what's missing (CI that builds and runs the tests through the repo's flake, AGENTS.md with the house blocks and the shared
       "Code Review Rules" section, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
-      nothing else. Don't ask for a review or merge it: the steward does that.
+      nothing else. For a private repo, every CI job, including the house workflow, must use the
+      machine's runner rather than billed hosted runners.${lib.optionalString (config.burrow.dispatch.fresh.enable or false) " Set the shared workflow's runner input to ${config.burrow.dispatch.fresh.label}, and install-nix to false; dispatch discovers private repos and registers isolated one-job runners automatically."}
+      ${lib.optionalString (!(config.burrow.dispatch.fresh.enable or false)) "If no machine runner is available, open an issue identifying the missing runner before leaving CI queued."}
+      Don't ask for a review or merge it: the steward does that.
     '';
   };
 

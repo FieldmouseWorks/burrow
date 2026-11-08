@@ -104,6 +104,29 @@ struct Run<'a> {
 impl Gate {
     fn new() -> Gate {
         let s = Scratch::default();
+        // Nix provisioning has its own real build check. Here it returns an
+        // isolated compiler bundle, so workflow tests need no network/store
+        // dependencies for the bootstrap and still compile the actual runner.
+        let compiler = std::process::Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .unwrap();
+        assert!(compiler.status.success());
+        let sysroot = String::from_utf8(compiler.stdout).unwrap();
+        fs::create_dir_all(s.join("compiler/bin")).unwrap();
+        crate::harness::executable(
+            &s.join("compiler/bin/rustc"),
+            &format!("exec {}/bin/rustc \"$@\"\n", sysroot.trim()),
+        );
+        std::os::unix::fs::symlink(which("cc"), s.join("compiler/bin/cc")).unwrap();
+        let expression = repo_file(".github/flake-check/compiler.nix")
+            .canonicalize()
+            .unwrap();
+        s.stub("nix-build", &format!(r#"[ "$#" = 8 ] && [ "$1" = --extra-experimental-features ] && [ "$2" = 'nix-command flakes' ] || exit 90
+[ "$3" = '{}' ] && [ "$4" = --out-link ] && [ -d "${{5%/*}}" ] || exit 90
+[ "$6" = --option ] && [ "$7" = extra-substituters ] && [ -z "$8" ] || exit 90
+printf '%s\n' '{}'
+"#, expression.display(), s.join("compiler").display()));
         let nix = which("nix");
         let (real_nix, real_bin) = (nix.display(), nix.parent().unwrap().display());
         // No binary cache: nothing in a case's store comes from one, and
@@ -456,14 +479,14 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
         tools["with"],
         crate::harness::yaml(
             "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
-             path: .flake-check, persist-credentials: false, sparse-checkout: .github/flake-check}"
+             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates/burrow-flake-check\\n\"}"
         )
     );
     assert!(tools.get("if").is_none(), "{tools:?}");
     // The plan it splices in is beside it.
     assert!(
-        read(&repo_file(".github/flake-check/gate.sh"))
-            .contains(r#"plan=$(< "${BASH_SOURCE[0]%/*}/plan.nix")"#)
+        read(&repo_file("crates/burrow-flake-check/src/gate.rs"))
+            .contains("use super::plan::PLAN;")
     );
 }
 
