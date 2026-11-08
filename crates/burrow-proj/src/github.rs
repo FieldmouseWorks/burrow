@@ -45,7 +45,7 @@ pub(crate) fn fingerprint_until(
     n: &str,
     until: Option<Instant>,
 ) -> Option<Value> {
-    let gh = |args: &[&str]| api_command(cfg, args, None, until);
+    let gh = |args: &[&str]| api_until(cfg, args, until);
     // A comment, review or check past the first hundred is news too.
     let pages = |path: String| every_until(cfg, &path, until);
     let issue = gh(&[&format!("repos/{repo}/issues/{n}")])?;
@@ -125,7 +125,11 @@ pub fn over(fp: &Value) -> Option<&'static str> {
 /// What GitHub's REST API answers (`gh api ARGS`), or None when it can't be
 /// asked or doesn't answer with JSON.
 pub fn api(cfg: &Config, args: &[&str]) -> Option<Value> {
-    api_command(cfg, args, None, None)
+    api_until(cfg, args, None)
+}
+
+fn api_until(cfg: &Config, args: &[&str], until: Option<Instant>) -> Option<Value> {
+    api_command(cfg, args, None, until)
 }
 
 /// GraphQL fields are data, not authentication routing. Select the target
@@ -172,7 +176,7 @@ pub fn every(cfg: &Config, path: &str) -> Option<Vec<Value>> {
 }
 
 fn every_until(cfg: &Config, path: &str, until: Option<Instant>) -> Option<Vec<Value>> {
-    let got = api_command(cfg, &["--paginate", "--slurp", path], None, until)?;
+    let got = api_until(cfg, &["--paginate", "--slurp", path], until)?;
     Some(
         got.as_array()?
             .iter()
