@@ -287,15 +287,53 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
         assert!(d.exists());
         assert!(!b.posted().contains("unread author replies"));
         b.cfg.tools.systemctl = b.path("systemctl");
-        fs::write(b.path("fail"), "api graphql").unwrap();
-        b.pass().jobs("sam/box", "box", &[]).unwrap();
-        assert!(d.exists());
-        fs::write(b.path("fail"), "body=@-").unwrap();
-        b.pass().jobs("sam/box", "box", &[]).unwrap();
-        assert!(d.exists());
-        fs::remove_file(b.path("fail")).unwrap();
+        fs::write(
+            b.cfg.jobs.join("j1/await"),
+            "https://github.com/sam/box/pull/1\n",
+        )
+        .unwrap();
+        fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();
         b.pass().jobs("sam/box", "box", &[]).unwrap();
         assert!(!d.exists());
+        let retired = b
+            .cfg
+            .inbox
+            .as_ref()
+            .unwrap()
+            .state
+            .join(".retired/sam_box-7-j1");
+        assert!(retired.exists());
+        assert!(!b.cfg.jobs.join("j1/await").exists());
+        assert!(b.cfg.jobs.join("j1/1.stopped").exists());
+        fs::write(b.path("fail"), "api graphql").unwrap();
+        b.pass().retired("sam/box").unwrap();
+        assert!(retired.exists());
+        fs::write(b.path("fail"), "body=@-").unwrap();
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        assert!(!d.exists());
+        assert!(retired.exists());
+        // Reopening starts a fresh conversation while the old notice is pending.
+        b.cfg.projects = b.path("projects");
+        fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
+        fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+        b.cfg.tools.systemctl = "false".into();
+        b.pass()
+            .new_issues("sam/box", std::slice::from_ref(&now))
+            .unwrap();
+        let fresh = fs::read_to_string(d.join("job")).unwrap();
+        assert_ne!(fresh.trim(), "j1");
+        assert_eq!(
+            fs::read_to_string(b.cfg.jobs.join(fresh.trim()).join("turns"))
+                .unwrap()
+                .trim(),
+            "1"
+        );
+        assert!(!b.cfg.jobs.join(fresh.trim()).join("session").exists());
+        fs::remove_file(b.path("fail")).unwrap();
+        b.cfg.tools.systemctl = b.path("systemctl");
+        b.pass().retired("sam/box").unwrap();
+        assert!(!retired.exists());
+        assert_eq!(fs::read_to_string(d.join("job")).unwrap(), fresh);
         let posted = b.posted();
         assert!(posted.contains("unread author replies"), "{posted}");
         assert!(posted.contains("#issuecomment-6"), "{posted}");
@@ -318,4 +356,77 @@ fn retiring_an_issue_without_unread_replies_needs_no_notice() {
     b.pass().jobs("sam/box", "box", &[]).unwrap();
     assert!(!d.exists());
     assert!(!b.posted().contains("unread author replies"));
+}
+
+#[test]
+fn retirement_does_not_repeat_a_delivered_notice_when_stopping_failed() {
+    let now = issue(7, "sam", &["claude"]);
+    let mut b = Box::new();
+    let d = finished(&mut b, &now, 0, &[said(6, "one more")], &now);
+    // stop fails, but reporting can succeed independently.
+    b.pass().jobs("sam/box", "box", &[]).unwrap();
+    assert!(!d.exists());
+    let retired = b
+        .cfg
+        .inbox
+        .as_ref()
+        .unwrap()
+        .state
+        .join(".retired/sam_box-7-j1");
+    assert!(retired.join("reported").exists());
+    let posted = b.posted();
+    b.cfg.tools.systemctl = b.path("systemctl");
+    b.pass().retired("sam/box").unwrap();
+    assert!(!retired.exists());
+    assert_eq!(b.posted(), posted);
+}
+
+#[test]
+fn retirement_notices_resume_after_a_partial_delivery_with_bounded_bodies() {
+    use std::os::unix::fs::PermissionsExt;
+    let now = issue(7, "sam", &["claude"]);
+    let mut b = Box::new();
+    let comments: Vec<Value> = (1..=1400).map(|id| said(id, "one more")).collect();
+    finished(&mut b, &now, 0, &comments, &now);
+    b.cfg.tools.systemctl = b.path("systemctl");
+    // Reject the second batch; the first must never be sent again.
+    let hook = b.path("hook");
+    fs::write(
+        &hook,
+        format!(
+            r#"#!/bin/sh
+case "$*" in *body=@-*)
+    if [ -e '{first}' ]; then echo 'body=@-' >'{fail}'; else touch '{first}'; fi ;;
+esac
+"#,
+            first = b.path("first").display(),
+            fail = b.path("fail").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    b.pass().jobs("sam/box", "box", &[]).unwrap();
+    let first = b.posted();
+    assert!(first.contains("#issuecomment-1\n"));
+    assert!(!first.contains("#issuecomment-1400\n"));
+    fs::remove_file(hook).unwrap();
+    fs::remove_file(b.path("fail")).unwrap();
+    b.pass().retired("sam/box").unwrap();
+    let posted = b.posted();
+    for id in 1..=1400 {
+        assert_eq!(posted.matches(&format!("#issuecomment-{id}\n")).count(), 1);
+    }
+    // The fixture concatenates complete signed comments.
+    for body in posted.split_inclusive("_proj-inbox on box_\n") {
+        assert!(body.chars().count() <= 65536, "{}", body.chars().count());
+    }
+    assert!(
+        !b.cfg
+            .inbox
+            .as_ref()
+            .unwrap()
+            .state
+            .join(".retired/sam_box-7-j1")
+            .exists()
+    );
 }

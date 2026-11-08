@@ -164,7 +164,9 @@ into project jobs.
   issue as it stands. Closing it yourself, or taking the label off, ends the
   job too. If author replies arrived during its last turn and were never
   handed on, the inbox posts links to them before retiring the job. Reopen
-  and restore the job label to pick them up.
+  and restore the job label to pick them up. Notice delivery retries separately
+  from stopping the old job, so a reopened issue starts afresh even while a
+  notice is pending. Long lists of unread replies are delivered in batches.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
