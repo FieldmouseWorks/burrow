@@ -26,12 +26,10 @@ import reviewers as V
 import stages as S
 import stopping
 import train as T
-import waits
 from aside import aside
 from common import CFG, MIN, save, ts
-from seal import MAJOR as MAJOR_VERDICT
-from touches import automerge_spent, automerges, bot_edited, codex_written, dep_kind, gate_edit, moved_from, provenance
-from tasks import DEP_SEEN, FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
+from touches import bot_edited, codex_written, dep_kind, gate_edit, moved_from
+from tasks import FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
 from tasks import fix_task as fix_task, judge_task as judge_task, proof_task as proof_task, negative as negative
 from prs import ci_state, has_ci, our_status
 from prs import onto, land, MERGE_STEPS as MERGE_STEPS
