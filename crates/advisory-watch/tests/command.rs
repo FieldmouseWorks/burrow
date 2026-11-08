@@ -5,7 +5,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -13,23 +12,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const BIN: &str = env!("CARGO_BIN_EXE_advisory-watch");
 
-fn script(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
+use burrow_test::executable as script;
 
-/// The stand-ins, written once for every test: a file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy".
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
         let b = bin.path();
-        fs::set_permissions(b, fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::permissions(b, 0o755);
         // Runs it as it is, and never under itself.
         script(
-            &b.join("sudo"),
+            b.join("sudo"),
             r#"#!/bin/sh
 echo "$*" >>"$FAKE/sudo"
 [ "$IN_SUDO" = "" ] && [ "$1" = -- ] || exit 9
@@ -38,7 +32,7 @@ IN_SUDO=1 exec "$@"
 "#,
         );
         script(
-            &b.join("runuser"),
+            b.join("runuser"),
             r#"#!/bin/sh
 [ "$1" = -u ] && [ "$3" = -- ] || exit 9
 echo "$2 ${XDG_RUNTIME_DIR-unset} ${4##*/}" >>"$FAKE/runuser"
@@ -47,7 +41,7 @@ exec "$@"
 "#,
         );
         script(
-            &b.join("nix-store"),
+            b.join("nix-store"),
             r#"#!/bin/sh
 echo "$*" >>"$FAKE/nix-store"
 cat "$FAKE/store"
@@ -55,7 +49,7 @@ exit "$(cat "$FAKE/store-exit" 2>/dev/null || echo 0)"
 "#,
         );
         script(
-            &b.join("vulnix"),
+            b.join("vulnix"),
             r#"#!/bin/sh
 echo "$*" >>"$FAKE/vulnix"
 [ ! -e "$FAKE/vulnix.json" ] || cat "$FAKE/vulnix.json"
@@ -64,7 +58,7 @@ exit "$(cat "$FAKE/vulnix-exit" 2>/dev/null || echo 0)"
 "#,
         );
         script(
-            &b.join("osv-scanner"),
+            b.join("osv-scanner"),
             r#"#!/bin/sh
 for d; do :; done
 echo "$*" >>"$FAKE/osv-scanner"
@@ -75,7 +69,7 @@ exit "$(cat "$d/osv-exit" 2>/dev/null || echo 0)"
         );
         // Keeps each job's words and its task, and says its id.
         script(
-            &b.join("proj"),
+            b.join("proj"),
             r#"#!/bin/sh
 if [ -e "$FAKE/proj-exit" ]; then echo "proj: no" >&2; exit "$(cat "$FAKE/proj-exit")"; fi
 n=$(( $(cat "$FAKE/jobs" 2>/dev/null || echo 0) + 1 ))
@@ -184,7 +178,6 @@ impl Machine {
     }
 
     fn with_kev(places: &[&str]) -> Machine {
-        stand_ins();
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         for p in [
@@ -588,7 +581,7 @@ fn a_source_it_cant_read_is_passed_over_and_tried_again() {
     assert!(!m.path("state/vulnix-day").exists());
     // Once they can be read, it's their first pass.
     fs::remove_file(m.path("www/moved.status")).unwrap();
-    fs::copy(m.path("www/second.json"), m.path("www/moved.json")).unwrap();
+    burrow_test::copy_file(m.path("www/second.json"), m.path("www/moved.json"));
     m.set_vulnix("[]");
     fs::remove_file(m.path("fake/vulnix-exit")).unwrap();
     m.set_osv("app", &[("RUSTSEC-1", "rustls")]);
@@ -607,7 +600,7 @@ fn a_pass_started_as_anyone_else_goes_through_sudo() {
         // As nobody, who may write the state and read the rest.
         for p in ["", "state", "src", "fake", "www"] {
             fs::create_dir_all(m.path(p)).unwrap();
-            fs::set_permissions(m.path(p), fs::Permissions::from_mode(0o777)).unwrap();
+            burrow_test::permissions(m.path(p), 0o777);
         }
         c.uid(65534).gid(65534);
     }

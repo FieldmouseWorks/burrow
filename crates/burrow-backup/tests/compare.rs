@@ -24,7 +24,7 @@ impl Rig {
         let s = r.snap();
         for d in ["data", "data/proj", "data/proj/sub", "data/with space"] {
             fs::create_dir_all(s.join(d)).unwrap();
-            fs::set_permissions(s.join(d), fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::permissions(s.join(d), 0o755);
         }
         r.file(
             &s.join("data/proj/a.txt"),
@@ -73,7 +73,7 @@ impl Rig {
 
     fn file(&self, path: &Path, bytes: &[u8], mode: u32) {
         fs::write(path, bytes).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        burrow_test::permissions(path, mode);
         // A time with nanoseconds in it, as a restore must keep.
         let t = SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
         File::options()
@@ -103,10 +103,10 @@ impl Rig {
             symlink(fs::read_link(&from).unwrap(), &to).unwrap();
         } else if m.is_dir() {
             fs::create_dir_all(&to).unwrap();
-            fs::set_permissions(&to, m.permissions()).unwrap();
+            burrow_test::permissions(&to, m.permissions().mode());
         } else {
-            fs::copy(&from, &to).unwrap();
-            fs::set_permissions(&to, m.permissions()).unwrap();
+            burrow_test::copy_file(&from, &to);
+            burrow_test::permissions(&to, m.permissions().mode());
             File::options()
                 .write(true)
                 .open(&to)
@@ -294,7 +294,7 @@ fn a_fifo_restored_as_it_was_passes() {
     for at in [r.at("/data/proj/pipe"), r.tree("/data/proj/pipe")] {
         use rustix::fs::{CWD, Mode, mkfifoat};
         mkfifoat(CWD, &at, Mode::from_raw_mode(0o640)).unwrap();
-        fs::set_permissions(&at, fs::Permissions::from_mode(0o640)).unwrap();
+        burrow_test::permissions(&at, 0o640);
     }
     assert_eq!(
         r.compare(&["/data/proj"]),
@@ -329,11 +329,7 @@ fn what_the_snapshot_doesnt_have_fails() {
 #[test]
 fn other_metadata_fails() {
     let r = Rig::new();
-    fs::set_permissions(
-        r.tree("/data/proj/a.txt"),
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    burrow_test::permissions(r.tree("/data/proj/a.txt"), 0o600);
     let mtime = SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_000);
     File::options()
         .write(true)
@@ -341,7 +337,7 @@ fn other_metadata_fails() {
         .unwrap()
         .set_modified(mtime)
         .unwrap();
-    fs::set_permissions(r.tree("/data/proj/sub"), fs::Permissions::from_mode(0o700)).unwrap();
+    burrow_test::permissions(r.tree("/data/proj/sub"), 0o700);
     let v = r.compare(&["/data/proj"]);
     let (uid, gid) = {
         use std::os::unix::fs::MetadataExt;

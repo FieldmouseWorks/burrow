@@ -1,0 +1,7 @@
+# A comment between a path attribute and its module, whose file a
+# #[cfg(test)] module reads too: lib/project.nix reads the attribute as the
+# module's and keeps the file.
+[package]
+name = "house-fixture-remarked"
+version = "0.1.0"
+edition = "2024"

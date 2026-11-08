@@ -33,6 +33,7 @@ members = [
     "burrow-rustc-wrapper",
     "burrow-switch",
     "burrow-systemd",
+    "burrow-test",
     "burrow-units",
     "burrow-update",
     "burrow-upkeep",
