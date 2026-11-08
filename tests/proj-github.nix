@@ -337,6 +337,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       done = {"number": 1, "user": {"login": "sam"}, "html_url": "https://github.com/o/d/issues/1",
               "title": "t", "body": "inbox-done", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/d/issues", json.dumps([done]))
+      # A finished job's close is decided on the issue as GitHub has it then.
+      github("repos/o/d/issues/1", json.dumps(done))
       github("repos/o/d/issues/1/comments", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       dj = machine.succeed("grep -l 'issue o/d#1 ' /data/dev/jobs/*/prompt.1").split()[0].split("/")[-2]
