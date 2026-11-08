@@ -93,7 +93,23 @@ pub fn spawn(
         c.stderr(File::create(job.turn(n, "stderr"))?);
     }
     if let Some(agent) = agent {
-        c.args(["agent", "sh", agent, "claude"])
+        let next = if must {
+            format!("Before answering, run {NEXT}.")
+        } else {
+            "If you are waiting on GitHub, run `proj await URL` for each target before answering."
+                .into()
+        };
+        args.extend(["--append-system-prompt".into(), format!(
+            "This is a sandboxed proj job, running headless. {next} The sandbox's proj records your declaration locally; the host registers GitHub waits when your run ends. Anything left running is stopped with the VM at the end of the turn. {LONG}"
+        )]);
+        c.args(["agent", "sh", agent, "env"])
+            .arg(format!("PROJ_VM_NEXT={}", crate::guest::path(job, n)))
+            .args([
+                "sh",
+                "-c",
+                "rm -f -- \"$PROJ_VM_NEXT\"; exec claude \"$@\"",
+                "sh",
+            ])
             .args(&args)
             .stdin(File::open(prompt)?);
         return c.spawn();

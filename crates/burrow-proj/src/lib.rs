@@ -133,7 +133,12 @@
 //!
 //! With --vm the job runs in its own microVM on a clone of the project, where
 //! nothing is refused at all; the work comes back with `agent fetch` (the
-//! sandbox id is in the job's `agent` and in `proj status`).
+//! sandbox id is in the job's `agent` and in `proj status`). The guest's
+//! `proj await`, `ask` and `done` write a local declaration. After each run
+//! the host reads it through `agent sh`, takes any GitHub baselines then,
+//! and stops the VM before a nudge or the turn's end. No host job path or
+//! GitHub credential enters the guest. Silent turns get the same single
+//! nudge and undeclared stall as host turns.
 //!
 //! With --app every turn runs in that App's env (modules/github.nix), its
 //! file from apps, so git and gh act as the App: the machine's own work, not
@@ -150,6 +155,7 @@ pub mod cmd;
 pub mod config;
 pub mod engine;
 pub mod github;
+pub mod guest;
 pub mod inbox;
 pub mod job;
 pub mod pick;

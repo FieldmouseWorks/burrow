@@ -432,8 +432,16 @@ fn wait_on(cfg: &Config, targets: &[String]) -> Result<(), Fail> {
         found
             .push(target(t).ok_or_else(|| Fail::new(2, format!("not a GitHub PR or issue: {t}")))?);
     }
-    let job = Job::new(cfg, &id);
-    let text = baselines(cfg, &found, targets)?;
+    record_wait(cfg, &Job::new(cfg, &id), &found, targets)
+}
+
+pub(crate) fn record_wait(
+    cfg: &Config,
+    job: &Job,
+    found: &[(String, String)],
+    targets: &[String],
+) -> Result<(), Fail> {
+    let text = baselines(cfg, found, targets)?;
     let next = job.path("await.next");
     File::options()
         .append(true)
