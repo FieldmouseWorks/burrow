@@ -7,7 +7,8 @@
 //! settle a PR, posting each one's answers once its push is the PR's head;
 //! `fetch`, which fetches refs into the steward's mirror of a
 //! repo; `carry`, which works out from it which of a PR's earlier heads'
-//! looks cover its head; and `sweep`, which deletes what the reviewers leave of its closed
+//! looks cover its head; `commits`, which reads a PR's commits whole for
+//! who made them; and `sweep`, which deletes what the reviewers leave of its closed
 //! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
@@ -23,6 +24,7 @@ use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::carry;
 use burrow_upkeep::claims;
+use burrow_upkeep::commits::{self, Read as Commits};
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
 use burrow_upkeep::mirror;
@@ -98,6 +100,13 @@ const USAGE: &str = "usage:
       those carried and what the head hides from the reviewers (or null
       when no clean review could carry), or why it couldn't tell, as JSON
       on stdout; --dry reads only what it said last
+  burrow-upkeep CONFIG commits OWNER/REPO --now SECONDS [--dry]
+      a PR's commits, every one on its head since it left its base, read
+      whole from GitHub's compare a page at a time; a JSON object on stdin
+      gives the head's sha, the base branch, the bots' addresses and the
+      committers' that aren't an edit: whether a Codex job wrote one and
+      whether anyone but the bots made one, or why GitHub won't list them
+      all (short), or why they couldn't be read this time, as JSON on stdout
   burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
       what the reviewers leave of the repo's PRs, deleted once nothing needs
       it, a JSON list on stdin giving the snapshots of its open PRs' heads:
@@ -220,7 +229,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
     }
     if ![
         "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "carry",
-        "sweep",
+        "sweep", "commits",
     ]
     .contains(&word)
     {
@@ -293,6 +302,15 @@ fn run(args: &[String]) -> Result<(), Stop> {
         )?),
         _ => None,
     };
+    let reading = match word {
+        "commits" => Some(stdin::<commits::Ask>(
+            "the PR's head and base and the bots' addresses, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
+    if let Some(why) = reading.as_ref().and_then(commits::Ask::wrong) {
+        return Err(Stop::Usage(why));
+    }
     let open = match word {
         "branches" => Some(stdin::<BTreeSet<String>>(
             "the open PRs' branches, as a JSON list on stdin",
@@ -375,6 +393,19 @@ fn run(args: &[String]) -> Result<(), Stop> {
             out["limited"] = json!(p.out.limited);
             out
         }
+        ("commits", _) => {
+            let Some(ask) = &reading else {
+                return Err(Stop::Usage("no PR to read".into()));
+            };
+            let (commits, short, why) = match commits::read(&mut p, ask) {
+                Ok(Commits::Whole { codex, edited }) => {
+                    (Some(json!({"codex": codex, "edited": edited})), None, None)
+                }
+                Ok(Commits::Short(why)) => (None, Some(why), None),
+                Err(why) => (None, None, Some(why)),
+            };
+            json!({"commits": commits, "short": short, "why": why, "limited": p.out.limited})
+        }
         ("branches", Some(open)) => {
             let default = f
                 .default
@@ -401,7 +432,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose earlier looks may carry, the open PRs' snapshots, or the
+/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose earlier looks may carry, the PR whose commits are read, the open PRs' snapshots, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();

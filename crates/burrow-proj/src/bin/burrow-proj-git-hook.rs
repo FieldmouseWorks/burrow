@@ -27,7 +27,7 @@ enum Settings {
     /// themselves.
     Push,
     /// git's own defaults alone: how the steward reads a message
-    /// (modules/autoland/touches.py).
+    /// (crates/burrow-upkeep/src/commits.rs).
     Defaults,
 }
 
@@ -129,7 +129,7 @@ const MARK: &str = "Engine: codex";
 
 /// Whether `message` carries [`MARK`] as the steward reads it: a line of
 /// `git interpret-trailers --parse` with git's defaults, compared
-/// case-blind (modules/autoland/touches.py). The job's trailer settings
+/// case-blind (crates/burrow-upkeep/src/commits.rs). The job's trailer settings
 /// (`trailer.*.key`, which could make `fake: codex` read as the mark)
 /// don't apply.
 fn marked(message: &str) -> Result<bool, String> {
