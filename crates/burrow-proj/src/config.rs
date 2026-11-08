@@ -174,38 +174,25 @@ impl Config {
     /// so a typo never silently sends work to a different engine. Repo scopes
     /// beat bare roles; duplicate keys fail with both lines, even on other roles.
     pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Choice, String> {
-        let text = match std::fs::read_to_string(&self.roles) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("{}: {e}", self.roles.display())),
-        };
-        let mut entries = BTreeMap::new();
-        let now = crate::now();
-        // Out of Claude's usage: a line with an overflow moves off Claude.
-        let held = crate::usage::out(self).is_some();
-        for (i, line) in text.lines().enumerate() {
-            if line.trim().is_empty() || line.trim_start().starts_with('#') {
-                continue;
-            }
-            let (key, choice) = crate::engine::role(line, self.meters.as_deref(), held, now)
-                .map_err(|e| format!("{} line {}: {line}: {e}", self.roles.display(), i + 1))?;
-            if let Some((first, original, _)) = entries.get(&key) {
-                return Err(format!(
-                    "{}: duplicate role key: line {first}: {original}; line {}: {line}",
-                    self.roles.display(),
-                    i + 1
-                ));
-            }
-            entries.insert(key, (i + 1, line, choice));
-        }
+        let text = crate::roles::read(&self.roles)?;
+        let entries = crate::roles::parse(
+            &self.roles,
+            &text,
+            self.meters.as_deref(),
+            crate::usage::out(self).is_some(),
+            crate::now(),
+        )?;
         Ok(entries
             .into_iter()
-            .filter_map(|(key, (_, _, choice))| {
-                key.specificity(role, repo).map(|rank| (rank, choice))
-            })
+            .filter_map(|(key, choice)| key.specificity(role, repo).map(|rank| (rank, choice)))
             .max_by_key(|(rank, _)| *rank)
             .map(|(_, choice)| choice)
             .unwrap_or_default())
+    }
+
+    /// Everything a turn reads as configuration, with the same roles parser.
+    pub fn check(&self) -> Result<(), String> {
+        self.engine("", None).map(|_| ())
     }
 
     /// How long a turn may wait in line, in seconds.

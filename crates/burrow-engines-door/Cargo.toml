@@ -1,0 +1,21 @@
+[package]
+name = "burrow-engines-door"
+description = "Switch the machine's saved engine setups from an author's issue, without an agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-door = { path = "../burrow-door" }
+burrow-github = { path = "../burrow-github" }
+burrow-proj = { path = "../burrow-proj" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

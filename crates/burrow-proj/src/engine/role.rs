@@ -7,8 +7,8 @@ use std::path::Path;
 /// Role names keep their spelling; only the repo is case-insensitive.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RoleKey<'a> {
-    name: &'a str,
-    repo: Option<String>,
+    pub(crate) name: &'a str,
+    pub(crate) repo: Option<String>,
 }
 
 impl<'a> RoleKey<'a> {

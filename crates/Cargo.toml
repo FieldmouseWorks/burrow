@@ -13,6 +13,7 @@ members = [
     "burrow-dispatch",
     "burrow-door",
     "burrow-events",
+    "burrow-engines-door",
     "burrow-firmware",
     "burrow-github",
     "burrow-guard",

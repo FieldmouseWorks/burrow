@@ -41,6 +41,14 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
+        Some("check-config") if args.len() == 1 => cfg.check().map_err(|e| Fail::new(1, e)),
+        Some("engines") => {
+            let said = crate::setups::Store::new(&cfg.roles)
+                .command(&args[1..])
+                .map_err(|e| Fail::new(1, e))?;
+            put(&said);
+            Ok(())
+        }
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {

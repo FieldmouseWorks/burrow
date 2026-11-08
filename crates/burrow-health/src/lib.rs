@@ -21,6 +21,7 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -38,6 +39,9 @@ pub struct Config {
     pub name: String,
     /// Where the checks are.
     pub dir: PathBuf,
+    /// Checks that must pass even if they failed before a switch.
+    #[serde(default)]
+    pub required: Vec<String>,
     /// The user whose own units count too (burrow.user).
     pub user: String,
     pub systemctl: PathBuf,
@@ -155,15 +159,34 @@ pub fn regressions(before: &[Line], now: &[Line]) -> Vec<String> {
 /// The report now: every check, then the system's failed units and the
 /// user's.
 pub fn report(cfg: &Config) -> Vec<Line> {
-    let mut lines = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
+    report_detailed(cfg).0
+}
+
+/// The same report, with bounded output from failed checks for a deploy notice.
+pub fn report_detailed(cfg: &Config) -> (Vec<Line>, Vec<String>) {
+    let mut details = Vec::new();
+    let mut lines = checks(
+        &cfg.dir,
+        Duration::from_secs(cfg.check_timeout),
+        &mut details,
+    );
+    for name in &cfg.required {
+        if !lines.iter().any(|l| l.check() == Some(name)) {
+            lines.push(Line {
+                key: format!("{CHECK}{name}"),
+                state: State::Fail,
+            });
+            details.push(format!("{CHECK}{name}: required check is missing"));
+        }
+    }
     lines.extend(failed_units(cfg, false));
     lines.extend(failed_units(cfg, true));
-    lines
+    (lines, details)
 }
 
 /// Every executable in `dir` but its dotfiles, in name order, as a check
 /// that passes or fails.
-fn checks(dir: &Path, within: Duration) -> Vec<Line> {
+fn checks(dir: &Path, within: Duration, details: &mut Vec<String>) -> Vec<Line> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -176,16 +199,19 @@ fn checks(dir: &Path, within: Duration) -> Vec<Line> {
         .iter()
         .map(|n| dir.join(n))
         .filter(|path| rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok())
-        .map(|path| Line {
-            key: format!(
+        .map(|path| {
+            let key = format!(
                 "{CHECK}{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
-            ),
-            state: if passes(&path, within) {
-                State::Ok
-            } else {
-                State::Fail
-            },
+            );
+            let (passed, said) = checked(&path, within);
+            if !passed && !said.is_empty() {
+                details.push(format!("{key}: {}", said.trim()));
+            }
+            Line {
+                key,
+                state: if passed { State::Ok } else { State::Fail },
+            }
         })
         .collect()
 }
@@ -231,19 +257,31 @@ const GRACE: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 
 /// Whether the check at `path` exits 0 within `within`. It runs with
-/// nothing on stdin and its output thrown away, in a process group of its
+/// nothing on stdin and captures bounded diagnostics, in a process group of its
 /// own. One that runs out of time fails, and its whole group is stopped:
 /// TERM, as timeout(1) sends it, then after GRACE a KILL for whatever is
 /// left, so a check that ignores its TERM doesn't hold HOST-health up.
 pub fn passes(path: &Path, within: Duration) -> bool {
-    let Ok(mut child) = Command::new(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-    else {
-        return false;
+    checked(path, within).0
+}
+
+fn checked(path: &Path, within: Duration) -> (bool, String) {
+    // A file avoids a full stdout pipe deadlocking a check before it exits.
+    let output = match tempfile::tempfile() {
+        Ok(f) => f,
+        Err(e) => return (false, e.to_string()),
+    };
+    let start = || -> std::io::Result<Child> {
+        Command::new(path)
+            .stdin(Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(output.try_clone()?)
+            .process_group(0)
+            .spawn()
+    };
+    let mut child = match start() {
+        Ok(c) => c,
+        Err(e) => return (false, e.to_string()),
     };
     let finished = exits(&child, within);
     if !finished {
@@ -255,7 +293,14 @@ pub fn passes(path: &Path, within: Duration) -> bool {
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
     }
     let status = child.wait();
-    finished && status.is_ok_and(|s| s.success())
+    let mut output = output;
+    let _ = output.seek(SeekFrom::Start(0));
+    let mut said = Vec::new();
+    let _ = output.take(4096).read_to_end(&mut said);
+    (
+        finished && status.is_ok_and(|s| s.success()),
+        String::from_utf8_lossy(&said).into_owned(),
+    )
 }
 
 /// Whether `child` exits within `within`, leaving it to be waited for.
@@ -275,6 +320,21 @@ fn exits(child: &Child, within: Duration) -> bool {
             return false;
         }
         sleep(POLL);
+    }
+}
+
+/// Required checks compare against success even when the snapshot failed.
+pub fn require(before: &mut Vec<Line>, required: &[String]) {
+    for name in required {
+        let key = format!("{CHECK}{name}");
+        if let Some(line) = before.iter_mut().find(|l| l.key == key) {
+            line.state = State::Ok;
+        } else {
+            before.push(Line {
+                key,
+                state: State::Ok,
+            });
+        }
     }
 }
 

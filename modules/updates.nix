@@ -91,6 +91,7 @@ let
   healthConfig = pkgs.writeText "health.json" (builtins.toJSON {
     name = health;
     dir = "/etc/${healthD}";
+    required = cfg.requiredHealth;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
     checkTimeout = 30;
@@ -139,7 +140,9 @@ let
       switch = lib.getExe tools.switch;
       confirm = lib.getExe tools.confirm;
       boot = if tools ? boot then lib.getExe tools.boot else null;
-      health = lib.getExe healthTool;
+      # After activation, compare with the health runner and required checks
+      # of the system now live, rather than this updater's old store closure.
+      health = "/run/current-system/sw/bin/${health}";
       notify = lib.getExe tools.notify;
       vulnix = lib.getExe pkgs.vulnix;
       curl = lib.getExe pkgs.curl;
@@ -408,6 +411,7 @@ let
 in
 {
   imports = [
+    ./updates/health-options.nix
     (import ./common.nix inputs)
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
@@ -492,20 +496,6 @@ in
         burrow.claude.manifest's path inside the flake's checkout. HOST-update
         bumps it to Claude Code's newest release along with the flake inputs.
         null: Claude Code comes with nixpkgs-unstable.
-      '';
-    };
-
-    health = lib.mkOption {
-      type = lib.types.attrsOf lib.types.str;
-      default = { };
-      example = { website = "curl -fsS -o /dev/null https://example.com/"; };
-      description = ''
-        Shell commands that exit 0 while the machine is healthy, by name.
-        HOST-update compares them before and after every switch: one that passed
-        before and fails after reverts the switch, and burrow.heartbeat tells
-        the owner about one that keeps failing. burrow adds its own (sshd, the
-        nix daemon, the operator, burrow-events, the ZFS pools, DNS, GitHub,
-        Claude Code...).
       '';
     };
 

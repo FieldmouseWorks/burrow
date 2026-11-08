@@ -16,7 +16,7 @@ mod sandbox;
 mod stream;
 pub use command::{LONG, NEXT, exec_codex, spawn};
 pub use handoff::first_prompt;
-pub(crate) use role::role;
+pub(crate) use role::{RoleKey, role};
 pub use stream::{Said, answer, last_result, names_session, stream_names_session};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]

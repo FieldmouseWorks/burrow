@@ -4,13 +4,21 @@
 { self, pkgs, ... }:
   let
     inbox = self.nixosConfigurations.example.extendModules {
-      modules = [ { burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; }; } ];
+      modules = [ {
+        burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; };
+        burrow.proj.engines.door = { enable = true; repo = "sam/homelab"; };
+      } ];
     };
   in
+  assert inbox.config.systemd.services.burrow-engines-door.serviceConfig.User == inbox.config.burrow.user;
+  assert inbox.config.burrow.events.handlers.engines.events == [ "issues" ];
+  assert inbox.config.burrow.events.handlers.engines.repos == [ "sam/homelab" ];
+  assert builtins.elem "proj-config" inbox.config.burrow.updates.requiredHealth;
   pkgs.runCommand "proj-config-check" { } ''
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
     [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+    ${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj check-config
     touch $out
   ''

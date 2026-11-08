@@ -61,6 +61,12 @@ let
     PRs to the steward. There are no TTY sessions: run each command whole.
   '');
 
+  roles = "${config.users.users.${user}.home}/.config/proj/roles";
+  enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
+    inherit (cfg.engines.door) repo label authors;
+    inherit roles;
+  });
+
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
@@ -78,7 +84,7 @@ let
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     inherit (cfg) meters;
-    roles = "${config.users.users.${user}.home}/.config/proj/roles";
+    inherit roles;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) labels unstickLabel authors vm outsideLabel;
@@ -121,6 +127,7 @@ let
 in
 {
   imports = [
+    ./updates/health-options.nix
     (import ./common.nix inputs)
     { key = "burrow/codex-login"; imports = [ (import ./codex-login.nix inputs) ]; }
     { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
@@ -266,6 +273,26 @@ in
       description = "The gh proj-watch and proj-inbox ask GitHub with (the test's is a stand-in).";
     };
 
+    engines.door = {
+      enable = lib.mkEnableOption "switching saved engine setups from an author's issue, without an agent";
+      repo = lib.mkOption {
+        type = lib.types.str;
+        example = "sam/homelab";
+        description = "OWNER/NAME of the repo whose engines issues switch this machine's saved setups. The machine flake sets it.";
+      };
+      label = lib.mkOption {
+        type = lib.types.str;
+        default = "engines";
+        description = "The label on an issue asking for list, use NAME or use back.";
+      };
+      authors = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = cfg.inbox.authors;
+        defaultText = lib.literalExpression "config.burrow.proj.inbox.authors";
+        description = "GitHub logins whose issues may switch setups. Anyone else's text, including an edit, is ignored.";
+      };
+    };
+
     inbox = {
       enable = lib.mkEnableOption ''
         proj-inbox: an open issue carrying a label in `inbox.labels` in a project's GitHub repo,
@@ -339,7 +366,7 @@ in
         };
         skip = lib.mkOption {
           type = lib.types.listOf lib.types.str;
-          default = [ "probe" "undo" "flaky" ];
+          default = [ "probe" "undo" "engines" "flaky" ];
           description = "Labels whose issues other machinery owns: never sorted or handed on.";
         };
         atOnce = lib.mkOption {
@@ -374,6 +401,14 @@ in
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package agents ];
+    burrow.updates.health.proj-config = ''
+      if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
+        exec ${proj}/bin/proj check-config
+      else
+        exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg user} -- ${proj}/bin/proj check-config
+      fi
+    '';
+    burrow.updates.requiredHealth = [ "proj-config" ];
     burrow.tools.proj = proj;
     # The guard is Codex's managed hook for the jobs, wherever proj runs.
     burrow.tools.codex-guard = guard.codex;
@@ -485,6 +520,37 @@ in
       them. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
   }
+
+  (lib.mkIf cfg.engines.door.enable {
+    assertions = [{
+      assertion = cfg.engines.door.authors != [ ];
+      message = "burrow.proj.engines.door.authors: name who may switch this machine's engines.";
+    }];
+    burrow.events.handlers.engines = {
+      events = [ "issues" ];
+      unit = "burrow-engines-door";
+      perRepo = false;
+      repos = [ cfg.engines.door.repo ];
+      gap = 2;
+    };
+    systemd.services.burrow-engines-door = {
+      description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
+      restartIfChanged = false;
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      path = [ cfg.gh ];
+      environment.GH_NO_UPDATE_NOTIFIER = "1";
+      serviceConfig = {
+        Type = "oneshot";
+        User = user;
+        ExecStart = "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-engines-door}/bin/burrow-engines-door ${enginesConfig}";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "full";
+        TimeoutStartSec = "5min";
+      };
+    };
+  })
 
   (lib.mkIf cfg.inbox.enable {
     assertions = [{

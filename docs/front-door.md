@@ -33,6 +33,9 @@ claude.ai project chat                   GitHub                  the box
 thread ── issue labelled `probe` ───▶ the machine's repo ──▶ burrow-probe (on its webhook)
        ◀── answers, then closed ────
 
+thread ── issue labelled `engines` ──▶ the machine's repo ──▶ burrow-engines-door (on its webhook)
+       ◀── active setup and engines, then closed
+
 thread ── issue labelled `undo` ────▶ the machine's repo ──▶ burrow-ledger-door (on its webhook)
        ◀── the undo's PR, then closed
 
@@ -74,6 +77,37 @@ own, say), in seconds and without starting a Claude.
   nothing.
 - On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
   the machine says it.
+
+## Engines with no agent
+
+Use the engines door when the chat asks to move the machine between saved
+engine setups, or back to the previous one. No job or session needs to start.
+The machine flake enables `burrow.proj.engines.door` and sets its `repo`;
+`label` defaults to `engines`, and `authors` to the inbox's authors.
+
+Open an issue there with that label, as an author, whose body is one line:
+`list`, `use NAME` or `use back`. The door uses proj's checked switch as the
+job user, comments with the old and new active setup and each role/scope's
+engine, then closes the issue. It never posts model choices. An unknown
+setup, bad file or different request changes nothing; text anyone outside
+the authors wrote or edited is ignored.
+
+On the machine, `proj engines` lists saved setups, marks the active one and
+names the previous one. `proj engines save NAME` checks the current roles
+file and saves it under `roles.d/NAME`, beside that file in the user's
+untracked config. Names use lowercase letters, digits and hyphens; `back`
+is reserved. Replacing a saved setup needs `--replace`.
+`proj engines use NAME` checks it with the turn's parser, then atomically
+replaces the roles path with a link to it. An unmatched plain roles file is
+kept as `roles.d/unsaved-<UTC time>` first. `proj engines use back` returns
+to the setup replaced by the last switch. Existing plain roles files keep
+working without creating setups.
+
+`proj check-config` checks the module's config and the current roles file.
+The update's health check runs it as the job user after every switch; it
+must pass before confirmation, and a failure notice names the bad line.
+Malformed roles still fail every turn: the checked switch and deploy check
+stop those mistakes before new turns have to discover them.
 
 ## Undo with no Claude
 

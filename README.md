@@ -168,6 +168,13 @@ Each has an entry below, and each can be imported on its own.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
 
+  Saved engine setups live beside the roles file in `roles.d/NAME`:
+  `proj engines save NAME`, `proj engines use NAME` and `use back` check and
+  switch them; `proj engines` lists them. `proj check-config` uses the turn's
+  parser and must pass the update's health check before confirmation.
+  With `engines.door.enable`, an author's `engines` issue in `engines.door.repo`
+  switches setups without an agent ([engines door](docs/front-door.md#engines-with-no-agent)).
+
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
