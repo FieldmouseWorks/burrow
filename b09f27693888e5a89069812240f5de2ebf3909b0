@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "02stka5bam81nrcpm5ztxfpg53",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 544,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/544",
+  "summary": "flake-check: narrow suffix test discovery to Go",
+  "task": "FieldmouseWorks/burrow#471",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "fdb5d4052de013325b62983017bbdd0c3fce0a33dc28351d5fe1bce9a29a2c79",
+    "before": "1a477ab7eebcf92953fda9b2d8f821d582d592e9",
+    "after": "b09f27693888e5a89069812240f5de2ebf3909b0",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794162885548
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816034754"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816034608"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816034423"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189/job/128816034286"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#544)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#544)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#544)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#544)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#544)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#544)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430189"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816067712"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816067666"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816067619"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128817515737"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42508430183/job/128816067708"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/544#pullrequestreview-5819059570"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/544"
+    }
+  ]
+}
