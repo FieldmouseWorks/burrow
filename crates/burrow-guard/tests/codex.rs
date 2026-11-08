@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use burrow_guard::config::{Config, current_user};
-use burrow_guard::{Guard, Hook, Input};
-use common::zfs;
+use burrow_guard::{Guard, Hook, Input, Namespace};
+use common::{systemd_run, zfs};
 
 mod common;
 
@@ -31,6 +31,7 @@ fn says(cmd: &str, codex: bool) -> Option<String> {
     let config = Config {
         git: PathBuf::from("git"),
         zfs: PathBuf::from("/no-such-zfs"),
+        systemd_run: PathBuf::from("/no-such-systemd-run"),
         snapshot_datasets: Vec::new(),
         ask_after_seconds: 8,
     };
@@ -38,6 +39,7 @@ fn says(cmd: &str, codex: bool) -> Option<String> {
         config: &config,
         codex,
         mark: dir.path().join("mark"),
+        namespace: Namespace::Machine,
     };
     guard.check(&bash(cmd, dir.path()), SystemTime::now())
 }
@@ -353,6 +355,10 @@ fn codexs_hook_snapshots_first_and_refuses_with_no_undo() {
         "git": "git",
         "zfs": zfs(dir.path()),
         "snapshotDatasets": ["pool/a"],
+        // The binary takes its namespace from the process it runs in, and
+        // a build sandbox is a user namespace: so zfs is reached by the
+        // manager there, and directly in the machine's own.
+        "systemdRun": systemd_run(dir.path()),
         "askAfterSeconds": 8,
     })
     .to_string();

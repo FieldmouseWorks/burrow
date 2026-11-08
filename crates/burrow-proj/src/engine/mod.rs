@@ -12,6 +12,7 @@ mod claude_limit;
 mod command;
 mod handoff;
 mod role;
+mod sandbox;
 mod stream;
 pub use command::{LONG, NEXT, exec_codex, spawn};
 pub use handoff::first_prompt;

@@ -1,7 +1,8 @@
 //! Engine argv and environment, inside the turn's timeout and login shell.
 
+use super::sandbox::{self, Env};
 use super::{Choice, Engine, stream::resume};
-use crate::{config::Config, job::Job, read, scratch};
+use crate::{config::Config, job::Job, scratch};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -13,7 +14,7 @@ pub const LONG: &str = "A command that can outlast one Bash call (ten minutes), 
 pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
 
 /// Parent exec flags precede resume: its subcommand accepts model and JSON,
-/// but not --sandbox or --add-dir (pinned CLI's exec/resume help).
+/// but not the parent's own flags (pinned CLI's exec/resume help).
 fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
     let mut args: Vec<String> = match choice.engine {
         Engine::Claude => [
@@ -26,10 +27,12 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
         .map(String::from)
         .to_vec(),
         // Stay in the turn's unit, rather than a shared background daemon.
-        // no_new_privs in Codex's sandbox prevents sudo from elevating.
-        Engine::Codex => ["--no-daemon", "exec", "--sandbox", "workspace-write"]
-            .map(String::from)
-            .to_vec(),
+        // No --sandbox: the pinned CLI reads that flag as the legacy policy
+        // and drops the named profile `proj _codex` gives (its
+        // resolve_permission_config_syntax), leaving only the cwd and /tmp
+        // writable, .git read-only and the network, unix sockets included,
+        // refused. The profile is the whole sandbox.
+        Engine::Codex => ["--no-daemon", "exec"].map(String::from).to_vec(),
     };
     if let Some(s) = session {
         match choice.engine {
@@ -58,77 +61,6 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
 fn exec_flags(args: &mut Vec<String>, flags: Vec<String>) {
     let at = args.iter().position(|a| a == "exec").map_or(0, |i| i + 1);
     args.splice(at..at, flags);
-}
-
-/// Explicit git metadata roots override workspace-write's automatic .git
-/// protection; the common dir is needed by worktrees created in scratch.
-/// A project that isn't a repository yet gets its own `.git` granted
-/// without making it, so the job can `git init` there (the pinned CLI
-/// grants a path that doesn't exist yet), and Codex is told to start
-/// outside one. Returns the exec flags that go before `resume`.
-fn configure_codex(
-    cfg: &Config,
-    job: &Job,
-    scratch: &Path,
-    instructions: &str,
-    home: &Path,
-    args: &mut Vec<String>,
-) -> std::io::Result<Vec<String>> {
-    let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
-    // proj await/done and commands' wait files write only this job's state.
-    let mut roots = vec![project.clone(), scratch.to_owned(), job.dir.clone()];
-    let git = Command::new(&cfg.tools.git)
-        .arg("-C")
-        .arg(&project)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()?;
-    let (metadata, exec) = if git.status.success() {
-        let common = String::from_utf8_lossy(&git.stdout).trim().to_owned();
-        (PathBuf::from(common), Vec::new())
-    } else {
-        (
-            project.join(".git"),
-            vec!["--skip-git-repo-check".to_owned()],
-        )
-    };
-    for (var, default) in [
-        ("CARGO_HOME", home.join(".cargo")),
-        ("XDG_CACHE_HOME", home.join(".cache")),
-    ] {
-        let root = std::env::var_os(var).map(PathBuf::from).unwrap_or(default);
-        std::fs::create_dir_all(&root)?;
-        roots.push(if var == "XDG_CACHE_HOME" {
-            root.join("nix")
-        } else {
-            root
-        });
-    }
-    for root in &roots {
-        std::fs::create_dir_all(root)?;
-    }
-    roots.push(metadata);
-    let quoted = |s: &str| serde_json::to_string(s).expect("string");
-    let roots = roots
-        .iter()
-        .map(|p| format!("{}=\"write\"", quoted(&p.to_string_lossy())))
-        .collect::<Vec<_>>()
-        .join(",");
-    for config in [
-        r#"approval_policy="never""#.to_owned(),
-        // Named permissions allow an explicit .git write grant; the legacy
-        // workspace roots also insert protected metadata paths. Keep the
-        // workspace-write mode, but name every grant in this profile.
-        r#"default_permissions="proj""#.to_owned(),
-        format!("permissions.proj.filesystem={{\":root\"=\"read\",\"/tmp\"=\"write\",{roots}}}"),
-        "permissions.proj.network.enabled=true".to_owned(),
-        // The login shell's App env and git hook config must reach commands.
-        r#"shell_environment_policy.inherit="all""#.to_owned(),
-        "shell_environment_policy.ignore_default_excludes=true".to_owned(),
-        format!("developer_instructions={}", quoted(instructions)),
-    ] {
-        args.extend(["-c".into(), config]);
-    }
-    Ok(exec)
 }
 
 /// One run of Claude, its output appended to the turn's stream. It goes
@@ -185,11 +117,10 @@ pub fn spawn(
     if choice.engine == Engine::Claude {
         args.extend(["--append-system-prompt".into(), instructions]);
     } else {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| std::io::Error::other("HOME isn't set"))?;
-        let exec = configure_codex(cfg, job, &scratch, &instructions, &home, &mut args)?;
-        exec_flags(&mut args, exec);
+        // The sandbox's own flags come once the login and the App's env have
+        // set the environment Codex starts in (`codex_args`).
+        let quoted = serde_json::to_string(&instructions).expect("string");
+        args.extend(["-c".into(), format!("developer_instructions={quoted}")]);
         args.push("-".into());
     }
     // A login shell, so the job sees the same PATH and env as an SSH login,
@@ -216,29 +147,74 @@ pub fn spawn(
         .spawn()
 }
 
-/// The login shell has applied the App's env. Append this job's hooks to
-/// its git configuration now, preserving the App's credentials and rewrites.
-pub fn codex_command(
+/// Codex's argv, the job's own /tmp it runs over, and the machine's paths
+/// under /tmp kept there, and where the CODEX_HOME it was given leads.
+pub struct Start {
+    pub args: Vec<String>,
+    pub tmp: PathBuf,
+    pub kept: Vec<PathBuf>,
+    pub codex_home: Option<PathBuf>,
+}
+
+/// The login shell has applied the App's env, so this is the environment
+/// Codex starts in: the job's sandbox goes into its exec flags now
+/// ([`sandbox`]), naming the paths Codex and the job's commands will find,
+/// with the job's own /tmp, which Codex then runs over.
+pub fn codex_args(
     cfg: &Config,
     args: &[String],
-    count: Option<&str>,
-) -> Result<Command, String> {
+    env: Env,
+    machine: &sandbox::Machine,
+) -> Result<Start, String> {
+    let id = env("PROJ_JOB")
+        .and_then(|v| v.into_string().ok())
+        .filter(|v| !v.is_empty())
+        .ok_or("PROJ_JOB: proj _codex starts a proj job's Codex")?;
+    let job = Job::new(cfg, &id);
+    let scratch = scratch::dir(cfg, &id);
+    let made = |e: std::io::Error| format!("couldn't make the job's sandbox: {e}");
+    let sandbox = sandbox::flags(cfg, &job, &scratch, env, machine).map_err(made)?;
+    let tmp = sandbox::private_tmp(&scratch).map_err(made)?;
+    sandbox::check_kept(&tmp, machine, &sandbox.kept).map_err(made)?;
+    let mut args = args.to_vec();
+    exec_flags(&mut args, sandbox.flags);
+    Ok(Start {
+        args,
+        tmp,
+        kept: sandbox.kept,
+        codex_home: sandbox.codex_home,
+    })
+}
+
+/// The login shell has applied the App's env. Append this job's hooks to
+/// its git configuration now, preserving the App's credentials and rewrites,
+/// and start Codex over the job's own /tmp.
+pub fn codex_command(cfg: &Config, start: &Start, count: Option<&str>) -> Result<Command, String> {
     let count: usize = count
         .unwrap_or("0")
         .parse()
         .map_err(|_| "GIT_CONFIG_COUNT isn't a number")?;
-    let mut c = Command::new(&cfg.tools.codex);
-    c.args(args)
-        .env("GIT_CONFIG_COUNT", (count + 1).to_string())
-        .env(format!("GIT_CONFIG_KEY_{count}"), "core.hooksPath")
-        .env(format!("GIT_CONFIG_VALUE_{count}"), &cfg.codex_hooks);
+    let mut c = Command::new(&cfg.tools.bwrap);
+    c.args(sandbox::wrap(
+        &start.tmp,
+        &start.kept,
+        start.codex_home.as_deref(),
+        &cfg.tools.codex,
+    ))
+    .args(&start.args)
+    .env("GIT_CONFIG_COUNT", (count + 1).to_string())
+    .env(format!("GIT_CONFIG_KEY_{count}"), "core.hooksPath")
+    .env(format!("GIT_CONFIG_VALUE_{count}"), &cfg.codex_hooks);
     Ok(c)
 }
 pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let count = std::env::var("GIT_CONFIG_COUNT").ok();
+    let machine = sandbox::Machine::real();
+    let start = codex_args(cfg, args, &|name| std::env::var_os(name), &machine)
+        .map_err(|e| crate::Fail::new(1, e))?;
     let mut command =
-        codex_command(cfg, args, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
+        codex_command(cfg, &start, count.as_deref()).map_err(|e| crate::Fail::new(1, e))?;
     Err(crate::Fail::new(
         1,
         format!("couldn't start codex: {}", command.exec()),
@@ -249,32 +225,15 @@ pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
 mod tests {
     use super::*;
     #[test]
-    fn sandbox_and_resume_flags_are_in_the_parent_command() {
+    fn the_profile_alone_is_the_sandbox_and_resume_flags_are_in_the_parent_command() {
         let c = Choice {
             engine: Engine::Codex,
             model: None,
         };
-        assert_eq!(
-            args(&c, None),
-            [
-                "--no-daemon",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "--json"
-            ]
-        );
+        assert_eq!(args(&c, None), ["--no-daemon", "exec", "--json"]);
         assert_eq!(
             args(&c, Some("thread".into())),
-            [
-                "--no-daemon",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "resume",
-                "--json",
-                "thread"
-            ]
+            ["--no-daemon", "exec", "resume", "--json", "thread"]
         );
         let c = Choice {
             model: Some("chosen".into()),
@@ -285,7 +244,31 @@ mod tests {
     #[test]
     fn app_git_configuration_is_extended_after_the_login_shell() {
         let cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        let command = codex_command(&cfg, &["exec".into(), "--json".into()], Some("9")).unwrap();
+        let start = Start {
+            args: vec!["exec".into(), "--json".into()],
+            tmp: "/scratch/tmp".into(),
+            kept: vec!["/tmp/codex".into()],
+            codex_home: Some("/home/dev/codex".into()),
+        };
+        let command = codex_command(&cfg, &start, Some("9")).unwrap();
+        // Codex, over the job's own /tmp with what it keeps of the
+        // machine's, with its args after.
+        assert_eq!(command.get_program(), "/bin/bwrap");
+        let argv: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            argv[4..9],
+            ["/scratch/tmp", "/tmp", "--bind", "/tmp/codex", "/tmp/codex"]
+        );
+        assert_eq!(
+            argv[argv.len() - 4..],
+            ["--", "/bin/codex", "exec", "--json"]
+        );
+        // With the CODEX_HOME it was given, where that leads.
+        let home = argv.iter().position(|a| *a == "CODEX_HOME").unwrap();
+        assert_eq!(
+            argv[home - 1..=home + 1],
+            ["--setenv", "CODEX_HOME", "/home/dev/codex"]
+        );
         let env: std::collections::BTreeMap<_, _> = command
             .get_envs()
             .map(|(k, v)| (k.to_str().unwrap(), v.unwrap().to_str().unwrap()))
@@ -294,73 +277,62 @@ mod tests {
         assert_eq!(env["GIT_CONFIG_KEY_9"], "core.hooksPath");
         assert_eq!(env["GIT_CONFIG_VALUE_9"], "/hooks");
         assert!(!env.contains_key("GIT_CONFIG_KEY_0"));
-        assert!(codex_command(&cfg, &[], Some("bad")).is_err());
+        assert!(codex_command(&cfg, &start, Some("bad")).is_err());
     }
 
     #[test]
-    fn sandbox_grants_are_exact_and_git_metadata_is_explicit() {
+    fn the_sandbox_is_made_in_the_environment_codex_starts_in() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
+        cfg.scratch = dir.path().join("scratch");
         cfg.tools.git = "git".into();
-        let project = dir.path().join("project");
-        assert!(
-            Command::new("git")
-                .arg("init")
-                .arg(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
         let job = Job::new(&cfg, "job");
         std::fs::create_dir_all(&job.dir).unwrap();
-        std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        let mut args = Vec::new();
-        let exec = configure_codex(
-            &cfg,
-            &job,
-            &dir.path().join("scratch"),
-            "This is proj job job",
-            &dir.path().join("home"),
-            &mut args,
-        )
-        .unwrap();
-        assert!(exec.is_empty());
-        let config = args.join("\n");
-        assert!(config.contains("default_permissions=\"proj\""));
-        assert!(config.contains("permissions.proj.network.enabled=true"));
-        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
-        assert!(config.contains("developer_instructions=\"This is proj job job\""));
-        assert!(config.contains(&format!("\"{}\"=\"write\"", job.dir.display())));
-    }
-
-    #[test]
-    fn a_project_with_no_repository_starts_and_may_make_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.jobs = dir.path().join("jobs");
-        cfg.tools.git = "git".into();
         let project = dir.path().join("plain");
         std::fs::create_dir_all(&project).unwrap();
-        let job = Job::new(&cfg, "job");
-        std::fs::create_dir_all(&job.dir).unwrap();
         std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        let mut args = Vec::new();
-        let exec = configure_codex(
-            &cfg,
-            &job,
-            &dir.path().join("scratch"),
-            "This is proj job job",
-            &dir.path().join("home"),
-            &mut args,
-        )
-        .unwrap();
-        assert_eq!(exec, ["--skip-git-repo-check"]);
-        // Its .git is granted, for a `git init`, but not made: an empty one
-        // would read as a broken repository.
+        let machine = sandbox::tests::machine_in(dir.path());
+        let home = dir.path().join("home");
+        // Where the login shell's profile moved Codex's home to.
+        let moved = dir.path().join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let env = |name: &str| match name {
+            "PROJ_JOB" => Some("job".into()),
+            "HOME" => Some(home.clone().into()),
+            "CODEX_HOME" => Some(moved.clone().into()),
+            _ => None,
+        };
+        let c = Choice {
+            engine: Engine::Codex,
+            model: None,
+        };
+        let mut given = args(&c, Some("thread".into()));
+        given.push("-".into());
+        let Start {
+            args,
+            tmp,
+            kept,
+            codex_home,
+        } = codex_args(&cfg, &given, &env, &machine).unwrap();
+        assert_eq!(tmp, cfg.scratch.join("jobs/job/tmp"));
+        assert_eq!(codex_home, Some(moved.canonicalize().unwrap()));
+        assert!(kept.is_empty(), "{kept:?}");
+        let denied = |dir: &Path| format!("\"{}\"=\"deny\"", dir.display());
         let config = args.join("\n");
-        assert!(config.contains(&format!("\"{}\"=\"write\"", project.join(".git").display())));
-        assert!(!project.join(".git").exists());
+        assert!(
+            config.contains(&denied(&moved.canonicalize().unwrap())),
+            "{config}"
+        );
+        assert!(!config.contains(&denied(&home.join(".codex"))), "{config}");
+        assert!(config.contains(&format!(
+            "\"{}\"=\"write\"",
+            cfg.scratch.join("jobs/job").display()
+        )));
+        // All of it is exec's, before resume; the prompt still comes last.
+        assert_eq!(args[..3], ["--no-daemon", "exec", "--skip-git-repo-check"]);
+        assert_eq!(args[args.len() - 4..], ["resume", "--json", "thread", "-"]);
+        assert!(codex_args(&cfg, &given, &|_| None, &machine).is_err());
     }
 
     #[test]
@@ -377,8 +349,6 @@ mod tests {
                 "--no-daemon",
                 "exec",
                 "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
                 "resume",
                 "--json",
                 "thread"

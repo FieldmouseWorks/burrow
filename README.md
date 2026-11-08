@@ -154,7 +154,11 @@ Each has an entry below, and each can be imported on its own.
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
   key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
-  small slot pool (`codex.slots`, two), workspace-write with network, the
+  small slot pool (`codex.slots`, two), a sandbox that writes only the
+  project, its scratch, its job's dir, git's metadata and a /tmp of its own,
+  and reads only those and the machine's system paths (no home, no /run/user,
+  no other projects: so no server of the user's own, wherever it listens,
+  and not Codex's login), with network, the
   shared one-way command list, the guard as its managed hook, and git hooks
   that mark its commits and refuse rewrites or deletes of the remote default
   branch, which the guard keeps on. A turn on the engine that didn't run the

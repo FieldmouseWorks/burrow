@@ -18,7 +18,10 @@
 //! pinned Codex runs a command whose hook asks, so every question is a
 //! refusal, and it refuses what would hide a commit from the job's hooks
 //! (codex.rs). Codex's apply_patch, which deletes and replaces files with no
-//! command, gets the undo snapshot too.
+//! command, gets the undo snapshot too. A job's Codex runs in a user
+//! namespace of proj's making, where zfs can't see the machine's datasets,
+//! so there the user's service manager takes the snapshot (undo.rs's
+//! [`Namespace`]).
 
 mod ansi_c;
 mod codex;
@@ -29,6 +32,8 @@ mod push;
 mod shell;
 mod undo;
 mod walk;
+
+pub use undo::Namespace;
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -62,6 +67,8 @@ pub struct Guard<'a> {
     /// When the last undo snapshot was taken, as its mtime: one round per
     /// five seconds is plenty for a burst of commands.
     pub mark: PathBuf,
+    /// The user namespace it runs in, which decides how zfs is reached.
+    pub namespace: Namespace,
 }
 
 impl Guard<'_> {
@@ -91,12 +98,7 @@ impl Guard<'_> {
             undo::patch_destroys(cmd, Some(cwd))
         };
         if !self.config.snapshot_datasets.is_empty() && destroys {
-            asks.extend(undo::snapshot(
-                &self.config.zfs,
-                &self.config.snapshot_datasets,
-                &self.mark,
-                now,
-            ));
+            asks.extend(undo::snapshot(self.config, self.namespace, &self.mark, now));
         }
         // A patch is only files: what it says isn't run.
         if tool == Some("Bash") {

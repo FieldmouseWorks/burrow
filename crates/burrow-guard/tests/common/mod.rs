@@ -24,6 +24,12 @@ pub fn stand_ins() -> &'static Path {
             &bin.path().join("zfs"),
             "#!/bin/sh\nd=${0%/*}\necho \"$@\" >> \"$d/zfs.log\"\n[ ! -e \"$d/fail\" ] || { cat \"$d/fail\" >&2; exit 1; }\n",
         );
+        // A user's service manager: logs what it's asked to run beside where
+        // it's linked from, and runs it.
+        script(
+            &bin.path().join("systemd-run"),
+            "#!/bin/sh\nd=${0%/*}\necho \"$@\" >> \"$d/manager.log\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        );
         // A git that never answers.
         script(&bin.path().join("hang"), "#!/bin/sh\nexec sleep 30\n");
         bin
@@ -34,6 +40,14 @@ pub fn stand_ins() -> &'static Path {
 fn script(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A systemd-run in `dir` that logs what it's asked to `dir/manager.log` and
+/// runs it.
+pub fn systemd_run(dir: &Path) -> PathBuf {
+    let path = dir.join("systemd-run");
+    symlink(stand_ins().join("systemd-run"), &path).unwrap();
+    path
 }
 
 /// A zfs in `dir` that logs what it's asked to `dir/zfs.log`, and fails,

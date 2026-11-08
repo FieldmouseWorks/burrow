@@ -42,7 +42,7 @@ fn config(dir: &Path) -> Config {
         "codexSlots": 2,
         "codexHooks": "/hooks",
         "inbox": null,
-        "tools": {"codex": "/bin/codex", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git",
+        "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git",
                   "systemctl": "/bin/systemctl", "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
     }))
     .unwrap()

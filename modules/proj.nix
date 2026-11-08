@@ -44,8 +44,13 @@ let
   rulesFile = pkgs.writeText "proj-codex.rules" policy.text;
   instructions = pkgs.writeText "proj-AGENTS.md" (config.burrow.claude.machineMd + ''
 
-    Codex jobs run headless in workspace-write with network access. The sandbox's
-    no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
+    Codex jobs run headless with network access, in a sandbox that writes only
+    the project, $PROJ_SCRATCH, the job's own dir, git's metadata and a /tmp of
+    the job's own, and reads nothing else but the machine's system paths, rustup's
+    toolchains and git's config: not home, the runtime dir (no systemctl --user or
+    systemd-run --user), other projects, or any server of the user's (tmux's, the
+    compile cache's), and not Codex's login. The
+    sandbox's no_new_privs prevents sudo elevation. One-way commands are forbidden; bring
     them to the owner. The machine's guard checks every command and patch first:
     what deletes or rewrites files gets an undo snapshot, or is refused without
     one. Commits carry Engine: codex, and a Claude judge decides whether their PR
@@ -86,6 +91,7 @@ let
     } else null;
     tools = {
       codex = "${agents}/bin/codex";
+      bwrap = "${pkgs.bubblewrap}/bin/bwrap";
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
       flock = "${pkgs.util-linux}/bin/flock";

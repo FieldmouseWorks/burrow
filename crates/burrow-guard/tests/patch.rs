@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use burrow_guard::config::{Config, current_user};
-use burrow_guard::{Guard, Hook, Input};
+use burrow_guard::{Guard, Hook, Input, Namespace};
 use common::zfs;
 
 mod common;
@@ -36,6 +36,7 @@ fn snapshotted(tool: &str, command: &str, cwd: &Path) -> (bool, Option<String>) 
     let config = Config {
         git: PathBuf::from("git"),
         zfs: zfs(dir.path()),
+        systemd_run: PathBuf::from("/no-such-systemd-run"),
         snapshot_datasets: vec!["pool/a".to_owned()],
         ask_after_seconds: 8,
     };
@@ -43,6 +44,7 @@ fn snapshotted(tool: &str, command: &str, cwd: &Path) -> (bool, Option<String>) 
         config: &config,
         codex: true,
         mark: dir.path().join("mark"),
+        namespace: Namespace::Machine,
     };
     let said = guard.check(&hook(tool, command, cwd), SystemTime::now());
     (dir.path().join("zfs.log").exists(), said)
@@ -129,6 +131,7 @@ fn no_snapshot_no_patch() {
         "git": "git",
         "zfs": zfs(dir.path()),
         "snapshotDatasets": ["pool/a"],
+        "systemdRun": "/no-such-systemd-run",
         "askAfterSeconds": 8,
     })
     .to_string();

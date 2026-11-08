@@ -12,6 +12,7 @@ let
   guardConfig = pkgs.writeText "claude-guard.json" (builtins.toJSON {
     git = lib.getExe config.programs.git.package;
     zfs = "${config.boot.zfs.package}/bin/zfs";
+    systemdRun = "${config.systemd.package}/bin/systemd-run";
     snapshotDatasets = lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets;
     askAfterSeconds = timeout - 2;
   });
