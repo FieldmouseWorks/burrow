@@ -26,7 +26,10 @@ The earlier 16–20 second hosted-runner Cargo build was a poor trade for a gate
 bootstrap. This runner instead builds unoptimized, with the standard library
 alone. Three fresh direct builds on the development machine took 1.161,
 0.792 and 0.794 seconds (the resulting binary was 5,573,448 bytes). These are
-local measurements, not hosted-runner measurements. The cost is paid once
+local measurements. The first [hosted CI run](https://github.com/FieldmouseWorks/burrow/actions/runs/42508563466)
+reported 1 second on each of its four gate legs and 0 or 1 second on the two
+negative invocations (the bootstrap timer has whole-second precision).
+The cost is paid once
 per invocation, including paths-only; correctness and a source-bound executable
 are worth that smaller cost. The bootstrap reports compilation seconds
 separately in CI logs so hosted timings can be compared.

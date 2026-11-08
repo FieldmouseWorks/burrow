@@ -44,7 +44,7 @@ pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
     ))?;
     let reference = output(git(top, &["symbolic-ref", "-q", "HEAD"]))?;
     let reference = if reference.status.success() {
-        String::from_utf8(reference.stdout)?.trim_end().to_owned()
+        text_output(reference.stdout)?
     } else {
         String::new()
     };
@@ -58,12 +58,8 @@ pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
             ),
         ],
     ))?;
-    let remote = String::from_utf8(remote.stdout)?;
-    let remote = if remote.trim().is_empty() {
-        "origin"
-    } else {
-        remote.trim()
-    };
+    let remote = text_output(remote.stdout)?;
+    let remote = if remote.is_empty() { "origin" } else { &remote };
     if !output(git(top, &["config", &format!("remote.{remote}.url")]))?
         .status
         .success()
@@ -76,21 +72,28 @@ pub fn snapshot(top: &Path, to: &Path) -> Result<()> {
             &["config", "-f", s(&config), "remote.origin.url", s(top)],
         ))?;
     }
+    // Alternate files are line-oriented, and libgit2 does not decode Git's
+    // quoted paths. Keep caller path bytes in a filesystem link instead of
+    // putting them into that format; new objects still stay in this snapshot.
+    std::os::unix::fs::symlink(
+        Path::new(&common).join("objects"),
+        to.join(".git/borrowed-objects"),
+    )?;
     fs::write(
         to.join(".git/objects/info/alternates"),
-        format!("{common}/objects\n"),
+        "../borrowed-objects\n",
     )?;
     if Path::new(&common).join("shallow").is_file() {
         fs::copy(Path::new(&common).join("shallow"), to.join(".git/shallow"))?;
     }
     let rev = output(git(top, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]))?;
     if rev.status.success() {
-        let rev = String::from_utf8(rev.stdout)?;
+        let rev = text_output(rev.stdout)?;
         if !reference.is_empty() {
             checked(git(to, &["symbolic-ref", "HEAD", &reference]))?;
-            checked(git(to, &["update-ref", &reference, rev.trim()]))?;
+            checked(git(to, &["update-ref", &reference, &rev]))?;
         } else {
-            checked(git(to, &["update-ref", "--no-deref", "HEAD", rev.trim()]))?;
+            checked(git(to, &["update-ref", "--no-deref", "HEAD", &rev]))?;
         }
     }
     if Path::new(&gitdir).join("index").is_file() {

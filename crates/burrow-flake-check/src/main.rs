@@ -46,10 +46,17 @@ fn checked(c: Command) -> Result<Vec<u8>> {
     }
     Ok(o.stdout)
 }
+// Git paths and config values may themselves end in whitespace, including
+// newlines. Remove exactly the command's output terminator, never path data.
+fn text_output(bytes: Vec<u8>) -> Result<String> {
+    let mut text = String::from_utf8(bytes)?;
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    Ok(text)
+}
 fn string(c: Command) -> Result<String> {
-    Ok(String::from_utf8(checked(c)?)?
-        .trim_end_matches('\n')
-        .to_owned())
+    text_output(checked(c)?)
 }
 fn run(mut c: Command) -> Result<bool> {
     Ok(c.status()?.success())
@@ -73,9 +80,7 @@ fn jq(input: &[u8], filter: &str) -> Result<String> {
     if !o.status.success() {
         return Err(err(String::from_utf8_lossy(&o.stderr).into_owned()));
     }
-    Ok(String::from_utf8(o.stdout)?
-        .trim_end_matches('\n')
-        .to_owned())
+    text_output(o.stdout)
 }
 fn quote(v: &str) -> String {
     // JSON is a Nix string too, after escaping interpolation's dollar.

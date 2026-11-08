@@ -254,3 +254,36 @@ fn the_runner_compiles_outside_the_callers_checkout() {
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(r.build().contains("-a.drv^*"), "{}", r.out);
 }
+
+/// Only Git's output terminator may be removed: trimming the caller path
+/// can silently select a different repository, for root and nested flakes.
+#[test]
+fn checkout_path_whitespace_never_selects_a_sibling() {
+    for suffix in [" ", "\t", "\r"] {
+        let g = Gate::new();
+        let sibling = g.flake(r#"{ checks.${system}.sibling = drv "sibling"; }"#);
+        let caller = g.flake(r#"{ checks.${system}.caller = drv "caller"; }"#);
+        let parent = g.dir();
+        let caller_path = parent.join(format!("project{suffix}"));
+        fs::rename(&sibling, parent.join("project")).unwrap();
+        fs::rename(&caller, &caller_path).unwrap();
+        // A nested flake with whitespace in its directory tests Git's
+        // prefix as well as its top-level checkout path.
+        for root in [&parent.join("project"), &caller_path] {
+            let nested = root.join(format!("nested{suffix}"));
+            fs::create_dir(&nested).unwrap();
+            fs::copy(root.join("flake.nix"), nested.join("flake.nix")).unwrap();
+            g.s.git(root, &["add", "."]);
+            g.s.git(root, &["commit", "-qm", "nested flake"]);
+        }
+        for dir in [
+            caller_path.clone(),
+            caller_path.join(format!("nested{suffix}")),
+        ] {
+            let r = g.apart(&dir);
+            assert_eq!(r.code, 0, "{dir:?}: {}", r.out);
+            assert!(r.build().contains("-caller.drv^*"), "{dir:?}: {}", r.out);
+            assert!(!r.build().contains("-sibling.drv^*"), "{dir:?}: {}", r.out);
+        }
+    }
+}

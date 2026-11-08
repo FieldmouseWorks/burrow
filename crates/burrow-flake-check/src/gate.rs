@@ -47,8 +47,8 @@ fn apart(skip: &str, legs: usize, leg: usize) -> Result<bool> {
     let source = work.join("source");
     let top = output(cmd("git", &["rev-parse", "--show-toplevel"]))?;
     let flake = if top.status.success() {
-        let top = String::from_utf8(top.stdout)?;
-        snapshot::snapshot(Path::new(top.trim()), &source)?;
+        let top = text_output(top.stdout)?;
+        snapshot::snapshot(Path::new(&top), &source)?;
         let prefix = string(cmd("git", &["rev-parse", "--show-prefix"]))?;
         source.join(prefix)
     } else {
