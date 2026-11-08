@@ -275,7 +275,7 @@ fn checkout_path_whitespace_never_selects_a_sibling() {
         for root in [&parent.join("project"), &caller_path] {
             let nested = root.join(format!("nested{suffix}"));
             fs::create_dir(&nested).unwrap();
-            fs::copy(root.join("flake.nix"), nested.join("flake.nix")).unwrap();
+            burrow_test::copy_file(root.join("flake.nix"), nested.join("flake.nix"));
             g.s.git(root, &["add", "."]);
             g.s.git(root, &["commit", "-qm", "nested flake"]);
         }
