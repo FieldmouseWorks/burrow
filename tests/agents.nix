@@ -10,7 +10,7 @@ pkgs.testers.runNixOSTest {
   nodes.host = { lib, pkgs, ... }: let
     inherit (import ./proj/stand-ins.nix { inherit pkgs; }) gh;
     # No login or network: exercise the actual guest proj and host lifecycle.
-    vmClaude = pkgs.runCommand "vm-claude" { nativeBuildInputs = [ pkgs.rustc ]; } ''
+    vmClaude = pkgs.runCommand "vm-claude" { nativeBuildInputs = [ pkgs.rustc pkgs.stdenv.cc ]; } ''
       mkdir -p $out/bin
       rustc --edition=2024 ${./agents/claude.rs} -o $out/bin/claude
     '';
