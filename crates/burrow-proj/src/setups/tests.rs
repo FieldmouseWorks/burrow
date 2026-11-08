@@ -9,6 +9,9 @@ fn switches_back_and_refuses_bad_or_unknown_without_changing_link() {
     fs::write(&roles, "work claude\n").unwrap();
     let store = Store::new(&roles);
     run(&store, &["save", "first"]).unwrap();
+    // Even matching plaintext must become a link when explicitly selected.
+    run(&store, &["use", "first"]).unwrap();
+    assert!(roles.is_symlink());
     fs::write(
         store.dir.join("second"),
         "work codex:chosen over 80 claude:other\nwork@sam/code claude\n",

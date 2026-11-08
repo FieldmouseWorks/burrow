@@ -156,7 +156,8 @@ impl<'a> Store<'a> {
         }
         let target = self.dir.join(&name);
         self.checked(&target)?;
-        if before == Some(name.as_str()) {
+        let target = fs::canonicalize(&target).map_err(|e| error(&target, e))?;
+        if self.roles.is_symlink() && fs::canonicalize(self.roles).ok().as_ref() == Some(&target) {
             return Ok(());
         }
         let mut old = before.map(str::to_owned);
@@ -181,7 +182,6 @@ impl<'a> Store<'a> {
             .roles
             .with_file_name(format!(".roles-{}", std::process::id()));
         // An absolute target works with either an absolute or relative roles path.
-        let target = fs::canonicalize(&target).map_err(|e| error(&target, e))?;
         symlink(&target, &tmp).map_err(|e| error(&tmp, e))?;
         let result = (|| {
             if let Some(old) = old {
