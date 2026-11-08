@@ -393,8 +393,11 @@ def prebuild(repo, pr, checks, st):
     rec = st.get("proofInputs") or {}
     if rec.get("for") == [head, drvs]:
         return "building" if rec.get("job") and running(rec["job"]) else None
+    # One for other checks on this head (a new head's is stopped as the head
+    # moves, stopping.moved): one that won't stop is tried again each pass
+    # (stopping.stop).
     if rec.get("job") and running(rec["job"]) and not C.stop_job(rec["job"]):
-        log(f"{repo}#{n}: couldn't stop the build of what its last proof is built from, {rec['job']}")
+        st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [rec["job"]]))
     try:
         ins, outs = inputs(drvs)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
@@ -408,7 +411,7 @@ def prebuild(repo, pr, checks, st):
     if jid is None:
         st.pop("proofInputs", None)
         return "couldn't start"
-    st["proofInputs"] = {"for": [head, drvs], "job": jid}
+    st["proofInputs"] = {"for": [head, drvs], "job": jid, "at": C.NOW}
     return "building"
 
 
@@ -458,12 +461,19 @@ def prune():
     """Ended builds' folders, and the roots of their outputs in them, KEEP
     days after they ended: their verdicts are long posted by then. A
     prebuild's, KEEP_INPUTS days on: a PR in line that long builds them
-    again in its turn, if they've been collected."""
+    again in its turn, if they've been collected. One that ended with no
+    end of its own (stopped, killed) is counted from when it started; one
+    still at work, or that systemd can't say about, is kept."""
     root = os.path.join(STATE, "builds")
     for jid in os.listdir(root) if os.path.isdir(root) else ():
         end = load(f"builds/{jid}/end.json", None)
         keep = KEEP_INPUTS if (load(f"builds/{jid}/build.json", None) or {}).get("inputs") else KEEP
-        if end and time.time() - end["at"] > keep * 86400:
+        try:
+            at = end["at"] if end else (None if C.build_state(jid) in ("running", None)
+                                        else os.path.getmtime(os.path.join(root, jid, "build.json")))
+        except OSError:
+            at = None
+        if at is not None and time.time() - at > keep * 86400:
             shutil.rmtree(os.path.join(root, jid), ignore_errors=True)
 
 

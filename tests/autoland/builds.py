@@ -18,7 +18,7 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
     upkeep_config
 from prs import ci_state
 
@@ -558,7 +558,11 @@ A, B = (f"/nix/store/{c * 32}-input-{c}" for c in "ab")
 INPUTS = {X: [A], Y: [B]}
 PRE = "Settled; building what remi-proof is built from, before its turn"
 kept_inputs = P.build_inputs
-P.build_inputs = lambda repo, pr, checks, ins: JOBS.append(f"inputs {pr['number']} {' '.join(ins)}") or f"{C.BUILD}{next(ids)}"
+def stub_inputs(repo, pr, checks, ins):
+    return JOBS.append(f"inputs {pr['number']} {' '.join(ins)}") or f"{C.BUILD}{next(ids)}"
+
+
+P.build_inputs = stub_inputs
 
 
 def inputs_job(n):
@@ -570,8 +574,14 @@ fresh_pr_state()
 VALID[:] = []
 nix_knows(refs=INPUTS)
 P.begin("sam/r", {1, 2})
+WAKES, kept_wake = [], C.wake
+C.wake = lambda repo, at: WAKES.append(at) or kept_wake(repo, at)
 status = line(1)
 assert PRE in status and JOBS == [f"inputs 1 {A}.drv"] and "provedJob" not in pr_state(1), (status, JOBS)
+# Its end kicks a pass; one is booked for when it's due to have ended, in
+# case that kick never comes.
+assert pr_state(1)["proofInputs"]["at"] + (S.CFG["proofTimeout"] + 5) * 60 in WAKES, WAKES
+C.wake = kept_wake
 status = line(2)
 assert PRE in status and JOBS == [f"inputs 2 {B}.drv"], (status, JOBS)
 # At work still: nothing started again, nobody in line.
@@ -636,14 +646,37 @@ status = run(clean(checks=proof, number=1, sha=heads[5]), 800)[0]
 assert PRE in status and STOPPED == [old] and JOBS == [f"inputs 1 {B}.drv"], (status, STOPPED, JOBS)
 sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[1]}:refs/pull/1/head", cwd=work)
 STOPPED.clear()
-# systemd won't start it: the PR says so, and the next pass tries again.
+# Pointed at another attribute on the same head while it builds, with proj
+# refusing to stop it: it stays marked, and each pass tries again.
+fresh_pr_state()
+UNSTOPPABLE.clear()
+nix_knows({1: X, (1, "checks.x86_64-linux.other"): Y}, refs=INPUTS)
+P.begin("sam/r", {1})
+line(1)
+old = inputs_job(1)
+UNSTOPPABLE.add(old)
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.other"}
+status = line(1, 800)
+assert PRE in status and pr_state(1)["stopping"] == [old] and JOBS == [f"inputs 1 {B}.drv"], (status, pr_state(1), JOBS)
+line(1, 900)
+assert pr_state(1)["stopping"] == [old] and pr_state(1)["strikes"] == {"stop": 1}, pr_state(1)
+UNSTOPPABLE.clear()
+line(1, 1000)
+assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPPED)
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+STOPPED.clear()
+# systemd won't start it: the PR says so, a strike books the next try, and
+# the next start clears it.
 fresh_pr_state()
 nix_knows(refs=INPUTS)
 P.build_inputs = lambda repo, pr, checks, ins: JOBS.append("inputs") and None
 P.begin("sam/r", {1})
 status = line(1)
 assert "Settled, but the build of what remi-proof is built from couldn't start" in status and JOBS == ["inputs"], status
-assert "couldn't start" in line(1, 800) and JOBS == ["inputs"], JOBS
+assert pr_state(1)["strikes"] == {"build": 1}, pr_state(1)
+assert "couldn't start" in line(1, 800) and JOBS == ["inputs"] and pr_state(1)["strikes"] == {"build": 2}, JOBS
+P.build_inputs = stub_inputs
+assert PRE in line(1, 900) and not pr_state(1)["strikes"], pr_state(1)
 P.build_inputs = kept_inputs
 
 del S.CFG["repos"]["sam/r"]

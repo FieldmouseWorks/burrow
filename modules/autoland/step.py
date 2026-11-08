@@ -730,8 +730,13 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         if builds and slots and not last and ahead != P.FREE and (pre := P.prebuild(repo, pr, checks, st)):
             ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
             if pre == "building":
+                cleared("build")
+                # Its end kicks a pass; this one sees it if that kick never comes.
+                due = st["proofInputs"]["at"] + (CFG["proofTimeout"] + 5) * MIN
+                C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)  # ends: its PR's wait, unchanged, is overdue at its deadline
                 settle("pending", f"Settled; building what {names} is built from, before its turn{ci_too}"[:140])
             else:
+                strike("build")
                 settle("pending", f"Settled, but the build of what {names} is built from couldn't start"[:140],
                        f"Couldn't start a proof build of what {names} is built from")
             return

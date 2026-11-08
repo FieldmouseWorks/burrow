@@ -206,8 +206,20 @@ inputs_end, proof_end = made({"0": A + ".drv"}), made({"vm": X + ".drv"})
 C.save(f"builds/{inputs_end}/build.json", {**C.load(f"builds/{inputs_end}/build.json", None), "inputs": True})
 for j in (inputs_end, proof_end):
     C.save(f"builds/{j}/end.json", {"state": "done", "exit": 0, "at": time.time() - P.KEEP_INPUTS * 86400 - 60})
+# One stopped or killed before it wrote its end goes as long after it
+# started; one still at work, or that systemd can't say about, stays.
+stopped_one, at_work, unsure = (made({"0": A + ".drv"}) for _ in range(3))
+for j in (stopped_one, at_work, unsure):
+    C.save(f"builds/{j}/build.json", {**C.load(f"builds/{j}/build.json", None), "inputs": True})
+    old = time.time() - P.KEEP_INPUTS * 86400 - 60
+    os.utime(f"{tmp}/state/builds/{j}/build.json", (old, old))
+kept_state = C.build_state
+C.build_state = lambda j: {at_work: "running", unsure: None}.get(j, kept_state(j))
 P.prune()
+C.build_state = kept_state
 assert not os.path.exists(f"{tmp}/state/builds/{inputs_end}") and os.path.isdir(f"{tmp}/state/builds/{proof_end}")
+assert not os.path.exists(f"{tmp}/state/builds/{stopped_one}"), stopped_one
+assert os.path.isdir(f"{tmp}/state/builds/{at_work}") and os.path.isdir(f"{tmp}/state/builds/{unsure}")
 # Past proofTimeout it's stopped, and says so.
 S.CFG["proofTimeout"] = 0.02  # minutes: 1.2 s
 tools(**{"nix-store": {"sleep": 30}})
