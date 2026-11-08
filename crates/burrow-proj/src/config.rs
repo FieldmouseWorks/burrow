@@ -10,6 +10,8 @@ use crate::engine::{Choice, Engine};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub usage_paid: bool,
     /// Where the projects are: each folder in it is one (burrow.projectsDir).
     pub projects: PathBuf,
     /// Each job's prompts, streams and answers, a folder a job.

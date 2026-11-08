@@ -669,3 +669,89 @@ fn the_owners_release_after_a_settled_hold_moves_the_release_on() {
     earlier(&cfg, "web-4", t + 3600, Some(t + 60)).unwrap();
     assert_eq!(out(&cfg).unwrap().until, t + 3600);
 }
+
+#[test]
+fn unpaid_usage_is_a_wait_not_a_billing_question() {
+    let mut cfg: crate::config::Config =
+        serde_json::from_value(crate::config::tests::example()).unwrap();
+    assert!(!cfg.usage_paid);
+    assert!(super::policy(&cfg).contains("never ask the owner"));
+    cfg.usage_paid = true;
+    assert!(!super::policy(&cfg).contains("disabled"));
+}
+
+#[test]
+fn old_holds_are_normalized_for_status_reminders_and_extensions() {
+    let (d, cfg) = rig();
+    let t = now();
+    let raw = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)";
+    let original = Spent {
+        until: t + 7200,
+        said: raw.into(),
+        job: "web-1".into(),
+        at: t - 10,
+        back: None,
+        told: t - RETELL,
+        last: Some(t - 5),
+    };
+    // Simulate the previous binary's disk record, bypassing record().
+    fs::write(
+        cfg.jobs.join(FILE),
+        serde_json::to_string(&original).unwrap(),
+    )
+    .unwrap();
+    let mut expected = original.clone();
+    expected.said = "Claude reached its weekly allowance".into();
+    assert_eq!(kept(&cfg), Some(expected.clone()));
+    assert_eq!(out(&cfg), Some(expected.clone()));
+    assert_eq!(expected.release(), original.release());
+    assert!(line(&expected).contains("weekly allowance"));
+    assert!(!line(&expected).contains("monthly spend limit"));
+    let capture = d.path().join("notice-body");
+    fs::write(
+        cfg.notify.as_ref().unwrap(),
+        format!("#!/bin/sh\nprintf '%s' \"$4\" >'{}'\n", capture.display()),
+    )
+    .unwrap();
+    remind(&cfg);
+    let notice = fs::read_to_string(&capture).unwrap();
+    assert!(notice.contains("weekly allowance"));
+    assert!(notice.contains("never ask the owner"));
+    assert!(!notice.contains("https://claude.ai/settings/usage"));
+    assert!(!notice.contains("monthly spend limit"));
+    let extended = record(
+        &cfg,
+        "web-2",
+        Some(t + 9000),
+        "Claude reached its weekly allowance",
+        t,
+    )
+    .unwrap();
+    assert_eq!(extended.said, expected.said);
+    assert_eq!(
+        (extended.until, extended.at, extended.last, extended.back),
+        (t + 9000, original.at, Some(t), None)
+    );
+    assert_eq!(extended.job, original.job);
+    assert!(
+        !fs::read_to_string(cfg.jobs.join(FILE))
+            .unwrap()
+            .contains("https://")
+    );
+    // Released historical holds retain release bookkeeping as well.
+    let mut released = original;
+    released.back = Some(t - 1);
+    fs::write(
+        cfg.jobs.join(FILE),
+        serde_json::to_string(&released).unwrap(),
+    )
+    .unwrap();
+    let loaded = kept(&cfg).unwrap();
+    assert_eq!(
+        (loaded.back, loaded.release(), loaded.last),
+        (released.back, released.release(), released.last)
+    );
+    // Direct callers of record() cannot introduce the old instructions either.
+    let fresh = record(&cfg, "web-3", Some(t + 10000), raw, t).unwrap();
+    assert_eq!(fresh.said, expected.said);
+}

@@ -20,7 +20,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       machine.fail("pgrep -f proj-spent-stray")
       machine.succeed("rm /tmp/spent-stray")
       out = json.loads(proj("usage"))
-      assert out["job"] == a and out["said"].startswith("You've hit your monthly spend limit"), out
+      assert out["job"] == a and out["said"] == "Claude reached its weekly allowance", out
       assert out["until"] > out["at"] + 20, out
       status = proj("status")
       assert status.startswith("Claude is out of usage until "), status
@@ -43,7 +43,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       turns = machine.succeed(f"cat /data/dev/jobs/{a}/turns /data/dev/jobs/{a}/*.outcome; ls /data/dev/jobs/{a}")
       assert turns.startswith("1\n"), turns
       told = machine.succeed("cat /tmp/told-spent")
-      assert told.startswith("Your last run was refused") and "monthly spend limit" in told and told.rstrip().endswith("spent"), told
+      assert told.startswith("Your last run was refused") and "weekly allowance" in told and told.rstrip().endswith("spent"), told
+      assert "monthly spend limit" not in told and "https://claude.ai/settings/usage" not in told, told
+      assert "never ask the owner" in told, told
       assert "--resume spent" in machine.succeed("cat /tmp/spent-args"), machine.succeed("cat /tmp/spent-args")
       # Back: nothing held, said so, and the notice closed.
       assert proj("usage") == "", proj("usage")
@@ -52,7 +54,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       assert notices[-1].startswith("close proj-usage "), notices
       assert sum(n.startswith("open proj-usage") for n in notices) == 1, notices
 
-  with subtest("proj usage back lets the line go before the reset: the owner raised the limit"):
+  with subtest("proj usage back lets the line go before the reset: usage became available sooner"):
       machine.succeed("echo 3600 >/tmp/spent")
       a = proj("run web spent")
       # Its record outlives the last hold a while: what says it's out is

@@ -158,13 +158,14 @@ Each has an entry below, and each can be imported on its own.
   resumes it) or `proj done`; one that won't is told once and answers again,
   and still silent is a stall. Only jobs whose starter acts on each turn's end
   (`--owned`: the steward's, the watchdog's) needn't say. A run Claude Code
-  refuses because the plan's usage is spent (a monthly spend limit, a weekly
-  or five-hour limit) holds Claude's queue until the limit
+  refuses because the plan's usage is spent (a weekly or five-hour allowance,
+  or extra-usage cap) holds Claude's queue until the limit
   resets: no Claude turn takes a slot till then, the refused turn waits in line and
   runs again by itself after, `proj status` says why and until when, and
-  `HOST-notify` tells you once (`proj usage back` lets the line go sooner,
-  once you've raised the limit, and keeps any older proj's or watchdog's
-  limit from holding it again).
+  `HOST-notify` tells you once. `burrow.proj.usage.paid` defaults to false:
+  paid extra usage is off, so limits mean waiting for reset, never asking
+  the owner to raise a cap. `proj usage back` releases a stale hold once
+  usage is available.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`

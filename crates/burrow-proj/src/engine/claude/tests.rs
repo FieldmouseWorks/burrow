@@ -22,10 +22,7 @@ fn a_refused_run_says_when_its_limit_resets() {
     assert_eq!(until, Some(1_793_822_400));
     // Its words say so too, for a stream that has no timestamp.
     assert_eq!(refused(&v(RESULT), "", NOW).unwrap().0, Some(1_793_822_400));
-    assert!(
-        said.starts_with("You've hit your monthly spend limit"),
-        "{said}"
-    );
+    assert!(said == "Claude reached its weekly allowance", "{said}");
     // Claude Code's other limits, by their words alone, the older one with
     // its reset after a bar, one with its zone read by those words.
     for (said, until) in [
@@ -44,7 +41,10 @@ fn a_refused_run_says_when_its_limit_resets() {
         let r = json!({"type": "result", "is_error": true, "result": said});
         assert_eq!(
             refused(&r, "", NOW),
-            Some((until, said.to_owned())),
+            Some((
+                until,
+                format!("Claude reached its {}", super::limit_name(said))
+            )),
             "{said}"
         );
     }
@@ -56,4 +56,21 @@ fn a_refused_run_says_when_its_limit_resets() {
     assert_eq!(refused(&answer, "", NOW), None);
     let api = json!({"type": "result", "is_error": true, "result": "API Error: 529 overloaded"});
     assert_eq!(refused(&api, "", NOW), None);
+}
+
+#[test]
+fn structured_limit_names_override_billing_words() {
+    for (kind, overage, name) in [
+        ("seven_day", "rejected", "weekly allowance"),
+        ("five_hour", "rejected", "five-hour allowance"),
+        ("overage", "rejected", "extra-usage cap"),
+    ] {
+        let event = json!({"rate_limit_info": {"status": "rejected", "resetsAt": NOW + 100,
+            "rateLimitType": kind, "overageStatus": overage, "isUsingOverage": false}});
+        let (until, said) = refused(&v(RESULT), &event.to_string(), NOW).unwrap();
+        assert_eq!(until, Some(NOW + 100));
+        assert_eq!(said, format!("Claude reached its {name}"));
+        assert!(!said.contains("raise"));
+        assert!(!said.contains("https://"));
+    }
 }

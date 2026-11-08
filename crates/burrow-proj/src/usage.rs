@@ -1,6 +1,6 @@
 //! The machine out of Claude usage. When Claude Code refuses a run because
-//! the plan's usage is spent (a monthly spend limit, a weekly or five-hour
-//! limit), every other run is refused the same way until it resets: from
+//! the plan's usage is spent (a weekly or five-hour allowance, or an extra-usage
+//! cap), every other run is refused the same way until it resets: from
 //! 2026-11-01 to 11-04 every job's turn ended at once, 1,391 of them, each
 //! retried and reported as an error, the cause named nowhere. So a refused
 //! run ([`refused`]) puts the whole machine out of usage until the limit
@@ -10,7 +10,7 @@
 //! usage` tells it), and the owner hears once, with the cause and when it
 //! resets. The first run that started after the refusal and isn't refused
 //! ends it ([`back`]), and the notice is closed; so does `proj usage back`,
-//! for a limit the owner raised before it would have reset.
+//! once usage is available before the recorded reset.
 //!
 //! Every change to it goes under jobs/.usage.lock, so turns refused at once,
 //! and runs that finish meanwhile, each see the last one's. Its record
@@ -110,8 +110,11 @@ pub fn kept(cfg: &Config) -> Option<Spent> {
 fn read(cfg: &Config) -> Result<Option<Spent>, String> {
     let path = cfg.jobs.join(FILE);
     match fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
+        Ok(text) => serde_json::from_str::<Spent>(&text)
+            .map(|mut s| {
+                s.said = crate::engine::claude::normalize_refusal(&s.said);
+                Some(s)
+            })
             .map_err(|e| format!("proj: {}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("proj: {}: {e}", path.display())),
@@ -188,7 +191,7 @@ fn put(
         },
         None => Spent {
             until,
-            said: said.to_owned(),
+            said: crate::engine::claude::normalize_refusal(said),
             job: id.to_owned(),
             at,
             back: None,
@@ -201,7 +204,7 @@ fn put(
     }
     keep(cfg, &spent)?;
     if lapsed {
-        tell(cfg, &["open", NOTICE, &title(&spent), &body(&spent)]);
+        tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
     }
     if lapsed || was.as_ref().is_some_and(|w| w.until != spent.until) {
         changed(cfg);
@@ -234,13 +237,13 @@ pub fn remind(cfg: &Config) {
     if let Some(mut s) = kept(cfg).filter(|s| due(s)) {
         s.told = now();
         if keep(cfg, &s).is_ok() {
-            tell(cfg, &["open", NOTICE, &title(&s), &body(&s)]);
+            tell(cfg, &["open", NOTICE, &title(&s), &body(cfg, &s)]);
         }
     }
 }
 
 /// Usage is back: a run that started at `started` (in seconds) and wasn't
-/// refused, or `proj usage back` (None: the owner raised the limit). The
+/// refused, or `proj usage back` (None: usage is available sooner). The
 /// turns waiting take slots again, every turn in line has its deadline
 /// moved, and the owner's notice is closed. A run that started no later
 /// than the last refusal proves nothing: its last call may have come before
@@ -451,17 +454,26 @@ fn title(s: &Spent) -> String {
     format!("Claude is out of usage until {}", when(s.until))
 }
 
-fn body(s: &Spent) -> String {
+fn body(cfg: &Config, s: &Spent) -> String {
     format!(
         "Since {}, Claude Code refuses every Claude job here. It answered job {}:\n\n> {}\n\n\
          proj starts no Claude turn until {}. The turns that were refused wait in line and run again then, by themselves, \
-         and the stall watchdog holds what waits on them. Raised the limit sooner? `proj usage back` starts them now. \
+         and the stall watchdog holds what waits on them. {} \
          This closes once a job runs again.",
         when(s.at),
         s.job,
         s.said,
-        when(s.until)
+        when(s.until),
+        policy(cfg)
     )
+}
+
+pub fn policy(cfg: &Config) -> &'static str {
+    if cfg.usage_paid {
+        "If usage is available sooner, `proj usage back` releases the hold."
+    } else {
+        "Paid extra usage is disabled. A usage limit means waiting until reset; never ask the owner to raise a spend cap or enable paid usage."
+    }
 }
 
 /// A moment as the machine's clock (its time zone) says it.
