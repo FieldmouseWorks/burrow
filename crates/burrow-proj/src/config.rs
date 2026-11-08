@@ -111,6 +111,36 @@ pub struct Inbox {
     pub wake: PathBuf,
     /// The machine's own GitHub App, which a bot's issue's job acts as.
     pub machinery: Option<String>,
+    /// The label on an issue carrying text from outside the authors, whoever
+    /// filed it: never a job, never sorted or handed on. "" is none.
+    #[serde(default)]
+    pub outside_label: String,
+    /// Sorting every other open issue, and handing the ready ones to idle
+    /// slots; None when it's off.
+    #[serde(default)]
+    pub triage: Option<Triage>,
+}
+
+/// proj-inbox's triage and drain ([`crate::inbox`]'s triage and drain).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Triage {
+    /// The label on an issue only the owner can settle (the steward's owner
+    /// label, which lists PRs for them).
+    pub owner_label: String,
+    /// Who such an issue is assigned to, so GitHub tells them; None assigns
+    /// nobody.
+    pub owner: Option<String>,
+    /// Labels whose issues other machinery owns (probe, undo, flaky): left
+    /// alone, never sorted or handed on.
+    pub skip: Vec<String>,
+    /// Sorting jobs at once, across every repo.
+    pub at_once: usize,
+    /// The engine ready issues are handed to, by its inbox label; None hands
+    /// none on.
+    pub drain: Option<Engine>,
+    /// Handed-on issues' jobs at once, across every repo.
+    pub drain_jobs: usize,
 }
 
 impl Config {

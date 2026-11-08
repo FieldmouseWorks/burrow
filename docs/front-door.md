@@ -118,7 +118,11 @@ into project jobs.
 - **Follow-ups:** reply on the issue. Replies from `inbox.authors` go to the
   same job as its next turn (`proj reply`), with everything it already did in
   context. A reply sent while a turn runs waits for it to finish.
-- **Done:** close the issue, or take the label off.
+- **Done:** a turn that ends `proj done` closes the issue once its answer is
+  posted, unless a reply is waiting (the stuck issue excepted: the steward
+  closes that). Reopen it to pick the work back up, as a fresh job from the
+  issue as it stands. Closing it yourself, or taking the label off, ends the
+  job too.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
@@ -133,6 +137,55 @@ into project jobs.
   pick up from your reply.
 - On the box: `proj-inbox status` maps issues to jobs, `proj log ID` shows an
   answer.
+
+### Triage and the drain: issues nobody labelled
+
+With `inbox.triage.enable`, an issue doesn't need a label to get done. Every
+open issue one of `inbox.authors` opened, with none of the labels below, an
+engine's or one in `triage.skip` (probe, undo, flaky: other machinery's), is
+sorted by a job of its own: the `triage` role's engine reads the issue and the
+repo, changes nothing, and answers with a verdict the inbox carries out.
+
+| Verdict | What happens |
+| --- | --- |
+| `ready` | labelled `ready`: an agent can finish it now and prove it |
+| `later` | labelled `later`: real, but too big, vague or waiting on other work |
+| `tracker` | labelled `tracker`: a checklist, milestone or dashboard |
+| `owner` | labelled `triage.ownerLabel`, assigned to `triage.owner`, with the call they're asked |
+| `duplicate #M` | closed as not planned, saying of what |
+| `done` | closed as completed, saying where |
+
+An answer with no verdict is `later`, saying so. A sorting job that ends with no
+answer at all (its engine refused it, say) leaves the issue as it was: it's
+sorted again once it changes, or once another issue's verdict shows sorting
+works again. A verdict on an issue whose text or authors' comments changed since it
+was sorted, even partway through carrying it out, is dropped and the issue
+sorted again as it stands. One GitHub took only part of is finished on a later
+pass, the same steps from where it stopped, with the sorting label last. Only the comments that close an
+issue or ask the owner something are posted; a label alone says nothing, so a
+backlog being sorted doesn't flood anyone's mail. Sorting jobs wait in line
+behind work someone asked for, `triage.atOnce` at a time across every repo, and
+each one's end runs a full pass, so a quiet repo's backlog is worked through
+too. Take a label off to have an issue sorted again.
+
+With `triage.drain` set to an engine, the drain hands `ready` issues to it: each
+pass, if that engine has an idle slot and fewer than `triage.drainJobs` handed-on
+issues have a job, the oldest `ready` issue in any repo's last-listed open issues
+(the pipeline's repos first), checked with GitHub as it stands, gets
+the engine's inbox label and is a job like any other from there, closed when
+it's done. A handed-on job takes its place in line rather than going first.
+While a `ready` issue waits for a slot, every job turn's end kicks a pass, since
+any of them frees one; a usage hold books one for when it resets.
+
+Strangers' issues are never sorted or handed on: an agent reads them with the
+box's logins. Nor is one labelled `inbox.outsideLabel` (`outside text`), whoever
+filed it: whatever files text from outside the authors (a game server filing
+its players' reports, say, even with an author's token) puts that label on as
+it opens the issue, and no job ever starts from it, engine label or not. That
+text gets to an agent only through an author who opens an issue of their own
+for it. A job whose issue gets the label later, or whose opener
+leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
+as its issue closes, and the issue hears why.
 
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
 with `ENGINE` either `claude` or `codex`. Scope a key to one repo with

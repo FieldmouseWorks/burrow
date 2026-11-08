@@ -556,6 +556,38 @@ fn waiter_alive(place: &Path, id: &str) -> bool {
     String::from_utf8_lossy(&cmdline).contains(&format!(" _exec {id} "))
 }
 
+/// Whether a turn on this engine started now would get a slot, as far as a
+/// look from outside the line can tell: for Claude, usage not spent, nobody
+/// in line and a slot free beyond the ones kept for the pipeline; for Codex,
+/// one of its pool free. Advisory: a turn already on its way may take the
+/// slot first, and the new one then waits in line like any other. For what
+/// work nobody is waiting on (proj-inbox's drain) starts only on idle slots.
+pub fn room(cfg: &Config, engine: Engine) -> bool {
+    let free = |dir: &str, n: usize| -> usize {
+        let dir = cfg.jobs.join(dir);
+        if fs::create_dir_all(&dir).is_err() {
+            return 0;
+        }
+        (1..=n)
+            .filter(|i| {
+                File::create(dir.join(i.to_string())).is_ok_and(|f| {
+                    let ok = f.try_lock().is_ok();
+                    let _ = f.unlock();
+                    ok
+                })
+            })
+            .count()
+    };
+    match engine {
+        Engine::Claude => {
+            usage::out(cfg).is_none()
+                && in_line(cfg).is_empty()
+                && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
+        }
+        Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
+    }
+}
+
 /// Memory to spare, in MiB: what the kernel says is available, plus what the
 /// ZFS ARC would give back (the kernel doesn't count it).
 pub fn spare() -> u64 {
