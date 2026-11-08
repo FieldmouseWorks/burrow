@@ -38,6 +38,38 @@ pub(crate) fn machine_in(dir: &Path) -> Machine {
     }
 }
 
+#[test]
+fn heavy_slots_are_readable_only_when_configured_and_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut cfg = job_in(dir.path(), &project);
+    let machine = machine_in(dir.path());
+    let home = dir.path().join("home");
+    let env = env_of(&[("HOME", &home)]);
+    let heavy = dir.path().join("heavy");
+    std::fs::create_dir(&heavy).unwrap();
+    std::fs::write(heavy.join("slot1"), "").unwrap();
+    let scratch = dir.path().join("scratch");
+    let profile = |cfg: &Config| {
+        let job = Job::new(cfg, "job");
+        flags(cfg, &job, &scratch, &env, &machine)
+            .unwrap()
+            .flags
+            .join("\n")
+    };
+    assert!(
+        cfg.heavy_dir.is_none(),
+        "old configs need no heavy directory"
+    );
+    assert!(!profile(&cfg).contains(&format!("\"{}\"=", heavy.display())));
+    cfg.heavy_dir = Some(heavy.clone());
+    assert!(profile(&cfg).contains(&format!("\"{}\"=\"read\"", heavy.display())));
+    let missing = dir.path().join("missing-heavy");
+    cfg.heavy_dir = Some(missing.clone());
+    assert!(!profile(&cfg).contains(&format!("\"{}\"=", missing.display())));
+}
+
 fn deny(path: &Path) -> String {
     format!("\"{}\"=\"deny\"", path.display())
 }
@@ -207,7 +239,7 @@ fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing
     let _server = UnixListener::bind(home.join(".config/git/config")).unwrap();
     let token = dir.path().join("gh-token/workers.sock");
     let env = env_of(&[("HOME", &home), ("GH_TOKEN_SOCKET", &token)]);
-    let paths = readable(&env, &machine).unwrap();
+    let paths = readable(&env, &machine, None).unwrap();
     assert_eq!(
         paths,
         [
@@ -235,7 +267,7 @@ fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing
         ..machine
     };
     assert_eq!(
-        readable(&env, &machine).unwrap(),
+        readable(&env, &machine, None).unwrap(),
         [dir.path().join("system"), toolchains, global]
     );
     // Nor one of the CLI's platform defaults below it, where the CLI's

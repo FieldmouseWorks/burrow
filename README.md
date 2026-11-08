@@ -176,6 +176,8 @@ Each has an entry below, and each can be imported on its own.
   branch, which the guard keeps on. A turn on the engine that didn't run the
   turns before it is handed what they were asked and answered. Log it in with
   `autoland-codex-login job`, separately from `autoland-codex-login review`.
+  With `burrow.cpu.enable`, Codex sandboxes also read the configured heavy
+  slot directory so jobs can run checks through `heavy`.
   Codex-written heads still get a Codex review and need a Claude judge.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
