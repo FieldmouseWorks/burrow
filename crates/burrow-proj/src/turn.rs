@@ -4,7 +4,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -217,9 +217,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         .map_err(|e| Fail::new(1, format!("proj: {}: {e}", waitdir.display())))?;
     rewatch(cfg, &[id]);
     // Whether its turns must say what comes next: an --owned job's starter
-    // acts on each end itself, and a sandbox's Claude can't run proj.
+    // acts on each end itself.
     let agent = read(&job.path("agent")).filter(|a| !a.is_empty());
-    let must = !job.path("owned").exists() && agent.is_none();
+    let must = !job.path("owned").exists();
     let stream = job.turn(&n, "jsonl");
     File::create(&stream).map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
     // What it's asked, after what its engine's conversation missed of the
@@ -289,6 +289,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             ),
             &read(&job.turn(&n, "stderr")).unwrap_or_default(),
         );
+        let declaration_error = agent
+            .as_deref()
+            .and_then(|a| crate::guest::collect(cfg, &job, &n, a).err());
         // The turn's next run, in the same conversation and slot, is told
         // `text`, kept in its N.KIND.
         let again = |text: &str, kind: &str| -> PathBuf {
@@ -406,9 +409,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // conversation and slot, and answers again. Waiting on GitHub is
         // proj await's. Only once all of the last run is gone, so none of it
         // overlaps the next or writes to its stream (and the next starts only
-        // if the turn has time left); a sandbox's work is in the VM, out of
-        // reach, so a --vm job isn't told.
+        // if the turn has time left). A sandbox is stopped before retrying.
         let mut told = String::new();
+        if let Some(error) = declaration_error {
+            let _ = fs::remove_file(job.path("end.next"));
+            let _ = fs::remove_file(job.path("await.next"));
+            told.push_str(&format!("The host couldn't register your sandbox next step: {error}. Check what you await and declare the next step again. "));
+        }
         if cut {
             told.push_str("Your answer ended the turn while something you left running in the background was still going, and it was stopped with it: nothing more from it reaches you, and the turn isn't over. If you were waiting on it, run it again and wait for it now.");
         }
@@ -424,12 +431,18 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         if !told.is_empty()
             && !job.turn(&n, "cut").exists()
-            && agent.is_none()
             && last.as_ref().is_some_and(|l| !is_error(l))
             && reap()
+            && agent.as_deref().is_none_or(|a| stopped("agent", a))
         {
             prompt = again(&format!("{told} Then answer again."), "cut");
             continue;
+        }
+        if let Some(a) = agent.as_deref()
+            && !stopped("agent", a)
+        {
+            outcome("couldn't stop the sandbox at the end of its turn");
+            return Err(Fail::quiet(1));
         }
         break (last, rc);
     };
@@ -712,11 +725,11 @@ fn stop(pid: Pid) {
 /// Whether sandbox `id`'s VM, and so everything a run left in it, is
 /// stopped: `agent stop` (as `agent`, the command) said so.
 fn stopped(agent: &str, id: &str) -> bool {
-    let ok = Command::new(agent)
-        .args(["stop", id])
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|st| st.success());
+    let ok = crate::guest::bounded(
+        Command::new(agent).args(["stop", id]),
+        Duration::from_secs(60),
+    )
+    .is_ok();
     if !ok {
         eprintln!("proj: agent stop {id} didn't say the sandbox stopped");
     }

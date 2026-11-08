@@ -210,6 +210,10 @@ in
 
     # Claude, with nothing to ask: the VM is the boundary.
     environment.systemPackages = [
+      (pkgs.runCommand "proj-guest" {} ''
+        mkdir -p $out/bin
+        ln -s ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj-guest $out/bin/proj
+      '')
       cfg.claudePackage
       pkgs.curl
       pkgs.jq

@@ -8,6 +8,12 @@ pkgs.testers.runNixOSTest {
   name = "agents";
 
   nodes.host = { lib, pkgs, ... }: let
+    inherit (import ./proj/stand-ins.nix { inherit pkgs; }) gh;
+    # No login or network: exercise the actual guest proj and host lifecycle.
+    vmClaude = pkgs.runCommand "vm-claude" { nativeBuildInputs = [ pkgs.rustc pkgs.stdenv.cc ]; } ''
+      mkdir -p $out/bin
+      rustc --edition=2024 ${./agents/claude.rs} -o $out/bin/claude
+    '';
     # The test commits, on the host and in the sandboxes.
     identity.programs.git.config.user = {
       name = "Test";
@@ -27,6 +33,9 @@ pkgs.testers.runNixOSTest {
       claude.enable = true;
       claude.effort = "high";
       proj.enable = true;
+      proj.gh = gh;
+      watchdog.enable = true;
+      claude.package = vmClaude;
       agents.enable = true;
       toolbox.enable = true;
       # Small sandboxes, so two fit (and not 2048: QEMU's microvm machine hangs).
@@ -35,6 +44,10 @@ pkgs.testers.runNixOSTest {
       # Everything the sandboxes log lands in this test's output.
       agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity slowBanner ];
     };
+
+    # Keep the recorded stall for assertions, without escalating it to jobs.
+    systemd.services.burrow-watchdog.enable = false;
+    environment.systemPackages = [ pkgs.jq ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -200,10 +213,38 @@ pkgs.testers.runNixOSTest {
         sandbox = host.succeed(f"cat /data/dev/jobs/{job}/agent").strip()
         assert sandbox == "demo-3", sandbox
         assert "[vm demo-3]" in dev("proj status")
-        # No Claude login in a test, so the job ends without an answer; what
-        # matters is that it ran claude inside the sandbox and kept its output.
-        host.wait_until_succeeds(f"[ \"$(su - dev -c 'proj status' | grep {job} | awk '{{print $2}}')\" != running ]", timeout=180)
-        host.succeed(f"test -s /data/dev/jobs/{job}/1.jsonl -o -s /data/dev/jobs/{job}/1.outcome")
+        def ended(job, turn=1):
+            host.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=240)
+            return host.succeed(f"cat /data/dev/jobs/{job}/{turn}.end").strip()
+
+        assert ended(job) == "done"
+        assert "[no next step]" not in dev("proj status")
+        # ask is read before the VM stops, and a reply starts it again.
+        dev(f"proj reply {job} ask")
+        assert ended(job, 2) == "ask"
+        assert "[asks]" in dev("proj status")
+        dev(f"proj reply {job} silent")
+        assert ended(job, 3) == "undeclared"
+        assert "[no next step]" in dev("proj status")
+        # Exactly one nudge, in the same turn and conversation.
+        nudge = host.succeed(f"cat /data/dev/jobs/{job}/3.cut")
+        assert "Your answer didn't say what comes next" in nudge
+        assert all(x in nudge for x in ["proj await URL", "proj ask", "proj done"])
+        stream = host.succeed(f"cat /data/dev/jobs/{job}/3.jsonl")
+        assert sum(json.loads(l).get("type") == "result" for l in stream.splitlines()) == 2
+        host.wait_until_succeeds(f"jq -e '.items[\"{job}\"].phase | contains(\"without saying what comes next\")' /data/dev/jobs/.waits.json", timeout=30)
+        wait = json.loads(host.succeed("cat /data/dev/jobs/.waits.json"))["items"][job]
+        assert wait["since"] == wait["due"], wait
+        # The declaration contains URLs only. GitHub is read on the host.
+        host.succeed("mkdir -p /tmp/gh; echo '{\"state\":\"open\"}' >/tmp/gh/repos_o_r_issues_1; echo '[]' >/tmp/gh/repos_o_r_issues_1_comments")
+        dev(f"proj reply {job} 'await https://github.com/o/r/issues/1'")
+        assert ended(job, 4) == "await"
+        baseline = host.succeed(f"cat /data/dev/jobs/{job}/await")
+        assert baseline.startswith("o/r#1\t") and '"state":"open"' in baseline
+        host.succeed("echo '[{\"body\":\"news\"}]' >/tmp/gh/repos_o_r_issues_1_comments")
+        dev("proj _watch o/r")
+        assert ended(job, 5) == "done"
+        assert host.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "5"
 
     with subtest("rm stops and saves, keep undoes it, gc deletes once expired"):
         dev(f"agent rm {o}")
