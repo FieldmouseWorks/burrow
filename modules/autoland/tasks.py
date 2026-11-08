@@ -143,7 +143,7 @@ def describe_task(repo, pr, why, before=None):
         "all over, and the steward has the judge look again at this same head once the new description is up. "
         "If the judge's comment finds the code failing too (its build or tests, a finding left unfixed, a reason that doesn't "
         "hold), this job can't settle that: change nothing and say so in your answers' comment. "
-        f"{answers(repo, pr)}{f'The last Claude job on this left answers that never went up: {before}. ' if before else ''}"
+        f"{answers(repo, pr)}Here pushed is null, and threads empty. {f'The last Claude job on this left answers that never went up: {before}. ' if before else ''}"
         "Don't ask for a review and don't merge: the steward does those once you're done. "
         "If something needs the owner (a decision only they can make, a secret), say exactly what in your answers' comment, "
         f"add the {CFG['labels']['owner']} label, and stop."

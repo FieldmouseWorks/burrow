@@ -25,7 +25,7 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0] and "its description wrong 
 task = JOBS[0]
 assert "Push nothing: no commit, no merge or rebase onto its base" in task, task
 assert "write the description anew to match this head" in task and '"description": TEXT' in task, task
-assert "git push" not in task and "If CI is red" not in task and "Merge main into the branch" not in task, task
+assert "Here pushed is null" in task and "git push origin" not in task and "If CI is red" not in task and "Merge main into the branch" not in task, task
 assert "Settled, but its judge found its description wrong; a Claude job has it since" in status, status
 assert "build or tests fail" not in status and not merged() and digest == [], (status, digest)
 # Once the edited description is up, the same head is judged again: no push needed.
