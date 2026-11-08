@@ -57,11 +57,42 @@ PROOF_RUN = os.path.abspath(sys.argv[7])
 # its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
 # every fix job as it was and says nothing of any (unpushed.py runs the real
 # one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
-# which ask GitHub nothing, and its `carry`, which reads the stand-in for
-# GitHub's git remote, on the config upkeep_config writes (UPKEEP_REAL).
+# which ask GitHub nothing, its `carry`, which reads the stand-in for
+# GitHub's git remote, and its `commits`, which reads GitHub's compare as
+# serve_compare has it, on the config upkeep_config writes (UPKEEP_REAL).
 # Those it starts as they are, from sh: every pass's PRs read their verdicts,
 # and a Python's start for each would be most of the Python check's time.
 UPKEEP_RAN, UPKEEP_REAL, UPKEEP_FAKE = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json", f"{tmp}/upkeep-fake"
+# GitHub's compare, as gh answers the real one's `commits` with it: page N
+# of what serve_compare last said (COMPARE_PAGES), with a Link to the next,
+# each page asked for noted (COMPARE_CALLED); no answer for None.
+COMPARE_BIN, COMPARE_PAGES, COMPARE_CALLED = f"{tmp}/compare-bin", f"{tmp}/compare.json", f"{tmp}/compare-called"
+os.makedirs(COMPARE_BIN)
+with open(f"{COMPARE_BIN}/gh", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, sys, urllib.parse
+path = sys.argv[5]
+with open({COMPARE_CALLED!r}, "a") as f:
+    f.write(path + "\\n")
+pages = json.load(open({COMPARE_PAGES!r}))
+query = urllib.parse.parse_qs(path.partition("?")[2])
+n = int(query.get("page", ["1"])[0])
+if not path.startswith("repos/sam/r/compare/") or pages is None or n > len(pages):
+    sys.stderr.write("no answer scripted\\n")  # gh's failure, which isn't asked again
+    sys.exit(1)
+link = f'Link: <https://api.github.com/{{path.partition("?")[0]}}?per_page=100&page={{n + 1}}>; rel="next"\\r\\n' if n < len(pages) else ""
+sys.stdout.write("HTTP/1.1 200 OK\\r\\n" + link + "\\r\\n" + json.dumps(pages[n - 1]))
+""")
+os.chmod(f"{COMPARE_BIN}/gh", 0o755)
+# burrow-upkeep as every pass here runs the real one: its `commits` asks
+# that gh, whatever gh a test puts first for the rest.
+UPKEEP_RUN = f"{tmp}/upkeep-run"
+with open(UPKEEP_RUN, "w") as f:
+    f.write(f"""#!/bin/sh
+[ "$2" = commits ] && PATH={shlex.quote(COMPARE_BIN)}:$PATH
+exec {shlex.quote(UPKEEP)} "$@"
+""")
+os.chmod(UPKEEP_RUN, 0o755)
 with open(UPKEEP_FAKE, "w") as f:
     f.write(f"""import json, sys
 if sys.argv[2] == "claims":
@@ -77,7 +108,7 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict|carry) shift; exec {shlex.quote(UPKEEP)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|sweep|verdict|carry|commits) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
@@ -117,7 +148,9 @@ def review_service():
 # raises it by the PR's labels there, with the raises CN says the ledger
 # kept from before ("kept"), as Conary does: `r2` makes it R2, `review` asks
 # for a review round, and `raised` names them, sorted.
-REST_HEADS = {}  # the head the PR commits endpoint is answering about
+# GitHub's compare's pages for a PR, by number, as serve_compare takes them:
+# unless set, its commits as COMMITS and COMMITTERS have them.
+COMPARE = {}
 CN, CN_LOG, TOUCHED = f"{tmp}/cn.json", f"{tmp}/cn-log", f"{tmp}/touched.json"
 with open(f"{tmp}/cn", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -185,7 +218,6 @@ def cn_classed():
 
 def touching(number, sha, files, labels=()):
     """What `cn class` reads a PR at a head touches, and its labels."""
-    REST_HEADS[number] = sha
     touched = json.load(open(TOUCHED)) if os.path.exists(TOUCHED) else {}
     touched[f"{number}@{sha}"] = {"files": list(files), "labels": list(labels)}
     with open(TOUCHED, "w") as f:
@@ -205,6 +237,11 @@ def agent_runs():
 
 agent()
 cn()
+# Each stage's label (labels.nix's labels.waiting), as the module gives them.
+WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for k, x in (
+    ("review", "review"), ("reviewer", "reviewer"), ("fix", "fix"), ("ci", "CI"), ("proofSlot", "proof slot"),
+    ("proof", "machine checks"), ("releaseAge", "release age"), ("train", "train"), ("merge", "merge"),
+    ("owner", "Sam"), ("base", "base branch"))}
 # The example machine's class policy (burrow.ledger.policy), as cn reads it.
 POLICY = sys.argv[2]
 with open(f"{tmp}/config.json", "w") as f:
@@ -213,7 +250,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer", "train": "waiting: train"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "authors": ["sam"]},
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": WAITING}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "authors": ["sam"]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
         "defaults": {"rounds": 5,
                      "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
@@ -285,7 +322,7 @@ def upkeep_config(path=f"{tmp}/upkeep.json", **over):
                               "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}},
                    "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"},
                    "git": f"{tmp}/origin", "snapshot": {"dir": V.TREES, "skipPaths": SKIP, "repos": {}}, **over}, f)
-    return [UPKEEP, path]
+    return [UPKEEP_RUN, path]
 
 
 upkeep_config(UPKEEP_REAL)
@@ -307,8 +344,8 @@ SINCE = []  # each job's place in line (C.job's since), in the order they starte
 ROLES = []  # and the kind of work each is (C.job's role), which picks its model
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 CARRY = {}  # what V.carry says of a head: nothing carries unless set
-COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
-COMMITTERS = {}  # a PR's commits' committer emails, by number, as the REST API gives them (None: the ask fails)
+COMMITS = {}  # a PR's commits' author emails, by number, as GitHub's compare gives them (None: the ask fails)
+COMMITTERS = {}  # and their committers' (None: the ask fails too)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
 
@@ -355,13 +392,6 @@ def gh_stub(*a, **k):
             raise got
         msgs = [{"message": m} for m in got]
         return [msgs[i:i + 100] for i in range(0, len(msgs), 100)] or [[]]  # --slurp: the pages
-    if a[:2] == ("pr", "view") and "commits" in a:
-        got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
-        return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}
-    if a[:1] == ("api",) and "--paginate" in a and a[-1].endswith("/commits?per_page=100"):
-        got = COMMITTERS.get(int(a[-1].split("/")[-2]), ["noreply@github.com"])
-        return None if got is None else [[{"sha": REST_HEADS.get(int(a[-1].split("/")[-2]), head),
-                                           "commit": {"message": "change: fixture", "committer": {"email": e}}} for e in got]]  # --slurp: the pages
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
@@ -374,6 +404,47 @@ def gh_stub(*a, **k):
         fork = FORKS.pop(0) if FORKS else FORK.get(urllib.parse.unquote(base), FORK["v"]) if dots else None
         return {"fork": fork} if fork else None
     return ""
+
+
+def commit(sha, message, author="bot@renovateapp.com", committer="noreply@github.com"):
+    """One commit as GitHub's REST API gives it."""
+    return {"sha": sha, "commit": {"message": message, "author": {"email": author}, "committer": {"email": committer}}}
+
+
+def compare_pages(commits, total=None, fork="f" * 40, shown=None):
+    """A compare of a head with its base, its pages a hundred commits each:
+    total_commits is the whole range's count, and GitHub may page through
+    only the first `shown` of them."""
+    listed = commits[:shown]
+    return [{"total_commits": len(commits) if total is None else total, "merge_base_commit": {"sha": fork},
+             "commits": listed[i:i + 100]} for i in range(0, max(len(listed), 1), 100)]
+
+
+def fixture_pages(number, sha):
+    """The PR's commits as COMMITS and COMMITTERS have them, the last at the
+    head: one for each author and committer set, its first author and
+    GitHub filling in. None if either fails."""
+    authors = COMMITS.get(number, ["bot@renovateapp.com"])
+    committers = COMMITTERS.get(number, ["noreply@github.com"])
+    if authors is None or committers is None:
+        return None
+    n = max(len(authors), len(committers))
+    return compare_pages([commit(sha if i == n - 1 else f"{i:040x}", "change: fixture",
+                                 (authors + authors[:1] * n)[i], (committers + ["noreply@github.com"] * n)[i])
+                          for i in range(n)])
+
+
+def serve_compare(pages):
+    """What GitHub's compare answers burrow-upkeep's `commits` with from now
+    on, page by page (None: no answer), and its calls so far forgotten."""
+    with open(COMPARE_PAGES, "w") as f:
+        json.dump(pages, f)
+    open(COMPARE_CALLED, "w").close()
+
+
+def compare_calls():
+    """The compare's pages burrow-upkeep asked for, since serve_compare."""
+    return open(COMPARE_CALLED).read().splitlines()
 
 
 FAIL = []  # writes that fail, by a piece of their arguments: gh's None, or with check what gh() raises
@@ -523,6 +594,7 @@ def run(pr, after, held=None, below=None):
     C.LIMITED.clear()
     POSTED.clear()
     digest = []
+    serve_compare(COMPARE[pr["number"]] if pr["number"] in COMPARE else fixture_pages(pr["number"], pr["headRefOid"]))
     touching(pr["number"], pr["headRefOid"], [f["path"] for f in pr["files"]["nodes"]], [x["name"] for x in pr["labels"]["nodes"]])
     H.T.CLASSES.clear()
     with C.acting_for("sam/r"):

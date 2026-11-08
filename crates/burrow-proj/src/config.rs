@@ -58,8 +58,9 @@ pub struct Config {
     /// ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
     /// Missing roles use Claude's default; malformed lines fail the turn.
     pub roles: PathBuf,
-    /// Claude's weekly reading, written by usage-reset; absent disables overflow.
-    pub meter: Option<PathBuf>,
+    /// The engines' meters (claude.json, codex.json), written by
+    /// usage-reset; absent disables overflow.
+    pub meters: Option<PathBuf>,
     /// Codex's own pool, and the immutable hooks dir it gives git.
     pub codex_slots: usize,
     pub codex_hooks: PathBuf,
@@ -180,11 +181,13 @@ impl Config {
         };
         let mut entries = BTreeMap::new();
         let now = crate::now();
+        // Out of Claude's usage: a line with an overflow moves off Claude.
+        let held = crate::usage::out(self).is_some();
         for (i, line) in text.lines().enumerate() {
             if line.trim().is_empty() || line.trim_start().starts_with('#') {
                 continue;
             }
-            let (key, choice) = crate::engine::role(line, self.meter.as_deref(), now)
+            let (key, choice) = crate::engine::role(line, self.meters.as_deref(), held, now)
                 .map_err(|e| format!("{} line {}: {line}: {e}", self.roles.display(), i + 1))?;
             if let Some((first, original, _)) = entries.get(&key) {
                 return Err(format!(
@@ -244,7 +247,7 @@ pub(crate) mod tests {
             "apps": {"workers": "/run/workers.env"},
             "notify": "/bin/notify",
             "roles": "/nowhere/roles",
-            "meter": null, "codexSlots": 2, "codexHooks": "/hooks",
+            "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box",
                       "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
@@ -352,39 +355,6 @@ pub(crate) mod tests {
                     && error.contains(&format!("line 4: {second}")),
                 "{error}"
             );
-        }
-    }
-
-    #[test]
-    fn overflow_belongs_to_the_winning_scoped_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(example()).unwrap();
-        cfg.roles = dir.path().join("roles");
-        let meter = dir.path().join("meter.json");
-        cfg.meter = Some(meter.clone());
-        std::fs::write(
-            &cfg.roles,
-            "work codex:bare\nwork@sam/code claude:scoped over 80 codex:burst\n",
-        )
-        .unwrap();
-        for (used, expected) in [
-            (
-                79,
-                Choice {
-                    engine: Engine::Claude,
-                    model: Some("scoped".into()),
-                },
-            ),
-            (
-                80,
-                Choice {
-                    engine: Engine::Codex,
-                    model: Some("burst".into()),
-                },
-            ),
-        ] {
-            std::fs::write(&meter, json!({"utilization":used, "resets_at":"2026-11-07T12:00:00Z", "read_at":crate::now()}).to_string()).unwrap();
-            assert_eq!(cfg.engine("work", Some("sam/code")).unwrap(), expected);
         }
     }
 

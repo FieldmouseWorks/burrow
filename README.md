@@ -151,7 +151,8 @@ Each has an entry below, and each can be imported on its own.
   once you've raised the limit, and keeps any older proj's or watchdog's
   limit from holding it again).
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
-  model and overflow above a fresh weekly meter reading. A `ROLE@OWNER/REPO`
+  model and an overflow to the other engine when its own is short and the
+  other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
   key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
   small slot pool (`codex.slots`, two), a sandbox that writes only the
   project, its scratch, its job's dir, git's metadata and a /tmp of its own,
@@ -233,7 +234,15 @@ Each has an entry below, and each can be imported on its own.
   can take it, you hear of it by the deadline a job's would have had. It
   books its own next pass for the next deadline: no timer,
   and no GitHub calls of its own. `burrow-watchdog status` shows what it
-  watches.
+  watches. With `units.enable` (on with the watchdog), what's broken on the
+  machine itself is a source too (`burrow-units`): a failed unit, and a
+  program that dumped core, whoever ran it, is a stall `units.graceMinutes`
+  after it's seen, and a crash counts for `units.crashHours`; `units.ignore`
+  takes globs of the units and programs that fail by design. A watcher
+  follows the journal for systemd's word of a failure and systemd-coredump's
+  of a dump and asks for a pass, touching no unit's own settings. The
+  watchdog's job clears a crash whose cause it fixed with
+  `burrow-units clear EXE`, and a later one is back.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
   on together, the machine's Actions runners and its deploy, keeps moving. A
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that
@@ -334,9 +343,12 @@ Each has an entry below, and each can be imported on its own.
   Claude Code of its own in a tmux and confirms it, at most once a week; a
   reset that only works at the limit waits for it, and with nothing banked it
   does nothing. `HOST-notify` tells you when it used one, or when it couldn't.
-  It books its own next look, sooner the faster the week is going: no timer.
-  Each fresh weekly reading replaces `meter.json` and appends to `meter.log`
-  in its state dir, for proj's overflow and the meter's history.
+  It books its own next look, sooner the faster the week is going, and never
+  more than 15 minutes on: no timer. Each pass also keeps the engines' meters
+  for proj's role overflow: Claude's five-hour session and week, and, with
+  proj's Codex, Codex's windows and whether it has credits (read through its
+  app-server's `account/rateLimits/read`). Each fresh reading replaces
+  `meters/ENGINE.json` and appends to `meters/log` in its state dir.
 
 - **`ops`** (`burrow.ops`): perf, bpftrace, bcc, strace, gdb, tcpdump,
   nvme-cli, smartctl, fwupd and friends, a systemd hardware watchdog (with

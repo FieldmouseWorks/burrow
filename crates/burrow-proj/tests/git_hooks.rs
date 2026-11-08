@@ -166,7 +166,7 @@ impl Repo {
 }
 
 /// The steward's reading of a stored commit message: `git
-/// interpret-trailers --parse`, case-blind (modules/autoland/touches.py).
+/// interpret-trailers --parse`, case-blind (crates/burrow-upkeep/src/commits.rs).
 fn steward_sees_mark(repo: &Repo, commit: &str) -> bool {
     let message = repo.ok(&["log", "-1", "--format=%B", commit]);
     let mut child = Command::new("git")

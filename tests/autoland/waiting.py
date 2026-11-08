@@ -1,16 +1,23 @@
-"""A PR's waiting label (prs.show_waiting): put on by the step whose status
-says what it waits on (its updates too new to take yet, its turn for a proof
-slot, a reviewer back in service), the steward's others taken off in the
-same call, and taken off once it waits on none of them. A PR whose labels are
-already right costs no call, and one GitHub didn't take is asked for again
-by the next pass."""
+"""A PR's stage label (prs.show_waiting): every status the steward posts names
+the stage of the pipeline the PR is at (stages.py), and the step that posts
+it puts that stage's label on and the other stages' off, in one call. A PR
+whose labels are already right costs no call, one GitHub didn't take is
+asked for again by the next pass, and a draft or a held PR carries none.
+No status can go up without a stage: settle takes none without one, and
+every call to it in the steward names one."""
 
+import ast
+import glob
 import itertools
+import json
+import os
 
 import proofs as P
-from harness import CI_GREEN, FAIL, JOBS, WROTE, C, S, T0, V, clean, fresh_pr_state, mkpr, run, said
+import stages
+from harness import CI_GREEN, FAIL, JOBS, WAITING, WROTE, C, S, T0, V, clean, fresh_pr_state, mkpr, run, rv_review, said
 
 AGE, SLOT, REVIEWER = "waiting: release age", "waiting: proof slot", "waiting: reviewer"
+REVIEW, FIX, MACHINE, MERGE = "waiting: review", "waiting: fix", "waiting: machine checks", "waiting: merge"
 
 
 def edits():
@@ -18,9 +25,34 @@ def edits():
     return [x for x in WROTE if x.startswith("pr edit ")]
 
 
-def on(n, *labels):
-    return f"pr edit {n} -R sam/r " + " ".join(f"--add-label {x}" for x in labels)
+def on(n, *labels, off=()):
+    return f"pr edit {n} -R sam/r " + " ".join([*(f"--add-label {x}" for x in labels), *(f"--remove-label {x}" for x in off)])
 
+
+# Every stage the steward names has a label, and every label a stage: the
+# module's own (the check passes labels.nix's keys in), else the harness's.
+keys = json.loads(os.environ.get("AUTOLAND_STAGES") or json.dumps(list(WAITING)))
+assert sorted(stages.ALL) == sorted(keys) == sorted(WAITING), (stages.ALL, keys)
+
+# Every call to settle names its stage, by keyword, so a status can't go up
+# without one even on a path no test here takes (settle has no default for it).
+here = os.path.dirname(os.path.abspath(S.__file__))
+
+
+def unstaged(path):
+    """The lines of the calls to settle in path that don't name a stage."""
+    calls = [x for x in ast.walk(ast.parse(open(path).read()))
+             if isinstance(x, ast.Call) and getattr(x.func, "id", None) == "settle"]
+    return [x.lineno for x in calls if not any(k.arg == "stage" for k in x.keywords)]
+
+
+missing = {os.path.basename(p): lines for p in glob.glob(f"{here}/*.py") if (lines := unstaged(p))}
+assert missing == {}, f"settle without a stage: {missing}"
+# The check catches one that doesn't.
+bare = f"{os.environ['HOME']}/bare.py"
+with open(bare, "w") as f:
+    f.write('settle("pending", "Settled; waiting for CI", stage=S.CI)\nsettle("pending", "Settled; next pass")\n')
+assert unstaged(bare) == [2], unstaged(bare)
 
 # A lock file refresh nothing in which is old enough yet: its status says
 # until when, and its label says why at a glance.
@@ -36,14 +68,16 @@ assert "nothing in it old enough until" in status and edits() == [on(16, AGE)], 
 # Already on: no call.
 run(mkpr(checks=[*CI_GREEN, artifacts], comments=[refused], labels=[AGE], **lock), 7300)
 assert edits() == [], WROTE
-# Refreshed with releases old enough, it waits on none of them: off.
+# Refreshed with releases old enough, it's green and merging: the label moves
+# with it in one call.
 status, _ = run(mkpr(labels=[AGE], **lock), 7400)
-assert "nothing in it old enough" not in status and edits() == ["pr edit 16 -R sam/r --remove-label waiting: release age"], WROTE
-# Red for any other reason, it's renovate-sweep's red CI, which no label names.
+assert "nothing in it old enough" not in status and edits() == [on(16, MERGE, off=[AGE])], (status, WROTE)
+# Red for any other reason, renovate-sweep fixes it.
 status, _ = run(mkpr(checks=[*CI_GREEN, artifacts], comments=[said("Not now.")], **lock), 7500)
-assert "CI red; renovate-sweep has it" in status and edits() == [], (status, WROTE)
+assert "CI red; renovate-sweep has it" in status and edits() == [on(16, FIX)], (status, WROTE)
 
-# Waiting its turn for a proof slot, and not once the turn has come.
+# Running the machine's own checks; waiting its turn for a proof slot, and
+# not once the turn has come.
 kept, repos = C.job, dict(S.CFG["repos"])
 ids = itertools.count(1)
 C.job = lambda repo, task, clone=False, since=None, role=None: JOBS.append(task) or f"job-{next(ids)}"
@@ -52,7 +86,7 @@ proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "st
 fresh_pr_state()
 P.begin("sam/r", {1, 2})
 status, _ = run(clean(checks=proof, number=1), 700)
-assert "a Claude job is running remi-proof" in status and edits() == [], (status, WROTE)
+assert "a Claude job is running remi-proof" in status and edits() == [on(1, MACHINE)], (status, WROTE)
 status, _ = run(clean(checks=proof, number=2), 700)
 assert "waiting its turn to run remi-proof (1 ahead)" in status and edits() == [on(2, SLOT)], (status, WROTE)
 # Moved from one wait to another, the label goes with it in one call: put
@@ -60,7 +94,7 @@ assert "waiting its turn to run remi-proof (1 ahead)" in status and edits() == [
 C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})
 status, _ = run(mkpr(checks=proof, number=2, labels=[SLOT]), 800)
 assert "No reviewer can review it now" in status, status
-assert edits() == ["pr edit 2 -R sam/r --add-label waiting: reviewer --remove-label waiting: proof slot"], WROTE
+assert edits() == [on(2, REVIEWER, off=[SLOT])], WROTE
 C.save(V.OUT, {})
 C.job = kept
 S.CFG["repos"] = repos
@@ -77,21 +111,36 @@ status, _ = run(clean(), 700)
 assert edits() == [on(5, REVIEWER)], WROTE
 run(clean(labels=[REVIEWER]), 800)
 assert edits() == [], WROTE
-# One back, it's reviewed: off.
+# One back, it's reviewed.
 C.save(V.OUT, {})
-status, _ = run(clean(labels=[REVIEWER]), 900)
-assert "No reviewer" not in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: reviewer"], (status, WROTE)
+fresh_pr_state()
+status, _ = run(mkpr(labels=[REVIEWER]), 900)
+assert "No reviewer" not in status and edits() == [on(5, REVIEW, off=[REVIEWER])], (status, WROTE)
+# A finding comes back: a Claude job has it.
+status, _ = run(mkpr(reviews=[rv_review("codex", 1)], threads=[False], labels=[REVIEW]), 7200)
+assert "1 open review thread" in status and edits() == [on(5, FIX, off=[REVIEW])], (status, WROTE)
 
-# Held by hand, it waits on what its holder knows, which no waiting label
-# names: off, whatever it had. A draft the same.
+# Held by hand, it waits on what its holder knows, and the hold label says
+# so: no stage's label, whatever it had. A draft the same.
 fresh_pr_state()
 status, _ = run(clean(labels=["hold", SLOT]), 600)
 assert "On hold" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: proof slot"], (status, WROTE)
 status, _ = run(clean(labels=[AGE, REVIEWER], draft=True), 600)
-assert "Draft" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: release age --remove-label waiting: reviewer"], \
+assert "Draft" in status and edits() == ["pr edit 5 -R sam/r --remove-label waiting: reviewer --remove-label waiting: release age"], \
     (status, WROTE)
-# Labels that aren't the steward's waiting ones are left alone, and a PR
-# with none of its waiting ones that waits on none costs no call.
+# Whatever path posts its status, a held PR's isn't a stage's: one with more
+# than a page to read is the owner's, but on hold it carries no label.
+def long(**kw):
+    pr = mkpr(**kw)
+    pr["comments"]["pageInfo"]["hasPreviousPage"] = True
+    return pr
+
+
+status, _ = run(long(labels=["hold", REVIEW]), 650)
+assert "Too many comments" in status and edits() == [f"pr edit 5 -R sam/r --remove-label {REVIEW}"], (status, WROTE)
+status, _ = run(long(), 660)
+assert "Too many comments" in status and edits() == [on(5, "waiting: Sam")], (status, WROTE)
+# Labels that aren't the steward's stage labels are left alone.
 status, _ = run(clean(labels=["first", "bug"]), 700)
-assert edits() == [], WROTE
-print("waiting labels: ok")
+assert edits() == [on(5, MERGE)], WROTE
+print("stage labels: ok")

@@ -1,6 +1,9 @@
 # usage-reset: the Claude plan's banked weekly reset gets used, once, when the
 # week's usage is nearly gone, rather than every Claude on the machine
 # stopping at the limit with a reset sitting unused (crates/burrow-usage-reset).
+# Each pass also keeps the engines' meters (Claude's session and week, and,
+# with proj's Codex, Codex's windows and credits) for proj's role overflow,
+# and books the next no more than 15 minutes on so they stay fresh.
 # Each pass reads the weekly meter through Claude Code itself, as burrow.user,
 # whose login is the owner's plan; past the line it types /limit-reset weekly
 # into a Claude Code of its own and confirms it, once a week at most, and
@@ -15,13 +18,19 @@ let
   inherit (config.burrow) user;
   name = "burrow-usage-reset";
   dir = "${config.burrow.stateDir}/usage-reset";
+  meters = "${dir}/meters";
+  # Codex's meter is the job user's plan, whose login is proj's (codex-login).
+  proj = config.burrow.proj.enable or false;
+  agents = import ./autoland/agents/package.nix { inherit pkgs; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-usage-reset;
 
   configFile = pkgs.writeText "${name}.json" (builtins.toJSON {
     claude = lib.getExe' config.burrow.claude.package "claude";
     tmux = lib.getExe config.burrow.tools.tmux;
     inherit (cfg) below;
+    inherit meters;
     stateDir = dir;
+    codex = if proj then "${agents}/bin/codex" else null;
     notify = lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify);
   });
 in
@@ -51,7 +60,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    burrow.proj.meter = lib.mkDefault "${dir}/meter.json";
+    burrow.proj.meters = lib.mkDefault meters;
     burrow.events.handlers.usage-reset = {
       # Nothing on GitHub: its own wake-ups, and the hourly catch-up.
       events = [ ];
@@ -84,7 +93,11 @@ in
         TimeoutStartSec = "15min";
       };
     };
-    systemd.tmpfiles.settings.burrow.${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+    systemd.tmpfiles.settings.burrow = {
+      ${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+      # Claude's weekly meter before meters/ held every engine's.
+      "${dir}/meter.json".r = { };
+    };
 
     burrow.claude.machineMd = lib.mkOrder 1320 ''
       ## Usage reset
@@ -94,8 +107,10 @@ in
       /limit-reset (once a week at most) and tells ${config.burrow.owner} with a notice.
       It drives its own Claude Code in `tmux -L ${name}`; leave that one
       alone. Don't run /limit-reset yourself unless ${config.burrow.owner} asks.
-      ${dir}/state.json says what it last saw. Every fresh reading goes to
-      ${dir}/meter.json and appends to meter.log; proj uses it for role overflow.
+      ${dir}/state.json says what it last saw. Each engine's fresh reading
+      (Claude's session and week; Codex's windows and whether it has credits)
+      goes to ${meters}/ENGINE.json and appends to ${meters}/log; proj uses them for
+      role overflow.
     '';
   };
 }

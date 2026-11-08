@@ -366,7 +366,7 @@ let
     # nothing to it then (rebase or newer release alike): a new head would
     # throw away the candidate it rides in, gate and all. A newer release
     # comes in its own PR once it has landed.
-    stopUpdatingLabel = autoland.labels.waiting.train;
+    stopUpdatingLabel = autoland.labels.waiting.train.name;
   } // {
     # The one command a repo's refresh may run after it (lock-age).
     allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];

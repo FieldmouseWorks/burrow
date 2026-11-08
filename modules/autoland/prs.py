@@ -1,5 +1,5 @@
 """A repo's open PRs as GitHub has them, and what the steward writes back
-about one: how its CI stands, its `review-settled` status, its waiting
+about one: how its CI stands, its `review-settled` status, its stage
 label, the merge."""
 
 import re
@@ -433,27 +433,20 @@ def post_status(repo, pr, state, desc):
                    check=False) is not None
 
 
-# What a PR can wait on that a label of the steward's says, at the top of the
-# PR and in its repo's list (labels.waiting; burrow-upkeep makes them): its
-# updates too new to take yet, its turn for a proof slot, a reviewer back in
-# service, and (train.py's LABEL) its turn in its repo's train.
-RELEASE_AGE, PROOF_SLOT, REVIEWER = "releaseAge", "proofSlot", "reviewer"
-
-
-def show_waiting(repo, pr, labels, kind):
-    """The PR's waiting label: the one for kind (one of those, or None) and
-    none of the others, put on with its status, from the same step. labels
+def show_waiting(repo, pr, labels, stage):
+    """The PR's label for stage (stages.py), and none of the other stages',
+    put on with its status, from the same step: none at all for NONE. labels
     is the PR's as this pass has them, kept up to date as they change. Best
     effort: one GitHub didn't take is asked for again by the next pass."""
-    names = CFG["labels"]["waiting"]
-    on = [names[kind]] if kind and names[kind] not in labels else []
-    off = [x for k, x in names.items() if k != kind and x in labels]
+    names = {k: x["name"] for k, x in CFG["labels"]["waiting"].items()}
+    on = [names[stage]] if stage and names[stage] not in labels else []
+    off = [x for k, x in names.items() if k != stage and x in labels]
     if not on and not off:
         return
     args = [a for x in on for a in ("--add-label", x)] + [a for x in off for a in ("--remove-label", x)]
     if C.write("pr", "edit", str(pr["number"]), "-R", repo, *args, check=False) is None:
         if not DRY:
-            log(f"{repo}#{pr['number']}: GitHub didn't take its waiting label ({' '.join(args)})")
+            log(f"{repo}#{pr['number']}: GitHub didn't take its stage label ({' '.join(args)})")
         return
     labels.difference_update(off)
     labels.update(on)

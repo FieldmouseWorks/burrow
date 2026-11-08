@@ -53,6 +53,7 @@ in
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
+    { key = "burrow/watchdog/units"; imports = [ (import ./watchdog/units.nix inputs) ]; }
   ];
 
   options.burrow.watchdog = {

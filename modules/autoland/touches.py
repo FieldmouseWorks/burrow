@@ -5,8 +5,8 @@ carries someone else's commits. Whether it's R2 is Conary's class policy's
 (train.py's gate)."""
 
 import codecs
+import json
 import re
-import subprocess
 
 import common as C
 from common import CFG, DEP_RE
@@ -109,64 +109,59 @@ def bot_edited(repo, pr, st, rechecked):
     return (not rechecked) if edited is None else edited
 
 
-def commit_pages(repo, pr, st):
-    """One full commit read per head and base, shared with provenance. Failures
-    aren't cached: a head whose authorship is unknown cannot land unchecked."""
-    seen = [pr["headRefOid"], pr["baseRefName"]]
-    if st.get("commitHead") != seen:
-        pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100", check=False)
-        # The PR may have moved during the read, or its commit list may be
-        # truncated. Neither is evidence about the queried head.
-        commits = [c for page in (pages or []) for c in page]
-        if (not commits or commits[-1].get("sha") != pr["headRefOid"]
-                or any(not isinstance(c.get("commit", {}).get("message"), str) for c in commits)):
+# What a PR's commits were read for before (touches.py's own read), dropped
+# from its state once burrow-upkeep's answer is kept in their place.
+READ_BEFORE = ("commitHead", "commitPages", "codexHead", "codexWritten", "editedHead", "edited")
+
+
+def pr_commits(repo, pr, st):
+    """What burrow-upkeep's `commits` (crates/burrow-upkeep/src/commits.rs)
+    reads of the PR's head, every commit since it left its base, from
+    GitHub's compare a page at a time (its list of a PR's commits stops at
+    250): {codex, edited}, whether a Codex job wrote one and whether anyone
+    but the bots made one; {short: why} when GitHub won't list them all,
+    which no later read changes; None when they couldn't be read this pass
+    (logged), which isn't kept and is asked again next pass: a head whose
+    authorship is unknown cannot land unchecked. Read once per head, base
+    and bots' addresses, since retargeting changes which commits are the
+    PR's, and setting Renovate's address right changes whose they are. A
+    missing address is no bot's."""
+    bots = [e for e in (CFG["renovateEmail"], DEPENDABOT_EMAIL) if e]
+    seen = [pr["headRefOid"], pr["baseRefName"], *bots]
+    if st.get("commitsHead") != seen:
+        out = C.upkeep("commits", repo, input=json.dumps({
+            "head": pr["headRefOid"], "base": pr["baseRefName"], "bots": bots, "committers": bots + [GITHUB_EMAIL]}))
+        if out["why"] is not None:
+            C.log(f"{repo}#{pr['number']}: couldn't read the commits of {pr['headRefOid'][:7]}: {out['why'][:200]}")
             return None
-        st["commitHead"], st["commitPages"] = seen, pages
-    return st["commitPages"]
+        for old in READ_BEFORE:
+            st.pop(old, None)
+        st["commitsHead"], st["commits"] = seen, out["commits"] or {"short": out["short"]}
+    return st["commits"]
 
 
 def codex_written(repo, pr, st):
-    """Only actual trailers count, on any commit since the PR's base. Cache
-    either answer per head and base; unreadable commits stay unknown and are
-    retried next pass, so they can neither land nor spend a judge."""
-    seen = [pr["headRefOid"], pr["baseRefName"]]
-    if st.get("codexHead") != seen:
-        pages = commit_pages(repo, pr, st)
-        if pages is None:
-            return None
-        st["codexWritten"] = any("engine: codex" in subprocess.run(["git", "interpret-trailers", "--parse"],
-                                 input=c["commit"]["message"], text=True, capture_output=True, check=True).stdout.casefold().splitlines()
-                                 for page in pages for c in page)
-        st["codexHead"] = seen
-    return st["codexWritten"]
+    """Whether a Codex job wrote a commit of the PR's (an `Engine: codex`
+    trailer on any of them): None if they couldn't be read this pass, so it
+    can neither land nor spend a judge. Where GitHub won't list them all,
+    why (a str): no one can say a Codex job didn't write it, so it's judged
+    as if one did, never landed on its reviews alone."""
+    got = pr_commits(repo, pr, st)
+    if got is None:
+        return None
+    return got["short"] if "short" in got else got["codex"]
 
 
 def provenance(repo, pr, st):
     """True if a dependency bot's branch has a commit some other author,
     co-author or committer made (bot_edited), False if every one is the bots'
-    alone, None if that's unknown: its commits couldn't be read, or a Renovate
-    branch on a machine with no Renovate address to check them against.
-    Asked once per head, base and bots' addresses, since retargeting changes
-    which commits are the PR's, and setting Renovate's address right changes
-    whose they are. A failed ask is asked again."""
-    renovate = pr["headRefName"].startswith("renovate/")
-    if renovate and not CFG["renovateEmail"]:
+    alone, None if that's unknown: its commits couldn't be read whole, or a
+    Renovate branch on a machine with no Renovate address to check them
+    against."""
+    if pr["headRefName"].startswith("renovate/") and not CFG["renovateEmail"]:
         return None
-    bots = {CFG["renovateEmail"], DEPENDABOT_EMAIL}
-    # GITHUB_EMAIL marks a read that looked at committers too: one from before
-    # that said nothing of them, so the same head is read again.
-    seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL, GITHUB_EMAIL]
-    if st.get("editedHead") != seen:
-        got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
-        # gh's commits have no committer, and GitHub's REST ones no co-authors.
-        pages = got and commit_pages(repo, pr, st)
-        if not pages:
-            return None
-        st["edited"] = (any(a.get("email") not in bots for c in got["commits"] for a in c["authors"])
-                        or any(c["commit"]["committer"]["email"] not in bots | {GITHUB_EMAIL}
-                               for page in pages for c in page))
-        st["editedHead"] = seen
-    return st["edited"]
+    got = pr_commits(repo, pr, st)
+    return None if not got or "short" in got else got["edited"]
 
 
 WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")

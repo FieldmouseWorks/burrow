@@ -11,7 +11,7 @@ use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
 use crate::config::{
-    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Snapshot, Waiting, Webhook,
+    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Snapshot, Stage, Webhook,
 };
 use crate::pass::{Jobs, Out, Pass};
 
@@ -56,12 +56,22 @@ pub fn config(dir: &Path) -> Config {
                 owner: "needs-owner".into(),
                 first: "first".into(),
                 batch: "upstream batch".into(),
-                waiting: Waiting {
-                    release_age: "waiting: release age".into(),
-                    proof_slot: "waiting: proof slot".into(),
-                    reviewer: "waiting: reviewer".into(),
-                    train: "waiting: train".into(),
-                },
+                waiting: [
+                    ("releaseAge", "waiting: release age"),
+                    ("proofSlot", "waiting: proof slot"),
+                    ("reviewer", "waiting: reviewer"),
+                    ("train", "waiting: train"),
+                ]
+                .into_iter()
+                .map(|(k, name)| {
+                    let stage = Stage {
+                        name: name.into(),
+                        description: format!("At the {k} stage"),
+                        color: "c5def5".into(),
+                    };
+                    (k.into(), stage)
+                })
+                .collect(),
             },
             defaults: Rules {
                 direct_push: false,
