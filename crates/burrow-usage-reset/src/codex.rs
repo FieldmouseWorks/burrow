@@ -148,7 +148,6 @@ pub fn snapshot(result: &Value, at: f64) -> Result<Snapshot, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// An answer as Codex's app-server gives it: the $20 plan's two windows,
     /// used up this week, with credits left.
@@ -202,14 +201,12 @@ mod tests {
     /// notification ahead of each answer, as the real one sends them.
     fn stand_in(dir: &std::path::Path, limits: &str) -> PathBuf {
         let path = dir.join("codex");
-        std::fs::write(
+        burrow_test::executable(
             &path,
             format!(
                 "#!/bin/sh\n[ \"$1\" = app-server ] || exit 2\nwhile read -r line; do\n  case \"$line\" in\n    *'\"initialize\"'*) echo '{{\"method\":\"note\"}}'; echo '{{\"id\":1,\"result\":{{}}}}' ;;\n    *rateLimits/read*) echo '{{\"method\":\"account/rateLimits/updated\"}}'; echo '{{\"id\":2,\"result\":{limits}}}' ;;\n  esac\ndone\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         path
     }
 

@@ -10,7 +10,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "house-fixture-across"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-binmod"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-bracketed"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-built"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-commented"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-contexts"
 version = "0.1.0"
 
 [[package]]
@@ -18,7 +38,15 @@ name = "house-fixture-declared"
 version = "0.1.0"
 
 [[package]]
+name = "house-fixture-deep"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-grouped"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-implicit"
 version = "0.1.0"
 
 [[package]]
@@ -26,11 +54,50 @@ name = "house-fixture-included"
 version = "0.1.0"
 
 [[package]]
+name = "house-fixture-inner"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-made"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-member"
 version = "0.1.0"
 
 [[package]]
+name = "house-fixture-nested"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-outer"
+version = "0.1.0"
+dependencies = [
+ "house-fixture-inner",
+]
+
+[[package]]
 name = "house-fixture-pathed"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-rawattr"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-rawpath"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-remarked"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-shebang"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-spaced"
 version = "0.1.0"
 
 [[package]]

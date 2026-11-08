@@ -3,16 +3,12 @@
 //! asked).
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-fn script(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
+use burrow_test::executable as script;
 
 /// A gh that answers `gh api -i` for sam/homelab with no issues yet, or
 /// whose login GitHub refuses.
@@ -29,26 +25,23 @@ case "$*" in
 esac
 "#;
 
-/// The stand-ins on PATH, written once for every test: each keeps what it
-/// was asked in the file its variable names. A file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy". No test
-/// starts one before these are written, and none is written after.
+/// The stand-ins on PATH, cached for the test binary. Each records calls in the
+/// file its environment variable names; installation uses burrow_test.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
         let b = bin.path();
-        script(&b.join("gh"), GH);
-        script(&b.join("id"), "#!/bin/sh\n[ \"$1\" = -un ] && echo \"$WHO\"\n");
+        script(b.join("gh"), GH);
+        script(b.join("id"), "#!/bin/sh\n[ \"$1\" = -un ] && echo \"$WHO\"\n");
         // runuser keeps what it was asked and runs the rest as the user.
         script(
-            &b.join("runuser"),
+            b.join("runuser"),
             "#!/bin/sh\necho \"$*\" >>\"$RUNUSER\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\n[ -n \"$STAYS\" ] || WHO=sam\nWHO=$WHO exec \"$@\"\n",
         );
-        script(&b.join("chown"), "#!/bin/sh\necho \"$*\" >>\"$CHOWN\"\n");
+        script(b.join("chown"), "#!/bin/sh\necho \"$*\" >>\"$CHOWN\"\n");
         script(
-            &b.join("systemd-cat"),
+            b.join("systemd-cat"),
             "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$(cat)\" >>\"$JOURNAL\"\n",
         );
         bin
@@ -62,8 +55,6 @@ struct Machine {
 
 impl Machine {
     fn new(repo: Option<&str>) -> Machine {
-        // Before anything here can start a process.
-        stand_ins();
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         fs::create_dir(d.join("notices")).unwrap();

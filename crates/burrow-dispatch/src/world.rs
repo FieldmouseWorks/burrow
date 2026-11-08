@@ -482,7 +482,6 @@ mod tests {
     // says nothing.
     #[test]
     fn sweeps_what_no_unit_has() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         assert!(sweep(&dir.path().join("gone"), Ok(vec![])).is_empty());
         assert!(sweep(dir.path(), Ok(vec![])).is_empty());
@@ -490,7 +489,7 @@ mod tests {
         for (name, mode) in [("17-1", 0o600), ("17-0", 0o400), ("18-0", 0o600)] {
             let path = dir.path().join(name);
             std::fs::write(&path, "secret").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            burrow_test::permissions(&path, mode);
         }
         // The units unlisted: every one stays, the unit it's for unknown.
         assert_eq!(
