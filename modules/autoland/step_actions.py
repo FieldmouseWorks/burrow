@@ -206,7 +206,7 @@ class Actions:
                 self.settle,
                 self.strike,
                 our_status(self.pr, T.CONTEXT)[1],
-                not (self.dep and not self.fixed),
+                not (self.dep and not self.fixed) or self.reviewed_round,
             )
             return
         if self.merging in ("wait", "refused"):
