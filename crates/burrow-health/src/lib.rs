@@ -21,6 +21,7 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -155,39 +156,59 @@ pub fn regressions(before: &[Line], now: &[Line]) -> Vec<String> {
 /// The report now: every check, then the system's failed units and the
 /// user's.
 pub fn report(cfg: &Config) -> Vec<Line> {
-    let mut lines = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
+    report_details(cfg).0
+}
+
+/// The report and bounded stderr from failed checks, run once per look.
+pub fn report_details(cfg: &Config) -> (Vec<Line>, Vec<(String, String)>) {
+    let (mut lines, details) = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
     lines.extend(failed_units(cfg, false));
     lines.extend(failed_units(cfg, true));
-    lines
+    (lines, details)
 }
 
 /// Every executable in `dir` but its dotfiles, in name order, as a check
 /// that passes or fails.
-fn checks(dir: &Path, within: Duration) -> Vec<Line> {
+fn checks(dir: &Path, within: Duration) -> (Vec<Line>, Vec<(String, String)>) {
     let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut names: Vec<OsString> = entries
         .filter_map(|e| e.ok().map(|e| e.file_name()))
         .filter(|n| !n.as_encoded_bytes().starts_with(b"."))
         .collect();
     names.sort();
-    names
+    let mut details = Vec::new();
+    let lines = names
         .iter()
         .map(|n| dir.join(n))
         .filter(|path| rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok())
-        .map(|path| Line {
-            key: format!(
+        .map(|path| {
+            let key = format!(
                 "{CHECK}{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
-            ),
-            state: if passes(&path, within) {
-                State::Ok
-            } else {
-                State::Fail
-            },
+            );
+            // A file avoids pipe backpressure and descendants holding a pipe
+            // open after exit. Stdout may be data, so keep only stderr.
+            let mut diagnostic = tempfile::tempfile().ok();
+            let stderr = diagnostic.as_ref().and_then(|f| f.try_clone().ok());
+            let passed = run_check(&path, within, stderr);
+            if !passed && let Some(file) = diagnostic.as_mut() {
+                let _ = file.seek(SeekFrom::Start(0));
+                let mut text = Vec::new();
+                let _ = file.take(4096).read_to_end(&mut text);
+                let text = String::from_utf8_lossy(&text);
+                if !text.trim().is_empty() {
+                    details.push((key.clone(), text.trim().to_owned()));
+                }
+            }
+            Line {
+                key,
+                state: if passed { State::Ok } else { State::Fail },
+            }
         })
-        .collect()
+        .collect();
+    (lines, details)
 }
 
 /// systemctl's failed units, the system's or the user's. Whatever systemctl
@@ -236,10 +257,14 @@ const POLL: Duration = Duration::from_millis(10);
 /// TERM, as timeout(1) sends it, then after GRACE a KILL for whatever is
 /// left, so a check that ignores its TERM doesn't hold HOST-health up.
 pub fn passes(path: &Path, within: Duration) -> bool {
+    run_check(path, within, None)
+}
+
+fn run_check(path: &Path, within: Duration, stderr: Option<fs::File>) -> bool {
     let Ok(mut child) = Command::new(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr.map_or_else(Stdio::null, Stdio::from))
         .process_group(0)
         .spawn()
     else {

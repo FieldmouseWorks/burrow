@@ -38,6 +38,7 @@ esac
         script(&b.join("pass"), "#!/bin/sh\nexit 0\n");
         script(&b.join("fail"), "#!/bin/sh\nexit 1\n");
         script(&b.join("noisy"), "#!/bin/sh\necho out\necho err >&2\n");
+        script(&b.join("bad-config"), "#!/bin/sh\necho private-stdout\necho 'roles line 2: unknown engine old-model' >&2\nexit 1\n");
         // Passes only when it's given what HOST-health was.
         script(
             &b.join("stdin"),
@@ -465,4 +466,22 @@ fn what_it_cant_run() {
     assert_eq!(ran.status.code(), Some(2));
     assert!(stderr(&ran).contains("unknown field `timeout`"), "{ran:?}");
     assert_eq!(m.read("systemctl.log"), "");
+}
+
+#[test]
+fn failed_compare_keeps_config_diagnostics_for_the_update_notice() {
+    let m = Machine::new(&[("proj-config", "bad-config"), ("old", "bad-config")]);
+    fs::write(m.path("before"), "check:proj-config ok\ncheck:old fail\n").unwrap();
+    let ran = m.run(&[], &["compare", m.path("before").to_str().unwrap(), "0"]);
+    assert_eq!(ran.status.code(), Some(1));
+    assert_eq!(
+        stdout(&ran),
+        "check:proj-config is failing\ncheck:proj-config: roles line 2: unknown engine old-model\n"
+    );
+    assert!(!stdout(&ran).contains("private-stdout"));
+    // A previously broken check still does not fail an update.
+    fs::write(m.path("before"), "check:proj-config fail\ncheck:old fail\n").unwrap();
+    let ran = m.run(&[], &["compare", m.path("before").to_str().unwrap(), "0"]);
+    assert!(ran.status.success());
+    assert_eq!(stdout(&ran), "healthy\n");
 }

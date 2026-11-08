@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use burrow_health::{Config, compare, parse, render, report};
+use burrow_health::{Config, compare, parse, render, report, report_details};
 
 enum Ask {
     Now,
@@ -83,11 +83,27 @@ fn main() -> ExitCode {
                 }
             };
             let within = Duration::from_secs(secs);
+            let mut details = Vec::new();
             match compare(&before, within, Duration::from_secs(cfg.settle), || {
-                report(&cfg)
+                let (report, diagnostics) = report_details(&cfg);
+                details = diagnostics;
+                report
             }) {
                 Ok(()) => print(&cfg, "healthy\n", ExitCode::SUCCESS),
-                Err(bad) => print(&cfg, &(bad.join("\n") + "\n"), ExitCode::FAILURE),
+                Err(mut bad) => {
+                    details.retain(|(key, _)| {
+                        bad.iter().any(|b| {
+                            b == &format!("{key} is failing")
+                                || b == &format!("{key} (new) is failing")
+                        })
+                    });
+                    bad.extend(
+                        details
+                            .into_iter()
+                            .map(|(key, text)| format!("{key}: {text}")),
+                    );
+                    print(&cfg, &(bad.join("\n") + "\n"), ExitCode::FAILURE)
+                }
             }
         }
     }

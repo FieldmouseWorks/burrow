@@ -202,7 +202,10 @@ The scoped line wins for that repo, regardless of line order; repo names
 match case-insensitively. Other repos, and jobs with no repo, use the bare
 role. With neither, the role uses Claude's default. Duplicate keys fail the
 turn and name both lines, including scopes spelled in different cases.
-Other invalid lines fail the turn and name the line. Add
+Other invalid lines fail the turn and name the line. `proj check-config`
+validates the deployed configuration and all roles without starting a job;
+updates run it as the job user in their health check before confirming
+([updates](../README.md)). Add
 `over PCT ENGINE[:MODEL]` to move a turn to that engine when its own engine
 is short: any window on its meter (the five-hour session or the week) at
 PCT with no credits to carry on, or, for Claude, the machine already out of
