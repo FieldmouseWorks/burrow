@@ -110,7 +110,6 @@ mod tests {
     use super::*;
     #[test]
     fn interruption_and_failed_receipt_cannot_replay_after_a_cli_switch() {
-        use std::os::unix::fs::PermissionsExt;
         for applied in [false, true] {
             let d = tempfile::tempdir().unwrap();
             let roles = d.path().join("roles");
@@ -143,10 +142,10 @@ mod tests {
                 store.switch("one", Some("two")).unwrap();
             }
             // Stop before or after the roles rename, then fail the result write.
-            fs::set_permissions(&receipts, fs::Permissions::from_mode(0o500)).unwrap();
+            burrow_test::permissions(&receipts, 0o500);
             assert!(store.command(&["use".into(), "three".into()]).is_err());
             assert_eq!(store.active().unwrap().as_deref(), Some("one"));
-            fs::set_permissions(&receipts, fs::Permissions::from_mode(0o700)).unwrap();
+            burrow_test::permissions(&receipts, 0o700);
             // A failed result rename is recoverable too; no switch can pass it.
             fs::create_dir(&receipt).unwrap();
             let done = Operation {

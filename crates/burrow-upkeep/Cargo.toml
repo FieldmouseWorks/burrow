@@ -20,6 +20,7 @@ tempfile.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+burrow-test = { path = "../burrow-test" }
 base64.workspace = true
 burrow-github = { path = "../burrow-github", features = ["fake"] }
 gh-token = { path = "../gh-token", features = ["fake"] }

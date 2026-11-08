@@ -790,7 +790,6 @@ fn oom_kills() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     use super::{github_app, gone_quiet, stopped};
     use crate::config::Config;
@@ -830,8 +829,7 @@ mod tests {
                 "#!/bin/sh\necho \"$*\" >>{}/asked\nexit {code}\n",
                 d.path().display()
             );
-            fs::write(&f, script).unwrap();
-            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&f, script);
             f.to_str().unwrap().to_owned()
         };
         assert!(stopped(&agent(0), "web-ab12"));

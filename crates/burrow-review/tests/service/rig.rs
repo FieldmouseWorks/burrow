@@ -5,7 +5,6 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -25,9 +24,7 @@ pub const STORE: [&str; 3] = [
 ];
 pub const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
-/// The stand-ins, written once for every test: a file being written while
-/// another test starts a process could be held open in that process as it
-/// runs (ETXTBSY), and none is written after the first test starts one.
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn fakes() -> &'static Path {
     static DIR: OnceLock<TempDir> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -39,8 +36,7 @@ fn fakes() -> &'static Path {
             )
             .unwrap();
             let path = dir.path().join(name);
-            fs::write(&path, format!("#!{}\n{body}", bash.display())).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&path, format!("#!{}\n{body}", bash.display()));
         }
         dir
     })
@@ -81,7 +77,10 @@ impl Rig {
         ] {
             fs::create_dir_all(t.join(d)).unwrap();
         }
-        fs::copy(fakes().join("codex"), t.join("agents/codex")).unwrap();
+        burrow_test::executable(
+            t.join("agents/codex"),
+            fs::read(fakes().join("codex")).unwrap(),
+        );
         fs::write(t.join("store-paths"), STORE.join("\n") + "\n").unwrap();
         fs::write(t.join("ca.crt"), "a CA\n").unwrap();
         let kicks = Arc::new(Mutex::new(Vec::new()));

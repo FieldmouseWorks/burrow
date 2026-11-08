@@ -3,7 +3,7 @@
 //! what the steps run as the machine's user.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -17,10 +17,8 @@ use crate::{Config, Train};
 /// The branch its PR comes from, in a train repo.
 pub const BRANCH: &str = "box-update";
 
-/// The stand-ins, written once for every test: a file being written while
-/// another test starts a process is open for writing in that process until
-/// it execs, and running the file then fails with "Text file busy". What a
-/// run runs as the machine's user (through runuser, and so PATH) keeps what
+/// Shared stand-ins installed by burrow_test. What a run runs as the
+/// machine's user (through runuser, and so PATH) keeps what
 /// a test needs to see under the HOME it runs with, the test's own; what it
 /// runs as root, by path, is a link in the test's own bin (`Machine::tool`),
 /// and keeps it beside that bin, in the test's dir (T below).
@@ -79,6 +77,10 @@ pub fn bin() -> &'static Path {
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
         for (name, text) in [
+            (
+                "nixos-version",
+                "#!/bin/sh\n[ \"$1\" = --configuration-revision ] || exit 9\ncat \"${0%/*}/../../revision\"\n",
+            ),
             (
                 "runuser",
                 r#"#!/bin/sh
@@ -147,8 +149,8 @@ if [ ! -d "$sys" ]; then
   git -C "$dir" show "$commit:claude-code.json" >"$sys/claude-code.json" 2>/dev/null || rm -f "$sys/claude-code.json"
   rev=$(printf '%s' "$stamp" | tr -d '"')
   [ "$rev" != null ] || rev=
-  printf '#!/bin/sh\n[ "$1" = --configuration-revision ] || exit 9\necho %s\n' "$rev" >"$sys/sw/bin/nixos-version"
-  chmod +x "$sys/sw/bin/nixos-version"
+  printf '%s\n' "$rev" >"$sys/revision"
+  ln -s "$(command -v nixos-version)" "$sys/sw/bin/nixos-version"
 fi
 echo "$sys"
 "#,
@@ -315,8 +317,7 @@ exec "$@"
             ),
         ] {
             let path = bin.path().join(name);
-            fs::write(&path, text).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&path, text);
         }
         bin
     })
@@ -642,19 +643,16 @@ impl Machine {
     }
 
     /// A system of its own, stamped `rev`, that no build made: one someone
-    /// switched to by hand. Written by a shell of its own, never this
-    /// process (`bin`).
+    /// switched to by hand.
     pub fn system(&self, name: &str, rev: &str) -> String {
         let sys = self.path("store").join(format!("{name}-nixos-system"));
-        let made = Command::new("sh")
-            .arg("-c")
-            .arg(r#"mkdir -p "$1/sw/bin" && printf '#!/bin/sh\necho %s\n' "$2" >"$1/sw/bin/nixos-version" && chmod +x "$1/sw/bin/nixos-version""#)
-            .arg("sh")
-            .arg(&sys)
-            .arg(rev)
-            .status()
-            .unwrap();
-        assert!(made.success());
+        fs::create_dir_all(sys.join("sw/bin")).unwrap();
+        fs::write(sys.join("revision"), format!("{rev}\n")).unwrap();
+        symlink(
+            bin().join("nixos-version"),
+            sys.join("sw/bin/nixos-version"),
+        )
+        .unwrap();
         sys.to_str().unwrap().into()
     }
 

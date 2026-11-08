@@ -11,7 +11,6 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -126,7 +125,7 @@ fn child() {
     if what == "hand-over" || what == "stay" {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
-        fs::write(
+        burrow_test::executable(
             &stub,
             format!(
                 r#"#!/bin/sh
@@ -136,9 +135,7 @@ case $1 in
 esac
 "#
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         cfg.deployed = stub;
         cfg.tools.bash = "sh".into();
         cfg.tools.flock = "true".into();
@@ -257,15 +254,13 @@ fn counted_look() {
     clones(&tmp);
     let log = tmp.path().join("git.log");
     let stub = tmp.path().join("git");
-    fs::write(
+    burrow_test::executable(
         &stub,
         format!(
             "#!/bin/sh\necho \"$*\" >>{}\nexec git \"$@\"\n",
             log.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut cfg = config(&jobs, 6);
     cfg.tools.git = stub;
     let _holder = line_of_size(&tmp, &jobs, 60);
@@ -637,8 +632,7 @@ fn successors() {
     let mut cfg = config(&dir, 1);
     let script = |name: &str, body: &str| {
         let p = dir.join(name);
-        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::executable(&p, format!("#!/bin/sh\n{body}\n"));
         p
     };
     let new = script("new", "[ \"$1\" = _handover_format ] && echo 1");

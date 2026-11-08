@@ -3,10 +3,8 @@
 //! on its PATH.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::RwLock;
 
 use tempfile::TempDir;
 use yaml_serde::Value;
@@ -54,21 +52,12 @@ pub fn text(v: &Value) -> &str {
     v.as_str().unwrap_or_else(|| panic!("not a string: {v:?}"))
 }
 
-/// Writing an executable while another thread starts a process lets the
-/// child inherit the file open for writing until it execs, and running the
-/// file then fails with "Text file busy". Writers take this whole, and
-/// starting a process takes it shared.
-static EXEC: RwLock<()> = RwLock::new(());
-
-/// A process's output, started under [`EXEC`].
+/// A process's output.
 pub fn output(mut cmd: Command) -> Output {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = {
-        let _shared = EXEC.read().unwrap_or_else(|e| e.into_inner());
-        cmd.spawn()
-    };
+    let child = cmd.spawn();
     child
         .and_then(|c| c.wait_with_output())
         .unwrap_or_else(|e| panic!("{cmd:?}: {e}"))
@@ -225,7 +214,6 @@ impl Scratch {
         cmd.stdin(Stdio::null())
             .stdout(to.try_clone().unwrap())
             .stderr(to);
-        let _shared = EXEC.read().unwrap_or_else(|e| e.into_inner());
         cmd.spawn().unwrap_or_else(|e| panic!("{cmd:?}: {e}"))
     }
 
@@ -280,11 +268,9 @@ impl Scratch {
     }
 }
 
-/// A bash script at `path`, written under [`EXEC`].
+/// A bash script installed through the workspace fixture helper.
 pub fn executable(path: &Path, body: &str) {
-    let _whole = EXEC.write().unwrap_or_else(|e| e.into_inner());
-    fs::write(path, format!("#!{}\n{body}", which("bash").display())).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(path, format!("#!{}\n{body}", which("bash").display()));
 }
 
 /// Writes a file, making its directory.

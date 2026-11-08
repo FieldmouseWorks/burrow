@@ -1,0 +1,13 @@
+[package]
+name = "burrow-test"
+description = "Shared test fixtures that cannot leak executable write descriptors across forks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
