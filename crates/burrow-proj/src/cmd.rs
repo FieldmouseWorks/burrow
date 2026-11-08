@@ -560,7 +560,7 @@ mod tests {
     use std::fs;
 
     use std::env;
-    use std::os::unix::fs::PermissionsExt;
+
     use std::process::Command;
 
     use super::{baselines, left_be};
@@ -647,7 +647,7 @@ mod tests {
         let gh = tmp.path().join("gh");
         // #5 a merged PR, #6 a PR closed without merging, #7 a closed
         // issue, #8 an open PR.
-        fs::write(
+        burrow_test::executable(
             &gh,
             r#"#!/bin/sh
 for a; do ep=${a%%\?*}; done
@@ -665,9 +665,7 @@ case $ep in
   *) exit 1 ;;
 esac
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut v = crate::config::tests::example();
         v["tools"]["gh"] = gh.to_str().unwrap().into();
         let cfg: Config = serde_json::from_value(v).unwrap();

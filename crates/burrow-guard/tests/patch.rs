@@ -92,7 +92,6 @@ fn a_patch_that_only_adds_or_edits_isnt() {
 
 /// `burrow-guard --codex-user ME CONFIG` on an apply_patch, as Codex runs it.
 fn codex_hook(config: &str, patch: &str, cwd: &Path) -> String {
-    common::stand_ins();
     let me = current_user().expect("this user has a name");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");

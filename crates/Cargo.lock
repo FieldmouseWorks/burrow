@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "advisory-watch"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "rustix",
  "serde",
@@ -60,6 +61,7 @@ dependencies = [
 name = "burrow-agent"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "rustix",
  "serde",
@@ -71,6 +73,7 @@ dependencies = [
 name = "burrow-backup"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "rustix",
  "serde",
@@ -83,6 +86,7 @@ dependencies = [
 name = "burrow-boot"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "rustix",
  "serde",
  "serde_json",
@@ -113,6 +117,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-events",
  "burrow-github",
+ "burrow-test",
  "burrow-watchdog",
  "jiff",
  "serde",
@@ -146,6 +151,7 @@ name = "burrow-events"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-test",
  "hmac",
  "serde",
  "serde_json",
@@ -157,6 +163,7 @@ dependencies = [
 name = "burrow-firmware"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "rustix",
  "serde",
@@ -177,6 +184,7 @@ dependencies = [
 name = "burrow-guard"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "regex",
  "serde",
@@ -188,6 +196,7 @@ dependencies = [
 name = "burrow-health"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "rustix",
  "serde",
  "serde_json",
@@ -199,6 +208,7 @@ name = "burrow-heartbeat"
 version = "0.0.0"
 dependencies = [
  "burrow-health",
+ "burrow-test",
  "serde",
  "serde_json",
  "tempfile",
@@ -209,6 +219,7 @@ dependencies = [
 name = "burrow-heavy"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "rustix",
  "serde",
  "serde_json",
@@ -222,6 +233,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "burrow-github",
+ "burrow-test",
  "house-sync",
  "regex",
  "serde_json",
@@ -232,6 +244,7 @@ dependencies = [
 name = "burrow-keep"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "serde_json",
  "sha2",
  "tempfile",
@@ -253,6 +266,7 @@ name = "burrow-notify"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-test",
  "serde",
  "serde_json",
  "tempfile",
@@ -287,6 +301,7 @@ dependencies = [
  "burrow-events",
  "burrow-github",
  "burrow-process",
+ "burrow-test",
  "burrow-usage-reset",
  "burrow-watchdog",
  "gh-token",
@@ -301,6 +316,7 @@ dependencies = [
 name = "burrow-proof"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "serde",
  "serde_json",
  "tempfile",
@@ -312,6 +328,7 @@ name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-test",
  "jiff",
  "md-5",
  "regex",
@@ -327,6 +344,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-codex",
  "burrow-events",
+ "burrow-test",
  "jiff",
  "rustix",
  "serde",
@@ -339,6 +357,7 @@ name = "burrow-robot"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "burrow-test",
  "serde",
  "serde_json",
  "tempfile",
@@ -349,6 +368,7 @@ dependencies = [
 name = "burrow-rustc-wrapper"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "rustix",
  "serde",
  "serde_json",
@@ -359,9 +379,17 @@ dependencies = [
 name = "burrow-switch"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-test"
+version = "0.0.0"
+dependencies = [
  "tempfile",
 ]
 
@@ -381,6 +409,7 @@ name = "burrow-update"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-test",
  "jiff",
  "rustix",
  "serde",
@@ -395,6 +424,7 @@ dependencies = [
  "base64",
  "burrow-github",
  "burrow-review",
+ "burrow-test",
  "flaky",
  "gh-token",
  "jiff",
@@ -410,6 +440,7 @@ dependencies = [
 name = "burrow-usage-reset"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "serde",
  "serde_json",
@@ -421,6 +452,7 @@ name = "burrow-watchdog"
 version = "0.0.0"
 dependencies = [
  "burrow-events",
+ "burrow-test",
  "jiff",
  "serde",
  "serde_json",
@@ -432,9 +464,12 @@ dependencies = [
 name = "burrow-workflows"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
+ "proc-macro2",
  "regex",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "tempfile",
  "yaml_serde",
 ]
@@ -753,6 +788,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "burrow-github",
+ "burrow-test",
  "serde",
  "serde_json",
  "sha2",
@@ -1042,6 +1078,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 name = "lock-age"
 version = "0.0.0"
 dependencies = [
+ "burrow-test",
  "jiff",
  "json5",
  "serde",

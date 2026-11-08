@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -236,16 +235,14 @@ fn refuses_once() {
     let posted = tmp.path().join("posted");
     let closed = tmp.path().join("closed");
     let gh = tmp.path().join("gh");
-    fs::write(
+    burrow_test::executable(
         &gh,
         format!(
             "#!/bin/sh\n[ ! -e '{}' ] || exit 1\njq -r .body >>'{}'\nprintf 'HTTP/2.0 201 Created\\n\\n{{}}'\n",
             closed.display(),
             posted.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.tools.gh = gh;
     let inbox = cfg.inbox.as_mut().unwrap();

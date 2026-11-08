@@ -1,0 +1,8 @@
+# A crate no workspace loads, whose root the program beside it loads too.
+[package]
+name = "house-fixture-shared"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "entry.rs"

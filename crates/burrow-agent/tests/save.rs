@@ -185,8 +185,7 @@ fn what_the_sandbox_wrote_into_its_git_config_never_runs() {
         "post-index-change",
     ] {
         let h = clone.join("hooks").join(hook);
-        fs::write(&h, format!("#!/bin/sh\n{}\n", touch(hook))).unwrap();
-        Command::new("chmod").arg("+x").arg(&h).status().unwrap();
+        burrow_test::executable(&h, format!("#!/bin/sh\n{}\n", touch(hook)));
     }
     fs::write(clone.join(".gitattributes"), "* filter=x\n").unwrap();
     fs::write(clone.join("b"), "vm\n").unwrap();

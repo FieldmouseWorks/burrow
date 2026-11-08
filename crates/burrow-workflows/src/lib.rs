@@ -20,3 +20,5 @@ mod harness;
 mod keep_builds;
 mod lane;
 mod pr_base;
+
+mod test_executables;

@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
@@ -33,8 +32,7 @@ impl Box {
         let at = |f: &str| tmp.path().join(f);
         let script = |name: &str, body: String| {
             let p = at(name);
-            fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&p, format!("#!/bin/sh\n{body}"));
             p
         };
         let gh = script(
@@ -462,15 +460,13 @@ fn a_turn_started_meanwhile_keeps_the_issue_open() {
     b.job("j1", "done", "Fixed in #12.");
     let d = b.record("j1");
     // proj reply, as the pass reads the issue's comments: turn 2 starts.
-    fs::write(
+    burrow_test::executable(
         b.path("hook"),
         format!(
             "#!/bin/sh\ncase \"$1\" in *--paginate*) echo 2 >'{}' ;; esac\n",
             b.cfg.jobs.join("j1/turns").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(b.path("hook"), fs::Permissions::from_mode(0o755)).unwrap();
+    );
     b.pass()
         .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
         .unwrap();

@@ -5,7 +5,6 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -252,8 +251,7 @@ fn failing_after_one_beat_fails_the_first() {
 /// A HOST-health that runs `script`, named `box-health`.
 fn health(dir: &Path, script: &str) -> PathBuf {
     let path = dir.join("box-health");
-    fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&path, format!("#!/bin/sh\n{script}\n"));
     path
 }
 

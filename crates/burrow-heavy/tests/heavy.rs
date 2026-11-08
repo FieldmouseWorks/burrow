@@ -3,7 +3,6 @@
 
 use std::fs::{self, File};
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
@@ -71,15 +70,13 @@ impl Slots {
     /// is heavy's fork, in heavy's process group.
     fn slow_setsid(&self) {
         let wrapper = self.path().join("slow-setsid");
-        fs::write(
+        burrow_test::executable(
             &wrapper,
             format!(
                 "#!/bin/sh\ntouch started\nsleep 0.5\nexec {} \"$@\"\n",
                 which("setsid").display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut config: serde_json::Value =
             serde_json::from_slice(&fs::read(&self.config).unwrap()).unwrap();
         config["setsid"] = wrapper.to_str().unwrap().into();
