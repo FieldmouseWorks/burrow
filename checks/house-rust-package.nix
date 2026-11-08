@@ -33,6 +33,16 @@ in pkgs.runCommand "house-rust-package-check" { } ''
   [ "$(${pkg}/bin/house-fixture-binmod)" = binmod ]
   [ "$(${pkg}/bin/house-fixture-contexts)" = contexts ]
   [ "$(${pkg}/bin/house-fixture-rawpath)" = rawpath ]
+  # Declarations with comments among them (a #[cfg(test)] commented out,
+  # one between a path attribute and its module), a cfg_attr path with a
+  # space before its parenthesis, a module a macro declares by a path
+  # attribute, and a module loaded from a crate inside the package that
+  # Cargo doesn't load.
+  [ "$(${pkg}/bin/house-fixture-commented)" = commented ]
+  [ "$(${pkg}/bin/house-fixture-remarked)" = remarked ]
+  [ "$(${pkg}/bin/house-fixture-spaced)" = spaced ]
+  [ "$(${pkg}/bin/house-fixture-made)" = made ]
+  [ "$(${pkg}/bin/house-fixture-across)" = across ]
   # A package whose release build compiles a crate in its tests/ that
   # includes one of its test modules.
   [ "$(${pkg}/bin/house-fixture-outer)" = outer ]

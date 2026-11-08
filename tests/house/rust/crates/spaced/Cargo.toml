@@ -1,0 +1,7 @@
+# A path attribute inside a cfg_attr written with a space before its
+# parenthesis, whose file a #[cfg(test)] module reads too: cargoTests keeps
+# the package whole.
+[package]
+name = "house-fixture-spaced"
+version = "0.1.0"
+edition = "2024"
