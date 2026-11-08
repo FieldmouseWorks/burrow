@@ -171,9 +171,14 @@ impl Pass<'_> {
             // be stopped (proj stop says why) is tried again in five minutes;
             // the rest are still seen to.
             let Some(listed_now) = now_open else {
-                let root = self.inbox.state.join(".retired");
+                let root = self
+                    .inbox
+                    .state
+                    .join(".retired")
+                    .join(key(repo).to_lowercase())
+                    .join(n);
                 fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
-                let retired = root.join(format!("{}-{n}-{id}", key(repo)));
+                let retired = root.join(&id);
                 fs::rename(&d, &retired).map_err(|e| io_fail(&retired, e))?;
                 self.retire(repo, n, &id, &retired)?;
                 continue;

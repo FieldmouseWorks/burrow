@@ -301,7 +301,7 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
             .as_ref()
             .unwrap()
             .state
-            .join(".retired/sam_box-7-j1");
+            .join(".retired/sam_box/7/j1");
         assert!(retired.exists());
         assert!(!b.cfg.jobs.join("j1/await").exists());
         assert!(b.cfg.jobs.join("j1/1.stopped").exists());
@@ -372,7 +372,7 @@ fn retirement_does_not_repeat_a_delivered_notice_when_stopping_failed() {
         .as_ref()
         .unwrap()
         .state
-        .join(".retired/sam_box-7-j1");
+        .join(".retired/sam_box/7/j1");
     assert!(retired.join("reported").exists());
     let posted = b.posted();
     b.cfg.tools.systemctl = b.path("systemctl");
@@ -426,7 +426,58 @@ esac
             .as_ref()
             .unwrap()
             .state
-            .join(".retired/sam_box-7-j1")
+            .join(".retired/sam_box/7/j1")
             .exists()
     );
+}
+
+#[test]
+fn long_repository_issue_and_job_names_retire_without_combining_components() {
+    let mut b = Box::new();
+    // Both existing record names fit NAME_MAX; their concatenation does not.
+    let owner = "o".repeat(31);
+    let project = "p".repeat(100);
+    let repo = format!("{owner}/{project}");
+    let key = super::key(&repo);
+    let number = i64::MAX;
+    let mut now = issue(number as u64, "sam", &["claude"]);
+    now["state"] = json!("closed");
+    fs::write(
+        b.path(&format!("repos_{key}_issues_{number}")),
+        now.to_string(),
+    )
+    .unwrap();
+    // Keep successful reporting and failed stopping pending for two distinct
+    // jobs of the same issue. Neither record may collide with the other.
+    b.cfg.tools.systemctl = "false".into();
+    let root = b.cfg.inbox.as_ref().unwrap().state.clone();
+    for suffix in ["AAAA", "BBBB"] {
+        let id = format!("{project}-20261108-092136-{suffix}");
+        b.job(&id, "done", "finished");
+        let active = root.join(format!("{key}-{number}"));
+        fs::create_dir_all(&active).unwrap();
+        for (file, body) in [
+            ("job", id.clone()),
+            ("issue", format!("{repo}#{number}")),
+            ("answered", "1".into()),
+            ("seen", "0".into()),
+        ] {
+            fs::write(active.join(file), body).unwrap();
+        }
+        b.pass().jobs(&repo, &project, &[]).unwrap();
+        assert!(!active.exists());
+        assert!(
+            root.join(".retired")
+                .join(&key)
+                .join(number.to_string())
+                .join(&id)
+                .join("reported")
+                .exists()
+        );
+    }
+    let retired = root.join(".retired").join(&key).join(number.to_string());
+    assert_eq!(fs::read_dir(&retired).unwrap().count(), 2);
+    b.cfg.tools.systemctl = b.path("systemctl");
+    b.pass().retired(&repo.to_uppercase()).unwrap();
+    assert_eq!(fs::read_dir(retired).unwrap().count(), 0);
 }

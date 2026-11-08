@@ -166,6 +166,11 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
         }
     }
+    for (name, path) in names(&state.join(".retired")) {
+        if name.eq_ignore_ascii_case(&want) {
+            fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+        }
+    }
     for dir in [".unreached", drain::READY_LISTS] {
         for (name, path) in names(&state.join(dir)) {
             if !name.starts_with('.') && name.to_lowercase() == want {

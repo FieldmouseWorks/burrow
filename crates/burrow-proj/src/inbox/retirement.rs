@@ -6,20 +6,27 @@ use crate::{Fail, cmd::stop, github::api, io_fail, read};
 
 impl Pass<'_> {
     pub(super) fn retired(&mut self, repo: &str) -> Result<(), Fail> {
-        for d in dirs(
-            &self.inbox.state.join(".retired"),
-            &format!("{}-", key(repo)),
-        ) {
-            let Some(issue) = read(&d.join("issue")) else {
-                continue;
-            };
-            let Some((of, n)) = issue.rsplit_once('#') else {
-                continue;
-            };
-            if of == repo
-                && let Some(id) = read(&d.join("job"))
+        for repository in dirs(&self.inbox.state.join(".retired"), "") {
+            if !repository
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&key(repo)))
             {
-                self.retire(repo, n, &id, &d)?;
+                continue;
+            }
+            for issue_dir in dirs(&repository, "") {
+                for d in dirs(&issue_dir, "") {
+                    let Some(issue) = read(&d.join("issue")) else {
+                        continue;
+                    };
+                    let Some((of, n)) = issue.rsplit_once('#') else {
+                        continue;
+                    };
+                    if of.eq_ignore_ascii_case(repo)
+                        && let Some(id) = read(&d.join("job"))
+                    {
+                        self.retire(repo, n, &id, &d)?;
+                    }
+                }
             }
         }
         Ok(())
