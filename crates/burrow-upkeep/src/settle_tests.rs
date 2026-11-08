@@ -178,20 +178,10 @@ fn labels_are_made_daily_and_at_once_when_one_is_new() {
     // Each stage's label says what labels.nix has it say, within the 100
     // characters GitHub takes.
     assert!(got.iter().all(|(_, d)| d.chars().count() <= 100), "{got:?}");
-    let waiting: Vec<_> = got
-        .iter()
-        .filter(|(n, _)| n.starts_with("waiting: "))
-        .map(|(_, d)| d.as_str())
-        .collect();
-    assert_eq!(
-        waiting,
-        [
-            "At the proofSlot stage",
-            "At the releaseAge stage",
-            "At the reviewer stage",
-            "At the train stage"
-        ]
-    );
+    let stages =
+        ["proofSlot", "releaseAge", "reviewer", "train"].map(|k| format!("At the {k} stage"));
+    let waiting = got.iter().filter(|(n, _)| n.starts_with("waiting: "));
+    assert!(waiting.map(|(_, d)| d).eq(&stages), "{got:?}");
     assert!(got.contains(&(
         "needs-owner".into(),
         "Waits for Sam; take the label off to let the steward carry on".into()
