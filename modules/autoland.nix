@@ -837,9 +837,9 @@ in
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
       # Its own status tells it nothing (a job awaiting the PR does want it),
-      # nor do its own waiting labels, which it puts on with that status.
+      # nor do its own stage labels, which it puts on with that status.
       ownStatuses = [ cfg.context ];
-      ownLabels = lib.attrValues cfg.labels.waiting;
+      ownLabels = lib.mapAttrsToList (_: l: l.name) cfg.labels.waiting;
     };
     systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
       description = if name == "autoland"
@@ -927,8 +927,8 @@ in
         `${cfg.labels.hold}` keeps the steward off a PR while it waits on something else (another
         PR, a deploy); one waiting on ${config.burrow.owner}'s OK gets `${cfg.labels.owner}` instead, which
         lists it for them.${lib.optionalString watchdog " A hold still on after ${toString cfg.holdStallAfterMinutes} minutes gets a Claude job's look."}
-        The steward's own labels (${lib.concatMapStringsSep ", " (x: "`${x}`") (lib.attrValues cfg.labels.waiting)})
-        say what its status says a PR waits on, and come off when that's over: leave them to it.
+        The steward's own labels (${lib.concatMapStringsSep ", " (x: "`${x.name}`") (lib.attrValues cfg.labels.waiting)})
+        say which stage of the pipeline a PR is at, one at a time, as its status does: leave them to it.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

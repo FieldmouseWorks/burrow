@@ -168,7 +168,7 @@ in
             default = [ ];
             description = ''
               The labels the handler's passes put on PRs and take off
-              themselves (the steward's waiting labels): a `pull_request`
+              themselves (the steward's stage labels): a `pull_request`
               delivery that one went on or came off is no news to it, so it
               starts none of its passes. Other labels, and other handlers,
               still count.

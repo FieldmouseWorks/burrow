@@ -118,17 +118,18 @@ pub struct Labels {
     pub owner: String,
     pub first: String,
     pub batch: String,
-    pub waiting: Waiting,
+    /// Each stage of the pipeline a PR can be at, by its key (the
+    /// steward's stages.py), and its label (prs.py's `show_waiting`).
+    pub waiting: BTreeMap<String, Stage>,
 }
 
-/// What a PR waits on, where it shows at a glance (prs.py's `show_waiting`).
+/// A stage's label, as labels.nix's `labels.waiting` says it.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Waiting {
-    pub release_age: String,
-    pub proof_slot: String,
-    pub reviewer: String,
-    pub train: String,
+#[serde(deny_unknown_fields)]
+pub struct Stage {
+    pub name: String,
+    pub description: String,
+    pub color: String,
 }
 
 /// A repo's rules: whether automation pushes to its default branch

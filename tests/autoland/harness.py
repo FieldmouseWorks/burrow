@@ -205,6 +205,11 @@ def agent_runs():
 
 agent()
 cn()
+# Each stage's label (labels.nix's labels.waiting), as the module gives them.
+WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for k, x in (
+    ("review", "review"), ("reviewer", "reviewer"), ("fix", "fix"), ("ci", "CI"), ("proofSlot", "proof slot"),
+    ("proof", "machine checks"), ("releaseAge", "release age"), ("train", "train"), ("merge", "merge"),
+    ("owner", "Sam"), ("base", "base branch"))}
 # The example machine's class policy (burrow.ledger.policy), as cn reads it.
 POLICY = sys.argv[2]
 with open(f"{tmp}/config.json", "w") as f:
@@ -213,7 +218,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer", "train": "waiting: train"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "authors": ["sam"]},
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": WAITING}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "authors": ["sam"]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
         "defaults": {"rounds": 5,
                      "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,

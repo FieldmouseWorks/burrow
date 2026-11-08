@@ -1,6 +1,6 @@
 # The labels the steward reads and puts on PRs (burrow.autoland.labels), and
 # burrow-upkeep keeps in each repo. Part of burrow.autoland, which imports it.
-{ lib, ... }:
+{ config, lib, ... }:
 let
   inherit (lib) mkOption types;
 in
@@ -41,35 +41,87 @@ in
         hour, which a branch merged to all day never is.
       '';
     };
-    # What a PR waits on, where it shows at a glance: the steward puts one
-    # on with the status that says it and takes it off once that wait is
-    # over (autoland/prs.py). Its status says the rest: until when, how
-    # many are ahead, which reviewer.
-    waiting = {
-      releaseAge = mkOption {
-        type = types.str;
-        default = "waiting: release age";
-        description = "On a lock file refresh none of whose updates is old enough to take yet (the minimum release age).";
-      };
-      proofSlot = mkOption {
-        type = types.str;
-        default = "waiting: proof slot";
-        description = "On a PR waiting its turn for one of its repo's proofSlots.";
-      };
-      reviewer = mkOption {
-        type = types.str;
-        default = "waiting: reviewer";
-        description = "On a PR that can't settle until a reviewer out of service is back.";
-      };
-      train = mkOption {
-        type = types.str;
-        default = "waiting: train";
-        description = ''
-          On a PR in its repo's merge train, until it lands or leaves. It's
-          Renovate's `stopUpdatingLabel` too: a push to a PR in the train
-          throws away the candidate it rides in, gate and all.
-        '';
-      };
-    };
+    # Where a PR is in the pipeline, at a glance: every status the steward
+    # posts names one of these stages (autoland/stages.py), and the PR
+    # carries that stage's label and none of the others, put on with the
+    # status and taken off with it (autoland/prs.py). Its status says the
+    # rest: who has it, until when, how many are ahead. A draft and a PR on
+    # hold carry none: GitHub's draft mark and the hold label say it.
+    # burrow-upkeep makes each in every repo, with its colour and
+    # description.
+    waiting =
+      lib.mapAttrs
+        (stage: d: {
+          name =
+            mkOption {
+              type = types.str;
+              default = d.name;
+              description = "The label on a PR at the `${stage}` stage.";
+            }
+            // lib.optionalAttrs (d ? defaultText) { inherit (d) defaultText; };
+          description =
+            mkOption {
+              type = types.str;
+              default = d.description;
+              description = "What the label says, in the repo's label list (GitHub keeps 100 characters).";
+            }
+            // lib.optionalAttrs (d ? descriptionText) { defaultText = d.descriptionText; };
+          color = mkOption {
+            type = types.strMatching "[0-9a-f]{6}";
+            default = d.color or "c5def5";
+            description = "The label's colour.";
+          };
+        })
+        {
+          review = {
+            name = "waiting: review";
+            description = "Its reviewers, or a Claude job judging it, are looking at this head";
+          };
+          reviewer = {
+            name = "waiting: reviewer";
+            description = "Can't settle until a reviewer out of service is back; the steward's status says which";
+          };
+          fix = {
+            name = "waiting: fix";
+            description = "A Claude job, or the session that opened it, fixes findings, red CI or a conflict";
+          };
+          ci = {
+            name = "waiting: CI";
+            description = "Reviewed clean; waits for its CI to finish";
+          };
+          proofSlot = {
+            name = "waiting: proof slot";
+            description = "Waits its turn for the machine's own checks; the steward's status says how many are ahead";
+          };
+          proof = {
+            name = "waiting: machine checks";
+            description = "The checks only the machine runs (VM tests and the like) are building or running";
+          };
+          releaseAge = {
+            name = "waiting: release age";
+            description = "Its updates are too new to take yet (the minimum release age); the status says until when";
+          };
+          train = {
+            # Renovate's `stopUpdatingLabel` too (updates.nix): a push to a PR
+            # in the train throws away the candidate it rides in, gate and all.
+            name = "waiting: train";
+            description = "In its merge train, which lands it; the steward's status says where. Renovate leaves it be";
+          };
+          merge = {
+            name = "waiting: merge";
+            description = "Settled and green: being merged by the steward, GitHub or its dependency bot";
+          };
+          owner = {
+            name = "waiting: ${config.burrow.owner}";
+            defaultText = lib.literalExpression ''"waiting: ''${config.burrow.owner}"'';
+            description = "Waits for ${config.burrow.owner}: listed in the steward's issue of PRs waiting for them";
+            descriptionText = lib.literalExpression ''"Waits for ''${config.burrow.owner}: ..."'';
+            color = "b60205";
+          };
+          base = {
+            name = "waiting: base branch";
+            description = "Waits on its base: the PR it's stacked on, or CI on the red default branch it fixes";
+          };
+        };
   };
 }

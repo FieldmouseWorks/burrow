@@ -65,10 +65,17 @@ assert env["CONARY_TOKEN_COMMAND"].endswith("/steward.py token") and " -E -s " i
 # What it waits on is the train's, with the train's deadline.
 noted = waits.NOTED["sam/r"]["sam/r#5"]
 assert noted["phase"].startswith("In the train, next in line.") and noted["minutes"] == 240, noted
-# Its waiting label says it's in the train, and is Renovate's stop label
+# Its stage label says it's in the train, and is Renovate's stop label
 # too: a push to a PR in the train throws away the candidate it rides in.
-TRAIN_ON, TRAIN_OFF = (f"pr edit 5 -R sam/r --{x}-label waiting: train" for x in ("add", "remove"))
-assert TRAIN_ON in WROTE, WROTE
+TRAIN_ON, TRAIN_OFF = (f"--{x}-label waiting: train" for x in ("add", "remove"))
+
+
+def labelled(edit):
+    """Whether the pass's label edits on #5 did this."""
+    return any(x.startswith("pr edit 5 -R sam/r ") and edit in x for x in WROTE)
+
+
+assert labelled(TRAIN_ON), WROTE
 
 # One touching a one-way path (R2), once its judge said land, joins like any
 # other: cn classes it, and rides it alone.
@@ -79,10 +86,13 @@ assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), statu
 
 # Once it's in at this head, it isn't joined again, and its status names the
 # candidate in flight: its own (gating, or green and landing), or the one
-# ahead of it. Each is a wait of its own.
+# ahead of it, and how many joined before it. Each is a wait of its own.
+idle = {"joined": [{"pr": 7}, {"pr": 9}, {"pr": 5}], "in_flight": None, "candidates": []}
 for show, says in ((train([5, 7]), "In the train, gating in candidate ABCDEFGH with #7."),
                    (train([5], "green"), "In the train, landing in candidate ABCDEFGH."),
-                   (train([7], joined=(7, 5)), "In the train, behind candidate ABCDEFGH.")):
+                   (train([7], joined=(7, 5)), "In the train, behind candidate ABCDEFGH, 1 ahead of it."),
+                   (train([7], joined=(7, 9, 5)), "In the train, behind candidate ABCDEFGH, 2 ahead of it."),
+                   (idle, "In the train, 2 ahead of it.")):
     seen(show=show)
     status, _ = run(clean(), 800)
     assert cn_runs() == [SHOW] and not merges(), (cn_runs(), WROTE)
@@ -165,7 +175,7 @@ for pr in (clean(threads=[False]), mkpr(sha=other), clean(draft=True), clean(lab
 fresh_pr_state()
 seen(show=train([5]))
 run(clean(threads=[False], labels=["waiting: train"]), 1000)
-assert cn_runs() == [SHOW, LEAVE] and TRAIN_OFF in WROTE, (cn_runs(), WROTE)
+assert cn_runs() == [SHOW, LEAVE] and labelled(TRAIN_OFF), (cn_runs(), WROTE)
 # One that isn't in has nothing to leave.
 seen()
 run(clean(threads=[False]), 1000)
@@ -215,7 +225,7 @@ del S.CFG["repos"]["sam/r"]["trainNegative"]
 fresh_pr_state()
 seen(join={"joined": False, "held": "red"})
 status, _ = run(clean(labels=["waiting: train"]), 700)
-assert "held out of the train" in status and TRAIN_OFF in WROTE, (status, WROTE)
+assert "held out of the train" in status and labelled(TRAIN_OFF), (status, WROTE)
 
 # GitHub not taking the status the rules require: out again, until it does.
 fresh_pr_state()

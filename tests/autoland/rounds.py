@@ -16,9 +16,9 @@ newer = "9" * 40
 fresh_pr_state()
 stuck = {"reviews": [rv_review("codex", 1)] * 5, "threads": [False]}
 status, digest = run(mkpr(**stuck), 0)
-assert not any("--add-label" in x or "/comments " in x for x in WROTE) and digest == [], (WROTE, digest)
+assert not any("--add-label needs-owner" in x or "/comments " in x for x in WROTE) and digest == [], (WROTE, digest)
 status, digest = run(mkpr(**stuck), 7200)
-assert not any("--add-label" in x or "/comments " in x for x in WROTE) and digest == [], (WROTE, digest)
+assert not any("--add-label needs-owner" in x or "/comments " in x for x in WROTE) and digest == [], (WROTE, digest)
 assert queued() == [] and "Past the review-round limit (5): 1 open review thread" in status, (queued(), status)
 assert len(JOBS) == 1 and "won't look again" in JOBS[0] and "answer the rest with why" in JOBS[0], JOBS
 # Answered without a push: still no look, a judge instead, told to read the answers too.

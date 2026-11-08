@@ -9,8 +9,9 @@ const LABELS: [&str; 8] = [
     "needs-owner",
     "first",
     "upstream batch",
-    "waiting: release age",
+    // The stages', in their keys' order: proofSlot, releaseAge, reviewer, train.
     "waiting: proof slot",
+    "waiting: release age",
     "waiting: reviewer",
     "waiting: train",
 ];
@@ -174,16 +175,13 @@ fn labels_are_made_daily_and_at_once_when_one_is_new() {
     assert!(!due && out.failed.is_empty(), "{out:?}");
     let got = made(&hub);
     assert_eq!(names(&got), sorted_labels());
-    // A waiting label says what the PR waits on, and that its status says
-    // more, within the 100 characters GitHub takes.
+    // Each stage's label says what labels.nix has it say, within the 100
+    // characters GitHub takes.
     assert!(got.iter().all(|(_, d)| d.chars().count() <= 100), "{got:?}");
+    let stages =
+        ["proofSlot", "releaseAge", "reviewer", "train"].map(|k| format!("At the {k} stage"));
     let waiting = got.iter().filter(|(n, _)| n.starts_with("waiting: "));
-    assert!(
-        waiting.clone().count() == 4
-            && waiting
-                .clone()
-                .all(|(_, d)| d.contains("review-settled says"))
-    );
+    assert!(waiting.map(|(_, d)| d).eq(&stages), "{got:?}");
     assert!(got.contains(&(
         "needs-owner".into(),
         "Waits for Sam; take the label off to let the steward carry on".into()
