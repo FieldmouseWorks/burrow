@@ -5,7 +5,8 @@
 # OIDC token request credentials and asks for a token in its name, or read
 # the runner's own credentials and take its jobs. Each of these is
 # registered for one job (GitHub's JIT config, which the machinery's App
-# asks for with the organization's Self-hosted runners permission) and runs
+# asks for with the organization's Self-hosted runners permission, or the
+# steward's Administration permission for a discovered private repo) and runs
 # as a unit of its own, `burrow-fresh-runner@INSTANCE`, as a user and in a
 # state directory nothing ran as or in before, removed when it stops. The
 # dispatcher starts one for each job queued for their label that none idle
@@ -45,7 +46,9 @@ in
     enable = lib.mkEnableOption ''
       runners started fresh for one job each, for the jobs that ask for
       their label: the machinery's App (burrow.github.machinery) needs the
-      organization's Self-hosted runners permission, read and write
+      organization's Self-hosted runners permission, read and write, for
+      org runners. Private repos of dispatch.privateOwners use the steward
+      App's Administration: write permission and repo-scoped registration
     '';
 
     owner = mkOption {
@@ -187,6 +190,7 @@ in
         OOMPolicy = "continue";
         NoNewPrivileges = true;
         ProtectHome = true;
+        InaccessiblePaths = [ "-/data" ];
         PrivateTmp = true;
       };
     };
@@ -205,7 +209,7 @@ in
         var verb = action.lookup("verb");
         if (verb != "start" && verb != "stop") return polkit.Result.NOT_HANDLED;
         var unit = action.lookup("unit");
-        return /^${template}[0-9]+-[0-9]+\.service$/.test(unit) ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
+        return /^${template}([0-9]+-)?[0-9]+-[0-9]+\.service$/.test(unit) ? polkit.Result.YES : polkit.Result.NOT_HANDLED;
       });
     '';
   };

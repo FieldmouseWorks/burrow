@@ -28,6 +28,14 @@ let
     # shared gate reads memory with and the slots it takes (heavy).
     awk 'BEGIN { exit 0 }'
     machine-tool
+    # A repository's job cannot read host homes, data, or another
+    # instance's workspace, even while both runners are alive.
+    [ ! -r /home/dev/host-only ]
+    [ ! -r /data/host-only ]
+    for other in /var/lib/private/burrow-fresh-runner/*/left; do
+      [ "$other" = "$RUNNER_ROOT/left" ] || [ ! -r "$other" ]
+    done
+    echo checked >"$RUNNER_ROOT/checked"
     case $1 in
       1-*) exit 0 ;;
       2-*) exit 1 ;;
@@ -54,6 +62,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     machine.wait_for_unit("multi-user.target")
+    machine.succeed("mkdir -p /data; echo host >/data/host-only; echo host >/home/dev/host-only; chmod 644 /data/host-only /home/dev/host-only")
 
     def hand(instance):
         machine.succeed(
@@ -83,6 +92,13 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("systemctl is-active burrow-fresh-runner@3-0.service")
     machine.wait_until_succeeds("test -e /var/lib/private/burrow-fresh-runner/3-0/left")
     machine.fail("test -e /run/burrow-fresh/3-0")
+    # Repo-id-prefixed instances use the same confined unit and the
+    # dispatcher's start/stop authorization, with a concurrent workspace.
+    hand("42-4-0")
+    machine.succeed("runuser -u dev -- systemctl start --no-block burrow-fresh-runner@42-4-0.service")
+    machine.wait_until_succeeds("test -e /var/lib/private/burrow-fresh-runner/42-4-0/checked")
+    machine.succeed("runuser -u dev -- systemctl stop burrow-fresh-runner@42-4-0.service")
+    gone("42-4-0")
     machine.succeed("systemctl stop burrow-fresh-runner@3-0.service")
     gone("3-0")
   '';

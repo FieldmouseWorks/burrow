@@ -121,10 +121,12 @@ dependencies = [
  "burrow-systemd",
  "burrow-test",
  "burrow-watchdog",
+ "gh-token",
  "jiff",
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

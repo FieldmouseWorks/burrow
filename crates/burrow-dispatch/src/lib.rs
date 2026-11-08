@@ -54,6 +54,7 @@
 pub mod config;
 pub mod fresh;
 pub mod pass;
+pub mod private;
 pub mod rules;
 pub mod snapshot;
 pub mod state;
