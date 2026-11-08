@@ -85,7 +85,7 @@ impl Box {
         fs::read_to_string(self.path("log")).unwrap_or_default()
     }
 
-    fn posted(&self) -> String {
+    pub(super) fn posted(&self) -> String {
         fs::read_to_string(self.path("posted")).unwrap_or_default()
     }
 
@@ -128,7 +128,8 @@ impl Box {
         .unwrap();
     }
 
-    /// The inbox's record of issue 7's job, nothing of it answered yet.
+    /// The inbox's record of issue 7's job, nothing of it answered yet,
+    /// handed the issue as [`issue`] has it and no comments.
     pub(super) fn record(&self, id: &str) -> PathBuf {
         let d = self.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&d).unwrap();
@@ -140,6 +141,10 @@ impl Box {
         ] {
             fs::write(d.join(f), format!("{v}\n")).unwrap();
         }
+        let input = self
+            .pass()
+            .issue_text("sam/box", &issue(7, "sam", &[]), &[]);
+        fs::write(d.join("input"), input).unwrap();
         d
     }
 }

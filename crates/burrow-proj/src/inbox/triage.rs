@@ -220,7 +220,7 @@ impl Pass<'_> {
             for (f, v) in [("updated", &updated), ("job", &id)] {
                 fs::write(d.join(f), format!("{v}\n")).map_err(|e| io_fail(&d.join(f), e))?;
             }
-            fs::write(d.join("input"), &input).map_err(|e| io_fail(&d.join("input"), e))?;
+            Self::hand(&d, &input)?;
             room -= 1;
         }
         Ok(())
@@ -336,7 +336,7 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 };
-                stale = fs::read_to_string(d.join("input")).ok() != Some(now);
+                stale = !Self::handed(&d, &now);
             }
             let mut failed = false;
             if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i)) {

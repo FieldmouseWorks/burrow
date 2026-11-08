@@ -478,6 +478,18 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         )
     }
 
+    /// Whether a job's record (`d`) says it was handed `now` of its issue:
+    /// its `input`, the [`Pass::issue_text`] it was last given. A record
+    /// without one (made before inputs were kept) wasn't handed it.
+    pub(super) fn handed(d: &Path, now: &str) -> bool {
+        fs::read_to_string(d.join("input")).is_ok_and(|kept| kept == now)
+    }
+
+    /// Kept in the job's record (`d`): what it's been handed of its issue now.
+    pub(super) fn hand(d: &Path, input: &str) -> Result<(), Fail> {
+        fs::write(d.join("input"), input).map_err(|e| io_fail(&d.join("input"), e))
+    }
+
     /// Each job works in a worktree of its own, in its own scratch (proj's
     /// PROJ_SCRATCH, gone once the job is over), so the project's checkout
     /// (and the session on it) is never in its way. A sandbox (VM) is a clone
@@ -704,6 +716,9 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             write("job", format!("{id}\n"))?;
             write("answered", "0\n".into())?;
             write("seen", format!("{}\n", seen.unwrap_or(0)))?;
+            // What it was handed, so it's closed with the issue only as long
+            // as the issue is still that (jobs.rs).
+            Self::hand(&d, &self.issue_text(repo, issue, &comments))?;
             // Said on the issue, or tried again next pass.
             write("unannounced", String::new())?;
         }
@@ -876,6 +891,8 @@ mod write;
 
 #[cfg(test)]
 mod drain_tests;
+#[cfg(test)]
+mod handed_tests;
 #[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]
