@@ -380,9 +380,10 @@ def inputs(drvs):
     return ins, sorted(set(nix("nix-store", "--query", "--outputs", *ins).split())) if ins else []
 
 
-def prebuild(repo, pr, checks, st):
+def prebuild(repo, pr, checks, st, stage):
     """What PR's build of checks is built from (inputs), built before its
-    turn in the line, once a head. "building" while that build is at work,
+    turn in the line, once a head and proof (stage, step.py's; one for
+    another is dropped as the proof changes, drop_inputs). "building" while that build is at work,
     just started included; "couldn't start" when systemd wouldn't (tried
     again next pass); None once there's nothing to build first: all of it
     built already, or the build of it over, whatever it built (the proof's
@@ -390,28 +391,47 @@ def prebuild(repo, pr, checks, st):
     went), or the store can't say what it is."""
     n, head = pr["number"], pr["headRefOid"]
     drvs = sorted({st["proofOutputs"]["drvs"][c] for c in checks})
-    rec = st.get("proofInputs") or {}
-    if rec.get("for") == [head, drvs]:
-        return "building" if rec.get("job") and running(rec["job"]) else None
-    # One for other checks on this head (a new head's is stopped as the head
-    # moves, stopping.moved): one that won't stop is tried again each pass
-    # (stopping.stop).
-    if rec.get("job") and running(rec["job"]) and not C.stop_job(rec["job"]):
-        st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [rec["job"]]))
+    key = [head, stage]
+    drop_inputs(st, key)
+    if rec := st.get("proofInputs"):
+        return building(repo, rec) if rec.get("job") and running(rec["job"]) else None
     try:
         ins, outs = inputs(drvs)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what {', '.join(checks)} is built from: {e}")
-        st["proofInputs"] = {"for": [head, drvs], "job": None}
+        st["proofInputs"] = {"for": key, "job": None}
         return None
     if not unbuilt(outs):
-        st["proofInputs"] = {"for": [head, drvs], "job": None}
+        st["proofInputs"] = {"for": key, "job": None}
         return None
     jid = build_inputs(repo, pr, checks, ins)
     if jid is None:
         st.pop("proofInputs", None)
         return "couldn't start"
-    st["proofInputs"] = {"for": [head, drvs], "job": jid, "at": C.NOW}
+    st["proofInputs"] = rec = {"for": key, "job": jid, "at": C.NOW}
+    return building(repo, rec)
+
+
+def drop_inputs(st, key):
+    """Forgets the PR's prebuild unless it's for key ([head, stage]), on
+    every path the proof takes, whether or not it prebuilds (a check
+    remapped to what's built already, a build turned run): one at work is
+    stopped, and one that won't stop just now goes on the stopping path,
+    which tries again each pass (stopping.stop). A new head's is stopped
+    as the head moves (stopping.moved)."""
+    rec = st.get("proofInputs")
+    if not rec or rec.get("for") == key:
+        return
+    if rec.get("job") and running(rec["job"]) and not C.stop_job(rec["job"]):
+        st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [rec["job"]]))
+    del st["proofInputs"]
+
+
+def building(repo, rec):
+    """"building", for the prebuild rec at work: its end kicks a pass, and
+    a wake at its deadline sees it if that kick never comes."""
+    due = rec["at"] + (CFG["proofTimeout"] + 5) * C.MIN
+    C.wake(repo, due if due > C.NOW else C.NOW + 15 * C.MIN)  # ends: its PR's wait, unchanged, is overdue at its deadline
     return "building"
 
 

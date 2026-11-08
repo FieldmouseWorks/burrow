@@ -627,6 +627,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         builds = [c for c in ci_names if c in rc["proofBuilds"]]
         runs = [] if builds else [c for c in ci_names if c in rc["proofRuns"]]
         beside = [c for c in ci_names if c not in machine]  # CI still running
+        ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
         checks = builds or runs or ci_names
         names = ", ".join(checks)
         # The steward's own proof, a build or a run, else a Claude job's.
@@ -642,19 +643,18 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         def running_now():
             skipped = "; nothing new to build, so it skipped the line" if st.get("provedFree") == head else ""
             busy = f"{VERB[unit]} {names} here" if unit else at_work("proved", doing)
-            ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
             settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140], stage=S.PROOF)
 
         # What this proof is: a build, a run or a Claude job, of which
         # checks, each built from which attribute or run as which command.
         # This head's proof so far was another (proofs.fits: a build before
         # the Claude jobs, a job from before its check had a build, a check
-        # added or remapped since): this one
-        # starts afresh, nothing of that one's carried over (its retries,
-        # the two lost answers, its verdicts). One still at work is stopped,
-        # on the stopping path when proj or systemd won't just now, and
-        # holds its slot until it's over (proofs.live).
+        # added or remapped since): this one starts afresh, nothing of that
+        # one's carried over (retries, lost answers, verdicts, a prebuild:
+        # proofs.drop_inputs). One at work is stopped (the stopping path when
+        # proj or systemd won't), and holds its slot till over (proofs.live).
         stage = [unit or "job", sorted(checks), {c: rc["proofBuilds" if builds else "proofRuns"].get(c) for c in checks}]
+        P.drop_inputs(st, [head, stage])
         if st.get("proved") == head and (jid := st.get("provedJob")) and not P.fits(st, stage):
             st["proofsLive"] = P.jobs(st)
             if running("proved") and not C.stop_job(jid):
@@ -733,21 +733,17 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and st.get("provedAgain") == head and not broke("proved")
         ahead = P.ahead(repo, n, st, slots, outs) if slots and not last else None
-        # A build in line builds what it's built from first, outside the
-        # line, so a slot is held only while its own derivations build; one
-        # whose outputs a running proof is building already needn't.
-        if builds and slots and not last and ahead != P.FREE and (pre := P.prebuild(repo, pr, checks, st)):
-            ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
+        # A build in line builds what it's built from first, outside the line
+        # (proofs.prebuild); one whose outputs a proof is building needn't.
+        if builds and slots and not last and ahead != P.FREE and (pre := P.prebuild(repo, pr, checks, st, stage)):
             if pre == "building":
                 cleared("build")
-                # Its end kicks a pass; this one sees it if that kick never comes.
-                due = st["proofInputs"]["at"] + (CFG["proofTimeout"] + 5) * MIN
-                C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)  # ends: its PR's wait, unchanged, is overdue at its deadline
-                settle("pending", f"Settled; building what {names} is built from, before its turn{ci_too}"[:140])
+                settle("pending", f"Settled; building what {names} is built from, before its turn{ci_too}"[:140],
+                       stage=S.PROOF_SLOT)
             else:
                 strike("build")
                 settle("pending", f"Settled, but the build of what {names} is built from couldn't start"[:140],
-                       f"Couldn't start a proof build of what {names} is built from")
+                       f"Couldn't start a proof build of what {names} is built from", stage=S.PROOF)
             return
         if ahead is not None:
             if ahead != P.FREE:

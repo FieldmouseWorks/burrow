@@ -665,6 +665,29 @@ line(1, 1000)
 assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPPED)
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 STOPPED.clear()
+# Remapped on the same head to what's built already, or turned into a check
+# a Claude job runs: neither builds anything first, and the prebuild for
+# the proof it was is stopped all the same, on the stopping path if it
+# won't stop.
+for remap in ({"remi-proof": "checks.x86_64-linux.other"}, {}):
+    fresh_pr_state()
+    VALID[:] = []
+    nix_knows({1: X, (1, "checks.x86_64-linux.other"): Y}, refs=INPUTS)
+    P.begin("sam/r", {1})
+    assert PRE in line(1)
+    old = inputs_job(1)
+    UNSTOPPABLE.add(old)
+    VALID[:] = [Y]
+    nix_knows({1: X, (1, "checks.x86_64-linux.other"): Y}, refs=INPUTS)
+    S.CFG["repos"]["sam/r"]["proofBuilds"] = remap
+    status = line(1, 800)
+    assert (STORE if remap else RUNNING_JOB) in status, status
+    assert pr_state(1)["stopping"] == [old] and "proofInputs" not in pr_state(1), pr_state(1)
+    UNSTOPPABLE.clear()
+    line(1, 900)
+    assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPPED)
+    S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+    STOPPED.clear()
 # systemd won't start it: the PR says so, a strike books the next try, and
 # the next start clears it.
 fresh_pr_state()
