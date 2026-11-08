@@ -264,3 +264,58 @@ fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
         }
     }
 }
+
+#[test]
+fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() {
+    for state in ["closed", "open"] {
+        let now = issue(7, "sam", &["claude"]);
+        let mut b = Box::new();
+        let comments = [
+            said(5, "already handed"),
+            said(6, "one more run"),
+            json!({"id": 7, "user": {"login": "stranger"}, "body": "outside"}),
+            said(8, "answer <!-- proj-inbox -->"),
+        ];
+        let d = finished(&mut b, &now, 5, &comments, &now);
+        let mut ended = now.clone();
+        ended["state"] = json!(state);
+        ended["labels"] = json!([]);
+        fs::write(b.path("repos_sam_box_issues_7"), ended.to_string()).unwrap();
+        // A running turn defers the notice and keeps the unread cursor.
+        b.cfg.tools.systemctl = "true".into();
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        assert!(d.exists());
+        assert!(!b.posted().contains("unread author replies"));
+        b.cfg.tools.systemctl = b.path("systemctl");
+        fs::write(b.path("fail"), "api graphql").unwrap();
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        assert!(d.exists());
+        fs::write(b.path("fail"), "body=@-").unwrap();
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        assert!(d.exists());
+        fs::remove_file(b.path("fail")).unwrap();
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        assert!(!d.exists());
+        let posted = b.posted();
+        assert!(posted.contains("unread author replies"), "{posted}");
+        assert!(posted.contains("#issuecomment-6"), "{posted}");
+        for id in [5, 7, 8] {
+            assert!(!posted.contains(&format!("#issuecomment-{id}")), "{posted}");
+        }
+        assert!(!b.cfg.jobs.join("j1/prompt.2").exists());
+    }
+}
+
+#[test]
+fn retiring_an_issue_without_unread_replies_needs_no_notice() {
+    let now = issue(7, "sam", &["claude"]);
+    let mut b = Box::new();
+    let d = finished(&mut b, &now, 5, &[said(5, "already handed")], &now);
+    b.cfg.tools.systemctl = b.path("systemctl");
+    let mut ended = now.clone();
+    ended["state"] = json!("closed");
+    fs::write(b.path("repos_sam_box_issues_7"), ended.to_string()).unwrap();
+    b.pass().jobs("sam/box", "box", &[]).unwrap();
+    assert!(!d.exists());
+    assert!(!b.posted().contains("unread author replies"));
+}

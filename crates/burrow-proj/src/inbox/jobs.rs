@@ -170,6 +170,36 @@ impl Pass<'_> {
             // be stopped (proj stop says why) is tried again in five minutes;
             // the rest are still seen to.
             let Some(listed_now) = now_open else {
+                // Respect the close or label removal, but account for replies
+                // made while the last turn was busy before forgetting its cursor.
+                let Some(issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+                    self.miss(repo);
+                    continue;
+                };
+                if self.eligible(&issue) {
+                    let Some(written) = self.written(repo, &issue) else {
+                        self.miss(repo);
+                        continue;
+                    };
+                    let seen = read(&d.join("seen"))
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let unread: Vec<String> = written
+                        .comments
+                        .iter()
+                        .filter(|c| self.heard(c))
+                        .filter_map(|c| c["id"].as_i64())
+                        .filter(|id| *id > seen)
+                        .map(|id| format!("https://github.com/{repo}/issues/{n}#issuecomment-{id}"))
+                        .collect();
+                    if !unread.is_empty() && !self.post(repo, n, &format!(
+                        "The job ended because this issue was closed or its job label was removed, with unread author replies:\n\n{}\n\nReopen the issue and restore its job label to have them picked up.",
+                        unread.join("\n")
+                    )) {
+                        self.miss(repo);
+                        continue;
+                    }
+                }
                 if let Err(f) = stop(self.cfg, &id, false) {
                     say(f);
                     self.retry(repo);
