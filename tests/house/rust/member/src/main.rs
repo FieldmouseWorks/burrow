@@ -2,5 +2,8 @@
 //! root's.
 
 fn main() {
-    println!("{}", house_fixture_member::double(21));
+    println!(
+        "{}",
+        house_fixture_member::double(house_fixture_member::shared::answer())
+    );
 }

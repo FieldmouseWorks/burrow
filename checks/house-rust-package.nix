@@ -3,6 +3,9 @@
 let
   pkg = (self.lib.project { self = ../tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
 in pkgs.runCommand "house-rust-package-check" { } ''
+  # Its answer comes from modules named like tests that the library uses:
+  # one declared plainly, one by a path attribute that a #[cfg(test)]
+  # module's path attribute names too.
   [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
   # What lib/project.nix's cargoTests must leave in: a program named tests,
   # and a member named tests that a glob finds (a module named tests that

@@ -206,17 +206,20 @@ let
   # need stays:
   # - a package's integration tests: the `tests` directory beside its
   #   manifest;
-  # - a module named tests (`tests.rs` or `tests/`) that the module beside
-  #   it declares only as `#[cfg(test)] mod tests;`, which Cargo drops
-  #   before reading its file (a program in src/bin named tests has no
-  #   module declaring it);
+  # - a module whatever its name (its file, its mod.rs, its directory of
+  #   modules, or the file a #[path] names) that every declaration reading
+  #   it marks #[cfg(test)] (`#[cfg(test)] mod tests;`,
+  #   `#[cfg(test)] #[path = "sweep_tests.rs"] mod tests;`), which Cargo
+  #   drops before reading its file, and nothing a declaration without it
+  #   reads (a program in src/bin named tests has no module declaring it);
   # and neither when it is, or holds, a target's file (a test target's
   # included: Cargo checks a declared target's file is there), anything in
   # a directory Cargo finds targets in by itself (src/bin, examples,
   # benches), or a crate, nor anywhere in a package with a build script or
-  # whose Rust has any include!, include_str! or include_bytes! at all
-  # (their argument can be computed) or a path attribute naming tests
-  # (always a literal), whose reads can't be told from here. What no reading
+  # whose Rust, outside the test modules themselves, has any include!,
+  # include_str! or include_bytes! at all (their argument can be computed),
+  # a path attribute naming tests, or one inside a cfg_attr (whose reads
+  # can't be told from here). What no reading
   # of the text can see (a macro from another crate that includes a file
   # named at the call, a proc macro reading one) the rust-package-sources
   # check sees: the build itself, from the whole directory, says which
@@ -233,24 +236,13 @@ let
         else if d == rustRoot || !(lib.hasPrefix "${rustRoot}/" d) then null
         else owner (dirOf d);
       pkg = owner (builtins.unsafeDiscardStringContext dir);
-      # The modules that could declare this one: the directory's own (mod.rs,
-      # or DIR.rs beside it) and a crate root in it.
-      declaring = builtins.filter (f: builtins.pathExists (at f))
-        (map (f: "${dir}/${f}") [ "mod.rs" "lib.rs" "main.rs" ] ++ [ "${dir}.rs" ]);
-      # Each `mod tests;` in them, as whether `#[cfg(test)]` is just before it.
-      declarations = lib.concatMap
-        (f: map (m: builtins.elemAt m 0 != null) (builtins.filter builtins.isList
-          (builtins.split "(#[[]cfg[(]test[)][]][[:space:]]*)?(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+tests[[:space:]]*;"
-            (builtins.readFile (at f)))))
-        declaring;
-      integration = type == "directory" && dir == pkg.dir;
-      module = declarations != [ ] && lib.all (x: x) declarations;
+      integration = name == "tests" && type == "directory" && dir == pkg.dir;
+      module = (type == "directory" || lib.hasSuffix ".rs" name) && pkg.modules.${path} or false;
     in
-    (name == "tests" || name == "tests.rs") && pkg != null && pkg.prunable
-    && !(lib.any (t: t == path || lib.hasPrefix "${path}/" t) pkg.targets)
+    pkg != null && (integration || module) && pkg.prunable
+    && !(lib.any (t: t == path || lib.hasPrefix "${path}/" t) (pkg.targets ++ pkg.needed))
     && !(lib.any (d: lib.hasPrefix "${pkg.dir}/${d}/" path) [ "src/bin" "examples" "benches" ])
-    && !(type == "directory" && lib.any (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive (at path)))
-    && (integration || module);
+    && !(type == "directory" && lib.any (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive (at path)));
   # Every package Cargo loads, by its directory's absolute path, with its
   # targets' files and build script (as absolute paths, `..` resolved) and
   # whether cargoTests may leave anything of it out. Cargo loads the root
@@ -332,11 +324,49 @@ let
           build = builtins.pathExists (pathOf "${dir}/build.rs") && (toml.package.build or true) != false
             || builtins.isString (toml.package.build or null);
           names = builtins.filter (f: lib.hasSuffix ".rs" (toString f)) (lib.filesystem.listFilesRecursive (pathOf dir));
-          includes = lib.any (r: builtins.length (builtins.split
-            "include(_str|_bytes)?[[:space:]]*!|[^[:alnum:]_]path[[:space:]]*=[[:space:]]*\"([^\"]*/)?tests(/|[.]rs\")"
+          # A test module's own reads don't count: Cargo builds the package
+          # without reading it.
+          includes = lib.any (r: !(modules.${builtins.unsafeDiscardStringContext (toString r)} or false) && builtins.length (builtins.split
+            "include(_str|_bytes)?[[:space:]]*!|[^[:alnum:]_]path[[:space:]]*=[[:space:]]*\"([^\"]*/)?tests(/|[.]rs\")|cfg_attr[(][^]]*[^[:alnum:]_]path[[:space:]]*="
             (builtins.readFile r)) > 1) names;
+          # Every `mod NAME;` in its Rust, with the attributes just before it,
+          # as what it reads (the file, its mod.rs, and the directory of its
+          # own modules; a #[path]'s file, relative to the declaring file's
+          # directory) and whether one of those attributes is #[cfg(test)].
+          # Beside a crate root or mod.rs a module's files are its siblings;
+          # beside FILE.rs, in FILE/.
+          declarations = lib.concatMap (r:
+            let
+              file = builtins.unsafeDiscardStringContext (toString r);
+              here = dirOf file;
+              base = baseNameOf file;
+              root = builtins.elem base [ "mod.rs" "lib.rs" "main.rs" ] || builtins.elem file targets;
+              children = if root then here else "${here}/${lib.removeSuffix ".rs" base}";
+            in
+            map (m:
+              let
+                attrs = builtins.elemAt m 0;
+                name = builtins.elemAt m 4;
+                pathed = builtins.match ".*#[[]path[[:space:]]*=[[:space:]]*\"([^\"]*)\"[]].*" attrs;
+              in
+              {
+                test = builtins.match ".*#[[]cfg[(]test[)][]].*" attrs != null;
+                reads = if pathed != null then [ (resolvePath here (builtins.head pathed)) ]
+                  else [ "${children}/${name}.rs" "${children}/${name}/mod.rs" "${children}/${name}" ];
+              })
+              (builtins.filter builtins.isList (builtins.split
+                "((#[[][^]]*[]][[:space:]]*)*)(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+([[:alnum:]_]+)[[:space:]]*;"
+                (builtins.readFile r))))
+            names;
+          # Each path some declaration reads, as whether every one that reads
+          # it is #[cfg(test)].
+          modules = lib.mapAttrs (_: ds: lib.all (d: d.test) ds)
+            (lib.groupBy (x: x.path) (lib.concatMap (d: map (path: { inherit path; inherit (d) test; }) d.reads) declarations));
+          # What a declaration that isn't #[cfg(test)] reads: never left out,
+          # nor any directory holding it.
+          needed = lib.concatMap (d: lib.optionals (!d.test) d.reads) declarations;
         in
-        lib.nameValuePair dir { inherit dir targets; prunable = !build && !includes; };
+        lib.nameValuePair dir { inherit dir targets modules needed; prunable = !build && !includes; };
     in
     lib.listToAttrs (map info (builtins.filter (d: (readToml (pathOf "${d}/Cargo.toml")) ? package) cargoDirs));
   hasBinary = dir:
