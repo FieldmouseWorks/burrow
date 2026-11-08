@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "5rhy9qrwwbwfpx7amyqn8wdr2c",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 529,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/529",
+  "summary": "proj: switch a machine's engines between saved setups with one checked command",
+  "task": "fieldmouseworks/burrow#504",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "5cbd6da30b2d51da98e050600e4cd26dc7e9a94d7ab7e5f31cbd52c62602ac12",
+    "before": "f3c341582ef6dc35c5771021ca054a36f8d53043",
+    "after": "bbbf69cd4be5c56594e4c0bd727daafc1d46d927",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794148209917
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753108007"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753107980"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997/job/128753107601"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#529)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#529)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#529)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#529)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#529)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#529)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708997"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/529#pullrequestreview-5818188182"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753149706"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753149802"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753149572"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128755759184"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753149727"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42487708978/job/128753107975"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/529"
+    }
+  ]
+}
