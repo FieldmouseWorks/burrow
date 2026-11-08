@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use std::{fs, io};
 
 impl Config {
-    pub(super) fn book(&self, repo: &str, next: Option<i64>, clear: bool) -> Result<(), Broke> {
+    pub(super) fn book(&self, repo: &str, next: Option<i64>) -> Result<(), Broke> {
         let wake = self.state.join("wake.json");
         let broke = |e| Broke(format!("{}: {e}", wake.display()));
         let mut booked: Map<String, Value> = match fs::read(&wake) {
@@ -17,7 +17,7 @@ impl Config {
         let key = repo.to_lowercase();
         if let Some(at) = next {
             booked.insert(key, Value::from(at));
-        } else if clear {
+        } else {
             booked.remove(&key);
         }
         // Readers see a whole map; other writers hold sweep.lock.

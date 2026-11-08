@@ -19,6 +19,7 @@
 mod handing;
 mod passes;
 mod refreshes;
+mod wakes;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -65,7 +66,7 @@ const STAND_INS: [(&str, &str); 6] = [
         r#"echo "gh $*" >>"$FAKE/log"
 case "$1 $2" in
   "api user") [ ! -e "$FAKE/user-fails" ] || exit 1; echo me ;;
-  "pr list") cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
+  "pr list") [ ! -e "$FAKE/list-fails" ] || { echo []; exit 1; }; cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
   "pr view")
     if [ "$(cat "$FAKE/gh-blocks" 2>/dev/null)" = "$3" ] && mv "$FAKE/gh-blocks" "$FAKE/gh-blocked" 2>/dev/null; then
       while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done

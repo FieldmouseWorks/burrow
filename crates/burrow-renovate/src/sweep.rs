@@ -47,6 +47,7 @@ use crate::{complain, say, trimmed};
 
 mod pr;
 mod request;
+mod scan;
 mod steward;
 mod task;
 mod wake;
@@ -206,24 +207,13 @@ impl Config {
     /// would fix it several times over, side by side.
     fn repo(&self, project: &str, repo: &str, who: &Who, steward: &Steward, pass: &mut Pass) {
         let info = steward.repo(repo, now());
-        let listed = self.said(
-            &self.tools.gh,
-            &[
-                "pr",
-                "list",
-                "-R",
-                repo,
-                "--state",
-                "open",
-                "--search",
-                "head:renovate/",
-                "--json",
-                "number,title,headRefName,headRefOid,baseRefName,labels,createdAt,statusCheckRollup",
-            ],
-        );
-        let prs = match serde_json::from_slice::<Value>(&listed) {
-            Ok(Value::Array(prs)) => prs,
-            _ => Vec::new(),
+        let prs = match self.list(repo) {
+            Ok(prs) => prs,
+            Err(Broke(why)) => {
+                complain(&why);
+                pass.failed = true;
+                return;
+            }
         };
         let mut sweep = Sweep {
             cfg: self,
@@ -241,11 +231,11 @@ impl Config {
                 Err(Broke(why)) => {
                     complain(&format!("{}: {why}", self.name));
                     pass.failed = true;
-                    break;
+                    return;
                 }
             }
         }
-        if let Err(Broke(why)) = self.book(repo, sweep.next, !pass.failed) {
+        if let Err(Broke(why)) = self.book(repo, sweep.next) {
             complain(&why);
             pass.failed = true;
             return;
@@ -656,6 +646,7 @@ impl Sweep<'_> {
         // the sweep does, and leaves the PR for a pass after, which waits out
         // a run that read it (handing over, below).
         if let Some(rest) = title.strip_prefix(TITLE) {
+            self.wake(now() + who.limits.pass);
             self.retitle(&n, rest.trim_start());
             return Ok(None);
         }
@@ -784,6 +775,7 @@ impl Sweep<'_> {
                 cfg.renovate_run / 60
             );
         } else if rel_sha == sha && now - rel_at < cfg.renovate_run as i64 {
+            self.wake(now + limits.pass);
             return Ok(None);
         }
         // Nor while a run that read a request that came off since (Renovate
@@ -794,6 +786,7 @@ impl Sweep<'_> {
                 .request_gone(&n)
                 .is_none_or(|at| at.is_some_and(|at| now - at < cfg.renovate_run as i64))
         {
+            self.wake(now + limits.pass);
             return Ok(None);
         }
         if major {
