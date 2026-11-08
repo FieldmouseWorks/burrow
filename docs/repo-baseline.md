@@ -12,8 +12,13 @@ own hook and starts the baseline job, which clones it on the machine. One
 made empty gets its settings and hook then, but not the ruleset, which
 would turn away the push that makes its default branch; that push's pass
 adds the ruleset and starts the job. Nothing about a new repo waits for
-the owner. A private repo's
-CI still needs a runner on the machine (burrow#236).
+the owner. With `burrow.dispatch.fresh.enable`, private repos of the steward's
+owners get isolated one-job runners automatically: dispatch discovers them
+through the steward App and registers repo-scoped JIT runners using its
+Administration: write permission. Their workflows use `dispatch.fresh.label`
+(the shared flake workflow's `runner` input) and `install-nix: false`.
+`dispatch.privateOwners` can narrow discovery. Public repos use hosted runners.
+No per-repo flake entry or hand registration is needed.
 
 A repo made under the name of one that was deleted is a new repo too, though
 GitHub gives it the same name, in any case, and so is one renamed or moved

@@ -41,6 +41,14 @@ let
     ] ++ modules;
   };
   committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
+  privateRepos = machine { } [ {
+    imports = [ self.nixosModules.autoland ];
+    burrow.autoland = {
+      enable = true;
+      owners = [ "sam" ];
+      app = { id = 123; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
+    };
+  } ];
   dispatchOnly = machine { } [ { burrow.dispatch.fresh.enable = lib.mkForce false; } ];
   # More kept waiting than there may be at once.
   overKept = machine { } [ { burrow.dispatch.fresh.idle = 3; } ];
@@ -88,6 +96,14 @@ let
   freshGot = lib.mapAttrs (name: want: builtins.filter (l: builtins.elem l (freshSections.${name} or [ ])) want) freshWant;
   handled = committed.config.burrow.events.handlers.dispatch.repos;
 in
+  assert lib.assertMsg ((settings privateRepos).private == { owners = [ "sam" ]; app = 123; }
+    && privateRepos.config.burrow.events.handlers.dispatch.repos == null
+    && builtins.elem "repository" privateRepos.config.burrow.events.handlers.dispatch.events
+    && privateRepos.config.systemd.services.burrow-dispatch.serviceConfig.LoadCredential == [ "app-key:/run/secrets/steward" ])
+    "dispatch: private repositories need owner discovery, events and the steward credential";
+  assert lib.assertMsg (freshUnit.serviceConfig.ProtectHome
+    && builtins.elem "-/data" freshUnit.serviceConfig.InaccessiblePaths)
+    "dispatch: runners must not see host homes or data";
   assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
   assert lib.assertMsg (settings dirty == settings committed)
     "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";

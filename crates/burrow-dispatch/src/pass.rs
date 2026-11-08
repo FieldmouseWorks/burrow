@@ -57,7 +57,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     Move::Cancel { repo, run, .. } => {
                         state.cancels.insert(format!("{repo}#{run}"), now);
                     }
-                    Move::Fresh { .. } | Move::Retire { .. } => {}
+                    Move::PrivateFresh { .. } | Move::Fresh { .. } | Move::Retire { .. } => {}
                 }
                 save(dir, "state.json", &state)?;
                 let done = match &m {
@@ -67,6 +67,16 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                         Some(f) => world.fresh(f, instance),
                         None => Err("the machine has no fresh runners".into()),
                     },
+                    Move::PrivateFresh { repo, instance, .. } => {
+                        match snap
+                            .private
+                            .iter()
+                            .find(|(f, _)| f.repository.as_ref() == Some(repo))
+                        {
+                            Some((f, _)) => world.fresh(f, instance),
+                            None => Err("private repository was not discovered".into()),
+                        }
+                    }
                     Move::Retire { unit, .. } => world.restart(unit, "stop"),
                 };
                 done.map_or_else(|e| e, |()| "ok".to_owned())
@@ -114,7 +124,7 @@ fn still(world: &dyn World, m: &Move) -> Result<(), String> {
         }
         // A start that turns out to be one too many is a runner stopped
         // `quiet` later.
-        Move::Fresh { .. } => Ok(()),
+        Move::Fresh { .. } | Move::PrivateFresh { .. } => Ok(()),
         Move::Retire { unit, .. } => {
             let now = world.unit(unit);
             if now.busy {
@@ -198,6 +208,22 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             if s.unit.busy { "at a job" } else { "idle" },
             s.queued.len()
         );
+    }
+    for (f, pool) in &snap.private {
+        match pool {
+            Ok(p) => {
+                let _ = writeln!(
+                    out,
+                    "private runners ({}): {} up; {} queued",
+                    f.owner,
+                    p.units.len(),
+                    p.queued.len()
+                );
+            }
+            Err(e) => {
+                let _ = writeln!(out, "private runners ({}): {e}", f.owner);
+            }
+        }
     }
     if let (Some(f), Some(Err(e))) = (&cfg.fresh, &snap.fresh) {
         let _ = writeln!(out, "fresh runners ({}): {e}", f.label);

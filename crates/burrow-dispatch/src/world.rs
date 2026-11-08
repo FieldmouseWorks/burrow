@@ -32,6 +32,10 @@ pub struct Unit {
 pub trait World {
     /// GET this path of GitHub's REST API (`repos/OWNER/REPO/...`): its JSON.
     fn github(&self, path: &str) -> Result<Value, String>;
+    fn private_github(&self, owner: &str, path: &str) -> Result<Value, String> {
+        let _ = owner;
+        self.github(path)
+    }
     fn unit(&self, unit: &str) -> Unit;
     /// The running system: the store path /run/current-system points to.
     fn running(&self) -> Result<String, String>;
@@ -57,21 +61,93 @@ pub trait World {
 
 /// The machine's own: gh (the machinery's, on the PATH), systemctl, and the
 /// cgroup tree.
-pub struct Real<'a>(pub &'a Config);
+pub struct Real<'a> {
+    cfg: &'a Config,
+    tokens: std::cell::RefCell<BTreeMap<String, String>>,
+}
+
+impl<'a> Real<'a> {
+    pub fn new(cfg: &'a Config) -> Self {
+        Self {
+            cfg,
+            tokens: Default::default(),
+        }
+    }
+
+    fn private_call(
+        &self,
+        owner: &str,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, String> {
+        let owner = owner.to_ascii_lowercase();
+        if !self.tokens.borrow().contains_key(&owner) {
+            let cfg = self
+                .cfg
+                .private
+                .as_ref()
+                .ok_or("private runners aren't configured")?;
+            if !cfg.owners.iter().any(|o| o.eq_ignore_ascii_case(&owner)) {
+                return Err("runner owner isn't covered".into());
+            }
+            let creds =
+                std::env::var_os("CREDENTIALS_DIRECTORY").ok_or("no App credential directory")?;
+            let pem = fs::read(Path::new(&creds).join("app-key"))
+                .map_err(|e| format!("reading App credential: {e}"))?;
+            let app = gh_token::app::App::new(
+                "https://api.github.com",
+                ureq::Proxy::try_from_env(),
+                cfg.app,
+                &pem,
+            )
+            .map_err(|e| e.to_string())?;
+            let target = gh_token::target::Target::parse(&owner)
+                .filter(|t| t.repo.is_none())
+                .ok_or("invalid owner")?;
+            let minted = app
+                .mint(&target, burrow_watchdog::now() as i64)
+                .map_err(|e| e.to_string())?
+                .ok_or("App isn't installed on owner")?;
+            self.tokens.borrow_mut().insert(owner.clone(), minted.token);
+        }
+        let token = self.tokens.borrow()[&owner].clone();
+        let r = call(
+            &mut Gh {
+                token: Some(token),
+                ..Gh::default()
+            },
+            method,
+            path,
+            body,
+            None,
+        )?;
+        if r.body.trim().is_empty() {
+            Ok(Value::Null)
+        } else {
+            Ok(r.json()?)
+        }
+    }
+}
 
 /// A REST call through burrow-github, which asks again when GitHub doesn't
 /// answer: its JSON.
 fn gh(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
     let r = call(&mut Gh::default(), method, path, body, None)?;
     if r.body.trim().is_empty() {
-        return Ok(Value::Null);
+        Ok(Value::Null)
+    } else {
+        Ok(r.json()?)
     }
-    Ok(r.json()?)
 }
 
 impl World for Real<'_> {
     fn github(&self, path: &str) -> Result<Value, String> {
         gh("GET", path, None)
+    }
+
+    fn private_github(&self, owner: &str, path: &str) -> Result<Value, String> {
+        self.private_call(owner, "GET", path, None)
     }
 
     fn unit(&self, unit: &str) -> Unit {
@@ -133,7 +209,7 @@ impl World for Real<'_> {
     }
 
     fn switching(&self) -> bool {
-        let Some(switch) = &self.0.switch else {
+        let Some(switch) = &self.cfg.switch else {
             return false;
         };
         // One it can't tell about counts as in flight: a restart then would
@@ -168,7 +244,7 @@ impl World for Real<'_> {
     }
 
     fn kick(&self, path: &str) {
-        let url = format!("{}/{path}", self.0.kick);
+        let url = format!("{}/{path}", self.cfg.kick);
         if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
             println!("couldn't kick {path}: {e}");
         }
@@ -184,12 +260,16 @@ impl World for Real<'_> {
 
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String> {
         let name = format!("{}{instance}", f.prefix);
-        let body = json!({"name": name, "runner_group_id": f.group, "labels": [f.label]});
-        let out = gh(
-            "POST",
-            &format!("orgs/{}/actions/runners/generate-jitconfig", f.owner),
-            Some(&body),
-        )
+        let (path, body) = registration(f, &name);
+        let out = match &f.repository {
+            Some(repo) => self.private_call(
+                repo.split('/').next().ok_or("invalid repo")?,
+                "POST",
+                &path,
+                Some(&body),
+            ),
+            None => gh("POST", &path, Some(&body)),
+        }
         .map_err(|e| format!("registering {name}: {e}"))?;
         // The registration is the job's to take: it's never printed, and
         // waits only in a file this user alone reads until the unit has it.
@@ -493,5 +573,40 @@ fresh-runner-old@3.service loaded active running other
         assert!(!pending(&got));
         assert!(pending(&shown("ActiveState=inactive\nJob=4242\n")));
         assert!(!pending(&shown("ActiveState=inactive\nJob=\n")));
+    }
+}
+
+/// Repo runners need Administration: write; org runners use their group.
+fn registration(f: &Fresh, name: &str) -> (String, Value) {
+    match &f.repository {
+        Some(repo) => (
+            format!("repos/{repo}/actions/runners/generate-jitconfig"),
+            json!({"name": name, "runner_group_id": 1, "labels": [f.label]}),
+        ),
+        None => (
+            format!("orgs/{}/actions/runners/generate-jitconfig", f.owner),
+            json!({"name": name, "runner_group_id": f.group, "labels": [f.label]}),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    #[test]
+    fn repository_registration_uses_repo_administration_and_default_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = crate::snapshot::tests::fresh(dir.path());
+        f.group = 99;
+        let (path, body) = registration(&f, "runner");
+        assert_eq!(path, "orgs/sam/actions/runners/generate-jitconfig");
+        assert_eq!(body["runner_group_id"], 99);
+        f.repository = Some("sam/new".into());
+        let (path, body) = registration(&f, "runner");
+        assert_eq!(path, "repos/sam/new/actions/runners/generate-jitconfig");
+        assert_eq!(
+            body,
+            json!({"name":"runner", "runner_group_id":1, "labels":["fresh-box"]})
+        );
     }
 }

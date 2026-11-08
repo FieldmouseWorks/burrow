@@ -41,6 +41,11 @@ pub enum Move {
     },
     /// Register a runner for one job, and start its unit as this instance.
     Fresh { instance: String, why: String },
+    PrivateFresh {
+        repo: String,
+        instance: String,
+        why: String,
+    },
     /// Stop a fresh runner's unit that has sat idle: one that hasn't taken
     /// a job in `quiet` won't.
     Retire { unit: String, why: String },
@@ -52,7 +57,9 @@ impl Move {
         match self {
             Move::Runner { unit, verb, .. } => format!("{verb} {unit}"),
             Move::Cancel { url, .. } => format!("cancel {url}"),
-            Move::Fresh { instance, .. } => format!("start fresh runner {instance}"),
+            Move::Fresh { instance, .. } | Move::PrivateFresh { instance, .. } => {
+                format!("start fresh runner {instance}")
+            }
             Move::Retire { unit, .. } => format!("stop {unit}"),
         }
     }
@@ -62,6 +69,7 @@ impl Move {
             Move::Runner { why, .. }
             | Move::Cancel { why, .. }
             | Move::Fresh { why, .. }
+            | Move::PrivateFresh { why, .. }
             | Move::Retire { why, .. } => why,
         }
     }
@@ -157,9 +165,32 @@ pub fn decide(
             &mut d,
         );
     }
+    crate::private::decide(cfg, snap, st, was, now, &mut d);
     if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
         let unread = f.repos.iter().any(|r| snap.unread.contains_key(r));
-        crate::fresh::decide(cfg, f, pool.as_ref().ok(), unread, (st, was), now, &mut d);
+        let mut limited = f.clone();
+        let private_starts = d
+            .moves
+            .iter()
+            .filter(|m| matches!(m, Move::PrivateFresh { .. }))
+            .count();
+        limited.most = limited.most.saturating_sub(private_starts);
+        if snap
+            .private
+            .iter()
+            .any(|(_, p)| p.as_ref().is_ok_and(|p| !p.queued.is_empty()))
+        {
+            limited.idle = 0;
+        }
+        crate::fresh::decide(
+            cfg,
+            &limited,
+            pool.as_ref().ok(),
+            unread,
+            (st, was),
+            now,
+            &mut d,
+        );
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         // Its last attempt failed without saying so (killed, timed out, a

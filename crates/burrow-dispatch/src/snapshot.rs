@@ -21,6 +21,8 @@ pub struct Snapshot {
     /// The fresh runners, when the machine has them, or why their units
     /// couldn't be listed.
     pub fresh: Option<Result<Pool, String>>,
+    pub private: Vec<(Fresh, Result<Pool, String>)>,
+    pub private_orphans: BTreeMap<String, Unit>,
     /// Each runner repo's push runs on its default branch that haven't
     /// finished, by OWNER/REPO, oldest first.
     pub pushes: BTreeMap<String, Vec<Run>>,
@@ -181,12 +183,13 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             }
         }
     }
+    crate::private::take(cfg, world, &mut snap);
     snap
 }
 
 /// The fresh runners' units, and the jobs queued in their repos that ask
 /// for their label and nothing else.
-fn pool(
+pub(crate) fn pool(
     world: &dyn World,
     f: &Fresh,
     queues: &BTreeMap<&str, Vec<Queued>>,
@@ -205,6 +208,8 @@ fn pool(
     let units = world
         .instances(&f.template)?
         .into_iter()
+        // The org pool also counts repo units against shared capacity.
+        .filter(|i| f.scope.is_empty() || f.owns(i))
         .map(|i| {
             let unit = world.unit(&format!("{}{i}.service", f.template));
             (i, unit)
@@ -214,7 +219,7 @@ fn pool(
 }
 
 /// A job queued in a repo, and the labels it asks for.
-struct Queued {
+pub(crate) struct Queued {
     job: Job,
     labels: Vec<String>,
 }
@@ -222,7 +227,7 @@ struct Queued {
 /// Every job queued in the repo, in its runs that are queued or under way
 /// (a run's later jobs queue once the ones they need are done); and its push
 /// runs on its default branch that haven't finished, oldest first.
-fn look(world: &dyn World, repo: &str) -> Result<(Vec<Queued>, Vec<Run>), String> {
+pub(crate) fn look(world: &dyn World, repo: &str) -> Result<(Vec<Queued>, Vec<Run>), String> {
     let branch = default_branch(world, repo)?;
     let mut out = Vec::new();
     let mut pushes: Vec<Run> = Vec::new();

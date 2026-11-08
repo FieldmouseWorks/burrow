@@ -74,7 +74,7 @@ fn wait(
     // On their way up, so soon waiting for a job.
     let coming = up
         .iter()
-        .filter(|(_, u)| !matches!(u.state.as_str(), "active" | "deactivating"))
+        .filter(|(i, u)| f.owns(i) && !matches!(u.state.as_str(), "active" | "deactivating"))
         .count();
     // Those waiting for a job, newest first: the newest `idle` are kept for
     // jobs to come, however long, and any other is stopped once it has sat
@@ -82,7 +82,7 @@ fn wait(
     // it would have taken it within seconds.
     let mut idle: Vec<_> = up
         .iter()
-        .filter(|(_, u)| u.state == "active" && !u.busy)
+        .filter(|(i, u)| f.owns(i) && u.state == "active" && !u.busy)
         .collect();
     idle.sort_by(|(_, a), (_, b)| b.since.unwrap_or(now).total_cmp(&a.since.unwrap_or(now)));
     let oldest = pool.queued.first();
@@ -139,7 +139,7 @@ fn wait(
     );
     for i in 0..start {
         d.moves.push(Move::Fresh {
-            instance: format!("{}-{i}", now as u64),
+            instance: format!("{}{}-{i}", f.scope, now as u64),
             why: why.clone(),
         });
     }
@@ -160,7 +160,7 @@ fn wait(
     let (oldest, queue) = (oldest?, queue?);
     // A queue all `most` of them, at jobs, explain is no stall: the jobs
     // they're at are.
-    if room == 0 && waiting == 0 && start == 0 && up.iter().all(|(_, u)| u.busy) {
+    if room == 0 && waiting == 0 && start == 0 && up.iter().all(|(i, u)| !f.owns(i) || u.busy) {
         return None;
     }
     let since = st.fresh.unwrap_or(now);

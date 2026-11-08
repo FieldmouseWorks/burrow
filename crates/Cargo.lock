@@ -114,10 +114,12 @@ dependencies = [
  "burrow-events",
  "burrow-github",
  "burrow-watchdog",
+ "gh-token",
  "jiff",
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

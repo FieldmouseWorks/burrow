@@ -10,6 +10,8 @@ publish.workspace = true
 burrow-github = { path = "../burrow-github" }
 burrow-events = { path = "../burrow-events" }
 burrow-watchdog = { path = "../burrow-watchdog" }
+gh-token = { path = "../gh-token" }
+ureq.workspace = true
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
