@@ -622,7 +622,6 @@ mod registration_tests {
 #[cfg(test)]
 mod private_transport_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn every_owner_request_preserves_its_token_with_either_login_wrapper() {
@@ -665,8 +664,7 @@ mod private_transport_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let write = |path: &Path, body: &str| {
-            fs::write(path, body).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(path, body);
         };
         write(
             &dir.path().join("raw-gh"),
