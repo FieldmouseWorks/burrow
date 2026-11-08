@@ -165,7 +165,7 @@
     example = self.nixosConfigurations.example.config;
   in pkgs.runCommand "renovate-train-label-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
     got=$(jq -r .stopUpdatingLabel ${example.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE})
-    [ "$got" = ${pkgs.lib.escapeShellArg example.burrow.autoland.labels.waiting.train} ] || { echo "stopUpdatingLabel: $got"; exit 1; }
+    [ "$got" = ${pkgs.lib.escapeShellArg example.burrow.autoland.labels.waiting.train.name} ] || { echo "stopUpdatingLabel: $got"; exit 1; }
     touch $out
   '';
   # The PR titles Renovate gives the example's updates, as Renovate's
