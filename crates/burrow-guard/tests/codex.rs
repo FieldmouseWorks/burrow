@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use burrow_guard::config::{Config, current_user};
 use burrow_guard::{Guard, Hook, Input, Namespace};
-use common::zfs;
+use common::{systemd_run, zfs};
 
 mod common;
 
@@ -355,7 +355,10 @@ fn codexs_hook_snapshots_first_and_refuses_with_no_undo() {
         "git": "git",
         "zfs": zfs(dir.path()),
         "snapshotDatasets": ["pool/a"],
-        "systemdRun": "/no-such-systemd-run",
+        // The binary takes its namespace from the process it runs in, and
+        // a build sandbox is a user namespace: so zfs is reached by the
+        // manager there, and directly in the machine's own.
+        "systemdRun": systemd_run(dir.path()),
         "askAfterSeconds": 8,
     })
     .to_string();
