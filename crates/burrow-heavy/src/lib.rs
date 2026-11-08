@@ -6,7 +6,10 @@
 //! COMMAND runs in the first free slot, and waits for one while all are
 //! busy (up to `--wait` seconds, then exit 75). It gets the slot's share of
 //! the threads in HEAVY_JOBS, and CARGO_BUILD_JOBS and RUST_TEST_THREADS from
-//! it unless they're set already. With `--all` it takes every slot instead,
+//! it unless they're set already. NIX_CONFIG defaults to max-jobs = 1 and
+//! cores = the share, before any caller settings so those win. These bound
+//! Nix's build concurrency and advertised cores, not a CPU quota.
+//! With `--all` it takes every slot instead,
 //! and gets all of the threads: for a run that has to have the machine to
 //! itself, such as a long gate with a deadline. While one waits, no
 //! ordinary run starts, so the machine empties under it. Its exit status passes through. Inside a

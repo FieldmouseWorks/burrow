@@ -49,7 +49,8 @@ impl Slots {
             .current_dir(self.path())
             .env_remove("HEAVY_SLOT")
             .env_remove("CARGO_BUILD_JOBS")
-            .env_remove("RUST_TEST_THREADS");
+            .env_remove("RUST_TEST_THREADS")
+            .env_remove("NIX_CONFIG");
         cmd
     }
 
@@ -571,4 +572,25 @@ fn what_ignores_the_signal_is_killed_after_the_grace() {
     );
     assert!(!alive(run.worker()));
     assert!(s.status().contains("slot1: free"));
+}
+
+#[test]
+fn nix_builds_get_the_share_and_caller_settings_win() {
+    let s = Slots::new(3, 3);
+    for (args, share) in [
+        (vec!["--"], (threads() / 3).max(1)),
+        (vec!["--all", "--"], threads()),
+    ] {
+        let mut args = args;
+        args.extend(["sh", "-c", "printf '%s' \"$NIX_CONFIG\""]);
+        let defaults = format!("max-jobs = 1\ncores = {share}\n");
+        let out = s.run(&args);
+        assert!(out.status.success());
+        assert_eq!(text(&out.stdout), defaults);
+        let caller = "# caller\nmax-jobs = 2\ncores = 1\nsubstitute = false";
+        let out = s.heavy(&args).env("NIX_CONFIG", caller).output().unwrap();
+        assert!(out.status.success());
+        // Nix reads assignments in order: the caller's later values win.
+        assert_eq!(text(&out.stdout), format!("{defaults}{caller}"));
+    }
 }
