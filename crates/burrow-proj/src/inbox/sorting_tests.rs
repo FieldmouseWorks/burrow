@@ -49,6 +49,40 @@ impl Box {
                 dir = tmp.path().display(),
             ),
         );
+        // GraphQL reads the same fixture text as REST, with known authorship.
+        fs::write(
+            at("written.jq"),
+            include_str!("../../../../tests/proj/written.jq"),
+        )
+        .unwrap();
+        let graphql = script(
+            "graphql",
+            format!(
+                r#"
+for arg in "$@"; do
+  case "$arg" in owner=*) owner=${{arg#owner=}} ;; name=*) name=${{arg#name=}} ;; n=*) n=${{arg#n=}} ;; esac
+done
+f='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"
+[ -e "$f" ] || f='{dir}/default-issue'
+jq -n --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{dir}/written.jq'
+"#,
+                dir = tmp.path().display()
+            ),
+        );
+        fs::write(at("default-issue"), issue(7, "sam", &[]).to_string()).unwrap();
+        fs::write(at("comments"), "[[]]").unwrap();
+        let original = fs::read_to_string(&gh).unwrap();
+        fs::write(
+            &gh,
+            original.replace(
+                "case \"$*\" in",
+                &format!(
+                    "case \"$*\" in\n  'api graphql'*) exec '{}' \"$@\" ;;",
+                    graphql.display()
+                ),
+            ),
+        )
+        .unwrap();
         let systemctl = script(
             "systemctl",
             format!(
@@ -570,6 +604,7 @@ fn a_verdict_on_a_changed_issue_is_dropped() {
 
     let b = Box::new();
     let d = sorting(&b, "done\nmain has it");
+    fs::write(b.path("repos_sam_box_issues_7"), edited.to_string()).unwrap();
     let mut p = b.pass();
     p.triage("sam/box", std::slice::from_ref(&edited)).unwrap();
     assert!(

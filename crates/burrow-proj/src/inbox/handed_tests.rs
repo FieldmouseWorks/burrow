@@ -190,3 +190,39 @@ fn a_young_comment_the_job_had_stays_in_the_issue_handed_whole() {
     let prompt = handed_whole(&b, &d, &now, std::slice::from_ref(&red));
     assert!(prompt.contains("the red one"), "{prompt}");
 }
+
+// The real continuation boundary, not just the writer predicate: a reply
+// must never carry a collaborator's edits in the refreshed issue either.
+#[test]
+fn a_reply_cannot_smuggle_outside_edits_into_a_running_job() {
+    for field in ["body", "title", "comment"] {
+        let had = issue(7, "sam", &["claude"]);
+        let mut now = had.clone();
+        let bad = json!({"totalCount":1,"nodes":[{"editor":{"login":"mallory"},"actor":{"login":"mallory"}}]});
+        let mut comments = vec![said(9, "authorized continuation")];
+        match field {
+            "body" => {
+                now["body"] = json!("MALICIOUS INPUT");
+                now["userContentEdits"] = bad;
+            }
+            "title" => {
+                now["title"] = json!("MALICIOUS INPUT");
+                now["timelineItems"] = bad;
+            }
+            _ => {
+                let mut c = said(10, "MALICIOUS INPUT");
+                c["userContentEdits"] = bad;
+                comments.push(c);
+            }
+        }
+        let mut b = Box::new();
+        finished(&mut b, &had, 0, &comments, &now);
+        b.pass().jobs("sam/box", "box", &[now]).unwrap();
+        let prompt = fs::read_to_string(b.cfg.jobs.join("j1/prompt.2")).unwrap();
+        assert!(
+            prompt.contains("authorized continuation"),
+            "{field}: {prompt}"
+        );
+        assert!(!prompt.contains("MALICIOUS INPUT"), "{field}: {prompt}");
+    }
+}
