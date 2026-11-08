@@ -1,0 +1,7 @@
+# A module a macro declares, by a path attribute whose file a #[cfg(test)]
+# module reads too: a mod lib/project.nix can't read as a declaration, so
+# cargoTests keeps the package whole.
+[package]
+name = "house-fixture-made"
+version = "0.1.0"
+edition = "2024"

@@ -1,0 +1,8 @@
+# A program whose module a path attribute loads from a crate inside it that
+# Cargo doesn't load, and whose own module a #[cfg(test)] module reads too:
+# neither package may leave anything out, since neither reads the other's
+# declarations.
+[package]
+name = "house-fixture-across"
+version = "0.1.0"
+edition = "2024"

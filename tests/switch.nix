@@ -6,6 +6,7 @@
 #
 #   nix build .#checks.x86_64-linux.switch -L
 { self, pkgs }:
+assert import ./switch-timeouts.nix { inherit self pkgs; nixpkgs = self.inputs.nixpkgs; };
 pkgs.testers.runNixOSTest {
   name = "switch";
 
@@ -30,8 +31,8 @@ pkgs.testers.runNixOSTest {
         systemd.services.keeper.environment.FLAVOUR = "slow";
         system.activationScripts.slow = "sleep 115";
       };
-      # Two ways the activation gets stuck; the third, a unit whose stop never
-      # ends (TimeoutStopSec=infinity), holds up the revert too: burrow#312.
+      # Unbounded stop timeouts are rejected by checks/switch-timeouts.nix.
+      # These activations hang with bounded stops, so the revert can finish.
       hung-script.configuration = {
         environment.etc.switch-test.text = "hung-script";
         systemd.services.keeper.environment.FLAVOUR = "hung-script";
@@ -42,8 +43,9 @@ pkgs.testers.runNixOSTest {
         systemd.services.keeper.environment.FLAVOUR = "hung-start";
         systemd.services.hung-start = {
           wantedBy = [ "multi-user.target" ];
-          serviceConfig.Type = "oneshot";
-          script = "sleep infinity";
+          serviceConfig = { Type = "oneshot"; TimeoutStopSec = "2s"; };
+          # A cancelled start must reach SIGKILL rather than block the revert.
+          script = "trap '' TERM; exec sleep infinity";
         };
       };
     };

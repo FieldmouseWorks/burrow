@@ -1,6 +1,5 @@
 //! What git says of a delete, the git that's run, and the globs.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -111,8 +110,7 @@ fn git() -> &'static Path {
             code=$(head -n1 \"$here/says\")\n\
             tail -n +2 \"$here/says\" >&2\n\
             exit \"$code\"\n";
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::executable(&bin, script);
         d
     })
     .path()

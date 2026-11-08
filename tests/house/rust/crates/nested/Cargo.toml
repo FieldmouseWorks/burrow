@@ -1,0 +1,6 @@
+# A module declared inside an inline module, whose file a #[cfg(test)]
+# module also reads: lib/project.nix's cargoTests keeps the package whole.
+[package]
+name = "house-fixture-nested"
+version = "0.1.0"
+edition = "2024"

@@ -152,3 +152,22 @@ CONTRIBUTING asks for it.
   not code.
 - ADRs, status docs, PR and issue templates, CONTRIBUTING.
 - Its license.
+
+## Executable fixtures in burrow's Rust tests
+
+[`burrow-test`](../crates/burrow-test/src/lib.rs) owns executable installation:
+`burrow_test::executable(path, contents)` writes a temporary source that is
+never run, then waits for a child `install -m 0755` to copy it into place.
+The test process never opens the executable for writing, so a concurrent
+fork cannot inherit a writer and cause ETXTBSY. No spawn lock is needed.
+Caches may still share fixtures across tests.
+
+For directory permissions and non-executable file metadata, use
+`burrow_test::permissions(path, mode)`. It refuses execute bits on a file. `burrow_test::copy_file(from, to)`
+copies data fixtures and refuses executable sources or destinations.
+The workspace's
+[`test_executables`](../crates/burrow-workflows/src/test_executables.rs)
+test follows inline and external test modules and rejects direct permission
+setters, including aliases, macro calls and permission-changing commands.
+To run its negative control against another checkout's `crates/`, set
+`BURROW_TEST_SOURCE_ROOT` for that test.

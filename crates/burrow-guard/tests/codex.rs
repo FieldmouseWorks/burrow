@@ -26,7 +26,6 @@ fn bash(cmd: &str, cwd: &Path) -> Hook {
 
 /// What the guard says about `cmd`, as Codex's (`codex`) or Claude's.
 fn says(cmd: &str, codex: bool) -> Option<String> {
-    common::stand_ins();
     let dir = tempfile::tempdir().unwrap();
     let config = Config {
         git: PathBuf::from("git"),
@@ -308,7 +307,6 @@ fn a_default_branch_rewrite_is_caught_whatever_the_hooks() {
 
 /// `burrow-guard --codex-user USER CONFIG`, as Codex runs it, on `command`.
 fn hook(user: &str, config: &str, command: &str) -> String {
-    common::stand_ins();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.json");
     fs::write(&path, config).unwrap();
