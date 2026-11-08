@@ -1,0 +1,10 @@
+# A test target declared at a module's file, which Cargo needs there even to
+# build the library: lib/project.nix's cargoTests keeps it.
+[package]
+name = "house-fixture-declared"
+version = "0.1.0"
+edition = "2024"
+
+[[test]]
+name = "declared"
+path = "src/tests.rs"

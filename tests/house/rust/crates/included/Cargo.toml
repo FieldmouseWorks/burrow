@@ -1,0 +1,8 @@
+# A program that includes a file from tests/: the package keeps tests/
+# (lib/project.nix's cargoTests).
+[package]
+name = "house-fixture-included"
+# tests/ holds no test, only what the program includes.
+autotests = false
+version = "0.1.0"
+edition = "2024"

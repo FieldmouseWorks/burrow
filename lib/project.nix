@@ -199,31 +199,31 @@ let
   # was. The checks that run tests (rustChecks) take the whole directory,
   # and the negative run (flake-check.yml) builds only the checks a PR's
   # tests change, so it builds those, not every machine test that runs the
-  # programs. Only what Cargo itself says is tests, and nothing a build
-  # could need:
-  # - a package's integration tests: the `tests` directory beside a
-  #   manifest with a [package], when the manifest declares no [[test]]
-  #   (Cargo checks a declared target's file is there) and no target or
-  #   build script under it, and nothing in it is a crate of its own;
+  # programs. Only what is plainly tests goes, and whatever a build could
+  # need stays:
+  # - a package's integration tests: the `tests` directory beside its
+  #   manifest;
   # - a module named tests (`tests.rs` or `tests/`) that the module beside
   #   it declares only as `#[cfg(test)] mod tests;`, which Cargo drops
-  #   before reading its file. One declared any other way, or by no module
-  #   found beside it (a program in src/bin named tests), stays.
+  #   before reading its file (a program in src/bin named tests has no
+  #   module declaring it);
+  # and neither when it is, or holds, a target's file (a test target's
+  # included: Cargo checks a declared target's file is there) or a crate,
+  # nor anywhere in a package with a build script or whose Rust names a
+  # file in tests through include!, include_str!, include_bytes! or
+  # #[path], whose roles in the build can't be told from here.
   cargoTests = path: type:
     let
       name = baseNameOf path;
       dir = dirOf path;
       at = p: /. + p;
-      manifest = "${dir}/Cargo.toml";
-      toml = readToml (at manifest);
-      targets = lib.concatMap (k: toml.${k} or [ ]) [ "bin" "example" "bench" ]
-        ++ lib.optional (toml ? lib) toml.lib;
-      paths = map (t: t.path or "") targets ++ [ (toString (toml.package.build or "")) ];
-      underTests = p: lib.hasPrefix "tests/" (lib.removePrefix "./" p);
-      integration = type == "directory" && name == "tests"
-        && builtins.pathExists (at manifest) && toml ? package && !(toml ? test)
-        && !(lib.any underTests paths)
-        && !(lib.any (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive (at path)));
+      # The package it's in: the nearest directory, its own included, whose
+      # manifest has a [package].
+      owner = d:
+        if cargoPackages ? ${d} then cargoPackages.${d}
+        else if d == rustRoot || !(lib.hasPrefix "${rustRoot}/" d) then null
+        else owner (dirOf d);
+      pkg = owner (builtins.unsafeDiscardStringContext dir);
       # The modules that could declare this one: the directory's own (mod.rs,
       # or DIR.rs beside it) and a crate root in it.
       declaring = builtins.filter (f: builtins.pathExists (at f))
@@ -234,10 +234,44 @@ let
           (builtins.split "(#[[]cfg[(]test[)][]][[:space:]]*)?(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+tests[[:space:]]*;"
             (builtins.readFile (at f)))))
         declaring;
-      module = ((type == "regular" && name == "tests.rs") || (type == "directory" && name == "tests"))
-        && declarations != [ ] && lib.all (x: x) declarations;
+      integration = type == "directory" && dir == pkg.dir;
+      module = declarations != [ ] && lib.all (x: x) declarations;
     in
-    (name == "tests" || name == "tests.rs") && (integration || module);
+    (name == "tests" || name == "tests.rs") && pkg != null && pkg.prunable
+    && !(lib.any (t: t == path || lib.hasPrefix "${path}/" t) pkg.targets)
+    && !(type == "directory" && lib.any (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive (at path)))
+    && (integration || module);
+  # Every package under rustDir, by its directory's absolute path, with its
+  # targets' files and build script (as absolute paths, `..` resolved) and
+  # whether cargoTests may leave anything of it out.
+  rustRoot = builtins.unsafeDiscardStringContext (toString rustDir);
+  cargoPackages =
+    let
+      manifests = builtins.filter (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive rustDir);
+      info = f:
+        let
+          dir = builtins.unsafeDiscardStringContext (toString (dirOf f));
+          toml = readToml f;
+          # A path relative to dir, with `.` and `..` resolved.
+          resolve = rel: "/" + lib.concatStringsSep "/" (lib.foldl'
+            (acc: part: if part == "" || part == "." then acc else if part == ".." then lib.init acc else acc ++ [ part ])
+            [ ] (lib.splitString "/" "${dir}/${rel}"));
+          kinds = { bin = "src/bin"; example = "examples"; bench = "benches"; test = "tests"; };
+          targets = lib.concatLists (lib.mapAttrsToList (k: d: lib.concatMap
+            (t: if t ? path then [ (resolve t.path) ] else [ (resolve "${d}/${t.name}.rs") (resolve "${d}/${t.name}/main.rs") ])
+            (toml.${k} or [ ])) kinds)
+            ++ lib.optional (toml.lib.path or null != null) (resolve toml.lib.path)
+            ++ lib.optional (builtins.isString (toml.package.build or null)) (resolve toml.package.build);
+          build = builtins.pathExists "${dir}/build.rs" && (toml.package.build or true) != false
+            || builtins.isString (toml.package.build or null);
+          names = builtins.filter (f: lib.hasSuffix ".rs" f) (lib.filesystem.listFilesRecursive (dirOf f));
+          includes = lib.any (r: builtins.length (builtins.split
+            "(include(_str|_bytes)?![[:space:]]*[(]|#[[]path[[:space:]]*=)[^;]*[^[:alnum:]_]tests(/|[.]rs)"
+            (builtins.readFile r)) > 1) names;
+        in
+        lib.nameValuePair dir { inherit dir targets; prunable = !build && !includes; };
+    in
+    lib.listToAttrs (map info (builtins.filter (f: (readToml f) ? package) manifests));
   hasBinary = dir:
     (memberToml dir).bin or [ ] != [ ]
     || builtins.pathExists (rustDir + "/${dir}/src/main.rs")

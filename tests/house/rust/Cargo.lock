@@ -10,6 +10,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "house-fixture-built"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-declared"
+version = "0.1.0"
+
+[[package]]
+name = "house-fixture-included"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-member"
 version = "0.1.0"
 
