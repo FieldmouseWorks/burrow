@@ -672,3 +672,13 @@ fn the_owners_release_after_a_settled_hold_moves_the_release_on() {
     earlier(&cfg, "web-4", t + 3600, Some(t + 60)).unwrap();
     assert_eq!(out(&cfg).unwrap().until, t + 3600);
 }
+
+#[test]
+fn unpaid_usage_is_a_wait_not_a_billing_question() {
+    let mut cfg: crate::config::Config =
+        serde_json::from_value(crate::config::tests::example()).unwrap();
+    assert!(!cfg.usage_paid);
+    assert!(super::policy(&cfg).contains("never ask the owner"));
+    cfg.usage_paid = true;
+    assert!(!super::policy(&cfg).contains("disabled"));
+}

@@ -375,7 +375,10 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
                     }
                     let asked = read(&first).unwrap_or_default();
-                    prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
+                    prompt = again(
+                        &format!("{SPENT}\n\n{said}. {}\n\n{asked}", usage::policy(cfg)),
+                        "spent",
+                    );
                     continue;
                 }
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");

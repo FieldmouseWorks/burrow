@@ -87,6 +87,7 @@ let
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     inherit (cfg) meters;
+    usagePaid = cfg.usage.paid;
     inherit roles;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
@@ -145,6 +146,12 @@ in
       default = 2;
       description = "How many Codex jobs may run at once, in a pool of their own. Keep it small: the plan's PR reviewer comes first.";
     };
+    usage.paid = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Whether paid extra usage is enabled. Otherwise usage limits mean waiting for reset, never asking the owner to raise a cap.";
+    };
+
     meters = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;

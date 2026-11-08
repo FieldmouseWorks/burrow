@@ -310,6 +310,12 @@ impl Pass<'_> {
                     }
                 }
                 let whole = self.issue_text(repo, &now_issue, &comments);
+                let human_reply = comments.iter().any(|c| {
+                    after(c)
+                        && self.heard(c)
+                        && c["user"]["type"] != "Bot"
+                        && !raw(&c["user"]["login"]).ends_with("[bot]")
+                });
                 let msg = if changed {
                     format!(
                         "The issue has changed since you were handed it: its title or text edited, or a comment on it edited or deleted. As it stands now:\n\n{whole}"
@@ -317,6 +323,7 @@ impl Pass<'_> {
                 } else {
                     msg
                 };
+                let msg = question_resume(&job, &msg, human_reply);
                 if !msg.is_empty() && reply(self.cfg, &id, &msg, true, None).is_err() {
                     // Woken by what it awaits (proj _watch) since it was
                     // looked at, or its turn couldn't start: the reply waits
@@ -359,4 +366,58 @@ pub(super) fn revived(d: &Path) -> (Option<i64>, i64) {
     let rv = read(&d.join("revived")).unwrap_or_default();
     let (turn, streak) = rv.split_once(' ').unwrap_or((&rv, ""));
     (turn.parse().ok(), streak.parse().unwrap_or(0))
+}
+
+/// Keep the posted question through machinery updates until a person replies.
+fn question_resume(job: &Job, msg: &str, human_reply: bool) -> String {
+    if msg.is_empty() {
+        return String::new();
+    }
+    let open = job.path("open-question");
+    if job
+        .turns()
+        .is_some_and(|n| read(&job.turn(&n, "end")).as_deref() == Some("done"))
+    {
+        let _ = fs::remove_file(&open);
+        return msg.to_owned();
+    }
+    let asking = open.exists()
+        || job
+            .turns()
+            .is_some_and(|n| read(&job.turn(&n, "end")).as_deref() == Some("ask"));
+    if human_reply {
+        let _ = fs::remove_file(open);
+        return msg.to_owned();
+    }
+    if asking {
+        let _ = fs::write(open, "ask\n");
+        format!(
+            "{msg}\n\nYour open question is still posted on this issue. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer."
+        )
+    } else {
+        msg.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+    #[test]
+    fn steward_resume_keeps_the_posted_question_until_a_person_replies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: crate::config::Config =
+            serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().to_owned();
+        let job = Job::new(&cfg, "asking");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "end"), "ask\n").unwrap();
+        let prompt = question_resume(&job, "steward entry", false);
+        assert!(prompt.contains("Do not repeat the question"));
+        assert!(prompt.contains("`proj ask` again without restating"));
+        job.set_turns(2).unwrap();
+        assert!(question_resume(&job, "another entry", false).contains("Do not repeat"));
+        assert_eq!(question_resume(&job, "owner answer", true), "owner answer");
+        assert_eq!(question_resume(&job, "later entry", false), "later entry");
+    }
 }
