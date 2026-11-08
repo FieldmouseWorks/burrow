@@ -86,6 +86,7 @@ let
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
+    heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     inherit (cfg) meters;
     usagePaid = cfg.usage.paid;
     inherit roles;

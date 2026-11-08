@@ -70,6 +70,8 @@ pub struct Config {
     /// Codex's own pool, and the immutable hooks dir it gives git.
     pub codex_slots: usize,
     pub codex_hooks: PathBuf,
+    /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
+    pub heavy_dir: Option<PathBuf>,
     pub tools: Tools,
     /// proj-inbox's settings; None when it's off.
     pub inbox: Option<Inbox>,

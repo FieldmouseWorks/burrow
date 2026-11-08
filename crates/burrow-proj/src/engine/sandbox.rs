@@ -130,7 +130,8 @@ impl Access {
 }
 
 /// What the job's commands may read, besides their grants: the machine's
-/// own paths that are there, the resolver's file, the dir of the App's
+/// own paths that are there, the configured root-owned heavy slot directory,
+/// the resolver's file, the dir of the App's
 /// token socket, rustup's toolchains (RUSTUP_HOME, else HOME's `.rustup`)
 /// and git's global config file (GIT_CONFIG_GLOBAL, else HOME's and XDG's),
 /// as a regular file, which no socket can be. Nothing else of the machine
@@ -139,13 +140,15 @@ impl Access {
 /// in the runtime dir, a compile-cache daemon in a network namespace of its
 /// own), isn't there to connect() to. Nor are the user's keys and logins
 /// (ssh, gh, rclone, the browser's profile), other projects or other jobs.
-fn readable(env: Env, machine: &Machine) -> io::Result<Vec<PathBuf>> {
+fn readable(env: Env, machine: &Machine, heavy: Option<&Path>) -> io::Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = machine
         .system
         .iter()
         .filter(|p| p.exists())
         .cloned()
         .collect();
+    // flock works on read-only descriptors; no write grant is needed for slots.
+    paths.extend(heavy.filter(|p| p.is_dir()).map(Path::to_owned));
     paths.extend(machine.resolver.canonicalize().ok().filter(|p| p.is_file()));
     if let Some(socket) = var(env, "GH_TOKEN_SOCKET") {
         paths.extend(std::path::absolute(socket)?.parent().map(Path::to_owned));
@@ -458,7 +461,7 @@ pub fn flags(
         let given = entries.entry(path).or_insert(access);
         *given = access.max(*given);
     };
-    for path in readable(env, machine)? {
+    for path in readable(env, machine, cfg.heavy_dir.as_deref())? {
         grant(&mut entries, path, Access::Read);
     }
     for path in roots {
