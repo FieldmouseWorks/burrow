@@ -9,13 +9,15 @@
 //! something main never gets. So it rides the PR instead (`ride`): main with
 //! the PR's head on top, which is what the train lands next.
 //!
-//! Unless a check failed on a head it pushed itself (`red`). The steward
-//! settles only a green PR, and takes one that goes red out of the train, so
-//! that head is in no candidate for a new one to stop, and riding it would
-//! hold the box until a Claude job got to it. So it brings in a fresh bump as
-//! if none were open, which goes up as the same PR's new head (`replace`):
-//! only a whole one, though, that isn't the red head's very tree
-//! (`replaces`).
+//! Unless the steward won't land a head it pushed itself as it is (`stuck`):
+//! a check failed on it, or a reviewer's finding on it is open. The steward
+//! settles only a green PR with every thread resolved, and takes one that
+//! goes red out of the train, so that head is in no candidate for a new one
+//! to stop, and riding it would hold the box, security fixes and all, until
+//! a Claude job got to it: forever, when the finding is about an input's own
+//! code, which only a newer pin fixes. So it brings in a fresh bump as if
+//! none were open, which goes up as the same PR's new head (`replace`): only
+//! a whole one, though, that isn't the stuck head's very tree (`replaces`).
 //!
 //! The head it pushed last is `proposed`, in its state dir: a head on its PR
 //! that isn't that one is someone else's, a fix, and what it holds hasn't
@@ -73,15 +75,34 @@ pub fn open(t: &Train, api: &mut dyn Api) -> Result<Option<Pr>, String> {
     }
 }
 
-/// Whether its open PR `pr` is red on a head HOST-update pushed, with that
-/// head fetched when it is (`replaces` reads it): false when it isn't, or
-/// when the head is anyone else's (`ride` holds for that). Red is CI as the
-/// steward reads it (ci_state in modules/autoland/prs.py, whose rules these
-/// are), in `failing`. Fails, saying why, when GitHub doesn't say, or the
-/// head moved since `pr` was listed.
-pub fn red(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<bool, String> {
+/// Why the steward won't land its PR's head as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stuck {
+    /// A check failed on it (`failing`).
+    Red,
+    /// A reviewer's finding on it is open (`found`).
+    Finding,
+}
+
+impl std::fmt::Display for Stuck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Stuck::Red => "red",
+            Stuck::Finding => "held by an open finding on it",
+        })
+    }
+}
+
+/// Whether its open PR `pr` is stuck on a head HOST-update pushed, and why,
+/// with that head fetched when it is (`replaces` reads it): None when it
+/// isn't, or when the head is anyone else's (`ride` holds for that). Red is
+/// CI as the steward reads it (ci_state in modules/autoland/prs.py, whose
+/// rules these are), in `failing`; a finding is a review thread on that
+/// head, in `found`. Fails, saying why, when GitHub doesn't say, or the head
+/// moved since `pr` was listed.
+pub fn stuck(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<Option<Stuck>, String> {
     if proposed(cfg).as_deref() != Some(pr.head.as_str()) {
-        return Ok(false);
+        return Ok(None);
     }
     let (owner, name) = parts(t);
     let vars = json!({"owner": owner, "name": name, "n": pr.number});
@@ -96,16 +117,24 @@ pub fn red(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<bool, 
             pr.number, pr.head
         ));
     }
-    if !failing(t, &p["commits"]["nodes"][0]["commit"]) {
-        return Ok(false);
-    }
+    let why = if failing(t, &p["commits"]["nodes"][0]["commit"]) {
+        Stuck::Red
+    } else if found(&p["reviewThreads"], &pr.head) {
+        Stuck::Finding
+    } else {
+        return Ok(None);
+    };
     fetch(cfg, t, pr)?;
-    Ok(true)
+    Ok(Some(why))
 }
 
-/// A PR's head commit's checks, as `failing` reads them.
+/// A PR's head commit's checks, as `failing` reads them, and its review
+/// threads, as `found` does.
 const CHECKS: &str = "query($owner: String!, $name: String!, $n: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid
+    reviewThreads(first: 100) { nodes { isResolved
+      comments(first: 1) { nodes { originalCommit { oid } } }
+    } }
     commits(last: 1) { nodes { commit {
       statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
         __typename
@@ -116,6 +145,22 @@ const CHECKS: &str = "query($owner: String!, $name: String!, $n: Int!) {
     } } }
   } }
 }";
+
+/// Whether `threads` (a PR's, as GraphQL gives them) hold an open one left
+/// on `head`: its first comment, the finding, was made on that commit. The
+/// steward merges nothing with a thread open, so that head won't land as it
+/// is. One left on an older head isn't this head's: the steward's job on
+/// the PR settles it against this one, and a reviewer that still finds it
+/// here leaves a new thread on it. Past the first 100 threads isn't read,
+/// as the steward doesn't read them either.
+fn found(threads: &Value, head: &str) -> bool {
+    threads["nodes"].as_array().is_some_and(|ts| {
+        ts.iter().any(|t| {
+            t["isResolved"] == false
+                && t["comments"]["nodes"][0]["originalCommit"]["oid"].as_str() == Some(head)
+        })
+    })
+}
 
 /// Whether CI on `commit` (as GraphQL gives it) is red: a check whose latest
 /// run failed (so one rerunning is pending), a workflow that failed to
@@ -186,12 +231,12 @@ pub fn ride(cfg: &Config, t: &Train, pr: &Pr) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether HEAD, a fresh bump on `main` for its red PR `pr`, replaces that
-/// head: Ok, or why it doesn't. `short` are the inputs that didn't make it
+/// Whether HEAD, a fresh bump on `main` for its stuck PR `pr`, replaces
+/// that head: Ok, or why it doesn't. `short` are the inputs that didn't make it
 /// in (they didn't build, or what's new in them couldn't be fetched). One
 /// short of any, or with nothing new on main at all, could take back what
-/// that head put live; one that's that head's very tree would only go red
-/// the same way again. Either way the Claude job on the red PR (or a rerun)
+/// that head put live; one that's that head's very tree would only be stuck
+/// the same way again. Either way the Claude job on the stuck PR (or a rerun)
 /// has it. A tree it can't read is a reason too: it never replaces a head
 /// it couldn't tell apart.
 pub fn replaces(cfg: &Config, pr: &Pr, main: &str, short: &[String]) -> Result<(), String> {
@@ -211,25 +256,26 @@ pub fn replaces(cfg: &Config, pr: &Pr, main: &str, short: &[String]) -> Result<(
     }
 }
 
-/// HEAD as its red PR `pr`'s new head, retitled for HEAD (`said`): the same
-/// PR, never a new one. Only while that head is still on it and still red: a
-/// head pushed since is someone's fix, and one gone green (a rerun) is the
-/// steward's to settle and put in the train, so it's ridden instead. Gives
-/// the PR's URL; fails, saying why, with the PR left as it was. A run calls
-/// it once HEAD is live and healthy but before it's confirmed (live.rs), so
-/// a refusal reverts it: the box never stays on a bump nothing will land.
+/// HEAD as its stuck PR `pr`'s new head, retitled for HEAD (`said`): the
+/// same PR, never a new one. Only while that head is still on it and still
+/// stuck: a head pushed since is someone's fix, and one the steward can land
+/// now (a rerun gone green, a finding resolved) is its to settle and put in
+/// the train, so it's ridden instead. Gives the PR's URL; fails, saying
+/// why, with the PR left as it was. A run calls it once HEAD is live and
+/// healthy but before it's confirmed (live.rs), so a refusal reverts it:
+/// the box never stays on a bump nothing will land.
 pub fn replace(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<String, String> {
     let (title, body) = said(cfg)?;
     let n = pr.number;
-    match red(cfg, t, api, pr) {
+    let why = match stuck(cfg, t, api, pr) {
         Err(why) => return Err(format!("{why}; its PR #{n} stays as it is")),
-        Ok(false) => {
+        Ok(None) => {
             return Err(format!(
-                "its PR #{n} isn't red any more, so it stays as it is"
+                "its PR #{n} isn't stuck any more, so it stays as it is"
             ));
         }
-        Ok(true) => {}
-    }
+        Ok(Some(why)) => why,
+    };
     let lease = format!("--force-with-lease=refs/heads/{}:{}", t.branch, pr.head);
     let to = format!("HEAD:refs/heads/{}", t.branch);
     cfg.git_hushed(&["push", "-q", &lease, "origin", &to])
@@ -248,11 +294,14 @@ pub fn replace(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<St
         .and_then(|r| r["html_url"].as_str().map(String::from))
         .unwrap_or_else(|| {
             format!(
-                "https://github.com/{}/pull/{n} (its title still says the red head's: GitHub didn't take the new one)",
+                "https://github.com/{}/pull/{n} (its title still says the old head's: GitHub didn't take the new one)",
                 t.repo
             )
         });
-    Ok(format!("{url}, in place of its red head {}", &pr.head[..7]))
+    Ok(format!(
+        "{url}, in place of its head {}, which was {why}",
+        &pr.head[..7]
+    ))
 }
 
 /// HEAD as a new PR, titled and described for HEAD (`said`), whose URL it
@@ -289,7 +338,7 @@ pub fn said(cfg: &Config) -> Result<(String, String), String> {
     let title = cfg.git(&["log", "-1", "--format=%s"])?;
     let did = cfg.git(&["log", "-1", "--format=%b"])?;
     let body = format!(
-        "{did}\n\nIt is live on {}. The steward settles this PR and the merge train lands it; until then {} brings in nothing newer, unless a check fails on it: then a fresh bump replaces it.",
+        "{did}\n\nIt is live on {}. The steward settles this PR and the merge train lands it; until then {} brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it.",
         cfg.host, cfg.update
     );
     Ok((title, body))

@@ -1,5 +1,5 @@
 //! Whole runs in a train repo, where what a run would push goes up as its
-//! PR (train.rs): proposed, ridden, replaced when red, and main itself
+//! PR (train.rs): proposed, ridden, replaced when stuck, and main itself
 //! going live with nothing put up.
 
 use burrow_github::fake::ok;
@@ -146,7 +146,7 @@ fn a_red_pr_of_its_own_gets_a_fresh_bump_as_its_head() {
         (
             "ok".into(),
             format!(
-                "live and confirmed: nixpkgs aaaaaaa -> ddddddd (up as https://github.com/sam/homelab/pull/8, in place of its red head {})",
+                "live and confirmed: nixpkgs aaaaaaa -> ddddddd (up as https://github.com/sam/homelab/pull/8, in place of its head {}, which was red)",
                 &red_head[..7]
             )
         )
@@ -164,6 +164,58 @@ fn a_red_pr_of_its_own_gets_a_fresh_bump_as_its_head() {
 }
 
 #[test]
+fn a_pr_of_its_own_held_by_a_finding_gets_a_fresh_bump_as_its_head() {
+    // Green, but a reviewer's finding on its head is open: the steward won't
+    // land it, so riding it would hold every input back, the fix for the
+    // finding included.
+    let (m, held) = proposed();
+    m.upstream("nixpkgs", &sha('d'));
+    let found = || {
+        let mut said = checked(&held, &[], false);
+        said["data"]["repository"]["pullRequest"]["reviewThreads"] = json!({"nodes": [
+            {"isResolved": false, "comments": {"nodes": [{"originalCommit": {"oid": held}}]}}
+        ]});
+        ok(200, said, &[])
+    };
+    let mut gh = Fake::default();
+    gh.on(
+        "GET",
+        "repos/sam/homelab/pulls?",
+        vec![ok(
+            200,
+            listed(&[(8, held.clone(), json!("sam/homelab"))]),
+            &[],
+        )],
+    );
+    gh.on("POST", "graphql", vec![found(), found()]);
+    gh.on(
+        "PATCH",
+        "repos/sam/homelab/pulls/8",
+        vec![ok(
+            200,
+            json!({"html_url": "https://github.com/sam/homelab/pull/8"}),
+            &[],
+        )],
+    );
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    let head = m.origin(&["rev-parse", &format!("refs/heads/{BRANCH}")]);
+    assert_ne!(head, held);
+    assert_eq!(head, m.head());
+    assert_eq!(
+        said(&m),
+        (
+            "ok".into(),
+            format!(
+                "live and confirmed: nixpkgs aaaaaaa -> ddddddd (up as https://github.com/sam/homelab/pull/8, in place of its head {}, which was held by an open finding on it)",
+                &held[..7]
+            )
+        )
+    );
+    assert!(running_lock(&m).contains(&sha('d')));
+    assert_eq!(gh.asked("PATCH").len(), 1);
+}
+
+#[test]
 fn a_fresh_bump_its_pr_wont_take_goes_straight_back() {
     let (m, red_head) = proposed();
     let live = m.running();
@@ -175,7 +227,7 @@ fn a_fresh_bump_its_pr_wont_take_goes_straight_back() {
         said(&m),
         (
             "held".into(),
-            "its PR #8 isn't red any more, so it stays as it is; reverted".into()
+            "its PR #8 isn't stuck any more, so it stays as it is; reverted".into()
         )
     );
     assert_eq!(m.running(), live);
