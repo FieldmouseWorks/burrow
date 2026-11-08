@@ -88,7 +88,8 @@ The programs the modules run are Rust, one Cargo workspace in `crates/`: each
 crate is a package of its own (`packages.SYSTEM.CRATE`) and a check
 (`checks.crates-*`), and `cargo test` there runs the same tests.
 `crates/burrow-workflows` tests the shared workflows' own steps and needs git,
-jq and nix on PATH.
+jq, nix and rustc on PATH. [The Rust runner](crates/burrow-flake-check/README.md)
+owns the shared gate and negative run.
 
 burrow is generic: anything about one machine (its hostname, users, owner,
 repos, addresses) is an option a machine's flake sets, never a value in a

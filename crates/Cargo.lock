@@ -165,6 +165,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-flake-check"
+version = "0.0.0"
+
+[[package]]
 name = "burrow-github"
 version = "0.0.0"
 dependencies = [

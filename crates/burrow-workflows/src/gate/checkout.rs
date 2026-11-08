@@ -237,3 +237,20 @@ fn an_uncommitted_checkout_is_evaluated_as_it_is() {
     });
     assert!(meta, "{b}");
 }
+
+/// Rustup consults the working directory's toolchain file. A caller must
+/// not choose the compiler of the source-pinned runner that judges it.
+#[test]
+fn the_runner_compiles_outside_the_callers_checkout() {
+    let g = Gate::new();
+    let d = g.flake(r#"{ checks.${system}.a = drv "a"; }"#);
+    // Keep the real compiler Gate::new selected, but reject invocation in
+    // the caller tree, where rustup could read its rust-toolchain.toml.
+    let compiler = read(&g.s.join("bin/rustc"));
+    g.s.stub("rustc", &format!(
+        "[ ! -e flake.nix ] || {{ echo 'compiler ran in caller checkout' >&2; exit 1; }}\n{compiler}"
+    ));
+    let r = g.apart(&d);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.build().contains("-a.drv^*"), "{}", r.out);
+}

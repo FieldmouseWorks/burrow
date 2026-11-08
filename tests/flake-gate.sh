@@ -111,6 +111,18 @@ d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@v1)")
 (cd "$d" && GATE_OUT=$tmp/out flake-gate) || fail "a named workflow that runs its files failed"
 [ "$(tail -n 1 "$tmp/out")" = "v1 $d" ] || fail "ran v1's files as $(cat "$tmp/out")"
 
+# The Rust bootstrap needs its crate from that same workflow commit too.
+mkdir -p "$tools/crates/burrow-flake-check/src"
+printf 'fn main() { println!("rust runner"); }\n' > "$tools/crates/burrow-flake-check/src/main.rs"
+cp "$burrow/.github/flake-check/gate.sh" "$burrow/.github/flake-check/run.sh" "$tools/.github/flake-check/"
+git -C "$tools" add . && git -C "$tools" commit -qm rust && git -C "$tools" tag rust
+# Caller sources with the same path must not supply the remote's executable.
+d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@rust)")
+mkdir -p "$d/crates/burrow-flake-check/src"
+printf 'compile_error!("caller source");\n' > "$d/crates/burrow-flake-check/src/main.rs"
+(cd "$d" && GATE_OUT=$tmp/out flake-gate) > "$tmp/rust" || fail "the pinned Rust runner wasn't fetched"
+grep -qx 'rust runner' "$tmp/rust" || fail "ran another Rust runner"
+
 # What it can't run as GitHub would, it refuses, and runs nothing.
 refused() {
   rm -f "$tmp/out"
@@ -134,14 +146,17 @@ refused "$(repo "$(caller ./.github/workflows/flake-check.yml)
 
 # burrow's own: CI's inputs, and the shared workflow's gate step as it is.
 d=$(mktemp -d "$tmp/burrow.XXXXXX")
-cp -r "$burrow/.github" "$d/" && chmod -R u+w "$d"
+cp -r "$burrow/.github" "$d/"
+mkdir "$d/crates"
+cp -r "$burrow/crates/burrow-flake-check" "$d/crates/"
+chmod -R u+w "$d"
 git -C "$d" init -q && git -C "$d" add . && git -C "$d" commit -qm burrow
 (cd "$d" && flake-gate --print) > "$tmp/print"
 yq '.jobs.check.steps[] | select(.id == "gate") | .run' "$d/.github/workflows/flake-check.yml" > "$tmp/step"
 diff <(grep -vE '^(workflow|env): ' "$tmp/print") "$tmp/step" || fail "flake-gate runs another script than CI's gate step"
 # Its files, from the checkout the workflow came from.
 grep -qx "env: TOOLS=$d/.github/flake-check" "$tmp/print" || fail "burrow's gate runs its files from $(grep TOOLS "$tmp/print")"
-[ -f "$d/.github/flake-check/gate.sh" ] && [ -f "$d/.github/flake-check/plan.nix" ] || fail "burrow's gate has no files to run"
+[ -f "$d/.github/flake-check/gate.sh" ] && [ -f "$d/crates/burrow-flake-check/src/plan.rs" ] || fail "burrow's gate has no files to run"
 # The whole flake at once holds 6-7G until its last build ends, beside every
 # other job on remi; one output at a time holds a fraction of that.
 grep -qx 'env: APART=true' "$tmp/print" || fail "burrow's gate evaluates the whole flake at once: $(head -3 "$tmp/print")"

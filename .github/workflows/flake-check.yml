@@ -361,7 +361,7 @@ jobs:
         with:
           extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
       # The gate's own files, at this workflow's commit: its script and the
-      # plan it evaluates (.github/flake-check), beside the checkout, which
+      # plan it evaluates (crates/burrow-flake-check), beside the checkout, which
       # they're no part of (nix reads only what git tracks).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -369,8 +369,10 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .flake-check
           persist-credentials: false
-          sparse-checkout: .github/flake-check
-      # The gate: what it does is .github/flake-check/gate.sh's to say.
+          sparse-checkout: |
+            .github/flake-check
+            crates/burrow-flake-check
+      # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       - id: gate
         shell: bash
         env:
@@ -669,7 +671,9 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .flake-check
           persist-credentials: false
-          sparse-checkout: .github/flake-check
+          sparse-checkout: |
+            .github/flake-check
+            crates/burrow-flake-check
       # Whether it needs a negative, which git alone can tell.
       - id: paths
         shell: bash
