@@ -60,7 +60,7 @@ if [ "$1" = api ]; then
       esac
       printf 'HTTP/2.0 200 OK\n\n{"full_name":"%s"}' "$repo" ;;
     installation/repositories)
-      [ ! -e "$FAKE/$GH_TOKEN_OWNER-fails" ] || exit 1
+      [ ! -e "$FAKE/$GH_TOKEN_OWNER-fails" ] || { printf 'HTTP/2.0 403 Forbidden\n\n{"message":"installation access denied"}'; exit 1; }
       printf 'HTTP/2.0 200 OK\n\n'
       jq -Rs '{repositories: [split("\n")[] | select(length>0) | {full_name:.,archived:false}]}' "$FAKE/$GH_TOKEN_OWNER-repos" ;;
     *) exit 2 ;;
@@ -480,7 +480,7 @@ fn a_repo_or_an_owner_that_fails_holds_up_none_of_the_rest_but_fails_the_pass() 
         (
             Some(1),
             String::new(),
-            "couldn't list the repos sam's installation reaches\n".into()
+            "GET installation/repositories: HTTP 403: installation access denied\ncouldn't list the repos sam's installation reaches\n".into()
         )
     );
     assert_eq!(m.runs(), [filter("kim/c")]);

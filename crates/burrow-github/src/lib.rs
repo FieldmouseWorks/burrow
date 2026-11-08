@@ -7,6 +7,9 @@ use std::{fmt, thread, time::Duration};
 
 use serde_json::Value;
 
+/// Allocation bound for deadline-bound GitHub reads, including pagination.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Response {
     pub status: u16,
@@ -134,10 +137,30 @@ pub fn call(
 /// Every JSON page of a REST read, following GitHub's Link header. Each
 /// page goes through the same retries; a failed page fails the whole read.
 pub fn pages(api: &mut dyn Api, path: &str) -> Result<Vec<Value>, Error> {
+    pages_with_limit(api, path, usize::MAX)
+}
+
+/// As `pages`, with a cumulative byte limit on the JSON pages and their
+/// enclosing array. Reject the whole read before retaining an excess page.
+pub fn pages_with_limit(
+    api: &mut dyn Api,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Vec<Value>, Error> {
     let mut path = path.to_owned();
     let mut pages = Vec::new();
+    let mut bytes = 2usize;
     loop {
         let response = call(api, "GET", &path, None, None)?;
+        bytes = bytes
+            .checked_add(response.body.len())
+            .and_then(|n| n.checked_add(usize::from(!pages.is_empty())))
+            .filter(|n| *n <= max_bytes)
+            .ok_or_else(|| {
+                Error::said(format!(
+                    "GET {path}: paginated response exceeded {max_bytes} bytes"
+                ))
+            })?;
         pages.push(response.json()?);
         match response.next() {
             Some(next) => path = next,

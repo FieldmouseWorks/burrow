@@ -129,6 +129,14 @@ pub(crate) fn client(cfg: &Config) -> Gh {
     }
 }
 
+/// Keep the final diagnostic when a caller represents failure as None.
+/// Retries remain quiet until the shared client has given up.
+pub(crate) fn reported<T>(result: Result<T, burrow_github::Error>) -> Option<T> {
+    result
+        .map_err(|e| eprintln!("proj: GitHub request failed: {e}"))
+        .ok()
+}
+
 /// One REST answer, or None when GitHub cannot be read.
 pub fn api(cfg: &Config, path: &str) -> Option<Value> {
     api_until(cfg, path, None)
@@ -137,7 +145,7 @@ pub fn api(cfg: &Config, path: &str) -> Option<Value> {
 fn api_until(cfg: &Config, path: &str, until: Option<Instant>) -> Option<Value> {
     let mut gh = client(cfg);
     gh.until = until;
-    call(&mut gh, "GET", path, None, None).ok()?.json().ok()
+    reported(reported(call(&mut gh, "GET", path, None, None))?.json())
 }
 
 /// GraphQL fields are data, not authentication routing. Pin the repository.
@@ -147,12 +155,20 @@ pub fn query_for(cfg: &Config, repo: &str, query: &str, variables: Value) -> Opt
     // REST's repository routing takes precedence over the account default.
     // Use call_repeating for this read-only POST, preserving that routing.
     let body = json!({"query": query, "variables": variables});
-    let got = burrow_github::call_repeating(&mut gh, "POST", "graphql", Some(&body))
-        .ok()?
-        .json()
-        .ok()?;
+    let got = reported(
+        reported(burrow_github::call_repeating(
+            &mut gh,
+            "POST",
+            "graphql",
+            Some(&body),
+        ))?
+        .json(),
+    )?;
     if got.get("errors").is_some() {
-        return None;
+        return reported(Err(burrow_github::Error::said(format!(
+            "GraphQL: {}",
+            got["errors"]
+        ))));
     }
     Some(got["data"].clone())
 }
@@ -160,7 +176,12 @@ pub fn query_for(cfg: &Config, repo: &str, query: &str, variables: Value) -> Opt
 fn pages_until(cfg: &Config, path: &str, until: Option<Instant>) -> Option<Vec<Value>> {
     let mut gh = client(cfg);
     gh.until = until;
-    burrow_github::pages(&mut gh, path).ok()
+    let max_bytes = if until.is_some() {
+        burrow_github::MAX_RESPONSE_BYTES
+    } else {
+        usize::MAX
+    };
+    reported(burrow_github::pages_with_limit(&mut gh, path, max_bytes))
 }
 
 /// Every page of a list, as one list.
@@ -204,6 +225,48 @@ mod tests {
     use std::fs;
 
     use super::{changes, over, target};
+
+    #[test]
+    fn review_final_diagnostics_are_visible() {
+        if std::env::var_os("PROJ_TEST_DIAGNOSTICS").is_some() {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = dir.path().join("gh");
+            burrow_test::executable(
+                &gh,
+                "#!/bin/sh\ncat >/dev/null\nprintf 'HTTP/2.0 403 Forbidden\\n\\n{\"message\":\"installation access denied\"}'\nexit 1\n",
+            );
+            let mut config = crate::config::tests::example();
+            config["tools"]["gh"] = json!(gh);
+            let cfg = serde_json::from_value(config).unwrap();
+            assert!(super::api(&cfg, "repos/sam/r").is_none());
+            assert!(super::query_for(&cfg, "sam/r", "query {viewer{login}}", json!({})).is_none());
+            assert!(super::pages_until(&cfg, "repos/sam/r/issues", None).is_none());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "github::tests::review_final_diagnostics_are_visible",
+                "--nocapture",
+            ])
+            .env("PROJ_TEST_DIAGNOSTICS", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for path in [
+            "GET repos/sam/r:",
+            "POST graphql:",
+            "GET repos/sam/r/issues:",
+        ] {
+            assert!(stderr.contains(path), "{stderr}");
+        }
+        assert_eq!(
+            stderr.matches("installation access denied").count(),
+            3,
+            "{stderr}"
+        );
+    }
 
     #[test]
     fn github_recovers_after_502() {

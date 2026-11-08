@@ -26,6 +26,41 @@ pub(super) struct Box {
     pub(super) cfg: Config,
 }
 
+#[test]
+fn review_closing_never_replays_a_stale_decision() {
+    for reason in ["completed", "not_planned"] {
+        for response in [
+            "HTTP/2.0 502 Bad Gateway",
+            "HTTP/2.0 429 Too Many Requests",
+            "reset",
+        ] {
+            let b = Box::new();
+            let attempts = b.path("attempts");
+            burrow_test::executable(
+                &b.cfg.tools.gh,
+                format!(
+                    r#"#!/bin/sh
+cat >/dev/null
+if [ ! -e '{attempts}' ]; then
+  echo asked >'{attempts}'
+  if [ '{response}' = reset ]; then echo 'connection reset by peer' >&2; else printf '{response}\n\n{{}}'; fi
+  exit 1
+fi
+echo asked >>'{attempts}'
+printf 'HTTP/2.0 200 OK\n\n{{}}'
+"#,
+                    attempts = attempts.display()
+                ),
+            );
+            assert!(
+                !b.pass().close("sam/box", "7", reason),
+                "{reason}: {response}"
+            );
+            assert_eq!(fs::read_to_string(attempts).unwrap(), "asked\n");
+        }
+    }
+}
+
 impl Box {
     pub(super) fn new() -> Box {
         let tmp = tempfile::TempDir::new().unwrap();

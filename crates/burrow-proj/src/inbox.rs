@@ -524,14 +524,14 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             "{body}\n\n---\n{}\n_proj-inbox on {}_\n",
             self.cfg.inbox_mark, self.inbox.host
         );
-        burrow_github::call(
+        crate::github::reported(burrow_github::call(
             &mut crate::github::client(self.cfg),
             "POST",
             &format!("repos/{repo}/issues/{n}/comments"),
             Some(&serde_json::json!({"body": text})),
             None,
-        )
-        .is_ok()
+        ))
+        .is_some()
     }
 
     /// The label, so it's there to pick on the phone. Once per repo.

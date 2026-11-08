@@ -1,4 +1,4 @@
-use super::{Api, Failed, Response};
+use super::{Api, Failed, MAX_RESPONSE_BYTES, Response};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -101,7 +101,7 @@ fn gh_api(
             &mut cmd,
             input.as_deref().map(str::as_bytes),
             until,
-            16 * 1024 * 1024,
+            MAX_RESPONSE_BYTES,
         )
         .map_err(|why| Failed {
             why,

@@ -137,7 +137,9 @@ impl Config {
     fn reached(&self, owner: &str) -> Option<String> {
         let mut gh = self.github();
         gh.env.push(("GH_TOKEN_OWNER".into(), owner.into()));
-        let pages = burrow_github::pages(&mut gh, "installation/repositories").ok()?;
+        let pages = burrow_github::pages(&mut gh, "installation/repositories")
+            .map_err(|e| complain(&e.to_string()))
+            .ok()?;
         let mut repos = Vec::new();
         for page in pages {
             for repo in page["repositories"].as_array()? {
