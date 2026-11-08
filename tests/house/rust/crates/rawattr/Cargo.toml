@@ -1,0 +1,6 @@
+# A path attribute named by a raw identifier (#[r#path = ...]), whose file
+# a #[cfg(test)] module reads too: cargoTests keeps the package whole.
+[package]
+name = "house-fixture-rawattr"
+version = "0.1.0"
+edition = "2024"

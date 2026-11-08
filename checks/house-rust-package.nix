@@ -43,6 +43,11 @@ in pkgs.runCommand "house-rust-package-check" { } ''
   [ "$(${pkg}/bin/house-fixture-spaced)" = spaced ]
   [ "$(${pkg}/bin/house-fixture-made)" = made ]
   [ "$(${pkg}/bin/house-fixture-across)" = across ]
+  # And what the scan doesn't lex: a nested block comment hiding a quote,
+  # a shebang line ending in #[cfg(test)], and #[r#path = ...].
+  [ "$(${pkg}/bin/house-fixture-deep)" = deep ]
+  [ "$(${pkg}/bin/house-fixture-shebang)" = shebang ]
+  [ "$(${pkg}/bin/house-fixture-rawattr)" = rawattr ]
   # A package whose release build compiles a crate in its tests/ that
   # includes one of its test modules.
   [ "$(${pkg}/bin/house-fixture-outer)" = outer ]

@@ -344,21 +344,33 @@ let
           # its comments gone and every string blanked to "\", which no
           # #[path] reads, but a path attribute's plain one. So no comment
           # or string makes or hides a declaration or an attribute. A char
-          # literal is kept whole, so its quote starts no string.
-          lex = text: lib.concatMapStrings (m:
+          # literal is kept whole, so its quote starts no string. Its tokens
+          # are matched once, so the forms they don't lex are found before
+          # lexing can hide them.
+          tokens = text: builtins.split ("(" + lib.concatStringsSep "|" [
+            ''path[[:space:]]*=[[:space:]]*"[^"\\]*"''
+            ''"([^"\\]|\\.)*"''
+            ''b?r"[^"]*"''
+            ''b?r#"([^"]|"+[^"#])*"+#''
+            "'([^'\\\\]|\\\\.)'"
+            "//[^\n]*"
+            ''/[*]([^*]|[*]+[^*/])*[*]+/''
+          ] + ")") text;
+          lex = lib.concatMapStrings (m:
             if builtins.isString m then m
             else
               let c = builtins.substring 0 1 (builtins.head m); in
-              if c == "/" then " " else if c == "p" || c == "'" then builtins.head m else ''"\"'')
-            (builtins.split ("(" + lib.concatStringsSep "|" [
-              ''path[[:space:]]*=[[:space:]]*"[^"\\]*"''
-              ''"([^"\\]|\\.)*"''
-              ''b?r"[^"]*"''
-              ''b?r#"([^"]|"+[^"#])*"+#''
-              "'([^'\\\\]|\\\\.)'"
-              "//[^\n]*"
-              ''/[*]([^*]|[*]+[^*/])*[*]+/''
-            ] + ")") text);
+              if c == "/" then " " else if c == "p" || c == "'" then builtins.head m else ''"\"'');
+          # What those tokens don't lex: a block comment with one nested in
+          # it (the token ends at the inner one's close), a shebang line
+          # (which Rust drops before lexing) and a raw string with more than
+          # one #.
+          unlexable = text: toks:
+            lib.any (m: builtins.isList m && (let t = builtins.head m; in
+              lib.hasPrefix "/*" t && lib.hasInfix "/*" (builtins.substring 2 (builtins.stringLength t) t))) toks
+            || (let body = lib.removePrefix (builtins.fromJSON ''"\ufeff"'') text; in
+              lib.hasPrefix "#!" body && !(lib.hasPrefix "#![" body))
+            || count ''r##+"'' text > 0;
           attrsRe = ''((#[[:space:]]*[[][^]]*[]][[:space:]]*)*)(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+(r#)?([[:alnum:]_]+)[[:space:]]*'';
           # A path attribute, and the word mod.
           pathRe = ''#[[:space:]]*[[][[:space:]]*path[^[:alnum:]_]'';
@@ -376,8 +388,8 @@ let
           # escaped), an inline module block that isn't #[cfg(test)], inside
           # which the declarations' paths are relative to a directory this
           # doesn't follow, or, in its own files, any mod or path attribute
-          # that isn't a declaration this reads, and code the tokens above
-          # don't lex (a raw string with more than one #, a nested comment).
+          # that isn't a declaration this reads (or is a raw identifier), and
+          # code the tokens above don't lex.
           # Each is looked for in the file as written and as lexed. A file of
           # its own that it leaves out (an integration test, a test module
           # or a file in one's directory) doesn't count: Cargo builds the
@@ -390,7 +402,9 @@ let
               count "include(_str|_bytes)?[[:space:]]*!|[^[:alnum:]_]path[[:space:]]*=[[:space:]]*\"([^\"]*/)?tests(/|[.]rs\")|cfg_attr[[:space:]]*[(][^]]*[^[:alnum:]_]path[[:space:]]*=" s > 0
               || lib.any (m: builtins.isList m && !(isTest (builtins.elemAt m 0))) (builtins.split (attrsRe + "[{]") s))
               [ x.text x.code ]
-              || count ''r##+"'' x.text > 0 || count ''/[*]|[*]/'' x.code > 0
+              || x.unlexed || count ''/[*]|[*]/'' x.code > 0
+              # A path or cfg_attr attribute named by a raw identifier.
+              || count ''r#(path|cfg_attr)([^[:alnum:]_]|$)'' x.code > 0
               || own x.file && (count modRe x.code != builtins.length x.decls + count (attrsRe + "[{]") x.code
                 || count pathRe x.code != lib.foldl' (n: d: n + count pathRe d.attrs) 0 x.decls))) sources;
           # Each Rust file in it, lexed, with its own files' `mod NAME;` and
@@ -400,7 +414,9 @@ let
             here = dirOf file;
             base = baseNameOf file;
             text = builtins.readFile r;
-            code = lex text;
+            toks = tokens text;
+            code = lex toks;
+            unlexed = unlexable text toks;
             decls = lib.optionals (own file) (map (m: { attrs = builtins.elemAt m 0; name = builtins.elemAt m 5; })
               (builtins.filter builtins.isList (builtins.split (attrsRe + ";") code)));
           }) names;
