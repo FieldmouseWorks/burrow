@@ -1,7 +1,8 @@
 """What a PR's new head stops: its Claude jobs still at work on the last
 head, whose answers would be for a head it no longer has. Those are its
 proofs, but for one building what the new head's proof wants
-(proofs.superseded), and its judge. Its fix jobs push to the branch
+(proofs.superseded), its judge, and the build of what its last proof is
+built from (proofs.prebuild). Its fix jobs push to the branch
 themselves, so a new head may be one's own push: claims.py stops one only
 once it's plain the head isn't (claims.stale). A job stopped here is
 forgotten as its kind's, so a head the PR comes back to gets jobs of its
@@ -22,6 +23,10 @@ def moved(repo, pr, st):
     old = P.superseded(repo, pr, st)
     if st.get("judged") and st.get("judgedJob") and P.running(st["judgedJob"]):
         old.append(st["judgedJob"])
+    # And the build of what its last head's proof is built from.
+    pre = st.pop("proofInputs", None) or {}
+    if pre.get("job") and pre["for"][0] != pr["headRefOid"] and P.running(pre["job"]):
+        old.append(pre["job"])
     for kind in KINDS:
         if st.get(kind + "Job") in old:
             for k in (kind, kind + "Lost", kind + "Again"):

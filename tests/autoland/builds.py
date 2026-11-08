@@ -7,7 +7,9 @@ while GitHub says it's waiting, saying so and naming the derivation. A slot is h
 a job: a job whose paths the jobs started before it are building holds
 none, and one whose eval failed, or whose check has no attribute, holds its
 own. A job on a head its PR no longer has keeps building only what the new
-head's proof wants."""
+head's proof wants. A build in line builds what it's built from first,
+outside the line, so the slot is held only while its own derivations
+build."""
 
 import itertools
 import json
@@ -16,7 +18,7 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
     upkeep_config
 from prs import ci_state
 
@@ -52,6 +54,8 @@ know = json.load(open({NIX!r}))
 if a[:2] == ["--check-validity", "--print-invalid"]:
     # A derivation is in the store until it's collected; an output once valid.
     print("\\n".join(p for p in a[2:] if ((p in know.get("collected", [])) if p.endswith(".drv") else (p not in know["valid"]))))
+elif a[:2] == ["--query", "--references"]:
+    print("\\n".join(r for d in a[2:] for r in know.get("refs", {{}}).get(d, [])))
 elif a[:2] == ["--query", "--outputs"]:
     print("\\n".join(o for d in a[2:] for o in know.get("outs", {{}}).get(d, [d.removesuffix(".drv")])))
 else:
@@ -72,14 +76,16 @@ X, Y, Z, W = (f"/nix/store/{c * 32}-proof-{c}" for c in "xyzw")
 VALID = [Z]
 
 
-def nix_knows(drvs=None, outs=None):
+def nix_knows(drvs=None, outs=None, refs=None):
     """Each PR's derivation (by number, or by (number, attribute), or by a
-    commit's tree as "tree:TREE"), and a derivation's outputs where it has
-    more than one."""
+    commit's tree as "tree:TREE"), a derivation's outputs where it has
+    more than one, and the derivations one is built from (none unless
+    said)."""
     drvs = drvs or {1: X, 2: Y, 3: Z, 4: X, 6: W}
     json.dump({"drvs": {heads[k] if isinstance(k, int) else k if isinstance(k, str) else f"{heads[k[0]]}#{k[1]}.drvPath":
                         d + ".drv" for k, d in drvs.items()},
-               "outs": {d + ".drv": o for d, o in (outs or {}).items()}, "valid": VALID}, open(NIX, "w"))
+               "outs": {d + ".drv": o for d, o in (outs or {}).items()}, "valid": VALID,
+               "refs": {d + ".drv": [r + ".drv" for r in rs] for d, rs in (refs or {}).items()}}, open(NIX, "w"))
     open(NIX_LOG, "w").close()
 
 
@@ -542,6 +548,159 @@ fresh_pr_state()
 status = line(1, checks=busy_ci + [dict(proof_state, state="PENDING")])
 assert "Settled; waiting for CI: ci, remi-proof" in status and JOBS == [], (status, JOBS)
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+
+# A build in line builds what it's built from first, outside the line: the
+# slot is held only while its own derivations build. PR 1's X is built from
+# A and PR 2's Y from B, neither built: both build them at once, and
+# neither holds the slot meanwhile, so the first whose inputs are built
+# takes it, older or not. Then the other waits its turn, as it would have.
+A, B = (f"/nix/store/{c * 32}-input-{c}" for c in "ab")
+INPUTS = {X: [A], Y: [B]}
+PRE = "Settled; building what remi-proof is built from, before its turn"
+kept_inputs = P.build_inputs
+def stub_inputs(repo, pr, checks, ins):
+    return JOBS.append(f"inputs {pr['number']} {' '.join(ins)}") or f"{C.BUILD}{next(ids)}"
+
+
+P.build_inputs = stub_inputs
+
+
+def inputs_job(n):
+    return pr_state(n)["proofInputs"]["job"]
+
+
+S.CFG["repos"]["sam/r"]["proofSlots"] = 1
+fresh_pr_state()
+VALID[:] = []
+nix_knows(refs=INPUTS)
+P.begin("sam/r", {1, 2})
+WAKES, kept_wake = [], C.wake
+C.wake = lambda repo, at: WAKES.append(at) or kept_wake(repo, at)
+status = line(1)
+assert PRE in status and JOBS == [f"inputs 1 {A}.drv"] and "provedJob" not in pr_state(1), (status, JOBS)
+# Its end kicks a pass; one is booked for when it's due to have ended, in
+# case that kick never comes.
+assert pr_state(1)["proofInputs"]["at"] + (S.CFG["proofTimeout"] + 5) * 60 in WAKES, WAKES
+C.wake = kept_wake
+status = line(2)
+assert PRE in status and JOBS == [f"inputs 2 {B}.drv"], (status, JOBS)
+# At work still: nothing started again, nobody in line.
+P.begin("sam/r", {1, 2})
+assert PRE in line(1, 800) and PRE in line(2, 800) and JOBS == [], JOBS
+# PR 2's done first: it takes the slot while PR 1's still builds A.
+VALID.append(B)
+nix_knows(refs=INPUTS)
+STATES[inputs_job(2)] = "done"
+P.begin("sam/r", {1, 2})
+assert PRE in line(1, 900) and JOBS == [], JOBS
+status = line(2, 900)
+assert RUNNING in status and JOBS == ["build 2 remi-proof"], (status, JOBS)
+# PR 1's done: its turn comes after PR 2's build of Y, with A built.
+VALID.append(A)
+nix_knows(refs=INPUTS)
+STATES[inputs_job(1)] = "done"
+P.begin("sam/r", {1, 2})
+assert ahead(1) in line(1, 1000) and JOBS == [], JOBS
+# One that ended without building them all (failed) goes in line too: its
+# own build builds what's left, and its verdict says how that went.
+fresh_pr_state()
+VALID[:] = []
+nix_knows(refs=INPUTS)
+P.begin("sam/r", {1})
+assert PRE in line(1) and len(JOBS) == 1, JOBS
+STATES[inputs_job(1)] = "failed"
+P.begin("sam/r", {1})
+status = line(1, 800)
+assert RUNNING in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
+# With what it's built from built already, straight to the line.
+fresh_pr_state()
+VALID[:] = [A]
+nix_knows(refs=INPUTS)
+P.begin("sam/r", {1})
+status = line(1)
+assert RUNNING in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
+# One whose outputs a running proof builds skips the line, and builds
+# nothing first: that proof is building it all (PR 4 builds X too).
+P.begin("sam/r", {1, 4})
+VALID[:] = []
+nix_knows(refs=INPUTS)
+status = line(4)
+assert SKIPPED in status and JOBS == ["build 4 remi-proof"], (status, JOBS)
+# With no proofSlots there's no line to stay out of: built at once.
+fresh_pr_state()
+del S.CFG["repos"]["sam/r"]["proofSlots"]
+P.begin("sam/r", {1})
+status = line(1)
+assert RUNNING in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
+S.CFG["repos"]["sam/r"]["proofSlots"] = 1
+# Pushed again while it builds them: that build is stopped, and the new
+# head's starts.
+fresh_pr_state()
+STOPPED.clear()
+nix_knows({1: X, 5: Y}, refs=INPUTS)
+P.begin("sam/r", {1})
+line(1)
+old = inputs_job(1)
+sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[5]}:refs/pull/1/head", cwd=work)
+status = run(clean(checks=proof, number=1, sha=heads[5]), 800)[0]
+assert PRE in status and STOPPED == [old] and JOBS == [f"inputs 1 {B}.drv"], (status, STOPPED, JOBS)
+sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[1]}:refs/pull/1/head", cwd=work)
+STOPPED.clear()
+# Pointed at another attribute on the same head while it builds, with proj
+# refusing to stop it: it stays marked, and each pass tries again.
+fresh_pr_state()
+UNSTOPPABLE.clear()
+nix_knows({1: X, (1, "checks.x86_64-linux.other"): Y}, refs=INPUTS)
+P.begin("sam/r", {1})
+line(1)
+old = inputs_job(1)
+UNSTOPPABLE.add(old)
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.other"}
+status = line(1, 800)
+assert PRE in status and pr_state(1)["stopping"] == [old] and JOBS == [f"inputs 1 {B}.drv"], (status, pr_state(1), JOBS)
+line(1, 900)
+assert pr_state(1)["stopping"] == [old] and pr_state(1)["strikes"] == {"stop": 1}, pr_state(1)
+UNSTOPPABLE.clear()
+line(1, 1000)
+assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPPED)
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+STOPPED.clear()
+# Remapped on the same head to what's built already, or turned into a check
+# a Claude job runs: neither builds anything first, and the prebuild for
+# the proof it was is stopped all the same, on the stopping path if it
+# won't stop.
+for remap in ({"remi-proof": "checks.x86_64-linux.other"}, {}):
+    fresh_pr_state()
+    VALID[:] = []
+    nix_knows({1: X, (1, "checks.x86_64-linux.other"): Y}, refs=INPUTS)
+    P.begin("sam/r", {1})
+    assert PRE in line(1)
+    old = inputs_job(1)
+    UNSTOPPABLE.add(old)
+    VALID[:] = [Y]
+    nix_knows({1: X, (1, "checks.x86_64-linux.other"): Y}, refs=INPUTS)
+    S.CFG["repos"]["sam/r"]["proofBuilds"] = remap
+    status = line(1, 800)
+    assert (STORE if remap else RUNNING_JOB) in status, status
+    assert pr_state(1)["stopping"] == [old] and "proofInputs" not in pr_state(1), pr_state(1)
+    UNSTOPPABLE.clear()
+    line(1, 900)
+    assert "stopping" not in pr_state(1) and STOPPED[-1] == old, (pr_state(1), STOPPED)
+    S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+    STOPPED.clear()
+# systemd won't start it: the PR says so, a strike books the next try, and
+# the next start clears it.
+fresh_pr_state()
+nix_knows(refs=INPUTS)
+P.build_inputs = lambda repo, pr, checks, ins: JOBS.append("inputs") and None
+P.begin("sam/r", {1})
+status = line(1)
+assert "Settled, but the build of what remi-proof is built from couldn't start" in status and JOBS == ["inputs"], status
+assert pr_state(1)["strikes"] == {"build": 1}, pr_state(1)
+assert "couldn't start" in line(1, 800) and JOBS == ["inputs"] and pr_state(1)["strikes"] == {"build": 2}, JOBS
+P.build_inputs = stub_inputs
+assert PRE in line(1, 900) and not pr_state(1)["strikes"], pr_state(1)
+P.build_inputs = kept_inputs
 
 del S.CFG["repos"]["sam/r"]
 C.job, P.build = kept, kept_build
