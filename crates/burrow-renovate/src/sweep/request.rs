@@ -1,7 +1,7 @@
 //! Asking Renovate to redo a branch, and taking the request back: its
 //! rebase label, and the rebase! title prefix the sweep only ever takes off.
 
-use std::process::{Command, Stdio};
+use serde_json::json;
 
 use serde_json::Value;
 
@@ -24,22 +24,13 @@ impl Sweep<'_> {
     /// on any page counts, though what it printed may still parse (an empty
     /// or a partial list).
     pub(super) fn request_gone(&self, n: &str) -> Option<Option<i64>> {
-        let out = Command::new(&self.cfg.tools.gh)
-            .args([
-                "api",
-                "--paginate",
-                "--slurp",
-                &format!("repos/{}/issues/{n}/timeline", self.repo),
-            ])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())?;
-        let pages: Vec<Vec<Value>> = serde_json::from_slice(&out.stdout).ok()?;
+        let pages = self
+            .cfg
+            .pages(&format!("repos/{}/issues/{n}/timeline", self.repo))?;
         Some(
             pages
                 .iter()
+                .filter_map(Value::as_array)
                 .flatten()
                 .filter(|e| match e["event"].as_str() {
                     Some("unlabeled") => e["label"]["name"] == REQUEST,
@@ -58,8 +49,12 @@ impl Sweep<'_> {
     pub(super) fn retitle(&self, n: &str, title: &str) {
         let cfg = self.cfg;
         let path = format!("repos/{}/pulls/{n}", self.repo);
-        let title = format!("title={title}");
-        cfg.quietly(&cfg.tools.gh, &["api", "-X", "PATCH", &path, "-f", &title]);
+        let _ = burrow_github::call_once(
+            &mut cfg.github(),
+            "PATCH",
+            &path,
+            Some(&json!({"title":title})),
+        );
     }
 
     /// PR `n` given Renovate's rebase label (`on`) or rid of it, whatever
@@ -75,11 +70,7 @@ impl Sweep<'_> {
                 format!("repos/{repo}/issues/{n}/labels/{REQUEST}"),
             )
         };
-        let label = format!("labels[]={REQUEST}");
-        let mut args = vec!["api", "-X", method, &path];
-        if on {
-            args.extend(["-f", &label]);
-        }
-        cfg.quietly(&cfg.tools.gh, &args);
+        let body = on.then(|| json!({"labels":[REQUEST]}));
+        let _ = burrow_github::call_repeating(&mut cfg.github(), method, &path, body.as_ref());
     }
 }

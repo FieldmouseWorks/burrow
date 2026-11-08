@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -524,20 +524,14 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             "{body}\n\n---\n{}\n_proj-inbox on {}_\n",
             self.cfg.inbox_mark, self.inbox.host
         );
-        let Ok(mut child) = Command::new(&self.cfg.tools.gh)
-            .args(["api", &format!("repos/{repo}/issues/{n}/comments")])
-            .args(["-F", "body=@-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-        else {
-            return false;
-        };
-        let wrote = child
-            .stdin
-            .take()
-            .is_some_and(|mut i| i.write_all(text.as_bytes()).is_ok());
-        child.wait().is_ok_and(|s| s.success()) && wrote
+        burrow_github::call(
+            &mut crate::github::client(self.cfg),
+            "POST",
+            &format!("repos/{repo}/issues/{n}/comments"),
+            Some(&serde_json::json!({"body": text})),
+            None,
+        )
+        .is_ok()
     }
 
     /// The label, so it's there to pick on the phone. Once per repo.
@@ -741,7 +735,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     pub(super) fn barred(&self, repo: &str, n: &str, listed: Option<&Value>) -> Option<bool> {
         match listed {
             Some(i) => Some(!self.eligible(i)),
-            None => crate::github::api(self.cfg, &[&format!("repos/{repo}/issues/{n}")])
+            None => crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
                 .map(|i| !self.eligible(&i)),
         }
     }

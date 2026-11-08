@@ -10,11 +10,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-/// Crates that still run `gh api` themselves, each to come through this
-/// crate (#491). The list only shrinks: one that no longer does fails here
-/// until it's taken off.
-const STILL: [&str; 2] = ["burrow-proj", "burrow-renovate"];
-
 /// Its code as built, less its tests: a file of tests, or what follows a
 /// file's `#[cfg(test)]`.
 fn code(dir: &Path, out: &mut String) {
@@ -59,12 +54,11 @@ fn strays(crates: &Path) -> BTreeSet<String> {
 #[test]
 fn one_way_to_github() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let still: BTreeSet<String> = STILL.iter().map(|s| s.to_string()).collect();
     assert_eq!(
         strays(crates),
-        still,
+        BTreeSet::new(),
         "a crate runs `gh api` itself: reach GitHub through burrow-github \
-         (call, call_repeating, query), or take a crate that no longer does off STILL"
+         (call, call_repeating, query)"
     );
 }
 

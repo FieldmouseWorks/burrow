@@ -3,9 +3,6 @@
 //! programs that talk to GitHub share it; with the `fake` feature, their
 //! tests get a GitHub that answers from a script.
 
-use std::ffi::OsString;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::{fmt, thread, time::Duration};
 
 use serde_json::Value;
@@ -132,6 +129,21 @@ pub fn call(
     etag: Option<&str>,
 ) -> Result<Response, Error> {
     call_allowing(api, method, path, body, etag, &[])
+}
+
+/// Every JSON page of a REST read, following GitHub's Link header. Each
+/// page goes through the same retries; a failed page fails the whole read.
+pub fn pages(api: &mut dyn Api, path: &str) -> Result<Vec<Value>, Error> {
+    let mut path = path.to_owned();
+    let mut pages = Vec::new();
+    loop {
+        let response = call(api, "GET", &path, None, None)?;
+        pages.push(response.json()?);
+        match response.next() {
+            Some(next) => path = next,
+            None => return Ok(pages),
+        }
+    }
 }
 
 /// call, where the statuses in `allowed` are answers too, for the caller to
@@ -319,164 +331,8 @@ pub fn encode(value: &str) -> String {
         .collect()
 }
 
-/// gh api, with -i so the status and headers come back too: as the login
-/// it's run with, or with `token` when it's given one.
-#[derive(Default)]
-pub struct Gh {
-    /// What every call goes with (GH_TOKEN) in place of that login: an
-    /// App's installation token a program minted itself.
-    pub token: Option<String>,
-    /// The command gh is run under, when it's to run as another user than
-    /// this program (`runuser -u USER --`, for one root runs that acts as
-    /// the machine's user): it runs `gh ...` itself, in this program's
-    /// environment. Empty, gh is run as this program runs.
-    pub via: Vec<OsString>,
-}
-
-impl Api for Gh {
-    fn request(
-        &mut self,
-        method: &str,
-        path: &str,
-        body: Option<&Value>,
-        etag: Option<&str>,
-    ) -> Result<Response, Failed> {
-        gh_api(self, method, path, body, etag, None)
-    }
-
-    fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
-        gh_api(self, "POST", "graphql", Some(body), None, Some(owner))
-    }
-}
-
-/// `gh api -i` under gh's `via`, with its `token` when there is one, else
-/// as `owner`'s account when the call names none.
-fn gh_api(
-    gh: &Gh,
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-    etag: Option<&str>,
-    owner: Option<&str>,
-) -> Result<Response, Failed> {
-    let mut cmd = match gh.via.split_first() {
-        Some((under, args)) => {
-            let mut c = Command::new(under);
-            c.args(args).arg("gh");
-            c
-        }
-        None => Command::new("gh"),
-    };
-    cmd.args(["api", "-i", "-X", method, path]);
-    if let Some(t) = &gh.token {
-        cmd.env("GH_TOKEN", t);
-    } else if let Some(owner) = owner {
-        // gh-token goes by GH_REPO and the checkout's remotes before this
-        // (account.rs), and they're not what the call is about.
-        cmd.env("GH_TOKEN_OWNER", owner)
-            .env_remove("GH_REPO")
-            .env_remove("GIT_DIR")
-            .current_dir("/");
-    }
-    if let Some(tag) = etag {
-        cmd.args(["-H", &format!("If-None-Match: {tag}")]);
-    }
-    if body.is_some() {
-        cmd.args(["--input", "-"]);
-    }
-    cmd.stdin(if body.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    })
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| Failed {
-        why: format!("gh: {e}"),
-        transient: false,
-    })?;
-    if let Some(b) = body {
-        let mut stdin = child.stdin.take().expect("piped");
-        stdin
-            .write_all(b.to_string().as_bytes())
-            .map_err(|e| Failed {
-                why: format!("gh: {e}"),
-                transient: true,
-            })?;
-    }
-    let out = child.wait_with_output().map_err(|e| Failed {
-        why: format!("gh: {e}"),
-        transient: true,
-    })?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    match parse(&stdout) {
-        Some(r) => Ok(r),
-        None => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Failed::from_gh(err)
-        }
-    }
-}
-
-impl Failed {
-    fn from_gh(err: String) -> Result<Response, Failed> {
-        // Less the URL gh quotes (`Get "https://...": dial tcp ...`), whose
-        // path names whatever the call was about.
-        let lower = unquoted(&err).to_lowercase();
-        let transient = [
-            "connect",
-            "timeout",
-            "timed out",
-            "eof",
-            "reset",
-            "tls",
-            "no such host",
-            "unreachable",
-            "temporary",
-        ]
-        .iter()
-        .any(|w| lower.contains(w));
-        Err(Failed {
-            why: format!("gh: {err}"),
-            transient,
-        })
-    }
-}
-
-/// `said`, less what's between double quotes.
-fn unquoted(said: &str) -> String {
-    said.split('"').step_by(2).collect::<Vec<_>>().join(" ")
-}
-
-/// gh api -i's output: the status line, headers, a blank line, the body.
-/// None when it printed no response (it never got one).
-pub fn parse(out: &str) -> Option<Response> {
-    // gh ends the status line with \n and GitHub's headers with \r\n, so the
-    // head ends at whichever blank line comes first.
-    let end = [
-        out.find("\r\n\r\n").map(|i| (i, 4)),
-        out.find("\n\n").map(|i| (i, 2)),
-    ]
-    .into_iter()
-    .flatten()
-    .min();
-    let (head, body) = end.map_or((out, ""), |(i, n)| (&out[..i], &out[i + n..]));
-    let mut lines = head.lines().map(|l| l.trim_end_matches('\r'));
-    let status_line = lines.next()?;
-    if !status_line.starts_with("HTTP/") {
-        return None;
-    }
-    let status = status_line.split_whitespace().nth(1)?.parse().ok()?;
-    let headers = lines
-        .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect();
-    Some(Response {
-        status,
-        headers,
-        body: body.to_string(),
-    })
-}
+mod transport;
+pub use transport::{Gh, parse};
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
@@ -489,6 +345,7 @@ mod tests {
     use super::fake::{Fake, ok};
     use super::*;
     use serde_json::json;
+    use std::ffi::OsString;
 
     #[test]
     fn encodes_a_query_value() {
@@ -552,6 +409,30 @@ mod tests {
             "GET a: HTTP 503, 3 times"
         );
         assert_eq!(gh.asked.len(), 3);
+    }
+
+    #[test]
+    fn a_later_page_is_retried_without_losing_the_earlier_one() {
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            "list?page=2",
+            vec![ok(502, Value::Null, &[]), ok(200, json!([2]), &[])],
+        );
+        gh.on(
+            "GET",
+            "list",
+            vec![ok(
+                200,
+                json!([1]),
+                &[("Link", "<https://api.github.com/list?page=2>; rel=\"next\"")],
+            )],
+        );
+        assert_eq!(
+            pages(&mut gh, "list").unwrap(),
+            vec![json!([1]), json!([2])]
+        );
+        assert_eq!(gh.paused, vec![2]);
     }
 
     #[test]
@@ -972,6 +853,7 @@ mod tests {
             via: ["/bin/sh", "-c", &answer, "runuser"]
                 .map(OsString::from)
                 .to_vec(),
+            ..Default::default()
         }
     }
 
@@ -989,5 +871,12 @@ mod tests {
         };
         let r = gh.request("GET", "a", None, Some("e")).unwrap();
         assert_eq!(r.body, "gh api -i -X GET a -H If-None-Match: e|ghs_x");
+        let mut gh = Gh {
+            program: Some("/configured/gh".into()),
+            env: vec![("GH_TOKEN_SOCKET".into(), "/configured/socket".into())],
+            ..under("GH_TOKEN_SOCKET")
+        };
+        let r = gh.request("GET", "a", None, None).unwrap();
+        assert_eq!(r.body, "/configured/gh api -i -X GET a|/configured/socket");
     }
 }

@@ -62,22 +62,53 @@ const STAND_INS: [(&str, &str); 6] = [
         // FAKE/gh-refuses is there, and the first to read PR N's comments when FAKE/gh-blocks
         // says N waits for FAKE/gh-go.
         "gh",
-        r#"echo "gh $*" >>"$FAKE/log"
+        r#"if [ "$1" = api ]; then
+  [ "$2 $3" = '-i -X' ] || exit 2
+  method=$4 path=$5
+  body='{}'
+  [ "$6" != --input ] || body=$(cat)
+  echo "gh $* body=$body" >>"$FAKE/api-log"
+  if [ -e "$FAKE/once-502" ]; then rm "$FAKE/once-502"; printf 'HTTP/2.0 502 Bad Gateway\n\n{}'; exit 1; fi
+  if [ "$method" = GET ]; then
+    fullpath=$path
+    path=${path%%\?*}
+    case "$path" in
+      user) [ ! -e "$FAKE/user-fails" ] || exit 1
+        echo 'gh api user' >>"$FAKE/log"
+        printf 'HTTP/2.0 200 OK\n\n{"login":"me"}'; exit 0 ;;
+      */timeline) n=${path%/timeline}; file="$FAKE/timeline-${n##*/}" ;;
+      */comments) n=${path%/comments}; file="$FAKE/rest-${n##*/}"; [ -e "$file" ] || exit 1 ;;
+      *) exit 2 ;;
+    esac
+    page=1; case "$fullpath" in *\?page=*|*\&page=*) page=${fullpath##*page=} ;; esac
+    if [ "$page" = 2 ] && [ -e "$FAKE/timeline-fails" ]; then exit 1; fi
+    pages=$(cat "$file" 2>/dev/null || echo '[[]]')
+    printf 'HTTP/2.0 200 OK\n'
+    count=$(printf '%s' "$pages" | jq length)
+    if [ "$page" -lt "$count" ] || { [ "$page" = 1 ] && [ -e "$FAKE/timeline-fails" ]; }; then
+      printf 'Link: <https://api.github.com/%s?page=%s>; rel="next"\n' "$path" "$((page+1))"
+    fi
+    printf '\n'
+    printf '%s' "$pages" | jq ".[$((page-1))] // []"
+    exit 0
+  fi
+  case "$method" in
+    POST) field=$(printf '%s' "$body" | jq -r 'if .labels then "labels[]=" + .labels[0] else "" end') ;;
+    PATCH) field=$(printf '%s' "$body" | jq -r '"title=" + .title') ;;
+    *) field= ;;
+  esac
+  echo "gh api -X $method $path${field:+ -f $field}" >>"$FAKE/log"
+  [ ! -e "$FAKE/gh-refuses" ] || exit 1
+  printf 'HTTP/2.0 200 OK\n\n{}'; exit 0
+fi
+echo "gh $*" >>"$FAKE/log"
 case "$1 $2" in
-  "api user") [ ! -e "$FAKE/user-fails" ] || exit 1; echo me ;;
   "pr list") cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
   "pr view")
     if [ "$(cat "$FAKE/gh-blocks" 2>/dev/null)" = "$3" ] && mv "$FAKE/gh-blocks" "$FAKE/gh-blocked" 2>/dev/null; then
       while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done
     fi
     cat "$FAKE/comments-$3" 2>/dev/null || echo '{"comments": []}' ;;
-  "api --paginate")
-    case "$4" in
-      */timeline) n=${4%/timeline}; cat "$FAKE/timeline-${n##*/}" 2>/dev/null || echo '[[]]'
-        [ ! -e "$FAKE/timeline-fails" ] ;;
-      *) n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
-    esac ;;
-  "api -X") [ ! -e "$FAKE/gh-refuses" ] ;;
   "label create"|"pr edit") ;;
   *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
 esac
@@ -102,7 +133,7 @@ cat "$2/.origin"
         "lock-wait",
         r#"if [ "$1" = --limits ]; then cat "$FAKE/limits" 2>/dev/null || echo 3 21600 3 600; exit; fi
 echo "lock-wait $1" >>"$FAKE/log"
-while read -r who when; do [ "$who" != "$1" ] || echo "$when"; done
+jq -r --arg who "$1" '.[][] | select(.user.login == $who) | .body'
 "#,
     ),
     (
@@ -413,7 +444,10 @@ impl Machine {
     /// A lock file refresh lock-age refused for age only, till `ripe`, as
     /// Renovate (`by`) says on it; under `title`.
     fn refresh(&self, n: u64, ripe: u64, by: &str, title: &str) -> Value {
-        self.set(&format!("rest-{n}"), &format!("{by} {ripe}\n"));
+        self.set(
+            &format!("rest-{n}"),
+            &json!([[{"user":{"login":by},"body":ripe.to_string()}]]).to_string(),
+        );
         refresh(n, title)
     }
 }

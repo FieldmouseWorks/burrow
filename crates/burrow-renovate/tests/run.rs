@@ -48,19 +48,30 @@ const STAND_INS: [(&str, &str); 4] = [
         // FAKE/OWNER-fails to fail).
         "gh",
         r#"echo "gh $* owner=${GH_TOKEN_OWNER-} socket=${GH_TOKEN_SOCKET-}" >>"$FAKE/log"
-case "$1 $2" in
-  "auth token") locked token; echo gho_user ;;
-  "api repos/"*)
-    case $2 in
-      repos/sam/r) echo Sam/R ;;
-      */gone) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
-      *) echo "${2#repos/}" ;;
-    esac ;;
-  "api installation/repositories")
-    [ ! -e "$FAKE/$GH_TOKEN_OWNER-fails" ] || exit 1
-    cat "$FAKE/$GH_TOKEN_OWNER-repos" ;;
-  *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
-esac
+if [ "$1" = api ]; then
+  if [ -e "$FAKE/once-502" ]; then
+    rm "$FAKE/once-502"
+    printf 'HTTP/2.0 502 Bad Gateway\n\n{}'; exit 1
+  fi
+  [ "$2 $3 $4" = '-i -X GET' ] || exit 2
+  path=$5
+  case "$path" in
+    repos/*)
+      case "$path" in
+        repos/sam/r) repo=Sam/R ;;
+        */gone) printf 'HTTP/2.0 404 Not Found\n\n{"message":"Not Found"}'; exit 1 ;;
+        *) repo=${path#repos/} ;;
+      esac
+      printf 'HTTP/2.0 200 OK\n\n{"full_name":"%s"}' "$repo" ;;
+    installation/repositories)
+      [ ! -e "$FAKE/$GH_TOKEN_OWNER-fails" ] || exit 1
+      printf 'HTTP/2.0 200 OK\n\n'
+      jq -Rs '{repositories: [split("\n")[] | select(length>0) | {full_name:.,archived:false}]}' "$FAKE/$GH_TOKEN_OWNER-repos" ;;
+    *) exit 2 ;;
+  esac
+else
+  case "$1 $2" in "auth token") locked token; echo gho_user ;; *) exit 2 ;; esac
+fi
 "#,
     ),
     (
@@ -220,6 +231,22 @@ fn filter(repo: &str) -> String {
 }
 
 #[test]
+fn github_recovers_after_502() {
+    let m = Machine::new(None);
+    m.set("once-502", "");
+    assert_eq!(m.run(&["sam/r"]), ok(""));
+    let calls = m.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("gh api -i -X GET repos/sam/r "))
+            .count(),
+        2
+    );
+    assert!(calls.iter().any(|c| c.starts_with("renovate ")));
+}
+
+#[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
     let m = Machine::new(None);
     for words in [&["sam"][..], &["sam/r", "now"], &["sam/r/x"], &[""]] {
@@ -278,7 +305,7 @@ fn one_repo_runs_as_github_spells_it_if_the_filter_covers_it() {
     assert_eq!(
         m.calls(),
         [
-            "gh api repos/sam/r --jq .full_name owner= socket=".to_string(),
+            "gh api -i -X GET repos/sam/r owner= socket=".to_string(),
             "covers Sam/R".into(),
             "gh auth token owner= socket=".into(),
             format!("renovate {} token=gho_user com=gho_user", filter("Sam/R")),
@@ -312,11 +339,15 @@ fn one_repo_runs_as_github_spells_it_if_the_filter_covers_it() {
     // GitHub's own word on a repo it doesn't have.
     assert_eq!(
         m.run(&["sam/gone"]),
-        (Some(1), String::new(), "gh: Not Found (HTTP 404)\n".into())
+        (
+            Some(1),
+            String::new(),
+            "GET repos/sam/gone: HTTP 404: Not Found\n".into()
+        )
     );
     assert_eq!(
         m.calls(),
-        ["gh api repos/sam/gone --jq .full_name owner= socket="]
+        ["gh api -i -X GET repos/sam/gone owner= socket="]
     );
 }
 
@@ -345,7 +376,7 @@ fn as_the_app_one_repos_run_gets_its_owners_token() {
     assert_eq!(
         calls[..3],
         [
-            "gh api repos/sam/r --jq .full_name owner= socket=/run/gh-token/workers.sock",
+            "gh api -i -X GET repos/sam/r owner= socket=/run/gh-token/workers.sock",
             "covers Sam/R",
             "gh-token get Sam"
         ]
@@ -390,13 +421,13 @@ fn a_full_run_as_the_app_is_a_run_per_repo_each_with_its_owners_token() {
     let calls = m.calls();
     let listed: Vec<&String> = calls
         .iter()
-        .filter(|c| c.starts_with("gh api installation/repositories"))
+        .filter(|c| c.starts_with("gh api -i -X GET installation/repositories"))
         .collect();
     assert_eq!(
         listed,
         [
-            "gh api installation/repositories --paginate --jq .repositories[] | select(.archived | not) | .full_name owner=sam socket=/run/gh-token/workers.sock",
-            "gh api installation/repositories --paginate --jq .repositories[] | select(.archived | not) | .full_name owner=kim socket=/run/gh-token/workers.sock",
+            "gh api -i -X GET installation/repositories owner=sam socket=/run/gh-token/workers.sock",
+            "gh api -i -X GET installation/repositories owner=kim socket=/run/gh-token/workers.sock",
         ]
     );
     let runs: Vec<&String> = calls

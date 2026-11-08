@@ -68,6 +68,7 @@ impl Config {
         Gh {
             token: None,
             via: self.as_user(),
+            ..Default::default()
         }
     }
 

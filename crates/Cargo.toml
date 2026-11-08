@@ -26,6 +26,7 @@ members = [
     "burrow-notify",
     "burrow-probe",
     "burrow-proj",
+    "burrow-process",
     "burrow-proof",
     "burrow-renovate",
     "burrow-review",

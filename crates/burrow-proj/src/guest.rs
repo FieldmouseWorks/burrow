@@ -193,7 +193,7 @@ mod tests {
     fn registration_bounds_stalled_github_and_pagination_without_publishing() {
         for script in [
             "exec sleep 60",
-            "case \"$*\" in *--paginate*) printf '['; sleep 60 ;; *) echo '{\"state\":\"open\"}' ;; esac",
+            "printf 'HTTP/2.0 200 OK\\n\\n'\ncase \"$*\" in */comments*) printf '['; sleep 60 ;; *) echo '{\"state\":\"open\"}' ;; esac",
         ] {
             let (_dir, cfg) = registration_fixture(script);
             registration_failure(
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn registration_uses_one_deadline_across_slow_requests_and_targets() {
         let (dir, cfg) = registration_fixture(
-            "sleep 0.15\ncase \"$*\" in *--paginate*) echo '[[]]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
+            "sleep 0.15\nprintf 'HTTP/2.0 200 OK\\n\\n'\ncase \"$*\" in */comments*) echo '[]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
         );
         registration_failure(
             &cfg,
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn registration_commits_complete_baselines_before_the_deadline() {
         let (_dir, cfg) = registration_fixture(
-            "case \"$*\" in *--paginate*) echo '[[]]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
+            "printf 'HTTP/2.0 200 OK\\n\\n'\ncase \"$*\" in */comments*) echo '[]' ;; *) echo '{\"state\":\"open\"}' ;; esac",
         );
         let job = Job::new(&cfg, "vm");
         fs::create_dir_all(&job.dir).unwrap();

@@ -1,0 +1,13 @@
+[package]
+name = "burrow-process"
+description = "Bounded subprocess input and output under an absolute deadline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@ publish.workspace = true
 fake = []
 
 [dependencies]
+burrow-process = { path = "../burrow-process" }
 serde_json.workspace = true
 
 [dev-dependencies]

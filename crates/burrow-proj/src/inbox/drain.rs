@@ -132,7 +132,7 @@ impl Pass<'_> {
             if passed.contains(&repo) {
                 continue;
             }
-            let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+            let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
                 self.miss(&repo);
                 passed.insert(repo);
                 continue;
@@ -169,7 +169,7 @@ impl Pass<'_> {
         let Some((repo, n)) = named.trim().split_once('#') else {
             return false;
         };
-        let Some(issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+        let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
             self.miss(repo);
             return true;
         };

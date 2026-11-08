@@ -1,5 +1,5 @@
 //! Text and its edit history are read together before crossing the job boundary.
-use super::{Pass, raw};
+use super::Pass;
 use serde_json::{Value, json};
 
 const QUERY: &str = "query($owner:String!,$name:String!,$n:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$n){author{login __typename} title body userContentEdits(first:100){totalCount nodes{editor{login __typename} deletedBy{login __typename}}} timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){totalCount nodes{... on RenamedTitleEvent{actor{login __typename}}}} comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} totalCount nodes{databaseId author{login __typename} body createdAt userContentEdits(first:100){totalCount nodes{editor{login __typename} deletedBy{login __typename}}}}}}}}";
@@ -49,29 +49,13 @@ impl Pass<'_> {
         let mut cursor = None;
         let mut comments = Vec::new();
         loop {
-            let mut args = vec![
-                "graphql".to_owned(),
-                "-f".into(),
-                format!("query={QUERY}"),
-                "-f".into(),
-                format!("owner={owner}"),
-                "-f".into(),
-                format!("name={name}"),
-                "-F".into(),
-                format!("n={}", raw(&rest["number"])),
-            ];
-            if let Some(c) = &cursor {
-                args.extend(["-f".into(), format!("cursor={c}")]);
-            }
-            let got = crate::github::api_for(
+            let got = crate::github::query_for(
                 self.cfg,
                 repo,
-                &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                QUERY,
+                json!({"owner":owner,"name":name,"n":rest["number"],"cursor":cursor}),
             )?;
-            if got.get("errors").is_some() {
-                return None;
-            }
-            let mut issue = got["data"]["repository"]["issue"].clone();
+            let mut issue = got["repository"]["issue"].clone();
             let page = &issue["comments"];
             comments.extend(page["nodes"].as_array()?.iter().cloned());
             if page["pageInfo"]["hasNextPage"] == true {

@@ -3,6 +3,23 @@
 use super::*;
 
 #[test]
+fn github_recovers_after_502() {
+    let m = Machine::new();
+    m.set("once-502", "");
+    m.prs(&[red(1)]);
+    let p = m.pass();
+    assert!(p.task().contains("#1 "));
+    let calls = fs::read_to_string(m.path("fake/api-log")).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|l| l.starts_with("gh api -i -X GET user "))
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn a_security_fix_merges_itself_and_is_the_owners_a_day_on() {
     // No job is asked for a verdict on one, a major too, and it's never
     // listed as held.
