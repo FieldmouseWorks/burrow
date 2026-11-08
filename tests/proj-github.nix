@@ -13,7 +13,7 @@
 # turn's answer (one resumed before it looked too, none misread while a turn
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
 # watch already asking GitHub keeps to), a stop that fails there not holding
-# up the rest, that an issue a bot opened is the machine's work, its job
+# up the rest, that a job that ends proj done closes its issue, that an issue a bot opened is the machine's work, its job
 # acting as the machinery's App, that one opened by anyone outside the authors
 # has no job and says so once, that one with the unstick label too (the
 # steward's stuck issue) has a job that waits in no line, one already waiting
@@ -329,6 +329,27 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.fail("grep -rl from-outside /data/dev/jobs")
       github("repos/o/x/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/x'")
+
+  with subtest("an issue's job that ends proj done closes its issue, once its answer is posted"):
+      machine.succeed("install -m 666 /dev/null /tmp/gh/calls")
+      machine.succeed("install -d -o dev -g dev /data/dev/src/dn")
+      machine.succeed("su - dev -c 'git -C /data/dev/src/dn init -q && git -C /data/dev/src/dn remote add origin https://github.com/o/d'")
+      done = {"number": 1, "user": {"login": "sam"}, "html_url": "https://github.com/o/d/issues/1",
+              "title": "t", "body": "inbox-done", "state": "open", "labels": [{"name": "claude"}]}
+      github("repos/o/d/issues", json.dumps([done]))
+      github("repos/o/d/issues/1/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      dj = machine.succeed("grep -l 'issue o/d#1 ' /data/dev/jobs/*/prompt.1").split()[0].split("/")[-2]
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {dj}' | grep -x done", timeout=120)
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      calls = machine.succeed("cat /tmp/gh/calls")
+      assert "-X PATCH repos/o/d/issues/1 -f state=closed -f state_reason=completed" in calls, calls
+      assert "did This task comes from GitHub issue o/d#1" in machine.succeed("cat /tmp/gh/posted")
+      # Only it: every other issue's job here asked, and is waiting on a reply.
+      assert [c for c in calls.splitlines() if "state=closed" in c and "repos/o/d/" not in c] == [], calls
+      github("repos/o/d/issues", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      machine.succeed("rm /tmp/gh/calls")
 
   with subtest("the stuck issue's job waits in no line, and one already waiting in it leaves it once the label comes"):
       machine.succeed("su - dev -c 'git -C /data/dev/src/uk init -q && git -C /data/dev/src/uk remote add origin https://github.com/o/u'")

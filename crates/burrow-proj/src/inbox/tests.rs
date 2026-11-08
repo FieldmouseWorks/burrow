@@ -128,11 +128,22 @@ fn forgets_a_repo() {
         fs::create_dir_all(state.join(d)).unwrap();
         fs::write(state.join(d).join("job"), "j\n").unwrap();
     };
-    for d in ["O_R-5", "o_r-12", "o_rx-5", "o_r-x-5", "p_r-5"] {
+    for d in [
+        "O_R-5",
+        "o_r-12",
+        "o_rx-5",
+        "o_r-x-5",
+        "p_r-5",
+        ".triage/O_R-6",
+        ".triage/o_rx-6",
+    ] {
         mk(d);
     }
     fs::create_dir_all(state.join(".unreached")).unwrap();
+    fs::create_dir_all(state.join(".ready")).unwrap();
     for f in [
+        ".ready/o_r",
+        ".ready/o_rx",
         ".label-O_R",
         ".label-o_rx",
         ".unreached/o_r",
@@ -151,9 +162,19 @@ fn forgets_a_repo() {
     };
     assert_eq!(
         left(state),
-        [".label-o_rx", ".unreached", "o_r-x-5", "o_rx-5", "p_r-5"]
+        [
+            ".label-o_rx",
+            ".ready",
+            ".triage",
+            ".unreached",
+            "o_r-x-5",
+            "o_rx-5",
+            "p_r-5"
+        ]
     );
     assert_eq!(left(&state.join(".unreached")), ["o_r-x"]);
+    assert_eq!(left(&state.join(".ready")), ["o_rx"]);
+    assert_eq!(left(&state.join(".triage")), ["o_rx-6"]);
     // Nothing kept of it: nothing to do.
     forget(state, "o/r").unwrap();
 }
