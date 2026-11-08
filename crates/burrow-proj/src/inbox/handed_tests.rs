@@ -46,8 +46,20 @@ fn finished(b: &mut Box, had: &Value, seen: u64, comments: &[Value], now: &Value
 /// issue as GitHub has it (`now`): the issue isn't closed, and the job gets
 /// it whole, which its record now says it was handed.
 fn handed_whole(b: &Box, d: &Path, now: &Value, comments: &[Value]) -> String {
+    handed_whole_listed(b, d, now, now, comments)
+}
+
+/// [`handed_whole`], with the pass's list of issues having `listed` for it
+/// (read before GitHub had `now`).
+fn handed_whole_listed(
+    b: &Box,
+    d: &Path,
+    listed: &Value,
+    now: &Value,
+    comments: &[Value],
+) -> String {
     b.pass()
-        .jobs("sam/box", "box", std::slice::from_ref(now))
+        .jobs("sam/box", "box", std::slice::from_ref(listed))
         .unwrap();
     assert!(!b.log().contains("state=closed"), "{}", b.log());
     assert!(d.exists());
@@ -145,4 +157,36 @@ fn a_reply_alone_is_handed_as_a_reply() {
         .jobs("sam/box", "box", std::slice::from_ref(&now))
         .unwrap();
     assert!(b.log().contains("state=closed"), "{}", b.log());
+}
+
+// Edited after the pass read its list of issues, while it saw to other jobs:
+// GitHub's issue as it is now decides, not the list.
+#[test]
+fn an_edit_after_the_list_was_read_is_handed_on() {
+    let had = issue(7, "sam", &["claude"]);
+    let mut now = had.clone();
+    now["body"] = json!("It's broken, and the docs need it too.");
+    let mut b = Box::new();
+    let d = finished(&mut b, &had, 0, &[], &now);
+    let prompt = handed_whole_listed(&b, &d, &had, &now, &[]);
+    assert!(prompt.contains("the docs need it too"), "{prompt}");
+}
+
+// A comment the job's first turn was handed while it was under a minute old
+// stays in what it's handed whole, and in its record, so a pass after that,
+// with nothing changed, closes the issue rather than handing it on again.
+#[test]
+fn a_young_comment_the_job_had_stays_in_the_issue_handed_whole() {
+    let had = issue(7, "sam", &["claude"]);
+    let mut now = had.clone();
+    now["body"] = json!("It's broken, and the docs need it too.");
+    let just = jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let mut red = said(5, "the red one");
+    red["created_at"] = json!(just);
+    let mut b = Box::new();
+    let d = finished(&mut b, &had, 5, std::slice::from_ref(&red), &now);
+    let prompt = handed_whole(&b, &d, &now, std::slice::from_ref(&red));
+    assert!(prompt.contains("the red one"), "{prompt}");
 }

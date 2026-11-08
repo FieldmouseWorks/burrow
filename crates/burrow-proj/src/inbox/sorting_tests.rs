@@ -173,6 +173,9 @@ fn a_finished_job_closes_its_issue() {
     let b = Box::new();
     b.job("j1", "done", "Fixed in #12.");
     let d = b.record("j1");
+    let mut now = issue(7, "sam", &["claude"]);
+    now["state"] = json!("open");
+    fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
     b.pass()
         .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
         .unwrap();
