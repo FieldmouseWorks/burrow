@@ -71,6 +71,20 @@ pub struct Tools {
 }
 
 impl Config {
+    /// The user's units a reboot would cut off: Claude jobs and proof runs.
+    pub fn user_work(&self) -> Vec<String> {
+        vec!["proj-*.service".into(), "autoland-proof-*.service".into()]
+    }
+
+    /// The system's units a reboot would cut off: sandboxes and
+    /// `busy_units`. Runners are apart: one is busy only while it has a
+    /// Runner.Worker in it.
+    pub fn system_work(&self) -> Vec<String> {
+        let mut units = self.busy_units.clone();
+        units.push("microvm@*.service".into());
+        units
+    }
+
     pub fn read(path: &Path) -> Result<Config, String> {
         let text = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))

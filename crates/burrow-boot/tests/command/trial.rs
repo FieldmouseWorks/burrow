@@ -352,7 +352,7 @@ fn a_completion_event_requests_another_trial_attempt() {
     let m = queued();
     m.set(
         "events",
-        r#"{"MESSAGE_ID":"9d1aaa27d60140bd96365438aad20286","USER_UNIT":"proj-1.service"}
+        r#"{"MESSAGE_ID":"9d1aaa27d60140bd96365438aad20286","USER_UNIT":"proj-1.service","_SYSTEMD_UNIT":"user@1000.service","_SYSTEMD_USER_UNIT":"init.scope"}
 "#,
     );
     let out = m.run(&["watch"]);
@@ -363,5 +363,27 @@ fn a_completion_event_requests_another_trial_attempt() {
             .matches("start --no-block box-boot-trial.service")
             .count(),
         2
+    );
+}
+
+#[test]
+fn what_a_postponed_trial_logs_requests_no_other_attempt() {
+    let m = queued();
+    // The transient unit and session a trial's `systemctl --user -M` starts.
+    m.set(
+        "events",
+        r#"{"MESSAGE_ID":"39f53479d3a045ac8e11786248231fbf","UNIT":"run-p675876-i63576323.service","_SYSTEMD_UNIT":"init.scope"}
+{"MESSAGE_ID":"39f53479d3a045ac8e11786248231fbf","UNIT":"session-4542.scope","_SYSTEMD_UNIT":"init.scope"}
+{"MESSAGE_ID":"7ad2d189f7e94e70a38c781354912448","UNIT":"run-p675876-i63576323.service","_SYSTEMD_UNIT":"init.scope"}
+"#,
+    );
+    let out = m.run(&["watch"]);
+    assert_eq!(out.status.code(), Some(1));
+    // Only the attempt it makes on starting.
+    assert_eq!(
+        m.fake("systemctl")
+            .matches("start --no-block box-boot-trial.service")
+            .count(),
+        1
     );
 }

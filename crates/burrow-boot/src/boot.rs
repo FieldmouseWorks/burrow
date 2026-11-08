@@ -406,13 +406,8 @@ impl<'a> Boot<'a> {
                 .success()
                 .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
         };
-        let jobs = list(
-            true,
-            &["proj-*.service".into(), "autoland-proof-*.service".into()],
-        );
-        let mut patterns = self.cfg.busy_units.clone();
-        patterns.push("microvm@*.service".into());
-        let units = list(false, &patterns);
+        let jobs = list(true, &self.cfg.user_work());
+        let units = list(false, &self.cfg.system_work());
         if [jobs, units]
             .iter()
             .any(|out| out.as_ref().is_none_or(|s| !s.trim().is_empty()))
