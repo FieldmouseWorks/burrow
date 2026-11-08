@@ -5,6 +5,11 @@
 //! also tries again what GitHub said no to: a stale one's archive, a
 //! delete, or a read a judgment needed.
 //!
+//! The same look at the closed PRs takes the steward's stage labels off any
+//! that still carry one: a stage is where an open PR is in the pipeline, so
+//! a merged or closed one is at none, and its last label would say it still
+//! waits.
+//!
 //! What it keeps is in repo-REPO.json, beside what settle and the steward
 //! keep there, which stays as it was.
 
@@ -274,10 +279,31 @@ fn look(
         st.base = Some(l.base);
     }
     if let Some(c) = closed {
-        st.closed_etag = c.etag;
+        // One whose label GitHub didn't take off is read again next pass.
+        let unstaged = unstage(p, &c.staged);
+        st.closed_etag = c.etag.filter(|_| unstaged);
         st.closed_since = Some(c.newest);
     }
     Ok(())
+}
+
+/// The stage labels taken off the closed PRs that carry them: whether
+/// GitHub took every one off.
+fn unstage(p: &mut Pass, staged: &[(u64, String)]) -> bool {
+    let mut all = true;
+    for (n, label) in staged {
+        if p.dry {
+            eprintln!("  would: take {label:?} off {}#{n}, closed", p.repo);
+            continue;
+        }
+        let path = format!("repos/{}/issues/{n}/labels/{}", p.repo, encode(label));
+        if let Err(e) = call(p.api, "DELETE", &path, None, None) {
+            let why = p.github(e);
+            eprintln!("{}#{n}: GitHub didn't take {label:?} off: {why}", p.repo);
+            all = false;
+        }
+    }
+    all
 }
 
 /// When a branch judged before was first seen at its tip. Every judged one
@@ -345,6 +371,8 @@ struct Closed {
     /// again instead: reading on by page number could skip one a reopen
     /// moves up a page.
     heads: Option<BTreeSet<(String, String)>>,
+    /// The stage labels the listed ones still carry, by PR.
+    staged: Vec<(u64, String)>,
 }
 
 /// The PRs closed since `since`, or None while nothing has changed. No
@@ -385,10 +413,28 @@ fn closed_heads(
             })
             .collect()
     });
+    let stages: BTreeSet<&str> = p
+        .cfg
+        .settle
+        .labels
+        .waiting
+        .values()
+        .map(|s| s.name.as_str())
+        .collect();
+    let staged = page
+        .iter()
+        .flat_map(|pr| {
+            let n = pr["number"].as_u64().unwrap_or_default();
+            let labels = pr["labels"].as_array().into_iter().flatten();
+            labels.filter_map(move |l| l["name"].as_str().map(|x| (n, x.to_string())))
+        })
+        .filter(|(_, l)| stages.contains(l.as_str()))
+        .collect();
     Ok(Some(Closed {
         etag,
         newest: newest.unwrap_or(since.unwrap_or(0.0)),
         heads,
+        staged,
     }))
 }
 

@@ -631,6 +631,43 @@ fn a_closed_feed_with_nothing_in_it_starts_the_next_look_where_this_one_did() {
 }
 
 #[test]
+fn a_closed_pr_has_its_stage_label_taken_off_and_its_others_kept() {
+    let mut r = settled();
+    // A merged one last waiting for a reviewer, and one GitHub won't
+    // take its label off: read again each pass until it does.
+    r.close("gone", 10, "1");
+    r.close("shut", 11, "2");
+    {
+        let mut w = r.world.borrow_mut();
+        let [.., gone, shut] = &mut w.closed[..] else {
+            unreachable!()
+        };
+        gone.labels = names(&["waiting: reviewer", "bug"]);
+        shut.labels = names(&["waiting: train"]);
+        w.unlabeling
+            .insert(11, (403, "Resource not accessible by integration"));
+    }
+    r.look(&[], false);
+    assert_eq!(
+        r.world.borrow().unlabeled,
+        [(10, "waiting: reviewer".into())]
+    );
+    r.look(&[], false);
+    assert_eq!(r.world.borrow().fed, [200]);
+    r.world.borrow_mut().unlabeling.clear();
+    r.look(&[], false);
+    assert_eq!(r.world.borrow().unlabeled, [(11, "waiting: train".into())]);
+    let w = r.world.borrow();
+    let labels: Vec<_> = w.closed.iter().map(|p| p.labels.clone()).collect();
+    assert_eq!(labels.concat(), ["bug"]);
+    drop(w);
+    // Once none carries one, the listing costs nothing again.
+    r.look(&[], false);
+    r.look(&[], false);
+    assert_eq!(r.world.borrow().fed, [304]);
+}
+
+#[test]
 fn the_trains_candidates_are_cns_while_its_train_is_on() {
     for (on, want) in [
         (true, vec!["old"]),

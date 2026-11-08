@@ -86,7 +86,9 @@ change nothing else in the same PR.
   (labels.nix says what each means). Every `review-settled` status the
   steward posts names its stage, which puts that label on and the others
   off, and the status says the rest: who has it, until when, how many are
-  ahead, where in the train. Renovate pushes nothing to a PR labelled
+  ahead, where in the train. Once a PR closes or merges, the branch watch
+  (`cleanBranches`, on by default) takes its stage label off, so only an
+  open PR says it waits. Renovate pushes nothing to a PR labelled
   `waiting: train`, which would throw away the candidate it rides in.
 
 ## The steward's GitHub App
