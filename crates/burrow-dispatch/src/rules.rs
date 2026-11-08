@@ -192,6 +192,21 @@ pub fn decide(
             &mut d,
         );
     }
+    // A stop emits no workflow event. Keep looking until shared capacity
+    // is actually free, even when the retiring runner's own queue is empty.
+    if let (Some(f), Some(Ok(pool))) = (&cfg.fresh, &snap.fresh) {
+        let demand = !pool.queued.is_empty()
+            || f.idle > 0
+            || snap
+                .private
+                .iter()
+                .any(|(_, p)| p.as_ref().is_ok_and(|p| !p.queued.is_empty()));
+        let retiring = d.moves.iter().any(|m| matches!(m, Move::Retire { .. }))
+            || pool.units.values().any(|u| u.state == "deactivating");
+        if demand && retiring {
+            book(&mut d, now);
+        }
+    }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         // Its last attempt failed without saying so (killed, timed out, a
         // command's error): what the run before it said no longer holds.

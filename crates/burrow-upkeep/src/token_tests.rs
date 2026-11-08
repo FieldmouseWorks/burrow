@@ -150,7 +150,7 @@ fn an_owners_installation_is_minted_for_once_a_process() {
     assert!(owners.api("sam").unwrap().is_some());
     assert!(owners.api("Sam").unwrap().is_some());
     assert!(
-        matches!(&owners.gh["sam"], Some(Gh { token: Some(t), via }) if t == "ghs_sam" && via.is_empty())
+        matches!(&owners.gh["sam"], Some(Gh { token: Some(t), via, .. }) if t == "ghs_sam" && via.is_empty())
     );
     // Eve's has none: GitHub's answer, kept too.
     assert!(owners.api("eve").unwrap().is_none());

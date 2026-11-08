@@ -96,7 +96,7 @@ let
   freshGot = lib.mapAttrs (name: want: builtins.filter (l: builtins.elem l (freshSections.${name} or [ ])) want) freshWant;
   handled = committed.config.burrow.events.handlers.dispatch.repos;
 in
-  assert lib.assertMsg ((settings privateRepos).private == { owners = [ "sam" ]; app = 123; }
+  assert lib.assertMsg ((settings privateRepos).private == { owners = [ "sam" ]; app = 123; gh = "${pkgs.gh}/bin/gh"; }
     && privateRepos.config.burrow.events.handlers.dispatch.repos == null
     && builtins.elem "repository" privateRepos.config.burrow.events.handlers.dispatch.events
     && privateRepos.config.systemd.services.burrow-dispatch.serviceConfig.LoadCredential == [ "app-key:/run/secrets/steward" ])

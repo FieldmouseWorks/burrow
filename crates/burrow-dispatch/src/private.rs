@@ -292,6 +292,7 @@ mod tests {
         cfg.fresh = Some(fresh(dir));
         cfg.fresh.as_mut().unwrap().repos.clear();
         cfg.private = Some(crate::config::Private {
+            gh: "gh".into(),
             owners: vec!["sam".into()],
             app: 12,
         });
@@ -556,5 +557,115 @@ mod tests {
             1800000000.0,
         );
         assert!(d.moves.iter().any(|m| matches!(m, Move::Retire { .. })));
+    }
+    #[test]
+    fn shared_capacity_follows_retirement_until_the_unit_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        for orphan in [false, true] {
+            for prewarm in [false, true] {
+                let (mut cfg, mut w) = fixture(dir.path());
+                let f = cfg.fresh.as_mut().unwrap();
+                f.most = 1;
+                f.idle = usize::from(prewarm);
+                let instance = if orphan {
+                    "99-1799999000-0"
+                } else {
+                    "42-1799999000-0"
+                };
+                let unit = format!("fresh-runner@{instance}.service");
+                w.instances = vec![instance.into()];
+                w.units.insert(
+                    unit.clone(),
+                    Unit {
+                        state: "active".into(),
+                        since: Some(1799999000.0),
+                        ..Unit::default()
+                    },
+                );
+                let mut snap = crate::snapshot::take(&cfg, &w);
+                for (_, p) in &mut snap.private {
+                    p.as_mut().unwrap().queued.clear();
+                }
+                if !prewarm {
+                    snap.fresh.as_mut().unwrap().as_mut().unwrap().queued.push(
+                        crate::snapshot::Job {
+                            at: 1800000000.0,
+                            url: "https://github.com/sam/r/actions/jobs/1".into(),
+                        },
+                    );
+                }
+                let plan = |s: &Snapshot| {
+                    rules::decide(&cfg, s, &State::default(), &BTreeMap::new(), 1800000000.0)
+                };
+                let d = plan(&snap);
+                assert!(d.moves.iter().any(|m| matches!(m, Move::Retire { .. })));
+                assert!(d.wake.is_some(), "orphan={orphan}, prewarm={prewarm}");
+                assert!(!d.moves.iter().any(|m| matches!(m, Move::Fresh { .. })));
+                // Stopping still occupies capacity and needs another look.
+                snap.fresh
+                    .as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .units
+                    .get_mut(instance)
+                    .unwrap()
+                    .state = "deactivating".into();
+                for (_, p) in &mut snap.private {
+                    if let Some(u) = p.as_mut().unwrap().units.get_mut(instance) {
+                        u.state = "deactivating".into();
+                    }
+                }
+                snap.private_orphans.clear();
+                let d = plan(&snap);
+                assert!(d.wake.is_some());
+                assert!(!d.moves.iter().any(|m| matches!(m, Move::Fresh { .. })));
+                // Only the stopped unit frees its place for the org scope.
+                snap.fresh.as_mut().unwrap().as_mut().unwrap().units.clear();
+                for (_, p) in &mut snap.private {
+                    p.as_mut().unwrap().units.clear();
+                }
+                assert_eq!(
+                    plan(&snap)
+                        .moves
+                        .iter()
+                        .filter(|m| matches!(m, Move::Fresh { .. }))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_status_reads_the_service_snapshot_without_credentials_or_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, mut w) = fixture(dir.path());
+        assert!(
+            crate::pass::status(&cfg, &Fake::default(), 1800000000.0)
+                .contains("no saved dispatch status")
+        );
+        crate::pass::run(&cfg, &w, 1800000000.0).unwrap();
+        let status = crate::pass::status(&cfg, &Fake::default(), 1800000060.0);
+        assert!(status.contains("60 seconds ago"), "{status}");
+        assert!(
+            status.contains("private runners (sam/new): 0 up; 1 queued"),
+            "{status}"
+        );
+        assert!(status.contains("private runners (sam/second)"));
+        assert!(!status.contains("credential"));
+        w.github
+            .remove("installation/repositories?per_page=100&page=2");
+        crate::pass::run(&cfg, &w, 1800000120.0).unwrap();
+        let status = crate::pass::status(&cfg, &Fake::default(), 1800000121.0);
+        assert!(status.contains("private/sam: couldn't read it"), "{status}");
+        assert!(status.contains("1 seconds ago"), "{status}");
+        assert!(
+            !status.contains("private runners (sam/new)"),
+            "failed discovery must replace the old queue observation: {status}"
+        );
+        // The watchdog deliberately retains previous waits when discovery
+        // fails; the saved report must retain them alongside the new error.
+        assert!(status.contains("waiting:"), "{status}");
     }
 }

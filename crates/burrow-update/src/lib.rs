@@ -66,8 +66,8 @@ impl Config {
     /// account a call is about.
     pub fn gh(&self) -> Gh {
         Gh {
-            token: None,
             via: self.as_user(),
+            ..Gh::default()
         }
     }
 

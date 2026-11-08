@@ -169,6 +169,7 @@ in
           then { state = "/run/${prefix}-switch"; revert = "${prefix}-revert"; } else null;
         private = if !cfg.fresh.enable || cfg.privateOwners == [ ] then null else {
           owners = cfg.privateOwners;
+          gh = "${pkgs.gh}/bin/gh";
           app = config.burrow.autoland.app.id;
         };
         fresh = if !cfg.fresh.enable then null else {
@@ -284,6 +285,9 @@ in
       For each job queued that asks for `${cfg.fresh.label}`, it starts a runner registered for that one job,
       `${cfg.fresh.template}INSTANCE` (named `${cfg.fresh.prefix}INSTANCE`, ${toString cfg.fresh.most} at most), keeps ${toString cfg.fresh.idle}
       started and waiting for jobs to come, and stops any other left idle.
+    '' + lib.optionalString (cfg.fresh.enable && cfg.privateOwners != [ ]) ''
+      Private repos of ${lib.concatStringsSep ", " cfg.privateOwners} are discovered automatically.
+      `burrow-dispatch status` reads the service's last timestamped snapshot; the App key stays in the service.
     '');
   } (lib.mkIf deploying {
     # HOST-update starting and ending moves what the deploy waits on.

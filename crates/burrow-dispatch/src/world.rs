@@ -114,6 +114,15 @@ impl<'a> Real<'a> {
         let token = self.tokens.borrow()[&owner].clone();
         let r = call(
             &mut Gh {
+                program: Some(
+                    self.cfg
+                        .private
+                        .as_ref()
+                        .ok_or("private runners aren't configured")?
+                        .gh
+                        .as_os_str()
+                        .to_owned(),
+                ),
                 token: Some(token),
                 ..Gh::default()
             },
@@ -608,5 +617,94 @@ mod registration_tests {
             body,
             json!({"name":"runner", "runner_group_id":1, "labels":["fresh-box"]})
         );
+    }
+}
+
+#[cfg(test)]
+mod private_transport_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn every_owner_request_preserves_its_token_with_either_login_wrapper() {
+        const CHILD: &str = "BURROW_DISPATCH_TRANSPORT_TEST";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let mut cfg = crate::snapshot::tests::config(&root);
+            cfg.private = Some(crate::config::Private {
+                owners: vec!["sam".into(), "kim".into()],
+                app: 12,
+                gh: root.join("raw-gh"),
+            });
+            let world = Real::new(&cfg);
+            // Fixture installation tokens; no App key or network is involved.
+            world.tokens.borrow_mut().extend([
+                ("sam".into(), "fixture-sam".into()),
+                ("kim".into(), "fixture-kim".into()),
+            ]);
+            for owner in ["sam", "kim", "sam"] {
+                for (method, path) in [
+                    ("GET", "installation/repositories".into()),
+                    (
+                        "GET",
+                        format!("repos/{owner}/new/actions/runs?status=queued"),
+                    ),
+                    ("GET", format!("repos/{owner}/new/actions/runs/1/jobs")),
+                    (
+                        "POST",
+                        format!("repos/{owner}/new/actions/runners/generate-jitconfig"),
+                    ),
+                ] {
+                    let body = (method == "POST").then(|| json!({"name":"fixture"}));
+                    let got = world
+                        .private_call(owner, method, &path, body.as_ref())
+                        .unwrap();
+                    assert_eq!(got["owner"], owner);
+                }
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &Path, body: &str| {
+            fs::write(path, body).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write(
+            &dir.path().join("raw-gh"),
+            r#"#!/bin/sh
+if [ "$4" = POST ]; then while read -r line; do :; done; fi
+case "$GH_TOKEN" in
+    fixture-sam) owner=sam ;;
+    fixture-kim) owner=kim ;;
+    *) echo 'selected token was discarded' >&2; exit 13 ;;
+esac
+printf 'HTTP/1.1 200 OK\n\n{"owner":"%s"}' "$owner"
+"#,
+        );
+        for machinery in [false, true] {
+            let bin = dir
+                .path()
+                .join(if machinery { "machinery" } else { "ordinary" });
+            fs::create_dir(&bin).unwrap();
+            write(
+                &bin.join("gh"),
+                &format!(
+                    "#!/bin/sh\n{}\nexec \"$BURROW_RAW_GH\" \"$@\"\n",
+                    if machinery { "export GH_TOKEN=''" } else { ":" }
+                ),
+            );
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "world::private_transport_tests::every_owner_request_preserves_its_token_with_either_login_wrapper", "--nocapture"])
+                .env(CHILD, dir.path())
+                .env("BURROW_RAW_GH", dir.path().join("raw-gh"))
+                .env("PATH", bin)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "machinery={machinery}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

@@ -130,6 +130,8 @@ impl Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Private {
+    /// Unwrapped CLI: explicitly supplied steward tokens must survive.
+    pub gh: PathBuf,
     pub owners: Vec<String>,
     pub app: u64,
 }
