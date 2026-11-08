@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "3n3gha3hbvmtf5syxpf03ce9h7",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 532,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/532",
+  "summary": "agents: let udev load the matching KVM module",
+  "task": "fieldmouseworks/burrow#135",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "560c1b6b71f0fb26cbd9097bca2493bd94bfdb0abb6789def22acdb1bfed4a7e",
+    "before": "bbbf69cd4be5c56594e4c0bd727daafc1d46d927",
+    "after": "4dc4fee808cde55ebe7dafdf2826ef672e884030",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794148766843
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755513917"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755513800"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755513627"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967/job/128755513196"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#532)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#532)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#532)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#532)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#532)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#532)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499967"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755553279"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755553330"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755553267"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128756407607"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42488499995/job/128755553227"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/532#pullrequestreview-5818213543"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/532"
+    }
+  ]
+}
