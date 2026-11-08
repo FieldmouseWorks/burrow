@@ -8,11 +8,15 @@ in pkgs.runCommand "house-rust-package-check" { } ''
   # and a member named tests that a glob finds (a module named tests that
   # isn't one, and a crate in tests/, the build itself needs).
   [ "$(${pkg}/bin/tests)" = tests ]
+  [ "$(${pkg}/bin/main)" = main ]
   [ "$(${pkg}/bin/house-fixture-tests-crate)" = crate ]
   # And a package's tests whose role in its build can't be told: a build
-  # script in tests/, a program that includes a file from it (and a test
-  # target declared at a module's file, which the build itself needs).
+  # script in tests/, a program that includes a file from it by a path it
+  # makes, one whose module is there by a conditional path attribute (and
+  # a test target declared at a module's file, which the build itself
+  # needs).
   [ "$(${pkg}/bin/house-fixture-built)" = built ]
   [ "$(${pkg}/bin/house-fixture-included)" = 9 ]
+  [ "$(${pkg}/bin/house-fixture-pathed)" = 5 ]
   touch $out
 ''

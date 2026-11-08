@@ -1,0 +1,8 @@
+# A program whose module is a file in tests/, named by a conditional path
+# attribute: the package keeps tests/ (lib/project.nix's cargoTests).
+[package]
+name = "house-fixture-pathed"
+# tests/ holds no test, only the module.
+autotests = false
+version = "0.1.0"
+edition = "2024"

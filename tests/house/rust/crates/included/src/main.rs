@@ -1,4 +1,4 @@
-include!("../tests/constants.rs");
+include!(concat!("../", "tests", "/constants.rs"));
 
 fn main() {
     println!("{ANSWER}");

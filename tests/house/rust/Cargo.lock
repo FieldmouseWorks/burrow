@@ -26,6 +26,10 @@ name = "house-fixture-member"
 version = "0.1.0"
 
 [[package]]
+name = "house-fixture-pathed"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-support"
 version = "0.1.0"
 
