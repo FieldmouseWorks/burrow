@@ -733,7 +733,10 @@ in
         have building at once, for proofs that take the whole machine: the
         rest wait their turn, those labelled `labels.first` first, then the
         oldest PR first; a job running a check without a build of its own
-        holds a slot of its own; unset, no limit), keepBranches
+        holds a slot of its own; a build first builds what its derivations
+        are built from, in a heavy slot but outside the line, so a slot is
+        held only while those derivations themselves build, a VM test's run
+        say; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in

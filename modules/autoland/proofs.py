@@ -38,6 +38,19 @@ which goes on the PR; its log stays on the machine, so nothing it prints
 reaches GitHub but what it chose to write there (note). Runs go after the
 builds and before the Claude jobs: a failed run needs no job either.
 
+In a repo with proofSlots, a build waiting its turn first builds what its
+derivations are built from, outside the line (prebuild): a slot is held
+only while the check's own derivations build, the VM test say, not every
+program and system it boots, which builds beside the others' turns. That
+is a build of the steward's like the proof's, in a heavy slot like it,
+but with no verdict: it ends, and the PR takes its place in the line, as
+it would had nothing been built first. What it builds is each check
+derivation's own inputs (`nix-store --query --references`), every output
+of each, rooted in its folder for a day (KEEP_INPUTS) so they're there
+when the PR's turn comes; one whose inputs are all built already goes
+straight to the line. One for a head or checks its PR no longer has is
+stopped when the next starts.
+
 A PR behind its base whose builds aren't in the store may have them there
 once it's brought up to date: most PRs change nothing a proof builds, so
 merged into the base's tip they build what the base does, which is built
@@ -77,6 +90,7 @@ LOG_TAIL = 60  # lines of a failed build's log that go on its PR
 # gh is given it in.
 COMMENT_BYTES = 60000
 KEEP = 7  # days an ended build's folder, its outputs' roots in it, is kept
+KEEP_INPUTS = 1  # days an ended prebuild's folder, the roots of what it built, is kept
 
 
 def begin(repo, numbers, first=()):
@@ -359,6 +373,59 @@ def start_run(repo, pr, checks, st):
                  f"the run of {', '.join(checks)}", [CFG["proofRun"], "start"])
 
 
+def inputs(drvs):
+    """The derivations drvs are built from, and every output of them:
+    ([drv, ...], [path, ...]). Raises when the store can't say."""
+    ins = sorted(p for p in nix("nix-store", "--query", "--references", *drvs).split() if p.endswith(".drv"))
+    return ins, sorted(set(nix("nix-store", "--query", "--outputs", *ins).split())) if ins else []
+
+
+def prebuild(repo, pr, checks, st):
+    """What PR's build of checks is built from (inputs), built before its
+    turn in the line, once a head. "building" while that build is at work,
+    just started included; "couldn't start" when systemd wouldn't (tried
+    again next pass); None once there's nothing to build first: all of it
+    built already, or the build of it over, whatever it built (the proof's
+    own build builds what's still missing, and its verdict says how that
+    went), or the store can't say what it is."""
+    n, head = pr["number"], pr["headRefOid"]
+    drvs = sorted({st["proofOutputs"]["drvs"][c] for c in checks})
+    rec = st.get("proofInputs") or {}
+    if rec.get("for") == [head, drvs]:
+        return "building" if rec.get("job") and running(rec["job"]) else None
+    if rec.get("job") and running(rec["job"]) and not C.stop_job(rec["job"]):
+        log(f"{repo}#{n}: couldn't stop the build of what its last proof is built from, {rec['job']}")
+    try:
+        ins, outs = inputs(drvs)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"{repo}#{n}: can't tell what {', '.join(checks)} is built from: {e}")
+        st["proofInputs"] = {"for": [head, drvs], "job": None}
+        return None
+    if not unbuilt(outs):
+        st["proofInputs"] = {"for": [head, drvs], "job": None}
+        return None
+    jid = build_inputs(repo, pr, checks, ins)
+    if jid is None:
+        st.pop("proofInputs", None)
+        return "couldn't start"
+    st["proofInputs"] = {"for": [head, drvs], "job": jid}
+    return "building"
+
+
+def build_inputs(repo, pr, checks, ins):
+    """Starts building ins, the derivations PR's build of checks is built
+    from, as a build of its own (run), with no verdict: its id, or None
+    when systemd wouldn't start it."""
+    n, head = pr["number"], pr["headRefOid"]
+    jid = unit_id(repo, n, head)
+    if C.DRY:
+        log(f"  would: build {', '.join(ins)}")
+        return jid
+    return start(jid, {"repo": repo, "number": n, "head": head, "inputs": True,
+                       "drvs": {str(i): d for i, d in enumerate(ins)}},
+                 f"the build of what {', '.join(checks)} is built from")
+
+
 def unit_id(repo, n, head):
     return f"{C.BUILD}{re.sub('[^a-z0-9]+', '-', repo.lower())}-{n}-{head[:12]}-{time.time_ns()}"
 
@@ -389,11 +456,14 @@ def own(*args):
 
 def prune():
     """Ended builds' folders, and the roots of their outputs in them, KEEP
-    days after they ended: their verdicts are long posted by then."""
+    days after they ended: their verdicts are long posted by then. A
+    prebuild's, KEEP_INPUTS days on: a PR in line that long builds them
+    again in its turn, if they've been collected."""
     root = os.path.join(STATE, "builds")
     for jid in os.listdir(root) if os.path.isdir(root) else ():
         end = load(f"builds/{jid}/end.json", None)
-        if end and time.time() - end["at"] > KEEP * 86400:
+        keep = KEEP_INPUTS if (load(f"builds/{jid}/build.json", None) or {}).get("inputs") else KEEP
+        if end and time.time() - end["at"] > keep * 86400:
             shutil.rmtree(os.path.join(root, jid), ignore_errors=True)
 
 
@@ -405,7 +475,8 @@ def run(jid):
     (judged), so nothing collected later can change it. Failed when nix
     couldn't build at all, or what it built isn't there (the machine's
     failure, not the PR's, so it's built again); timed out past
-    proofTimeout. Then it kicks its repo's pass, which posts them."""
+    proofTimeout. A prebuild's has no verdicts: only how it ended. Then it
+    kicks its repo's pass, which posts them, or puts the PR in line."""
     b = load(f"builds/{jid}/build.json", None)
     end = {"state": "failed", "exit": None}
     # Derivations collected since they were worked out leave nothing to
@@ -422,7 +493,7 @@ def run(jid):
                 p.wait()
                 rc = None
         end = {"state": state_of(rc), "exit": rc}
-        if end["state"] == "done":
+        if end["state"] == "done" and not b.get("inputs"):
             end = {**end, **judged(jid, b)}
     save(f"builds/{jid}/end.json", {**end, "at": time.time()})
     C.kick(b["repo"])

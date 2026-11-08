@@ -188,6 +188,26 @@ C.save(f"builds/{young}/end.json", {"state": "done", "exit": 0, "at": time.time(
 P.prune()
 assert not os.path.exists(f"{tmp}/state/builds/{old_end}"), old_end
 assert os.path.isdir(f"{tmp}/state/builds/{young}") and os.path.isdir(f"{tmp}/state/builds/{running_one}")
+# A prebuild (proofs.prebuild): what a proof is built from, each rooted in
+# its folder as a proof's outputs are, and an end with no verdicts, one it
+# couldn't build all of included: the proof's own build says how that went.
+A, B = "/nix/store/" + "a" * 32 + "-system", "/nix/store/" + "b" * 32 + "-driver"
+for rc in (0, 100):
+    tools(**{"nix-store": {"rc": rc, "valid": [A]}})
+    jid = made({"0": A + ".drv", "1": B + ".drv"})
+    C.save(f"builds/{jid}/build.json", {**C.load(f"builds/{jid}/build.json", None), "inputs": True})
+    KICKS.clear()
+    P.run(jid)
+    assert end(jid) | {"at": 0} == {"state": "done", "exit": rc, "at": 0}, end(jid)
+    assert os.readlink(f"{tmp}/state/builds/{jid}/out-0") == A and KICKS == ["/kick/autoland/sam/r"], KICKS
+    assert C.build_state(jid) == "done" and P.verdicts(jid) is None, jid
+# Its folder, the roots of all it built, goes KEEP_INPUTS days on.
+inputs_end, proof_end = made({"0": A + ".drv"}), made({"vm": X + ".drv"})
+C.save(f"builds/{inputs_end}/build.json", {**C.load(f"builds/{inputs_end}/build.json", None), "inputs": True})
+for j in (inputs_end, proof_end):
+    C.save(f"builds/{j}/end.json", {"state": "done", "exit": 0, "at": time.time() - P.KEEP_INPUTS * 86400 - 60})
+P.prune()
+assert not os.path.exists(f"{tmp}/state/builds/{inputs_end}") and os.path.isdir(f"{tmp}/state/builds/{proof_end}")
 # Past proofTimeout it's stopped, and says so.
 S.CFG["proofTimeout"] = 0.02  # minutes: 1.2 s
 tools(**{"nix-store": {"sleep": 30}})
