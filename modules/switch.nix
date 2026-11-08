@@ -89,6 +89,16 @@ let
     in if m == null || unit == null || lib.toInt (lib.head m) == 0 then null
       else lib.toInt (lib.head m) * unit;
 
+  # Stops can belong to an earlier activation or to the revert itself. There
+  # is no safe way to attribute PID 1's jobs to a killed activation, so require
+  # bounded stops on every enabled service, even ones not restarted on change.
+  # TimeoutSec supplies both timeouts unless the stop timeout overrides it.
+  defaultStop = config.systemd.settings.Manager.DefaultTimeoutStopSec or "90s";
+  unboundedStops = lib.attrNames (lib.filterAttrs (_: s:
+    s.enable && seconds (s.serviceConfig.TimeoutStopSec or
+      (s.serviceConfig.TimeoutSec or defaultStop)) == null
+  ) config.systemd.services);
+
   # RemainAfterExit as systemd reads it: free-form, so a Nix bool or any of
   # its words. Unset, or one it wouldn't read as true, is false.
   remains = sc: builtins.elem (lib.toLower (toString (sc.RemainAfterExit or false))) [ "1" "yes" "true" "on" "y" "t" ];
@@ -174,6 +184,17 @@ in
           finds one running restarts it and waits, reverting if it times out:
           ${lib.concatStringsSep ", " longOneshots}. Give each restartIfChanged = false,
           so a switch leaves a running one be and the next run is the new one.'';
+      } {
+        assertion = seconds defaultStop != null && unboundedStops == [ ];
+        message = ''
+          burrow.switch needs bounded service stops so the revert cannot wait
+          forever behind ExecStop, ExecStopPost, or a SIGTERM-deaf start.
+          Set systemd.settings.Manager.DefaultTimeoutStopSec and each enabled
+          service's effective TimeoutStopSec (including TimeoutSec) to a positive
+          integer with a seconds, minutes, hours or days unit, never 0 or infinity.
+          Unbounded or unrecognised service timeouts: ${lib.concatStringsSep ", " unboundedStops}.
+          restartIfChanged = false does not exempt a service: dependencies and
+          removing a unit can still stop it during a switch or revert.'';
       }];
 
       environment.systemPackages = [ switchTool confirmTool ];

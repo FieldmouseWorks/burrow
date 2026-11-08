@@ -79,8 +79,13 @@ Each has an entry below, and each can be imported on its own.
   switch for system changes. The new system goes live but isn't the boot
   default; unless confirmed within 10 minutes the old one comes back by
   itself. So a change that cuts off SSH, the network or Claude undoes itself.
-  An activation that hangs is killed in time for the revert to land inside the
-  window. `--abort` reverts at once; with `flakeInputs` it refuses a system
+  An activation that hangs is killed before the window expires to let the
+  revert run. Enabled services must have bounded stop timeouts (including the
+  manager default and `TimeoutSec`): the module rejects zero, infinity and
+  time spans it cannot establish as positive integer seconds, minutes, hours
+  or days. This also bounds stopping a start that ignores SIGTERM. Finite
+  stops can still delay the revert; existing generations and hand-written
+  unit files need the same discipline. `--abort` reverts at once; with `flakeInputs` it refuses a system
   built from an older nixpkgs. With `trialBoot` (GRUB), `HOST-boot` boots a
   new kernel, initrd or command line once at a quiet hour and makes it the
   default only after it came up; one that panics or hangs resets into the last
