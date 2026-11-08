@@ -286,3 +286,41 @@ fn a_timeline_that_cant_be_read_holds_the_pr() {
     m.unset("timeline-fails");
     assert!(m.pass().task().contains("#29 "));
 }
+
+// No GitHub event is needed at the age boundary: the sweep books a pass.
+#[test]
+fn a_wait_books_its_date_and_keeps_other_repos_wakes() {
+    let m = Machine::new();
+    let ripe = now() + 120;
+    m.prs(&[m.refresh(20, ripe, "me", LOCK)]);
+    m.pass();
+    let wake = m.path("state/wake.json");
+    let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+    assert_eq!(booked[REPO], ripe);
+    let mut booked = booked;
+    booked["sam/other"] = json!(ripe + 30);
+    fs::write(&wake, booked.to_string()).unwrap();
+    m.prs(&[m.refresh(20, now() - 60, "me", LOCK)]);
+    assert_eq!(m.pass().asked(), rebase(20));
+    let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+    assert_eq!(booked["sam/other"], ripe + 30);
+    let retry = booked[REPO].as_u64().unwrap();
+    assert!(retry >= now() + 3590 && retry <= now() + 3600);
+    m.prs(&[]);
+    m.pass();
+    let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+    assert!(booked.get(REPO).is_none());
+    assert_eq!(booked["sam/other"], ripe + 30);
+}
+
+#[test]
+fn the_retry_wake_uses_the_watchdogs_exported_limit() {
+    let m = Machine::new();
+    m.set("limits", "3 21600 3 600 45\n");
+    m.prs(&[m.refresh(20, now() - 60, "me", LOCK)]);
+    assert_eq!(m.pass().asked(), rebase(20));
+    let booked: Value =
+        serde_json::from_slice(&fs::read(m.path("state/wake.json")).unwrap()).unwrap();
+    let retry = booked[REPO].as_u64().unwrap();
+    assert!(retry >= now() + 40 && retry <= now() + 45);
+}
