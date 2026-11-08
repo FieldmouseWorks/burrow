@@ -129,7 +129,25 @@ pub fn api(cfg: &Config, args: &[&str]) -> Option<Value> {
 }
 
 fn api_until(cfg: &Config, args: &[&str], until: Option<Instant>) -> Option<Value> {
+    api_command(cfg, args, None, until)
+}
+
+/// GraphQL fields are data, not authentication routing. Select the target
+/// repository explicitly, overriding the caller's checkout and GH_REPO.
+pub fn api_for(cfg: &Config, repo: &str, args: &[&str]) -> Option<Value> {
+    api_command(cfg, args, Some(repo), None)
+}
+
+fn api_command(
+    cfg: &Config,
+    args: &[&str],
+    repo: Option<&str>,
+    until: Option<Instant>,
+) -> Option<Value> {
     let mut command = Command::new(&cfg.tools.gh);
+    if let Some(repo) = repo {
+        command.env("GH_REPO", repo);
+    }
     command
         .arg("api")
         .args(args)

@@ -30,12 +30,14 @@ let
   cert = pkgs.runCommand "github-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=github.com \
-      -addext subjectAltName=DNS:github.com -keyout $out/key.pem -out $out/cert.pem
+      -addext subjectAltName=DNS:github.com,DNS:storage.example -keyout $out/key.pem -out $out/cert.pem
     openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=peter \
       -keyout $out/peter.key -out $out/peter.pem
   '';
   gitServer = pkgs.writers.writePython3 "fake-github-git" { flakeIgnore = [ "E501" ]; } ''
     import base64
+    import hashlib
+    import json
     import socketserver
     import ssl
     import threading
@@ -43,15 +45,97 @@ let
 
 
     class Git(BaseHTTPRequestHandler):
-        def do_GET(self):
+        def record(self):
             auth = self.headers.get_all("Authorization") or []
             logins = ["negotiate" if a.startswith("Negotiate ") else base64.b64decode(a.split(" ", 1)[1]).decode() for a in auth]
+            logins += ["storage-token:" + v for v in self.headers.get_all("X-Storage-Token") or []]
             logins += ["cookie:" + c for c in self.headers.get_all("Cookie") or []]
             shown = getattr(self.connection, "getpeercert", lambda: None)()
             if shown:
                 logins.append("cert:" + dict(x[0] for x in shown["subject"])["commonName"])
             with open("/tmp/logins", "a") as f:
                 f.write(" ".join([self.path] + logins) + "\n")
+            return auth
+
+        def do_POST(self):
+            auth = self.record()
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "/verify-redirect/" in self.path:
+                self.send_response(307)
+                self.send_header("Location", "https://github.com" + self.path.replace("/verify-redirect/", "/verify/"))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if "/verify/" in self.path:
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            operation = body["operation"]
+            data = b"LFS object\n"
+            oid = hashlib.sha256(data).hexdigest()
+            href = "https://github.com/sam/r.git/info/lfs/" + ("redirect/" if operation == "download" else "objects/") + oid
+            action = {"href": href}
+            if "/storage" in self.path:
+                action = {"href": "https://storage.example/sam/r.git/info/lfs/objects/capability-secret/" + oid + "?token=batch-secret", "header": {"Authorization": "Basic " + base64.b64encode(b"storage:batch").decode(), "X-Storage-Token": "batch"}}
+            if "/storage-redirect.git/" in self.path:
+                action["href"] = action["href"].replace("/objects/", "/to-github/")
+            if "/reject" in self.path:
+                action = {"href": "https://" + ("storage.example" if "storage" in self.path else "github.com") + "/sam/r.git/info/lfs/" + ("redirect/" if operation == "download" else "objects/") + "reject/" + oid}
+            actions = {operation: action}
+            if "/storage" in self.path and operation == "upload":
+                actions["verify"] = {"href": "https://storage.example/sam/r.git/info/lfs/" + ("verify-redirect/" if "/storage-verify-redirect.git/" in self.path else "verify/") + "capability-secret/" + oid + "?token=verify-secret", "header": {"Authorization": "Basic " + base64.b64encode(b"storage:verify").decode()}}
+            response = json.dumps({"transfer": "test" if "/custom.git/" in self.path else ("tus" if "/storage-tus" in self.path and operation == "upload" else "basic"), "objects": [{"oid": oid, "size": len(data), "authenticated": "/reject-authenticated" in self.path, "actions": actions}]}).encode()
+            self.send_response(200 if auth else 401)
+            self.send_header("Content-Type", "application/vnd.git-lfs+json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def do_HEAD(self):
+            self.record()
+            self.send_response(200)
+            self.send_header("Upload-Offset", "0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_PATCH(self):
+            self.record()
+            data = self.rfile.read(int(self.headers["Content-Length"]))
+            assert data == b"LFS object\n"
+            self.send_response(204)
+            self.send_header("Upload-Offset", str(len(data)))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_PUT(self):
+            self.record()
+            assert self.rfile.read(int(self.headers["Content-Length"])) == b"LFS object\n"
+            self.send_response(401 if "/reject/" in self.path else 200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            auth = self.record()
+            if "/to-github/" in self.path:
+                self.send_response(307)
+                self.send_header("Location", "https://github.com" + self.path.replace("/to-github/", "/objects/"))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if "/info/lfs/redirect/" in self.path:
+                self.send_response(307)
+                self.send_header("Location", self.path.replace("/redirect/", "/objects/"))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if "/info/lfs/objects/" in self.path:
+                data = b"LFS object\n"
+                self.send_response(200 if auth and "/reject/" not in self.path else 401)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             self.send_response(404 if auth else 401)
             if not auth:
                 if "/kerberos" in self.path:
@@ -160,7 +244,7 @@ pkgs.testers.runNixOSTest {
       serviceConfig.ExecStart = github;
     };
     # github.com, and github.com. as curl looks it up.
-    networking.hosts."127.0.0.1" = [ "github.com" "github.com." ];
+    networking.hosts."127.0.0.1" = [ "github.com" "github.com." "storage.example" ];
     security.pki.certificateFiles = [ "${cert}/cert.pem" ];
     systemd.services.fake-github-git = {
       wantedBy = [ "multi-user.target" ];
@@ -463,32 +547,164 @@ pkgs.testers.runNixOSTest {
           ]), app=False))
           machine.succeed(dev("git config --global --remove-section http && kdestroy", app=False))
 
-      with subtest("git-lfs isn't run in the App's env, however git or a config starts it"):
-          assert "git-lfs/" in machine.succeed(dev("git lfs version", app=False))
+      with subtest("LFS transfers use only the App token, through filters, hooks and direct calls"):
+          import hashlib
+          data = b"LFS object\n"
+          oid = hashlib.sha256(data).hexdigest()
+          pointer = f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(data)}\n"
+          machine.succeed(dev("git init -q lfs && git -C lfs remote add origin https://github.com/sam/r.git", app=False))
+          machine.succeed(dev("printf %s " + shlex.quote(pointer) + " > lfs/pointer", app=False))
           machine.succeed(dev(" && ".join([
+              "git lfs install --local",
               "printf '*.bin filter=lfs -text\\n' > .gitattributes",
-              "echo data > x.bin",
-              "printf '#!/bin/sh\\ngit lfs pre-push \"$@\"\\n' > .git/hooks/pre-push",
-              "printf '#!/bin/sh\\ngit-lfs pre-push \"$@\"\\n' > .git/hooks/post-checkout",
-              "chmod +x .git/hooks/pre-push .git/hooks/post-checkout",
-          ]), app=False, at="~/own"))
-          for call in [
-              "git lfs version",
-              "git-lfs version",
-              "git hook run pre-push -- origin https://github.com/sam/r.git </dev/null",
-              "git hook run post-checkout -- HEAD HEAD 1",
-              # A filter: the file goes in neither as it is nor as LFS's.
-              "git add x.bin",
-              "git -c filter.lfs.required=false add x.bin",
-          ]:
-              status, out = machine.execute(dev(call + " 2>&1", at="~/own"))
-              assert status != 0 and "git-lfs isn't run" in out, (call, status, out)
-              assert machine.succeed(dev("git ls-files x.bin", at="~/own")).strip() == "", call
-          # A checkout's config naming another git-lfs, the one LFS installs, say.
-          machine.succeed(dev("git -C own config filter.lfs.process '${pkgs.git-lfs}/bin/git-lfs filter-process'", app=False))
-          status, out = machine.execute(dev("git add x.bin 2>&1", at="~/own"))
-          assert status != 0 and "git-lfs isn't run" in out, (status, out)
-          assert machine.succeed(dev("git ls-files x.bin", at="~/own")).strip() == ""
+              "cp pointer x.bin",
+              f"git config http.extraHeader '{header}'",
+              f"git config http.https://github.com/sam/r.git/info/lfs.extraHeader '{header}'",
+              f"git config http.https://github.com/sam/r.git/info/lfs/objects/batch.extraHeader '{header}'",
+              "git config lfs.transfer.maxretries 1",
+              "git config lfs.locksverify false",
+              "git config filter.lfs.process '${pkgs.git-lfs}/bin/git-lfs filter-process'",
+              f"git config http.sslCert {peter}.pem",
+              f"git config http.sslKey {peter}.key",
+              "git config http.cookieFile ~/cookies",
+          ]), app=False, at="~/lfs"))
+          for app in [False, True]:
+              for call in ["git lfs smudge < pointer", "git-lfs smudge < pointer", "git -c lfs.url=https://peter:url-token@github.com/sam/r.git/info/lfs lfs smudge < pointer", "git checkout-index -f -- x.bin"]:
+                  machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+                  if "checkout-index" in call:
+                      machine.succeed(dev("cp pointer x.bin && git add .gitattributes x.bin && rm x.bin", at="~/lfs"))
+                  machine.succeed(": > /tmp/logins")
+                  out = machine.succeed(dev(call, app=app, at="~/lfs"))
+                  if "smudge" in call:
+                      assert out == data.decode(), out
+                  else:
+                      assert machine.succeed(dev("cat x.bin", at="~/lfs")) == data.decode(), call
+                  got = machine.succeed("cat /tmp/logins").splitlines()
+                  assert any("/objects/batch" in line for line in got), got
+                  assert any("/objects/" + oid in line for line in got), got
+                  if app:
+                      assert all("x-access-token:ghs_" in line and "peter" not in line for line in got), got
+                  else:
+                      assert any("peter:header" in line for line in got), got
+              assert "git-lfs/" in machine.succeed(dev("git lfs version", app=app))
+          machine.succeed(dev("git config --remove-section http && git config --remove-section http.https://github.com/sam/r.git/info/lfs && git config --remove-section http.https://github.com/sam/r.git/info/lfs/objects/batch", app=False, at="~/lfs"))
+          for app in [False, True]:
+              machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+              machine.succeed(": > /tmp/logins")
+              assert machine.succeed(dev("git lfs smudge < pointer", app=app, at="~/lfs")) == data.decode()
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert any(("x-access-token:ghs_" if app else "peter:netrc") in line for line in got), got
+              if app:
+                  assert not any("peter" in line for line in got), got
+          machine.succeed(dev(f"git config http.extraHeader '{header}'", app=False, at="~/lfs"))
+          # The installed pre-push hook uses git's exec-path LFS, too.
+          machine.succeed(dev("printf 'LFS object\\n' > x.bin && git add .gitattributes x.bin && git -c user.name=dev -c user.email=dev@example.org commit -qm lfs", at="~/lfs"))
+          for app in [False, True]:
+              machine.succeed(": > /tmp/logins")
+              call = "printf 'refs/heads/main %s refs/heads/main %040d\\n' $(git rev-parse HEAD) 0 | .git/hooks/pre-push origin https://github.com/sam/r.git"
+              machine.succeed(dev(call, app=app, at="~/lfs"))
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert any("/objects/batch" in line for line in got), got
+              assert any("/objects/" + oid in line for line in got), got
+              if app:
+                  assert not any("peter" in line for line in got), got
+                  assert all("x-access-token:ghs_" in line for line in got if "/info/lfs/" in line), got
+              else:
+                  assert any("peter:header" in line for line in got), got
+          # Storage uses credentials returned by the batch, never the netrc
+          # or configured headers, and never the installation token.
+          machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+          machine.succeed(": > /tmp/logins")
+          out = machine.succeed(dev("git -c lfs.url=https://github.com/sam/storage.git/info/lfs lfs smudge < pointer", at="~/lfs"))
+          assert out == data.decode(), out
+          got = machine.succeed("cat /tmp/logins").splitlines()
+          assert any("x-access-token:ghs_" in line for line in got), got
+          assert any("storage:batch" in line for line in got), got
+          assert not any("peter" in line for line in got), got
+          for rewritten in [False, True]:
+              machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+              machine.succeed(": > /tmp/logins")
+              repo = "storage" if rewritten else "storage-redirect"
+              rewrite = "-c lfs.transfer.enablehrefrewrite=true -c url.https://github.com/sam/r.git/info/lfs/objects/.insteadOf=https://storage.example/sam/r.git/info/lfs/objects/ " if rewritten else ""
+              status, out = machine.execute(dev(f"git {rewrite}-c lfs.url=https://github.com/sam/{repo}.git/info/lfs lfs smudge < pointer", at="~/lfs"))
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert status != 0, (out, got)
+              assert not any("/objects/" in line and "/objects/batch" not in line for line in got), got
+          # A rewrite within the action's origin still retains signed paths,
+          # queries and headers, and completes the transfer.
+          machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+          same = "-c lfs.transfer.enablehrefrewrite=true -c url.https://storage.example/sam/r.git/info/lfs/objects/renamed/.insteadOf=https://storage.example/sam/r.git/info/lfs/objects/ "
+          assert machine.succeed(dev("git " + same + "-c lfs.url=https://github.com/sam/storage.git/info/lfs lfs smudge < pointer", at="~/lfs")) == data.decode()
+          # An unpatched LFS shows the regression with the same credentials.
+          machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+          machine.succeed(": > /tmp/logins")
+          machine.succeed(dev("${pkgs.git-lfs}/bin/git-lfs smudge < pointer", at="~/lfs"))
+          assert "peter:header" in machine.succeed("cat /tmp/logins")
+          for setup in ["GH_TOKEN_SOCKET=/run/gh-token/none.sock ", "git -c lfs.url=https://github.com/eve/x.git/info/lfs "]:
+              machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+              machine.succeed(": > /tmp/logins")
+              call = setup + ("git lfs smudge" if setup.startswith("GH_TOKEN") else "lfs smudge")
+              machine.fail(dev(call + " < pointer", at="~/lfs"))
+              assert machine.succeed("cat /tmp/logins").strip() == ""
+
+      with subtest("App LFS verification actions work and authentication rejection terminates"):
+          # Upload verification uses an external batch action with its own credential.
+          machine.succeed(dev("printf 'LFS object\\n' > x.bin && git add x.bin", at="~/lfs"))
+          machine.succeed(": > /tmp/logins")
+          machine.succeed(dev("git -c lfs.url=https://github.com/sam/storage.git/info/lfs lfs push --object-id origin " + oid, at="~/lfs"))
+          got = machine.succeed("cat /tmp/logins").splitlines()
+          assert any("/verify/" in line and "storage:verify" in line for line in got), got
+          assert not any("peter" in line for line in got), got
+          for resumable in [False, True]:
+              repo = "storage-tus" if resumable else "storage"
+              options = f"-c lfs.tustransfers=true -c lfs.url=https://github.com/sam/{repo}.git/info/lfs "
+              machine.succeed(": > /tmp/logins")
+              machine.succeed(dev("git " + options + "lfs push --object-id origin " + oid, at="~/lfs"))
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert any("capability-secret" in line and "token=batch-secret" in line and "storage:batch" in line for line in got), got
+              machine.succeed(": > /tmp/logins")
+              rewrite = "-c lfs.transfer.enablehrefrewrite=true -c url.https://github.com/sam/r.git/info/lfs/objects/.insteadOf=https://storage.example/sam/r.git/info/lfs/objects/ "
+              machine.fail(dev("git " + options + rewrite + "lfs push --object-id origin " + oid, at="~/lfs"))
+              got = machine.succeed("cat /tmp/logins").splitlines()
+              assert not any("capability-secret" in line or "token=batch-secret" in line for line in got), got
+          machine.succeed(": > /tmp/logins")
+          machine.fail(dev("git -c lfs.url=https://github.com/sam/storage-verify-redirect.git/info/lfs lfs push --object-id origin " + oid, at="~/lfs"))
+          got = machine.succeed("cat /tmp/logins").splitlines()
+          assert any("/verify-redirect/" in line and "token=verify-secret" in line for line in got), got
+          assert not any("/verify/" in line for line in got), got
+          # Both values of authenticated must return a bounded failure for
+          # uploads and downloads instead of recursively retrying a 401.
+          for repo in ["reject", "reject-authenticated", "reject-storage", "reject-authenticated-storage"]:
+              for call in ["lfs smudge < pointer", "lfs push --object-id origin " + oid]:
+                  if "smudge" in call:
+                      machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+                  else:
+                      machine.succeed(dev("printf 'LFS object\\n' > x.bin && git add x.bin", at="~/lfs"))
+                  machine.succeed(": > /tmp/logins")
+                  status, out = machine.execute(dev(f"timeout 30 git -c lfs.url=https://github.com/sam/{repo}.git/info/lfs -c lfs.transfer.maxretries=1 {call}", at="~/lfs"))
+                  assert status not in [0, 124, 137], (status, out)
+                  got = machine.succeed("cat /tmp/logins").splitlines()
+                  rejected = [line for line in got if "/objects/reject/" in line]
+                  assert 1 <= len(rejected) <= 4, got
+
+      with subtest("custom LFS programs cannot bypass App authentication"):
+          machine.succeed(dev("printf '#!/bin/sh\\necho ran > /tmp/custom-lfs-ran\\nexit 1\\n' > ~/lfs-adapter && chmod +x ~/lfs-adapter", app=False))
+          machine.succeed(dev("git config lfs.customtransfer.test.path $HOME/lfs-adapter && git config lfs.standalonetransferagent test", app=False, at="~/lfs"))
+          machine.succeed(dev("rm -rf .git/lfs/objects", app=False, at="~/lfs"))
+          machine.fail(dev("git lfs smudge < pointer", app=False, at="~/lfs"))
+          machine.succeed("test -e /tmp/custom-lfs-ran && rm /tmp/custom-lfs-ran")
+          for standalone in [True, False]:
+              if not standalone:
+                  machine.succeed(dev("git config --unset lfs.standalonetransferagent", app=False, at="~/lfs"))
+              for prefix in ["", "GH_TOKEN_SOCKET=/run/gh-token/none.sock "]:
+                  for call in ["lfs smudge < pointer", "checkout-index -f -- x.bin"]:
+                      machine.succeed(dev("rm -rf .git/lfs/objects && rm -f x.bin", app=False, at="~/lfs"))
+                      machine.fail(dev(prefix + "git -c lfs.url=https://github.com/sam/custom.git/info/lfs " + call, at="~/lfs"))
+                      machine.fail("test -e /tmp/custom-lfs-ran")
+                  machine.succeed(dev("printf 'LFS object\\n' > x.bin && git add x.bin", at="~/lfs"))
+                  hook = "printf 'refs/heads/main %s refs/heads/main %040d\\n' $(git rev-parse HEAD) 0 | " + prefix + ".git/hooks/pre-push origin https://github.com/sam/r.git"
+                  machine.fail(dev("git config lfs.url https://github.com/sam/custom.git/info/lfs && " + hook, at="~/lfs"))
+                  machine.fail("test -e /tmp/custom-lfs-ran")
 
       with subtest("gh, in the App's env, has the App's token, and no login of dev's"):
           assert machine.succeed(dev("gh auth token", app=False)).strip() == "peter-token"
