@@ -806,3 +806,47 @@ fn a_barred_issue_off_the_list_stops_its_job() {
     p.jobs("sam/box", "box", &[]).unwrap();
     assert!(d.exists() && p.wake.contains_key("sam/box"));
 }
+
+// An already finished sorting verdict must not change a running lane's work.
+#[test]
+fn a_handed_issue_url_blocks_triage_and_its_completed_verdict() {
+    let b = Box::new();
+    b.job("lane", "done", "finished");
+    let old = b.record("lane");
+    let lane = old.with_file_name("sam_box-100");
+    fs::rename(old, &lane).unwrap();
+    fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
+    Pass::hand(
+        &lane,
+        "[deliver](HTTPS://GITHUB.COM/SAM/BOX/ISSUES/7#issue-123)",
+    )
+    .unwrap();
+    // Only the delivery job is active; the sorter has finished.
+    burrow_test::executable(
+        &b.cfg.tools.systemctl,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *is-active*proj-lane.service*) [ -e '{}' ] && exit 0; exit 3 ;; *is-active*) exit 3 ;; *show*) echo inactive ;; esac\nexit 0\n",
+            b.path("active").display()
+        ),
+    );
+    fs::write(b.path("active"), "").unwrap();
+    let seven = issue(7, "sam", &[]);
+    let mut p = b.pass();
+    p.triage("sam/box", std::slice::from_ref(&seven)).unwrap();
+    assert!(p.wake.is_empty(), "no sorting job started");
+    let d = sorting(&b, "done\nalready finished");
+    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+    p.verdicts("sam/box", t, std::slice::from_ref(&seven))
+        .unwrap();
+    assert!(!d.exists(), "the obsolete verdict is discarded");
+    assert!(!b.log().contains("-X"), "{}", b.log());
+    assert!(b.posted().is_empty());
+    fs::remove_file(b.path("active")).unwrap();
+    sorting(&b, "done\nalready finished");
+    p.verdicts("sam/box", t, &[seven]).unwrap();
+    assert!(
+        b.log().contains(CLOSE),
+        "eligible after the lane ends: {}",
+        b.log()
+    );
+}

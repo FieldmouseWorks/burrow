@@ -28,30 +28,100 @@ impl Pass<'_> {
                 continue;
             }
             let input = fs::read_to_string(d.join("input")).unwrap_or_default();
-            for (at, _) in input.match_indices('#') {
-                // A bare #N is local; OWNER/REPO#N must name this repo.
-                let qualifier = input[..at]
-                    .rsplit(|c: char| !c.is_ascii_alphanumeric() && !"/_.-".contains(c))
-                    .next()
-                    .unwrap_or_default();
-                // Slashes also separate bare references, as in #7/#8.
-                if !qualifier.is_empty()
-                    && !qualifier.ends_with('/')
-                    && !qualifier.eq_ignore_ascii_case(repo)
-                {
-                    continue;
-                }
-                let digits: String = input[at + 1..]
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect();
-                if let Ok(n) = digits.parse::<u64>()
-                    && n > 0
-                {
-                    claimed.insert(n.to_string());
-                }
-            }
+            claimed.extend(references(repo, &input));
         }
         claimed
+    }
+}
+
+/// Parse whole reference tokens so a URL's fragment cannot become shorthand.
+fn references(repo: &str, input: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for token in input.split(|c: char| c.is_whitespace() || "[]()<>`\"',;*".contains(c)) {
+        let token = token
+            .trim_end_matches(['.', '!', '?', ':'])
+            .to_ascii_lowercase();
+        if token.contains("://") {
+            // target also understands PRs; only issue URLs own issue work.
+            if let Some(path) = token.strip_prefix("https://github.com/") {
+                let parts: Vec<_> = path.split('/').collect();
+                if parts.get(2) == Some(&"issues") {
+                    record(repo, &token, &mut found);
+                }
+            }
+            continue;
+        }
+        // A slash between shorthand references is punctuation, while the
+        // slash inside OWNER/REPO remains part of the qualified reference.
+        for (index, part) in token.split("/#").enumerate() {
+            let part = if index == 0 {
+                part.to_owned()
+            } else {
+                format!("#{part}")
+            };
+            let reference = if part.starts_with('#') {
+                format!("{repo}{part}")
+            } else {
+                part
+            };
+            if !record(repo, &reference, &mut found) {
+                break;
+            }
+        }
+    }
+    found
+}
+
+// Whether this is a complete reference, including a valid foreign one.
+fn record(repo: &str, reference: &str, found: &mut BTreeSet<String>) -> bool {
+    let Some((of, n)) = crate::github::target(reference) else {
+        return false;
+    };
+    let Ok(n) = n.parse::<u64>() else {
+        return false;
+    };
+    if n == 0 {
+        return false;
+    }
+    if of.eq_ignore_ascii_case(repo) {
+        found.insert(n.to_string());
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::references;
+
+    #[test]
+    fn whole_issue_references() {
+        for text in [
+            "#7",
+            "SAM/BOX#7",
+            "#8/#7",
+            "sam/box#8/#7",
+            "https://github.com/sam/box/issues/7",
+            "[deliver](HTTPS://GITHUB.COM/SAM/BOX/ISSUES/7#issuecomment-123)",
+            "<https://github.com/Sam/Box/issues/7?x=y>",
+        ] {
+            assert!(references("sam/box", text).contains("7"), "{text}");
+        }
+        for text in [
+            "https://example.org/docs/#7",
+            "https://example.org/docs#7",
+            "example.org/docs/#7",
+            "https://github.com/sam/game/issues/7#7",
+            "sam/game#7",
+            "https://github.com/sam/box/pull/7",
+            "word#7",
+            "#7word",
+            "#0",
+        ] {
+            assert!(references("sam/box", text).is_empty(), "{text}");
+        }
+        assert_eq!(
+            references("sam/box", "https://github.com/sam/box/issues/8#7"),
+            std::collections::BTreeSet::from(["8".into()])
+        );
     }
 }

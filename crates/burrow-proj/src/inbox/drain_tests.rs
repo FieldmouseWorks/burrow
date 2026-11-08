@@ -356,7 +356,7 @@ fn running_handed_references_are_not_drained() {
     let b = Box::new();
     b.job("lane", "done", "finished");
     let d = b.record("lane");
-    super::Pass::hand(&d, "Deliver #7/#8 and SAM/BOX#10; sam/game#9 is elsewhere.").unwrap();
+    super::Pass::hand(&d, "Deliver https://github.com/sam/box/issues/7 and #8/#10; sam/game#9 is elsewhere. https://example.org/docs/#11").unwrap();
     fs::write(b.path("active"), "").unwrap();
     fs::write(b.cfg.jobs.join("lane/1.slot"), "").unwrap();
     let seven = found("sam/box", 7, "sam", &["ready"], "2026-10-01T00:00:00Z");
@@ -374,6 +374,7 @@ fn running_handed_references_are_not_drained() {
         ("sam/box", 8, true),
         ("sam/box", 10, true),
         ("sam/box", 9, false),
+        ("sam/box", 11, false),
         ("sam/game", 7, false),
     ] {
         let i = found(repo, n, "sam", &["ready"], "2026-10-01T00:00:00Z");
