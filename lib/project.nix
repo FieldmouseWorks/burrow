@@ -344,7 +344,8 @@ let
           # its comments gone and every string blanked to "\", which no
           # #[path] reads, but a path attribute's plain one. So no comment
           # or string makes or hides a declaration or an attribute. A char
-          # literal is kept whole, so its quote starts no string. Its tokens
+          # literal is blanked to '_', so its quote starts no string and its
+          # bracket closes no attribute. Its tokens
           # are matched once, so the forms they don't lex are found before
           # lexing can hide them.
           tokens = text: builtins.split ("(" + lib.concatStringsSep "|" [
@@ -360,7 +361,7 @@ let
             if builtins.isString m then m
             else
               let c = builtins.substring 0 1 (builtins.head m); in
-              if c == "/" then " " else if c == "p" || c == "'" then builtins.head m else ''"\"'');
+              if c == "/" then " " else if c == "p" then builtins.head m else if c == "'" then "'_'" else ''"\"'');
           # What those tokens don't lex: a block comment with one nested in
           # it (the token ends at the inner one's close), a shebang line
           # (which Rust drops before lexing) and a raw string with more than
@@ -388,8 +389,8 @@ let
           # escaped), an inline module block that isn't #[cfg(test)], inside
           # which the declarations' paths are relative to a directory this
           # doesn't follow, or, in its own files, any mod or path attribute
-          # that isn't a declaration this reads (or is a raw identifier), and
-          # code the tokens above don't lex.
+          # that isn't a declaration this reads (or is a raw identifier, or
+          # has brackets in it), and code the tokens above don't lex.
           # Each is looked for in the file as written and as lexed. A file of
           # its own that it leaves out (an integration test, a test module
           # or a file in one's directory) doesn't count: Cargo builds the
@@ -403,8 +404,11 @@ let
               || lib.any (m: builtins.isList m && !(isTest (builtins.elemAt m 0))) (builtins.split (attrsRe + "[{]") s))
               [ x.text x.code ]
               || x.unlexed || count ''/[*]|[*]/'' x.code > 0
-              # A path or cfg_attr attribute named by a raw identifier.
+              # A path or cfg_attr attribute named by a raw identifier, or an
+              # attribute with brackets inside it, which the scan reads only
+              # up to the first ].
               || count ''r#(path|cfg_attr)([^[:alnum:]_]|$)'' x.code > 0
+              || count ''#[[:space:]]*[[][^]]*[[]'' x.code > 0
               || own x.file && (count modRe x.code != builtins.length x.decls + count (attrsRe + "[{]") x.code
                 || count pathRe x.code != lib.foldl' (n: d: n + count pathRe d.attrs) 0 x.decls))) sources;
           # Each Rust file in it, lexed, with its own files' `mod NAME;` and

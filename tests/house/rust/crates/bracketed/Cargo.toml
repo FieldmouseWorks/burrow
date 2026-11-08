@@ -1,0 +1,6 @@
+# A cfg_attr path after an attribute with brackets inside it, whose file a
+# #[cfg(test)] module reads too: cargoTests keeps the package whole.
+[package]
+name = "house-fixture-bracketed"
+version = "0.1.0"
+edition = "2024"

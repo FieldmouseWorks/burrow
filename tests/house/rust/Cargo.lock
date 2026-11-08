@@ -18,6 +18,10 @@ name = "house-fixture-binmod"
 version = "0.1.0"
 
 [[package]]
+name = "house-fixture-bracketed"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-built"
 version = "0.1.0"
 
