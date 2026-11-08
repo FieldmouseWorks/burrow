@@ -5,7 +5,8 @@ let
 in pkgs.runCommand "house-rust-package-check" { } ''
   # Its answer comes from modules named like tests that the library uses:
   # one declared plainly, one by a path attribute that a #[cfg(test)]
-  # module's path attribute names too.
+  # module's path attribute names too; and from one named by a raw
+  # identifier that a #[cfg(test)] module reads too.
   [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
   # What lib/project.nix's cargoTests must leave in: a program named tests,
   # and a member named tests that a glob finds (a module named tests that
@@ -21,5 +22,10 @@ in pkgs.runCommand "house-rust-package-check" { } ''
   [ "$(${pkg}/bin/house-fixture-built)" = built ]
   [ "$(${pkg}/bin/house-fixture-included)" = 9 ]
   [ "$(${pkg}/bin/house-fixture-pathed)" = 5 ]
+  # A program at Cargo's default path that a #[cfg(test)] module reads too
+  # and that includes a test module's file, and a module inside an inline
+  # one whose file a #[cfg(test)] module reads too.
+  [ "$(${pkg}/bin/house-fixture-implicit)" = implicit ]
+  [ "$(${pkg}/bin/house-fixture-nested)" = nested ]
   touch $out
 ''

@@ -1,6 +1,6 @@
 //! A workspace member, which the Rust gate must check as well as the root.
-// shared_tests.rs is two modules on purpose (lib/project.nix keeps a file
-// any module that isn't #[cfg(test)] reads).
+// shared_tests.rs and type.rs are two modules each on purpose
+// (lib/project.nix keeps a file any module that isn't #[cfg(test)] reads).
 #![allow(clippy::duplicate_mod)]
 
 pub mod halve;
@@ -11,6 +11,11 @@ pub mod shared;
 #[path = "shared_tests.rs"]
 mod shared_again;
 pub mod sorting;
+pub mod r#type;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "type.rs"]
+mod type_again;
 pub mod vm_tests;
 
 pub fn double(a: u32) -> u32 {
