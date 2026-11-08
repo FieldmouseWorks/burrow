@@ -419,7 +419,11 @@ Each has an entry below, and each can be imported on its own.
   process acts as the App with the App's `env`: `gh` then gets a token for the
   account its call names, and git's only credential helper gets one for the
   repo it pushes to, and neither can fall back to your login when the App's
-  can't be had.
+  can't be had. LFS uses the same broker for GitHub HTTP requests, ignoring
+  user headers, netrc, cookies and client certificates in the App's env.
+  Object storage uses only the signed URLs and headers the batch API returns.
+  Action URLs cannot change origin through rewrites or redirects. Custom
+  transfer programs are refused in the App's environment.
 
 ## Assumptions
 
