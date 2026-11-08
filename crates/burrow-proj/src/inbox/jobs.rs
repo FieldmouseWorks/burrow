@@ -412,12 +412,30 @@ mod question_tests {
         fs::create_dir_all(&job.dir).unwrap();
         job.set_turns(1).unwrap();
         fs::write(job.turn("1", "end"), "ask\n").unwrap();
+        assert!(
+            crate::cmd::declaration_tests::response(&cfg, "asking", "ask")
+                .contains("with your question")
+        );
         let prompt = question_resume(&job, "steward entry", false);
         assert!(prompt.contains("Do not repeat the question"));
         assert!(prompt.contains("`proj ask` again without restating"));
         job.set_turns(2).unwrap();
         assert!(question_resume(&job, "another entry", false).contains("Do not repeat"));
+        assert!(
+            crate::cmd::declaration_tests::response(&cfg, "asking", "ask")
+                .contains("without repeating")
+        );
         assert_eq!(question_resume(&job, "owner answer", true), "owner answer");
+        assert!(
+            crate::cmd::declaration_tests::response(&cfg, "asking", "ask")
+                .contains("with your question")
+        );
         assert_eq!(question_resume(&job, "later entry", false), "later entry");
+        fs::write(job.path("open-question"), "ask\n").unwrap();
+        crate::cmd::declaration_tests::response(&cfg, "asking", "done");
+        assert!(
+            crate::cmd::declaration_tests::response(&cfg, "asking", "ask")
+                .contains("with your question")
+        );
     }
 }

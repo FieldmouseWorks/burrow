@@ -289,7 +289,18 @@ fn asking_job_resumes_on_steward_entry_without_posting_the_question_again() {
     let prompt = fs::read_to_string(job.join("prompt.2")).unwrap();
     assert!(prompt.contains("Do not repeat the question"), "{prompt}");
     assert!(prompt.contains("`proj ask` again without restating"));
-    // The resumed engine follows the prompt, handles the entry and asks
+    let job_state = crate::job::Job::new(&b.cfg, "j1");
+    let response = crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask");
+    assert!(
+        response.contains("without repeating the question already posted"),
+        "{response}"
+    );
+    assert!(!response.contains("with your question"));
+    assert_eq!(
+        crate::read(&job_state.path("end.next")).as_deref(),
+        Some("ask")
+    );
+    // The resumed engine follows both the prompt and command response, handles the entry and asks
     // again through the declaration, without repeating its posted question.
     fs::write(
         job.join("2.jsonl"),

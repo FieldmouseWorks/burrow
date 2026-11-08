@@ -83,3 +83,13 @@ fn limit_name(said: &str) -> &'static str {
         "usage allowance"
     }
 }
+
+/// Old holds contain the refusal verbatim. Preserve unrelated migration
+/// descriptions, but remove billing instructions from recognized refusals.
+pub(crate) fn normalize_refusal(said: &str) -> String {
+    if limit_words(said) {
+        format!("Claude reached its {}", limit_name(said))
+    } else {
+        said.to_owned()
+    }
+}

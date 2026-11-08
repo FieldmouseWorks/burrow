@@ -110,8 +110,11 @@ pub fn kept(cfg: &Config) -> Option<Spent> {
 fn read(cfg: &Config) -> Result<Option<Spent>, String> {
     let path = cfg.jobs.join(FILE);
     match fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
+        Ok(text) => serde_json::from_str::<Spent>(&text)
+            .map(|mut s| {
+                s.said = crate::engine::claude::normalize_refusal(&s.said);
+                Some(s)
+            })
             .map_err(|e| format!("proj: {}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("proj: {}: {e}", path.display())),
@@ -188,7 +191,7 @@ fn put(
         },
         None => Spent {
             until,
-            said: said.to_owned(),
+            said: crate::engine::claude::normalize_refusal(said),
             job: id.to_owned(),
             at,
             back: None,
