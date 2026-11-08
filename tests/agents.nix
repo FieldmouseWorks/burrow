@@ -34,7 +34,6 @@ pkgs.testers.runNixOSTest {
       claude.effort = "high";
       proj.enable = true;
       proj.gh = gh;
-      watchdog.enable = true;
       claude.package = vmClaude;
       agents.enable = true;
       toolbox.enable = true;
@@ -44,10 +43,6 @@ pkgs.testers.runNixOSTest {
       # Everything the sandboxes log lands in this test's output.
       agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity slowBanner ];
     };
-
-    # Keep the recorded stall for assertions, without escalating it to jobs.
-    systemd.services.burrow-watchdog.enable = false;
-    environment.systemPackages = [ pkgs.jq ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -209,7 +204,14 @@ pkgs.testers.runNixOSTest {
         host.fail("test -e /data/dev/src/demo/e")
 
     with subtest("proj runs a job inside a sandbox"):
-        job = dev("proj run --vm demo 'say hi'").strip()
+        # What only a sandbox shows, since each run of a turn boots one: the
+        # guest's proj declares, the host reads it before stopping the VM and
+        # reads GitHub itself, a silent run is told once in a VM booted again
+        # for it, and the next turn boots it once more. What each end means
+        # (ask, a stall, news) is the host's alone: proj.nix, proj-github.nix
+        # and guest.rs's tests.
+        host.succeed("mkdir -p /tmp/gh; echo '{\"state\":\"open\"}' >/tmp/gh/repos_o_r_issues_1; echo '[]' >/tmp/gh/repos_o_r_issues_1_comments")
+        job = dev("proj run --vm demo silent").strip()
         sandbox = host.succeed(f"cat /data/dev/jobs/{job}/agent").strip()
         assert sandbox == "demo-3", sandbox
         assert "[vm demo-3]" in dev("proj status")
@@ -217,34 +219,22 @@ pkgs.testers.runNixOSTest {
             host.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=240)
             return host.succeed(f"cat /data/dev/jobs/{job}/{turn}.end").strip()
 
-        assert ended(job) == "done"
-        assert "[no next step]" not in dev("proj status")
-        # ask is read before the VM stops, and a reply starts it again.
-        dev(f"proj reply {job} ask")
-        assert ended(job, 2) == "ask"
-        assert "[asks]" in dev("proj status")
-        dev(f"proj reply {job} silent")
-        assert ended(job, 3) == "undeclared"
-        assert "[no next step]" in dev("proj status")
-        # Exactly one nudge, in the same turn and conversation.
-        nudge = host.succeed(f"cat /data/dev/jobs/{job}/3.cut")
+        # Told once, in the same turn and conversation, it awaits an issue:
+        # the declaration holds its URL, and the host reads the issue.
+        assert ended(job) == "await"
+        nudge = host.succeed(f"cat /data/dev/jobs/{job}/1.cut")
         assert "Your answer didn't say what comes next" in nudge
         assert all(x in nudge for x in ["proj await URL", "proj ask", "proj done"])
-        stream = host.succeed(f"cat /data/dev/jobs/{job}/3.jsonl")
+        stream = host.succeed(f"cat /data/dev/jobs/{job}/1.jsonl")
         assert sum(json.loads(l).get("type") == "result" for l in stream.splitlines()) == 2
-        host.wait_until_succeeds(f"jq -e '.items[\"{job}\"].phase | contains(\"without saying what comes next\")' /data/dev/jobs/.waits.json", timeout=30)
-        wait = json.loads(host.succeed("cat /data/dev/jobs/.waits.json"))["items"][job]
-        assert wait["since"] == wait["due"], wait
-        # The declaration contains URLs only. GitHub is read on the host.
-        host.succeed("mkdir -p /tmp/gh; echo '{\"state\":\"open\"}' >/tmp/gh/repos_o_r_issues_1; echo '[]' >/tmp/gh/repos_o_r_issues_1_comments")
-        dev(f"proj reply {job} 'await https://github.com/o/r/issues/1'")
-        assert ended(job, 4) == "await"
         baseline = host.succeed(f"cat /data/dev/jobs/{job}/await")
         assert baseline.startswith("o/r#1\t") and '"state":"open"' in baseline
+        # News is its next turn, in the sandbox again, which says it's done.
         host.succeed("echo '[{\"body\":\"news\"}]' >/tmp/gh/repos_o_r_issues_1_comments")
         dev("proj _watch o/r")
-        assert ended(job, 5) == "done"
-        assert host.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "5"
+        assert ended(job, 2) == "done"
+        assert "[no next step]" not in dev("proj status")
+        assert host.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
 
     with subtest("rm stops and saves, keep undoes it, gc deletes once expired"):
         dev(f"agent rm {o}")
