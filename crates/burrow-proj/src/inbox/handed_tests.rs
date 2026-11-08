@@ -229,7 +229,6 @@ fn a_reply_cannot_smuggle_outside_edits_into_a_running_job() {
 
 #[test]
 fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
-    use std::os::unix::fs::PermissionsExt;
     for field in ["title", "body"] {
         for outsider in [false, true] {
             let had = issue(7, "sam", &["claude"]);
@@ -248,8 +247,14 @@ fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
             let d = finished(&mut b, &had, 0, &[], &had);
             let input = fs::read_to_string(d.join("input")).unwrap();
             fs::write(b.path("new-issue"), edited.to_string()).unwrap();
-            fs::write(b.path("hook"), format!("#!/bin/sh\nif [ \"$1\" = 'api repos/sam/box/issues/7' ]; then cp '{}' '{}'; fi\n", b.path("new-issue").display(), b.path("repos_sam_box_issues_7").display())).unwrap();
-            fs::set_permissions(b.path("hook"), fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(
+                b.path("hook"),
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = 'api repos/sam/box/issues/7' ]; then cp '{}' '{}'; fi\n",
+                    b.path("new-issue").display(),
+                    b.path("repos_sam_box_issues_7").display()
+                ),
+            );
             let mut p = b.pass();
             p.jobs("sam/box", "box", std::slice::from_ref(&had))
                 .unwrap();

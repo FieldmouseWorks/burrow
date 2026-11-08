@@ -206,7 +206,7 @@ fn a_closed_prs_sessions_go_for_good() {
         fs::write(sessions.join(x).join("home/sessions/s"), "said").unwrap();
     }
     let locked = sessions.join(".gone-1-codex--pr-sam_r-6-1234abcd/home");
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+    burrow_test::permissions(&locked, 0o500);
     rig.work();
     assert_eq!(rig.names("sessions"), ["codex--pr-sam_r-5-1234abcd"]);
 }

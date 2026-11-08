@@ -5,7 +5,6 @@
 //! its exits.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -13,9 +12,7 @@ use std::sync::OnceLock;
 
 const BIN: &str = env!("CARGO_BIN_EXE_burrow-update");
 
-/// Written once for every test: a file being written while another test
-/// starts a process is open for writing in that process until it execs,
-/// and running the file then fails with "Text file busy".
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
@@ -44,11 +41,10 @@ fn bin() -> &'static Path {
             )
         })) {
             let path = bin.path().join(name);
-            fs::write(&path, text).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&path, text);
         }
         // For a run as nobody, too.
-        fs::set_permissions(bin.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::permissions(bin.path(), 0o755);
         bin
     })
     .path()
@@ -85,7 +81,7 @@ impl Machine {
             // For nobody (`command`), who may write where it keeps its
             // state and the stand-ins keep what they did.
             for p in ["", "fake"] {
-                fs::set_permissions(m.path(p), fs::Permissions::from_mode(0o777)).unwrap();
+                burrow_test::permissions(m.path(p), 0o777);
             }
         }
         let b = bin();

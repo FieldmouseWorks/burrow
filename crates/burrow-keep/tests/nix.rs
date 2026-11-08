@@ -190,7 +190,7 @@ fn copy_dir(from: &Path, to: &Path) {
         if f.file_type().unwrap().is_dir() {
             copy_dir(&f.path(), &to.join(f.file_name()));
         } else {
-            fs::copy(f.path(), to.join(f.file_name())).unwrap();
+            burrow_test::copy_file(f.path(), to.join(f.file_name()));
         }
     }
 }

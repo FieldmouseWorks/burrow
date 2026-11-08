@@ -3,16 +3,12 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-fn script(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
+use burrow_test::executable as script;
 
 /// What each stand-in keeps: how it was run ($0 and its words) and the
 /// SCCACHE_ variables it got, one line each, in $LOGS/NAME.
@@ -20,11 +16,7 @@ const KEEPS: &str = r#"name=${0##*/}
 { echo "$0 $*"; env | grep '^SCCACHE_' | sort; } >"$LOGS/$name"
 "#;
 
-/// The stand-ins, written once for every test: each keeps what it was run
-/// with. A file being written while another test starts a process is open
-/// for writing in that process until it execs, and running the file then
-/// fails with "Text file busy". No test starts one before these are written,
-/// and none is written after.
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
@@ -34,17 +26,17 @@ fn stand_ins() -> &'static Path {
         // its environment, since the wrapper takes every SCCACHE_ variable
         // out: STAND_IN, or killed when that's `kill`.
         script(
-            &b.join("sccache"),
-            &format!(
+            b.join("sccache"),
+            format!(
                 "#!/bin/sh\n{KEEPS}[ \"$STAND_IN\" = kill ] && kill -9 $$\nexit \"${{STAND_IN:-0}}\"\n"
             ),
         );
         script(
-            &b.join("cc"),
-            &format!("#!/bin/sh\n{KEEPS}exit \"${{CC_EXIT:-0}}\"\n"),
+            b.join("cc"),
+            format!("#!/bin/sh\n{KEEPS}exit \"${{CC_EXIT:-0}}\"\n"),
         );
         script(
-            &b.join("id"),
+            b.join("id"),
             "#!/bin/sh\n[ \"$1\" = -un ] && [ -n \"$WHO\" ] && echo \"$WHO\"\n",
         );
         fs::write(b.join("not-runnable"), "#!/bin/sh\n").unwrap();
@@ -66,7 +58,6 @@ impl Machine {
     }
 
     fn with(daemon: bool) -> Machine {
-        // Before anything here can start a process.
         let bin = stand_ins();
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();

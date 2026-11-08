@@ -34,17 +34,14 @@ const SWEEP: &str = env!("CARGO_BIN_EXE_burrow-renovate-sweep");
 const REPO: &str = "sam/r";
 const LOCK: &str = "Lock file maintenance (cargo)";
 
-/// Written once for every test: a file being written while another test
-/// starts a process is open for writing in that process until it execs,
-/// and running the file then fails with "Text file busy".
+/// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
         for (name, text) in STAND_INS {
             let path = bin.path().join(name);
-            fs::write(&path, format!("#!/bin/sh\n{text}")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&path, format!("#!/bin/sh\n{text}"));
         }
         bin
     })

@@ -144,19 +144,16 @@ mod tests {
     // A local gh fixture, so the deadline is exercised through baseline
     // registration and the real API/pagination path, not a mocked timer.
     fn registration_fixture(script: &str) -> (tempfile::TempDir, Config) {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let gh = d.path().join("gh");
-        fs::write(
+        burrow_test::executable(
             &gh,
             format!(
                 "#!/bin/sh\necho $$ >>{}/pids\necho \"$*\" >>{}/calls\n{script}\n",
                 d.path().display(),
                 d.path().display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut value = crate::config::tests::example();
         value["jobs"] = serde_json::json!(d.path().join("jobs"));
         value["tools"]["gh"] = serde_json::json!(gh);
@@ -321,7 +318,6 @@ mod tests {
 
     #[test]
     fn every_collection_failure_stops_the_vm_before_returning() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let mut value = crate::config::tests::example();
         value["jobs"] = serde_json::json!(d.path().join("jobs"));
@@ -341,16 +337,14 @@ mod tests {
         ] {
             let marker = d.path().join("stopped");
             let _ = fs::remove_file(&marker);
-            fs::write(
+            burrow_test::executable(
                 &agent,
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = stop ]; then touch {}; else {}; fi\n",
                     marker.display(),
                     command
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+            );
             assert!(
                 collect_with(
                     &cfg,

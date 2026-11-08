@@ -368,7 +368,6 @@ mod tests {
 
     #[test]
     fn noisy_checks_are_drained_with_bounded_capture_in_every_outcome() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         for (name, end, within, expected) in [
             ("success", "exit 0", Duration::from_secs(10), true),
@@ -383,8 +382,12 @@ mod tests {
             // A regular-file capture exceeds the child's file-size limit and
             // fails the success case. A bounded pipe drains without that disk use.
             let path = dir.path().join(name);
-            fs::write(&path, format!("#!/bin/sh\nchunk=xxxxxxxx; for step in 1 2 3 4 5 6 7 8 9 10; do chunk=$chunk$chunk; done\nulimit -c 0; ulimit -f 1\ni=0; while [ \"$i\" -lt 256 ]; do printf '%s' \"$chunk\"; printf '%s' \"$chunk\" >&2; i=$((i+1)); done\n{end}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(
+                &path,
+                format!(
+                    "#!/bin/sh\nchunk=xxxxxxxx; for step in 1 2 3 4 5 6 7 8 9 10; do chunk=$chunk$chunk; done\nulimit -c 0; ulimit -f 1\ni=0; while [ \"$i\" -lt 256 ]; do printf '%s' \"$chunk\"; printf '%s' \"$chunk\" >&2; i=$((i+1)); done\n{end}\n"
+                ),
+            );
             let (passed, said) = run_check(&path, within);
             assert_eq!(passed, expected, "{name}");
             assert_eq!(said.len(), 4096, "{name}");
