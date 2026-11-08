@@ -74,9 +74,12 @@ impl Pass<'_> {
         };
         let waiting = self.inbox.state.join(WAITING);
         // Its own still going: a record with the mark and a job, or a mark
-        // whose job hasn't started yet. One that hasn't after ten minutes
-        // (the label didn't take, or someone took it off) is let go, and a
-        // pass is booked for then.
+        // whose job hasn't started yet. One that hasn't after ten minutes is
+        // let go only once GitHub says the issue no longer carries the label
+        // (it didn't take, someone took it off, or the issue closed): while
+        // it does, the inbox is still trying to start its job, and its misses
+        // tell the owner, so it holds its place rather than handing on
+        // another issue that would stall the same way.
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
@@ -90,6 +93,8 @@ impl Pass<'_> {
                 if let Some(repo) = self.wake_repo() {
                     self.book(&repo, m + 2 * RETRY);
                 }
+            } else if self.still_handed(&mark, &label) {
+                going += 1;
             } else {
                 let _ = fs::remove_dir_all(&d);
             }
@@ -139,7 +144,8 @@ impl Pass<'_> {
             }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
-            fs::write(d.join("drained"), "").map_err(|e| io_fail(&d.join("drained"), e))?;
+            fs::write(d.join("drained"), format!("{repo}#{n}\n"))
+                .map_err(|e| io_fail(&d.join("drained"), e))?;
             if !self.add_label(&repo, &n, &label) {
                 let _ = fs::remove_dir_all(&d);
                 self.miss(&repo);
@@ -152,6 +158,25 @@ impl Pass<'_> {
             break;
         }
         Ok(())
+    }
+
+    /// Whether the issue a `drained` mark names (OWNER/REPO#N) is open with
+    /// the engine's label still on, as GitHub has it now. One GitHub won't
+    /// say about counts as still handed on, its repo's retry booked; a mark
+    /// that names none is let go.
+    fn still_handed(&mut self, mark: &std::path::Path, label: &str) -> bool {
+        let named = fs::read_to_string(mark).unwrap_or_default();
+        let Some((repo, n)) = named.trim().split_once('#') else {
+            return false;
+        };
+        let Some(issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
+            self.miss(repo);
+            return true;
+        };
+        issue["state"] == "open"
+            && issue["labels"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(label)))
     }
 
     /// The repo a pass is booked on for the drain's own sake (any pass ends

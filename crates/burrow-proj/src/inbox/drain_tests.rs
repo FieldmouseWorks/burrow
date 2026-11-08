@@ -297,3 +297,55 @@ fn a_label_refused_does_not_hold_up_the_drain() {
     assert_eq!(log.matches("labels[]=codex").count(), 1, "{log}");
     assert!(state.join("sam_box-8/drained").exists());
 }
+
+// One handed on whose job never starts holds its place while GitHub still
+// has it open with the engine's label: the drain doesn't hand on another
+// that would stall the same way. Once the label's off, it's let go and the
+// next is handed on.
+#[test]
+fn a_stalled_hand_on_holds_its_place() {
+    let b = Box::new();
+    let state = b.cfg.inbox.as_ref().unwrap().state.clone();
+    let old = "2026-10-01T00:00:00Z";
+    let four = found("sam/game", 4, "sam", &["ready"], old);
+    let five = found("sam/game", 5, "sam", &["ready"], old);
+    b.pass()
+        .note_ready("sam/game", &[four.clone(), five.clone()])
+        .unwrap();
+    on_github(&b, &four);
+    on_github(&b, &five);
+    let backdate = |n: u64| {
+        let mark = state.join(format!("sam_game-{n}/drained"));
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&mark)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    };
+    b.pass().drain().unwrap();
+    assert!(b.log().contains("issues/4/labels -f labels[]=codex"));
+    assert_eq!(
+        fs::read_to_string(state.join("sam_game-4/drained")).unwrap(),
+        "sam/game#4\n"
+    );
+    // Its job never started, and GitHub has the label on still.
+    backdate(4);
+    on_github(&b, &found("sam/game", 4, "sam", &["ready", "codex"], old));
+    let before = b.log().len();
+    b.pass().drain().unwrap();
+    let log = b.log()[before..].to_owned();
+    assert!(!log.contains("labels[]=codex"), "{log}");
+    assert!(state.join("sam_game-4/drained").exists());
+    // The label's off: its old mark is let go, and the oldest ready one
+    // (itself again, as nothing else holds it) handed on afresh.
+    on_github(&b, &four);
+    let before = b.log().len();
+    b.pass().drain().unwrap();
+    let log = b.log()[before..].to_owned();
+    assert!(log.contains("issues/4/labels -f labels[]=codex"), "{log}");
+    let mark = state.join("sam_game-4/drained");
+    let made = crate::mtime(&mark).unwrap();
+    assert!(crate::now() - made < 60, "a fresh mark: {log}");
+}
