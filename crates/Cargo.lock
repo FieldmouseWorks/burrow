@@ -280,6 +280,7 @@ dependencies = [
  "burrow-github",
  "burrow-usage-reset",
  "burrow-watchdog",
+ "gh-token",
  "jiff",
  "rustix",
  "serde",

@@ -58,6 +58,7 @@ impl Box {
 for arg in "$@"; do
   case "$arg" in owner=*) owner=${{arg#owner=}} ;; name=*) name=${{arg#name=}} ;; n=*) n=${{arg#n=}} ;; esac
 done
+[ "$GH_REPO" = "$owner/$name" ] || exit 1
 f='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"
 [ -e "$f" ] || f='{dir}/default-issue'
 jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{dir}/written.jq'
