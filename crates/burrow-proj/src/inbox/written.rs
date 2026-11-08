@@ -63,8 +63,9 @@ impl Pass<'_> {
             if let Some(c) = &cursor {
                 args.extend(["-f".into(), format!("cursor={c}")]);
             }
-            let got = crate::github::api(
+            let got = crate::github::api_for(
                 self.cfg,
+                repo,
                 &args.iter().map(String::as_str).collect::<Vec<_>>(),
             )?;
             if got.get("errors").is_some() {
@@ -115,6 +116,36 @@ impl Pass<'_> {
 mod tests {
     use super::*;
     use crate::inbox::sorting_tests::{Box, issue};
+    #[test]
+    fn text_verification_routes_every_page_to_its_repository() {
+        use std::fs;
+        for repo in ["FieldmouseWorks/box", "TusanHomichi/box"] {
+            let b = Box::new();
+            // Jobs, continuations and triage all use written(). Require the
+            // route on both its first read and its comment pagination.
+            let gh = &b.cfg.tools.gh;
+            let script = fs::read_to_string(gh).unwrap();
+            let guard = format!(
+                "[ \"$GH_REPO\" = '{repo}' ] || exit 1\nprintf '%s\\n' \"$GH_REPO\" >>'{}'\n",
+                b.path("routes").display()
+            );
+            fs::write(
+                gh,
+                script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{guard}"), 1),
+            )
+            .unwrap();
+            let graphql = b.path("graphql");
+            let script = fs::read_to_string(&graphql).unwrap();
+            // First page asks for another page; second page completes the
+            // same empty comment list. Keep the real fixture's provenance.
+            fs::write(&graphql, format!("{} | jq --arg args \"$*\" '.data.repository.issue.comments.pageInfo = (if ($args | contains(\"cursor=\")) then {{hasNextPage:false,endCursor:null}} else {{hasNextPage:true,endCursor:\"next\"}} end)'\n", script.trim_end())).unwrap();
+            assert!(b.pass().written(repo, &issue(7, "sam", &[])).is_some());
+            assert_eq!(
+                fs::read_to_string(b.path("routes")).unwrap(),
+                format!("{repo}\n{repo}\n")
+            );
+        }
+    }
     fn text() -> Value {
         let edits = json!({"totalCount":0,"nodes":[]});
         json!({"author":{"login":"sam"},"title":"trusted title","body":"trusted body", "userContentEdits":edits,"timelineItems":edits,"comments":{"totalCount":1,"nodes":[{"databaseId":9,"author":{"login":"sam"},"body":"trusted reply","createdAt":"2026-11-01T00:00:00Z","userContentEdits":edits}]}})

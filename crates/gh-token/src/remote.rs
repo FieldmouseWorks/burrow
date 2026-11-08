@@ -25,10 +25,6 @@
 //! host their own way (`github.com.`, `%67ithub.com`), so a reading of ours
 //! that differed from theirs would let a login through.
 //!
-//! git-lfs does its own HTTP, sending git's headers and the netrc's login
-//! by its own rules, and nothing like this can stop it. So in the App's env
-//! it isn't run at all: `lfs` refuses it.
-
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -98,18 +94,6 @@ fn command(
         .env_remove("GIT_SSL_CERT")
         .env("NETRC", "/dev/null");
     Ok(helper)
-}
-
-/// git-lfs, REAL, with `args`, but never in the App's env (with the
-/// socket). Returns only when it couldn't, or wouldn't.
-pub fn lfs(real: &str, args: &[String], socket: Option<&Path>) -> Error {
-    if socket.is_some() {
-        return Error::refused(
-            "acting as the App, git-lfs isn't run: it would send your own login (git's headers, your netrc) without asking for the App's",
-        );
-    }
-    let e = Command::new(real).args(args).exec();
-    Error::refused(format!("{real}: {e}"))
 }
 
 /// The URL without its user and password: its host ends at the first `/`,
@@ -322,18 +306,5 @@ mod tests {
         // Nothing, or more than git gives: refused.
         assert!(run(&[], socket).is_err());
         assert!(run(&["origin", bundle, "x"], socket).is_err());
-    }
-
-    #[test]
-    fn never_runs_git_lfs_as_the_app() {
-        let e = lfs(
-            "/nonexistent/git-lfs",
-            &args(&["pre-push", "origin"]),
-            Some(Path::new("/run/gh-token/workers.sock")),
-        );
-        assert!(e.what.contains("acting as the App"), "{e}");
-        // Outside the env it's git-lfs, as it is: here, one that isn't there.
-        let e = lfs("/nonexistent/git-lfs", &args(&["version"]), None);
-        assert!(e.what.starts_with("/nonexistent/git-lfs: "), "{e}");
     }
 }
