@@ -47,6 +47,7 @@ pkgs.testers.runNixOSTest {
 
     # Keep the recorded stall for assertions, without escalating it to jobs.
     systemd.services.burrow-watchdog.enable = false;
+    environment.systemPackages = [ pkgs.jq ];
 
     users.users.dev = {
       isNormalUser = true;
