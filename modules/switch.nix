@@ -269,7 +269,10 @@ in
       };
       systemd.services."${boot}-trial-watch" = {
         description = "Retry queued trial boots on work completion";
-        after = [ "${boot}-check.service" ];
+        # A target normally orders itself after its wanted services. The
+        # settlement check runs after multi-user.target, so opt out of that
+        # implicit ordering as well as waiting for settlement.
+        after = [ "multi-user.target" "${boot}-check.service" ];
         wantedBy = [ "multi-user.target" ];
         restartIfChanged = false;
         serviceConfig = {
