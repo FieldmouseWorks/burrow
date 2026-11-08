@@ -380,4 +380,52 @@ status, _ = run(mkpr(**dedited), 900)
 assert not merged() and "Dependency update" not in status, status
 S.CFG["renovateEmail"] = email
 
+# An explicit review raise gates every landing outcome, including Renovate's
+# success status and a judge's already-sealed land verdict.
+for update in (
+    {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13},
+    {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 12},
+    {**major, "comments": [said(swept("ok"))]},
+    {"branch": "dependabot/npm/foo-2", "title": "Bump foo from 1.4 to 2.0", "number": 10,
+     "comments": [said(judgment("land", n=10))]},
+):
+    fresh_pr_state()
+    status, _ = run(mkpr(labels=("review",), **update), 900)
+    assert not merged() and "state=success" not in status and "review" in status, status
+    status, _ = run(clean(labels=("review",), **update), 1000)
+    assert "state=success" in status, status
+
+# Removing the label doesn't remove Conary's persisted raise.
+from harness import cn
+fresh_pr_state()
+cn(kept=["review"])
+status, _ = run(mkpr(**bump), 900)
+assert not merged() and "review" in status, status
+status, _ = run(clean(**bump), 1000)
+assert merged(), status
+cn()
+
+# A clean review cannot replace either major gate.
+fresh_pr_state()
+status, _ = run(clean(labels=("review",), **major), 900)
+assert not merged() and JOBS == [] and "waiting for renovate-sweep" in status, status
+fresh_pr_state()
+status, _ = run(clean(labels=("review",), branch="dependabot/npm/foo-2",
+                      title="Bump foo from 1.4 to 2.0", number=10), 900)
+assert not merged() and len(JOBS) == 1 and "major dependency update" in JOBS[0], (status, JOBS)
+
+# Review raises leave every sweep ownership fence in place, findings included.
+for update in (
+    {**major, "comments": [said(swept("held"))]},
+    major,
+    {**minor, "checks": red_ci},
+    {**lock, "checks": [*CI_GREEN, artifacts], "comments": [refused()]},
+):
+    for threads in ([], [False]):
+        fresh_pr_state()
+        kw = {**update, "labels": ("review",), "threads": threads}
+        run(mkpr(**kw), 0)
+        status, _ = run(clean(**kw), 7200)
+        assert not merged() and JOBS == [] and "renovate-sweep" in status, (status, JOBS)
+
 print("deps: ok")
