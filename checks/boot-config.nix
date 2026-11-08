@@ -14,6 +14,13 @@ let
   trial = cfg.systemd.services.burrow-boot-trial;
   watch = cfg.systemd.services.burrow-boot-trial-watch;
   path = cfg.systemd.paths.burrow-boot-trial;
+  withRunner = machine.extendModules {
+    modules = [
+      self.nixosModules.dispatch
+      { burrow.dispatch.runners.ci = { repo = "sam/homelab"; labels = [ "self-hosted" ]; }; }
+    ];
+  };
+  changedWatch = withRunner.config.systemd.services.burrow-boot-trial-watch;
   inherit (nixpkgs) lib;
   names = [
     "burrow-boot-check.service"
@@ -43,6 +50,9 @@ assert builtins.elem "burrow-boot-check.service" trial.after;
 assert builtins.elem "burrow-boot-check.service" watch.after;
 assert builtins.elem "multi-user.target" watch.wantedBy;
 assert watch.serviceConfig.Restart == "always";
+# Switches must restart the listener when its captured work patterns change.
+assert watch.restartIfChanged && changedWatch.restartIfChanged;
+assert watch.serviceConfig.ExecStart != changedWatch.serviceConfig.ExecStart;
 assert path.pathConfig.Unit == "burrow-boot-trial.service";
 assert builtins.elem "/run/burrow-switch" path.pathConfig.PathChanged;
 assert cfg.systemd.timers.burrow-boot-trial.timerConfig.OnCalendar == "*-*-* 05:15:00";

@@ -274,7 +274,9 @@ in
         # implicit ordering as well as waiting for settlement.
         after = [ "multi-user.target" "${boot}-check.service" ];
         wantedBy = [ "multi-user.target" ];
-        restartIfChanged = false;
+        # Unlike the work it observes, the listener can restart safely. Its
+        # wrapped command captures runner patterns and must follow switches.
+        restartIfChanged = true;
         serviceConfig = {
           ExecStart = "${bootTool}/bin/${boot} watch";
           Restart = "always";
