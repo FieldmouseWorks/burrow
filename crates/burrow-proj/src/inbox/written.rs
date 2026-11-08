@@ -205,6 +205,25 @@ mod tests {
         } = b.pass().checked(&issue(7, "worker[bot]", &[]), &t).unwrap();
         assert_eq!(safe["title"], "trusted title");
         assert!(b.pass().heard(&comments[0]));
+        // An old bot issue at the cap is still unprovable. Its publisher
+        // must replace it, not receive an exception to the trust boundary.
+        t["userContentEdits"] = json!({"totalCount":100,"nodes":vec![json!({"editor":{"login":"worker","__typename":"Bot"}});100]});
+        assert_eq!(
+            b.pass()
+                .checked(&issue(7, "worker[bot]", &[]), &t)
+                .unwrap()
+                .issue["title"],
+            "Issue text withheld"
+        );
+        // Fresh, unedited bot snapshots stay readable however many updates
+        // were published as separate comments instead of body edits.
+        t["userContentEdits"] = json!({"totalCount":0,"nodes":[]});
+        let comment = t["comments"]["nodes"][0].clone();
+        t["comments"] = json!({"totalCount":105,"nodes":vec![comment;105]});
+        let written = b.pass().checked(&issue(7, "worker[bot]", &[]), &t).unwrap();
+        assert_eq!(written.issue["title"], "trusted title");
+        assert_eq!(written.comments.len(), 105);
+        assert!(written.comments.iter().all(|c| b.pass().heard(c)));
     }
     #[test]
     fn retained_authorized_edits_cannot_hide_a_pruned_outsider() {
