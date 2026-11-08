@@ -2,12 +2,14 @@
 use super::*;
 #[path = "classify.rs"]
 mod classify;
+// Only Go uses the suffix pattern globally; other suffix-named tests
+// count when they live under one of the test-directory patterns.
 const SPECS: &[&str] = &[
     ":(glob)tests/**",
     ":(glob)**/tests.rs",
     ":(glob)**/tests/**",
     ":(glob)**/test_*.py",
-    ":(glob)**/*_test.*",
+    ":(glob)**/*_test.go",
     ":(glob)**/*.test.ts",
     ":(glob)src/test/**",
 ];
