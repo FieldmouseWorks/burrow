@@ -1,6 +1,6 @@
 //! HOST-boot: GRUB only ever defaults to a kernel that has already booted on
 //! the machine. A new kernel, initrd or kernel command line gets tried once,
-//! at a quiet hour, and becomes the default only after it comes up healthy.
+//! when the machine goes idle, and becomes the default only after it comes up healthy.
 //! If it panics or hangs, the panic timer or the hardware watchdog resets the
 //! board and GRUB boots the last good one.
 //!
@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 pub mod boot;
 pub mod menu;
+pub mod watch;
 
 /// What modules/switch.nix tells HOST-boot about the machine.
 #[derive(Debug, Deserialize)]
@@ -44,6 +45,12 @@ pub struct Config {
     /// says what boots next (/boot, and a mirrored /boot-fallback).
     pub grub_cfg: PathBuf,
     pub grub_dirs: Vec<PathBuf>,
+    /// Runner unit globs: listeners alone are idle; Runner.Worker means busy.
+    #[serde(default)]
+    pub runners: Vec<String>,
+    /// Other work a reboot must not interrupt (including activating oneshots).
+    #[serde(default)]
+    pub busy_units: Vec<String>,
     pub tools: Tools,
 }
 
@@ -55,6 +62,8 @@ pub struct Tools {
     pub sudo: PathBuf,
     pub grub_editenv: PathBuf,
     pub systemctl: PathBuf,
+    #[serde(default)]
+    pub journalctl: PathBuf,
     /// HOST-notify, which tells the owner.
     pub notify: PathBuf,
     /// systemd-cat, for what it says in the journal.

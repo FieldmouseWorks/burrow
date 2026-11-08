@@ -10,6 +10,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use burrow_github::{Gh, call, call_once};
+use burrow_systemd::working;
 use serde_json::{Value, json};
 
 use crate::config::{Config, Fresh};
@@ -319,41 +320,6 @@ fn shown(out: &str) -> BTreeMap<String, String> {
         .filter_map(|l| l.split_once('='))
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect()
-}
-
-/// Whether a Runner.Worker process is anywhere in this cgroup: an error
-/// when the cgroup, or the name of a process in it, can't be read. A
-/// process whose name is missing is one gone, unless the cgroup still has
-/// it: then /proc hides it from us.
-fn working(cg: &Path) -> std::io::Result<bool> {
-    let procs = |dir: &Path| -> std::io::Result<Vec<String>> {
-        Ok(fs::read_to_string(dir.join("cgroup.procs"))?
-            .lines()
-            .map(|p| p.trim().to_owned())
-            .collect())
-    };
-    let mut missing = Vec::new();
-    for pid in procs(cg)? {
-        match fs::read_to_string(format!("/proc/{pid}/comm")) {
-            Ok(comm) if comm.trim() == "Runner.Worker" => return Ok(true),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(pid),
-            Err(e) => return Err(e),
-        }
-    }
-    if let Some(pid) = procs(cg)?.into_iter().find(|p| missing.contains(p)) {
-        return Err(std::io::Error::other(format!(
-            "process {pid} is in {} but not in /proc",
-            cg.display()
-        )));
-    }
-    for e in fs::read_dir(cg)? {
-        let e = e?;
-        if e.file_type()?.is_dir() && working(&e.path())? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]

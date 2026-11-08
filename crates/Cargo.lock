@@ -83,6 +83,7 @@ dependencies = [
 name = "burrow-boot"
 version = "0.0.0"
 dependencies = [
+ "burrow-systemd",
  "rustix",
  "serde",
  "serde_json",
@@ -113,6 +114,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-events",
  "burrow-github",
+ "burrow-systemd",
  "burrow-watchdog",
  "jiff",
  "serde",
@@ -352,6 +354,13 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-systemd"
+version = "0.0.0"
+dependencies = [
  "tempfile",
 ]
 

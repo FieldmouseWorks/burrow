@@ -33,8 +33,9 @@ pub fn bin() -> &'static Path {
             ),
             (
                 "systemctl",
-                "#!/bin/sh\necho \"$*\" >>\"$FAKE/systemctl\"\ncase \"$*\" in\n  --user*list-units*) cat \"$FAKE/jobs\" 2>/dev/null ;;\n  list-units*) cat \"$FAKE/sandboxes\" 2>/dev/null ;;\n  \"-q is-active sshd.service\") [ ! -e \"$FAKE/sshd-down\" ] ;;\n  reboot) [ ! -e \"$FAKE/fail-reboot\" ] ;;\nesac\n",
+                "#!/bin/sh\necho \"$*\" >>\"$FAKE/systemctl\"\ncase \"$*\" in\n  --user*list-units*) cat \"$FAKE/jobs\" 2>/dev/null; exit 0 ;;\n  *ci-runner.service*) cat \"$FAKE/runners\" 2>/dev/null; exit 0 ;;\n  *box-update.service*) cat \"$FAKE/update\" 2>/dev/null; exit 0 ;;\n  list-units*) cat \"$FAKE/sandboxes\" 2>/dev/null; exit 0 ;;\n  \"-q is-active sshd.service\") [ ! -e \"$FAKE/sshd-down\" ] ;;\n  reboot) [ ! -e \"$FAKE/fail-reboot\" ] ;;\nesac\n",
             ),
+            ("journalctl", "#!/bin/sh\ncat \"$FAKE/events\"\n"),
             (
                 "box-notify",
                 "#!/bin/sh\n(IFS='|'; echo \"$*\") >>\"$FAKE/notify\"\n[ ! -e \"$FAKE/fail-notify\" ]\n",
@@ -101,7 +102,7 @@ impl Machine {
             "grubCfg": m.path("boot/grub/grub.cfg"),
             "grubDirs": [m.path("boot"), m.path("boot-fallback"), m.path("nowhere")],
             "tools": {"sudo": b.join("sudo"), "grubEditenv": b.join("grub-editenv"),
-                      "systemctl": b.join("systemctl"), "notify": b.join("box-notify"),
+                      "systemctl": b.join("systemctl"), "journalctl": b.join("journalctl"), "notify": b.join("box-notify"),
                       "logger": b.join("systemd-cat")},
         });
         fs::write(m.path("config.json"), config.to_string()).unwrap();

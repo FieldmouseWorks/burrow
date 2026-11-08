@@ -4,7 +4,7 @@
 # including what it needs to reach it, and a mistake undoes itself.
 #
 # With trialBoot, the same goes for kernels: HOST-boot boots a new kernel,
-# initrd or kernel command line once, at a quiet hour, and GRUB only defaults
+# initrd or kernel command line once, when idle, and GRUB only defaults
 # to it after it came up.
 inputs:
 { config, lib, pkgs, ... }:
@@ -30,6 +30,10 @@ let
   # is).
   bootTool = wrapped boot "burrow-boot" "burrow-boot" (pkgs.writeText "boot.json" (builtins.toJSON {
     inherit boot user switchState;
+    busyUnits = [ "${prefix}-update.service" "autoland*.service" ];
+    runners = lib.mapAttrsToList (name: _: "github-runner-${name}.service") (config.services.github-runners or { })
+      ++ lib.mapAttrsToList (name: _: "${name}.service") (config.burrow.dispatch.runners or { })
+      ++ lib.optional (config.burrow.dispatch.fresh.enable or false) "${config.burrow.dispatch.fresh.template}*.service";
     host = config.networking.hostName;
     state = stateDir;
     booted = "/run/booted-system";
@@ -40,6 +44,7 @@ let
       sudo = "${config.security.wrapperDir}/sudo";
       grubEditenv = "${pkgs.grub2}/bin/grub-editenv";
       systemctl = "${config.systemd.package}/bin/systemctl";
+      journalctl = "${config.systemd.package}/bin/journalctl";
       notify = lib.getExe config.burrow.tools.notify;
       logger = "${config.systemd.package}/bin/systemd-cat";
     };
@@ -159,7 +164,7 @@ in
       at = lib.mkOption {
         type = lib.types.str;
         default = "*-*-* 05:15:00";
-        description = "When a queued trial boot happens (systemd calendar event). Pick a quiet hour.";
+        description = "Daily backstop for queued trial boots, including the two-day busy-work deadline. Idle completion events try earlier.";
       };
     };
   };
@@ -255,10 +260,29 @@ in
 
       systemd.services."${boot}-trial" = {
         description = "Boot a new kernel once, if one is waiting";
+        after = [ "${boot}-check.service" ];
         restartIfChanged = false;
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${bootTool}/bin/${boot} trial";
+        };
+      };
+      systemd.services."${boot}-trial-watch" = {
+        description = "Retry queued trial boots on work completion";
+        after = [ "${boot}-check.service" ];
+        wantedBy = [ "multi-user.target" ];
+        restartIfChanged = false;
+        serviceConfig = {
+          ExecStart = "${bootTool}/bin/${boot} watch";
+          Restart = "always";
+          RestartSec = 5;
+        };
+      };
+      systemd.paths."${boot}-trial" = {
+        wantedBy = [ "multi-user.target" ];
+        pathConfig = {
+          PathChanged = [ "${stateDir}/boot-trial" switchState ];
+          Unit = "${boot}-trial.service";
         };
       };
       systemd.timers."${boot}-trial" = {

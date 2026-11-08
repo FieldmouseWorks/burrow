@@ -40,6 +40,7 @@ fn parse(words: &[String]) -> Option<(bool, Word)> {
     let word = match words {
         [] => Word::Status,
         [w] if w == "status" => Word::Status,
+        [w] if w == "watch" => Word::Watch,
         [w] if w == "check" => Word::Check,
         [w] if w == "trial" => Word::Trial { force: false },
         [w, f] if w == "trial" && f == "--force" => Word::Trial { force: true },

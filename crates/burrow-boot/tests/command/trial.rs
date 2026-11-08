@@ -31,7 +31,7 @@ fn a_trial_reboots_once_into_its_menu_entry() {
     let systemctl = m.fake("systemctl");
     assert!(systemctl.ends_with("\nreboot\n"), "{systemctl}");
     // The box was idle: it asked.
-    assert!(systemctl.starts_with("--user -M sam@ list-units --plain --no-legend --state=active proj-*.service\nlist-units --plain --no-legend --state=active microvm@*.service\n"), "{systemctl}");
+    assert!(systemctl.starts_with("--user -M sam@ list-units --plain --no-legend --state=active,activating,deactivating,reloading proj-*.service autoland-proof-*.service\nlist-units --plain --no-legend --state=active,activating,deactivating,reloading microvm@*.service\n"), "{systemctl}");
     // The trial stays queued until the boot after settles it, and a grubenv
     // there already is used as it is.
     assert!(m.state("boot-trial").is_some());
@@ -69,7 +69,7 @@ fn nothing_queued_or_proven_since_is_no_reboot() {
 
 #[test]
 fn jobs_or_sandboxes_put_a_trial_off_for_two_days_unless_forced() {
-    let postponed = ok("jobs or sandboxes running; trial postponed\n");
+    let postponed = ok("work running; trial postponed\n");
     for busy in ["jobs", "sandboxes"] {
         let m = queued();
         m.set(busy, "proj-1.service loaded active running x\n");
@@ -310,4 +310,58 @@ fn an_older_trial_that_never_booted_makes_way_once_let_go_of() {
     assert!(m.fake("systemctl").ends_with("reboot\n"));
     assert_eq!(m.state("boot-failed"), Some(String::new()));
     assert_eq!(m.state("boot-proven"), Some(String::new()));
+}
+
+#[test]
+fn update_and_runner_work_postpone_until_the_completion_retry() {
+    for (field, pattern, fake, unit) in [
+        (
+            "busyUnits",
+            "box-update.service",
+            "update",
+            "box-update.service loaded activating start x\n",
+        ),
+        (
+            "runners",
+            "ci-runner.service",
+            "runners",
+            "ci-runner.service loaded active running x\n",
+        ),
+    ] {
+        let m = queued();
+        let path = m.path("config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config[field] = serde_json::json!([pattern]);
+        std::fs::write(path, config.to_string()).unwrap();
+        m.set(fake, unit);
+        assert_eq!(
+            said(&m.run(&["trial"])),
+            ok("work running; trial postponed\n")
+        );
+        assert!(!m.fake("systemctl").contains("reboot"));
+        // The event retries the same command after the work leaves.
+        m.set(fake, "");
+        assert_eq!(said(&m.run(&["trial"])), ok(""));
+        assert!(m.fake("systemctl").ends_with("reboot\n"));
+    }
+}
+
+#[test]
+fn a_completion_event_requests_another_trial_attempt() {
+    let m = queued();
+    m.set(
+        "events",
+        r#"{"MESSAGE_ID":"9d1aaa27d60140bd96365438aad20286","USER_UNIT":"proj-1.service"}
+"#,
+    );
+    let out = m.run(&["watch"]);
+    // Losing the journal stream fails the watcher so systemd restarts it.
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        m.fake("systemctl")
+            .matches("start --no-block box-boot-trial.service")
+            .count(),
+        2
+    );
 }

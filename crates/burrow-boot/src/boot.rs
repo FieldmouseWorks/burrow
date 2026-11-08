@@ -27,7 +27,7 @@ use crate::{Broke, Config, menu};
 const PROVEN: &str = "boot-proven";
 const FAILED: &str = "boot-failed";
 const DEFAULT: &str = "boot-default";
-const TRIAL: &str = "boot-trial";
+pub(crate) const TRIAL: &str = "boot-trial";
 const TRYING: &str = "boot-trying";
 
 /// How long jobs and sandboxes running can put a queued trial off, in
@@ -39,6 +39,8 @@ const NOTICE: &str = "boot-trial";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Word {
+    /// Follow completion events and request trials.
+    Watch,
     /// Make SYSTEM the boot default if its boot bits came up here before;
     /// otherwise keep the default and queue SYSTEM for a trial
     /// (HOST-confirm says this).
@@ -59,6 +61,7 @@ pub fn run(cfg: &Config, word: &Word) -> Result<u8, Broke> {
     match word {
         Word::Default(system) => boot.default(system),
         Word::Trial { force } => boot.trial(*force),
+        Word::Watch => crate::watch::run(cfg),
         Word::Check => boot.check(),
         Word::Status => boot.status(),
     }
@@ -135,7 +138,7 @@ impl<'a> Boot<'a> {
             return Ok(0);
         }
         if !force && self.queued_for()? < POSTPONE && self.busy() {
-            say("jobs or sandboxes running; trial postponed");
+            say("work running; trial postponed");
             return Ok(0);
         }
         // Never with an unconfirmed switch live: a reboot would decide it.
@@ -382,23 +385,64 @@ impl<'a> Boot<'a> {
             .map_or(0, |d| d.as_secs()))
     }
 
-    /// Agent work in flight that a reboot would cut off: the user's Claude
-    /// jobs, and sandboxes.
+    /// All work a reboot would cut off. Failed inspection postpones too.
     fn busy(&self) -> bool {
-        let systemctl = &self.cfg.tools.systemctl;
-        let units = |args: &[&str]| {
-            Command::new(systemctl)
-                .args(args)
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
+        let list = |user: bool, patterns: &[String]| -> Option<String> {
+            let mut cmd = Command::new(&self.cfg.tools.systemctl);
+            if user {
+                cmd.args(["--user", "-M", &format!("{}@", self.cfg.user)]);
+            }
+            let out = cmd
+                .args([
+                    "list-units",
+                    "--plain",
+                    "--no-legend",
+                    "--state=active,activating,deactivating,reloading",
+                ])
+                .args(patterns)
                 .output()
-                .map_or(0, |o| o.stdout.iter().filter(|&&b| b == b'\n').count())
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
         };
-        let list = ["list-units", "--plain", "--no-legend", "--state=active"];
-        let user = format!("{}@", self.cfg.user);
-        let jobs = units(&[&["--user", "-M", &user][..], &list, &["proj-*.service"]].concat());
-        let sandboxes = units(&[&list[..], &["microvm@*.service"]].concat());
-        jobs + sandboxes > 0
+        let jobs = list(
+            true,
+            &["proj-*.service".into(), "autoland-proof-*.service".into()],
+        );
+        let mut patterns = self.cfg.busy_units.clone();
+        patterns.push("microvm@*.service".into());
+        let units = list(false, &patterns);
+        if [jobs, units]
+            .iter()
+            .any(|out| out.as_ref().is_none_or(|s| !s.trim().is_empty()))
+        {
+            return true;
+        }
+        if self.cfg.runners.is_empty() {
+            return false;
+        }
+        let Some(runners) = list(false, &self.cfg.runners) else {
+            return true;
+        };
+        runners.lines().any(|line| {
+            let Some(unit) = line.split_whitespace().next() else {
+                return false;
+            };
+            let out = Command::new(&self.cfg.tools.systemctl)
+                .args(["show", "--property=ControlGroup", "--value", unit])
+                .output();
+            let Ok(out) = out else {
+                return true;
+            };
+            if !out.status.success() {
+                return true;
+            }
+            let cg = String::from_utf8_lossy(&out.stdout);
+            let cg = cg.trim().trim_start_matches('/');
+            cg.is_empty()
+                || burrow_systemd::working(&Path::new("/sys/fs/cgroup").join(cg)).unwrap_or(true)
+        })
     }
 
     fn sshd_active(&self) -> bool {
