@@ -80,12 +80,15 @@ NEGATIVE = ("{} is burrow's negative: it ran the tests this PR adds or changes o
             "code it tests (an inline #[cfg(test)] block counts as code) to get it out of the negative's sight.")
 
 
-def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, red_negative=None):
+def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, red_negative=None, describe=False):
     """proofs: the failing checks that run on a machine, not in CI, and how;
     train: the merge train's failure is among them; has_ci: the repo's CI
     runs its gate on a push; before: why the last job's answers on this
     head didn't go up (claims.unposted); red_negative: the failing check
-    that is burrow's negative (negative())."""
+    that is burrow's negative (negative()); describe: its judge found only
+    its description wrong (MISDESCRIBED), which describe_task fixes."""
+    if describe:
+        return describe_task(repo, pr, why, before)
     machine = "".join(f" {c} isn't CI: it's run on a machine, like this: {how} Rerun it that way on what you push."
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
     if red_negative:
@@ -121,7 +124,49 @@ def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, 
     )
 
 
+def describe_task(repo, pr, why, before=None):
+    """A fix job for a head whose judge found its code sound and only its
+    description wrong: it edits the description and pushes nothing, since a
+    push throws away every proof the head has (burrow#507's merge of its
+    base, which nothing needed, started its CI and proofs over), and an
+    edited description is judged again on the same head."""
+    n, head = pr["number"], pr["headRefOid"]
+    return (
+        f"{about(repo, pr)} isn't settled: {why}. Its code needs nothing: fix its description, and only that. "
+        f"First check it's still yours: if the PR's head (gh pr view {n} -R {repo} --json headRefOid) isn't {head}, someone else "
+        "has pushed since it was handed to you, so stop there, leaving nothing. "
+        f"Read the judge's comment (its newest on the PR, ending in an {JUDGMENT} line), the diff (gh pr diff {n} -R {repo}) and "
+        f"the description (gh pr view {n} -R {repo} --json body), and write the description anew to match this head: correct "
+        "what the judge found wrong, add what it found left out, check every other claim in it against the diff too, and keep "
+        f"the rest as it is. {CLAIMS}"
+        "Push nothing: no commit, no merge or rebase onto its base. The head's CI and proofs are done, a push would start them "
+        "all over, and the steward has the judge look again at this same head once the new description is up. "
+        "If the judge's comment finds the code failing too (its build or tests, a finding left unfixed, a reason that doesn't "
+        "hold), this job can't settle that: change nothing and say so in your answers' comment. "
+        f"{answers(repo, pr)}Here pushed is null, and threads empty. {f'The last Claude job on this left answers that never went up: {before}. ' if before else ''}"
+        "Don't ask for a review and don't merge: the steward does those once you're done. "
+        "If something needs the owner (a decision only they can make, a secret), say exactly what in your answers' comment, "
+        f"add the {CFG['labels']['owner']} label, and stop."
+    )
+
+
 JUDGMENT = "autoland-judgment"
+# A judge's verdicts that fail a head, by what fails, each with why its fix
+# job has it and the PR's status meanwhile. FAILED: the code (its build or
+# tests, a finding left unfixed, a reason that doesn't hold), which only a
+# push settles. MISDESCRIBED: the description alone (it says the head does
+# what it doesn't, or leaves out what it does), which an edit settles with
+# no push (describe_task). A failed line from before the two were told
+# apart is the code's.
+FAILED, MISDESCRIBED = "failed", "misdescribed"
+FAILURES = {
+    FAILED: ("the Claude job that judged it found something failing on this head, its build or tests, a finding "
+             "left unfixed or a reason in its description that doesn't hold (its comment on the PR says what)",
+             "Settled, but its build or tests fail"),
+    MISDESCRIBED: ("the Claude job that judged it found its code sound and its description wrong about this head, saying "
+                   "it does what it doesn't or leaving out what it does (its comment on the PR says what)",
+                   "Settled, but its judge found its description wrong"),
+}
 
 
 REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
@@ -184,11 +229,13 @@ def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
         f"Send it to {owner} only if it can't be undone (it drops or rewrites data for good, or exposes a secret) "
         f"or it decides something the repo reserves for {owner}, and only if you genuinely can't make the call yourself. "
         "If its build or tests fail, or a reason doesn't hold, don't judge it: say what fails, and the steward hands it to a "
-        "Claude job that fixes it. "
+        "Claude job that fixes it. If the code is sound and only the description is wrong about it (it says the PR does what "
+        "it doesn't, or leaves out what it does), say what, and that job edits the description and pushes nothing. "
         "Don't push, merge, or change the PR in any other way. "
         f"Post one comment on the PR (gh pr comment {n} -R {repo}) saying what you checked and why you decided as you did, "
         f"ending with the line {verdict_line(repo, n, 'land', head, on)}, {verdict_line(repo, n, 'owner', head, on)} "
-        f"or, when its build or tests fail or a reason doesn't hold, {verdict_line(repo, n, 'failed', head, on)}, exactly as written here "
+        f"or, when its build or tests fail or a reason doesn't hold, {verdict_line(repo, n, FAILED, head, on)}, "
+        f"or, when nothing fails but its description is wrong about it, {verdict_line(repo, n, MISDESCRIBED, head, on)}, exactly as written here "
         "(the steward trusts no other), and only the one you chose. "
         f"Don't label it: for owner, the steward adds the {CFG['labels']['owner']} label itself. "
         f"Only that exact head on {base}, with the description quoted below, counts: if the PR has moved on (a new head, "
