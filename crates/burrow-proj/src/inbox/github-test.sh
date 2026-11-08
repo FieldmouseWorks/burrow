@@ -10,6 +10,7 @@ if [ -e "$TEST/once-502" ]; then
   printf 'HTTP/2.0 502 Bad Gateway\n\n{}'; exit 1
 fi
 if [ "$path" = graphql ]; then
+  if [ -f "$TEST/fail" ] && printf '%s' "api graphql" | grep -qF -f "$TEST/fail"; then exit 1; fi
   # The GraphQL fixture reads variables as fields for its jq data builder.
   set -- api graphql
   for key in owner name n cursor; do

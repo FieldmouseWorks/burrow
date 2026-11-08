@@ -16,7 +16,7 @@ job that stops before it finishes (it times out, goes quiet or crashes) is
 the machine failing, not the job's answer: it's started again the same way
 (retry_at)."""
 
-import time
+import dependency_step
 import claims
 import common as C
 import lock_wait
@@ -26,12 +26,10 @@ import reviewers as V
 import stages as S
 import stopping
 import train as T
-import waits
 from aside import aside
 from common import CFG, MIN, save, ts
-from seal import MAJOR as MAJOR_VERDICT
-from touches import automerge_spent, automerges, bot_edited, codex_written, dep_kind, gate_edit, moved_from, provenance
-from tasks import DEP_SEEN, FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
+from touches import bot_edited, codex_written, dep_kind, gate_edit, moved_from
+from tasks import FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
 from tasks import fix_task as fix_task, judge_task as judge_task, proof_task as proof_task, negative as negative
 from prs import ci_state, has_ci, our_status
 from prs import onto, land, MERGE_STEPS as MERGE_STEPS
@@ -191,154 +189,29 @@ class Pass(Context, Jobs, Actions):
             save(self.key, self.st)
             return
 
+        self.reviewed_round = False
         if self.dep and not self.fixed:
-            major_verdict = (
-                C.marker(self.pr, MAJOR_VERDICT, self.head, self.repo, self.pr["baseRefName"])
-                if self.dep == "major" and self.renovate
-                else None
-            )
-            threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
-            if changes:
-                threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
-            if (ripe := self.refresh.get("ripe")) and not threads:
-                when = time.strftime("%b %-d, ", time.localtime(ripe)) + clock(ripe)
-                self.settle(
-                    "pending",
-                    f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then",
-                    stage=S.RELEASE_AGE,
-                    wait=waits.SWEEP,
-                )
-            elif self.renovate and self.ci == "red":
-                self.settle(
-                    "pending",
-                    "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
-                    stage=S.FIX,
-                    wait=waits.SWEEP,
-                )
-            elif self.renovate and self.dep == "major" and threads and not major_verdict:
-                # Until it gives this head a verdict, renovate-sweep's job has its
-                # branch: one job on it. Its threads and reviews wait for that
-                # verdict, then go to a job of ours.
-                self.settle("pending", f"Major update, {threads}; renovate-sweep has it"[:140], stage=S.FIX, wait=waits.SWEEP)
-            elif self.renovate and self.dep == "major" and major_verdict == "held":
-                # Held for the owner (renovate-sweep tells them): no job pushes
-                # to it, threads or not, and changes what they're deciding on.
-                self.settle("pending", "Major update; renovate-sweep held it: see its comment", stage=S.OWNER, wait=None)
-            elif threads or self.ci == "red":
-                what = threads or "CI is red (" + ", ".join(self.ci_names) + ")"
-                kind = "handed" if threads else "redFixed"
-                self.hand_off(what, f"Dependency update; {what}", kind)
-            elif self.dep == "major" and self.renovate and major_verdict != "ok":
-                # renovate-sweep's verdict comes first, and its job runs the proofs
-                # until then: neither a judge nor a proof job of the steward's
-                # works the branch beside it.
-                self.settle("pending", "Major update; waiting for renovate-sweep's verdict on this head", stage=S.REVIEW, wait=waits.SWEEP)
-            elif self.held:
-                self.judged("a Claude job was asked to judge this head", DEP_SEEN)
-            elif proof_only or build_early:
-                self.prove()
-            elif self.ci == "pending":
-                self.settle("pending", "Dependency update, CI pending", stage=S.CI)
-            elif self.gate() or self.ci == "none" or asked:
-                self.judged(
-                    f"a dependency update touching {self.gate()}"
-                    if self.gate()
-                    else "the repo has no CI"
-                    if self.ci == "none"
-                    else "a Claude job was asked to judge this head",
-                    DEP_SEEN + ("; renovate-sweep cleared the major version for this head" if major_verdict == "ok" else ""),
-                )
-            elif self.dep == "major" and not self.renovate:
-                self.judged("a major dependency update", DEP_SEEN)
-            elif self.dep == "major":
-                self.land_now("Major update renovate-sweep cleared, CI green")
-            elif (
-                self.renovate
-                and not T.on(self.repo)
-                and not (
-                    (automerge_spent(self.pr) or automerges(self.pr) and CFG["labels"]["batch"] in self.labels)
-                    and provenance(self.repo, self.pr, self.st) is False
-                )
-            ):
-                # Renovate merges its own, on its next run on the repo, except in
-                # a repo with its train on, where it merges none (updates.nix):
-                # the train lands those against the default branch, and land_now
-                # the rest. So does a batch of a trusted owner's branch pins (its
-                # label): Renovate merges none while that branch keeps moving
-                # (updates/renovate-policy.nix), but only one whose commits were
-                # read and are Renovate's alone (provenance): Renovate checks
-                # that before it merges, so one that couldn't be read waits for
-                # it. So does one whose automerge Renovate switched off itself
-                # (automerge_spent), which it never merges. One with it on, open past
-                # renovateMergeAfter is a stall, which that run is kicked for
-                # first (waits.py). Not one nothing may merge (mergeable): one
-                # whose change has landed already is Renovate's to close.
-                if self.mergeable():
-                    self.settle(
-                        "success",
-                        "Dependency update, CI green",
-                        stage=S.MERGE,
-                        wait=waits.RENOVATE if automerges(self.pr) else waits.STEWARD,
-                    )
-            else:
-                self.land_now("Dependency update, CI green")
+            dependency_step.step(
+                self.repo, self.pr, self.st, dep=self.dep, renovate=self.renovate,
+                head=self.head, labels=self.labels, refresh=self.refresh,
+                open_threads=open_threads, changes=changes, ci=self.ci, ci_names=self.ci_names,
+                held=self.held, proof_only=proof_only, build_early=build_early, asked=asked,
+                gate=self.gate, reviewed=lambda: self.reviewed(open_threads, changes, swept),
+                settle=self.settle, hand_off=self.hand_off, judged=self.judged,
+                prove=self.prove, land_now=self.land_now, mergeable=self.mergeable, clock=clock)
             self.open_a_day(f"Dependency update, CI {self.ci}", swept=self.renovate)
             save(self.key, self.st)
             return
 
-        # The reviewers (review_step.py).
-        live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = review_step.look(
-            self.repo,
-            self.pr,
-            self.key,
-            self.st,
-            self.lost_on,
-            self.digest,
-            self.line,
-            self.age,
-            self.after,
-            self.strike,
-            self.cleared,
-            lambda: T.review(self.repo, self.pr),
-        )
+        looked = self.reviewed(open_threads, changes, swept)
+        if looked is None:
+            self.open_a_day(our_status(self.pr)[1] or "unsettled")
+            save(self.key, self.st)
+            return
+        live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = looked
 
-        what = []
-        if open_threads:
-            what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
-        if changes:
-            what.append("changes requested by " + ", ".join(changes))
-        if late:
-            what.append("review findings on " + ", ".join(sorted(set(late))))
-        if waiting:
-            # One reviewer's threads needn't wait for the other to finish.
-            if what:
-                self.hand_off(", ".join(what), "; ".join(waiting + stuck + what), ours=not swept)
-            else:
-                self.settle("pending", "; ".join(waiting + stuck), stage=S.REVIEWER if out_of_service else S.REVIEW)
-        elif what and capped:
-            self.hand_off(
-                f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
-                "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
-                "A Claude job judges it after, without the reviewers",
-                f"Past the review-round limit ({rounds}): " + ", ".join(what),
-                ours=not swept,
-            )
-        elif (not clean and not capped) or what:
-            if not what:
-                # Every finding answered without a new commit: the reviewers that
-                # had findings look again.
-                for r in live:
-                    if said[r][0] == "findings":
-                        self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
-                        if C.NOW - said[r][1] > self.rc["settleDelay"] * MIN:
-                            V.ask(self.repo, self.pr, self.key, r, self.st["rv"].setdefault(r, {}), self.after)
-                self.settle(
-                    "pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"), stage=S.REVIEW
-                )
-            else:
-                self.hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), ours=not swept)
         # 2. The reviewers are clean on this head and nothing is open: CI, then land.
-        elif self.ci == "red":
+        if self.ci == "red":
             # Its own once a head, apart from a findings job's: one that answered
             # a finding here without pushing didn't fix a check that failed since.
             self.hand_off(
@@ -381,3 +254,62 @@ class Pass(Context, Jobs, Actions):
 
         self.open_a_day(our_status(self.pr)[1] or "unsettled")
         save(self.key, self.st)
+
+    def reviewed(self, open_threads, changes, swept):
+        # The reviewers (review_step.py).
+        looked = review_step.look(
+            self.repo,
+            self.pr,
+            self.key,
+            self.st,
+            self.lost_on,
+            self.digest,
+            self.line,
+            self.age,
+            self.after,
+            self.strike,
+            self.cleared,
+            lambda: T.review(self.repo, self.pr),
+        )
+
+        live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = looked
+
+        what = []
+        if open_threads:
+            what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
+        if changes:
+            what.append("changes requested by " + ", ".join(changes))
+        if late:
+            what.append("review findings on " + ", ".join(sorted(set(late))))
+        if waiting:
+            # One reviewer's threads needn't wait for the other to finish.
+            if what:
+                self.hand_off(", ".join(what), "; ".join(waiting + stuck + what), ours=not swept)
+            else:
+                self.settle("pending", "; ".join(waiting + stuck), stage=S.REVIEWER if out_of_service else S.REVIEW)
+        elif what and capped:
+            self.hand_off(
+                f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
+                "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
+                "A Claude job judges it after, without the reviewers",
+                f"Past the review-round limit ({rounds}): " + ", ".join(what),
+                ours=not swept,
+            )
+        elif (not clean and not capped) or what:
+            if not what:
+                # Every finding answered without a new commit: the reviewers that
+                # had findings look again.
+                for r in live:
+                    if said[r][0] == "findings":
+                        self.after(said[r][1], self.rc["settleDelay"])  # ends: the look it asks for, once
+                        if C.NOW - said[r][1] > self.rc["settleDelay"] * MIN:
+                            V.ask(self.repo, self.pr, self.key, r, self.st["rv"].setdefault(r, {}), self.after)
+                self.settle(
+                    "pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"), stage=S.REVIEW
+                )
+            else:
+                self.hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), ours=not swept)
+        else:
+            self.reviewed_round = not unreviewed
+            return looked
+        return None
