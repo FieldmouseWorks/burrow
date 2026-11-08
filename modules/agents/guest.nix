@@ -89,11 +89,8 @@ in
 
     # Credentials arrive over fw_cfg, which PID 1 reads at start.
     boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
-    boot.kernelModules = [
-      "vmw_vsock_virtio_transport"
-      # Projects that run their own VMs get KVM in the sandbox too (nested).
-      "kvm-intel"
-    ];
+    # Udev loads the CPU's KVM module for nested VMs on either CPU vendor.
+    boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
 
     # Mount what `agent new` shared: the project's clone at the same path it has
     # on the host (absolute paths in node_modules, .venv and scripts keep working),
