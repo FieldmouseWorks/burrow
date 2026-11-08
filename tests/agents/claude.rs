@@ -6,13 +6,12 @@ use std::{
 
 fn declaration(prompt: &str) -> Option<Vec<&str>> {
     let prompt = prompt.trim_end();
-    if prompt.starts_with("silent") || prompt.starts_with("Your answer didn't say what comes next")
-    {
+    if prompt.starts_with("silent") {
         None
-    } else if prompt == "ask" {
-        Some(vec!["ask"])
-    } else if let Some(url) = prompt.strip_prefix("await ") {
-        Some(vec!["await", url])
+    } else if prompt.starts_with("Your answer didn't say what comes next") {
+        // Nudged, it awaits the issue the test serves, so one turn shows
+        // the nudge and a declaration that GitHub is read for.
+        Some(vec!["await", "https://github.com/o/r/issues/1"])
     } else {
         Some(vec!["done"])
     }
@@ -50,11 +49,6 @@ mod tests {
         assert_eq!(declaration("silent\n"), None);
         assert_eq!(
             declaration("Your answer didn't say what comes next. Say it now"),
-            None
-        );
-        assert_eq!(declaration("ask\n"), Some(vec!["ask"]));
-        assert_eq!(
-            declaration("await https://github.com/o/r/issues/1\n"),
             Some(vec!["await", "https://github.com/o/r/issues/1"])
         );
         assert_eq!(
