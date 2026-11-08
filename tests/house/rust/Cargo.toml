@@ -12,4 +12,4 @@ unsafe_code = "forbid"
 # A root package with a member, so the checks are shown to cover every
 # member, not only the root.
 [workspace]
-members = ["member", "crates/*"]
+members = ["member", "crates/*", "groups/*/members/*"]

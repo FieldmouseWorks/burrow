@@ -225,7 +225,7 @@ let
     let
       name = baseNameOf path;
       dir = dirOf path;
-      at = p: /. + p;
+      at = pathOf;
       # The package it's in: the nearest directory, its own included, whose
       # manifest has a [package].
       owner = d:
@@ -258,6 +258,9 @@ let
   # exclude), and whatever any of those depends on by path, its own or the
   # workspace's; any other Cargo.toml (a fixture) is just a file.
   rustRoot = builtins.unsafeDiscardStringContext (toString rustDir);
+  # An absolute path under rustRoot, as a path into rustDir: read through
+  # it as Nix read the source, whatever the file's name.
+  pathOf = p: if p == rustRoot then rustDir else rustDir + "/${lib.removePrefix "${rustRoot}/" p}";
   # PATH, relative to DIR, as an absolute path, with `.` and `..` resolved.
   resolvePath = dir: rel: "/" + lib.concatStringsSep "/" (lib.foldl'
     (acc: part: if part == "" || part == "." then acc else if part == ".." then lib.init acc else acc ++ [ part ])
@@ -265,25 +268,49 @@ let
   cargoDirs =
     let
       ws = rootToml.workspace or { };
-      # A member glob's directories: each part a name, or a pattern (`*`, `?`,
-      # `[...]`) matched against the directories there.
-      glob = pattern: lib.foldl'
-        (dirs: part:
-          if builtins.match ".*[*?[].*" part == null then map (d: "${d}/${part}") dirs
-          else lib.concatMap (d: map (n: "${d}/${n}") (builtins.filter
-            (n: builtins.match (builtins.replaceStrings [ "." "*" "?" ] [ "[.]" "[^/]*" "[^/]" ] part) n != null)
-            (lib.attrNames (lib.filterAttrs (_: t: t == "directory") (builtins.readDir (/. + d)))))) dirs)
-        [ rustRoot ] (builtins.filter (p: p != "" && p != ".") (lib.splitString "/" pattern));
-      excluded = map (resolvePath rustRoot) (ws.exclude or [ ]);
-      members = builtins.filter (d: !(builtins.elem d excluded) && builtins.pathExists "${d}/Cargo.toml")
-        (lib.concatMap glob (ws.members or [ ]));
+      # Cargo's member globs as regexes over a directory's path from the
+      # root, with a trailing slash: `*`, `?`, `[...]` and `[!...]` within
+      # a part, `**` for any number of parts, everything else literal, and
+      # `.` and `..` parts resolved first. Matched against every directory
+      # with a Cargo.toml, so a branch the glob doesn't reach is no error.
+      globRegex = pattern:
+        let
+          parts = lib.foldl' (acc: p: if p == "" || p == "." then acc else if p == ".." then lib.init acc else acc ++ [ p ])
+            [ ] (lib.splitString "/" pattern);
+          # One character on: st is what's made so far, whether it's in a
+          # class, and whether the class has nothing in it yet (where `!`
+          # negates and `]` is itself, as a POSIX bracket takes it first).
+          char = st: c:
+            let add = x: st // { out = st.out + x; fresh = false; }; in
+            if st.inClass then
+              (if c == "]" && !st.fresh then add "]" // { inClass = false; }
+              else if c == "!" && st.fresh && lib.hasSuffix "[" st.out then st // { out = st.out + "^"; }
+              # A class's characters are its own: a POSIX bracket has no escapes.
+              else add c)
+            else if c == "[" then st // { out = st.out + "["; inClass = true; fresh = true; }
+            else if c == "*" then add "[^/]*"
+            else if c == "?" then add "[^/]"
+            else if builtins.elem c [ "." "+" "(" ")" "{" "}" "|" "^" "$" "\\" "]" ] then add ("\\" + c)
+            else add c;
+          part = p: if p == "**" then "([^/]+/)*"
+            else (lib.foldl' char { inClass = false; fresh = false; out = ""; } (lib.stringToCharacters p)).out + "/";
+        in
+        lib.concatStrings (map part parts);
+      manifestDirs = map (f: builtins.unsafeDiscardStringContext (toString (dirOf f)))
+        (builtins.filter (f: baseNameOf f == "Cargo.toml") (lib.filesystem.listFilesRecursive rustDir));
+      relOf = d: lib.removePrefix "${rustRoot}/" d + "/";
+      excluded = map (e: relOf (resolvePath rustRoot e)) (ws.exclude or [ ]);
+      members = builtins.filter
+        (d: d != rustRoot && lib.any (g: builtins.match (globRegex g) (relOf d) != null) (ws.members or [ ])
+          && !(lib.any (e: lib.hasPrefix e (relOf d)) excluded))
+        manifestDirs;
       # The directories DIR's manifest depends on by path.
       pathDeps = dir: lib.concatMap (t: lib.concatLists (lib.mapAttrsToList (name: d:
         let inherited = ws.dependencies.${name} or { }; in
         if !builtins.isAttrs d then [ ]
         else if d ? path then [ (resolvePath dir d.path) ]
         else if (d.workspace or false) && builtins.isAttrs inherited && inherited ? path then [ (resolvePath rustRoot inherited.path) ]
-        else [ ]) t)) (depTables (readToml "${dir}/Cargo.toml"));
+        else [ ]) t)) (depTables (readToml (pathOf "${dir}/Cargo.toml")));
     in
     map (x: x.key) (builtins.genericClosure {
       startSet = map (key: { inherit key; }) ([ rustRoot ] ++ members);
@@ -294,7 +321,7 @@ let
     let
       info = dir:
         let
-          toml = readToml "${dir}/Cargo.toml";
+          toml = readToml (pathOf "${dir}/Cargo.toml");
           resolve = resolvePath dir;
           kinds = { bin = "src/bin"; example = "examples"; bench = "benches"; test = "tests"; };
           targets = lib.concatLists (lib.mapAttrsToList (k: d: lib.concatMap
@@ -302,16 +329,16 @@ let
             (toml.${k} or [ ])) kinds)
             ++ lib.optional (toml.lib.path or null != null) (resolve toml.lib.path)
             ++ lib.optional (builtins.isString (toml.package.build or null)) (resolve toml.package.build);
-          build = builtins.pathExists "${dir}/build.rs" && (toml.package.build or true) != false
+          build = builtins.pathExists (pathOf "${dir}/build.rs") && (toml.package.build or true) != false
             || builtins.isString (toml.package.build or null);
-          names = builtins.filter (f: lib.hasSuffix ".rs" f) (lib.filesystem.listFilesRecursive (/. + dir));
+          names = builtins.filter (f: lib.hasSuffix ".rs" (toString f)) (lib.filesystem.listFilesRecursive (pathOf dir));
           includes = lib.any (r: builtins.length (builtins.split
             "include(_str|_bytes)?[[:space:]]*!|[^[:alnum:]_]path[[:space:]]*=[[:space:]]*\"([^\"]*/)?tests(/|[.]rs\")"
             (builtins.readFile r)) > 1) names;
         in
         lib.nameValuePair dir { inherit dir targets; prunable = !build && !includes; };
     in
-    lib.listToAttrs (map info (builtins.filter (d: (readToml "${d}/Cargo.toml") ? package) cargoDirs));
+    lib.listToAttrs (map info (builtins.filter (d: (readToml (pathOf "${d}/Cargo.toml")) ? package) cargoDirs));
   hasBinary = dir:
     (memberToml dir).bin or [ ] != [ ]
     || builtins.pathExists (rustDir + "/${dir}/src/main.rs")
@@ -420,9 +447,11 @@ let
       # whole directory, read none of the files the packages leave out.
       # rustc's dep-info names every file a crate read: its modules, any
       # file include!d however its path was made, through whichever crate's
-      # macro, and what a proc macro tracks.
-      rust-package-sources = craneLib.mkCargoDerivation (common // {
-        inherit cargoArtifacts;
+      # macro, and what a proc macro tracks. Built for release, as the
+      # packages are, so code only release compiles is read too.
+      rust-package-sources = craneLib.mkCargoDerivation (common // rec {
+        CARGO_PROFILE = "release";
+        cargoArtifacts = craneLib.buildDepsOnly (common // { inherit CARGO_PROFILE; });
         pnameSuffix = "-package-sources";
         buildPhaseCargoCommand = "cargoWithProfile build --locked --workspace";
         doInstallCargoArtifacts = false;
@@ -432,10 +461,14 @@ let
           (cd ${craneLib.cleanCargoSource rustDir} && find . -type f | sort) >"$TMPDIR/all"
           (cd ${packageSource pkgs} && find . -type f | sort) >"$TMPDIR/kept"
           comm -23 "$TMPDIR/all" "$TMPDIR/kept" | sed 's|^[.]/||' >"$TMPDIR/left"
-          # Each file a dep-info names on a line of its own, from the
-          # workspace's root as rustc and cargo ran there.
-          find target -name '*.d' -exec grep -h '^[^ ].*:$' {} + | sed 's/:$//' | sort -u \
-            | xargs -r -d '\n' realpath -m -s --relative-to="$PWD" -- | sort -u >"$TMPDIR/read"
+          # Each file a dep-info names on a line of its own (a space in its
+          # name escaped, as make reads it), from the workspace's root as
+          # rustc and cargo ran there: as named, and with its links
+          # followed to the file itself. Either way it's a file the
+          # packages must have.
+          find target -name '*.d' -exec grep -h '^[^ ].*:$' {} + | sed 's/:$//; s/\\\(.\)/\1/g' | sort -u >"$TMPDIR/named"
+          { xargs -r -d '\n' realpath -m -s --relative-to="$PWD" -- <"$TMPDIR/named"
+            xargs -r -d '\n' realpath -m --relative-to="$PWD" -- <"$TMPDIR/named"; } | sort -u >"$TMPDIR/read"
           if read=$(comm -12 "$TMPDIR/left" "$TMPDIR/read") && [ -n "$read" ]; then
             echo "The packages leave these out as tests, but building them reads them:"
             echo "$read"

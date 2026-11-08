@@ -18,6 +18,10 @@ name = "house-fixture-declared"
 version = "0.1.0"
 
 [[package]]
+name = "house-fixture-grouped"
+version = "0.1.0"
+
+[[package]]
 name = "house-fixture-included"
 version = "0.1.0"
 
