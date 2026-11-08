@@ -22,9 +22,13 @@ use serde_json::{Value, json};
 const WRITTEN: &str = "query($owner: String!, $name: String!, $n: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $n) {
+      id
       author { login }
       title
       body
+      openCycle: timelineItems(itemTypes: [REOPENED_EVENT], last: 1) {
+        nodes { ... on ReopenedEvent { id } }
+      }
       userContentEdits(first: 100) {
         totalCount
         nodes { editor { login } deletedBy { login } }
@@ -103,6 +107,40 @@ impl Door<'_> {
         api: &mut dyn Api,
         issue: &Issue,
     ) -> Result<Result<Value, String>, String> {
+        self.vetted(api, issue)
+            .map(|r| r.map(|i| json!({"title": i["title"], "body": i["body"]})))
+    }
+
+    /// The vetted text and its open cycle, in the same snapshot. A reopen
+    /// makes a fresh request even when the title and body did not change.
+    pub fn written_cycle(
+        &self,
+        api: &mut dyn Api,
+        issue: &Issue,
+    ) -> Result<Result<(Value, String), String>, String> {
+        self.vetted(api, issue).map(|r| {
+            r.and_then(|i| {
+                let nodes = i["openCycle"]["nodes"]
+                    .as_array()
+                    .ok_or("GitHub didn't identify the issue's open cycle")?;
+                let cycle = match nodes.as_slice() {
+                    [] => "initial".to_owned(),
+                    [event] => event["id"]
+                        .as_str()
+                        .ok_or("GitHub didn't identify the reopen event")?
+                        .to_owned(),
+                    _ => return Err("GitHub returned more than one latest reopen event".into()),
+                };
+                let issue = i["id"].as_str().ok_or("GitHub didn't identify the issue")?;
+                Ok((
+                    json!({"title": i["title"], "body": i["body"]}),
+                    format!("{issue}:{cycle}"),
+                ))
+            })
+        })
+    }
+
+    fn vetted(&self, api: &mut dyn Api, issue: &Issue) -> Result<Result<Value, String>, String> {
         let who = self.authors.join(" or ");
         if !self.is_author(&issue.opener) {
             return Ok(Err(format!(
@@ -140,9 +178,7 @@ impl Door<'_> {
                 "This issue's text was written or changed by someone other than {who}, or by someone GitHub doesn't name, so nothing was run. Ask in a new issue."
             )));
         }
-        Ok(Ok(
-            json!({ "title": issue["title"], "body": issue["body"] }),
-        ))
+        Ok(Ok(issue.clone()))
     }
 
     /// The comment, cut to what one holds ([`MAX_COMMENT`]), then the

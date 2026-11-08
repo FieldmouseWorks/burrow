@@ -21,10 +21,14 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -266,16 +270,20 @@ pub fn passes(path: &Path, within: Duration) -> bool {
 }
 
 fn checked(path: &Path, within: Duration) -> (bool, String) {
-    // A file avoids a full stdout pipe deadlocking a check before it exits.
-    let output = match tempfile::tempfile() {
-        Ok(f) => f,
+    let (reader, writer) = match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
+        Ok(p) => p,
         Err(e) => return (false, e.to_string()),
     };
+    if let Err(e) = rustix::fs::fcntl_getfl(&reader)
+        .and_then(|flags| rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK))
+    {
+        return (false, e.to_string());
+    }
     let start = || -> std::io::Result<Child> {
         Command::new(path)
             .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output.try_clone()?)
+            .stdout(writer.try_clone()?)
+            .stderr(writer)
             .process_group(0)
             .spawn()
     };
@@ -283,6 +291,9 @@ fn checked(path: &Path, within: Duration) -> (bool, String) {
         Ok(c) => c,
         Err(e) => return (false, e.to_string()),
     };
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stop_reader = Arc::clone(&stopped);
+    let capture = std::thread::spawn(move || drain(fs::File::from(reader), &stop_reader));
     let finished = exits(&child, within);
     if !finished {
         // Until it's waited for, the check's process ID, and so its group's,
@@ -293,14 +304,43 @@ fn checked(path: &Path, within: Duration) -> (bool, String) {
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
     }
     let status = child.wait();
-    let mut output = output;
-    let _ = output.seek(SeekFrom::Start(0));
-    let mut said = Vec::new();
-    let _ = output.take(4096).read_to_end(&mut said);
+    stopped.store(true, Ordering::Release);
+    let said = capture
+        .join()
+        .unwrap_or_else(|_| b"diagnostic reader failed".to_vec());
     (
         finished && status.is_ok_and(|s| s.success()),
         String::from_utf8_lossy(&said).into_owned(),
     )
+}
+
+/// Retain at most 4096 bytes, while draining both streams from their shared
+/// bounded pipe. Nonblocking reads let us stop even if an orphan keeps it open.
+fn drain(mut reader: fs::File, stopped: &AtomicBool) -> Vec<u8> {
+    let mut kept = Vec::with_capacity(4096);
+    let mut chunk = [0; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let take = n.min(4096 - kept.len());
+                kept.extend_from_slice(&chunk[..take]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+        if stopped.load(Ordering::Acquire) && kept.len() == 4096 {
+            break;
+        }
+    }
+    kept
 }
 
 /// Whether `child` exits within `within`, leaving it to be waited for.
@@ -366,6 +406,31 @@ mod tests {
 
     fn lines(text: &str) -> Vec<Line> {
         parse(text).unwrap()
+    }
+
+    #[test]
+    fn noisy_checks_are_drained_with_bounded_capture_in_every_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for (name, end, within, expected) in [
+            ("success", "exit 0", Duration::from_secs(10), true),
+            ("failure", "exit 1", Duration::from_secs(10), false),
+            (
+                "timeout",
+                "while :; do printf '%8192s' x; printf '%8192s' y >&2; done",
+                Duration::from_millis(200),
+                false,
+            ),
+        ] {
+            // A regular-file capture exceeds the child's file-size limit and
+            // fails the success case. A bounded pipe drains without that disk use.
+            let path = dir.path().join(name);
+            fs::write(&path, format!("#!/bin/sh\nulimit -c 0; ulimit -f 1\ni=0; while [ \"$i\" -lt 256 ]; do printf '%8192s' x; printf '%8192s' y >&2; i=$((i+1)); done\n{end}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            let (passed, said) = checked(&path, within);
+            assert_eq!(passed, expected, "{name}");
+            assert_eq!(said.len(), 4096, "{name}");
+        }
     }
 
     #[test]

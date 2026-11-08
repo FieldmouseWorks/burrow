@@ -90,8 +90,11 @@ Open an issue there with that label, as an author, whose body is one line:
 job user, comments with the old and new active setup and each role/scope's
 engine, then closes the issue. It never posts model choices. An unknown
 setup, bad file or different request changes nothing; text anyone outside
-the authors wrote or edited is ignored. A completed switch is kept until
-GitHub accepts its reply and close, so a retry of `use back` only replies.
+the authors wrote or edited is ignored. Each open cycle is one request:
+reopening asks again even with unchanged text. Before a switch, proj records
+its resolved destination in a durable journal. The door and CLI recover it
+under the same lock before another change; completed results stay attached
+to that cycle, so interruption or a failed GitHub reply cannot repeat `back`.
 
 On the machine, `proj engines` lists saved setups, marks the active one and
 names the previous one. `proj engines save NAME` checks the current roles

@@ -137,6 +137,7 @@ dependencies = [
  "burrow-proj",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

@@ -4,6 +4,8 @@ use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+mod operation;
+
 pub struct Store<'a> {
     roles: &'a Path,
     dir: PathBuf,
@@ -95,16 +97,8 @@ impl<'a> Store<'a> {
 
     /// Serialized across the CLI and door, including the status they report.
     pub fn command(&self, args: &[String]) -> Result<String, String> {
-        let parent = self.roles.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(parent).map_err(|e| error(parent, e))?;
-        let lock_path = parent.join("roles.lock");
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|e| error(&lock_path, e))?;
-        lock.lock().map_err(|e| error(&lock_path, e))?;
+        let _lock = self.lock()?;
+        self.recover()?;
         let before = self.active()?;
         match args
             .iter()
@@ -115,7 +109,7 @@ impl<'a> Store<'a> {
             [] | ["list"] => {}
             ["save", name] => self.save(name, false)?,
             ["save", name, "--replace"] => self.save(name, true)?,
-            ["use", name] => self.switch(name, before.as_deref())?,
+            ["use", name] => self.switch(&self.resolve(name)?, before.as_deref())?,
             _ => {
                 return Err(
                     "usage: proj engines [save NAME [--replace] | use NAME | use back]".into(),
@@ -123,6 +117,20 @@ impl<'a> Store<'a> {
             }
         }
         self.status(before.as_deref())
+    }
+
+    fn lock(&self) -> Result<File, String> {
+        let parent = self.roles.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|e| error(parent, e))?;
+        let lock_path = parent.join("roles.lock");
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| error(&lock_path, e))?;
+        lock.lock().map_err(|e| error(&lock_path, e))?;
+        Ok(lock)
     }
 
     fn save(&self, name: &str, replace: bool) -> Result<(), String> {
@@ -140,16 +148,24 @@ impl<'a> Store<'a> {
                 .create_new(true)
                 .open(&path)
                 .map_err(|e| error(&path, e))?;
-            f.write_all(text.as_bytes()).map_err(|e| error(&path, e))
+            f.write_all(text.as_bytes())
+                .and_then(|()| f.sync_all())
+                .map_err(|e| error(&path, e))?;
+            sync_parent(&path)
         }
     }
 
-    fn switch(&self, name: &str, before: Option<&str>) -> Result<(), String> {
-        let name = if name == "back" {
-            self.previous()?.ok_or("no previous setup")?
+    fn resolve(&self, name: &str) -> Result<String, String> {
+        if name == "back" {
+            self.previous()?.ok_or("no previous setup".into())
         } else {
-            name.to_owned()
-        };
+            Ok(name.to_owned())
+        }
+    }
+
+    /// Only a resolved setup name, never another interpretation of back.
+    fn switch(&self, name: &str, before: Option<&str>) -> Result<(), String> {
+        let name = name.to_owned();
         // Membership before joining: issue text cannot reach another path.
         if !valid_name(&name) || !self.names()?.contains(&name) {
             return Err(format!("unknown setup: {name}"));
@@ -158,7 +174,7 @@ impl<'a> Store<'a> {
         self.checked(&target)?;
         let target = fs::canonicalize(&target).map_err(|e| error(&target, e))?;
         if self.roles.is_symlink() && fs::canonicalize(self.roles).ok().as_ref() == Some(&target) {
-            return Ok(());
+            return sync_parent(self.roles);
         }
         let mut old = before.map(str::to_owned);
         if old.is_none() && self.roles.is_file() {
@@ -175,19 +191,23 @@ impl<'a> Store<'a> {
                 .create_new(true)
                 .open(&path)
                 .map_err(|e| error(&path, e))?;
-            f.write_all(&text).map_err(|e| error(&path, e))?;
+            f.write_all(&text)
+                .and_then(|()| f.sync_all())
+                .map_err(|e| error(&path, e))?;
+            sync_parent(&path)?;
             old = Some(name);
         }
-        let tmp = self
-            .roles
-            .with_file_name(format!(".roles-{}", std::process::id()));
+        let staging = tempfile::tempdir_in(self.roles.parent().unwrap_or(Path::new(".")))
+            .map_err(|e| error(self.roles, e))?;
+        let tmp = staging.path().join("roles");
         // An absolute target works with either an absolute or relative roles path.
         symlink(&target, &tmp).map_err(|e| error(&tmp, e))?;
         let result = (|| {
             if let Some(old) = old {
                 atomic_text(&self.previous, &old)?;
             }
-            fs::rename(&tmp, self.roles).map_err(|e| error(self.roles, e))
+            fs::rename(&tmp, self.roles).map_err(|e| error(self.roles, e))?;
+            sync_parent(self.roles)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
@@ -220,21 +240,21 @@ impl<'a> Store<'a> {
     }
 }
 
+fn sync_parent(path: &Path) -> Result<(), String> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    File::open(parent)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| error(parent, e))
+}
+
 fn atomic_text(path: &Path, text: &str) -> Result<(), String> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let result = (|| {
-        let mut f = File::options()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|e| error(&tmp, e))?;
-        f.write_all(text.as_bytes()).map_err(|e| error(&tmp, e))?;
-        fs::rename(&tmp, path).map_err(|e| error(path, e))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(tmp);
-    }
-    result
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| error(parent, e))?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(|e| error(path, e))?;
+    file.persist(path).map_err(|e| error(path, e))?;
+    sync_parent(path)
 }
 
 #[cfg(test)]

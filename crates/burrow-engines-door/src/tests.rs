@@ -19,7 +19,8 @@ fn github(author: &str, body: &str, editor: Option<&str>) -> Fake {
         vec![ok(
             200,
             json!({"data":{"repository":{"issue":{
-                "author":{"login":author},"title":"engines","body":body,
+                "id":"issue-one", "author":{"login":author},"title":"engines","body":body,
+                "openCycle":{"nodes":[]},
                 "userContentEdits":{"totalCount":edits.len(),"nodes":edits},
                 "timelineItems":{"totalCount":0,"nodes":[]}
             }}}}),
@@ -89,6 +90,7 @@ fn switch_bad_setup_and_non_authors() {
         "use first\nuse next",
     ] {
         let mut gh = github("sam", body, None);
+        cycle(&mut gh, body);
         pass(&mut gh, &cfg).unwrap();
         assert_eq!(fs::read_link(&cfg.roles).unwrap(), link);
         let text = gh
@@ -142,6 +144,105 @@ fn a_failed_reply_does_not_repeat_back() {
     pass(&mut gh, &cfg).unwrap();
     assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
     // Once closed successfully a reopened issue really does ask again.
+    cycle(&mut gh, "second-open");
     pass(&mut gh, &cfg).unwrap();
     assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
+}
+
+fn cycle(gh: &mut Fake, id: &str) {
+    for (method, path, answers) in &mut gh.answers {
+        if method == "POST" && path == "graphql" {
+            for answer in answers {
+                let response = answer.as_mut().unwrap();
+                let mut json: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+                json["data"]["repository"]["issue"]["openCycle"] = json!({"nodes":[{"id":id}]});
+                response.body = json.to_string();
+            }
+        }
+    }
+}
+
+#[test]
+fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
+    let d = tempfile::tempdir().unwrap();
+    let roles = d.path().join("roles");
+    fs::create_dir(d.path().join("roles.d")).unwrap();
+    fs::write(&roles, "work claude\n").unwrap();
+    fs::write(d.path().join("roles.d/one"), "work claude\n").unwrap();
+    fs::write(d.path().join("roles.d/two"), "work codex\n").unwrap();
+    Store::new(&roles)
+        .command(&["use".into(), "two".into()])
+        .unwrap();
+    let cfg = Config {
+        repo: "sam/box".into(),
+        label: "engines".into(),
+        authors: vec!["sam".into()],
+        roles,
+        state: d.path().join("state"),
+    };
+    let mut gh = github("sam", "use back", None);
+    gh.answers
+        .iter_mut()
+        .find(|(m, _, _)| m == "PATCH")
+        .unwrap()
+        .2 = vec![Err(burrow_github::Failed {
+        why: "close accepted but response lost".into(),
+        transient: false,
+    })]
+    .into();
+    assert!(pass(&mut gh, &cfg).is_err());
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    // GitHub may have closed it despite the lost response, or a person may
+    // close it manually. The latest reopen event distinguishes both cases.
+    let mut reopened = github("sam", "use back", None);
+    cycle(&mut reopened, "reopened-after-ambiguous-close");
+    pass(&mut reopened, &cfg).unwrap();
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
+    pass(&mut reopened, &cfg).unwrap(); // same open cycle: only a reply retry
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
+}
+
+#[test]
+fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
+    let d = tempfile::tempdir().unwrap();
+    let roles = d.path().join("roles");
+    fs::create_dir(d.path().join("roles.d")).unwrap();
+    for (name, text) in [
+        ("one", "work claude\n"),
+        ("two", "work codex\n"),
+        ("three", "work claude:chosen\n"),
+    ] {
+        fs::write(d.path().join("roles.d").join(name), text).unwrap();
+    }
+    let store = Store::new(&roles);
+    store.command(&["use".into(), "two".into()]).unwrap();
+    store.command(&["use".into(), "one".into()]).unwrap();
+    store.command(&["use".into(), "two".into()]).unwrap();
+    let cfg = Config {
+        repo: "sam/box".into(),
+        label: "engines".into(),
+        authors: vec!["sam".into()],
+        roles,
+        state: d.path().join("state"),
+    };
+    let state = cfg.state.join("sam--box");
+    fs::create_dir_all(&state).unwrap();
+    let hash: String = Sha256::digest(b"issue-one:initial")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let blocked = state.join(format!("1-{hash}.next"));
+    fs::create_dir(&blocked).unwrap();
+    let mut gh = github("sam", "use back", None);
+    assert!(pass(&mut gh, &cfg).is_err());
+    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    Store::new(&cfg.roles)
+        .command(&["use".into(), "three".into()])
+        .unwrap();
+    fs::remove_dir(blocked).unwrap();
+    pass(&mut gh, &cfg).unwrap();
+    assert_eq!(
+        fs::read_to_string(&cfg.roles).unwrap(),
+        "work claude:chosen\n"
+    );
 }

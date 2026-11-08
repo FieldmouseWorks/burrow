@@ -3,6 +3,7 @@ use burrow_door::{Door, asked, fenced};
 use burrow_github::Api;
 use burrow_proj::setups::{Store, valid_name};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::path::Path;
 use std::path::PathBuf;
@@ -19,9 +20,10 @@ pub struct Config {
 
 /// A completed request whose GitHub answer is still pending. Keeping it until
 /// the close succeeds makes a retry of `use back` a reply, never another switch.
+/// Receipts stay keyed by open cycle: a lost close response or cleanup cannot
+/// turn a reopened issue into a retry of its previous request.
 #[derive(Serialize, Deserialize)]
 struct Pending {
-    request: serde_json::Value,
     body: String,
     reason: String,
 }
@@ -59,11 +61,16 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
     stored(&lock_path, lock.lock())?;
     for issue in door.issues(api)? {
         // A non-author's text is ignored, including edits by outsiders.
-        let text = match door.written(api, &issue)? {
+        let (text, cycle) = match door.written_cycle(api, &issue)? {
             Ok(t) => t,
             Err(_) => continue,
         };
-        let receipt = state.join(format!("{}.json", issue.number));
+        let cycle: String = Sha256::digest(cycle.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let receipt = state.join(format!("{}-{cycle}.json", issue.number));
+        let operation = receipt.with_extension("operation");
         let pending = match fs::read(&receipt) {
             Ok(bytes) => Some(
                 serde_json::from_slice::<Pending>(&bytes)
@@ -72,9 +79,8 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("{}: {e}", receipt.display())),
         };
-        if let Some(pending) = pending.filter(|p| p.request == text) {
+        if let Some(pending) = pending {
             door.reply(api, issue.number, &pending.body, &pending.reason)?;
-            stored(&receipt, fs::remove_file(&receipt))?;
             continue;
         }
         let lines = asked(&text);
@@ -88,11 +94,18 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
         };
         let store = Store::new(&cfg.roles);
         let (body, reason) = match args {
-            Some(args) => match store.command(&args) {
+            Some(args) => match if args[0] == "use" {
+                store.request(&operation, &args)
+            } else {
+                store.command(&args)
+            } {
                 Ok(said) => (fenced(&said), "completed"),
                 // Roles errors include the raw line, which may name a model.
                 // Keep just the location, never echo issue text or model choices.
                 Err(e) => {
+                    if store.pending()? || operation.try_exists().map_err(|e| e.to_string())? {
+                        return Err(e);
+                    }
                     let why = diagnostic(&e);
                     let current = store
                         .command(&["list".into()])
@@ -118,7 +131,6 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
             }
         };
         let pending = Pending {
-            request: text,
             body,
             reason: reason.into(),
         };
@@ -127,7 +139,6 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
         stored(&tmp, fs::write(&tmp, bytes))?;
         stored(&receipt, fs::rename(&tmp, &receipt))?;
         door.reply(api, issue.number, &pending.body, reason)?;
-        stored(&receipt, fs::remove_file(&receipt))?;
     }
     Ok(())
 }

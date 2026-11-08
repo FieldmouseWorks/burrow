@@ -12,6 +12,7 @@ burrow-github = { path = "../burrow-github" }
 burrow-proj = { path = "../burrow-proj" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 burrow-github = { path = "../burrow-github", features = ["fake"] }

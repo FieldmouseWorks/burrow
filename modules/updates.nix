@@ -88,6 +88,7 @@ let
   # HOST-health (crates/burrow-health), with its config built in. Its checks
   # are in /etc/HEALTHD, one for each of burrow.updates.health.
   healthD = "burrow/health.d";
+  healthRunner = "burrow/health";
   healthConfig = pkgs.writeText "health.json" (builtins.toJSON {
     name = health;
     dir = "/etc/${healthD}";
@@ -142,7 +143,7 @@ let
       boot = if tools ? boot then lib.getExe tools.boot else null;
       # After activation, compare with the health runner and required checks
       # of the system now live, rather than this updater's old store closure.
-      health = "/run/current-system/sw/bin/${health}";
+      health = "/etc/${healthRunner}";
       notify = lib.getExe tools.notify;
       vulnix = lib.getExe pkgs.vulnix;
       curl = lib.getExe pkgs.curl;
@@ -614,7 +615,9 @@ in
   # not updates is on (without it, only the ones other modules add).
   {
     burrow.tools.health = healthTool;
-    environment.etc = lib.mapAttrs'
+    # Stable across a prefix/hostname change and when updates are disabled.
+    # The updater's old process must compare with the target's required checks.
+    environment.etc = { "${healthRunner}".source = lib.getExe healthTool; } // lib.mapAttrs'
       (name: cmd: lib.nameValuePair "${healthD}/${name}" {
         source = pkgs.writeShellScript "health-${name}" ''
           export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
