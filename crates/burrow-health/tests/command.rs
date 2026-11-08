@@ -474,6 +474,37 @@ fn what_it_cant_run() {
 }
 
 #[test]
+fn required_config_failure_blocks_confirm_and_keeps_its_bad_line() {
+    let m = Machine::new(&[]);
+    let check = m.path("health.d/proj-config");
+    script(
+        &check,
+        "#!/bin/sh\necho 'roles line 2: unknown engine' >&2\nexit 1\n",
+    );
+    let path = m.path("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    cfg["required"] = serde_json::json!(["proj-config"]);
+    fs::write(&path, cfg.to_string()).unwrap();
+    // Even a snapshot in which the config was already broken cannot excuse it.
+    assert!(
+        m.run(&[], &["snapshot", m.path("before").to_str().unwrap()])
+            .status
+            .success()
+    );
+    let out = m.run(&[], &["compare", m.path("before").to_str().unwrap(), "0"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success());
+    assert!(
+        said.contains("check:proj-config is failing") && said.contains("roles line 2"),
+        "{said}"
+    );
+    fs::remove_file(check).unwrap();
+    let out = m.run(&[], &["compare", m.path("before").to_str().unwrap(), "0"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("required check is missing"));
+}
+
+#[test]
 fn failed_compare_keeps_config_diagnostics_for_the_update_notice() {
     let m = Machine::new(&[("proj-config", "bad-config"), ("old", "bad-config")]);
     fs::write(m.path("before"), "check:proj-config ok\ncheck:old fail\n").unwrap();

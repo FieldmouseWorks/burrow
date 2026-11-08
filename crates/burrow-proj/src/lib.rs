@@ -55,6 +55,9 @@
 //! proj unstick ID             make a job one run --unstick from now on: a
 //!                             turn of it waiting in line leaves it at its
 //!                             next look, one running carries on
+//! proj engines                list saved engine setups, active and previous
+//! proj engines save NAME [--replace]  check and save the current roles
+//! proj engines use NAME       check and atomically switch roles (back returns)
 //! proj check-config           validate machine config and every roles line
 //! proj list                   projects you can run jobs in
 //! proj await TARGET...        from inside a job: resume it once a PR or
@@ -150,7 +153,9 @@ pub mod github;
 pub mod inbox;
 pub mod job;
 pub mod pick;
+mod roles;
 pub mod scratch;
+pub mod setups;
 pub mod slot;
 pub mod systemd;
 pub mod turn;

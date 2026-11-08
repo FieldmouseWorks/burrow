@@ -41,6 +41,9 @@ pub struct Config {
     pub name: String,
     /// Where the checks are.
     pub dir: PathBuf,
+    /// Checks that must pass even if they failed before a switch.
+    #[serde(default)]
+    pub required: Vec<String>,
     /// The user whose own units count too (burrow.user).
     pub user: String,
     pub systemctl: PathBuf,
@@ -163,7 +166,17 @@ pub fn report(cfg: &Config) -> Vec<Line> {
 
 /// The report and bounded stderr from failed checks, run once per look.
 pub fn report_details(cfg: &Config) -> (Vec<Line>, Vec<(String, String)>) {
-    let (mut lines, details) = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
+    let (mut lines, mut details) = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
+    for name in &cfg.required {
+        if !lines.iter().any(|l| l.check() == Some(name)) {
+            let key = format!("{CHECK}{name}");
+            lines.push(Line {
+                key: key.clone(),
+                state: State::Fail,
+            });
+            details.push((key, "required check is missing".into()));
+        }
+    }
     lines.extend(failed_units(cfg, false));
     lines.extend(failed_units(cfg, true));
     (lines, details)
@@ -244,7 +257,7 @@ const GRACE: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 
 /// Whether the check at `path` exits 0 within `within`. It runs with
-/// nothing on stdin and its output thrown away, in a process group of its
+/// nothing on stdin and captures bounded diagnostics, in a process group of its
 /// own. One that runs out of time fails, and its whole group is stopped:
 /// TERM, as timeout(1) sends it, then after GRACE a KILL for whatever is
 /// left, so a check that ignores its TERM doesn't hold HOST-health up.
@@ -308,6 +321,21 @@ fn exits(child: &Child, within: Duration, diagnostic: &mut Diagnostic) -> bool {
     }
 }
 
+/// Required checks compare against success even when the snapshot failed.
+pub fn require(before: &mut Vec<Line>, required: &[String]) {
+    for name in required {
+        let key = format!("{CHECK}{name}");
+        if let Some(line) = before.iter_mut().find(|l| l.key == key) {
+            line.state = State::Ok;
+        } else {
+            before.push(Line {
+                key,
+                state: State::Ok,
+            });
+        }
+    }
+}
+
 /// After a change: `look`, after `settle`, until nothing has regressed
 /// since `before`, for up to `within`. What regressed at the last look if
 /// it never clears.
@@ -336,6 +364,31 @@ mod tests {
 
     fn lines(text: &str) -> Vec<Line> {
         parse(text).unwrap()
+    }
+
+    #[test]
+    fn noisy_checks_are_drained_with_bounded_capture_in_every_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for (name, end, within, expected) in [
+            ("success", "exit 0", Duration::from_secs(10), true),
+            ("failure", "exit 1", Duration::from_secs(10), false),
+            (
+                "timeout",
+                "while :; do printf '%s' \"$chunk\"; printf '%s' \"$chunk\" >&2; done",
+                Duration::from_millis(200),
+                false,
+            ),
+        ] {
+            // A regular-file capture exceeds the child's file-size limit and
+            // fails the success case. A bounded pipe drains without that disk use.
+            let path = dir.path().join(name);
+            fs::write(&path, format!("#!/bin/sh\nchunk=xxxxxxxx; for step in 1 2 3 4 5 6 7 8 9 10; do chunk=$chunk$chunk; done\nulimit -c 0; ulimit -f 1\ni=0; while [ \"$i\" -lt 256 ]; do printf '%s' \"$chunk\"; printf '%s' \"$chunk\" >&2; i=$((i+1)); done\n{end}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            let (passed, said) = run_check(&path, within);
+            assert_eq!(passed, expected, "{name}");
+            assert_eq!(said.len(), 4096, "{name}");
+        }
     }
 
     #[test]

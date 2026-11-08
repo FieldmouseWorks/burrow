@@ -7,10 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustix = { version = "1.1.6", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "pipe"] }
 serde.workspace = true
 serde_json.workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true
 
