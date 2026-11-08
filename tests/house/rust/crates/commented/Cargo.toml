@@ -1,0 +1,6 @@
+# A module under a commented-out #[cfg(test)]: lib/project.nix reads past
+# the comment and keeps its file.
+[package]
+name = "house-fixture-commented"
+version = "0.1.0"
+edition = "2024"
