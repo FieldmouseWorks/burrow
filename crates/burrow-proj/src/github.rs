@@ -201,7 +201,7 @@ pub fn changes(was: &Map<String, Value>, now: &Map<String, Value>) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::fs;
 
     use super::{changes, over, target};
 
@@ -209,7 +209,7 @@ mod tests {
     fn github_recovers_after_502() {
         let dir = tempfile::tempdir().unwrap();
         let gh = dir.path().join("gh");
-        fs::write(
+        burrow_test::executable(
             &gh,
             r#"#!/bin/sh
 cd "$(dirname "$0")"
@@ -229,9 +229,7 @@ case "$*" in
     echo '{"state":"open"}' ;;
 esac
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut config = crate::config::tests::example();
         config["tools"]["gh"] = json!(gh);
         let cfg = serde_json::from_value(config).unwrap();
