@@ -210,6 +210,14 @@ impl Config {
             .unwrap_or_default())
     }
 
+    /// Validate the turn-start configuration without starting a job. Config::load
+    /// already parses the module's JSON; engine validates every external role,
+    /// including unused scopes and overflow choices. Runtime state (meters,
+    /// usage holds and individual jobs) is not machine configuration.
+    pub fn check_config(&self) -> Result<(), String> {
+        self.engine("", None).map(|_| ())
+    }
+
     /// How long a turn may wait in line, in seconds.
     pub fn stall_queued(&self) -> i64 {
         (self.stall_after_minutes * 60) as i64
@@ -257,6 +265,33 @@ pub(crate) mod tests {
             "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
+    }
+
+    #[test]
+    fn check_config_rejects_legacy_roles_and_checks_unused_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        cfg.check_config().unwrap(); // An absent file means default engines.
+        std::fs::write(&cfg.roles, "# roles\nunused old-model\n").unwrap();
+        let err = crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap_err();
+        let said = err.say.unwrap();
+        assert_eq!(err.code, 1);
+        assert!(
+            said.contains(&format!("{} line 2", cfg.roles.display())),
+            "{said}"
+        );
+        assert!(said.contains("unknown engine old-model"), "{said}");
+        std::fs::write(&cfg.roles, "unused claude\nother codex over 80 claude\n").unwrap();
+        crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
+        // An existing but unreadable roles path must not mean defaults.
+        std::fs::remove_file(&cfg.roles).unwrap();
+        std::fs::create_dir(&cfg.roles).unwrap();
+        assert!(
+            cfg.check_config()
+                .unwrap_err()
+                .contains(&cfg.roles.display().to_string())
+        );
     }
 
     #[test]

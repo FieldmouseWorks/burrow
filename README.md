@@ -92,7 +92,10 @@ Each has an entry below, and each can be imported on its own.
   compares health checks before and after (`HOST-health`), confirms and pushes
   to main (as a PR the merge train lands, when the flake's repo has its train
   on); anything that breaks reverts and goes to a Claude job. It deploys main
-  too, so a merged PR goes live the same way. Plus Renovate for every repo you
+  too, so a merged PR goes live the same way. The `proj-config` health check
+  runs `proj check-config` as `burrow.user`, validating the deployed config
+  and every line of the machine’s roles file before confirmation. Failed
+  checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
   repo, and all of them run hourly), `advisory-watch` (CISA KEV, vulnix,

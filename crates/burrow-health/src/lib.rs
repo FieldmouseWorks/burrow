@@ -30,6 +30,9 @@ use std::time::{Duration, Instant};
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use serde::Deserialize;
 
+mod diagnostic;
+use diagnostic::Diagnostic;
+
 /// What modules/updates.nix tells HOST-health, as JSON.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -155,39 +158,49 @@ pub fn regressions(before: &[Line], now: &[Line]) -> Vec<String> {
 /// The report now: every check, then the system's failed units and the
 /// user's.
 pub fn report(cfg: &Config) -> Vec<Line> {
-    let mut lines = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
+    report_details(cfg).0
+}
+
+/// The report and bounded stderr from failed checks, run once per look.
+pub fn report_details(cfg: &Config) -> (Vec<Line>, Vec<(String, String)>) {
+    let (mut lines, details) = checks(&cfg.dir, Duration::from_secs(cfg.check_timeout));
     lines.extend(failed_units(cfg, false));
     lines.extend(failed_units(cfg, true));
-    lines
+    (lines, details)
 }
 
 /// Every executable in `dir` but its dotfiles, in name order, as a check
 /// that passes or fails.
-fn checks(dir: &Path, within: Duration) -> Vec<Line> {
+fn checks(dir: &Path, within: Duration) -> (Vec<Line>, Vec<(String, String)>) {
     let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut names: Vec<OsString> = entries
         .filter_map(|e| e.ok().map(|e| e.file_name()))
         .filter(|n| !n.as_encoded_bytes().starts_with(b"."))
         .collect();
     names.sort();
-    names
+    let mut details = Vec::new();
+    let lines = names
         .iter()
         .map(|n| dir.join(n))
         .filter(|path| rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok())
-        .map(|path| Line {
-            key: format!(
+        .map(|path| {
+            let key = format!(
                 "{CHECK}{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
-            ),
-            state: if passes(&path, within) {
-                State::Ok
-            } else {
-                State::Fail
-            },
+            );
+            let (passed, text) = run_check(&path, within);
+            if !passed && !text.is_empty() {
+                details.push((key.clone(), text));
+            }
+            Line {
+                key,
+                state: if passed { State::Ok } else { State::Fail },
+            }
         })
-        .collect()
+        .collect();
+    (lines, details)
 }
 
 /// systemctl's failed units, the system's or the user's. Whatever systemctl
@@ -236,33 +249,50 @@ const POLL: Duration = Duration::from_millis(10);
 /// TERM, as timeout(1) sends it, then after GRACE a KILL for whatever is
 /// left, so a check that ignores its TERM doesn't hold HOST-health up.
 pub fn passes(path: &Path, within: Duration) -> bool {
+    run_check(path, within).0
+}
+
+fn run_check(path: &Path, within: Duration) -> (bool, String) {
     let Ok(mut child) = Command::new(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
     else {
-        return false;
+        return (false, String::new());
     };
-    let finished = exits(&child, within);
+    let mut diagnostic = match Diagnostic::new(child.stderr.take().unwrap()) {
+        Ok(diagnostic) => diagnostic,
+        Err(_) => {
+            let _ = rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
+            let _ = child.wait();
+            return (false, "could not capture check stderr".into());
+        }
+    };
+    let finished = exits(&child, within, &mut diagnostic);
     if !finished {
         // Until it's waited for, the check's process ID, and so its group's,
         // can't be anyone else's.
         let group = Pid::from_child(&child);
         let _ = rustix::process::kill_process_group(group, Signal::TERM);
-        exits(&child, GRACE);
+        exits(&child, GRACE, &mut diagnostic);
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
     }
     let status = child.wait();
-    finished && status.is_ok_and(|s| s.success())
+    diagnostic.drain();
+    (
+        finished && status.is_ok_and(|s| s.success()),
+        diagnostic.text(),
+    )
 }
 
 /// Whether `child` exits within `within`, leaving it to be waited for.
-fn exits(child: &Child, within: Duration) -> bool {
+fn exits(child: &Child, within: Duration, diagnostic: &mut Diagnostic) -> bool {
     let pid = Pid::from_child(child);
     let deadline = Instant::now().checked_add(within);
     loop {
+        diagnostic.drain();
         match rustix::process::waitid(
             WaitId::Pid(pid),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,

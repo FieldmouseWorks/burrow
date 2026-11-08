@@ -479,6 +479,20 @@ fn unhealthy_after_the_switch_goes_straight_back() {
 }
 
 #[test]
+fn bad_proj_config_reverts_without_confirm_and_names_the_line_in_the_notice() {
+    let m = machine();
+    let was = m.running();
+    m.upstream("nixpkgs", &sha('c'));
+    let diagnostic = "check:proj-config is failing\ncheck:proj-config: /home/dev/.config/proj/roles line 2: unused old-model: unknown engine old-model";
+    fs::write(m.path("unhealthy"), diagnostic).unwrap();
+    assert_eq!(go(&m), 1);
+    assert_eq!(m.running(), was);
+    assert!(m.did("calls").ends_with("switch --abort\n"));
+    assert!(!m.did("calls").lines().any(|line| line == "confirm"));
+    assert!(m.did("notice-health").contains(diagnostic));
+}
+
+#[test]
 fn a_confirm_that_fails_is_left_to_revert_by_itself() {
     let m = machine();
     let main = m.main();

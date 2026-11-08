@@ -55,6 +55,7 @@
 //! proj unstick ID             make a job one run --unstick from now on: a
 //!                             turn of it waiting in line leaves it at its
 //!                             next look, one running carries on
+//! proj check-config           validate machine config and every roles line
 //! proj list                   projects you can run jobs in
 //! proj await TARGET...        from inside a job: resume it once a PR or
 //!                             issue (URL or OWNER/REPO#N) changes; one
