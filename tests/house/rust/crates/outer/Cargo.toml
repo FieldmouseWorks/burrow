@@ -1,0 +1,10 @@
+# A crate in a package's tests/ that the package's release build compiles,
+# and that includes one of the package's test modules: lib/project.nix's
+# cargoTests keeps it.
+[package]
+name = "house-fixture-outer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+house-fixture-inner = { path = "tests/inner" }

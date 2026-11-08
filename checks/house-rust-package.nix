@@ -27,5 +27,14 @@ in pkgs.runCommand "house-rust-package-check" { } ''
   # one whose file a #[cfg(test)] module reads too.
   [ "$(${pkg}/bin/house-fixture-implicit)" = implicit ]
   [ "$(${pkg}/bin/house-fixture-nested)" = nested ]
+  # A program in src/bin, where a #[cfg(test)] module's own modules would
+  # be; modules found from a #[path]'s file and from a module named main;
+  # and a module whose #[path] is a raw string.
+  [ "$(${pkg}/bin/house-fixture-binmod)" = binmod ]
+  [ "$(${pkg}/bin/house-fixture-contexts)" = contexts ]
+  [ "$(${pkg}/bin/house-fixture-rawpath)" = rawpath ]
+  # A package whose release build compiles a crate in its tests/ that
+  # includes one of its test modules.
+  [ "$(${pkg}/bin/house-fixture-outer)" = outer ]
   touch $out
 ''

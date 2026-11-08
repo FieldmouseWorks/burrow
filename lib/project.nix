@@ -325,7 +325,13 @@ let
             ++ [ (resolve "src/lib.rs") (resolve "src/main.rs") ];
           build = builtins.pathExists (pathOf "${dir}/build.rs") && (toml.package.build or true) != false
             || builtins.isString (toml.package.build or null);
-          names = builtins.filter (f: lib.hasSuffix ".rs" (toString f)) (lib.filesystem.listFilesRecursive (pathOf dir));
+          str = f: builtins.unsafeDiscardStringContext (toString f);
+          files = lib.filesystem.listFilesRecursive (pathOf dir);
+          names = builtins.filter (f: lib.hasSuffix ".rs" (str f)) files;
+          # The crates inside it (any directory with a Cargo.toml, loaded or
+          # not): their files are theirs, never its modules.
+          nested = map (f: dirOf (str f)) (builtins.filter (f: baseNameOf (str f) == "Cargo.toml" && dirOf (str f) != dir) files);
+          own = file: !(lib.any (d: lib.hasPrefix "${d}/" file) nested);
           # Whether a module's attributes make it #[cfg(test)]: cfg(test), or
           # cfg(all(...)) with test among its terms.
           isTest = attrs: builtins.match
@@ -333,55 +339,74 @@ let
           # What cargoTests keeps however a file is declared: a target's file
           # and any directory holding one, what a declaration that isn't
           # #[cfg(test)] reads, and the directories Cargo finds targets in
-          # itself.
-          kept = path: lib.any (t: t == path || lib.hasPrefix "${path}/" t) (targets ++ needed)
-            || lib.any (d: lib.hasPrefix "${dir}/${d}/" path) [ "src/bin" "examples" "benches" ];
+          # itself, with all they hold and the directories holding them.
+          auto = map (d: "${dir}/${d}") [ "src/bin" "examples" "benches" ];
+          kept = path: lib.any (t: t == path || lib.hasPrefix "${path}/" t) (targets ++ needed ++ auto)
+            || lib.any (d: lib.hasPrefix "${d}/" path) auto;
           # Whether its Rust reads what can't be told from here: any include
           # macro (its argument can be computed), a path attribute naming
-          # tests or inside a cfg_attr, or an inline module block that isn't
-          # #[cfg(test)], inside which the declarations' paths are relative
-          # to a directory this doesn't follow. A file left out (an
+          # tests, inside a cfg_attr, or in a string this doesn't read (raw or
+          # escaped), or an inline module block that isn't #[cfg(test)],
+          # inside which the declarations' paths are relative to a directory
+          # this doesn't follow. A file of its own that it leaves out (an
           # integration test, a test module or a file in one's directory)
-          # doesn't count: Cargo builds the package without reading it.
+          # doesn't count: Cargo builds the package without reading it. A
+          # crate's inside it does: it's built from what it reads.
           testDirs = [ "${dir}/tests" ] ++ builtins.filter (p: modules.${p}) (builtins.attrNames modules);
-          out = file: !(kept file) && (modules.${file} or false || lib.any (p: lib.hasPrefix "${p}/" file) testDirs);
-          unclear = lib.any (r:
-            let file = builtins.unsafeDiscardStringContext (toString r); text = builtins.readFile r; in
+          out = file: own file && !(kept file) && (modules.${file} or false || lib.any (p: lib.hasPrefix "${p}/" file) testDirs);
+          unclear = lib.any (d: d.unresolved && !(out d.file)) declarations || lib.any (r:
+            let file = str r; text = builtins.readFile r; in
             !(out file) && (builtins.length (builtins.split
               "include(_str|_bytes)?[[:space:]]*!|[^[:alnum:]_]path[[:space:]]*=[[:space:]]*\"([^\"]*/)?tests(/|[.]rs\")|cfg_attr[(][^]]*[^[:alnum:]_]path[[:space:]]*="
               text) > 1
             || lib.any (m: builtins.isList m && !(isTest (builtins.elemAt m 0))) (builtins.split
               "((#[[][^]]*[]][[:space:]]*)*)(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+(r#)?[[:alnum:]_]+[[:space:]]*[{]"
               text))) names;
-          # Every `mod NAME;` in its Rust, with the attributes just before it,
-          # as what it reads (the file, its mod.rs, and the directory of its
-          # own modules; a #[path]'s file, relative to the declaring file's
-          # directory) and whether one of those attributes is #[cfg(test)].
-          # Beside a crate root or mod.rs a module's files are its siblings;
-          # beside FILE.rs, in FILE/.
-          declarations = lib.concatMap (r:
-            let
-              file = builtins.unsafeDiscardStringContext (toString r);
-              here = dirOf file;
-              base = baseNameOf file;
-              root = builtins.elem base [ "mod.rs" "lib.rs" "main.rs" ] || builtins.elem file targets;
-              children = if root then here else "${here}/${lib.removeSuffix ".rs" base}";
-            in
-            map (m:
-              let
-                attrs = builtins.elemAt m 0;
-                name = builtins.elemAt m 5;
-                pathed = builtins.match ".*#[[]path[[:space:]]*=[[:space:]]*\"([^\"]*)\"[]].*" attrs;
-              in
-              {
-                test = isTest attrs;
-                reads = if pathed != null then [ (resolvePath here (builtins.head pathed)) ]
-                  else [ "${children}/${name}.rs" "${children}/${name}/mod.rs" "${children}/${name}" ];
-              })
+          # Each of its own files' `mod NAME;`, with the attributes just
+          # before it.
+          scans = map (r: rec {
+            file = str r;
+            here = dirOf file;
+            base = baseNameOf file;
+            decls = map (m: { attrs = builtins.elemAt m 0; name = builtins.elemAt m 5; })
               (builtins.filter builtins.isList (builtins.split
                 "((#[[][^]]*[]][[:space:]]*)*)(pub([(][^)]*[)])?[[:space:]]+)?mod[[:space:]]+(r#)?([[:alnum:]_]+)[[:space:]]*;"
-                (builtins.readFile r))))
-            names;
+                (builtins.readFile r)));
+          }) (builtins.filter (r: own (str r)) names);
+          # A declaration's #[path] file, relative to the declaring file's
+          # directory: null without one, false for one in a string this
+          # doesn't read (raw or escaped).
+          pathed = here: attrs:
+            let
+              plain = builtins.match ".*#[[][[:space:]]*path[[:space:]]*=[[:space:]]*\"([^\"\\]*)\"[[:space:]]*[]].*" attrs;
+            in
+            if plain != null then resolvePath here (builtins.head plain)
+            else if builtins.match ".*#[[][[:space:]]*path[^[:alnum:]_].*" attrs != null then false
+            else null;
+          # The files a #[path] loads.
+          loaded = lib.concatMap (x: lib.concatMap (d: let p = pathed x.here d.attrs; in lib.optional (builtins.isString p) p) x.decls) scans;
+          # Every declaration as what it reads (its module's file, mod.rs and
+          # directory of modules, or its #[path]'s file) and whether it's
+          # #[cfg(test)]. Beside a crate root, a mod.rs or a file a #[path]
+          # loads, a module's files are its siblings; beside FILE.rs, in
+          # FILE/; a file loaded both ways has both.
+          declarations = lib.concatMap (x:
+            let
+              root = x.base == "mod.rs" || builtins.elem x.file targets;
+              children = lib.optional (root || builtins.elem x.file loaded) x.here
+                ++ lib.optional (!root) "${x.here}/${lib.removeSuffix ".rs" x.base}";
+            in
+            map (d:
+              let p = pathed x.here d.attrs; in
+              {
+                inherit (x) file;
+                test = isTest d.attrs;
+                unresolved = p == false;
+                reads = if builtins.isString p then [ p ]
+                  else lib.concatMap (c: [ "${c}/${d.name}.rs" "${c}/${d.name}/mod.rs" "${c}/${d.name}" ]) children;
+              })
+              x.decls)
+            scans;
           # Each path some declaration reads, as whether every one that reads
           # it is #[cfg(test)].
           modules = lib.mapAttrs (_: ds: lib.all (d: d.test) ds)

@@ -1,0 +1,6 @@
+# A #[cfg(test)] module named bin, whose directory of modules is the one
+# Cargo finds programs in: lib/project.nix's cargoTests keeps src/bin.
+[package]
+name = "house-fixture-binmod"
+version = "0.1.0"
+edition = "2024"
