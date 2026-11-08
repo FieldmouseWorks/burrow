@@ -14,27 +14,39 @@ store without substituters, with the comparison tree evaluating afterwards.
 ## Delivery and caller cost
 
 The workflow checks out its own immutable `job.workflow_sha`, including this
-crate, then compiles it directly with `rustc --edition=2021` in a private
-temporary directory, so Rustup cannot read the caller's toolchain file. No Cargo build,
-registry access, release download or caller-writable executable cache sits
-between those sources and the runner. The local `flake-gate` fetches the same
-sources beside the workflow; its Nix package supplies rustc and a C linker.
-Self-hosted CI runners need both on PATH, as hosted Ubuntu runners already
-have them.
+crate, its lock file and the crate toolchain specification. `compiler.nix`
+gets Nixpkgs and rust-overlay from that lock, and the minimal Rust channel
+from `crates/rust-toolchain.toml`. Nix supplies both the compiler and C linker;
+no runner needs a Rustup default, a Rust installation or an ambient linker.
+This also covers burrow's fresh runners without changing the machine flake.
+The local `flake-gate` fetches the same files at the named workflow commit.
 
-The earlier 16–20 second hosted-runner Cargo build was a poor trade for a gate
-bootstrap. This runner instead builds unoptimized, with the standard library
-alone. Three fresh direct builds on the development machine took 1.161,
-0.792 and 0.794 seconds (the resulting binary was 5,573,448 bytes). These are
-local measurements. The first [hosted CI run](https://github.com/FieldmouseWorks/burrow/actions/runs/42508563466)
-reported 1 second on each of its four gate legs and 0 or 1 second on the two
-negative invocations (the bootstrap timer has whole-second precision).
-The cost is paid once
-per invocation, including paths-only; correctness and a source-bound executable
-are worth that smaller cost. The bootstrap reports compilation seconds
-separately in CI logs so hosted timings can be compared.
-No binary is reused between invocations: a preceding caller step must not be
-able to supply the executable that judges its tests.
+The compiler closure stays rooted while the bootstrap compiles the runner
+in a private directory. No Cargo dependency build, registry access, release
+download or caller-writable executable cache sits between the pinned sources
+and the runner. Caller toolchain files cannot choose its compiler. Both gate
+and paths-only runs require Nix: the negative job now installs it before its
+path filter. Kept-build restores remain conditional on needing a negative;
+compiler provisioning does not query that cache before it has been restored.
+
+The earlier 16–20 second hosted Cargo build remains avoided. The bootstrap
+reports toolchain provisioning and direct compilation separately. A real run
+with broken ambient `rustc` and `cc` commands took 1 second for provisioning
+and 2 seconds for compilation with the compiler already in the local store.
+The earlier [hosted CI run](https://github.com/FieldmouseWorks/burrow/actions/runs/42508563466)
+reported 1 second per gate compilation using the host toolchain; that excludes
+the new Nix provisioning and is not an end-to-end timing of this bootstrap.
+
+A cold store must fetch compiler inputs and their closure (about 1.1 GiB
+uncompressed on x86_64 Linux); hosted cold timing remains to be measured.
+Using the minimal pinned toolchain reduces that from about 1.9 GiB with
+Nixpkgs' general rustc package. The store shares those inputs with Rust gates
+and subsequent runs, but a non-Rust caller still pays that cold setup cost.
+We accept it to supply a working, pinned compiler on every supported runner
+without a separate binary publication and verification system. Paths-only
+runs now pay Nix setup as well. This is a cold provisioning cost, not just
+the one-second compilation figure; CI logs expose both costs explicitly.
+No runner executable is reused between invocations.
 
 The behavioral tests live in `burrow-workflows/src/gate`: they run the workflow's
 own steps with real git and Nix evaluation, including the private-store retry,

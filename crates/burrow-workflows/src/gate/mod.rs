@@ -104,19 +104,29 @@ struct Run<'a> {
 impl Gate {
     fn new() -> Gate {
         let s = Scratch::default();
-        // The runner starts rustc in a caller checkout, without Cargo. Tests
-        // clear HOME; give them the actual compiler, rather than a rustup
-        // proxy that needs the user's default toolchain in that HOME.
+        // Nix provisioning has its own real build check. Here it returns an
+        // isolated compiler bundle, so workflow tests need no network/store
+        // dependencies for the bootstrap and still compile the actual runner.
         let compiler = std::process::Command::new("rustc")
             .args(["--print", "sysroot"])
             .output()
             .unwrap();
         assert!(compiler.status.success());
         let sysroot = String::from_utf8(compiler.stdout).unwrap();
-        s.stub(
-            "rustc",
+        fs::create_dir_all(s.join("compiler/bin")).unwrap();
+        crate::harness::executable(
+            &s.join("compiler/bin/rustc"),
             &format!("exec {}/bin/rustc \"$@\"\n", sysroot.trim()),
         );
+        std::os::unix::fs::symlink(which("cc"), s.join("compiler/bin/cc")).unwrap();
+        let expression = repo_file(".github/flake-check/compiler.nix")
+            .canonicalize()
+            .unwrap();
+        s.stub("nix-build", &format!(r#"[ "$#" = 8 ] && [ "$1" = --extra-experimental-features ] && [ "$2" = 'nix-command flakes' ] || exit 90
+[ "$3" = '{}' ] && [ "$4" = --out-link ] && [ -d "${{5%/*}}" ] || exit 90
+[ "$6" = --option ] && [ "$7" = extra-substituters ] && [ -z "$8" ] || exit 90
+printf '%s\n' '{}'
+"#, expression.display(), s.join("compiler").display()));
         let nix = which("nix");
         let (real_nix, real_bin) = (nix.display(), nix.parent().unwrap().display());
         // No binary cache: nothing in a case's store comes from one, and

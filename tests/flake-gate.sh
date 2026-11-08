@@ -114,7 +114,30 @@ d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@v1)")
 # The Rust bootstrap needs its crate from that same workflow commit too.
 mkdir -p "$tools/crates/burrow-flake-check/src"
 printf 'fn main() { println!("rust runner"); }\n' > "$tools/crates/burrow-flake-check/src/main.rs"
-cp "$burrow/.github/flake-check/gate.sh" "$burrow/.github/flake-check/run.sh" "$tools/.github/flake-check/"
+cp "$burrow/.github/flake-check/gate.sh" "$burrow/.github/flake-check/run.sh" "$burrow/.github/flake-check/compiler.nix" "$tools/.github/flake-check/"
+cp "$burrow/flake.lock" "$tools/flake.lock"
+cp "$burrow/crates/rust-toolchain.toml" "$tools/crates/rust-toolchain.toml"
+# Nix built this compiler as a native input of the check. The stand-in
+# verifies which expression and lock the remote adapter supplies; the real
+# bootstrap then compiles its Rust source with that compiler and linker.
+mkdir "$tmp/bootstrap-bin"
+printf '#!%s\n' "$(command -v bash)" > "$tmp/bootstrap-bin/nix-build"
+cat >> "$tmp/bootstrap-bin/nix-build" <<'NIX_BUILD'
+set -e
+[ "$1" = --extra-experimental-features ]
+[ "$2" = 'nix-command flakes' ]
+[ "$4" = --out-link ]
+[ -d "${5%/*}" ]
+[ "$6" = --option ]
+[ "$7" = extra-substituters ]
+[ -z "$8" ]
+test -f "$3"
+test -f "${3%/*}/../../flake.lock"
+test -f "${3%/*}/../../crates/rust-toolchain.toml"
+printf '%s\n' "$FLAKE_CHECK_COMPILER"
+NIX_BUILD
+chmod +x "$tmp/bootstrap-bin/nix-build"
+export PATH="$tmp/bootstrap-bin:$PATH"
 git -C "$tools" add . && git -C "$tools" commit -qm rust && git -C "$tools" tag rust
 # Caller sources with the same path must not supply the remote's executable.
 d=$(repo "$(caller o/tools/.github/workflows/flake-check.yml@rust)")

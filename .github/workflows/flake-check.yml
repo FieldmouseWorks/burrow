@@ -674,6 +674,14 @@ jobs:
           sparse-checkout: |
             .github/flake-check
             crates/burrow-flake-check
+      # Nix supplies the bootstrap compiler even for the paths-only step.
+      - if: inputs.keep-builds && inputs.install-nix
+        shell: bash
+        run: mkdir -p "$RUNNER_TEMP/kept"
+      - if: inputs.install-nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
       # Whether it needs a negative, which git alone can tell.
       - id: paths
         shell: bash
@@ -696,9 +704,6 @@ jobs:
       # checks the negative tree changes have derivations of their own,
       # which no gate built, so it builds and runs them; it takes from these
       # only what they're built from.
-      - if: inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true'
-        shell: bash
-        run: mkdir -p "$RUNNER_TEMP/kept"
       - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 1 }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -747,10 +752,6 @@ jobs:
           path: ${{ runner.temp }}/kept
           key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-${{ github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-
-      - if: inputs.install-nix && steps.paths.outputs.needs == 'true'
-        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-        with:
-          extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
       - id: negative
         if: steps.paths.outputs.needs == 'true'
         shell: bash

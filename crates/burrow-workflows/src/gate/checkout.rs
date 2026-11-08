@@ -246,10 +246,13 @@ fn the_runner_compiles_outside_the_callers_checkout() {
     let d = g.flake(r#"{ checks.${system}.a = drv "a"; }"#);
     // Keep the real compiler Gate::new selected, but reject invocation in
     // the caller tree, where rustup could read its rust-toolchain.toml.
-    let compiler = read(&g.s.join("bin/rustc"));
-    g.s.stub("rustc", &format!(
-        "[ ! -e flake.nix ] || {{ echo 'compiler ran in caller checkout' >&2; exit 1; }}\n{compiler}"
-    ));
+    let compiler = read(&g.s.join("compiler/bin/rustc"));
+    crate::harness::executable(
+        &g.s.join("compiler/bin/rustc"),
+        &format!(
+            "[ ! -e flake.nix ] || {{ echo 'compiler ran in caller checkout' >&2; exit 1; }}\n{compiler}"
+        ),
+    );
     let r = g.apart(&d);
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(r.build().contains("-a.drv^*"), "{}", r.out);
@@ -286,4 +289,20 @@ fn checkout_path_whitespace_never_selects_a_sibling() {
             assert!(!r.build().contains("-sibling.drv^*"), "{dir:?}: {}", r.out);
         }
     }
+}
+
+/// Self-hosted CI can expose rustup's proxy without a default toolchain.
+/// Provision the compiler with Nix instead of depending on that user state.
+#[test]
+fn a_rustup_proxy_with_no_default_is_not_used() {
+    let g = Gate::new();
+    let d = g.flake(r#"{ checks.${system}.a = drv "a"; }"#);
+    g.s.stub(
+        "rustc",
+        "echo 'rustup could not choose a version: no default is configured' >&2\nexit 1\n",
+    );
+    g.s.stub("cc", "echo no caller linker >&2; exit 1\n");
+    let r = g.apart(&d);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.build().contains("-a.drv^*"), "{}", r.out);
 }
