@@ -1,0 +1,230 @@
+--- a/lfshttp/client.go
++++ b/lfshttp/client.go
+@@ -268,0 +269,3 @@
++	if AppEnvironment() {
++		return req.Header
++	}
+@@ -503 +506 @@
+-	if isClientCertEnabledForHost(c, host) {
++	if !AppEnvironment() && isClientCertEnabledForHost(c, host) {
+@@ -524,0 +528,4 @@
++	if AppEnvironment() {
++		return appTransport{next: tr}, nil
++	}
++
+@@ -561 +568 @@
+-	if isCookieJarEnabledForHost(c, host) {
++	if !AppEnvironment() && isCookieJarEnabledForHost(c, host) {
+--- /dev/null
++++ b/lfshttp/app.go
+@@ -0,0 +1,80 @@
++package lfshttp
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"os"
++	"os/exec"
++	"strings"
++)
++
++// App authentication is enforced at the last HTTP boundary, including
++// redirects and object requests, after netrc and LFS's API authentication.
++func AppEnvironment() bool { return os.Getenv("GH_TOKEN_SOCKET") != "" }
++
++// AppAction keeps only credentials returned by the authenticated batch API,
++// never credentials from local configuration. Storage services use signed
++// URLs or these action headers rather than a GitHub installation token.
++type appActionKey struct{}
++type appAction struct {
++	origin  string
++	headers http.Header
++}
++
++func AppAction(req *http.Request) *http.Request {
++	action := appAction{origin: req.URL.Scheme + "://" + req.URL.Host, headers: req.Header.Clone()}
++	return req.WithContext(context.WithValue(req.Context(), appActionKey{}, action))
++}
++
++type appTransport struct{ next http.RoundTripper }
++
++func (t appTransport) RoundTrip(original *http.Request) (*http.Response, error) {
++	req := original.Clone(original.Context())
++	u := *original.URL
++	req.URL = &u
++	req.URL.User = nil
++	req.Header.Del("Authorization")
++	req.Header.Del("Cookie")
++	req.Header.Del("Proxy-Authorization")
++	if req.URL.Scheme != "https" {
++		return nil, fmt.Errorf("acting as the App, LFS requires HTTPS")
++	}
++	host := strings.ToLower(req.URL.Hostname())
++	if host != "github.com" {
++		action, ok := req.Context().Value(appActionKey{}).(appAction)
++		if !ok {
++			return nil, fmt.Errorf("acting as the App, LFS requires a GitHub batch endpoint")
++		}
++		for key := range action.headers {
++			req.Header.Del(key)
++		}
++		if action.origin == req.URL.Scheme+"://"+req.URL.Host {
++			for key, values := range action.headers {
++				req.Header[key] = append([]string(nil), values...)
++			}
++		}
++		return t.next.RoundTrip(req)
++	}
++	// The broker's credential entry point owns host and repository validation.
++	cmd := exec.Command("@gh-token@", "git-credential", "get")
++	cmd.Stdin = strings.NewReader("protocol=" + req.URL.Scheme + "\nhost=" + req.URL.Host + "\npath=" + strings.TrimPrefix(req.URL.EscapedPath(), "/") + "\n\n")
++	out, err := cmd.Output()
++	if err != nil {
++		return nil, fmt.Errorf("acting as the App, LFS credentials unavailable")
++	}
++	var user, password string
++	for _, line := range strings.Split(string(out), "\n") {
++		if v, ok := strings.CutPrefix(line, "username="); ok {
++			user = v
++		}
++		if v, ok := strings.CutPrefix(line, "password="); ok {
++			password = v
++		}
++	}
++	if user != "x-access-token" || password == "" {
++		return nil, fmt.Errorf("acting as the App, LFS has no installation token")
++	}
++	req.SetBasicAuth(user, password)
++	return t.next.RoundTrip(req)
++}
+--- /dev/null
++++ b/lfshttp/app_test.go
+@@ -0,0 +1,113 @@
++package lfshttp
++
++import (
++	"io"
++	"net"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++type appSend func(*http.Request) (*http.Response, error)
++
++func (f appSend) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++func TestAppTransport(t *testing.T) {
++	socket := filepath.Join(t.TempDir(), "broker.sock")
++	listener, err := net.Listen("unix", socket)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	t.Setenv("GH_TOKEN_SOCKET", socket)
++	go func() {
++		for {
++			conn, err := listener.Accept()
++			if err != nil {
++				return
++			}
++			input, _ := io.ReadAll(conn)
++			if string(input) == "sam/r\n" {
++				io.WriteString(conn, "token ghs_app\n")
++			} else {
++				io.WriteString(conn, "refused no installation\n")
++			}
++			conn.Close()
++		}
++	}()
++	sent := 0
++	transport := appTransport{next: appSend(func(r *http.Request) (*http.Response, error) {
++		sent++
++		user, password, ok := r.BasicAuth()
++		if !ok || user != "x-access-token" || password != "ghs_app" {
++			t.Error("did not send only the App credential")
++		}
++		if r.URL.User != nil || r.Header.Get("Cookie") != "" || r.Header.Get("Proxy-Authorization") != "" {
++			t.Error("sent a user credential")
++		}
++		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
++	})}
++	for _, url := range []string{"https://github.com/sam/r.git/info/lfs", "https://user:secret@github.com/sam/r.git/info/lfs"} {
++		req, _ := http.NewRequest("GET", url, nil)
++		req.SetBasicAuth("user", "secret")
++		req.Header.Set("Cookie", "user=secret")
++		req.Header.Set("Proxy-Authorization", "secret")
++		if _, err := transport.RoundTrip(req); err != nil {
++			t.Fatal(err)
++		}
++		if u, _, _ := req.BasicAuth(); u != "user" {
++			t.Fatal("mutated original request")
++		}
++	}
++	if sent != 2 {
++		t.Fatal(sent)
++	}
++	for _, url := range []string{"http://github.com/sam/r", "https://other.example/sam/r", "https://github.com/eve/r", "https://github.com/sam/r%0apath=eve/r"} {
++		req, _ := http.NewRequest("GET", url, nil)
++		if _, err := transport.RoundTrip(req); err == nil {
++			t.Fatalf("accepted %s", url)
++		}
++	}
++	os.Remove(socket)
++	req, _ := http.NewRequest("GET", "https://github.com/sam/r", nil)
++	if _, err := transport.RoundTrip(req); err == nil {
++		t.Fatal("accepted missing broker")
++	}
++	if sent != 2 {
++		t.Fatal("sent a request without broker authorization")
++	}
++}
++
++func TestAppStorageAction(t *testing.T) {
++	req, _ := http.NewRequest("GET", "https://storage.example/object", nil)
++	req.SetBasicAuth("storage", "batch")
++	req.Header.Set("X-Storage-Token", "batch")
++	req = AppAction(req)
++	req.SetBasicAuth("user", "netrc")
++	req.Header.Set("Cookie", "user=secret")
++	transport := appTransport{next: appSend(func(r *http.Request) (*http.Response, error) {
++		user, password, _ := r.BasicAuth()
++		if user != "storage" || password != "batch" || r.Header.Get("Cookie") != "" {
++			t.Error("did not isolate batch credentials")
++		}
++		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
++	})}
++	if _, err := transport.RoundTrip(req); err != nil {
++		t.Fatal(err)
++	}
++	redirected, err := newRequestForRetry(req, "https://other.example/object")
++	if err != nil {
++		t.Fatal(err)
++	}
++	transport.next = appSend(func(r *http.Request) (*http.Response, error) {
++		if strings.Contains(r.Header.Get("Authorization"), "Basic") || r.Header.Get("Cookie") != "" || r.Header.Get("X-Storage-Token") != "" {
++			t.Error("forwarded credentials across origins")
++		}
++		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
++	})
++	if _, err := transport.RoundTrip(redirected); err != nil {
++		t.Fatal(err)
++	}
++}
+--- a/lfsapi/auth.go
++++ b/lfsapi/auth.go
+@@ -85,0 +86,3 @@
++	if lfshttp.AppEnvironment() {
++		return c.client.Do(req)
++	}
+--- a/tq/adapterbase.go
++++ b/tq/adapterbase.go
+@@ -11,0 +12 @@
++	"github.com/git-lfs/git-lfs/v3/lfshttp"
+@@ -223,0 +225,3 @@
++	if lfshttp.AppEnvironment() {
++		req = lfshttp.AppAction(req)
++	}

@@ -24,7 +24,7 @@
 # git doesn't use SSH (GitHub's SSH remotes go over https), no host hears the
 # logins git's config could send without asking the helper (a URL's, a
 # header's, a cookie jar's, a client certificate, a Kerberos ticket, the
-# netrc's: ./github/src/remote.rs), git-lfs, which would, isn't run, and gh's
+# netrc's: crates/gh-token/src/remote.rs), and gh's
 # own login, in a file or the keyring, is out of its reach.
 # Without that env, all of them are the user's, as before. Each App's `gh`
 # acts as it whoever runs it, and its `envFile` is the env for a shell to
@@ -62,11 +62,14 @@ let
     exit 1
   '';
 
-  # git-lfs as everyone runs it: never in an App's env, where it would send
-  # the user's own login (remote.rs), git-lfs otherwise.
-  gitLfs = pkgs.writeShellScriptBin "git-lfs" ''
-    exec ${package}/bin/gh-token git-lfs ${pkgs.git-lfs}/bin/git-lfs "$@"
-  '';
+  # LFS does its own HTTP: enforce App authentication at its transport,
+  # after headers, netrc and API authentication, including redirects.
+  gitLfs = pkgs.git-lfs.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/git-lfs-app.patch ];
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace lfshttp/app.go --replace-fail '@gh-token@' '${package}/bin/gh-token'
+    '';
+  });
 
   # git's own helpers (GIT_EXEC_PATH), but for curl's: gh-token's
   # git-remote, which runs git's with only the credential helper's login.
@@ -135,9 +138,7 @@ let
     GIT_CONFIG_VALUE_3 = "git@github.com:";
     GIT_CONFIG_KEY_4 = "url.https://github.com/.insteadOf";
     GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
-    # LFS's filters, whatever git-lfs a config names, are the one that
-    # refuses, and a file they'd filter fails rather than going in or
-    # out as it is.
+    # LFS's filters always use the transport that enforces App authentication.
     GIT_CONFIG_KEY_5 = "filter.lfs.process";
     GIT_CONFIG_VALUE_5 = "${gitLfs}/bin/git-lfs filter-process";
     GIT_CONFIG_KEY_6 = "filter.lfs.smudge";
