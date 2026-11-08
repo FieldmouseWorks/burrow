@@ -489,6 +489,8 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
             return False
         return True
 
+    reviewed_round = False
+
     def land_now(desc):
         """Settled: merged, unless what GitHub says of its merge asks for
         something first (MERGE_STEPS). Behind a base whose rules want it up
@@ -509,7 +511,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
             # GitHub says of merging it alone is no wait of its own: GitHub
             # works that out afresh each time the branch moves, which the
             # train's every landing does.
-            T.ride(repo, pr, st, desc, settle, strike, our_status(pr, T.CONTEXT)[1], not (dep and not fixed))
+            T.ride(repo, pr, st, desc, settle, strike, our_status(pr, T.CONTEXT)[1], not (dep and not fixed) or reviewed_round)
             return
         if merging in ("wait", "refused"):
             settle("pending", "Settled; GitHub is still working out whether it can be merged" if merging == "wait"
@@ -870,6 +872,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
         return
 
     def reviewed():
+        nonlocal reviewed_round
         # The reviewers (review_step.py).
         looked = review_step.look(
             repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, lambda: T.review(repo, pr))
@@ -907,6 +910,7 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
             else:
                 hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), ours=not swept)
         else:
+            reviewed_round = not unreviewed
             return looked
         return None
 
