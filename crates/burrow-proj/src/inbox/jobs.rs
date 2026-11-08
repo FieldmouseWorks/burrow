@@ -169,7 +169,7 @@ impl Pass<'_> {
             // job, which nothing it awaits brings back. A job that couldn't
             // be stopped (proj stop says why) is tried again in five minutes;
             // the rest are still seen to.
-            if !open.iter().any(|i| raw(&i["number"]) == n) {
+            let Some(listed_now) = now_open else {
                 if let Err(f) = stop(self.cfg, &id, false) {
                     say(f);
                     self.retry(repo);
@@ -177,7 +177,7 @@ impl Pass<'_> {
                 }
                 let _ = fs::remove_dir_all(&d);
                 continue;
-            }
+            };
 
             // Carried on: replies wait for the next pass, which its turn's end
             // kicks.
@@ -202,7 +202,14 @@ impl Pass<'_> {
                 .unwrap_or_default();
             let made = |c: &Value| c["created_at"].as_str().unwrap_or_default().to_owned();
             let after = |c: &Value| c["id"].as_i64().is_some_and(|i| i > seen);
-            let comments: Vec<Value> = all.iter().filter(|c| made(c) < before).cloned().collect();
+            // What the job has had (whatever their age: a job's first turn
+            // is handed every comment there is), and the replies since that
+            // are a minute old.
+            let comments: Vec<Value> = all
+                .iter()
+                .filter(|c| !after(c) || made(c) < before)
+                .cloned()
+                .collect();
             // A newer reply is handed on once it's a minute old: one of the
             // authors', never the inbox's own answer.
             let young = all
@@ -230,44 +237,24 @@ impl Pass<'_> {
                 .filter_map(|c| c["id"].as_i64())
                 .max()
                 .unwrap_or(seen);
+            // What the job has had of the issue: its title and text, and the
+            // authors' comments up to the last it was handed.
+            let had: Vec<Value> = all.iter().filter(|c| !after(c)).cloned().collect();
             // Finished (its last turn ran to its end and said so with `proj
             // done`, not `ask` or `await`), every answer posted and no reply
-            // since: the issue is closed with it, so what's open is what's
-            // still to do. Reopening it starts a job afresh from the issue as
-            // it stands. The stuck issue isn't the job's to close: the
+            // since: the issue may be closed with it, so what's open is what's
+            // still to do. The stuck issue isn't the job's to close: the
             // steward closes it once nothing is stuck.
-            // Looked at again, closed and stopped under the lock turns start
-            // under: a reply (proj reply, proj _watch) that started a turn
-            // since the look above leaves the issue open, and none starts
-            // between the close and the stop.
-            if msg.is_empty()
+            let closable = msg.is_empty()
                 && young.is_none()
                 && k >= turns
-                && !now_open.is_some_and(|i| self.lane(i))
-            {
-                let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-                let still: i64 = job.turns().and_then(|t| t.parse().ok()).unwrap_or(0);
-                if still == turns
-                    && job.state() == "done"
-                    && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
-                {
-                    if !self.close(repo, n, "completed") {
-                        drop(held);
-                        self.miss(repo);
-                        continue;
-                    }
-                    if let Err(f) = halt(self.cfg, &job, false) {
-                        drop(held);
-                        say(f);
-                        self.retry(repo);
-                        continue;
-                    }
-                    drop(held);
-                    let _ = fs::remove_dir_all(&d);
-                    continue;
-                }
-            }
-            if !msg.is_empty() {
+                && st == "done"
+                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
+                && !self.lane(listed_now);
+            let listed_changed = !Self::handed(&d, &self.issue_text(repo, listed_now, &had));
+            if closable || !msg.is_empty() || listed_changed {
+                // Decided on the issue as GitHub has it now, not as the list
+                // read before this pass started jobs had it.
                 let Some(now_issue) = api(self.cfg, &[&format!("repos/{repo}/issues/{n}")]) else {
                     self.miss(repo);
                     continue;
@@ -276,7 +263,49 @@ impl Pass<'_> {
                 if now_issue["state"] != "open" || !labelled || !self.eligible(&now_issue) {
                     continue;
                 }
-                if reply(self.cfg, &id, &msg, true, None).is_err() {
+                // Not what the job's record says it was handed (the title or
+                // text edited, a comment it had edited or deleted, or a
+                // record from before what it was handed was kept): changed,
+                // and the job is handed the issue as it stands, replies and
+                // all, rather than the issue closed.
+                let changed = !Self::handed(&d, &self.issue_text(repo, &now_issue, &had));
+                // Closed with the job, and the job stopped, under the lock
+                // turns start under: a reply (proj reply, proj _watch) that
+                // started a turn since the look above leaves the issue open,
+                // and none starts between the close and the stop. Reopening
+                // it starts a job afresh from the issue as it stands.
+                if closable && !changed {
+                    let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    let still: i64 = job.turns().and_then(|t| t.parse().ok()).unwrap_or(0);
+                    if still == turns
+                        && job.state() == "done"
+                        && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
+                    {
+                        if !self.close(repo, n, "completed") {
+                            drop(held);
+                            self.miss(repo);
+                            continue;
+                        }
+                        if let Err(f) = halt(self.cfg, &job, false) {
+                            drop(held);
+                            say(f);
+                            self.retry(repo);
+                            continue;
+                        }
+                        drop(held);
+                        let _ = fs::remove_dir_all(&d);
+                        continue;
+                    }
+                }
+                let whole = self.issue_text(repo, &now_issue, &comments);
+                let msg = if changed {
+                    format!(
+                        "The issue has changed since you were handed it: its title or text edited, or a comment on it edited or deleted. As it stands now:\n\n{whole}"
+                    )
+                } else {
+                    msg
+                };
+                if !msg.is_empty() && reply(self.cfg, &id, &msg, true, None).is_err() {
                     // Woken by what it awaits (proj _watch) since it was
                     // looked at, or its turn couldn't start: the reply waits
                     // for the next pass, in five minutes (a turn that did
@@ -300,6 +329,9 @@ impl Pass<'_> {
                         .map_err(|e| io_fail(&d.join("job"), e))?;
                     fs::write(d.join("answered"), "0\n")
                         .map_err(|e| io_fail(&d.join("answered"), e))?;
+                }
+                if !msg.is_empty() {
+                    Self::hand(&d, &whole)?;
                 }
             }
             fs::write(d.join("seen"), format!("{newest}\n"))

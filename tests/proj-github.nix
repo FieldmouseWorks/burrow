@@ -337,6 +337,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       done = {"number": 1, "user": {"login": "sam"}, "html_url": "https://github.com/o/d/issues/1",
               "title": "t", "body": "inbox-done", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/d/issues", json.dumps([done]))
+      # A finished job's close is decided on the issue as GitHub has it then.
+      github("repos/o/d/issues/1", json.dumps(done))
       github("repos/o/d/issues/1/comments", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       dj = machine.succeed("grep -l 'issue o/d#1 ' /data/dev/jobs/*/prompt.1").split()[0].split("/")[-2]
@@ -347,6 +349,38 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       assert "did This task comes from GitHub issue o/d#1" in machine.succeed("cat /tmp/gh/posted")
       # Only it: every other issue's job here asked, and is waiting on a reply.
       assert [c for c in calls.splitlines() if "state=closed" in c and "repos/o/d/" not in c] == [], calls
+      github("repos/o/d/issues", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      machine.succeed("rm /tmp/gh/calls")
+
+  with subtest("an issue edited while its job ran stays open, and the job is handed it as it stands"):
+      machine.succeed("install -m 666 /dev/null /tmp/gh/calls")
+      first = {"number": 2, "user": {"login": "sam"}, "html_url": "https://github.com/o/d/issues/2",
+               "title": "t", "body": "inbox-done", "state": "open", "labels": [{"name": "claude"}]}
+      github("repos/o/d/issues", json.dumps([first]))
+      github("repos/o/d/issues/2", json.dumps(first))
+      github("repos/o/d/issues/2/comments", "[]")
+      # Its first turn waits for the edit, however quickly the pass looks.
+      machine.succeed("touch /tmp/inbox-hold")
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      ej = machine.succeed("grep -l 'issue o/d#2 ' /data/dev/jobs/*/prompt.1").split()[0].split("/")[-2]
+      # Edited after the job was handed it, before it was done.
+      edited = {**first, "body": "inbox-done, and also the edit"}
+      github("repos/o/d/issues", json.dumps([edited]))
+      github("repos/o/d/issues/2", json.dumps(edited))
+      machine.succeed("rm /tmp/inbox-hold")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {ej}' | grep -x done", timeout=120)
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      calls = machine.succeed("cat /tmp/gh/calls")
+      assert "repos/o/d/issues/2 -f state=closed" not in calls, calls
+      machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{ej}/turns", timeout=30)
+      prompt = machine.succeed(f"cat /data/dev/jobs/{ej}/prompt.2")
+      assert "has changed since you were handed it" in prompt and "and also the edit" in prompt, prompt
+      # It had what it stands as, so once it's done again the issue closes.
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {ej}' | grep -x done", timeout=120)
+      machine.succeed("su - dev -c 'proj-inbox o/d'")
+      calls = machine.succeed("cat /tmp/gh/calls")
+      assert "-X PATCH repos/o/d/issues/2 -f state=closed -f state_reason=completed" in calls, calls
       github("repos/o/d/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/d'")
       machine.succeed("rm /tmp/gh/calls")

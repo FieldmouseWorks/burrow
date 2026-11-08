@@ -32,7 +32,8 @@
   # As a job, it says what comes next before it answers (proj done, or proj
   # ask for an inbox job unless told "inbox-done"; "ask" asks, "await"
   # awaits), but "silent" doesn't, and with /tmp/silent nothing does, even
-  # told to; what it's told is kept in /tmp/told.
+  # told to; what it's told is kept in /tmp/told. While /tmp/inbox-hold exists, an
+  # inbox job's turn waits before it says what comes next.
   # Handed what its conversation missed first (proj's engine/handoff.rs:
   # a turn before this one named no session, as a run killed before it
   # said anything doesn't), it does what this turn asks, as Claude would.
@@ -58,6 +59,7 @@
       # one closes its issue.
       ends=done
       if grep -qs '^proj-inbox/' "/data/dev/jobs/$PROJ_JOB/kick"; then
+        while [ -e /tmp/inbox-hold ]; do sleep 0.2; done
         case $prompt in *inbox-done*) ;; *) ends=ask ;; esac
       fi
       case $prompt in silent*|spent*) ;; *) proj "$ends" >/dev/null ;; esac

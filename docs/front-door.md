@@ -119,8 +119,10 @@ into project jobs.
   same job as its next turn (`proj reply`), with everything it already did in
   context. A reply sent while a turn runs waits for it to finish.
 - **Done:** a turn that ends `proj done` closes the issue once its answer is
-  posted, unless a reply is waiting (the stuck issue excepted: the steward
-  closes that). Reopen it to pick the work back up, as a fresh job from the
+  posted, unless a reply is waiting or the issue changed since the job was
+  handed it (its title or text edited, a comment edited or deleted): then the
+  job is handed the issue as it stands instead. The stuck issue is excepted:
+  the steward closes that. Reopen it to pick the work back up, as a fresh job from the
   issue as it stands. Closing it yourself, or taking the label off, ends the
   job too.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
