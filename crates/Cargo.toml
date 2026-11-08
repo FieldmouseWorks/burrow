@@ -15,6 +15,7 @@ members = [
     "burrow-events",
     "burrow-engines-door",
     "burrow-firmware",
+    "burrow-flake-check",
     "burrow-github",
     "burrow-guard",
     "burrow-health",
