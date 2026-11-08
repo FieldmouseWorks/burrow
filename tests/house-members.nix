@@ -25,10 +25,15 @@ let
   hello = all.members-hello;
   # Without a file of the other program's.
   less = project (rel: rel != "${fixture}/other/src/seven.rs");
+  # Without the tests of the library it reaches (lib/project.nix's
+  # cargoTests).
+  untested = project (rel: rel != "${fixture}/shared/src/tests.rs");
 in
 {
   house-members-package = pkgs.runCommand "house-members-package-check" { } ''
     [ "$(${hello}/bin/members-hello)" = 42 ] || { echo "members-hello didn't say 42"; exit 1; }
+    # A program named tests is a program (lib/project.nix's cargoTests).
+    [ "$(${hello}/bin/tests)" = tests ] || { echo "members-hello has no program named tests"; exit 1; }
     [ "$(${all.members-other}/bin/members-other)" = 7 ] || { echo "members-other didn't say 7"; exit 1; }
     for p in members-hello members-other; do
       [ -x ${all.default}/bin/$p ] || { echo "packages.default has no $p"; exit 1; }
@@ -38,7 +43,7 @@ in
     # manifest and lockfile name only those.
     cd ${hello.src}
     got=$(find . ! -type d | sort)
-    want=$(printf '%s\n' ./hello/Cargo.toml ./hello/src/main.rs ./shared/Cargo.toml ./shared/src/lib.rs)
+    want=$(printf '%s\n' ./hello/Cargo.toml ./hello/src/bin/tests.rs ./hello/src/main.rs ./shared/Cargo.toml ./shared/src/lib.rs)
     [ "$got" = "$want" ] || { printf "members-hello's source has:\n%s\n" "$got"; exit 1; }
     got=$(grep '^name = ' ${hello.cargoLock} | sort)
     want=$(printf '%s\n' 'name = "members-hello"' 'name = "members-shared"')
@@ -49,5 +54,10 @@ in
   house-members-apart = pkgs.runCommand "house-members-apart-check" { } (
     if hello.drvPath == less.members-hello.drvPath then "touch $out"
     else "echo '${fixture}/other/src/seven.rs, which members-hello never reaches, changes its package'; exit 1"
+  );
+  house-members-tests-apart = pkgs.runCommand "house-members-tests-apart-check" { } (
+    if !builtins.pathExists ../${fixture}/shared/src/tests.rs then "echo '${fixture}/shared/src/tests.rs, the test this takes away, is gone'; exit 1"
+    else if hello.drvPath == untested.members-hello.drvPath then "touch $out"
+    else "echo '${fixture}/shared/src/tests.rs, a test, changes the package of members-hello'; exit 1"
   );
 }

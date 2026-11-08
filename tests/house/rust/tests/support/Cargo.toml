@@ -1,0 +1,6 @@
+# A crate inside the root package's tests/, which Cargo loads as one of its
+# dev-dependencies, so that tests/ stays in the package's source.
+[package]
+name = "house-fixture-support"
+version = "0.1.0"
+edition = "2024"

@@ -1,0 +1,7 @@
+# A build script in tests/, named by a path through src/..: the package keeps
+# tests/ (lib/project.nix's cargoTests).
+[package]
+name = "house-fixture-built"
+version = "0.1.0"
+edition = "2024"
+build = "src/../tests/build.rs"

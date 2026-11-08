@@ -1,0 +1,5 @@
+# A member a nested glob finds, beside a branch (groups/b) it doesn't reach.
+[package]
+name = "house-fixture-grouped"
+version = "0.1.0"
+edition = "2024"
