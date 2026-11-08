@@ -150,7 +150,9 @@ Each has an entry below, and each can be imported on its own.
   `proj done` closes its issue. With `inbox.triage`, every other issue the
   authors open is sorted by a job of its own (`ready`, `later`, `tracker`, the
   owner's call, or closed as a duplicate or done), and `triage.drain` hands
-  `ready` ones to an engine's idle slots ([front door](docs/front-door.md#triage-and-the-drain-issues-nobody-labelled)). One that also has
+  `ready` ones to an engine's idle slots ([front door](docs/front-door.md#triage-and-the-drain-issues-nobody-labelled)).
+  Triage and the drain leave same-repo issue references in a running or queued
+  inbox job's handed brief alone until that job ends. One that also has
   `inbox.unstickLabel` (the steward's stuck issue) is run `--unstick`. Every
   turn says what comes next before it answers: `proj await` a PR or issue (the
   job holds no slot and is resumed when it changes; one already merged or

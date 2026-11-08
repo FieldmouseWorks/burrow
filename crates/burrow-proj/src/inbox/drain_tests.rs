@@ -349,3 +349,47 @@ fn a_stalled_hand_on_holds_its_place() {
     let made = crate::mtime(&mark).unwrap();
     assert!(crate::now() - made < 60, "a fresh mark: {log}");
 }
+
+// A lane's handed brief owns its references until its job ends.
+#[test]
+fn running_handed_references_are_not_drained() {
+    let b = Box::new();
+    b.job("lane", "done", "finished");
+    let d = b.record("lane");
+    super::Pass::hand(&d, "Deliver https://github.com/sam/box/issues/7 and #8/#10; sam/game#9 is elsewhere. https://example.org/docs/#11").unwrap();
+    fs::write(b.path("active"), "").unwrap();
+    fs::write(b.cfg.jobs.join("lane/1.slot"), "").unwrap();
+    let seven = found("sam/box", 7, "sam", &["ready"], "2026-10-01T00:00:00Z");
+    // The lane's own record must not be the reason #7 is skipped.
+    let lane = d.with_file_name("sam_box-100");
+    fs::rename(&d, &lane).unwrap();
+    fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+    let p = b.pass();
+    assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
+    let mut unsorted = seven.clone();
+    unsorted["labels"] = json!([]);
+    assert!(p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    for (repo, n, claimed) in [
+        ("sam/box", 8, true),
+        ("sam/box", 10, true),
+        ("sam/box", 9, false),
+        ("sam/box", 11, false),
+        ("sam/game", 7, false),
+    ] {
+        let i = found(repo, n, "sam", &["ready"], "2026-10-01T00:00:00Z");
+        assert_eq!(p.pick_ready(t, &[i]).is_none(), claimed);
+    }
+    p.note_ready("sam/box", std::slice::from_ref(&seven))
+        .unwrap();
+    on_github(&b, &seven);
+    b.pass().drain().unwrap();
+    assert!(!b.log().contains("labels[]=codex"));
+    // Waiting for a slot still owns the brief.
+    fs::remove_file(b.cfg.jobs.join("lane/1.slot")).unwrap();
+    assert_eq!(b.pass().pick_ready(t, std::slice::from_ref(&seven)), None);
+    fs::remove_file(b.path("active")).unwrap();
+    assert!(!b.pass().sorted(t, &unsorted, &b.pass().claimed("sam/box")));
+    b.pass().drain().unwrap();
+    assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
+}

@@ -154,8 +154,11 @@ impl Pass<'_> {
     }
 
     /// Whether an issue is sorted already, or isn't triage's to sort.
-    pub(super) fn sorted(&self, t: &Triage, issue: &Value) -> bool {
-        if issue.get("pull_request").is_some() || !self.eligible(issue) {
+    pub(super) fn sorted(&self, t: &Triage, issue: &Value, claimed: &BTreeSet<String>) -> bool {
+        if issue.get("pull_request").is_some()
+            || !self.eligible(issue)
+            || claimed.contains(&raw(&issue["number"]))
+        {
             return true;
         }
         let labels: Vec<&str> = issue["labels"]
@@ -180,6 +183,7 @@ impl Pass<'_> {
         let root = self.sorting_dir();
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let handled = self.verdicts(repo, &t, all)?;
+        let claimed = self.claimed(repo);
         let going = dirs(&root, "")
             .iter()
             .filter(|d| d.join("job").exists())
@@ -190,7 +194,7 @@ impl Pass<'_> {
                 break;
             }
             let n = raw(&issue["number"]);
-            if self.sorted(&t, issue) || handled.contains(&n) {
+            if self.sorted(&t, issue, &claimed) || handled.contains(&n) {
                 continue;
             }
             let d = root.join(format!("{}-{n}", key(repo)));
@@ -286,6 +290,7 @@ impl Pass<'_> {
         all: &[Value],
     ) -> Result<BTreeSet<String>, Fail> {
         let mut handled = BTreeSet::new();
+        let claimed = self.claimed(repo);
         let prefix = format!("{}-", key(repo));
         for d in dirs(&self.sorting_dir(), &prefix) {
             let name = d
@@ -331,7 +336,7 @@ impl Pass<'_> {
             // even partway through carrying its verdict out, the verdict is
             // of something else, and the issue is sorted again as it stands.
             let mut stale = false;
-            if !barred && let Some(i) = open.filter(|i| !self.sorted(t, i)) {
+            if !barred && let Some(i) = open.filter(|i| !self.sorted(t, i, &claimed)) {
                 let Some(now) = self.input(repo, i) else {
                     self.miss(repo);
                     continue;
@@ -339,7 +344,7 @@ impl Pass<'_> {
                 stale = !Self::handed(&d, &now);
             }
             let mut failed = false;
-            if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i)) {
+            if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i, &claimed)) {
                 match told(self.cfg, &id, "1") {
                     Ok(answer) => {
                         let Some(plan) = self.plan(&d, t, &id, &answer) else {

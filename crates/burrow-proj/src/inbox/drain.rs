@@ -248,6 +248,11 @@ impl Pass<'_> {
     /// an author, nobody else's to work, and without a record here; the
     /// pipeline's repos first, then the rest, oldest first.
     fn ranked(&self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
+        let claimed: std::collections::BTreeMap<_, _> = self
+            .project
+            .keys()
+            .map(|repo| (repo.clone(), self.claimed(repo)))
+            .collect();
         let rank = |repo: &str| {
             !self
                 .cfg
@@ -286,7 +291,7 @@ impl Pass<'_> {
                     .state
                     .join(format!("{}-{n}", key(&repo)))
                     .exists();
-                (labels.contains(&READY) && !theirs && !kept)
+                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n))
                     .then(|| (rank(&repo), raw(&i["created_at"]), repo, n))
             })
             .collect::<BTreeSet<_>>()
