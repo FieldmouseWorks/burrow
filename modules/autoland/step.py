@@ -914,7 +914,6 @@ def handle(repo, pr, repo_info, digest, held=None, below=None):
             return looked
         return None
 
-
     if dep and not fixed:
         dependency_step.step(
             repo, pr, st, dep=dep, renovate=renovate, head=head, labels=labels, refresh=refresh,
