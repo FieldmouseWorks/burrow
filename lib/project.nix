@@ -103,7 +103,11 @@ let
   # The workspace's binaries, built for release: packages.default, what a
   # machine installs.
   rustPackage = pkgs: (craneFor pkgs).buildPackage {
-    src = (craneFor pkgs).cleanCargoSource rustDir;
+    src = lib.cleanSourceWith {
+      src = (craneFor pkgs).cleanCargoSource rustDir;
+      name = "source";
+      filter = path: type: !(testPath (rootToml.workspace.members or [ ]) (lib.removePrefix "${toString rustDir}/" (toString path)) type);
+    };
     strictDeps = true;
     nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
     buildInputs = rustCfg.buildInputs pkgs;
@@ -188,6 +192,20 @@ let
       kept = lib.genAttrs (map (x: x.key) reached) (_: true);
     in
     lockToml // { package = builtins.filter (p: kept ? ${lockKey p}) lockToml.package; };
+  # A crate's tests, as Cargo lays them out: a `tests` directory (integration
+  # tests, or a module's `mod tests;` as tests/mod.rs) or a `tests.rs` file,
+  # at REL in the workspace, unless it's one of the workspace's MEMBERS or
+  # holds one. Cargo builds a package's library and programs without them
+  # (`#[cfg(test)] mod tests;` drops the module before its file is read),
+  # and a package runs no test (doCheck = false), so its source leaves them
+  # out, and a change to a test alone leaves the package, and every check
+  # built from it, as it was. The checks that run tests (rustChecks) take
+  # the whole directory. The negative run (flake-check.yml) builds only the
+  # checks a PR's tests change, so it builds those, not every machine test
+  # that runs the programs.
+  testPath = members: rel: type:
+    ((type == "directory" && baseNameOf rel == "tests") || (type == "regular" && baseNameOf rel == "tests.rs"))
+    && !(lib.any (d: rel == d || lib.hasPrefix "${rel}/" d) members);
   hasBinary = dir:
     (memberToml dir).bin or [ ] != [ ]
     || builtins.pathExists (rustDir + "/${dir}/src/main.rs")
@@ -208,7 +226,8 @@ let
         name = "${toml.package.name}-source";
         filter = path: type:
           let rel = lib.removePrefix "${toString rustDir}/" (toString path); in
-          lib.any (d: rel == d || lib.hasPrefix "${d}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" d)) dirs;
+          lib.any (d: rel == d || lib.hasPrefix "${d}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" d)) dirs
+          && !(testPath dirs rel type);
       };
       cargoLockParsed = lockFor dirs;
       postPatch = "cp ${cargoToml} Cargo.toml";

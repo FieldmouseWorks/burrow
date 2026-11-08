@@ -25,6 +25,9 @@ let
   hello = all.members-hello;
   # Without a file of the other program's.
   less = project (rel: rel != "${fixture}/other/src/seven.rs");
+  # Without the tests of the library it reaches (lib/project.nix's
+  # testPath).
+  untested = project (rel: rel != "${fixture}/shared/src/tests.rs");
 in
 {
   house-members-package = pkgs.runCommand "house-members-package-check" { } ''
@@ -49,5 +52,10 @@ in
   house-members-apart = pkgs.runCommand "house-members-apart-check" { } (
     if hello.drvPath == less.members-hello.drvPath then "touch $out"
     else "echo '${fixture}/other/src/seven.rs, which members-hello never reaches, changes its package'; exit 1"
+  );
+  house-members-tests-apart = pkgs.runCommand "house-members-tests-apart-check" { } (
+    if !builtins.pathExists ../${fixture}/shared/src/tests.rs then "echo '${fixture}/shared/src/tests.rs, the test this takes away, is gone'; exit 1"
+    else if hello.drvPath == untested.members-hello.drvPath then "touch $out"
+    else "echo '${fixture}/shared/src/tests.rs, a test, changes the package of members-hello'; exit 1"
   );
 }

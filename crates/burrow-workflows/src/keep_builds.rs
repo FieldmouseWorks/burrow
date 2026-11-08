@@ -5,7 +5,8 @@
 //! own ref); and only a push to the default branch whose gate passed keeps
 //! them, last, under the key and the path restores look for, without its
 //! failure failing the gate, with crates/burrow-keep (whose tests say what
-//! it keeps) from the workflow's own commit.
+//! it keeps) from the workflow's own commit. A PR's negative run restores
+//! every leg's, on the same terms, when it has a negative to build.
 
 use yaml_serde::Value;
 
@@ -172,4 +173,102 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
             c.insert(off.to_owned(), true.into());
         }
     }
+}
+
+/// The negative job restores every leg's kept builds, under the keys and
+/// path each leg restores its own from and on the same terms (no PR from a
+/// fork), but only when it has a negative to build, and nix substitutes
+/// from them as the legs' does. Without them it built what no public cache
+/// has (the workspace's dependencies, the machines' patched packages) again
+/// for every PR that adds a test.
+#[test]
+fn a_negative_restores_every_legs_kept_builds() {
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let neg = &wf["jobs"]["negative"];
+    let all = steps(neg);
+    let gate = job();
+    let gate_all = steps(&gate);
+    let (gate_made, gate_restore, gate_install) = (&gate_all[2], &gate_all[3], &gate_all[4]);
+    let uses = |s: &Value, action: &str| s["uses"].as_str().is_some_and(|u| u.starts_with(action));
+    let at = |f: &dyn Fn(&Value) -> bool| all.iter().position(f).unwrap();
+    let restores: Vec<&Value> = all
+        .iter()
+        .filter(|s| uses(s, "actions/cache/restore@"))
+        .collect();
+    assert_eq!(restores.len(), 8, "one a leg, up to eight");
+    let first = at(&|s| uses(s, "actions/cache/restore@"));
+    let made = &all[first - 1];
+    let install = &all[at(&|s| uses(s, "cachix/install-nix-action@"))];
+    // After the paths step says whether there's a negative, the directory
+    // nix's config names first, then the restores, then nix, then the run.
+    assert!(at(&|s| s["id"] == "paths") < first - 1);
+    assert!(first + 8 <= at(&|s| uses(s, "cachix/install-nix-action@")));
+    assert!(at(&|s| uses(s, "cachix/install-nix-action@")) < at(&|s| s["id"] == "negative"));
+    assert_eq!(script(made), script(gate_made));
+    let base = |legs: u64| {
+        ctx(&[
+            ("inputs.keep-builds", true.into()),
+            ("inputs.install-nix", true.into()),
+            ("inputs.legs", legs.into()),
+            ("steps.paths.outputs.needs", "true".into()),
+            ("github.event_name", "pull_request".into()),
+            ("github.repository", "FieldmouseWorks/burrow".into()),
+            (
+                "github.event.pull_request.head.repo.full_name",
+                "FieldmouseWorks/burrow".into(),
+            ),
+            ("github.workflow", "flake".into()),
+            ("runner.os", "Linux".into()),
+            ("runner.temp", "/tmp/runner".into()),
+            ("github.sha", "abc".into()),
+        ])
+    };
+    for legs in 1..=8u64 {
+        for (k, r) in restores.iter().enumerate() {
+            let leg = k as u64 + 1;
+            let c = base(legs);
+            assert_eq!(
+                value(text(&r["if"]), &c).truthy(),
+                leg <= legs,
+                "leg {leg} of {legs}"
+            );
+            // The entry that leg's own restore finds.
+            let mut as_leg = c.clone();
+            as_leg.insert("matrix.leg".to_owned(), leg.into());
+            for field in ["path", "key", "restore-keys"] {
+                assert_eq!(
+                    value(text(&r["with"][field]), &c).text(),
+                    value(text(&gate_restore["with"][field]), &as_leg).text(),
+                    "leg {leg} of {legs}: {field}"
+                );
+            }
+            assert_eq!(r["uses"], gate_restore["uses"]);
+        }
+    }
+    // None for a PR from a fork, or one whose fork is gone, nor with no
+    // negative to build, nor with keep-builds or nix's install off.
+    for (key, off) in [
+        (
+            "github.event.pull_request.head.repo.full_name",
+            V::from("someone/burrow"),
+        ),
+        ("github.event.pull_request.head.repo.full_name", V::Null),
+        ("steps.paths.outputs.needs", "false".into()),
+        ("inputs.keep-builds", false.into()),
+        ("inputs.install-nix", false.into()),
+    ] {
+        let mut c = base(8);
+        c.insert(key.to_owned(), off.clone());
+        for r in &restores {
+            assert!(!value(text(&r["if"]), &c).truthy(), "{key} {off:?}");
+        }
+        if key != "github.event.pull_request.head.repo.full_name" {
+            assert!(!condition(text(&made["if"]), &c), "{key} {off:?}");
+        }
+    }
+    assert!(condition(text(&made["if"]), &base(1)));
+    assert_eq!(
+        install["with"]["extra_nix_config"],
+        gate_install["with"]["extra_nix_config"]
+    );
 }
