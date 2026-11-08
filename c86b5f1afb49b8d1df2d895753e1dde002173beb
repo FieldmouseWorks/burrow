@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "3g684dwb50p59jhh7szsghjjqt",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 547,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/547",
+  "summary": "autoland: split per-pr steps around a shared context",
+  "task": "fieldmouseworks/burrow#241",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "e2f16024b08308423a112fcfd64bea8702fb43641f2b7d5b47acdcccae8e8b42",
+    "before": "b09f27693888e5a89069812240f5de2ebf3909b0",
+    "after": "c86b5f1afb49b8d1df2d895753e1dde002173beb",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794164091400
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818032015"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818031987"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818031671"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436/job/128818031321"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#547)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#547)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#547)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#547)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#547)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#547)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093436"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818067716"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818067842"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818835650"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818067752"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42509093429/job/128818067706"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/547"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/547#pullrequestreview-5819106678"
+    }
+  ]
+}
