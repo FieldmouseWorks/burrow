@@ -27,8 +27,7 @@
 //! one. A Codex turn, whoever's issue it is, acts as an App all the same
 //! (`turn::github_app`).
 //!
-//! Everything goes through GitHub's REST API: its GraphQL budget is shared
-//! with whatever else runs under the same login, and runs out first.
+//! Discovery uses REST; text is read with its edit history through GraphQL.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -695,11 +694,16 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
             // Comments already there are part of the task; replies after
             // this are turns.
-            let Some(comments) = every(self.cfg, &format!("repos/{repo}/issues/{n}/comments"))
+            let Some(written::Written {
+                issue: safe,
+                comments,
+                ..
+            }) = self.written(repo, issue)
             else {
                 self.miss(repo);
                 continue;
             };
+            let issue = &safe;
             let id = match self.start(repo, issue, &comments) {
                 Ok(id) => id,
                 Err(f) => {
@@ -885,6 +889,7 @@ fn say(f: Fail) {
 
 mod drain;
 mod jobs;
+mod written;
 
 pub(crate) use drain::WAITING;
 mod triage;

@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{CUT_OFF, Pass, dirs, key, raw, say, seconds, trimmed};
 use crate::cmd::{halt, reply, stop, told, unstick};
-use crate::github::{api, every};
+use crate::github::api;
 use crate::job::Job;
 use crate::{Fail, filled, io_fail, now, read};
 
@@ -193,10 +193,13 @@ impl Pass<'_> {
             let seen: i64 = read(&d.join("seen"))
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let Some(all) = every(self.cfg, &format!("repos/{repo}/issues/{n}/comments")) else {
+            let Some(written) = self.written(repo, listed_now) else {
                 self.miss(repo);
                 continue;
             };
+            let safe_issue = &written.issue;
+            let all = &written.comments;
+            let listed_now = safe_issue;
             let before = jiff::Timestamp::from_second(now() - 60)
                 .map(|t| t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
                 .unwrap_or_default();
@@ -259,6 +262,15 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 };
+                // A later REST read may have observed an edit after our verified
+                // snapshot. Never overwrite that signal and close stale work.
+                if !written.matches(&now_issue) {
+                    self.retry(repo);
+                    continue;
+                }
+                let mut now_issue = now_issue;
+                now_issue["title"] = safe_issue["title"].clone();
+                now_issue["body"] = safe_issue["body"].clone();
                 let labelled = self.engine(&now_issue).is_some();
                 if now_issue["state"] != "open" || !labelled || !self.eligible(&now_issue) {
                     continue;

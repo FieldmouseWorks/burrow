@@ -44,7 +44,6 @@ use serde_json::Value;
 use super::{Pass, dirs, key, raw, say, trimmed};
 use crate::cmd::{New, start_job, stop, told};
 use crate::config::Triage;
-use crate::github::every;
 use crate::job::Job;
 use crate::{Fail, io_fail, read};
 
@@ -229,9 +228,10 @@ impl Pass<'_> {
     /// What a sorting job reads of the issue: its text and its authors'
     /// comments, as they stand. None when GitHub didn't say.
     pub(super) fn input(&self, repo: &str, issue: &Value) -> Option<String> {
-        let n = raw(&issue["number"]);
-        let comments = every(self.cfg, &format!("repos/{repo}/issues/{n}/comments"))?;
-        Some(self.issue_text(repo, issue, &comments))
+        let super::written::Written {
+            issue, comments, ..
+        } = self.written(repo, issue)?;
+        Some(self.issue_text(repo, &issue, &comments))
     }
 
     /// A sorting job for the issue: its id, and what it was given to read

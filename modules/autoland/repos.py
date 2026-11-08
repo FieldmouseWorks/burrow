@@ -482,7 +482,7 @@ def publish(digest):
         # Its job never waits in proj's line (the unstick label), which may be
         # the very thing stuck.
         issue("stuck.json", "[autoland] Stuck in the pipeline", stuck_label(), "", stuck_brief(),
-              [x for x in digest if x not in owner], "Nothing stuck.", also=CFG["inbox"]["unstickLabel"])
+              [x for x in digest if x not in owner], "Nothing stuck.", also=CFG["inbox"]["unstickLabel"], immutable=True)
 
 
 def stuck_label():
@@ -518,19 +518,22 @@ one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and t
 {CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
 this machine when it's the machine. Then get it moving again (`curl -fsS -d '' {CFG['kick']}/OWNER/REPO` starts a \
 repo's pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
-something new stuck comes as a comment, and it closes the issue itself once nothing is, so don't close it. If one \
+the latest complete stall list comes as a fresh comment and replaces earlier lists, and it closes the issue itself once nothing is, so don't close it. If one \
 really does need {who} (a login only they can do, a call that's theirs), say exactly what and assign this issue to \
 them.
 
 """
 
 
-def issue(key, title, label, assignee, intro, digest, done, also=""):
+def issue(key, title, label, assignee, intro, digest, done, also="", immutable=False):
     """One issue in config.notify.repo listing digest, kept up to date: each
     new or changed entry is a comment too, and it's closed once there's none.
     It's found by label, and has the label `also` as well, when there is one:
     put back on the open one when it's gone. Without a routing label, only
-    an empty digest is allowed: find the old issue by title and close it."""
+    an empty digest is allowed: find the old issue by title and close it.
+    Agent-bound issues have immutable bodies: fresh complete-list comments
+    cannot accumulate the pruned edit history that the inbox must distrust.
+    Retire a pre-migration issue once instead of asking the inbox to trust it."""
     if not label and digest:
         raise ValueError("an issue with work needs a routing label")
     nrepo = CFG["notify"]["repo"]
@@ -550,7 +553,7 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
         return
     prev = load(key, {"entries": []})
     # Unchanged since the last look, under an hour ago: nothing to read or write.
-    if prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
+    if (not immutable or prev.get("immutable")) and prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
     found = C.gh("issue", "list", "-R", nrepo, *(["--label", label] if label else []), "--state", "open", "--search",
                  f'"{title}" in:title', "--json", "number,body,labels", check=False)
@@ -566,6 +569,14 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
         if ok:
             save(key, {"entries": [], "body": body, "checked": C.NOW})
         return
+    if immutable and found and not prev.get("immutable"):
+        # Existing bot issues may already have 100 retained edits. Neither
+        # the local state nor the surviving history proves who wrote them.
+        # Close first: a failed close must not create a second active lane.
+        if C.gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment",
+                "Replaced by a fresh issue with an immutable body; updated stall lists will be fresh comments.", check=False) is None:
+            return
+        found = []
     full = intro + body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
         for name in (label, also):
@@ -578,13 +589,17 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
         ok = C.gh(*args, check=False) is not None
     else:
         num = str(found[0]["number"])
-        if found[0]["body"] != full:
+        if not immutable and found[0]["body"] != full:
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
         if also and ok and also not in {x.get("name") for x in found[0].get("labels") or []}:
             C.gh("label", "create", also, "-R", nrepo, "--color", "B60205", check=False)
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--add-label", also, check=False) is not None
         added = [news[x] for x in entries if x not in prev.get("entries", [])]
-        if added and ok:
-            ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
+        removed = set(prev.get("entries", [])) - set(entries)
+        if (added or (immutable and removed)) and ok:
+            comment = "New:\n" + "\n".join(f"- {x}" for x in added) if added else "Stalls cleared."
+            if immutable:
+                comment += "\n\nCurrent complete stall list (replaces all earlier lists):\n" + body
+            ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", comment, check=False) is not None
     if ok:
-        save(key, {"entries": entries, "body": body, "checked": C.NOW})
+        save(key, {"entries": entries, "body": body, "checked": C.NOW, "immutable": immutable})

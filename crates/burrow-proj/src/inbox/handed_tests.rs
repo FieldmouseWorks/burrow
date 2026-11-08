@@ -190,3 +190,77 @@ fn a_young_comment_the_job_had_stays_in_the_issue_handed_whole() {
     let prompt = handed_whole(&b, &d, &now, std::slice::from_ref(&red));
     assert!(prompt.contains("the red one"), "{prompt}");
 }
+
+// The real continuation boundary, not just the writer predicate: a reply
+// must never carry a collaborator's edits in the refreshed issue either.
+#[test]
+fn a_reply_cannot_smuggle_outside_edits_into_a_running_job() {
+    for field in ["body", "title", "comment"] {
+        let had = issue(7, "sam", &["claude"]);
+        let mut now = had.clone();
+        let bad = json!({"totalCount":1,"nodes":[{"editor":{"login":"mallory"},"actor":{"login":"mallory"}}]});
+        let mut comments = vec![said(9, "authorized continuation")];
+        match field {
+            "body" => {
+                now["body"] = json!("MALICIOUS INPUT");
+                now["userContentEdits"] = bad;
+            }
+            "title" => {
+                now["title"] = json!("MALICIOUS INPUT");
+                now["timelineItems"] = bad;
+            }
+            _ => {
+                let mut c = said(10, "MALICIOUS INPUT");
+                c["userContentEdits"] = bad;
+                comments.push(c);
+            }
+        }
+        let mut b = Box::new();
+        finished(&mut b, &had, 0, &comments, &now);
+        b.pass().jobs("sam/box", "box", &[now]).unwrap();
+        let prompt = fs::read_to_string(b.cfg.jobs.join("j1/prompt.2")).unwrap();
+        assert!(
+            prompt.contains("authorized continuation"),
+            "{field}: {prompt}"
+        );
+        assert!(!prompt.contains("MALICIOUS INPUT"), "{field}: {prompt}");
+    }
+}
+
+#[test]
+fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
+    use std::os::unix::fs::PermissionsExt;
+    for field in ["title", "body"] {
+        for outsider in [false, true] {
+            let had = issue(7, "sam", &["claude"]);
+            let mut edited = had.clone();
+            edited[field] = json!("NEW REQUEST AFTER SNAPSHOT");
+            edited["state"] = json!("open");
+            if outsider {
+                let history = if field == "title" {
+                    "timelineItems"
+                } else {
+                    "userContentEdits"
+                };
+                edited[history] = json!({"totalCount":1,"nodes":[{"actor":{"login":"mallory"},"editor":{"login":"mallory"}}]});
+            }
+            let mut b = Box::new();
+            let d = finished(&mut b, &had, 0, &[], &had);
+            let input = fs::read_to_string(d.join("input")).unwrap();
+            fs::write(b.path("new-issue"), edited.to_string()).unwrap();
+            fs::write(b.path("hook"), format!("#!/bin/sh\nif [ \"$1\" = 'api repos/sam/box/issues/7' ]; then cp '{}' '{}'; fi\n", b.path("new-issue").display(), b.path("repos_sam_box_issues_7").display())).unwrap();
+            fs::set_permissions(b.path("hook"), fs::Permissions::from_mode(0o755)).unwrap();
+            let mut p = b.pass();
+            p.jobs("sam/box", "box", std::slice::from_ref(&had))
+                .unwrap();
+            assert!(!b.log().contains("state=closed"));
+            assert!(!b.cfg.jobs.join("j1/prompt.2").exists());
+            assert_eq!(fs::read_to_string(d.join("input")).unwrap(), input);
+            assert!(p.wake.contains_key("sam/box"));
+            b.pass().jobs("sam/box", "box", &[edited]).unwrap();
+            let prompt = fs::read_to_string(b.cfg.jobs.join("j1/prompt.2")).unwrap();
+            assert_eq!(prompt.contains("NEW REQUEST AFTER SNAPSHOT"), !outsider);
+            assert!(!b.log().contains("state=closed"));
+        }
+    }
+}

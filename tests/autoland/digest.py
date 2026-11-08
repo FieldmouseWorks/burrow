@@ -40,7 +40,11 @@ def relabelled(n):
 
 def said(n):
     """The comments on issue n since CALLS was cleared."""
-    return [a[a.index("--body") + 1] for a in CALLS if a[:3] == ("issue", "comment", str(n))]
+    comments = [a[a.index("--body") + 1] for a in CALLS if a[:3] == ("issue", "comment", str(n))]
+    if n in {OPEN.get(label) for label in R.CFG["inbox"]["labels"]}:
+        for comment in comments:
+            assert "\n\nCurrent complete stall list (replaces all earlier lists):\n" in comment, comment
+    return [c.split("\n\nCurrent complete stall list", 1)[0] for c in comments]
 
 
 def fresh(enable=True, app=True, labels=None):
@@ -151,12 +155,12 @@ CALLS.clear()
 R.publish(DIGEST + [("Open over a day", "sam/r#4", "unsettled")])
 assert said(9) == ["New:\n- Open over a day: sam/r#4: unsettled"], said(9)
 # Its status moving on, as a day-old PR's does at each step of its reviews
-# and CI, isn't news: the issue says where it is now, and no comment hands
-# it to the job again (each was a turn that found nothing to do).
+# and CI, isn't news: keep the latest meaningful snapshot, without a new
+# comment handing it to the job again just for a status transition.
 CALLS.clear()
 R.publish(DIGEST + [("Open over a day", "sam/r#4", "Codex is reviewing this commit")])
 assert said(9) == [], said(9)
-assert any(a[:3] == ("issue", "edit", "9") and "sam/r#4: Codex is reviewing this commit" in a[-1] for a in CALLS), CALLS
+assert not any(a[:2] == ("issue", "edit") and "--body" in a for a in CALLS), CALLS
 # The same kind on the same PR with another diagnosis: news.
 moved = [x if x[0] != "Couldn't merge" else (x[0], x[1], "GitHub says it's behind") for x in DIGEST]
 CALLS.clear()
@@ -239,6 +243,61 @@ for labels in ({"codex": "codex"}, {}):
     assert owner and "no inbox label routes to Claude" in owner["--body"], owner
     assert all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
     assert made("codex") is None and ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
+
+# A bot's long-lived stuck issue may already have 100 retained edits.
+# Retire that unprovable body, then keep one fresh issue and session alive
+# for more than 100 updates by posting immutable complete-list comments.
+fresh()
+old = {"number": 100, "body": "old mutable body", "labels": [{"name": "claude"}, {"name": "unstick"}],
+       "author": "steward[bot]", "edits": 100, "open": True, "comments": []}
+issues = [old]
+retire_fails = True
+
+
+def lifecycle(*a, **k):
+    CALLS.append(a)
+    if a[:2] == ("issue", "list"):
+        return [i for i in issues if i["open"]] if "--label" in a and a[a.index("--label") + 1] == "claude" else []
+    if a[:2] == ("issue", "close"):
+        if retire_fails:
+            return None
+        next(i for i in issues if str(i["number"]) == a[2])["open"] = False
+    if a[:2] == ("issue", "create"):
+        issues.append({"number": 101, "body": a[a.index("--body") + 1], "labels": old["labels"],
+                       "author": "steward[bot]", "edits": 0, "open": True, "comments": []})
+    if a[:2] == ("issue", "edit") and "--body" in a:
+        i = next(i for i in issues if str(i["number"]) == a[2])
+        i["body"] = a[a.index("--body") + 1]
+        i["edits"] += 1
+    if a[:2] == ("issue", "comment"):
+        next(i for i in issues if str(i["number"]) == a[2])["comments"].append(a[a.index("--body") + 1])
+    return {}
+
+
+C.gh = lifecycle
+R.publish(DIGEST[3:])
+assert len(issues) == 1 and old["open"], issues  # failed retirement cannot duplicate the lane
+retire_fails = False
+R.publish(DIGEST[3:])
+assert len(issues) == 2 and not old["open"] and issues[1]["open"], issues
+current = issues[1]
+initial = current["body"]
+assert current["author"] == "steward[bot]" and current["edits"] == 0
+assert all(x in initial for x in ("sam/r#3", "sam/r#4", "sam/r#5")), initial
+for n in range(105):
+    R.publish([("Couldn't merge", f"sam/r#{200 + n}", "current stall")])
+    assert len(issues) == 2 and current["open"], issues
+    assert current["body"] == initial and current["edits"] == 0, current
+    assert f"sam/r#{200 + n}: current stall" in current["comments"][-1], current["comments"][-1]
+assert len(current["comments"]) == 105
+# A disappearance is a complete-list snapshot too, not an obsolete body edit.
+R.publish([("Couldn't merge", "sam/r#304", "current stall"), ("Couldn't merge", "sam/r#305", "current stall")])
+R.publish([("Couldn't merge", "sam/r#305", "current stall")])
+latest = current["comments"][-1]
+assert "Stalls cleared." in latest and "sam/r#305" in latest and "sam/r#304" not in latest, latest
+R.publish([])
+assert not current["open"] and current["edits"] == 0, current
+
 
 C.gh, R.CFG["inbox"], R.CFG["projectsDir"] = kept[0], kept[1], kept[3]
 R.CFG["notify"].clear()

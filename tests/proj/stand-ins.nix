@@ -176,6 +176,20 @@
     shift
     # Every call's arguments, once a test makes the log for it.
     [ -w /tmp/gh/calls ] && echo "$*" >>/tmp/gh/calls
+    if [ "$1" = graphql ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          owner=*) owner=''${arg#owner=} ;;
+          name=*) name=''${arg#name=} ;;
+          n=*) n=''${arg#n=} ;;
+        esac
+      done
+      issue="/tmp/gh/repos_''${owner}_''${name}_issues_''${n}"
+      comments="''${issue}_comments"
+      [ -e "$issue" ] || issue="/tmp/gh/repos_''${owner}_''${name}_issues"
+      [ -e "$comments" ] || comments=${pkgs.writeText "no-comments.json" "[]"}
+      exec ${pkgs.jq}/bin/jq -n --argjson n "$n" --slurpfile i "$issue" --slurpfile c "$comments" -f ${../../crates/burrow-proj/src/inbox/written.jq}
+    fi
     slurp="" post=""
     while [ $# -gt 0 ]; do
       case $1 in
