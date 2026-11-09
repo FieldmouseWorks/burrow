@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_engine_and_vm_start_orders_the_marker_before_immediate_output() {
-        use std::{fs, os::unix::fs::PermissionsExt};
+        use std::fs;
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = tmp.path().join("jobs");
@@ -261,12 +261,10 @@ mod tests {
         let fixture = tmp.path().join("immediate-child");
         // Stand in for timeout at the common process boundary, including the
         // VM command. It emits immediately without buffering or initialization.
-        fs::write(
+        burrow_test::executable(
             &fixture,
             "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\"}'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         for engine in [Engine::Claude, Engine::Codex] {
             for agent in [None, Some("vm")] {
                 for _ in 0..2 {
