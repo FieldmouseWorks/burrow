@@ -397,6 +397,10 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
         ));
     }
     rewatch(cfg, &[id]);
+    kick(cfg, ["proj-watch".to_owned()]);
+    if let Err(e) = crate::question::notify(cfg, job) {
+        eprintln!("proj: {e}");
+    }
     if idle {
         scratch::clear(cfg, id);
     }
@@ -543,11 +547,15 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
         "PROJ_ENDED",
         "proj _ended is for the end of a job turn, run by proj-ended@ID",
     )?;
-    let job = Job::new(cfg, &id);
+    finish(cfg, &id)
+}
+
+pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
+    let job = Job::new(cfg, id);
     job.mark_ended();
-    crate::question::notify(cfg, &job).map_err(|e| Fail::new(1, e))?;
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
+    names.push("proj-watch".into());
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
         names.push(watch::kick_for(&a.target));
     }
@@ -565,6 +573,8 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     if scratch::over(&job) {
         scratch::clear(cfg, &id);
     }
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    crate::question::notify(cfg, &job).map_err(|e| Fail::new(1, e))?;
     Ok(())
 }
 

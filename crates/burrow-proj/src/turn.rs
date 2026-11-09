@@ -123,6 +123,7 @@ fn start_with(
         return Err(couldnt());
     }
     question.commit();
+    kick(cfg, ["proj-watch".to_owned()]);
     rewatch(cfg, &[id]);
     Ok(())
 }
