@@ -7,7 +7,10 @@
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
-//! stop it while it waits), `N.slot` (the slot it took, once it has one), `N.jsonl` (its stream), `N.result` (its answer), `N.outcome`
+//! stop it while it waits), `N.slot` (the slot it took, once it has one),
+//! `N.started` (immutable first execution time, Unix seconds), `N.jsonl`
+//! (its stream, with host-written `burrow.run` boundaries), `N.result`
+//! (its answer), `N.outcome`
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
 //! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
 //! one of its commands waits in line for), `N.waits` (where they say so),
@@ -20,6 +23,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+mod start;
 
 use crate::config::Config;
 use crate::engine::last_result;
@@ -59,6 +64,15 @@ impl<'a> Job<'a> {
     pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
         let n = if valid_turn(n) { n } else { "invalid-turn" };
         self.dir.join(format!("{n}.{kind}"))
+    }
+
+    /// The engine recorded for this turn, including jobs that changed engines.
+    pub fn engine_label(&self, n: &str) -> &'static str {
+        match read(&self.turn(n, "engine")).as_deref() {
+            Some("codex") => "Codex",
+            Some("claude") | None => "Claude",
+            _ => "Unknown",
+        }
     }
 
     /// The latest turn's number, as written; None before the first.
@@ -679,5 +693,34 @@ mod tests {
         assert_eq!(got[0].was, "{\"state\":\"open\"}");
         assert_eq!(got[1].line(), "x/y#1\t200\t\n");
         assert_eq!((got[2].target.as_str(), got[2].since.as_str()), ("bad", ""));
+    }
+}
+
+#[cfg(test)]
+mod usage_start_tests {
+    #[test]
+    fn first_execution_is_recorded_once_across_later_waits_and_runs() {
+        use super::super::{
+            config::{Config, tests::example},
+            job::Job,
+        };
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.jobs = tmp.path().join("jobs");
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(job.turn("1", "jsonl"), "").unwrap();
+        assert!(!job.turn("1", "started").exists());
+        job.start_run("1", 100, || Ok(())).unwrap();
+        fs::write(job.turn("1", "slot"), "slot").unwrap();
+        fs::remove_file(job.turn("1", "slot")).unwrap();
+        job.start_run("1", 300, || Ok(())).unwrap();
+        assert_eq!(
+            fs::read_to_string(job.turn("1", "started")).unwrap(),
+            "100\n"
+        );
+        let lines = fs::read_to_string(job.turn("1", "jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2);
     }
 }

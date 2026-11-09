@@ -287,6 +287,7 @@ dependencies = [
  "burrow-door",
  "burrow-events",
  "burrow-github",
+ "burrow-process",
  "jiff",
  "regex",
  "serde",
@@ -299,6 +300,7 @@ name = "burrow-process"
 version = "0.0.0"
 dependencies = [
  "rustix",
+ "tempfile",
 ]
 
 [[package]]
@@ -440,6 +442,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "burrow-github",
+ "burrow-process",
  "burrow-review",
  "burrow-test",
  "flaky",

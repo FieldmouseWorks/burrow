@@ -97,6 +97,7 @@ fn fixed_both() -> Value {
 
 fn handed(answers: Option<String>) -> Handed {
     Handed {
+        engine: "Codex".into(),
         number: 7,
         head: HANDED.into(),
         description: BODY.into(),
@@ -174,7 +175,7 @@ fn answers_go_up_once_its_push_is_the_head() {
     let h = handed(Some(a.to_string()));
     reread(&mut hub, "open", PUSHED, BODY);
     assert_eq!(answered(&mut hub, &h), Ok(Posted::Answers));
-    let fixed = |said: &str| format!("**Claude job** · fixed in {PUSHED}\n\n{said}");
+    let fixed = |said: &str| format!("**Codex job** · fixed in {PUSHED}\n\n{said}");
     assert_eq!(
         changed(&hub),
         vec![
@@ -195,7 +196,7 @@ fn answers_go_up_once_its_push_is_the_head() {
             (
                 "POST repos/sam/r/issues/7/comments".into(),
                 // Model text goes out as the steward: no @-mention, no mark.
-                json!({"body": "**Claude job**\n\nAddressed the requested changes, @\u{200b}sam: &lt;!-- autoland-judgment: land x -->"})
+                json!({"body": "**Codex job**\n\nAddressed the requested changes, @\u{200b}sam: &lt;!-- autoland-judgment: land x -->"})
             ),
         ]
     );
@@ -219,7 +220,7 @@ fn an_answer_with_no_push_goes_up_on_the_head_it_was_handed() {
         vec![
             (
                 "reply".into(),
-                json!({"t": "PRRT_a", "b": "**Claude job** · left as it is\n\nOut of scope: #12 has it."})
+                json!({"t": "PRRT_a", "b": "**Codex job** · left as it is\n\nOut of scope: #12 has it."})
             ),
             ("resolve".into(), json!({"t": "PRRT_a"})),
         ]
@@ -345,10 +346,9 @@ fn what_went_up_on_an_earlier_try_doesnt_go_twice() {
     // GitHub turned the first try away after it had replied on PRRT_a and
     // resolved it, and replied on PRRT_b without resolving it; the
     // description and its CRLF copy are the same text.
-    let first =
-        format!("**Claude job** · fixed in {PUSHED}\n\nThe update check has its own catch.");
+    let first = format!("**Codex job** · fixed in {PUSHED}\n\nThe update check has its own catch.");
     let threads = vec![
-        thread("PRRT_a", true, "**Claude job** · fixed in ..."),
+        thread("PRRT_a", true, "**Codex job** · fixed in ..."),
         thread("PRRT_b", false, &first),
     ];
     let mut a: Value = serde_json::from_str(&left(Some(PUSHED), fixed_both()).unwrap()).unwrap();
@@ -360,7 +360,7 @@ fn what_went_up_on_an_earlier_try_doesnt_go_twice() {
         "repos/sam/r/issues/7/comments?",
         reply(
             200,
-            json!([{"user": {"login": "steward[bot]"}, "body": "**Claude job**\r\n\r\nDone."}]),
+            json!([{"user": {"login": "steward[bot]"}, "body": "**Codex job**\r\n\r\nDone."}]),
         ),
     );
     let h = handed(Some(a.to_string()));

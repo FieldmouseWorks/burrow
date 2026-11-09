@@ -231,6 +231,7 @@ const CLOSE: &str = "-X PATCH repos/sam/box/issues/7 -f state=closed -f state_re
 fn a_finished_job_closes_its_issue() {
     let b = Box::new();
     b.job("j1", "done", "Fixed in #12.");
+    fs::write(b.cfg.jobs.join("j1/1.engine"), "codex").unwrap();
     let d = b.record("j1");
     let mut now = issue(7, "sam", &["claude"]);
     now["state"] = json!("open");
@@ -238,6 +239,7 @@ fn a_finished_job_closes_its_issue() {
     b.pass()
         .jobs("sam/box", "box", &[issue(7, "sam", &["claude"])])
         .unwrap();
+    assert!(b.posted().contains("**Codex job**"), "{}", b.posted());
     assert!(b.posted().contains("Fixed in #12."), "{}", b.posted());
     assert!(b.log().contains(CLOSE), "{}", b.log());
     assert!(!d.exists());
@@ -353,6 +355,7 @@ fn input(b: &Box, n: u64) -> String {
 fn sorted_as(said: &str, still: Value) -> Box {
     let b = Box::new();
     b.job("s1", "done", said);
+    fs::write(b.cfg.jobs.join("s1/1.engine"), "codex").unwrap();
     let d = b
         .cfg
         .inbox
@@ -392,6 +395,7 @@ fn verdicts_are_carried_out() {
 
     let b = sorted_as("done\nmain has it since #9", issue(7, "sam", &[]));
     assert!(b.posted().contains("main has it since #9"));
+    assert!(b.posted().contains("**Codex job**"));
     assert!(b.log().contains(CLOSE));
 
     let b = sorted_as("Hmm, hard to say.", issue(7, "sam", &[]));

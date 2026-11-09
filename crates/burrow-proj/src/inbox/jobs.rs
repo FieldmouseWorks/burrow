@@ -164,7 +164,11 @@ impl Pass<'_> {
                         })
                 };
                 // GitHub takes 65536 characters a comment.
-                let body: String = body.chars().take(60000).collect();
+                let engine = job.engine_label(&k.to_string());
+                let body: String = format!("**{engine} job**\n\n{body}")
+                    .chars()
+                    .take(60000)
+                    .collect();
                 if !self.post(repo, n, &body) {
                     self.miss(repo);
                     continue 'jobs;

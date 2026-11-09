@@ -11,6 +11,9 @@ use std::fmt;
 pub enum Query {
     /// RAM, swap, the ARC, pressure, and the cgroups holding the most.
     Memory,
+    Usage {
+        since: When,
+    },
     /// Failed units and jobs under way, the system's and the user's.
     Units,
     /// A unit's journal between two times: one on the allowlist only.
@@ -38,7 +41,7 @@ pub enum Query {
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -200,6 +203,15 @@ impl Query {
                     "contains expects OWNER/REPO and a 7–40 digit commit ({VOCABULARY})"
                 )),
             },
+            "usage" => match args {
+                [] => Ok(Query::Usage {
+                    since: When::Ago(18000),
+                }),
+                [since] => Ok(Query::Usage {
+                    since: When::parse(since)?,
+                }),
+                _ => Err(format!("`usage` takes one time at most ({VOCABULARY})")),
+            },
             "oom" => match args {
                 [] => Ok(Query::Oom {
                     since: When::Ago(86400),
@@ -228,6 +240,7 @@ impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Query::Memory => f.write_str("memory"),
+            Query::Usage { since } => write!(f, "usage {}", show(*since)),
             Query::Units => f.write_str("units"),
             Query::Rc => f.write_str("rc"),
             Query::Queue => f.write_str("queue"),

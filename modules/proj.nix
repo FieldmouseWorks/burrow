@@ -88,6 +88,7 @@ let
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     machinery = if machineApp == null then null else machineApp.name;
+    stewardLogin = if config.burrow.autoland.enable or false then "${config.burrow.autoland.app.slug}[bot]" else null;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;

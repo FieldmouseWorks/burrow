@@ -1,4 +1,5 @@
-//! Bounded child transport, shared by guest SSH and GitHub requests.
+//! Bounded child transport and confined process-state reads.
+pub mod state_reads;
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
     process::{Pid, Signal, kill_process_group},

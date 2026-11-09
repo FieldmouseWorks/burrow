@@ -9,6 +9,7 @@ mod memory;
 mod system;
 #[cfg(test)]
 mod tests;
+mod usage;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -148,6 +149,7 @@ impl Machine<'_> {
     pub fn answer(&self, q: &Query) -> Result<String, String> {
         match q {
             Query::Memory => memory::memory(self),
+            Query::Usage { since } => usage::answer(self, since.at(self.now)),
             Query::Units => system::units(self),
             Query::Journal { unit, since, until } => {
                 system::journal(self, unit, since.at(self.now), until.at(self.now))
