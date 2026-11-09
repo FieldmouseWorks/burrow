@@ -437,6 +437,8 @@ fn a_review_is_a_job_told_what_the_machine_runs() {
         proj_words(&m),
         [
             "run".to_owned(),
+            "--role".into(),
+            "firmware".into(),
             "--app".into(),
             "box-app".into(),
             "box-project".into(),
@@ -462,9 +464,9 @@ fn what_a_review_cant_find_out_is_unknown() {
     fs::write(m.path("cpuinfo"), "processor\t: 0\nCPU part\t: 0xd0c\n").unwrap();
     assert_eq!(said(&m.run(&["--review"])), ok());
     let words = proj_words(&m);
-    assert_eq!(&words[..2], ["run", "box-project"]);
+    assert_eq!(&words[..4], ["run", "--role", "firmware", "box-project"]);
     assert_eq!(
-        words[2],
+        words[4],
         task("unknown", "unknown", "unknown", "unknown", "unknown")
     );
     // No drives is none, and no cpuinfo at all is unknown.
@@ -472,7 +474,7 @@ fn what_a_review_cant_find_out_is_unknown() {
     fs::remove_file(m.path("cpuinfo")).unwrap();
     m.run(&["--review"]);
     assert_eq!(
-        proj_words(&m)[2],
+        proj_words(&m)[4],
         task("unknown", "unknown", "unknown", "", "unknown")
     );
 }

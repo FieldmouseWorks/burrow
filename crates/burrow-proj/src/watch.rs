@@ -35,6 +35,24 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
+        {
+            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            match crate::ask::expire(cfg, &job) {
+                Ok(Some(at)) => retry.push((String::new(), at)),
+                Ok(None) => (),
+                Err(e) => {
+                    eprintln!("proj question: {e}");
+                    retry.push((String::new(), now() + RETRY));
+                }
+            }
+        }
+        if let Err(error) = crate::ask::visibility(cfg, &job) {
+            eprintln!("proj question: {error}");
+            retry.push((String::new(), now() + RETRY));
+        }
+        if crate::ask::host_path(&job, "question-needs-owner").exists() {
+            continue;
+        }
         // Notifications are independent of GitHub waits and include stopped
         // and completed jobs. Serialize with starts so rollback stays atomic.
         {

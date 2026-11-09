@@ -252,6 +252,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
         .collect();
     let key = p.ask("flaky", &mut st.ask);
     p.out.jobs.push(Job {
+        role: "flaky",
         part: "flaky",
         key,
         task: task(p, cfg, st, &handed),

@@ -428,7 +428,12 @@ pub fn flags(
             );
         }
     }
-    for path in denied(env)? {
+    let control = crate::ask::control_root(cfg);
+    std::fs::create_dir_all(&control)?;
+    for path in denied(env)?
+        .into_iter()
+        .chain([control.clone(), control.canonicalize()?])
+    {
         grant(&mut entries, path, Access::Deny);
     }
     // What's kept in the job's /tmp gets its own entry there, so /tmp's

@@ -26,13 +26,19 @@ pub enum Query {
     /// What the machine runs: its system, its inputs' revisions, and what
     /// HOST-update last found live.
     Deployed,
+    Contains {
+        repo: String,
+        commit: String,
+    },
     /// The kernel's and systemd-oomd's kills since a time (a day back
     /// unless one is given).
-    Oom { since: When },
+    Oom {
+        since: When,
+    },
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | deployed | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -179,6 +185,21 @@ impl Query {
             "rc" => none(Query::Rc),
             "queue" => none(Query::Queue),
             "deployed" => none(Query::Deployed),
+            "contains" => match args {
+                [repo, commit]
+                    if repository(repo)
+                        && (7..=40).contains(&commit.len())
+                        && commit.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                {
+                    Ok(Query::Contains {
+                        repo: repo.to_string(),
+                        commit: commit.to_string(),
+                    })
+                }
+                _ => Err(format!(
+                    "contains expects OWNER/REPO and a 7–40 digit commit ({VOCABULARY})"
+                )),
+            },
             "oom" => match args {
                 [] => Ok(Query::Oom {
                     since: When::Ago(86400),
@@ -210,6 +231,7 @@ impl fmt::Display for Query {
             Query::Units => f.write_str("units"),
             Query::Rc => f.write_str("rc"),
             Query::Queue => f.write_str("queue"),
+            Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
             Query::Deployed => f.write_str("deployed"),
             Query::Oom { since } => write!(f, "oom {}", show(*since)),
             Query::Journal { unit, since, until } => {
@@ -231,6 +253,17 @@ fn show(w: When) -> String {
             |t| t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
         ),
     }
+}
+
+pub fn repository(repo: &str) -> bool {
+    repo.split_once('/').is_some_and(|(owner, name)| {
+        [owner, name].iter().all(|s| {
+            !s.is_empty()
+                && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -347,5 +380,13 @@ mod tests {
         ] {
             assert_eq!(Query::parse(line).unwrap().to_string(), line);
         }
+    }
+}
+
+#[cfg(test)]
+mod regression_569 {
+    #[test]
+    fn contains_question_is_recognized() {
+        assert!(super::Query::parse("contains sam/tool aaaaaaa").is_ok());
     }
 }

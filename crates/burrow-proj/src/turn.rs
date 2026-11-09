@@ -138,6 +138,9 @@ fn start_with(
         return Err(couldnt());
     }
     question.commit();
+    if crate::ask::host_path(&job, "label").exists() {
+        crate::job::kick(cfg, ["proj-watch".into(), "autoland".into()]);
+    }
     if crate::question::needs_watch(&job) {
         kick(cfg, ["proj-watch".to_owned()]);
     }
@@ -158,7 +161,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    for f in ["await", "await.next", "end.next"] {
+    for f in ["await", "await.next", "end.next", "ask.next"] {
         let _ = fs::remove_file(job.path(f));
     }
     // Its scratch, made before it takes a slot: one that can't be made fails
@@ -192,11 +195,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let mut app_env = String::new();
     match github_app(cfg, read(&job.path("app")), choice.engine) {
         Ok(None) => {}
-        Ok(Some(app)) => match cfg
-            .app_env(&app)
-            .and_then(|f| read(f))
-            .filter(|e| !e.is_empty())
-        {
+        Ok(Some(app)) => match cfg.app_environment(&app).filter(|e| !e.is_empty()) {
             Some(e) => app_env = e,
             None => {
                 outcome(&format!("no GitHub App {app} on this machine to act as"));
@@ -285,6 +284,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
         let ooms = oom_kills();
         let started = now();
+        let bridge = match crate::probe::Bridge::start(cfg, &job, &n, agent.as_deref()) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("proj probe: {e}");
+                break (None, 1);
+            }
+        };
         let child = match engine::spawn(
             cfg,
             &job,
@@ -310,6 +316,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             quiet,
         }
         .watch(child, from);
+        drop(bridge);
         let rc = code(status);
         let oomed = oom_kills() > ooms;
         let last = engine::ended(
@@ -346,11 +353,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // slot and waits in line again, where none is handed out till then,
         // and runs once more in its own conversation, its clock stood still
         // meanwhile. Any other answer says usage is there.
-        let refusal = last.as_ref().and_then(|l| {
-            let text = fs::read(&stream).unwrap_or_default();
-            let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
-            engine::refused(choice.engine, l, &run, now())
-        });
+        let refusal = last
+            .as_ref()
+            .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
         if choice.engine == Engine::Codex {
             if let Some((Some(due), _)) = &refusal {
                 if let Err(e) = swap(
@@ -502,6 +507,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             let _ = fs::write(job.turn(&n, "end"), format!("{end}\n"));
         }
         let done = !is_error(&last);
+        if done {
+            crate::ask::finish(cfg, &job, &end).map_err(|e| Fail::new(1, e))?;
+        }
         outcome(if done { "done" } else { "error" });
         // What it awaits, from the baseline `proj await` took; one line per
         // target, the first await of it in the turn.

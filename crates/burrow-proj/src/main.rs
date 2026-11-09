@@ -11,6 +11,17 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
+    if args.first().map(String::as_str) == Some("probe")
+        && let Some(path) = std::env::var_os("PROJ_PROBE_SOCKET")
+    {
+        return match burrow_proj::probe::client(std::path::Path::new(&path), &args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("proj probe: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let cfg = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {

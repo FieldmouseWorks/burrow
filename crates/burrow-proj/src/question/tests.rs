@@ -177,25 +177,23 @@ fn recovery_keeps_origin_across_automated_updates_and_unrelated_closes() {
 
 #[test]
 fn legacy_recovery_excludes_previously_answered_questions() {
-    let f = Fixture::new();
-    f.ending(1, "ask");
-    f.ending(2, "ask");
-    fs::write(
-        f.job().path("prompt.2"),
-        "A human answers the earlier question",
-    )
-    .unwrap();
-    fs::write(
-        f.job().path("prompt.3"),
-        format!("event\n\n{OPEN_UPDATE}\n"),
-    )
-    .unwrap();
-    fs::write(f.job().path("open-question"), "ask").unwrap();
-    f.ending(3, "ask");
-    notify(&f.cfg, &f.job()).unwrap();
-    assert!(f.deliveries().contains("Question 2?"));
-    assert!(!f.deliveries().contains("Question 1?"));
-    assert!(!f.deliveries().contains("Question 3?"));
+    for update in [OPEN_UPDATE, LEGACY_OPEN_UPDATE] {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        f.ending(2, "ask");
+        fs::write(
+            f.job().path("prompt.2"),
+            "A human answers the earlier question",
+        )
+        .unwrap();
+        fs::write(f.job().path("prompt.3"), format!("event\n\n{update}\n")).unwrap();
+        fs::write(f.job().path("open-question"), "ask").unwrap();
+        f.ending(3, "ask");
+        notify(&f.cfg, &f.job()).unwrap();
+        assert!(f.deliveries().contains("Question 2?"));
+        assert!(!f.deliveries().contains("Question 1?"));
+        assert!(!f.deliveries().contains("Question 3?"));
+    }
 }
 
 #[test]
@@ -654,4 +652,55 @@ fn initial_and_completed_questions_keep_normal_declarations() {
     assert_eq!(next.prompt("new task"), "new task");
     next.commit();
     assert!(response(&cfg, "j1", "ask").contains("with your question"));
+}
+
+#[test]
+fn notification_outbox_rejects_symlinked_bodies_and_boundaries() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    f.ending(1, "ask");
+    let denied = f.dir.path().join("denied");
+    fs::write(&denied, "ordinary confidential text").unwrap();
+    symlink(&denied, f.job().turn("1", "question")).unwrap();
+    assert!(notify(&f.cfg, &f.job()).is_err());
+    assert!(!f.deliveries().contains("ordinary confidential text"));
+    fs::remove_file(f.job().turn("1", "question")).unwrap();
+    symlink(&denied, f.job().path("question-answered-through")).unwrap();
+    assert!(notify(&f.cfg, &f.job()).is_err());
+    assert!(Resume::prepare(&f.job(), true).is_err());
+}
+
+#[test]
+fn machine_question_notifications_include_the_default_deadline_and_policy_once() {
+    for one_way in [false, true] {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        let job = f.job();
+        fs::write(job.turn("1", "result"), "Question 1?").unwrap();
+        let recommendation = crate::ask::Recommendation {
+            default: "keep the old release".into(),
+            one_way,
+        };
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&f.cfg, &job, "ask").unwrap();
+        notify(&f.cfg, &job).unwrap();
+        let body = f.deliveries();
+        assert!(body.contains("Without an answer by"), "{body}");
+        assert!(body.contains("keep the old release"), "{body}");
+        assert!(
+            body.contains(if one_way {
+                "This is one-way"
+            } else {
+                "reversible default"
+            }),
+            "{body}"
+        );
+        Resume::prepare(&job, false).unwrap().commit();
+        f.ending(2, "ask");
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&f.cfg, &job, "ask").unwrap();
+        notify(&f.cfg, &job).unwrap();
+        assert_eq!(f.deliveries().matches("Without an answer by").count(), 1);
+        assert!(!f.deliveries().contains("Question 2?"));
+    }
 }

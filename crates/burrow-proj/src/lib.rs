@@ -68,7 +68,7 @@
 //!                             back: it isn't, now (the limit was raised)
 //! proj usage hold UNTIL       the hold an earlier stall watchdog kept,
 //!                             taken into proj's
-//! proj ask                    from inside a job: its answer is a question for
+//! proj ask --default TEXT [--one-way]  from inside a job: its answer is a question for
 //!                             a person, whose reply resumes it
 //! proj done                   from inside a job: its work is finished
 //! ```
@@ -151,6 +151,7 @@ use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod ask;
 pub mod cmd;
 pub mod config;
 pub mod engine;
@@ -159,6 +160,7 @@ pub mod guest;
 pub mod inbox;
 pub mod job;
 pub mod pick;
+pub mod probe;
 mod question;
 mod roles;
 pub mod scratch;
@@ -208,7 +210,7 @@ pub fn io_fail(path: &Path, e: io::Error) -> Fail {
 /// A file's text as `$(cat FILE)` has it, its trailing newlines dropped; None
 /// when it can't be read.
 pub fn read(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = state_reads::bytes(path).ok()?;
     Some(
         String::from_utf8_lossy(&bytes)
             .trim_end_matches('\n')
@@ -287,6 +289,8 @@ pub fn nanos(d: &str) -> Option<i64> {
     Some(s.ceil().min(1e18) as i64)
 }
 
+mod state_reads;
+
 #[cfg(test)]
 mod tests {
     use super::nanos;
@@ -314,3 +318,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod regression_569;

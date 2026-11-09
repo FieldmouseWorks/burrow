@@ -270,6 +270,7 @@ fn whats_stuck_goes_to_a_job_then_the_stuck_issue() {
     let out = watch_at(&cfg, &mut hub, &mut jobs, DAY);
     assert!(out.stuck.is_empty() && out.jobs.len() == 1, "{out:?}");
     let job = &out.jobs[0];
+    assert_eq!(job.role, "dependency-dashboard");
     assert_eq!(
         (job.part, job.pipeline, job.timeout),
         ("dashboard", true, 60)

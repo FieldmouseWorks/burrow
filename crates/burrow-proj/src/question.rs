@@ -8,10 +8,14 @@ use std::path::{Path, PathBuf};
 
 use crate::{job::Job, read, swap};
 
-const OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer.";
+const OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask --default \"TEXT\" [--one-way]` again with the same recommendation without restating the question if it still needs an answer.";
+
+const LEGACY_OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer.";
 
 fn read_state(path: &Path) -> Result<Option<String>, String> {
-    match fs::read_to_string(path) {
+    match crate::state_reads::bytes(path)
+        .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+    {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
@@ -25,16 +29,46 @@ pub(crate) struct Resume {
     boundary_before: Option<String>,
     asking: bool,
     committed: bool,
+    metadata: Vec<(PathBuf, String)>,
 }
 
 impl Resume {
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
+        if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
+            return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
+        }
         let path = job.path("open-question");
-        let before = read_state(&path)?;
+        let before = match crate::state_reads::bytes(&path)
+            .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+        {
+            Ok(s) => Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
         let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
         let asking = !answered
-            && end.as_deref() != Some("done")
-            && (before.is_some() || end.as_deref() == Some("ask"));
+            && (crate::ask::load(job).is_some()
+                || (end.as_deref() != Some("done")
+                    && (before.is_some() || end.as_deref() == Some("ask"))));
+        let mut metadata = Vec::new();
+        if !asking {
+            for name in [
+                "question",
+                "question-needs-owner",
+                "question-text",
+                "question-since",
+                "question-id",
+            ] {
+                let path = crate::ask::host_path(job, name);
+                match crate::state_reads::bytes(&path)
+                    .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+                {
+                    Ok(text) => metadata.push((path, text)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(format!("{}: {e}", path.display())),
+                }
+            }
+        }
         let boundary = job.path("question-answered-through");
         let boundary_before = read_state(&boundary)?;
         let state = Self {
@@ -44,7 +78,11 @@ impl Resume {
             before: before.clone(),
             asking,
             committed: false,
+            metadata,
         };
+        for (path, _) in &state.metadata {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
         if answered && let Some(n) = job.turns() {
             swap(&state.boundary, &n).map_err(|e| e.to_string())?;
         }
@@ -84,6 +122,11 @@ impl Resume {
 impl Drop for Resume {
     fn drop(&mut self) {
         if !self.committed {
+            for (path, text) in &self.metadata {
+                if let Err(e) = swap(path, text) {
+                    eprintln!("proj: could not restore {}: {e}", path.display());
+                }
+            }
             if let Some(before) = &self.boundary_before {
                 let _ = swap(&self.boundary, before);
             } else {
@@ -179,7 +222,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             let name = e.file_name().to_string_lossy().into_owned();
             let t = name.strip_prefix("prompt.")?.parse::<u64>().ok()?;
             let prompt = read(&e.path())?;
-            (!prompt.ends_with(OPEN_UPDATE)).then_some(t.saturating_sub(1))
+            (!prompt.ends_with(OPEN_UPDATE) && !prompt.ends_with(LEGACY_OPEN_UPDATE))
+                .then_some(t.saturating_sub(1))
         })
         .max()
         .unwrap_or(0);
@@ -237,6 +281,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 body.truncate(at);
                 body.push_str("\n[Full answer: proj log]");
             }
+            if let Some(question) = crate::ask::load(job) {
+                body.push_str(&question.notice());
+            }
             swap(
                 &path,
                 &format!(
@@ -276,8 +323,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 .args(["close", &key, "The job no longer needs this answer."])
                 .status()
         } else {
-            let body = match fs::read_to_string(entry.path()) {
-                Ok(body) => body,
+            let body = match read_state(&entry.path()) {
+                Ok(Some(body)) => body,
+                Ok(None) => continue,
                 Err(e) => {
                     errors.push(e.to_string());
                     continue;

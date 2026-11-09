@@ -374,3 +374,28 @@ fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identit
     }
     forget(state, "O/r").unwrap();
 }
+
+#[test]
+fn machine_issues_have_roles_while_person_issues_keep_label_engines() {
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.inbox
+        .as_mut()
+        .unwrap()
+        .roles
+        .insert("drift".into(), "career-drift".into());
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["labels"] = json!([{"name":"claude"}]);
+    assert_eq!(p.machine_role(&i), None);
+    i["labels"] = json!([{"name":"drift"}]);
+    assert_eq!(p.machine_role(&i).as_deref(), Some("career-drift"));
+    i["labels"] = json!([{"name":p.inbox.unstick_label}]);
+    assert_eq!(p.machine_role(&i).as_deref(), Some("stuck"));
+    i["labels"] = json!([{"name":"claude"}]);
+    i["user"]["login"] = json!("steward[bot]");
+    assert_eq!(p.machine_role(&i).as_deref(), Some("machine-inbox"));
+    i["labels"] = json!([{"name":p.inbox.unstick_label}]);
+    assert_eq!(p.machine_role(&i).as_deref(), Some("stuck"));
+    i["labels"] = json!([{"name":"drift"}]);
+    assert_eq!(p.machine_role(&i).as_deref(), Some("career-drift"));
+}

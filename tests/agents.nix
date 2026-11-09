@@ -34,6 +34,7 @@ pkgs.testers.runNixOSTest {
       claude.effort = "high";
       proj.enable = true;
       proj.gh = gh;
+      probe.repo = "o/machine";
       claude.package = vmClaude;
       agents.enable = true;
       toolbox.enable = true;
@@ -235,6 +236,13 @@ pkgs.testers.runNixOSTest {
         assert ended(job, 2) == "done"
         assert "[no next step]" not in dev("proj status")
         assert host.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
+
+    with subtest("a sandboxed job gets the host deployed answer"):
+        probe_job = dev("proj run --vm demo probe").strip()
+        assert ended(probe_job) == "done"
+        answer = dev(f"proj log {probe_job}")
+        assert "Running:" in answer
+        assert host.succeed("readlink /run/current-system").strip() in answer
 
     with subtest("rm stops and saves, keep undoes it, gc deletes once expired"):
         dev(f"agent rm {o}")

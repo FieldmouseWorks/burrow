@@ -49,6 +49,22 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
+            // Adopt existing machine issues too: a deployment must not leave
+            // the long-lived stuck job pinned to its old label's engine.
+            if let Some(role) = open
+                .iter()
+                .find(|i| raw(&i["number"]) == n)
+                .and_then(|i| self.machine_role(i))
+            {
+                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                crate::swap(&job.path("role"), &format!("{role}\n"))
+                    .map_err(|e| io_fail(&job.path("role"), e))?;
+                match fs::remove_file(job.path("engine")) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(io_fail(&job.path("engine"), e)),
+                }
+            }
             // The state and the turn count, read together: a turn starts
             // (proj reply, proj _watch) holding the job's lock, and halfway
             // through it the count names the new turn while the state is
@@ -148,6 +164,11 @@ impl Pass<'_> {
                 fs::write(d.join("answered"), format!("{k}\n"))
                     .map_err(|e| io_fail(&d.join("answered"), e))?;
             }
+            if let Err(error) = crate::ask::visibility(self.cfg, &job) {
+                eprintln!("proj question: {error}");
+                self.retry(repo);
+            }
+            let needs_owner = crate::ask::host_path(&job, "question-needs-owner").exists();
             // Labelled to wait in no line: the job is made one that doesn't
             // (proj unstick), whatever it's doing, and again every pass. That
             // tells the watchdog afresh, since a turn begun before the switch
@@ -253,7 +274,8 @@ impl Pass<'_> {
             // since: the issue may be closed with it, so what's open is what's
             // still to do. The stuck issue isn't the job's to close: the
             // steward closes it once nothing is stuck.
-            let closable = msg.is_empty()
+            let closable = !needs_owner
+                && msg.is_empty()
                 && young.is_none()
                 && k >= turns
                 && st == "done"
@@ -328,6 +350,9 @@ impl Pass<'_> {
                 } else {
                     msg
                 };
+                if needs_owner && !human_reply {
+                    continue;
+                }
                 let resumed = if msg.is_empty() {
                     Ok(())
                 } else if human_reply {

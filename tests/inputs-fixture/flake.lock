@@ -1,0 +1,1 @@
+{"root":"root","nodes":{"root":{"inputs":{"fetcher":"fetcher-node","alias":"git-node","unknown":"other"}},"fetcher-node":{"locked":{"type":"github","owner":"sam","repo":"one"}},"git-node":{"locked":{"type":"git","url":"https://github.com/sam/two.git"}},"other":{"locked":{"type":"git","url":"https://other.invalid/sam/two.git"}}}}

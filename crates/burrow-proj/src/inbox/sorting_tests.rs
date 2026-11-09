@@ -161,9 +161,20 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
 
     /// A job whose one turn ended as `outcome`, saying it ends with `proj
     /// END` (None: it said nothing).
-    fn job_ending(&self, id: &str, outcome: &str, end: Option<&str>, said: &str) {
+    pub(super) fn job_ending(&self, id: &str, outcome: &str, end: Option<&str>, said: &str) {
         let d = self.cfg.jobs.join(id);
         fs::create_dir_all(&d).unwrap();
+        crate::ask::ensure(&crate::job::Job::new(&self.cfg, id)).unwrap();
+        fs::write(
+            crate::ask::host_path(&crate::job::Job::new(&self.cfg, id), "question-text"),
+            said,
+        )
+        .unwrap();
+        fs::write(
+            crate::ask::host_path(&crate::job::Job::new(&self.cfg, id), "question-id"),
+            "initial",
+        )
+        .unwrap();
         fs::write(d.join("turns"), "1\n").unwrap();
         fs::write(d.join("1.outcome"), format!("{outcome}\n")).unwrap();
         if let Some(end) = end {
@@ -544,7 +555,7 @@ fn a_job_lets_go_of_an_issue_it_may_no_longer_read() {
 
 /// A sorting job s1 for issue 7 that answered `said`, its record made as
 /// of [`UPDATED`]: the record.
-fn sorting(b: &Box, said: &str) -> PathBuf {
+pub(super) fn sorting(b: &Box, said: &str) -> PathBuf {
     b.job("s1", "done", said);
     let d = b
         .cfg
@@ -868,4 +879,24 @@ fn a_handed_issue_url_blocks_triage_and_its_completed_verdict() {
         "eligible after the lane ends: {}",
         b.log()
     );
+}
+
+#[test]
+fn existing_machine_issue_jobs_adopt_the_role_and_drop_the_label_pin() {
+    let mut b = Box::new();
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .authors
+        .push("steward[bot]".into());
+    b.job("j1", "done", "Nothing's stuck.");
+    b.record("j1");
+    let job = crate::job::Job::new(&b.cfg, "j1");
+    fs::write(job.path("engine"), "claude").unwrap();
+    let i = issue(7, "steward[bot]", &["claude", "stuck"]);
+    fs::write(b.path("repos_sam_box_issues_7"), i.to_string()).unwrap();
+    b.pass().jobs("sam/box", "box", &[i]).unwrap();
+    assert_eq!(fs::read_to_string(job.path("role")).unwrap(), "stuck\n");
+    assert!(!job.path("engine").exists());
 }

@@ -52,6 +52,8 @@ REVIEW, FAKES = sys.argv[3], sys.argv[4]
 UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
 # burrow-proof (argv[7]), which starts a proof run's unit (runs.py).
 PROOF_RUN = os.path.abspath(sys.argv[7])
+# The Rust question rows consumed by the owner digest.
+PROJ_ASK_SRC = sys.argv[8]
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
 # its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
@@ -462,7 +464,7 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, role=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, *, role):
     JOBS.append(task)
     SINCE.append(since)
     ROLES.append(role)

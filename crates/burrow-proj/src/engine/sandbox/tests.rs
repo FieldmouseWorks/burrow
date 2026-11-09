@@ -414,6 +414,7 @@ fn what_codex_and_the_job_use_under_tmp_is_kept_with_its_own_access() {
         global.clone(),
         home.join(".cache/nix"),
         home.join(".cargo"),
+        tmp.join("jobs/.question-control"),
         tmp.join("jobs/job"),
         project.clone(),
         repo.join(".git"),
@@ -429,6 +430,10 @@ fn what_codex_and_the_job_use_under_tmp_is_kept_with_its_own_access() {
     let access = |path: &Path| entry(&first.flags, path);
     assert_eq!(access(&tmp).as_deref(), Some("write"));
     assert_eq!(access(&tmp.join("codex-home")).as_deref(), Some("deny"));
+    assert_eq!(
+        access(&tmp.join("jobs/.question-control")).as_deref(),
+        Some("deny")
+    );
     assert_eq!(access(&tmp.join("codex-home/auth.json")), None);
     for read in [&global, &rustup, &tmp.join("gh-token")] {
         assert_eq!(access(read).as_deref(), Some("read"), "{}", read.display());
@@ -653,5 +658,24 @@ fn the_jobs_tmp_is_its_own() {
             "--",
             "/bin/codex"
         ]
+    );
+}
+
+#[test]
+fn host_question_authority_stays_denied_inside_a_writable_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut cfg = job_in(dir.path(), &project);
+    cfg.host_state = Some(project.join("host-control"));
+    let job = Job::new(&cfg, "job");
+    let machine = machine_in(dir.path());
+    let home = dir.path().join("home");
+    let env = env_of(&[("HOME", &home)]);
+    let profile = flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
+    assert_eq!(entry(&profile.flags, &project), Some("write".into()));
+    assert_eq!(
+        entry(&profile.flags, cfg.host_state.as_ref().unwrap()),
+        Some("deny".into())
     );
 }

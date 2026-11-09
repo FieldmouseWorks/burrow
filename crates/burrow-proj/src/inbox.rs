@@ -389,9 +389,11 @@ impl Pass<'_> {
         // Handed on by the drain, nobody's waiting on it: it takes its place
         // in line.
         let drained = self.drained(repo, &raw(&issue["number"]));
+        let (role, engine) = self.routing(issue);
         let new = New {
             vm: self.inbox.vm,
-            engine: self.engine(issue),
+            engine,
+            role,
             first: !pipeline && !drained,
             pipeline,
             unstick: self.lane(issue),
@@ -400,12 +402,49 @@ impl Pass<'_> {
             app,
             ..New::default()
         };
-        start_job(
+        let id = start_job(
             self.cfg,
             &new,
             &self.project[repo],
             &self.task(repo, issue, comments),
-        )
+        )?;
+        if !drained
+            && !self.lane(issue)
+            && issue["user"]["type"] != "Bot"
+            && !raw(&issue["user"]["login"]).ends_with("[bot]")
+        {
+            let job = crate::job::Job::new(self.cfg, &id);
+            let path = crate::ask::host_path(&job, "question-reader");
+            fs::write(&path, "issue author\n").map_err(|e| io_fail(&path, e))?;
+        }
+        Ok(id)
+    }
+
+    fn routing(&self, issue: &Value) -> (Option<String>, Option<crate::engine::Engine>) {
+        let role = self.machine_role(issue);
+        let pinned = role.is_none().then(|| self.engine(issue)).flatten();
+        (role, pinned)
+    }
+
+    /// Machine labels route by role even without an App; other bot issues
+    /// have a generic role. Ordinary human issues keep label routing.
+    fn machine_role(&self, issue: &Value) -> Option<String> {
+        self.inbox
+            .roles
+            .iter()
+            .find(|(label, _)| {
+                issue["labels"].as_array().is_some_and(|ls| {
+                    ls.iter()
+                        .any(|l| l["name"].as_str() == Some(label.as_str()))
+                })
+            })
+            .map(|(_, role)| role.clone())
+            .or_else(|| self.lane(issue).then(|| "stuck".into()))
+            .or_else(|| {
+                raw(&issue["user"]["login"])
+                    .ends_with("[bot]")
+                    .then(|| "machine-inbox".into())
+            })
     }
 
     /// A Codex label takes precedence when an issue has both labels.
@@ -897,6 +936,7 @@ mod retirement;
 mod written;
 
 pub(crate) use drain::WAITING;
+mod sorting_questions;
 mod triage;
 mod write;
 
@@ -904,6 +944,8 @@ mod write;
 mod drain_tests;
 #[cfg(test)]
 mod handed_tests;
+#[cfg(test)]
+mod question_tests;
 #[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]

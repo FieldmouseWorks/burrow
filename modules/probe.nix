@@ -20,7 +20,7 @@ let
   inherit (config.burrow) user prefix;
 
   # What crates/burrow-probe reads (its Config).
-  probeConfig = pkgs.writeText "burrow-probe.json" (builtins.toJSON {
+  settings = {
     inherit (cfg) repo label authors;
     machinery = if config.burrow.github.machineApp == null then null
       else "${config.burrow.github.machineApp.slug}[bot]";
@@ -28,12 +28,17 @@ let
     inherit user;
     inherit (config.burrow) stateDir;
     journal = { inherit (cfg.journal) units userUnits; };
-    proj = if config.burrow.proj.enable or false then lib.getExe' config.burrow.tools.proj "proj" else null;
+    proj = null;
+    projects = config.burrow.projectsDir;
     tools = {
+      git = lib.getExe config.programs.git.package;
       journalctl = "${config.systemd.package}/bin/journalctl";
       systemctl = "${config.systemd.package}/bin/systemctl";
     };
-  });
+  };
+  probeConfig = pkgs.writeText "burrow-probe.json" (builtins.toJSON (settings // {
+    proj = if config.burrow.proj.enable or false then lib.getExe' config.burrow.tools.proj "proj" else null;
+  }));
 
   probe = pkgs.runCommand "burrow-probe" {
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
@@ -51,10 +56,12 @@ in
   ];
 
   options.burrow.probe = {
+    settings = mkOption { type = types.attrs; internal = true; readOnly = true; default = settings; };
     enable = lib.mkEnableOption "probes: read-only questions about the machine, asked and answered on a private repo's issues";
 
     repo = mkOption {
       type = types.str;
+      default = "";
       example = "sam/homelab";
       description = ''
         OWNER/NAME of the private repo whose issues are probes: the machine
@@ -117,6 +124,9 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [{
+      assertion = cfg.repo != "";
+      message = "burrow.probe.repo: name the private repository for issue probes.";
+    } {
       assertion = cfg.authors != [ ];
       message = "burrow.probe.authors: name who may ask the probe.";
     }];

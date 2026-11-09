@@ -72,10 +72,15 @@ let
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
+    hostState = "${stateDir}/proj-questions";
     scratch = config.burrow.scratchDir;
     slice = "claude-jobs.slice";
     inherit (cfg) maxJobs pipelineSlots maxJobsPerProject minFreeMemory jobMemoryMax timeout maxWait stallAfterMinutes awaitHours;
     inherit (config.burrow.events) kick;
+    askTimeout = cfg.askTimeout;
+    waitingOwnerLabel = "waiting: ${config.burrow.owner}";
+    needsOwnerLabel = config.burrow.autoland.labels.owner or cfg.inbox.triage.ownerLabel;
+    probe = config.burrow.probe.settings;
     wake = watchWake;
     waits = if watchdog then waits else null;
     inherit inboxMark pipelineRepos leadRepos;
@@ -93,7 +98,7 @@ let
     inherit roles;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
       host = config.networking.hostName;
       wake = inboxWake;
       triage = if cfg.inbox.triage.enable then {
@@ -139,6 +144,7 @@ in
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
+    { key = "burrow/probe"; imports = [ (import ./probe.nix inputs) ]; }
   ];
 
   options.burrow.proj = {
@@ -268,6 +274,12 @@ in
         takes then.
       '';
     };
+    askTimeout = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 21600;
+      description = "Seconds before an unanswered question takes its reversible default or releases a one-way decision to the owner.";
+    };
+
     awaitHours = lib.mkOption {
       type = lib.types.ints.positive;
       default = 24;
@@ -314,6 +326,11 @@ in
         type = lib.types.attrsOf (lib.types.enum [ "claude" "codex" ]);
         default = { claude = "claude"; codex = "codex"; };
         description = "Issue labels and the engine each starts. Codex takes code with a checkable bar; Claude takes judgment and what the owner reads. Each label is created in each repo; Codex wins if an issue has both.";
+      };
+      roles = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
+        default = {};
+        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
@@ -470,6 +487,7 @@ in
       "L+ ${codexHome}/AGENTS.md - - - - ${instructions}"
       "L+ ${codexHome}/rules/burrow.rules - - - - ${rulesFile}"
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
+      "d ${stateDir}/proj-questions 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
       # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
       # job is over: no age here.
@@ -514,9 +532,10 @@ in
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       Each turn ends saying what comes next: `proj await PR-URL` when it waits
       on GitHub (CI, a review; it's resumed when the PR changes, holding no slot
-      meanwhile), `proj ask` when its answer is a question for you to settle or
-      relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
+      meanwhile), `proj ask --default "TEXT" [--one-way]` when its answer is a question for you to settle or
+      relay (`proj status` marks it [asks]; `proj reply` answers; a reversible default runs after ${toString cfg.askTimeout}s without an answer, a one-way default stays open for the owner), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
+      Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.
       Roles live in ~/.config/proj/roles, one `ROLE ENGINE[:MODEL]` line each.
       `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
       other repos and jobs with no repo use the bare role. Duplicate keys fail

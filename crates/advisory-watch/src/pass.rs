@@ -124,7 +124,7 @@ fn as_user(cfg: &Config, program: &Path) -> Command {
 /// The job's id, from proj.
 fn job(cfg: &Config, p: &str, task: &str) -> Result<String, String> {
     let mut c = as_user(cfg, &cfg.tools.proj);
-    c.args(["run", "--first"]);
+    c.args(["run", "--first", "--role", "advisory"]);
     if let Some(app) = &cfg.app {
         c.args(["--app", app]);
     }

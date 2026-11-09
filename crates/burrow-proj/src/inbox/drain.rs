@@ -1,7 +1,7 @@
-//! The drain: when the engine it hands on to has an idle slot, the oldest
-//! issue triage sorted [`READY`] gets that engine's inbox label, and from
-//! there it's an inbox issue like any other: its job, its answers, closed
-//! when it's done. The pipeline's own repos go first, then the rest,
+//! The drain enrolls issues triage sorted [`READY`] using its configured
+//! engine label. It admits the oldest candidate whose resolved engine has
+//! room; roles may choose another engine. From there it's an inbox issue
+//! like any other: its job, its answers, closed when it's done. The pipeline's own repos go first, then the rest,
 //! oldest first within each. At most `drain_jobs` of the
 //! issues it handed on have a job at once, and one goes each pass at most;
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
@@ -112,15 +112,7 @@ impl Pass<'_> {
         // after this look has its turn's end find the mark and kick a pass,
         // and one freed before it is seen free here.
         fs::write(&waiting, format!("{first}\n")).map_err(|e| io_fail(&waiting, e))?;
-        if !slot::room(self.cfg, engine) {
-            if engine == Engine::Claude
-                && let Some(spent) = usage::out(self.cfg)
-            {
-                self.book(first, spent.until);
-            }
-            return Ok(());
-        }
-        let _ = fs::remove_file(&waiting);
+        let mut blocked = false;
         // Each as it stands now, in order, and handed on. One closed,
         // sorted otherwise or handed on since its repo's pass is passed
         // over, and that pass, booked now, lists afresh; one GitHub won't
@@ -137,9 +129,44 @@ impl Pass<'_> {
                 passed.insert(repo);
                 continue;
             };
-            if now_issue["state"] != "open" || self.pick_ready(&t, &[now_issue]).is_none() {
+            if now_issue["state"] != "open"
+                || self
+                    .pick_ready(&t, std::slice::from_ref(&now_issue))
+                    .is_none()
+            {
                 self.book(&repo, now());
                 passed.insert(repo);
+                continue;
+            }
+            // Resolve the exact routing metadata the enrollment event will
+            // give start(), including a role mapped to the enrollment label.
+            let mut enrolled = now_issue;
+            enrolled["labels"]
+                .as_array_mut()
+                .expect("ready issue labels")
+                .push(serde_json::json!({"name": label}));
+            let (role, pinned) = self.routing(&enrolled);
+            let engine = match crate::engine::resolve(
+                self.cfg,
+                role.as_deref().unwrap_or_default(),
+                Some(&repo),
+                pinned.map(Engine::name),
+            ) {
+                Ok(choice) => choice.engine,
+                Err(error) => {
+                    super::say(Fail::new(1, error));
+                    self.retry(&repo);
+                    passed.insert(repo);
+                    continue;
+                }
+            };
+            if !slot::room(self.cfg, engine) {
+                blocked = true;
+                if engine == Engine::Claude
+                    && let Some(spent) = usage::out(self.cfg)
+                {
+                    self.book(&repo, spent.until);
+                }
                 continue;
             }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
@@ -156,6 +183,9 @@ impl Pass<'_> {
             // that never comes.
             self.book(&repo, now() + 60);
             break;
+        }
+        if !blocked {
+            let _ = fs::remove_file(&waiting);
         }
         Ok(())
     }

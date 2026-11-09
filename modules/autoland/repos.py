@@ -455,7 +455,7 @@ def hooks(repos):
 # a merge GitHub won't take, a PR stuck a day, a branch it couldn't
 # archive), which a Claude job on this machine takes when proj's inbox is on.
 OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
-          "No reviewer can review it", "Flaky tests someone else quarantined")
+          "No reviewer can review it", "Flaky tests someone else quarantined", "Jobs waiting for the owner")
 
 
 # Kinds whose words are the PR's status as it stands, which changes each time
@@ -465,10 +465,17 @@ OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
 MOVING = ("Open over a day",)
 
 
+def job_questions():
+    result = subprocess.run([CFG["proj"], "_questions"], capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(result.stdout)
+
+
 def publish(digest):
     """What waits for the owner, in one issue in config.notify.repo assigned
     to them; what the pipeline is stuck on, in another the inbox hands to a
     Claude job. All of it is the owner's when the inbox can't take it."""
+    # proj owns question eligibility and deadlines; this is only digest glue.
+    digest = [*digest, *job_questions()]
     owners = (*OWNERS, f"Labelled {CFG['labels']['owner']}")
     off = inbox_off()
     owner = [x for x in digest if x[0] in owners or off]
@@ -486,9 +493,9 @@ def publish(digest):
 
 
 def stuck_label():
-    """The stuck issue is judgment: only a label configured for Claude routes it.
+    """The label enrolls the issue; the inbox assigns its stuck routing role.
     With none, publish leaves the work with the owner and retires the old issue."""
-    return next((label for label, engine in sorted(CFG["inbox"]["labels"].items()) if engine == "claude"), None)
+    return next(iter(sorted(CFG["inbox"]["labels"])), None)
 
 
 def inbox_off():
@@ -500,7 +507,7 @@ def inbox_off():
     if not ib["enable"]:
         return "it's off"
     if stuck_label() is None:
-        return "no inbox label routes to Claude"
+        return "no inbox label enrolls machine issues"
     if not nrepo:  # the digest goes to the journal: there's no issue to take
         return "notify.repo isn't set"
     if not C.project_dir(nrepo):

@@ -4,7 +4,10 @@ a Claude job; when the inbox can't take it, all of it is the owner's."""
 
 import os
 
-from harness import UPKEEP_SRC, C, R, fresh_pr_state, sh, tmp
+from harness import PROJ_ASK_SRC, UPKEEP_SRC, C, R, fresh_pr_state, sh, tmp
+
+QUESTIONS = []
+R.job_questions = lambda: QUESTIONS
 
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
@@ -115,6 +118,7 @@ for heading in ("Stale branches it couldn't archive", "Branches GitHub wouldn't 
 # would go to the inbox, never to the owner.
 src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "aside.py", "review_step.py", "repos.py"))
 src += "".join(open(os.path.join(UPKEEP_SRC, f)).read() for f in sorted(os.listdir(UPKEEP_SRC)) if not f.endswith("_tests.rs"))
+src += open(PROJ_ASK_SRC).read()
 for kind in R.OWNERS:
     assert src.count(f'"{kind}"') >= 2, kind
 
@@ -226,23 +230,20 @@ for nrepo in (None, ""):
 R.log = log_kept
 R.CFG["notify"]["repo"] = "sam/notes"
 
-# Engine selection follows the map's values, not the spelling of a label.
-fresh(labels={"claude": "codex", "judgment": "claude", "z-judgment": "claude"})
+# Labels only enroll machine issues; the inbox's stuck role chooses the engine.
+fresh(labels={"codex": "codex"})
 R.publish(DIGEST)
-assert made("judgment")["--label"] == ["judgment", "unstick"], CALLS
-assert made("claude") is None, CALLS
+assert made("codex")["--label"] == ["codex", "unstick"], CALLS
 
-# Without a Claude label, only the owner gets the work; the old stuck issue
-# is found by title and closed, rather than opened under a Codex label.
-for labels in ({"codex": "codex"}, {}):
-    fresh(labels=labels)
-    OPEN[None] = 9
-    LABELS[9] = ["old-inbox-label", "unstick"]
-    R.publish(DIGEST)
-    owner = made("autoland")
-    assert owner and "no inbox label routes to Claude" in owner["--body"], owner
-    assert all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
-    assert made("codex") is None and ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
+# No enrollment label leaves the work with the owner and retires the old issue.
+fresh(labels={})
+OPEN[None] = 9
+LABELS[9] = ["old-inbox-label", "unstick"]
+R.publish(DIGEST)
+owner = made("autoland")
+assert owner and "no inbox label enrolls machine issues" in owner["--body"], owner
+assert all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
+assert ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
 
 # A bot's long-lived stuck issue may already have 100 retained edits.
 # Retire that unprovable body, then keep one fresh issue and session alive
@@ -297,6 +298,18 @@ latest = current["comments"][-1]
 assert "Stalls cleared." in latest and "sam/r#305" in latest and "sam/r#304" not in latest, latest
 R.publish([])
 assert not current["open"] and current["edits"] == 0, current
+
+
+# A job's unattended question belongs in the owner digest, never back in the
+# stuck issue whose own job may have asked it.
+C.gh = gh
+fresh()
+QUESTIONS.append(("Jobs waiting for the owner", "[job](https://github.com/sam/r/issues/42)", "default: keep it; deadline tomorrow"))
+R.publish([])
+owner_question = made("autoland")
+assert owner_question and "issues/42" in owner_question["--body"], CALLS
+assert not made("claude"), CALLS
+QUESTIONS.clear()
 
 
 C.gh, R.CFG["inbox"], R.CFG["projectsDir"] = kept[0], kept[1], kept[3]

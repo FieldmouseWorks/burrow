@@ -15,6 +15,7 @@ use crate::waits::rewatch;
 use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
 mod run;
+mod starter;
 
 pub(crate) use run::reply_answer;
 pub use run::{New, reply, start_job};
@@ -123,7 +124,11 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
         },
         Some("await") => wait_on(cfg, &args[1..]),
-        Some(how @ ("ask" | "done")) => ends(cfg, how, args.len()),
+        Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("_questions") => {
+            put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
+            Ok(())
+        }
         Some("_watch") => watch::look(cfg, args.get(1).map_or("", String::as_str)),
         Some("_ended") => ended(cfg),
         Some("_handover_format") => {
@@ -178,48 +183,54 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
     }
     for (_, id) in jobs.into_iter().take(limit) {
         let job = Job::new(cfg, &id);
-        let st = job.state();
-        let n = job.turns().unwrap_or_default();
-        let each = |name: &str, f: &dyn Fn(&str) -> Option<String>| -> String {
-            lines(&job.path(name))
-                .iter()
-                .filter_map(|l| f(l))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let mut notes = String::new();
-        notes += &each("agent", &|l| Some(format!("[vm {l}] ")));
-        notes += &each("app", &|l| Some(format!("[as {l}] ")));
-        if let Some(why) = demoted(cfg, &job.dir) {
-            notes += &format!("[{why}] ");
-        }
-        if st == "running" {
-            notes += &each(&format!("{n}.wait"), &|l| {
-                let what = l.split('\t').nth(1).unwrap_or(l);
-                (!what.is_empty()).then(|| format!("[waiting in line: {what}] "))
-            });
-        }
-        let targets: Vec<String> = awaits(&read(&job.path("await")).unwrap_or_default())
-            .into_iter()
-            .map(|a| a.target)
-            .collect();
-        if !targets.is_empty() {
-            notes += &format!("[awaits {}] ", targets.join(" "));
-        }
-        notes += &each(&format!("{n}.end"), &|l| match l {
-            "ask" => Some("[asks] ".into()),
-            "undeclared" => Some("[no next step] ".into()),
-            _ => None,
-        });
-        let result = fs::read(job.turn(&n, "result")).unwrap_or_default();
-        let mut cut = result.len().min(100);
-        while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
-            cut -= 1;
-        }
-        notes += &String::from_utf8_lossy(&result[..cut]).replace('\n', " ");
-        put(&format!("{id:<40} {st:<8} {notes}\n"));
+        put(&status_line(&job));
     }
     Ok(())
+}
+
+pub(crate) fn status_line(job: &Job) -> String {
+    let cfg = job.cfg;
+    let id = job.id;
+    let st = job.state();
+    let n = job.turns().unwrap_or_default();
+    let each = |name: &str, f: &dyn Fn(&str) -> Option<String>| -> String {
+        lines(&job.path(name))
+            .iter()
+            .filter_map(|l| f(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut notes = String::new();
+    notes += &each("agent", &|l| Some(format!("[vm {l}] ")));
+    notes += &each("app", &|l| Some(format!("[as {l}] ")));
+    if let Some(why) = demoted(cfg, &job.dir) {
+        notes += &format!("[{why}] ");
+    }
+    if st == "running" {
+        notes += &each(&format!("{n}.wait"), &|l| {
+            let what = l.split('\t').nth(1).unwrap_or(l);
+            (!what.is_empty()).then(|| format!("[waiting in line: {what}] "))
+        });
+    }
+    let targets: Vec<String> = awaits(&read(&job.path("await")).unwrap_or_default())
+        .into_iter()
+        .map(|a| a.target)
+        .collect();
+    if !targets.is_empty() {
+        notes += &format!("[awaits {}] ", targets.join(" "));
+    }
+    notes += &each(&format!("{n}.end"), &|l| match l {
+        "ask" => Some("[asks] ".into()),
+        "undeclared" => Some("[no next step] ".into()),
+        _ => None,
+    });
+    let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    let mut cut = result.len().min(100);
+    while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
+        cut -= 1;
+    }
+    notes += &String::from_utf8_lossy(&result[..cut]).replace('\n', " ");
+    format!("{id:<40} {st:<8} {notes}\n")
 }
 
 /// `proj log ID [--turn N] [--raw]`: a turn's answer, and how it ended.
@@ -249,8 +260,8 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     };
     if raw {
         let stream = job.turn(&n, "jsonl");
-        let text = fs::read(&stream).map_err(|e| io_fail(&stream, e))?;
-        let _ = io::stdout().lock().write_all(&text);
+        crate::state_reads::copy(&stream, &mut io::stdout().lock())
+            .map_err(|e| io_fail(&stream, e))?;
         return Ok(());
     }
     match told(cfg, id, &n) {
@@ -272,9 +283,14 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     // A turn's answer is read from its own stream, so an earlier turn's is
     // still there once later ones have started.
     let stream = job.turn(n, "jsonl");
-    let text = String::from_utf8_lossy(&fs::read(&stream).unwrap_or_default()).into_owned();
     let last = last_result(&stream, 0);
-    let said = Some(answer(&stream)).filter(|a| !a.is_empty());
+    let mut said = answer(&stream);
+    if read(&job.turn(n, "end")).as_deref() == Some("ask")
+        && let Some(q) = crate::ask::load(&job)
+    {
+        said.push_str(&q.notice());
+    }
+    let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
         let mut out = format!("{said}\n");
         // An answer, then an error, or a run told to answer again that ended
@@ -302,8 +318,7 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     } else {
         format!("(turn {n} ended without an answer)\n")
     };
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    out.push_str(&lines[lines.len().saturating_sub(3)..].concat());
+    out.push_str(&crate::engine::stream_tail(&stream));
     Err(out)
 }
 
@@ -397,6 +412,10 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             format!("proj: couldn't stop {id}"),
         ));
     }
+    crate::ask::clear(job);
+    if crate::ask::host_path(job, "label").exists() {
+        kick(cfg, ["proj-watch".into()]);
+    }
     rewatch(cfg, &[id]);
     if crate::question::needs_watch(job) {
         kick(cfg, ["proj-watch".to_owned()]);
@@ -487,13 +506,13 @@ fn baselines(
     let mut text = String::new();
     for ((repo, n), t) in found.iter().zip(targets) {
         let fp = fingerprint_until(cfg, repo, n, until).ok_or_else(|| {
-            Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask"))
+            Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask --default TEXT [--one-way]"))
         })?;
         if let Some(how) = over(&fp) {
             return Err(Fail::new(
                 1,
                 format!(
-                    "proj: {t} is {how} already, so nothing is awaited: go on with what comes after it, then end the turn with proj await on what's still open, proj ask or proj done"
+                    "proj: {t} is {how} already, so nothing is awaited: go on with what comes after it, then end the turn with proj await on what's still open, proj ask --default TEXT [--one-way] or proj done"
                 ),
             ));
         }
@@ -505,12 +524,17 @@ fn baselines(
 /// `proj ask` and `proj done`, from inside a job: how its turn ends, said
 /// before it does. The last of proj await, ask and done stands; neither of
 /// these waits on GitHub any longer.
-fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
+fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_JOB",
         &format!("proj {how} is for a proj job, about how its turn ends"),
     )?;
-    if words != 1 {
+    let recommendation = if how == "ask" {
+        Some(crate::ask::Recommendation::parse(args).map_err(|e| Fail::new(2, e))?)
+    } else {
+        None
+    };
+    if how == "done" && !args.is_empty() {
         return Err(Fail::new(
             2,
             format!("usage: proj {how} (nothing more: your answer says it)"),
@@ -518,6 +542,9 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
     }
     let job = Job::new(cfg, &id);
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    if let Some(recommendation) = recommendation {
+        crate::ask::record(&job, &recommendation).map_err(|e| Fail::new(1, e))?;
+    }
     put(declare_end(&job, how)?);
     Ok(())
 }
@@ -558,6 +585,9 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     job.mark_ended();
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
+    if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {
+        names.extend(["proj-watch".into(), "autoland".into()]);
+    }
     if crate::question::needs_watch(&job) {
         names.push("proj-watch".into());
     }
@@ -760,6 +790,10 @@ pub(crate) mod declaration_tests {
         };
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = jobs.into();
-        dispatch(&cfg, &[env::var("PROJ_TEST_END_HOW").unwrap()]).unwrap();
+        let mut args = vec![env::var("PROJ_TEST_END_HOW").unwrap()];
+        if args[0] == "ask" {
+            args.extend(["--default".into(), "continue".into()]);
+        }
+        dispatch(&cfg, &args).unwrap();
     }
 }

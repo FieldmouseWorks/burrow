@@ -156,8 +156,15 @@ Each has an entry below, and each can be imported on its own.
   has `inbox.unstickLabel` (the steward's stuck issue) is run `--unstick`. Every
   turn says what comes next before it answers: `proj await` a PR or issue (the
   job holds no slot and is resumed when it changes; one already merged or
-  closed is refused, so the job goes on), `proj ask` a person (their reply
-  resumes it) or `proj done`; one that won't is told once and answers again,
+  closed is refused, so the job goes on), `proj ask --default "TEXT" [--one-way]`
+  a person, or `proj done`. A bare ask is refused. The recommended answer runs
+  after `proj.askTimeout` (seconds, default 6h) without a reply; a one-way
+  recommendation instead ends the job, frees its claim and leaves the issue
+  open under the owner label. Machine-started questions carry the owner's
+  waiting label and appear in the pipeline's owner issue. Jobs first check
+  machine facts with `proj probe QUESTION...`, using the host's probe and
+  scrubber even inside a sandbox, without credentials or a probe issue.
+  A turn that won't declare what comes next is told once and answers again,
   and still silent is a stall. Only jobs whose starter acts on each turn's end
   (`--owned`: the steward's, the watchdog's) needn't say. A run Claude Code
   refuses because the plan's usage is spent (a weekly or five-hour allowance,
@@ -171,9 +178,24 @@ Each has an entry below, and each can be imported on its own.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
-  key overrides the bare role for that repo, matched case-insensitively. Both engines consume the
+  key overrides the bare role for that repo, matched case-insensitively.
+  Machine starters always name a role: `flaky`, `dependency-dashboard`,
+  `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
+  `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the
+  steward's `steward-handed`, `steward-redFixed`, `steward-failFixed`,
+  `steward-conflictFixed`, `steward-proved`, and `steward-judged` roles. Inbox issues use `stuck` when they
+  have `inbox.unstickLabel`; other bot issues use `machine-inbox`. Machines map
+  their own labels to roles with `burrow.proj.inbox.roles` (for example
+  career drift), including machines without an App. Engine labels enroll
+  these issues but their roles choose
+  the engine each turn, defaulting to Claude when no line matches.
+  A machine unit invoking `proj run` must supply `--role`, including units
+  declared by the machine itself. Remote Control sessions and existing
+  proj jobs retain the roleless form for work an agent hands on.
+  Both engines consume the
   [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
-  project and scratch, job state (`proj await`, `ask`, `done`), git metadata,
+  project and scratch, job state (`proj await`, `ask`, `done`), host facts (`proj probe`),
+  git metadata,
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and

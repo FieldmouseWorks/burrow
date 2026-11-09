@@ -4,7 +4,7 @@ use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
 mod capabilities;
@@ -18,7 +18,7 @@ mod stream;
 pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
 pub use handoff::first_prompt;
 pub(crate) use role::{RoleKey, role};
-pub use stream::{Said, answer, last_result, names_session, stream_names_session};
+pub use stream::{Said, answer, last_result, names_session, stream_names_session, stream_tail};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -50,9 +50,25 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     } else {
         crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
     };
-    let mut c = cfg.engine(&role, (!repo.is_empty()).then_some(repo.as_str()))?;
-    if let Some(engine) = read(&job.path("engine")) {
-        c = Choice::parse(&engine)?;
+    resolve(
+        cfg,
+        &role,
+        (!repo.is_empty()).then_some(repo.as_str()),
+        read(&job.path("engine")).as_deref(),
+    )
+}
+
+/// Turn startup and drain admission share role scopes, overflow, pins and
+/// the judge restriction.
+pub(crate) fn resolve(
+    cfg: &Config,
+    role: &str,
+    repo: Option<&str>,
+    pinned: Option<&str>,
+) -> Result<Choice, String> {
+    let mut c = cfg.engine(role, repo)?;
+    if let Some(engine) = pinned {
+        c = Choice::parse(engine)?;
     }
     if role == "steward-judged" && c.engine == Engine::Codex {
         c = Choice::default();
@@ -99,6 +115,27 @@ pub fn refused(
                 )
             })
         }
+    }
+}
+
+/// Refusal metadata is parsed a record at a time, including after retry offsets.
+pub fn refused_file(
+    engine: Engine,
+    last: &Value,
+    path: &Path,
+    from: u64,
+    now: i64,
+) -> Option<(Option<i64>, String)> {
+    match engine {
+        Engine::Claude => claude::refused_records(
+            last,
+            stream::lines(path, from)
+                .ok()?
+                .map_while(Result::ok)
+                .filter_map(|line| serde_json::from_str::<Value>(&line).ok()),
+            now,
+        ),
+        Engine::Codex => refused(engine, last, "", now),
     }
 }
 

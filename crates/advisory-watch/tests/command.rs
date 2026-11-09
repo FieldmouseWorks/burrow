@@ -384,7 +384,7 @@ fn a_later_pass_hands_whats_new_to_each_projects_job() {
     m.pass();
     let jobs = m.jobs();
     assert_eq!(jobs.len(), 2, "{jobs:?}");
-    assert_eq!(jobs[0].0, "run --first --app box-bot app");
+    assert_eq!(jobs[0].0, "run --first --role advisory --app box-bot app");
     assert!(
         jobs[0].1.starts_with(
             "advisory-watch found new vulnerabilities in this project's dependencies (osv-scanner):\n\
@@ -393,7 +393,7 @@ fn a_later_pass_hands_whats_new_to_each_projects_job() {
         "{}",
         jobs[0].1
     );
-    assert_eq!(jobs[1].0, "run --first --app box-bot box");
+    assert_eq!(jobs[1].0, "run --first --role advisory --app box-bot box");
     assert!(
         jobs[1].1.starts_with(
             "advisory-watch found new vulnerabilities in what boxhost runs:\n\
@@ -496,7 +496,10 @@ fn a_project_whose_checkout_has_gone_drops_what_it_had_waiting() {
     fs::remove_dir_all(m.path("src/box/.git")).unwrap();
     m.pass();
     assert_eq!(m.jobs().len(), 1);
-    assert_eq!(m.jobs()[0].0, "run --first --app box-bot box");
+    assert_eq!(
+        m.jobs()[0].0,
+        "run --first --role advisory --app box-bot box"
+    );
     // Back, it's new again.
     fs::create_dir(m.path("src/app/.git")).unwrap();
     m.pass();
