@@ -117,9 +117,9 @@ index eb949b8..8a4feed 100644
              use_legacy_landlock: self.features.use_legacy_landlock(),
 -            apps_enabled: self.features.enabled(Feature::Apps),
 +            apps_enabled: self.features.enabled(Feature::Apps) && !strict_mcp_config,
-             prefix_mcp_tool_names: self.prefix_mcp_tool_names(),
-             non_prefixed_mcp_tool_servers: if self
+             apps_early_resource_discovery: self
                  .features
+                 .enabled(Feature::AppsEarlyResourceDiscovery),
 @@ -1975,7 +1991,8 @@ impl Config {
                  Vec::new()
              },
