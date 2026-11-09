@@ -199,3 +199,89 @@ fn a_job_thats_over_is_answered_for_once() {
             .starts_with("its answers file can't be read")
     );
 }
+
+#[test]
+fn external_awaits_keep_every_fix_claim_until_its_final_answers() {
+    for kind in ["handed", "redFixed", "failFixed", "conflictFixed"] {
+        for own_push in [false, true] {
+            for intermediate_answers in [false, true] {
+                let jobs = tempfile::tempdir().unwrap();
+                let dir = jobs.path().join("job-1");
+                std::fs::create_dir(&dir).unwrap();
+                let head = if own_push { PUSHED } else { HANDED };
+                let mut l = at(HANDED, jobs.path(), true);
+                l.answering.get_mut("job-1").unwrap().kind = kind.into();
+                if intermediate_answers {
+                    std::fs::write(dir.join("answers.json"), "intermediate answers").unwrap();
+                }
+                for upstream in ["sam/up#3", "sam/other#9", "sam/up#3"] {
+                    std::fs::write(
+                        dir.join("await"),
+                        format!("SAM/R#5\t0\t{{}}\n{upstream}\t0\t{{}}\n"),
+                    )
+                    .unwrap();
+                    l.head = head.into();
+                    let mut hub = Hub::default();
+                    hub.on("GET", ACTIVITY, reply(200, pushes("workers[bot]", head)));
+                    let (s, _) = seen(&mut hub, "done", &l);
+                    assert_eq!(s.answering.len(), 1, "{kind}");
+                    assert!(s.stop.is_empty() && s.answered.is_empty());
+                    l.answering = s.answering;
+                    l.pushed_by = s.pushed_by;
+                    let (s, _) = seen(&mut Hub::default(), "running", &l);
+                    assert_eq!(s.answering, l.answering);
+                }
+                // Final answers replace any intermediate file, and go up.
+                std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+                std::fs::write(dir.join("answers.json"), json!({
+                    "pushed": own_push.then_some(head), "threads": [], "comment": "Finished the fix."
+                }).to_string()).unwrap();
+                let mut hub = Hub {
+                    graphql: vec![(
+                        "reviewThreads(first: 100)".into(),
+                        reply(
+                            200,
+                            json!({
+                                "data": {"repository": {"pullRequest": {
+                                    "state": "OPEN", "headRefOid": head, "headRefName": "feat", "body": "Does it.",
+                                    "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": []}
+                                }}}
+                            }),
+                        ),
+                    )],
+                    ..Hub::default()
+                };
+                hub.on(
+                    "GET",
+                    "repos/sam/r/issues/5/comments?",
+                    reply(200, json!([])),
+                );
+                hub.on(
+                    "POST",
+                    "repos/sam/r/issues/5/comments$",
+                    reply(201, json!({"id": 1})),
+                );
+                let (s, _) = seen(&mut hub, "done", &l);
+                assert!(s.answering.is_empty());
+                assert_eq!(s.answered[0].outcome, "posted");
+                assert!(hub.paths().iter().any(|p| p.contains("issues/5/comments")));
+            }
+        }
+    }
+}
+
+#[test]
+fn externally_awaiting_jobs_still_stop_for_another_authors_push() {
+    let jobs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(jobs.path().join("job-1")).unwrap();
+    std::fs::write(jobs.path().join("job-1/await"), "sam/up#3\t0\t{}\n").unwrap();
+    for kind in ["handed", "redFixed", "failFixed", "conflictFixed"] {
+        let mut l = at(THEIRS, jobs.path(), true);
+        l.answering.get_mut("job-1").unwrap().kind = kind.into();
+        let mut hub = Hub::default();
+        hub.on("GET", ACTIVITY, reply(200, pushes("sam", THEIRS)));
+        let (s, _) = seen(&mut hub, "done", &l);
+        assert_eq!(s.stop.len(), 1);
+        assert!(s.answering.is_empty() && s.answered.is_empty());
+    }
+}
