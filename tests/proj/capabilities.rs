@@ -197,7 +197,7 @@ fn main() {
                 );
             }
             "kvm" => {
-                use std::os::fd::AsRawFd;
+                use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
                 unsafe extern "C" {
                     fn ioctl(fd: i32, request: usize, ...) -> i32;
                 }
@@ -207,6 +207,13 @@ fn main() {
                     .open("/dev/kvm")
                     .unwrap();
                 assert_eq!(unsafe { ioctl(device.as_raw_fd(), 0xae00) }, 12);
+                let vm = unsafe { ioctl(device.as_raw_fd(), 0xae01, 0usize) };
+                assert!(
+                    vm >= 0,
+                    "KVM_CREATE_VM: {}",
+                    std::io::Error::last_os_error()
+                );
+                let _vm = unsafe { OwnedFd::from_raw_fd(vm) };
             }
             "mcp" => {
                 UnixStream::connect("/run/reach/socket").unwrap();
