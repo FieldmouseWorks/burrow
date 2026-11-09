@@ -349,10 +349,10 @@ Each has an entry below, and each can be imported on its own.
   Idle ones stop after a day and are saved and deleted after a week. Opt-in
   per task.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,
-  signed in to your accounts by you, that every Claude there drives through
-  Playwright's MCP server (`browser`, in the user's Claude config), which
-  saves what Claude asks of it (a screenshot, a page's text) in the user's
-  runtime dir, in RAM, rather than the checkout Claude works in. You watch it
+  signed in to your accounts by you, that job engines drive through
+  Playwright's MCP server (`browser`, in the [shared registry](modules/mcp.nix)), which
+  saves what an agent asks of it (a screenshot, a page's text) in the user's
+  runtime dir, in RAM, outside the checkout. You watch it
   and sign in through noVNC on `viewer.interfaces` (a tailnet's, say), and
   nowhere else even where the firewall trusts an interface: no password, so
   only name interfaces that reach only you, and its WebSocket takes only pages
