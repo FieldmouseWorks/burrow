@@ -53,6 +53,7 @@ impl Run for Fake {
 
 fn config(state: &Path) -> Config {
     Config {
+        jobs: None,
         projects: None,
         machinery: None,
         repo: "sam/box".into(),
@@ -389,4 +390,85 @@ fn units_and_queue_ask_the_user_manager_too() {
     let asked = fake.asked.borrow();
     let users: Vec<bool> = asked.iter().map(|a| a.2).collect();
     assert_eq!(users, [false, false, true, true, true]);
+}
+
+#[test]
+fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
+    use std::fs::FileTimes;
+    use std::time::{Duration, UNIX_EPOCH};
+    let tmp = tempfile::tempdir().unwrap();
+    let jobs = tmp.path().join("jobs");
+    let job = jobs.join("example");
+    fs::create_dir_all(&job).unwrap();
+    fs::write(job.join("role"), "repair").unwrap();
+    fs::write(job.join("usage-kind"), "inbox labels=codex opener=owner").unwrap();
+    let put = |n, engine, at, text: &str| {
+        fs::write(job.join(format!("{n}.engine")), engine).unwrap();
+        fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
+        let f = fs::File::create(job.join(format!("{n}.slot"))).unwrap();
+        f.set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(at)))
+            .unwrap();
+    };
+    let result = r#"{"type":"result","session_id":"s","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40},"total_cost_usd":1.5,"result":"SECRET PROMPT"}"#;
+    put(1, "claude", 100, result);
+    put(2, "claude", 200, result);
+    put(3, "codex", 250, r#"{"type":"turn.completed"}"#);
+    put(
+        4,
+        "claude",
+        300,
+        r#"{"type":"assistant","message":{"id":"m","usage":{"input_tokens":7,"output_tokens":9},"content":"SECRET PROMPT"}}"#,
+    );
+    let other = jobs.join("manual");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("starter"), "operator-session").unwrap();
+    fs::write(other.join("1.engine"), "codex").unwrap();
+    fs::write(other.join("1.jsonl"), "{}\n").unwrap();
+    fs::File::create(other.join("1.slot"))
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(275)))
+        .unwrap();
+    let state = tmp.path().join("state");
+    fs::create_dir_all(state.join("usage-reset/meters")).unwrap();
+    fs::write(state.join("usage-reset/meters/log"), concat!(
+        "{\"engine\":\"claude\",\"read_at\":150,\"windows\":{\"five_hour\":{\"used\":100},\"seven_day\":{\"used\":60}}}\n",
+        "{\"engine\":\"codex\",\"read_at\":250,\"windows\":{\"300m\":{\"used\":20},\"10080m\":{\"used\":40}}}\n",
+        "{\"engine\":\"claude\",\"read_at\":10,\"windows\":{\"five_hour\":{\"used\":99}}}\n"
+    )).unwrap();
+    let mut cfg = config(&state);
+    cfg.jobs = Some(jobs);
+    let fake = Fake::default();
+    let m = Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 400,
+        uid: 1,
+        run: &fake,
+    };
+    let answer = m.answer(&Query::parse("usage @150").unwrap()).unwrap();
+    assert!(answer.contains("claude: 2 turns"), "{answer}");
+    assert!(answer.contains("codex: 2 turns"));
+    assert!(answer.contains("role repair; inbox labels=codex opener=owner"));
+    assert!(answer.contains("input=0 output=0 cache-read=0 cache-write=0 cost=$0.000000"));
+    assert!(answer.contains(
+        "input=7 output=9 cache-read=0 cache-write=0; no result: partial tokens, cost unavailable"
+    ));
+    assert!(answer.contains("claude five_hour: 100% HIT 100%"));
+    assert!(answer.contains("codex seven_day: 40%"));
+    assert!(answer.contains("codex / no role; starter=operator-session: 1 turns"));
+    assert!(!answer.contains("99%"));
+    assert!(!answer.contains("SECRET"));
+    let full = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
+    assert!(
+        full.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$1.500000"),
+        "{full}"
+    );
+    assert!(fake.asked.borrow().is_empty());
+    assert_eq!(
+        Query::parse("usage").unwrap(),
+        Query::Usage {
+            since: crate::query::When::Ago(18000)
+        }
+    );
+    assert!(Query::parse("usage -1h extra").is_err());
 }

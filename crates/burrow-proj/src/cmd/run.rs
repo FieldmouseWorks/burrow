@@ -19,6 +19,8 @@ use crate::{Fail, filled, io_fail, now};
 /// A new job's settings: `proj run`'s flags.
 #[derive(Clone, Debug, Default)]
 pub struct New {
+    /// Structured inbox attribution, without its prompt or title.
+    pub usage_kind: Option<String>,
     pub vm: bool,
     pub first: bool,
     pub pipeline: bool,
@@ -392,6 +394,23 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
     };
     write("project", &format!("{project}\n"))?;
+    if let Some(kind) = &new.usage_kind {
+        write("usage-kind", kind)?;
+    }
+    let parent = std::env::var("PROJ_JOB").ok().filter(|s| !s.is_empty());
+    let starter = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    write(
+        "starter",
+        parent
+            .as_deref()
+            .or_else(|| {
+                starter
+                    .lines()
+                    .find_map(|l| l.rsplit('/').next())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or("unknown"),
+    )?;
     if !new.kicks.is_empty() {
         write(
             "kick",

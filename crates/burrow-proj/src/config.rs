@@ -70,6 +70,9 @@ pub struct Config {
     /// `apps`: what a bot's issue's job, and every Codex turn with no App
     /// of its own, acts as ([`crate::turn::github_app`]). None for none.
     pub machinery: Option<String>,
+    /// The steward App's GitHub login, distinct from the App running jobs.
+    #[serde(default)]
+    pub steward_login: Option<String>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.

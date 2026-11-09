@@ -391,6 +391,7 @@ impl Pass<'_> {
         let drained = self.drained(repo, &raw(&issue["number"]));
         let (role, engine) = self.routing(issue);
         let new = New {
+            usage_kind: Some(usage::kind(self.cfg.steward_login.as_deref(), issue)),
             vm: self.inbox.vm,
             engine,
             role,
@@ -950,3 +951,5 @@ mod question_tests;
 mod sorting_tests;
 #[cfg(test)]
 mod tests;
+
+mod usage;

@@ -120,7 +120,18 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 continue;
             }
         };
+        let dir = l.jobs.join(jid);
+        let turn = std::fs::read_to_string(dir.join("turns")).unwrap_or_default();
+        let engine = std::fs::read_to_string(dir.join(format!("{}.engine", turn.trim())))
+            .unwrap_or_default();
+        let engine = match engine.trim() {
+            "codex" => "Codex",
+            "claude" | "" => "Claude",
+            _ => "Unknown",
+        }
+        .to_owned();
         let h = Handed {
+            engine,
             number: l.number,
             head: rec.head.clone(),
             description: rec.body.clone(),

@@ -1,4 +1,4 @@
-//! What a Claude job of the steward's that settles a PR leaves for the
+//! What a job of the steward's that settles a PR leaves for the
 //! steward to post (tasks.py `fix_task`): its replies on the PR's review
 //! threads, each resolved after it, the PR's new description and a comment.
 //! The job pushes and writes them to its answers file; once the job is over
@@ -24,6 +24,7 @@ use crate::post::quiet;
 /// The PR, what its job was handed, and what the job left.
 #[derive(Debug)]
 pub struct Handed {
+    pub engine: String,
     pub number: u64,
     /// The PR's head when the job was handed it.
     pub head: String,
@@ -157,16 +158,16 @@ fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
 
 /// What goes on a thread for its answer: the commit it's fixed in, which is
 /// the PR's head (checked), never one the job named itself.
-fn reply_text(r: &Reply, pushed: Option<&str>) -> String {
+fn reply_text(r: &Reply, pushed: Option<&str>, engine: &str) -> String {
     let said = quiet(r.reply.trim());
     match pushed {
-        Some(c) if r.fixed => format!("**Claude job** · fixed in {c}\n\n{said}"),
-        _ => format!("**Claude job** · left as it is\n\n{said}"),
+        Some(c) if r.fixed => format!("**{engine} job** · fixed in {c}\n\n{said}"),
+        _ => format!("**{engine} job** · left as it is\n\n{said}"),
     }
 }
 
-fn comment_text(c: &str) -> String {
-    format!("**Claude job**\n\n{}", quiet(c.trim()))
+fn comment_text(c: &str, engine: &str) -> String {
+    format!("**{engine} job**\n\n{}", quiet(c.trim()))
 }
 
 fn unposted(e: Error) -> Unposted {
@@ -262,7 +263,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         if t["isResolved"] == json!(true) {
             continue;
         }
-        let text = reply_text(r, pushed);
+        let text = reply_text(r, pushed, &h.engine);
         let last = t["comments"]["nodes"][0]["body"].as_str();
         if !last.is_some_and(|l| same(l, &text)) {
             mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}))
@@ -289,7 +290,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
             .map_err(|e| unposted(p.noted(e)))?;
     }
     if let Some(c) = &a.comment {
-        let text = comment_text(c);
+        let text = comment_text(c, &h.engine);
         let since = jiff::Timestamp::from_second(h.at as i64)
             .map_or_else(|_| String::new(), |t| t.to_string());
         let path = format!(
@@ -308,7 +309,8 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         }
     }
     eprintln!(
-        "{repo}#{n}: a Claude job's answers posted, {} thread(s){}",
+        "{repo}#{n}: a {} job's answers posted, {} thread(s){}",
+        h.engine,
         a.threads.len(),
         pushed.map_or(String::new(), |c| format!(", on its push of {}", short(c)))
     );

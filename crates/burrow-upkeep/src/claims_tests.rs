@@ -199,3 +199,55 @@ fn a_job_thats_over_is_answered_for_once() {
             .starts_with("its answers file can't be read")
     );
 }
+
+#[test]
+fn comment_engine_comes_from_the_finished_turn() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = jobs.path().join("job-1");
+    std::fs::create_dir(&dir).unwrap();
+    for (name, text) in [
+        ("turns", "2"),
+        ("engine", "claude"),
+        ("1.engine", "claude"),
+        ("2.engine", "codex"),
+    ] {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"comment":"Done."}).to_string(),
+    )
+    .unwrap();
+    let mut hub = Hub {
+        graphql: vec![(
+            "reviewThreads(first: 100)".into(),
+            reply(
+                200,
+                json!({"data":{"repository":{"pullRequest":{
+                    "state":"OPEN", "headRefOid":HANDED, "body":"Does it.",
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}
+                }}}}),
+            ),
+        )],
+        ..Hub::default()
+    };
+    hub.on(
+        "GET",
+        "repos/sam/r/issues/5/comments?",
+        reply(200, json!([])),
+    );
+    hub.on(
+        "POST",
+        "repos/sam/r/issues/5/comments$",
+        reply(201, json!({"id":1})),
+    );
+    let (s, _) = seen(&mut hub, "done", &at(HANDED, jobs.path(), true));
+    assert_eq!(s.answered[0].outcome, "posted");
+    assert!(hub.asked.iter().any(|(method, path, _, body)| {
+        method == "POST"
+            && path == "repos/sam/r/issues/5/comments"
+            && body
+                .as_ref()
+                .is_some_and(|v| v["body"] == "**Codex job**\n\nDone.")
+    }));
+}

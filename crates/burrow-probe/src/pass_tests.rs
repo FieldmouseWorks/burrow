@@ -7,6 +7,7 @@ use crate::{Config, Journal, Tools};
 
 fn config() -> Config {
     Config {
+        jobs: None,
         projects: None,
         machinery: None,
         repo: "sam/box".into(),

@@ -273,6 +273,7 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
         let new = New {
+            usage_kind: Some(super::usage::kind(self.cfg.steward_login.as_deref(), issue)),
             vm: self.inbox.vm,
             owned: true,
             kicks: vec!["proj-inbox".into()],
@@ -382,7 +383,7 @@ impl Pass<'_> {
                             self.retry(repo);
                             continue;
                         };
-                        if !self.carry_out(repo, n, &d, &plan) {
+                        if !self.carry_out(repo, n, &d, &plan, &job) {
                             self.miss(repo);
                             continue;
                         }
@@ -489,7 +490,7 @@ impl Pass<'_> {
     /// (`did`, in `d`) doesn't have done: whether GitHub took all of them.
     /// Each one GitHub takes is counted there, so a pass that comes back to
     /// it carries on from the next and says nothing twice.
-    fn carry_out(&self, repo: &str, n: &str, d: &Path, steps: &[Step]) -> bool {
+    fn carry_out(&self, repo: &str, n: &str, d: &Path, steps: &[Step], job: &Job) -> bool {
         let did: usize = read(&d.join("did"))
             .and_then(|n| n.parse().ok())
             .unwrap_or(0);
@@ -497,7 +498,10 @@ impl Pass<'_> {
             let took = match step {
                 Step::Label(l) => self.add_label(repo, n, l),
                 Step::Assign(o) => self.assign(repo, n, o),
-                Step::Post(body) => self.post(repo, n, body),
+                Step::Post(body) => {
+                    let engine = job.engine_label(&job.turns().unwrap_or_default());
+                    self.post(repo, n, &format!("**{engine} job**\n\n{body}"))
+                }
                 Step::Close(reason) => self.close(repo, n, reason),
             };
             if !took || fs::write(d.join("did"), format!("{}\n", i + 1)).is_err() {

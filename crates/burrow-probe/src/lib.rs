@@ -49,6 +49,8 @@ pub struct Config {
     pub proj: Option<PathBuf>,
     #[serde(default)]
     pub projects: Option<PathBuf>,
+    #[serde(default)]
+    pub jobs: Option<PathBuf>,
     pub tools: Tools,
 }
 

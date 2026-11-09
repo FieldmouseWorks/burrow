@@ -61,6 +61,15 @@ impl<'a> Job<'a> {
         self.dir.join(format!("{n}.{kind}"))
     }
 
+    /// The engine recorded for this turn, including jobs that changed engines.
+    pub fn engine_label(&self, n: &str) -> &'static str {
+        match read(&self.turn(n, "engine")).as_deref() {
+            Some("codex") => "Codex",
+            Some("claude") | None => "Claude",
+            _ => "Unknown",
+        }
+    }
+
     /// The latest turn's number, as written; None before the first.
     pub fn turns(&self) -> Option<String> {
         read(&self.path("turns")).filter(|n| valid_turn(n))
