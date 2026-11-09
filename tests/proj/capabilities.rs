@@ -63,6 +63,7 @@ fn main() {
             } else {
                 let job = env::var("PROJ_JOB").unwrap();
                 let marker = if env::var("MCP_ENGINE").as_deref() == Ok("1") {
+                    assert!(env::var_os("EXTRA_SERVER_ONLY").is_none());
                     "mcp-called"
                 } else {
                     "mcp-direct"

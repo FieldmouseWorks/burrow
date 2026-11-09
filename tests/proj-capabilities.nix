@@ -46,6 +46,12 @@ let
     [mcp_servers.outside]
     command = "${fixture}/bin/capabilities"
     args = ["outside"]
+    [mcp_servers.reach]
+    command = "${fixture}/bin/capabilities"
+    args = ["outside"]
+    enabled = false
+    [mcp_servers.reach.env]
+    EXTRA_SERVER_ONLY = "outside"
   '';
 in pkgs.testers.runNixOSTest {
   name = "proj-capabilities";

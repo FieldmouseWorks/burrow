@@ -84,6 +84,7 @@ impl Capabilities {
         if !self.repository {
             flags.push("--skip-git-repo-check".into());
         }
+        flags.extend(["-c".into(), "strict_mcp_config=true".into()]);
         for (name, value) in self.environment() {
             flags.extend([
                 "-c".into(),
@@ -227,14 +228,21 @@ pub fn resolve(
         .find(|g| g.capability == Capability::Environment)
         .unwrap()
         .inherit_environment = true;
-    let mcp = items
+    let mut capabilities = Capabilities { items, repository };
+    let environment = capabilities.environment();
+    let mcp = capabilities
+        .items
         .iter_mut()
         .find(|g| g.capability == Capability::Mcp)
         .unwrap();
     mcp.servers = cfg.mcp_servers.clone();
     for server in mcp.servers.values_mut() {
         for name in &server.env_vars {
-            if let Some(value) = env(name).and_then(|v| v.into_string().ok()) {
+            if let Some(value) = environment
+                .get(name)
+                .cloned()
+                .or_else(|| env(name).and_then(|v| v.into_string().ok()))
+            {
                 server.env.entry(name.clone()).or_insert(value);
             }
         }
@@ -243,7 +251,7 @@ pub fn resolve(
         mcp.paths
             .extend(server.write_paths.iter().cloned().map(|p| (p, true)));
     }
-    Ok(Capabilities { items, repository })
+    Ok(capabilities)
 }
 
 #[cfg(test)]
@@ -265,7 +273,7 @@ mod tests {
                 command: "/bin/server".into(),
                 args: vec!["--stdio".into()],
                 env: BTreeMap::from([("SETTING".into(), "value".into())]),
-                env_vars: vec!["SETTING".into(), "EXTRA".into()],
+                env_vars: vec!["SETTING".into(), "EXTRA".into(), "NIX_REMOTE".into()],
                 read_paths: vec![socket.clone()],
                 write_paths: vec![output.clone()],
             },
@@ -295,6 +303,10 @@ mod tests {
             config["mcpServers"]["machine.ledger"]["env"]["EXTRA"],
             "inherited"
         );
+        assert_eq!(
+            config["mcpServers"]["machine.ledger"]["env"]["NIX_REMOTE"],
+            "daemon"
+        );
         assert!(claude.contains(&"--strict-mcp-config".to_owned()));
         assert!(claude.contains(&output.to_string_lossy().into_owned()));
         let profile = sandbox::flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
@@ -302,7 +314,11 @@ mod tests {
             .flags
             .join("\n");
         assert!(profile.contains(r#"mcp_servers={"machine.ledger"={command="/bin/server""#));
-        assert!(profile.contains(r#"env={"EXTRA"="inherited","SETTING"="value"}"#));
+        assert!(
+            profile
+                .contains(r#"env={"EXTRA"="inherited","NIX_REMOTE"="daemon","SETTING"="value"}"#)
+        );
+        assert!(profile.contains("strict_mcp_config=true"));
         assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
         assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
         assert!(profile.contains(r#""/dev/kvm"="write""#));
