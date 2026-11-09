@@ -94,6 +94,24 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
     };
     for (jid, rec) in &l.answering {
         let mut rec = rec.clone();
+        // proj starts turns under this lock. Keep state, turn identity,
+        // awaits and final answer collection in the same lifecycle snapshot.
+        let lock = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(l.jobs.join(jid).join("lock"));
+        let Ok(lock) = lock else {
+            seen.answering.insert(jid.clone(), rec);
+            continue;
+        };
+        if lock.lock_shared().is_err() {
+            seen.answering.insert(jid.clone(), rec);
+            continue;
+        }
+        let resumed = std::fs::read_to_string(l.jobs.join(jid).join("turns"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|n| n > 1);
         let state = p.jobs.state(jid);
         // A completed turn awaiting upstream is still an active job. Keep its
         // original claim (including ownership checks) until its final turn;
@@ -101,7 +119,13 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         let awaiting = state.as_deref() == Some("done") && awaits_elsewhere(p, l, jid);
         if awaiting || matches!(state.as_deref(), None | Some("queued" | "running")) {
             if rec.head != l.head
-                && let Some(why) = stale(p, l, &mut seen, state.as_deref(), &mut rec)
+                && let Some(why) = stale(
+                    p,
+                    l,
+                    &mut seen,
+                    if resumed { None } else { state.as_deref() },
+                    &mut rec,
+                )
             {
                 seen.stop.push(Stop {
                     jid: jid.clone(),
