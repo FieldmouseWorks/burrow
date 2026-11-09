@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "7cgar83ba3cd0vspdmn13rj0tp",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 597,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/597",
+  "summary": "autoland: a pass GitHub doesn't answer ends cleanly and comes back",
+  "task": "FieldmouseWorks/remi#892",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "b4ec89b2163eba193550f8932cb0da9c8815982a40e73ea1c3a8ecd841491f56",
+    "before": "294cc6624ac2285dd543fc3e06fab0bc97883bcb",
+    "after": "62277ef67226fc853240ff2ce07d4a5cd91aee47",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794241387284
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279607629"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279607249"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#597)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#597)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#597)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#597)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#597)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148/job/129279611629"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#597)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651744148"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129281919244"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279689748"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279689747"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279689664"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279689646"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/597#pullrequestreview-5828806489"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/597"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42651742484/job/129279607635"
+    }
+  ]
+}
