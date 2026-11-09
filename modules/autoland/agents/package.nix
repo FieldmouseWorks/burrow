@@ -5,7 +5,7 @@
 (nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.codex).overrideAttrs (old: {
   patches = (old.patches or [ ]) ++ [ ../../../patches/codex-job-capabilities.patch ];
   doCheck = true;
-  cargoCheckFlags = [
+  cargoTestFlags = [
     "--package" "codex-config"
     "--package" "codex-linux-sandbox"
     "--lib" "job_capabilities_"
