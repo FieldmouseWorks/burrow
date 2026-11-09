@@ -87,7 +87,7 @@ fn apply_receipt(path: &Path, job_dir: &Path) -> Result<(), String> {
 }
 
 /// Caller holds the job lock. Only accepted receipts can retire a question.
-fn recover(job: &Job) -> Result<(), String> {
+pub(crate) fn recover(job: &Job) -> Result<(), String> {
     let dir = crate::ask::host_path(job, "");
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -123,6 +123,19 @@ pub(crate) fn accept(job: &Job, n: &str) -> Result<(), String> {
     receipt.accepted = true;
     save_receipt(&path, &receipt)?;
     apply_receipt(&path, &job.dir)
+}
+
+/// A published prompt whose unit has not recorded acceptance must not let
+/// an expired older question execute its default while _exec reconciles.
+pub(crate) fn acceptance_pending(job: &Job) -> Result<bool, String> {
+    let Some(n) = job.turns() else {
+        return Ok(false);
+    };
+    let Some(text) = read_state(&receipt_path(job, &n))? else {
+        return Ok(false);
+    };
+    let r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(!r.accepted)
 }
 
 pub(crate) struct Resume {

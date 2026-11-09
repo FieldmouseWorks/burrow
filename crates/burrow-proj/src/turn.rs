@@ -137,11 +137,18 @@ fn start_with(
         undo();
         return Err(couldnt());
     }
-    question.commit()?;
+    // systemd has accepted this turn. Reconciliation errors cannot turn it
+    // into a failed start: callers must consume its input exactly once.
+    let reconcile_pending = if let Err(e) = question.commit() {
+        eprintln!("proj: accepted turn {n} of {id}; question reconciliation pending: {e}");
+        true
+    } else {
+        false
+    };
     if crate::ask::host_path(&job, "label").exists() {
         crate::job::kick(cfg, ["proj-watch".into(), "autoland".into()]);
     }
-    if crate::question::needs_watch(&job) {
+    if reconcile_pending || crate::question::needs_watch(&job) {
         kick(cfg, ["proj-watch".to_owned()]);
     }
     rewatch(cfg, &[id]);

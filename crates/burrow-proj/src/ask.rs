@@ -141,6 +141,10 @@ pub(crate) fn clear(job: &Job) {
 /// Called under the job lock. The wake belongs to proj-watch, including jobs
 /// with no GitHub target. An unavailable starter is retried without losing intent.
 pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
+    crate::question::recover(job)?;
+    if crate::question::acceptance_pending(job)? {
+        return Ok(Some(crate::now() + 60));
+    }
     let Some(q) = load(job) else { return Ok(None) };
     if job.end_pending() || matches!(job.state().as_str(), "queued" | "running") {
         return Ok(Some(q.due.max(crate::now() + 60)));

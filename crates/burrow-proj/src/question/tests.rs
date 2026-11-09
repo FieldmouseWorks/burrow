@@ -837,3 +837,5 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
         assert_eq!(f.deliveries().matches("Question 1?").count(), 1);
     }
 }
+
+mod recovery;
