@@ -136,7 +136,7 @@ fn newer_marker_cannot_erase_an_older_failed_close_write() {
     let f = Fixture::new();
     f.ending(1, "ask");
     notify(&f.cfg, &f.job()).unwrap();
-    Resume::prepare(&f.job(), true).unwrap().commit();
+    Resume::prepare(&f.job(), true).unwrap().commit().unwrap();
     f.ending(2, "ask");
     fs::create_dir(f.job().turn("1", "question-close")).unwrap();
     assert!(notify(&f.cfg, &f.job()).is_err());
@@ -155,7 +155,7 @@ fn recovery_keeps_origin_across_automated_updates_and_unrelated_closes() {
         f.ending(1, "ask");
         notify(&f.cfg, &f.job()).unwrap();
         f.flag("fail-close");
-        Resume::prepare(&f.job(), true).unwrap().commit();
+        Resume::prepare(&f.job(), true).unwrap().commit().unwrap();
         f.ending(2, "ask");
         fs::write(f.job().turn("1", "question-close"), "close").unwrap();
         fs::remove_file(f.job().path("question-answered-through")).unwrap();
@@ -166,7 +166,7 @@ fn recovery_keeps_origin_across_automated_updates_and_unrelated_closes() {
             assert!(notify(&f.cfg, &f.job()).is_err());
             fs::remove_dir(f.job().turn("2", "question.new")).unwrap();
         }
-        Resume::prepare(&f.job(), false).unwrap().commit();
+        Resume::prepare(&f.job(), false).unwrap().commit().unwrap();
         f.ending(3, "ask");
         notify(&f.cfg, &f.job()).unwrap();
         assert!(f.deliveries().contains("Question 2?"));
@@ -401,7 +401,7 @@ fn ordinary_jobs_do_not_add_question_watcher_kicks() {
 }
 
 #[test]
-fn failed_answer_start_restores_closure_boundary_atomically() {
+fn failed_answer_cleanup_is_recovered_from_accepted_receipt() {
     let f = Fixture::new();
     f.ending(1, "ask");
     notify(&f.cfg, &f.job()).unwrap();
@@ -412,16 +412,19 @@ fn failed_answer_start_restores_closure_boundary_atomically() {
         [0xff]
     );
     assert!(notify(&f.cfg, &f.job()).is_err());
-    assert!(f.job().path("open-question").exists());
     fs::remove_file(f.job().path("question-answered-through")).unwrap();
+    let pending = Resume::prepare(&f.job(), true).unwrap();
     fs::create_dir(f.job().path("question-answered-through.new")).unwrap();
-    assert!(Resume::prepare(&f.job(), true).is_err());
-    fs::remove_dir(f.job().path("question-answered-through.new")).unwrap();
+    assert!(pending.commit().is_err());
     assert!(f.job().path("open-question").exists());
-    drop(Resume::prepare(&f.job(), true).unwrap());
-    assert!(!f.job().path("question-answered-through").exists());
+    fs::remove_dir(f.job().path("question-answered-through.new")).unwrap();
+    f.job().set_turns(2).unwrap();
     notify(&f.cfg, &f.job()).unwrap();
-    assert!(!f.job().turn("1", "question-close").exists());
+    assert!(f.job().turn("1", "question-closed").exists());
+    assert_eq!(
+        read(&f.job().path("question-answered-through")).as_deref(),
+        Some("1")
+    );
 }
 
 #[test]
@@ -438,13 +441,13 @@ fn only_new_human_questions_reach_notify() {
     assert!(f.deliveries().contains("Question 1?"));
     let notice = f.deliveries();
     notify(&f.cfg, &j).unwrap();
-    Resume::prepare(&j, false).unwrap().commit();
+    Resume::prepare(&j, false).unwrap().commit().unwrap();
     notify(&f.cfg, &j).unwrap();
     assert_eq!(f.deliveries(), notice);
     drop(Resume::prepare(&j, true).unwrap());
     notify(&f.cfg, &j).unwrap();
     assert_eq!(f.deliveries(), notice);
-    Resume::prepare(&j, true).unwrap().commit();
+    Resume::prepare(&j, true).unwrap().commit().unwrap();
     j.set_turns(2).unwrap();
     notify(&f.cfg, &j).unwrap();
     assert!(j.turn("1", "question-closed").exists());
@@ -463,7 +466,7 @@ fn ambiguous_delivery_and_closure_survive_restarts_and_later_questions() {
     notify(&f.cfg, &f.job()).unwrap();
     assert_eq!(f.deliveries().matches("Question 1?").count(), 1);
     f.flag("fail-close");
-    Resume::prepare(&f.job(), true).unwrap().commit();
+    Resume::prepare(&f.job(), true).unwrap().commit().unwrap();
     f.ending(2, "ask");
     notify(&f.cfg, &f.job()).unwrap();
     assert!(f.job().turn("1", "question-close").exists());
@@ -615,7 +618,7 @@ fn watcher_retries_notices_without_github_waits_and_stop_closes_them() {
 fn legacy_open_marker_does_not_acknowledge_delivery() {
     let f = Fixture::new();
     f.ending(1, "ask");
-    Resume::prepare(&f.job(), false).unwrap().commit();
+    Resume::prepare(&f.job(), false).unwrap().commit().unwrap();
     assert!(f.job().path("open-question").exists());
     assert!(!f.job().turn("1", "question").exists());
     f.job().set_turns(2).unwrap();
@@ -634,7 +637,7 @@ fn initial_and_completed_questions_keep_normal_declarations() {
     fs::create_dir_all(&job.dir).unwrap();
     let initial = Resume::prepare(&job, false).unwrap();
     assert_eq!(initial.prompt("new task"), "new task");
-    initial.commit();
+    initial.commit().unwrap();
     assert!(response(&cfg, "j1", "ask").contains("with your question"));
     job.set_turns(1).unwrap();
     fs::write(job.turn("1", "end"), "ask\n").unwrap();
@@ -643,14 +646,14 @@ fn initial_and_completed_questions_keep_normal_declarations() {
     assert!(retry.prompt("update").contains("Do not repeat"));
     drop(retry);
     assert!(!job.path("open-question").exists());
-    Resume::prepare(&job, false).unwrap().commit();
+    Resume::prepare(&job, false).unwrap().commit().unwrap();
     assert!(response(&cfg, "j1", "ask").contains("without repeating"));
     response(&cfg, "j1", "done");
     assert!(!job.path("open-question").exists());
     fs::write(job.turn("1", "end"), "done\n").unwrap();
     let next = Resume::prepare(&job, false).unwrap();
     assert_eq!(next.prompt("new task"), "new task");
-    next.commit();
+    next.commit().unwrap();
     assert!(response(&cfg, "j1", "ask").contains("with your question"));
 }
 
@@ -695,12 +698,142 @@ fn machine_question_notifications_include_the_default_deadline_and_policy_once()
             }),
             "{body}"
         );
-        Resume::prepare(&job, false).unwrap().commit();
+        Resume::prepare(&job, false).unwrap().commit().unwrap();
         f.ending(2, "ask");
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&f.cfg, &job, "ask").unwrap();
         notify(&f.cfg, &job).unwrap();
         assert_eq!(f.deliveries().matches("Without an answer by").count(), 1);
         assert!(!f.deliveries().contains("Question 2?"));
+    }
+}
+
+#[test]
+fn interrupted_reply_preparations_preserve_question_and_outbox() {
+    // Forget simulates SIGKILL/OOM/restart: no destructor or rollback runs.
+    for source in ["operator", "inbox"] {
+        for boundary in ["prepare", "prompt", "published"] {
+            let f = Fixture::new();
+            f.ending(1, "ask");
+            notify(&f.cfg, &f.job()).unwrap();
+            crate::ask::ensure(&f.job()).unwrap();
+            for name in [
+                "question-text",
+                "question-since",
+                "question-id",
+                "question-needs-owner",
+            ] {
+                fs::write(crate::ask::host_path(&f.job(), name), "original authority").unwrap();
+            }
+            let pending = Resume::prepare(&f.job(), true).unwrap();
+            std::mem::forget(pending);
+            if boundary != "prepare" {
+                crate::turn::write_prompt(&f.job().path("prompt.2"), source).unwrap();
+            }
+            if boundary == "published" {
+                f.job().set_turns(2).unwrap();
+            }
+            // Fresh Job, as on the next watcher after the replying process dies.
+            notify(&f.cfg, &f.job()).unwrap();
+            assert_eq!(
+                read(&f.job().path("open-question")).as_deref(),
+                Some("1"),
+                "{source}: {boundary}"
+            );
+            assert!(
+                !f.job().turn("1", "question-close").exists(),
+                "{source}: {boundary}"
+            );
+            assert!(!f.job().turn("1", "question-closed").exists());
+            for name in [
+                "question-text",
+                "question-since",
+                "question-id",
+                "question-needs-owner",
+            ] {
+                assert_eq!(
+                    read(&crate::ask::host_path(&f.job(), name)).as_deref(),
+                    Some("original authority")
+                );
+            }
+            assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+        }
+    }
+}
+
+#[test]
+fn exec_accepts_reply_when_launcher_dies_before_commit() {
+    let f = Fixture::new();
+    f.ending(1, "ask");
+    notify(&f.cfg, &f.job()).unwrap();
+    let pending = Resume::prepare(&f.job(), true).unwrap();
+    crate::turn::write_prompt(&f.job().path("prompt.2"), "human answer").unwrap();
+    f.job().set_turns(2).unwrap();
+    std::mem::forget(pending);
+    // _exec proves that systemd accepted the reply, even without the launcher.
+    accept(&f.job(), "2").unwrap();
+    notify(&f.cfg, &f.job()).unwrap();
+    assert!(f.job().turn("1", "question-closed").exists());
+    // Re-entry is idempotent: it cannot delete the next question's state.
+    fs::write(
+        crate::ask::host_path(&f.job(), "question-text"),
+        "next question",
+    )
+    .unwrap();
+    accept(&f.job(), "2").unwrap();
+    assert_eq!(
+        read(&crate::ask::host_path(&f.job(), "question-text")).as_deref(),
+        Some("next question")
+    );
+}
+
+#[test]
+fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
+    // Receipt, boundary, each metadata deletion, marker deletion and final
+    // applied receipt are distinct writes. Restart after every prefix.
+    for prefix in 0..=METADATA.len() + 2 {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        notify(&f.cfg, &f.job()).unwrap();
+        crate::ask::ensure(&f.job()).unwrap();
+        for name in METADATA {
+            fs::write(crate::ask::host_path(&f.job(), name), "old question").unwrap();
+        }
+        let pending = Resume::prepare(&f.job(), true).unwrap();
+        std::mem::forget(pending);
+        f.job().set_turns(2).unwrap();
+        save_receipt(
+            &receipt_path(&f.job(), "2"),
+            &Receipt {
+                through: 1,
+                answered: true,
+                clear: true,
+                accepted: true,
+                applied: false,
+            },
+        )
+        .unwrap();
+        if prefix > 0 {
+            fs::write(f.job().path("question-answered-through"), "1").unwrap();
+        }
+        for name in METADATA.iter().take(prefix.saturating_sub(1)) {
+            fs::remove_file(crate::ask::host_path(&f.job(), name)).unwrap();
+        }
+        if prefix > METADATA.len() + 1 {
+            fs::remove_file(f.job().path("open-question")).unwrap();
+        }
+        notify(&f.cfg, &f.job()).unwrap();
+        assert!(
+            f.job().turn("1", "question-closed").exists(),
+            "prefix {prefix}"
+        );
+        for name in METADATA {
+            assert!(
+                !crate::ask::host_path(&f.job(), name).exists(),
+                "{prefix}: {name}"
+            );
+        }
+        notify(&f.cfg, &f.job()).unwrap();
+        assert_eq!(f.deliveries().matches("Question 1?").count(), 1);
     }
 }

@@ -383,7 +383,8 @@ mod tests {
             assert_eq!(expire(&cfg, &job).unwrap(), Some(q.due));
             crate::question::Resume::prepare(&job, false)
                 .unwrap()
-                .commit();
+                .commit()
+                .unwrap();
             record(
                 &job,
                 &Recommendation {
@@ -437,7 +438,8 @@ mod tests {
         assert!(owner_lines(&cfg)[0].2.contains("Which release should run?"));
         crate::question::Resume::prepare(&job, true)
             .unwrap()
-            .commit();
+            .commit()
+            .unwrap();
         assert!(!host_path(&job, "question-text").exists());
     }
     #[test]
@@ -456,16 +458,18 @@ mod tests {
         let before = read(&host_path(&job, "question"));
         crate::question::Resume::prepare(&job, false)
             .unwrap()
-            .commit();
+            .commit()
+            .unwrap();
         assert_eq!(read(&host_path(&job, "question")), before);
         {
             let _resume = crate::question::Resume::prepare(&job, true).unwrap();
-            assert!(load(&job).is_none());
+            assert_eq!(read(&host_path(&job, "question")), before);
         }
         assert_eq!(read(&host_path(&job, "question")), before);
         crate::question::Resume::prepare(&job, true)
             .unwrap()
-            .commit();
+            .commit()
+            .unwrap();
         assert!(load(&job).is_none());
     }
 }

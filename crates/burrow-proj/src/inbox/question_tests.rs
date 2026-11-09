@@ -165,7 +165,8 @@ fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
     assert!(!crate::scratch::over(&job), "owned questions keep scratch");
     crate::question::Resume::prepare(&job, true)
         .unwrap()
-        .commit();
+        .commit()
+        .unwrap();
     job.set_turns(2).unwrap();
     fs::write(job.turn("2", "end"), "done\n").unwrap();
     fs::write(job.turn("2", "outcome"), "done\n").unwrap();
@@ -278,7 +279,8 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
         assert_eq!(b.posted().matches("First question?").count(), 1);
         crate::question::Resume::prepare(&job, false)
             .unwrap()
-            .commit();
+            .commit()
+            .unwrap();
         job.set_turns(2).unwrap();
         fs::write(job.turn("2", "outcome"), "done\n").unwrap();
         fs::write(job.turn("2", "result"), "Unrelated update handled.").unwrap();
@@ -289,7 +291,8 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
         match resolution {
             "human" => crate::question::Resume::prepare(&job, true)
                 .unwrap()
-                .commit(),
+                .commit()
+                .unwrap(),
             "explicit" => crate::ask::finish(&b.cfg, &job, "done").unwrap(),
             _ => {
                 let mut q = crate::ask::load(&job).unwrap();
@@ -306,7 +309,8 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
                     assert_eq!(b.posted().matches("No answer by").count(), 1);
                     crate::question::Resume::prepare(&job, true)
                         .unwrap()
-                        .commit();
+                        .commit()
+                        .unwrap();
                 }
             }
         }

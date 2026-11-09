@@ -137,7 +137,7 @@ fn start_with(
         undo();
         return Err(couldnt());
     }
-    question.commit();
+    question.commit()?;
     if crate::ask::host_path(&job, "label").exists() {
         crate::job::kick(cfg, ["proj-watch".into(), "autoland".into()]);
     }
@@ -155,6 +155,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let n = job
         .turns()
         .ok_or_else(|| Fail::new(1, format!("proj: {id} has no turn to run")))?;
+    // Serialize receipt acceptance with the launcher and watcher. The launcher
+    // holds this lock through systemd-run, but never waits for _exec to finish.
+    {
+        let _lock = job.lock().map_err(|e| Fail::new(1, e.to_string()))?;
+        crate::question::accept(&job, &n).map_err(|e| Fail::new(1, e))?;
+    }
     let outcome = |text: &str| {
         let _ = fs::write(job.turn(&n, "outcome"), format!("{text}\n"));
     };
