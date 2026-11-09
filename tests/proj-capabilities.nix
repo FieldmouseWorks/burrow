@@ -79,7 +79,7 @@ in pkgs.testers.runNixOSTest {
       "d /var/lib/job-meters 0755 root root -"
       "f /var/lib/job-meters/reach 0644 root root - facts"
     ];
-    environment.systemPackages = [ pkgs.git pkgs.jq pkgs.python3 fixture ];
+    environment.systemPackages = [ pkgs.git pkgs.jq fixture ];
     environment.etc."capability-build.nix".text = ''
       derivation {
         name = "job-build";
@@ -91,7 +91,7 @@ in pkgs.testers.runNixOSTest {
     # An MCP dependency in a root-owned socket directory, outside /run/user.
     systemd.services.reach = {
       wantedBy = [ "multi-user.target" ];
-      serviceConfig = { RuntimeDirectory = "reach"; UMask = "0000"; ExecStart = "${pkgs.python3}/bin/python3 -c 'import socket,time; s=socket.socket(socket.AF_UNIX); s.bind(\"/run/reach/socket\"); s.listen(100); time.sleep(10000)'"; };
+      serviceConfig = { RuntimeDirectory = "reach"; UMask = "0000"; ExecStart = "${fixture}/bin/capabilities listener"; };
     };
     systemd.services.burrow-events.enable = false;
     systemd.timers.burrow-events-catch-up.enable = false;

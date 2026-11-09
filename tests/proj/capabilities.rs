@@ -15,6 +15,13 @@ fn run(program: &str, args: &[&str]) {
 }
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
+    if args.first().is_some_and(|s| s == "listener") {
+        let listener = std::os::unix::net::UnixListener::bind("/run/reach/socket").unwrap();
+        for stream in listener.incoming() {
+            drop(stream.unwrap());
+        }
+        return;
+    }
     if args.first().is_some_and(|s| s == "outside") {
         fs::write("/data/dev/src/web/unexpected-server", "started").unwrap();
         return;
