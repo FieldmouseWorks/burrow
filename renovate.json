@@ -5,13 +5,6 @@
       "description": "The project template's workflow follows burrow's main on purpose; a project made from it gets its own pin. Pinned here, every merge to main would make the next pin PR.",
       "matchFileNames": ["templates/**"],
       "enabled": false
-    },
-    {
-      "description": "The steward's review agent (codex) stays on its newest release, majors included, merged once the flake check has built it and run it.",
-      "matchFileNames": ["modules/autoland/agents/package.json"],
-      "groupName": "review agents",
-      "automerge": true,
-      "labels": []
     }
   ]
 }

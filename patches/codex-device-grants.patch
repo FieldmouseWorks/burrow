@@ -1,0 +1,80 @@
+diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+index 11959d0..a4847c7 100644
+--- a/codex-rs/linux-sandbox/src/bwrap.rs
++++ b/codex-rs/linux-sandbox/src/bwrap.rs
+@@ -24,6 +24,7 @@ use std::fs::Metadata;
+ use std::io;
+ use std::os::fd::AsRawFd;
+ use std::os::unix::ffi::OsStringExt;
++use std::os::unix::fs::FileTypeExt;
+ use std::os::unix::fs::MetadataExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+@@ -643,7 +644,14 @@ fn create_filesystem_args(
+         let redundant_root_alias =
+             binds_file_system_root && root != Path::new("/") && mount_root == Path::new("/");
+         if !redundant_root_alias {
+-            bwrap_args.args.push("--bind".to_string());
++            // A normal bind adds nodev. Honour explicit device grants without
++            // allowing devices anywhere else in the filesystem policy.
++            let device = fs::metadata(mount_root).is_ok_and(|metadata| {
++                metadata.file_type().is_char_device() || metadata.file_type().is_block_device()
++            });
++            bwrap_args
++                .args
++                .push(if device { "--dev-bind" } else { "--bind" }.to_string());
+             bwrap_args.args.push(path_to_string(mount_root));
+             bwrap_args.args.push(path_to_string(mount_root));
+             if mount_root == Path::new("/") {
+diff --git a/codex-rs/protocol/src/permissions.rs b/codex-rs/protocol/src/permissions.rs
+index bd67575..89cd14a 100644
+--- a/codex-rs/protocol/src/permissions.rs
++++ b/codex-rs/protocol/src/permissions.rs
+@@ -2528,6 +2528,15 @@ fn protected_metadata_names_for_writable_root(
+     root: &AbsolutePathBuf,
+     raw_writable_roots: &[&AbsolutePathBuf],
+ ) -> Vec<String> {
++    // Explicit writable files and device nodes cannot contain metadata.
++    // Missing roots can still become directories, so keep their protection.
++    if root
++        .as_path()
++        .metadata()
++        .is_ok_and(|metadata| !metadata.is_dir())
++    {
++        return Vec::new();
++    }
+     let mut protected_names = Vec::new();
+     for metadata_name in PROTECTED_METADATA_PATH_NAMES {
+         let mut metadata_paths = vec![root.join(*metadata_name)];
+diff --git a/codex-rs/linux-sandbox/src/bwrap_tests.rs b/codex-rs/linux-sandbox/src/bwrap_tests.rs
+index 9f53e2c..570e91b 100644
+--- a/codex-rs/linux-sandbox/src/bwrap_tests.rs
++++ b/codex-rs/linux-sandbox/src/bwrap_tests.rs
+@@ -14,0 +15,27 @@ use tempfile::TempDir;
++#[test]
++fn explicit_device_roots_are_devices_without_directory_metadata() {
++    let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
++        AbsolutePathBuf::from_absolute_path("/dev/null")
++            .unwrap()
++            .into(),
++        FileSystemAccessMode::Write,
++    )]);
++    let roots = policy.get_writable_roots_with_cwd_inheriting_root_metadata(Path::new("/"));
++    assert_eq!(roots.len(), 1);
++    assert!(roots[0].protected_metadata_names.is_empty());
++    let args = create_bwrap_command_args(
++        vec!["/bin/true".to_string()],
++        &policy,
++        Path::new("/"),
++        Path::new("/"),
++        BwrapOptions::default(),
++    )
++    .unwrap()
++    .args;
++    assert!(
++        args.windows(3)
++            .any(|args| args == ["--dev-bind", "/dev/null", "/dev/null"])
++    );
++    assert!(!args.iter().any(|arg| arg.starts_with("/dev/null/")));
++}
++

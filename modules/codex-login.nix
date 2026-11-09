@@ -5,7 +5,7 @@ let
   proj = config.burrow.proj.enable or false;
   review = (config.burrow.autoland.enable or false) && (config.burrow.autoland.reviewers.codex.enable or false);
   inherit (import ./autoland/paths.nix config) reviewer reviewerHome;
-  agents = import ./autoland/agents/package.nix { inherit pkgs; };
+  agents = import ./autoland/agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-codex;
   loginConfig = pkgs.writeText "codex-login.json" (builtins.toJSON {
     sudo = "/run/wrappers/bin/sudo";

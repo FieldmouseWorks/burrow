@@ -209,9 +209,7 @@ pub fn resolve(
             Capability::Nix,
             vec![(cache, true), ("/nix/var/nix/daemon-socket".into(), false)],
         ),
-        // A read-only bind of a device node permits open(O_RDWR) and ioctl;
-        // writable roots are directories to the CLI (with .git protection).
-        Grant::new(Capability::Kvm, vec![("/dev/kvm".into(), false)]),
+        Grant::new(Capability::Kvm, vec![("/dev/kvm".into(), true)]),
         Grant::new(Capability::Mcp, vec![]),
         Grant::new(Capability::Network, vec![]),
         Grant::new(Capability::Environment, vec![]),
@@ -293,7 +291,7 @@ mod tests {
         assert!(profile.contains(r#"env={"SETTING"="value"}"#));
         assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
         assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
-        assert!(profile.contains(r#""/dev/kvm"="read""#));
+        assert!(profile.contains(r#""/dev/kvm"="write""#));
         assert_eq!(grants.environment()["NIX_REMOTE"], "daemon");
         // Both adapters take their environment from the same resolved contract.
         let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();

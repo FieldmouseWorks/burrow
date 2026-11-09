@@ -21,7 +21,7 @@ let
   meters = "${dir}/meters";
   # Codex's meter is the job user's plan, whose login is proj's (codex-login).
   proj = config.burrow.proj.enable or false;
-  agents = import ./autoland/agents/package.nix { inherit pkgs; };
+  agents = import ./autoland/agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-usage-reset;
 
   configFile = pkgs.writeText "${name}.json" (builtins.toJSON {

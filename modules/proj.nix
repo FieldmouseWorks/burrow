@@ -28,7 +28,7 @@ let
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
-  agents = import ./autoland/agents/package.nix { inherit pkgs; };
+  agents = import ./autoland/agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj;
   hooks = pkgs.runCommand "proj-codex-git-hooks" { } ''
     mkdir -p $out

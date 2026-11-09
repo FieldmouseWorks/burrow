@@ -4,7 +4,7 @@ let
     mkdir -p $out/bin
     rustc --edition=2024 ${./proj/capabilities.rs} -o $out/bin/capabilities
   '';
-  agents = import ../modules/autoland/agents/package.nix { inherit pkgs; };
+  agents = import ../modules/autoland/agents/package.nix { inherit pkgs; inherit (self.inputs) nixpkgs-unstable; };
   model = "${self.packages.${pkgs.stdenv.hostPlatform.system}.codex-stand-in}/bin/codex-stand-in";
   # Claude's CLI stand-in runs the very same tool executable as Codex's
   # stand-in provider. Its argv checks the engine's MCP configuration too.
@@ -33,7 +33,7 @@ let
   '';
   calls = pkgs.writeText "capability-calls.json" (builtins.toJSON [
     [ "exec_command" { cmd = "${fixture}/bin/capabilities"; yield_time_ms = 300000; } ]
-    [ "mcp__reach__ping" { } ]
+    [ "mcp__reach.ping" { } ]
   ]);
   config = pkgs.writeText "stand-in.toml" ''
     model = "stand-in"

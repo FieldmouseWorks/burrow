@@ -12,7 +12,7 @@ let
   # The reviewers' service's program.
   service = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review;
   # The review agents (codex).
-  agents = import ./agents/package.nix { inherit pkgs; };
+  agents = import ./agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   # What the reviewers' service runs commands with, and so what an agent
   # reads the snapshot with, and runs the repo's own checks with (python3:
   # the scripts a repo checks itself with).
