@@ -669,3 +669,38 @@ fn notification_outbox_rejects_symlinked_bodies_and_boundaries() {
     assert!(notify(&f.cfg, &f.job()).is_err());
     assert!(Resume::prepare(&f.job(), true).is_err());
 }
+
+#[test]
+fn machine_question_notifications_include_the_default_deadline_and_policy_once() {
+    for one_way in [false, true] {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        let job = f.job();
+        fs::write(job.turn("1", "result"), "Question 1?").unwrap();
+        let recommendation = crate::ask::Recommendation {
+            default: "keep the old release".into(),
+            one_way,
+        };
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&f.cfg, &job, "ask").unwrap();
+        notify(&f.cfg, &job).unwrap();
+        let body = f.deliveries();
+        assert!(body.contains("Without an answer by"), "{body}");
+        assert!(body.contains("keep the old release"), "{body}");
+        assert!(
+            body.contains(if one_way {
+                "This is one-way"
+            } else {
+                "reversible default"
+            }),
+            "{body}"
+        );
+        Resume::prepare(&job, false).unwrap().commit();
+        f.ending(2, "ask");
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&f.cfg, &job, "ask").unwrap();
+        notify(&f.cfg, &job).unwrap();
+        assert_eq!(f.deliveries().matches("Without an answer by").count(), 1);
+        assert!(!f.deliveries().contains("Question 2?"));
+    }
+}

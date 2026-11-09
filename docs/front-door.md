@@ -54,8 +54,7 @@ own, say), in seconds and without starting a Claude.
 
 - **Ask:** open an issue there labelled `probe` (`probe.label`), as one of
   `probe.authors` (the inbox's, unless set), or as the configured
-  `github.machinery` App. Jobs can use this same scrubbed, read-only door
-  to check `deployed` before post-deploy work. Ask with a question a line:
+  `github.machinery` App. A job uses the in-job path below. Ask with a question a line:
   - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
   - `units`: failed units and jobs under way, the system's and the user's
   - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
@@ -353,7 +352,7 @@ Dependencies (`node_modules`, `target/`) get rebuilt there; set
 `burrow.remoteControl.sameDir = [ "NAME" ]` for a project where that's too
 slow.
 
-A job ending with `proj ask` sends its question through `burrow.tools.notify`
+A job ending with `proj ask --default "TEXT" [--one-way]` sends its question through `burrow.tools.notify`
 when configured. The open-question state survives automated resumes (#549).
 Each question has its own notification key and durable outbox beside the turn
 log. `proj-watch` retries opens with `notify ensure` (no daily reminders),

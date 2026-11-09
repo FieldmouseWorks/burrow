@@ -281,6 +281,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 body.truncate(at);
                 body.push_str("\n[Full answer: proj log]");
             }
+            if let Some(question) = crate::ask::load(job) {
+                body.push_str(&question.notice());
+            }
             swap(
                 &path,
                 &format!(
