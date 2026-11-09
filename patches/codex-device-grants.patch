@@ -1,7 +1,7 @@
-diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+diff --git a/linux-sandbox/src/bwrap.rs b/linux-sandbox/src/bwrap.rs
 index 11959d0..a4847c7 100644
---- a/codex-rs/linux-sandbox/src/bwrap.rs
-+++ b/codex-rs/linux-sandbox/src/bwrap.rs
+--- a/linux-sandbox/src/bwrap.rs
++++ b/linux-sandbox/src/bwrap.rs
 @@ -24,6 +24,7 @@ use std::fs::Metadata;
  use std::io;
  use std::os::fd::AsRawFd;
@@ -26,10 +26,10 @@ index 11959d0..a4847c7 100644
              bwrap_args.args.push(path_to_string(mount_root));
              bwrap_args.args.push(path_to_string(mount_root));
              if mount_root == Path::new("/") {
-diff --git a/codex-rs/protocol/src/permissions.rs b/codex-rs/protocol/src/permissions.rs
+diff --git a/protocol/src/permissions.rs b/protocol/src/permissions.rs
 index bd67575..89cd14a 100644
---- a/codex-rs/protocol/src/permissions.rs
-+++ b/codex-rs/protocol/src/permissions.rs
+--- a/protocol/src/permissions.rs
++++ b/protocol/src/permissions.rs
 @@ -2528,6 +2528,15 @@ fn protected_metadata_names_for_writable_root(
      root: &AbsolutePathBuf,
      raw_writable_roots: &[&AbsolutePathBuf],
@@ -46,10 +46,10 @@ index bd67575..89cd14a 100644
      let mut protected_names = Vec::new();
      for metadata_name in PROTECTED_METADATA_PATH_NAMES {
          let mut metadata_paths = vec![root.join(*metadata_name)];
-diff --git a/codex-rs/linux-sandbox/src/bwrap_tests.rs b/codex-rs/linux-sandbox/src/bwrap_tests.rs
+diff --git a/linux-sandbox/src/bwrap_tests.rs b/linux-sandbox/src/bwrap_tests.rs
 index 9f53e2c..570e91b 100644
---- a/codex-rs/linux-sandbox/src/bwrap_tests.rs
-+++ b/codex-rs/linux-sandbox/src/bwrap_tests.rs
+--- a/linux-sandbox/src/bwrap_tests.rs
++++ b/linux-sandbox/src/bwrap_tests.rs
 @@ -14,0 +15,27 @@ use tempfile::TempDir;
 +#[test]
 +fn explicit_device_roots_are_devices_without_directory_metadata() {
