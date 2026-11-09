@@ -1,7 +1,7 @@
 """What renovate-sweep (crates/burrow-renovate) leaves to Python, by their
-command lines: major-seal, which seals a job's verdict on a major with the
-token its task gives it and checks a seal (with the seal the autoland
-steward checks it with), and lock-wait (../modules/autoland/lock_wait.py,
+command lines: major-seal, which seals the verdicts on a major the sweep
+hands its job and checks a seal (with the seal the autoland steward checks
+it with), and lock-wait (../modules/autoland/lock_wait.py,
 the steward's too), which says when a lock file refresh lock-age refused
 for age only can go again. The sweep's own tests run stand-ins for both.
 
@@ -30,19 +30,15 @@ spec = importlib.util.spec_from_file_location("seal", sys.argv[2])
 S = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(S)
 KEY = "ab" * 32
-TOKEN = "0123456789abcdef" * 2
 
 
 def state(key=KEY):
-    """A sweep's state dir: its key, and the token of a job handed PRs 1
-    and 3 of REPO as majors."""
+    """A sweep's state dir, with its key."""
     d = os.path.join(tempfile.mkdtemp(dir=tmp), "renovate-sweep")
-    os.makedirs(os.path.join(d, "seal"))
+    os.makedirs(d)
     if key:
         with open(os.path.join(d, "verdict.key"), "w") as f:
             f.write(key)
-    with open(os.path.join(d, "seal", TOKEN), "w") as f:
-        f.write(f"{REPO}\n1\n3\n")
     return d
 
 
@@ -57,15 +53,15 @@ def sha(n):
     return f"{n:040x}"
 
 
-# The job seals its verdict with the token its task gives it, for a major
-# that task handed it: what it prints ends its comment, and the seal in it
-# is the one the steward checks.
+# The sweep seals each verdict on the head and base it hands a major over
+# on: what it prints is the marker its job ends its comment with, and the
+# seal in it is the one the steward checks.
 st = state()
-code, line = seal(st, TOKEN, "1", "ok", sha(1), "main")
+code, line = seal(st, REPO, "1", "ok", sha(1), "main")
 assert code == 0 and line.startswith(f"<!-- major-verdict: ok {sha(1)} on main ") and line.endswith(" -->"), (code, line)
 mac = line.split()[-2]
 assert mac == S.major(KEY, REPO, 1, "ok", sha(1), "main"), mac
-assert seal(st, TOKEN, "3", "held", sha(3), "release")[1].split()[-2] == S.major(KEY, REPO, 3, "held", sha(3), "release")
+assert seal(st, REPO, "3", "held", sha(3), "release")[1].split()[-2] == S.major(KEY, REPO, 3, "held", sha(3), "release")
 # --check takes that seal, the repo in any case (a clone's remote needn't
 # spell it as GitHub does), and nothing else: another verdict, head, base,
 # PR or repo, another key's, or one with no key.
@@ -76,11 +72,15 @@ for a in ((REPO, "1", "held", sha(1), "main"), (REPO, "1", "ok", sha(2), "main")
     assert seal(st, "--check", *a, mac) == (1, ""), a
 for other in (state("cd" * 32), state(None)):
     assert seal(other, "--check", REPO, "1", "ok", sha(1), "main", mac) == (1, ""), other
-# It seals only for a PR the token's task handed over as a major, with that
-# token, and only a verdict it can read back.
-for a in ((TOKEN, "6", "ok", sha(6), "main"), ("0" * 32, "1", "ok", sha(1), "main"),
-          ("../" + TOKEN, "1", "ok", sha(1), "main"), (TOKEN, "1", "maybe", sha(1), "main"),
-          (TOKEN, "1", "ok", "abc", "main"), (TOKEN, "1", "ok", sha(1), "a>b"), (TOKEN, "1", "ok", sha(1))):
+# A key it makes when there's none is one --check takes after.
+fresh = state(None)
+code, line = seal(fresh, REPO, "1", "held", sha(1), "main")
+assert code == 0 and seal(fresh, "--check", REPO, "1", "held", sha(1), "main", line.split()[-2]) == (0, ""), line
+# It seals only what it can read back: a repo, PR, verdict, head and base
+# each as a marker names them.
+for a in (("sam", "1", "ok", sha(1), "main"), ("sam/r x", "1", "ok", sha(1), "main"), (REPO, "x", "ok", sha(1), "main"),
+          (REPO, "1", "maybe", sha(1), "main"), (REPO, "1", "ok", "abc", "main"), (REPO, "1", "ok", sha(1), "a>b"),
+          (REPO, "1", "ok", sha(1))):
     assert seal(st, *a) == (2, ""), a
 
 

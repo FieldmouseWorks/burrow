@@ -44,7 +44,7 @@ fn a_major_without_a_verdict_goes_to_a_job_that_is_told_what_to_trust() {
     );
     assert!(
         m.key(1, "")
-            .starts_with(&format!("{} sealed verdict on main after CI ", sha(1)))
+            .starts_with(&format!("{} verdicts sealed for main after CI ", sha(1)))
     );
     // Once a head, and its CI's finishing.
     assert!(m.pass().jobs.is_empty());
@@ -92,7 +92,7 @@ fn as_the_app_its_job_acts_as_it_and_only_its_bots_verdict_counts() {
     m2.prs(&[pr(3)]);
     let v = m2.verdict(3, "ok", "main", "me");
     m2.comments(3, &[v]);
-    assert_eq!(m2.pass().task().matches("#3 ").count(), 1);
+    assert_eq!(m2.pass().task().matches("#3 \"").count(), 1);
     // Without it, the job is the user's, and so is the verdict.
     let mut m = Machine::new();
     m.covered(&[REPO], &[], 0, json!({}));
@@ -278,10 +278,7 @@ fn only_our_own_sealed_verdict_on_this_head_and_base_counts() {
         let p = pass(said);
         assert!(p.task().contains("#3 ") && p.majors().0 == "close");
         let task = p.task();
-        assert!(
-            task.contains("baseRefName")
-                && task.contains("a marker written any other way doesn't count")
-        );
+        assert!(task.contains("A marker written any other way doesn't count"));
     }
     // major-seal is asked of exactly what the marker names.
     let p = pass(&|_| vec![marked("me", &marker(3, "ok", "main", &"f".repeat(32)))]);
@@ -322,49 +319,79 @@ fn one_handed_over_before_verdicts_were_sealed_goes_once_more() {
     );
     let p = m.pass();
     assert!(p.task().contains("#2 ") && p.majors().0 == "close");
+    // And one handed over when its job sealed its verdict itself, with a
+    // token for major-seal its sandbox may not have let it read (a Codex
+    // job's didn't: Conary#271).
+    let m = Machine::new();
+    m.prs(&[pr(2)]);
+    m.pass();
+    let then = m
+        .key(2, "")
+        .replace(" verdicts sealed for ", " sealed verdict on ");
+    let m = Machine::new();
+    m.keep(2, "", &then);
+    m.prs(&[pr(2)]);
+    assert!(m.pass().task().contains("#2 "));
 }
 
 #[test]
-fn the_jobs_token_names_its_repo_and_the_majors_it_was_handed() {
+fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
     let m = Machine::new();
-    m.prs(&[pr(1), red(6)]);
+    let mut retargeted = pr(3);
+    retargeted["baseRefName"] = json!("release");
+    m.prs(&[pr(1), retargeted, red(6)]);
     let p = m.pass();
     let task = p.task();
-    let seal = format!("`{} ", bin().join("major-seal").display());
-    let at = task.find(&seal).unwrap() + seal.len();
-    let token = &task[at..at + 32];
-    assert!(task[at + 32..].starts_with(" N ok SHA BASE`"), "{task}");
-    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()), "{token}");
-    let sealed = m.state(&format!("seal/{token}"));
-    assert_eq!(fs::read_to_string(&sealed).unwrap(), "sam/r\n1\n");
-    let mode = fs::metadata(m.state("seal")).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o700);
-    // A token three days old is gone: its job is long done. One two days
-    // old stays, and anything in there that isn't a file.
-    let old = SystemTime::now() - Duration::from_secs(3 * 86400 + 60);
-    let recent = SystemTime::now() - Duration::from_secs(2 * 86400);
-    let young = m.state("seal/young");
-    fs::write(&young, "").unwrap();
-    fs::File::options()
-        .write(true)
-        .open(&sealed)
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
-    fs::File::options()
-        .write(true)
-        .open(&young)
-        .unwrap()
-        .set_modified(recent)
-        .unwrap();
-    fs::create_dir(m.state("seal/dir")).unwrap();
-    fs::File::open(m.state("seal/dir"))
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
-    m.prs(&[]);
-    m.pass();
-    assert!(!sealed.exists() && young.exists() && m.state("seal/dir").exists());
+    // The sweep seals both verdicts on each major, as it hands it over: the
+    // job runs nothing of the sweep's, whose state a sandboxed job can't
+    // read (a Codex job's couldn't: Conary#271), and has no seal for a head
+    // or base it wasn't handed.
+    let sealed = |n: u64, base: &str| {
+        format!(
+            "- #{n} on {} for {base}: ok `<!-- major-verdict: ok {} on {base} sealed-{n}-ok -->`, held `<!-- major-verdict: held {} on {base} sealed-{n}-held -->`",
+            sha(n),
+            sha(n),
+            sha(n)
+        )
+    };
+    assert!(
+        task.ends_with(&format!(
+            "the head and base it was handed to you on:\n{}\n{}",
+            sealed(1, "main"),
+            sealed(3, "release")
+        )),
+        "{task}"
+    );
+    assert!(!task.contains("#6 on"), "{task}");
+    assert!(!task.contains("major-seal"), "{task}");
+    for asked in [
+        format!("major-seal {REPO} 1 ok {} main", sha(1)),
+        format!("major-seal {REPO} 1 held {} main", sha(1)),
+        format!("major-seal {REPO} 3 ok {} release", sha(3)),
+        format!("major-seal {REPO} 3 held {} release", sha(3)),
+    ] {
+        assert!(p.log.contains(&asked), "{asked}: {:#?}", p.log);
+    }
+    // Nothing's kept for the job to read.
+    assert!(!m.state("seal").exists());
+    // A job handed only red CI is told of no markers.
+    let m = Machine::new();
+    m.prs(&[red(6)]);
+    assert!(!m.pass().task().contains("verdict markers, sealed"));
+    // With no seal, no job: the head isn't kept as handed, and the next
+    // pass hands it over.
+    let m = Machine::new();
+    m.prs(&[pr(1)]);
+    m.set("seal-fails", "");
+    let p = m.sweep(&[]);
+    assert_eq!(p.code, Some(1));
+    assert!(
+        p.jobs.is_empty() && m.key(1, "").is_empty(),
+        "{:#?}",
+        p.jobs
+    );
+    m.unset("seal-fails");
+    assert!(m.pass().task().contains("sealed-1-ok"));
 }
 
 #[test]
@@ -377,9 +404,8 @@ fn a_job_that_doesnt_start_keeps_nothing_and_fails_the_pass() {
     assert_eq!(p.err, "renovate-sweep: sam/r: proj run: exit status: 3\n");
     assert_eq!(p.out, "");
     assert_eq!(p.jobs.len(), 1);
-    // Its token is gone and the PR's key isn't kept: the next pass hands
-    // it over again. The notices go out all the same.
-    assert_eq!(fs::read_dir(m.state("seal")).unwrap().count(), 0);
+    // The PR's key isn't kept: the next pass hands it over again. The
+    // notices go out all the same.
     assert_eq!(m.key(1, ""), "");
     assert_eq!(p.majors().0, "close");
     m.unset("proj-fails");

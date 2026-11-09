@@ -2,8 +2,9 @@
 //! proj, the notifier, major-seal and lock-wait: which Renovate PRs go to a
 //! Claude job, what the owner's notices list, which verdicts count, and the
 //! lock file refreshes that only wait for their releases to be old enough.
-//! What major-seal makes of a token or a seal, and lock-wait of Renovate's
-//! comments, is theirs (tests/renovate-sweep.py): here major-seal takes the
+//! What major-seal makes of a verdict or a seal, and lock-wait of Renovate's
+//! comments, is theirs (tests/renovate-sweep.py): here major-seal seals a
+//! verdict as `sealed-N-VERDICT` (fails with FAKE/seal-fails), takes the
 //! seals FAKE/seals lists, and lock-wait says the time on the line of
 //! FAKE/rest-N (Renovate's comments on PR N) that names who it was asked
 //! about.
@@ -122,7 +123,9 @@ cat "$2/.origin"
     (
         "major-seal",
         r#"echo "major-seal $*" >>"$FAKE/log"
-[ "$1" = --check ] && shift && grep -qxF -- "$*" "$FAKE/seals" 2>/dev/null
+if [ "$1" = --check ]; then shift; grep -qxF -- "$*" "$FAKE/seals" 2>/dev/null; exit; fi
+[ -e "$FAKE/seal-fails" ] && exit 2
+echo "<!-- major-verdict: $3 $4 on $5 sealed-$2-$3 -->"
 "#,
     ),
     (

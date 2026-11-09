@@ -11,9 +11,12 @@
 //! The job's verdict on a major: ok when it can merge as it is, held when
 //! it shouldn't (its comment says why). The job ends that comment with a
 //! marker naming the head it cleared and the base it was cleared for,
-//! sealed, `<!-- major-verdict: ok|held SHA on BASE MAC -->`, which it gets
-//! from major-seal with the token its task gives it, and labels the PR
-//! major-ok or major-held for people to see. A verdict counts only for the
+//! sealed, `<!-- major-verdict: ok|held SHA on BASE MAC -->`, and labels the
+//! PR major-ok or major-held for people to see. The sweep seals both verdicts
+//! on the head and base it hands a major over on (major-seal) and puts the
+//! markers in the task, as the steward gives a judge its seals: the job runs
+//! nothing of the sweep's, whose state its sandbox needn't see (a Codex
+//! job's doesn't), and can seal no head it wasn't handed. A verdict counts only for the
 //! head and base it names, only from our own login and only with its seal,
 //! so a job still finishing on an older head, a push since, a PR retargeted
 //! since, someone else's comment or another job quoting a marker can't
@@ -32,12 +35,11 @@
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{FlockOperation, flock};
 use serde::Deserialize;
@@ -64,9 +66,6 @@ pub(crate) const HELD: &str = "major-held";
 const RUN_COMES: i64 = 3600;
 /// How long a security fix may stay open before it's a notice.
 const SECURITY_DAY: i64 = 86400;
-/// How long a job's seal token is kept (find's -mtime +2, three whole
-/// days): its job is long done by then.
-const TOKEN_KEPT: Duration = Duration::from_secs(3 * 86400);
 
 /// What modules/updates.nix tells renovate-sweep.
 #[derive(Debug, Deserialize)]
@@ -75,9 +74,8 @@ pub struct Config {
     /// renovate-sweep, as the machine names it: how it says itself.
     pub name: String,
     /// Its own: what each PR was last handed over for (OWNER_REPO-N), its
-    /// refresh requests taken back (OWNER_REPO-N.released), and each job's
-    /// seal token (seal/TOKEN: the repo, then the majors it handed over),
-    /// which major-seal reads.
+    /// refresh requests taken back (OWNER_REPO-N.released), and the key
+    /// major-seal seals verdicts with.
     pub state: PathBuf,
     /// Where the machine's projects are: each clone of a GitHub repo, a
     /// project its job runs in.
@@ -117,7 +115,7 @@ pub struct Tools {
     pub proj: PathBuf,
     /// HOST-notify, which tells the owner.
     pub notify: PathBuf,
-    /// major-seal, which checks a verdict's seal, and makes one for the job.
+    /// major-seal, which seals the verdicts a job is handed, and checks one.
     pub seal: PathBuf,
     /// lock-wait (modules/autoland/lock_wait.py): when a lock file refresh that
     /// lock-age refused for age only can go again, and how far the sweep
@@ -188,7 +186,6 @@ impl Config {
             }
         };
         let limits = self.limits()?;
-        self.seals()?;
         let who = Who {
             me,
             renovate,
@@ -301,24 +298,23 @@ impl Config {
         info: &steward::Repo,
         handed: &[Handed],
     ) -> Result<(), Broke> {
-        let mut bytes = [0u8; 16];
-        File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut bytes))
-            .map_err(|e| Broke(format!("/dev/urandom: {e}")))?;
-        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let sealed = self.state.join("seal").join(&token);
-        let mut text = format!("{repo}\n");
-        for n in handed.iter().filter_map(|h| h.major.as_ref()) {
-            text.push_str(&format!("{n}\n"));
+        let mut seals = String::new();
+        for h in handed {
+            if let Some(m) = &h.major {
+                let [ok, held] = ["ok", "held"].map(|v| self.seal(repo, m, v));
+                seals.push_str(&format!(
+                    "- #{} on {} for {}: ok `{}`, held `{}`\n",
+                    m.n, m.sha, m.base, ok?, held?
+                ));
+            }
         }
-        write(&sealed, &text)?;
         let todo: String = handed.iter().map(|h| h.line.as_str()).collect();
         let task = task::task(
             self,
             repo,
             todo.trim_end_matches('\n'),
             &info.proofs,
-            &token,
+            seals.trim_end_matches('\n'),
         );
         let mut proj = Command::new(&self.tools.proj);
         // The kind of work it is, which the machine may give a model of its own.
@@ -342,9 +338,28 @@ impl Config {
             Ok(s) => format!("{repo}: proj run: {s}"),
             Err(e) => format!("{}: {e}", self.tools.proj.display()),
         };
-        // No job holds its token.
-        let _ = fs::remove_file(&sealed);
         Err(Broke(why))
+    }
+
+    /// The marker major-seal seals verdict `v` on major `m` with, in `repo`.
+    fn seal(&self, repo: &str, m: &Major, v: &str) -> Result<String, Broke> {
+        let seal = &self.tools.seal;
+        let out = Command::new(seal)
+            .args([repo, &m.n, v, &m.sha, &m.base])
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|e| Broke(format!("{}: {e}", seal.display())))?;
+        let marker = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !out.status.success() || !marker.starts_with("<!-- ") {
+            return Err(Broke(format!(
+                "{repo}: {} {} {v}: {}",
+                seal.display(),
+                m.n,
+                out.status
+            )));
+        }
+        Ok(marker)
     }
 
     /// The majors waiting on the owner, in one notice: the held ones apart
@@ -443,31 +458,6 @@ impl Config {
         }
     }
 
-    /// Each job's token for major-seal, kept where only the user reads
-    /// them, and the ones two days old gone: their jobs are long done.
-    fn seals(&self) -> Result<(), Broke> {
-        let dir = self.state.join("seal");
-        let broke = |e: io::Error| Broke(format!("{}: {e}", dir.display()));
-        fs::create_dir_all(&dir).map_err(broke)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(broke)?;
-        let now = SystemTime::now();
-        for entry in fs::read_dir(&dir).map_err(broke)? {
-            let entry = entry.map_err(broke)?;
-            let path = entry.path();
-            let meta = fs::symlink_metadata(&path)
-                .map_err(|e| Broke(format!("{}: {e}", path.display())))?;
-            let old = meta
-                .modified()
-                .ok()
-                .and_then(|m| now.duration_since(m).ok())
-                .is_some_and(|age| age >= TOKEN_KEPT);
-            if meta.is_file() && old {
-                fs::remove_file(&path).map_err(|e| Broke(format!("{}: {e}", path.display())))?;
-            }
-        }
-        Ok(())
-    }
-
     /// The GitHub repo the clone at `dir` is of, as its remote spells it.
     fn origin(&self, dir: &Path) -> Option<String> {
         let mut git = Command::new(&self.tools.git);
@@ -545,14 +535,22 @@ struct Pass {
     failed: bool,
 }
 
-/// A PR handed to the repo's job: its line in the task, its number if it's
-/// a major (its token seals verdicts on those only), and what it's kept as
-/// handed over for once the job has it.
+/// A PR handed to the repo's job: its line in the task, the head and base
+/// it's handed over on if it's a major (the verdicts the job is handed are
+/// sealed on those), and what it's kept as handed over for once the job has
+/// it.
 struct Handed {
     line: String,
-    major: Option<String>,
+    major: Option<Major>,
     key: PathBuf,
     want: String,
+}
+
+/// A major as it's handed over: its number, head and base.
+struct Major {
+    n: String,
+    sha: String,
+    base: String,
 }
 
 /// Something it needed broke.
@@ -597,12 +595,12 @@ impl Sweep<'_> {
         let security = pr.security();
         let key = cfg.state.join(format!("{}-{n}", repo.replace('/', "_")));
         let seen = fs::read(&key).map(trimmed).unwrap_or_default();
-        // A major's key also says the job was asked for a verdict on this
-        // base, so one retargeted since (or handed over before verdicts
-        // named their base or were sealed) is handed over once more.
+        // A major's key also says the job was handed sealed verdicts on
+        // this base, so one retargeted since (or handed over before its
+        // task carried them) is handed over once more.
         let mut want = sha.clone();
         if major {
-            want = format!("{sha} sealed verdict on {base}");
+            want = format!("{sha} verdicts sealed for {base}");
         }
         if security {
             want = format!("{sha} {}", jiff::Zoned::now().strftime("%Y-%m-%d"));
@@ -859,7 +857,7 @@ impl Sweep<'_> {
         };
         Ok(Some(Handed {
             line: format!("- #{n} \"{title}\" (branch {branch}): {why}{request}\n"),
-            major: major.then_some(n),
+            major: major.then(|| Major { n, sha, base }),
             key,
             want,
         }))
