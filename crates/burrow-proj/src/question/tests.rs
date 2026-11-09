@@ -839,3 +839,5 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
 }
 
 mod recovery;
+
+mod lifecycle;

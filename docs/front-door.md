@@ -362,6 +362,9 @@ after its new turn is accepted: host-owned resume receipts distinguish preparato
 prompts and turn counts from acceptance. The launcher and `_exec` can both
 record acceptance; interrupted cleanup is replayed before the watcher acts.
 Failed or killed starters leave the outstanding question and its authority intact.
+When its unit is known gone, an unaccepted preparation is retained as a failed
+turn with its undelivered prompt; it no longer defers the original question
+deadline. Active units and unknown lifecycle states stay protected.
 Completion (native or VM) or an explicit stop also closes the notice; a later question gets its own key even if
 an older close is still pending. Notification errors do not interrupt turn
 finalization, watchdog updates, completion kicks or scratch cleanup.

@@ -31,6 +31,7 @@ struct Receipt {
     answered: bool,
     clear: bool,
     accepted: bool,
+    // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
     applied: bool,
 }
 
@@ -106,8 +107,37 @@ pub(crate) fn recover(job: &Job) -> Result<(), String> {
         }
     }
     receipts.sort_by_key(|(n, _)| *n);
-    for (_, path) in receipts {
-        apply_receipt(&path, &job.dir)?;
+    for (n, path) in receipts {
+        let Some(text) = read_state(&path)? else {
+            continue;
+        };
+        let mut r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        if r.accepted {
+            apply_receipt(&path, &job.dir)?;
+        } else if job.turns().as_deref() == Some(n.to_string().as_str()) {
+            // The caller owns the launcher lock. A live unit or unknown
+            // lifecycle can still accept a preparation; a vanished unit cannot.
+            if !r.applied {
+                let load = crate::systemd::show(job.cfg, &job.unit(), "LoadState");
+                let active = crate::systemd::show(job.cfg, &job.unit(), "ActiveState");
+                if (load == "not-found" || matches!(active.as_str(), "inactive" | "failed"))
+                    && !job.end_pending()
+                {
+                    // Reconcile as abandoned, never as answered. Keep the
+                    // failed turn's identity and prompt without touching any
+                    // question authority, its original deadline or its outbox.
+                    r.applied = true;
+                    save_receipt(&path, &r)?;
+                }
+            }
+            if r.applied
+                && !job.turn(&n.to_string(), "stopped").exists()
+                && read_state(&job.turn(&n.to_string(), "outcome"))?.is_none()
+            {
+                swap(&job.turn(&n.to_string(), "outcome"), "failed\n")
+                    .map_err(|e| e.to_string())?;
+            }
+        }
     }
     Ok(())
 }
@@ -120,6 +150,9 @@ pub(crate) fn accept(job: &Job, n: &str) -> Result<(), String> {
         return Ok(());
     };
     let mut receipt: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !receipt.accepted && receipt.applied {
+        return Err(format!("prepared turn {n} was abandoned before acceptance"));
+    }
     receipt.accepted = true;
     save_receipt(&path, &receipt)?;
     apply_receipt(&path, &job.dir)
@@ -135,7 +168,7 @@ pub(crate) fn acceptance_pending(job: &Job) -> Result<bool, String> {
         return Ok(false);
     };
     let r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(!r.accepted)
+    Ok(!r.accepted && !r.applied)
 }
 
 pub(crate) struct Resume {
