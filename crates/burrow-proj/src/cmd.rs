@@ -181,48 +181,54 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
     }
     for (_, id) in jobs.into_iter().take(limit) {
         let job = Job::new(cfg, &id);
-        let st = job.state();
-        let n = job.turns().unwrap_or_default();
-        let each = |name: &str, f: &dyn Fn(&str) -> Option<String>| -> String {
-            lines(&job.path(name))
-                .iter()
-                .filter_map(|l| f(l))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let mut notes = String::new();
-        notes += &each("agent", &|l| Some(format!("[vm {l}] ")));
-        notes += &each("app", &|l| Some(format!("[as {l}] ")));
-        if let Some(why) = demoted(cfg, &job.dir) {
-            notes += &format!("[{why}] ");
-        }
-        if st == "running" {
-            notes += &each(&format!("{n}.wait"), &|l| {
-                let what = l.split('\t').nth(1).unwrap_or(l);
-                (!what.is_empty()).then(|| format!("[waiting in line: {what}] "))
-            });
-        }
-        let targets: Vec<String> = awaits(&read(&job.path("await")).unwrap_or_default())
-            .into_iter()
-            .map(|a| a.target)
-            .collect();
-        if !targets.is_empty() {
-            notes += &format!("[awaits {}] ", targets.join(" "));
-        }
-        notes += &each(&format!("{n}.end"), &|l| match l {
-            "ask" => Some("[asks] ".into()),
-            "undeclared" => Some("[no next step] ".into()),
-            _ => None,
-        });
-        let result = fs::read(job.turn(&n, "result")).unwrap_or_default();
-        let mut cut = result.len().min(100);
-        while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
-            cut -= 1;
-        }
-        notes += &String::from_utf8_lossy(&result[..cut]).replace('\n', " ");
-        put(&format!("{id:<40} {st:<8} {notes}\n"));
+        put(&status_line(&job));
     }
     Ok(())
+}
+
+pub(crate) fn status_line(job: &Job) -> String {
+    let cfg = job.cfg;
+    let id = job.id;
+    let st = job.state();
+    let n = job.turns().unwrap_or_default();
+    let each = |name: &str, f: &dyn Fn(&str) -> Option<String>| -> String {
+        lines(&job.path(name))
+            .iter()
+            .filter_map(|l| f(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut notes = String::new();
+    notes += &each("agent", &|l| Some(format!("[vm {l}] ")));
+    notes += &each("app", &|l| Some(format!("[as {l}] ")));
+    if let Some(why) = demoted(cfg, &job.dir) {
+        notes += &format!("[{why}] ");
+    }
+    if st == "running" {
+        notes += &each(&format!("{n}.wait"), &|l| {
+            let what = l.split('\t').nth(1).unwrap_or(l);
+            (!what.is_empty()).then(|| format!("[waiting in line: {what}] "))
+        });
+    }
+    let targets: Vec<String> = awaits(&read(&job.path("await")).unwrap_or_default())
+        .into_iter()
+        .map(|a| a.target)
+        .collect();
+    if !targets.is_empty() {
+        notes += &format!("[awaits {}] ", targets.join(" "));
+    }
+    notes += &each(&format!("{n}.end"), &|l| match l {
+        "ask" => Some("[asks] ".into()),
+        "undeclared" => Some("[no next step] ".into()),
+        _ => None,
+    });
+    let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    let mut cut = result.len().min(100);
+    while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
+        cut -= 1;
+    }
+    notes += &String::from_utf8_lossy(&result[..cut]).replace('\n', " ");
+    format!("{id:<40} {st:<8} {notes}\n")
 }
 
 /// `proj log ID [--turn N] [--raw]`: a turn's answer, and how it ended.
@@ -252,7 +258,7 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     };
     if raw {
         let stream = job.turn(&n, "jsonl");
-        let text = fs::read(&stream).map_err(|e| io_fail(&stream, e))?;
+        let text = crate::state_reads::bytes(&stream).map_err(|e| io_fail(&stream, e))?;
         let _ = io::stdout().lock().write_all(&text);
         return Ok(());
     }
@@ -275,7 +281,8 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     // A turn's answer is read from its own stream, so an earlier turn's is
     // still there once later ones have started.
     let stream = job.turn(n, "jsonl");
-    let text = String::from_utf8_lossy(&fs::read(&stream).unwrap_or_default()).into_owned();
+    let text = String::from_utf8_lossy(&crate::state_reads::bytes(&stream).unwrap_or_default())
+        .into_owned();
     let last = last_result(&stream, 0);
     let mut said = answer(&stream);
     if read(&job.turn(n, "end")).as_deref() == Some("ask")

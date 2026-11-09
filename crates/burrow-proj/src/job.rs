@@ -47,12 +47,13 @@ impl<'a> Job<'a> {
 
     /// Turn N's file of this kind: N.slot, N.jsonl...
     pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
+        let n = if valid_turn(n) { n } else { "invalid-turn" };
         self.dir.join(format!("{n}.{kind}"))
     }
 
     /// The latest turn's number, as written; None before the first.
     pub fn turns(&self) -> Option<String> {
-        read(&self.path("turns"))
+        read(&self.path("turns")).filter(|n| valid_turn(n))
     }
 
     /// Swapped in whole, so a reader never finds it missing or half written.
@@ -143,7 +144,7 @@ impl<'a> Job<'a> {
     /// stream, and not a sandbox's, whose VM may outlive it. Under the job's
     /// lock.
     pub fn cut_off(&self, n: &str) -> bool {
-        let text = fs::read(self.turn(n, "jsonl")).unwrap_or_default();
+        let text = crate::state_reads::bytes(&self.turn(n, "jsonl")).unwrap_or_default();
         let text = String::from_utf8_lossy(&text);
         self.turns().as_deref() == Some(n)
             && self.state() == "failed"
@@ -333,6 +334,10 @@ pub fn escape(s: &str) -> String {
         }
     }
     out
+}
+
+fn valid_turn(n: &str) -> bool {
+    !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok_and(|v| v > 0)
 }
 
 #[cfg(test)]

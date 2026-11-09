@@ -65,6 +65,7 @@ let
     "python3 -c 'import os; os.listdir(\"/var/lib/burrow/proj-questions\")' || touch /data/dev/jobs/$PROJ_JOB/control-read-refused"
     "python3 -c 'open(\"/var/lib/burrow/proj-questions/forged\", \"w\").close()' || touch /data/dev/jobs/$PROJ_JOB/control-write-refused"
     "proj probe deployed > /data/dev/jobs/$PROJ_JOB/host-probe && touch /data/dev/jobs/$PROJ_JOB/host-probed"
+    "ln -s /var/lib/burrow/proj-questions/probe-private /data/dev/jobs/$PROJ_JOB/agent && proj probe queue > /data/dev/jobs/$PROJ_JOB/host-queue && touch /data/dev/jobs/$PROJ_JOB/queue-confined"
     "git fetch -q origin && touch /data/dev/jobs/$PROJ_JOB/fetched"
     "git worktree add -q -b work \"$PROJ_SCRATCH/tree\" origin/trunk && git -C \"$PROJ_SCRATCH/tree\" commit -q --allow-empty -m changed && touch /data/dev/jobs/$PROJ_JOB/committed"
     "python3 -c 'import os, socket; socket.socket(socket.AF_UNIX).connect(os.environ[\"GH_TOKEN_SOCKET\"])' && touch /data/dev/jobs/$PROJ_JOB/connected"
@@ -284,6 +285,7 @@ pkgs.testers.runNixOSTest {
     dev("install -d -m 0700 ~/.ssh && echo secret-key-material >~/.ssh/id_test")
     jobs.fail("test -e /tmp/tmux-1001")
     dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
+    jobs.succeed("echo ordinary-confidential-probe-text >/var/lib/burrow/proj-questions/probe-private")
     j = dev('proj run --role coder --app workers web "go"')
     # Once a command is running, the user starts two more: in tmux's default
     # dir, which must still take a server, and the custom one.
@@ -296,13 +298,15 @@ pkgs.testers.runNixOSTest {
     jobs.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
-    for mark in ["control-read-refused", "control-write-refused", "host-probed", "fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
+    for mark in ["control-read-refused", "control-write-refused", "host-probed", "queue-confined", "fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
                  "login-target-refused", "codex-config-refused", "gitconfig-read-only", "bus-refused", "manager-refused", "tmux-socket-refused",
                  "tmux-custom-refused", "tmux-refused", "tmux-late-refused", "tmux-relative-refused",
                  "netns-refused", "daemon-refused", "keys-refused", "tmp-own", "store-queried", "removed"]:
         assert mark in marks, (mark, marks, said)
     jobs.succeed("test -d /var/lib/burrow/proj-questions && test ! -e /var/lib/burrow/proj-questions/forged")
     assert jobs.succeed("readlink /run/current-system").strip() in dev(f"cat /data/dev/jobs/{j}/host-probe")
+    assert "ordinary-confidential-probe-text" not in dev(f"cat /data/dev/jobs/{j}/host-queue")
+    jobs.succeed(f"rm /data/dev/jobs/{j}/agent")
     # The file went, after the guard's undo snapshot of its dataset, which
     # still has it.
     def snapshots():

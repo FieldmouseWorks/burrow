@@ -346,7 +346,8 @@ impl Pass<'_> {
             // A resolved one-way question's owner label was ours, not an
             // independent sorting verdict. Clear it and ignore a stale list
             // snapshot of that label when consuming the resumed verdict.
-            let answered = read(&d.join("question-notice")).as_deref() == Some("one-way");
+            let answered =
+                read(&d.join("question-notice")).is_some_and(|n| n.ends_with("\tone-way"));
             let resolved = open.cloned().map(|mut issue| {
                 if answered && let Some(labels) = issue["labels"].as_array_mut() {
                     labels.retain(|l| {

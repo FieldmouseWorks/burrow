@@ -170,6 +170,11 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
             said,
         )
         .unwrap();
+        fs::write(
+            crate::ask::host_path(&crate::job::Job::new(&self.cfg, id), "question-id"),
+            "initial",
+        )
+        .unwrap();
         fs::write(d.join("turns"), "1\n").unwrap();
         fs::write(d.join("1.outcome"), format!("{outcome}\n")).unwrap();
         if let Some(end) = end {

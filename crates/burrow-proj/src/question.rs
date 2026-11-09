@@ -22,7 +22,9 @@ impl Resume {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
         }
         let path = job.path("open-question");
-        let before = match fs::read_to_string(&path) {
+        let before = match crate::state_reads::bytes(&path)
+            .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+        {
             Ok(s) => Some(s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("{}: {e}", path.display())),
@@ -39,9 +41,12 @@ impl Resume {
                 "question-needs-owner",
                 "question-text",
                 "question-since",
+                "question-id",
             ] {
                 let path = crate::ask::host_path(job, name);
-                match fs::read_to_string(&path) {
+                match crate::state_reads::bytes(&path)
+                    .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+                {
                     Ok(text) => metadata.push((path, text)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                     Err(e) => return Err(format!("{}: {e}", path.display())),

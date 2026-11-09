@@ -89,6 +89,11 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             due,
         };
         if !host_path(job, "question-text").exists() {
+            swap(
+                &host_path(job, "question-id"),
+                &crate::now_nanos().to_string(),
+            )
+            .map_err(|e| e.to_string())?;
             swap(&host_path(job, "question-since"), &crate::now().to_string())
                 .map_err(|e| e.to_string())?;
             let text = job
@@ -122,6 +127,7 @@ pub(crate) fn clear(job: &Job) {
         "question-needs-owner",
         "question-text",
         "question-since",
+        "question-id",
     ] {
         let _ = fs::remove_file(host_path(job, name));
     }

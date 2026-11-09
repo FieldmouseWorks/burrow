@@ -30,8 +30,10 @@ impl Pass<'_> {
             eprintln!("proj sorting question: {e}");
             self.retry(repo);
         }
-        let notice = if pending { "one-way" } else { "ask" };
-        if read(&d.join("question-notice")).as_deref() != Some(notice) {
+        let identity = read(&ask::host_path(job, "question-id"))
+            .ok_or_else(|| Fail::new(1, "sorting question has no host identity"))?;
+        let notice = format!("{identity}\t{}", if pending { "one-way" } else { "ask" });
+        if read(&d.join("question-notice")).as_deref() != Some(notice.as_str()) {
             let question = read(&ask::host_path(job, "question-text")).unwrap_or_default();
             let body = if pending {
                 format!(
@@ -47,7 +49,7 @@ impl Pass<'_> {
                 )
             };
             if self.post(repo, n, &body) {
-                fs::write(d.join("question-notice"), notice).map_err(|e| crate::io_fail(d, e))?;
+                fs::write(d.join("question-notice"), &notice).map_err(|e| crate::io_fail(d, e))?;
             } else {
                 self.miss(repo);
                 return Ok(true);

@@ -245,3 +245,89 @@ fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
     assert!(!d.exists());
     assert!(b.log().contains("labels[]=ready"), "{}", b.log());
 }
+
+#[test]
+fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() {
+    for resolution in ["human", "reversible-timeout", "explicit", "one-way-timeout"] {
+        let mut b = Box::new();
+        b.cfg.tools.systemd_run = "true".into();
+        burrow_test::executable(
+            &b.cfg.tools.systemctl,
+            "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+        );
+        super::sorting_tests::sorting(&b, "First question?");
+        let job = crate::job::Job::new(&b.cfg, "s1");
+        fs::write(job.path("session"), "s1").unwrap();
+        fs::remove_file(crate::ask::host_path(&job, "question-text")).unwrap();
+        fs::write(job.turn("1", "result"), "First question?").unwrap();
+        let recommendation = crate::ask::Recommendation {
+            default: "keep it".into(),
+            one_way: resolution == "one-way-timeout",
+        };
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&b.cfg, &job, "ask").unwrap();
+        fs::write(job.turn("1", "end"), "ask\n").unwrap();
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        let check = || {
+            b.pass()
+                .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+                .unwrap();
+        };
+        check();
+        check();
+        assert_eq!(b.posted().matches("First question?").count(), 1);
+        crate::question::Resume::prepare(&job, false)
+            .unwrap()
+            .commit();
+        job.set_turns(2).unwrap();
+        fs::write(job.turn("2", "outcome"), "done\n").unwrap();
+        fs::write(job.turn("2", "result"), "Unrelated update handled.").unwrap();
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&b.cfg, &job, "ask").unwrap();
+        check();
+        assert_eq!(b.posted().matches("First question?").count(), 1);
+        match resolution {
+            "human" => crate::question::Resume::prepare(&job, true)
+                .unwrap()
+                .commit(),
+            "explicit" => crate::ask::finish(&b.cfg, &job, "done").unwrap(),
+            _ => {
+                let mut q = crate::ask::load(&job).unwrap();
+                q.due = crate::now() - 1;
+                fs::write(
+                    crate::ask::host_path(&job, "question"),
+                    serde_json::to_string(&q).unwrap(),
+                )
+                .unwrap();
+                crate::ask::expire(&b.cfg, &job).unwrap();
+                if recommendation.one_way {
+                    check();
+                    check();
+                    assert_eq!(b.posted().matches("No answer by").count(), 1);
+                    crate::question::Resume::prepare(&job, true)
+                        .unwrap()
+                        .commit();
+                }
+            }
+        }
+        let turn = job.turns().unwrap().parse::<u64>().unwrap() + 1;
+        job.set_turns(turn).unwrap();
+        fs::write(job.turn(&turn.to_string(), "outcome"), "done\n").unwrap();
+        fs::write(job.turn(&turn.to_string(), "result"), "Second question?").unwrap();
+        crate::ask::record(&job, &recommendation).unwrap();
+        crate::ask::finish(&b.cfg, &job, "ask").unwrap();
+        check();
+        check();
+        assert_eq!(
+            b.posted().matches("Second question?").count(),
+            1,
+            "{resolution}: {}",
+            b.posted()
+        );
+        assert_eq!(
+            b.posted().matches("Without an answer by").count(),
+            2,
+            "{resolution}"
+        );
+    }
+}

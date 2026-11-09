@@ -210,7 +210,7 @@ pub fn io_fail(path: &Path, e: io::Error) -> Fail {
 /// A file's text as `$(cat FILE)` has it, its trailing newlines dropped; None
 /// when it can't be read.
 pub fn read(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = state_reads::bytes(path).ok()?;
     Some(
         String::from_utf8_lossy(&bytes)
             .trim_end_matches('\n')
@@ -288,6 +288,8 @@ pub fn nanos(d: &str) -> Option<i64> {
     let s = number.parse::<f64>().ok()? * per * 1e9;
     Some(s.ceil().min(1e18) as i64)
 }
+
+mod state_reads;
 
 #[cfg(test)]
 mod tests {

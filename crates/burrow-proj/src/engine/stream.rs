@@ -59,7 +59,7 @@ pub fn names_session(text: &str) -> bool {
     text.lines().any(|l| session(l).is_some())
 }
 pub fn stream_names_session(stream: &Path, from: u64) -> bool {
-    fs::read(stream).is_ok_and(|b| {
+    crate::state_reads::bytes(stream).is_ok_and(|b| {
         names_session(&String::from_utf8_lossy(
             b.get(from as usize..).unwrap_or_default(),
         ))
@@ -72,7 +72,9 @@ fn results(text: &str) -> Vec<Value> {
     text.lines().filter_map(|l| decoder.line(l)).collect()
 }
 pub fn answer(stream: &Path) -> String {
-    let text = fs::read_to_string(stream).unwrap_or_default();
+    let text = crate::state_reads::bytes(stream)
+        .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+        .unwrap_or_default();
     results(&text)
         .iter()
         .filter_map(|v| {
@@ -85,7 +87,7 @@ pub fn answer(stream: &Path) -> String {
         .join("\n\n")
 }
 pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
-    let text = fs::read(stream).ok()?;
+    let text = crate::state_reads::bytes(stream).ok()?;
     results(&String::from_utf8_lossy(
         text.get(from as usize..).unwrap_or_default(),
     ))
