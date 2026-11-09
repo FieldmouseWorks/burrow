@@ -102,13 +102,10 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
                 kind += &inbox;
             } else if role.is_empty() {
                 let starter = read(&dir, "starter");
-                let kick = read(&dir, "kick");
                 kind += &format!(
                     "no role; starter={}",
                     if !starter.is_empty() {
                         starter
-                    } else if !kick.is_empty() {
-                        kick.replace('\n', ",")
                     } else {
                         "unknown (not recorded)".into()
                     }
