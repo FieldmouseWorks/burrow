@@ -130,8 +130,8 @@ impl Access {
 }
 
 /// What the job's commands may read, besides their grants: the machine's
-/// own paths that are there, the resolver's file, the dir of the App's
-/// token socket, rustup's toolchains (RUSTUP_HOME, else HOME's `.rustup`)
+/// own paths that are there, the resolver's file,
+/// rustup's toolchains (RUSTUP_HOME, else HOME's `.rustup`)
 /// and git's global config file (GIT_CONFIG_GLOBAL, else HOME's and XDG's),
 /// as a regular file, which no socket can be. Nothing else of the machine
 /// is mounted in the sandbox, so a server of the user's, wherever it binds
@@ -147,9 +147,6 @@ pub(super) fn readable(env: Env, machine: &Machine) -> io::Result<Vec<PathBuf>> 
         .cloned()
         .collect();
     paths.extend(machine.resolver.canonicalize().ok().filter(|p| p.is_file()));
-    if let Some(socket) = var(env, "GH_TOKEN_SOCKET") {
-        paths.extend(std::path::absolute(socket)?.parent().map(Path::to_owned));
-    }
     let home = home(env)?;
     let rustup = match var(env, "RUSTUP_HOME") {
         Some(dir) => std::path::absolute(dir)?,

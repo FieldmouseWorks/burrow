@@ -227,7 +227,7 @@ fn the_login_is_denied_where_codex_keeps_it_and_where_it_leads() {
 }
 
 #[test]
-fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing_else() {
+fn the_job_reads_the_system_its_toolchains_and_gits_config_and_nothing_else() {
     use std::os::unix::net::UnixListener;
     let dir = tempfile::tempdir().unwrap();
     let machine = machine_in(dir.path());
@@ -237,15 +237,13 @@ fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing
     std::fs::write(home.join(".gitconfig"), "[user]\n").unwrap();
     // A socket where git's XDG config would be: not a file, not read.
     let _server = UnixListener::bind(home.join(".config/git/config")).unwrap();
-    let token = dir.path().join("gh-token/workers.sock");
-    let env = env_of(&[("HOME", &home), ("GH_TOKEN_SOCKET", &token)]);
+    let env = env_of(&[("HOME", &home)]);
     let paths = readable(&env, &machine).unwrap();
     assert_eq!(
         paths,
         [
             dir.path().join("system"),
             dir.path().join("resolved/stub").canonicalize().unwrap(),
-            dir.path().join("gh-token"),
             home.join(".rustup"),
             home.join(".gitconfig"),
         ]

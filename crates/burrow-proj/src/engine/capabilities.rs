@@ -177,7 +177,6 @@ pub fn resolve(
         .map(std::path::absolute)
         .transpose()?
         .and_then(|p| p.parent().map(Path::to_owned));
-    system.retain(|p| Some(p) != github.as_ref() && p != Path::new("/nix/var/nix/daemon-socket"));
     let mut items = vec![
         Grant::new(
             Capability::Workspace,
