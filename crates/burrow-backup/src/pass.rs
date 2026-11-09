@@ -331,7 +331,7 @@ fn hand_over(run: &Run, proj: &Path, task: &str, job: &Path) {
         .command("runuser")
         .args(["-u", &cfg.user, "--"])
         .arg(proj)
-        .args(["run", &cfg.project, task])
+        .args(["run", "--role", "backup", &cfg.project, task])
         .env_remove("XDG_RUNTIME_DIR")
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())

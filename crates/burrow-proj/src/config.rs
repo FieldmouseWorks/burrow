@@ -107,6 +107,9 @@ pub struct Inbox {
     pub state: PathBuf,
     /// Each label selects its engine; Codex wins when both are present.
     pub labels: BTreeMap<String, Engine>,
+    /// Machine issue labels mapped to routing roles.
+    #[serde(default)]
+    pub roles: BTreeMap<String, String>,
     /// The label that, with an engine label, makes an issue's job one that waits in no
     /// line (proj run --unstick): the steward's stuck issue's.
     pub unstick_label: String,

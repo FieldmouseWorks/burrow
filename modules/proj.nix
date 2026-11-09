@@ -92,7 +92,7 @@ let
     inherit roles;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
       host = config.networking.hostName;
       wake = inboxWake;
       triage = if cfg.inbox.triage.enable then {
@@ -313,6 +313,11 @@ in
         type = lib.types.attrsOf (lib.types.enum [ "claude" "codex" ]);
         default = { claude = "claude"; codex = "codex"; };
         description = "Issue labels and the engine each starts. Codex takes code with a checkable bar; Claude takes judgment and what the owner reads. Each label is created in each repo; Codex wins if an issue has both.";
+      };
+      roles = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
+        default = {};
+        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;

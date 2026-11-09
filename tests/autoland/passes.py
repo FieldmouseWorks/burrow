@@ -84,7 +84,7 @@ run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 H.land = land
 fresh_pr_state()
-C.job, job = (lambda repo, task, clone=False, since=None, role=None: None), C.job
+C.job, job = (lambda repo, task, clone=False, since=None, *, role: None), C.job
 run(clean(files=["secrets/1.yaml"]), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 C.job = job
@@ -136,21 +136,21 @@ os.makedirs(f"{tmp}/src/r", exist_ok=True)
 kept = dict(S.CFG)
 S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
-assert REAL["job"]("sam/r", "the task") == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+assert REAL["job"]("sam/r", "the task", role="steward-handed") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--role", "steward-handed", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # One that's project work, with a timeout of its own (a flaky test's).
-assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240) == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240, role="flaky") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--role", "flaky", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # With a machinery App, the job is the machine's own work, and acts as it.
 S.CFG["machinery"] = "workers"
-assert REAL["job"]("sam/r", "the task") == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--app", "workers", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+assert REAL["job"]("sam/r", "the task", role="steward-handed") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--app", "workers", "--role", "steward-handed", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # A PR's job stands in line from when the PR was opened (--since, whole
 # seconds), and never from after now, which proj refuses.
-assert REAL["job"]("sam/r", "the task", since=1792800000.7) == "job-9"
+assert REAL["job"]("sam/r", "the task", since=1792800000.7, role="steward-handed") == "job-9"
 assert open(f"{tmp}/proj-args").read().split()[:5] == ["run", "--pipeline", "--app", "workers", "--since"], open(f"{tmp}/proj-args").read()
 assert open(f"{tmp}/proj-args").read().split()[5] == "1792800000"
-REAL["job"]("sam/r", "the task", since=time.time() + 3600)
+REAL["job"]("sam/r", "the task", since=time.time() + 3600, role="steward-handed")
 assert int(open(f"{tmp}/proj-args").read().split()[5]) <= time.time()
 C.project_dir = project_dir
 S.CFG.clear()
@@ -189,7 +189,7 @@ sys.argv = ["steward", "kick", "Sam/R"]  # as burrow-events spells it, or not
 C.WAKE.clear()
 C.save("known.json", [])
 NEW_JOBS = []
-C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append((repo, task, clone)) or "job-new"), C.job
+C.job, job = (lambda repo, task, clone=False, *, role: NEW_JOBS.append((repo, task, clone, role)) or "job-new"), C.job
 S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
 S.main()
 S.CFG["baselineJobs"] = False
@@ -198,7 +198,7 @@ C.job = job
 sys.argv = argv
 S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 assert seen_repos == ["sam/r"], seen_repos
-assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
+assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True, "baseline")], \
     (order, NEW_JOBS)
 assert C.load("known.json", None) == ["sam/r"]
 # The branch watch leaves every open PR's branches, its base as well as its head
@@ -291,7 +291,7 @@ S.R.discover = lambda: [{"repo": "sam/new", "default": None}]
 S.R.settle_repo = lambda r, known: settled.append(r["repo"]) or r["repo"] not in known
 S.R.publish = lambda *a: None
 S.open_prs = kicked_prs
-C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append(repo) or "job-new"), C.job
+C.job, job = (lambda repo, task, clone=False, *, role: NEW_JOBS.append((repo, role)) or "job-new"), C.job
 S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
 C.save("known.json", [])
 for args in (["steward", "kick", "sam/new"], ["steward"]):

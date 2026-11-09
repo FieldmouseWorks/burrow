@@ -49,9 +49,25 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     } else {
         crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
     };
-    let mut c = cfg.engine(&role, (!repo.is_empty()).then_some(repo.as_str()))?;
-    if let Some(engine) = read(&job.path("engine")) {
-        c = Choice::parse(&engine)?;
+    resolve(
+        cfg,
+        &role,
+        (!repo.is_empty()).then_some(repo.as_str()),
+        read(&job.path("engine")).as_deref(),
+    )
+}
+
+/// Turn startup and drain admission share role scopes, overflow, pins and
+/// the judge restriction.
+pub(crate) fn resolve(
+    cfg: &Config,
+    role: &str,
+    repo: Option<&str>,
+    pinned: Option<&str>,
+) -> Result<Choice, String> {
+    let mut c = cfg.engine(role, repo)?;
+    if let Some(engine) = pinned {
+        c = Choice::parse(engine)?;
     }
     if role == "steward-judged" && c.engine == Engine::Codex {
         c = Choice::default();

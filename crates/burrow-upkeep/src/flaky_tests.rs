@@ -101,6 +101,7 @@ fn each_issue_goes_to_one_job_at_a_time_then_the_stuck_issue() {
     let out = run(&cfg, &mut hub, &mut jobs, 0.0, listed);
     assert!(out.stuck.is_empty() && out.jobs.len() == 1, "{out:?}");
     let job = &out.jobs[0];
+    assert_eq!(job.role, "flaky");
     assert_eq!(
         (job.part, job.pipeline, job.timeout, job.wake),
         ("flaky", false, 240, T + 245.0 * MIN)

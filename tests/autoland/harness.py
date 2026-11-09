@@ -462,7 +462,7 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, role=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, *, role):
     JOBS.append(task)
     SINCE.append(since)
     ROLES.append(role)

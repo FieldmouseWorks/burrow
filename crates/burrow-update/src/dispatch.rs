@@ -37,7 +37,7 @@ pub fn dispatch(cfg: &Config, key: &str, prompt: &str) -> Option<String> {
         }
     }
     let mut c = cfg.run_as_user("proj");
-    c.args(["run", "--pipeline"]);
+    c.args(["run", "--pipeline", "--role", "update"]);
     if let Some(app) = &cfg.app {
         c.args(["--app", app]);
     }

@@ -15,6 +15,7 @@ use crate::waits::rewatch;
 use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
 mod run;
+mod starter;
 
 pub(crate) use run::reply_answer;
 pub use run::{New, reply, start_job};

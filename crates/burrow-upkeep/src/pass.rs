@@ -50,6 +50,8 @@ pub struct Out {
 pub struct Job {
     /// Whose it is: `dashboard` or `flaky`.
     pub part: &'static str,
+    /// Routing role, required for every upkeep starter.
+    pub role: &'static str,
     /// What proj keeps it under (`proj run --key`, one job a key): the
     /// part asks under the same key until a look finds a job under it, so
     /// a starter that outlived its pass can't start a second beside it.

@@ -25,6 +25,31 @@
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
 import ./proj/test.nix { inherit self pkgs; } "proj" ''
+
+  with subtest("real machine units require roles while session and job units may omit them"):
+      import shlex
+      for starter_unit, role, job, expected in [
+          ("claude-rc@role-admission.service", False, False, 1),
+          ("proj-role-admission-agent.service", False, True, 1),
+          ("proj-role-admission-missing.service", False, False, 2),
+          ("proj-role-admission-named.service", True, False, 1),
+      ]:
+          flags = "--role flaky " if role else ""
+          script = (
+              'test -n "$INVOCATION_ID" || exit 99; '
+              f'/run/current-system/sw/bin/proj run {flags}missing-role-project task '
+              '> /tmp/proj-role-admission.log 2>&1; status=$?; '
+              '/run/current-system/sw/bin/cat /tmp/proj-role-admission.log; '
+              f'test "$status" -eq {expected}'
+          )
+          env = "--setenv=PROJ_JOB=role-admission" if job else ""
+          out = machine.succeed(
+              f"systemd-run --quiet --wait --pipe --collect --unit={starter_unit} "
+              f"--property=User=dev {env} /bin/sh -c {shlex.quote(script)}"
+          )
+          message = "needs --role NAME" if expected == 2 else "no such project:"
+          assert message in out, (starter_unit, out)
+
   with subtest("Claude has no ceiling and no throttle of its own, and may swap"):
       # The kernel shares the machine's memory out: a cap here only killed
       # or stalled Claudes while memory sat free.

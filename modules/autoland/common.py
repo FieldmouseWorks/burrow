@@ -670,7 +670,7 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, role=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
@@ -702,7 +702,7 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=No
     # Never after now, which proj refuses: a clock that's behind GitHub's.
     when = ["--since", str(int(min(since, time.time())))] if since else []
     keyed = ["--key", key] if key else []
-    keyed += ["--role", role] if role else []
+    keyed += ["--role", role]
     p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when, *keyed,
                         "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],

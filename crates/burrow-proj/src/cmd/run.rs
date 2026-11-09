@@ -191,6 +191,15 @@ const KEY: &str = "proj run --key KEY (letters, digits and ._/:-, at most 200)";
 
 /// `proj run` and `proj reply`.
 pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
+    run_with_cgroup(cfg, reply, args, || fs::read_to_string("/proc/self/cgroup"))
+}
+
+fn run_with_cgroup(
+    cfg: &Config,
+    reply: bool,
+    args: &[String],
+    cgroup: impl FnOnce() -> io::Result<String>,
+) -> Result<(), Fail> {
     let mut new = New::default();
     let mut cutoff = None;
     let mut i = 0;
@@ -318,6 +327,7 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
         let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
+        super::starter::check(new.role.as_deref(), cgroup)?;
         start_job(cfg, &new, p, &args[i + 1])?
     };
     put(&format!("{id}\n"));
@@ -540,8 +550,8 @@ fn id_name(project: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer,
-        since_time, start, start_job,
+        Command, Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply,
+        reply_answer, run, run_with_cgroup, since_time, start, start_job,
     };
 
     #[test]
@@ -555,6 +565,89 @@ mod tests {
             ("-x", "dot-x"),
         ] {
             assert_eq!(id_name(project), name, "{project}");
+        }
+    }
+
+    // Use child processes so inherited systemd environments cannot race with
+    // other tests. Reaching project validation proves CLI admission succeeded,
+    // without launching a real job or contacting systemd.
+    #[test]
+    fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
+        const CHILD: &str = "PROJ_ROLELESS_START_TEST";
+        if let Ok(context) = std::env::var(CHILD) {
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg = keyed(tmp.path(), "not-found");
+            for flags in [vec![], vec!["--role", "flaky"]] {
+                let job = context == "proj-project-123.service";
+                let machine = context != "shell" && !context.starts_with("claude-rc@") && !job;
+                let needs_role = machine && flags.is_empty();
+                let args: Vec<String> = flags
+                    .into_iter()
+                    .chain(["missing-project", "task"])
+                    .map(str::to_owned)
+                    .collect();
+                let fail = if context == "shell" || job {
+                    run(&cfg, false, &args)
+                } else {
+                    // Kernel cgroup fixture: test the CLI parser and inherited
+                    // environment without creating a real service.
+                    let cgroup =
+                        format!("0::/user.slice/user@1001.service/claude-rc.slice/{context}\n");
+                    run_with_cgroup(&cfg, false, &args, || Ok(cgroup))
+                }
+                .unwrap_err();
+                if needs_role {
+                    assert_eq!(fail.code, 2, "{context}: {:?}", fail.say);
+                    assert_eq!(
+                        fail.say.as_deref(),
+                        Some("proj run from a machine unit needs --role NAME")
+                    );
+                    assert!(!cfg.jobs.exists());
+                    continue;
+                }
+                assert_eq!(fail.code, 1);
+                assert_eq!(
+                    fail.say,
+                    Some(format!(
+                        "no such project: {}/missing-project",
+                        cfg.projects.display()
+                    ))
+                );
+                assert!(!cfg.jobs.exists(), "no job created by validation");
+            }
+            return;
+        }
+        for unit in [
+            None,
+            Some("claude-rc@project.service"),
+            Some("proj-project-123.service"),
+            Some("advisory-watch.service"),
+            Some("claude-rc-scan.service"),
+            Some("proj-inbox.service"),
+        ] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "cmd::run::tests::roleless_starts_from_sessions_and_jobs_reach_project_validation", "--nocapture"])
+                .env(CHILD, unit.unwrap_or("shell"))
+                .env_remove("INVOCATION_ID")
+                .env_remove("SYSTEMD_EXEC_PID")
+                .env_remove("PROJ_JOB");
+            if let Some(unit) = unit {
+                child
+                    .env("INVOCATION_ID", "0123456789abcdef0123456789abcdef")
+                    .env("SYSTEMD_EXEC_PID", "123");
+                if unit == "proj-project-123.service" {
+                    child.env("PROJ_JOB", "project-123");
+                } else if unit == "proj-inbox.service" {
+                    child.env("PROJ_JOB", "");
+                }
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{unit:?}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
