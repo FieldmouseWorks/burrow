@@ -239,7 +239,7 @@ fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing
     let _server = UnixListener::bind(home.join(".config/git/config")).unwrap();
     let token = dir.path().join("gh-token/workers.sock");
     let env = env_of(&[("HOME", &home), ("GH_TOKEN_SOCKET", &token)]);
-    let paths = readable(&env, &machine, None).unwrap();
+    let paths = readable(&env, &machine).unwrap();
     assert_eq!(
         paths,
         [
@@ -267,7 +267,7 @@ fn the_job_reads_the_system_its_token_its_toolchains_and_gits_config_and_nothing
         ..machine
     };
     assert_eq!(
-        readable(&env, &machine, None).unwrap(),
+        readable(&env, &machine).unwrap(),
         [dir.path().join("system"), toolchains, global]
     );
     // Nor one of the CLI's platform defaults below it, where the CLI's

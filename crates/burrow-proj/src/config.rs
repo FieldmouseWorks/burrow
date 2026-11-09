@@ -72,6 +72,9 @@ pub struct Config {
     pub codex_hooks: PathBuf,
     /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
+    /// Machine MCP servers, shared by every job engine.
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServer>,
     pub tools: Tools,
     /// proj-inbox's settings; None when it's off.
     pub inbox: Option<Inbox>,
@@ -81,6 +84,21 @@ pub struct Config {
     /// The proj this is, whole: PROJ_SELF, its wrapper, as a store path.
     #[serde(skip)]
     pub me: PathBuf,
+}
+
+/// A stdio MCP server and the host paths its tools need.
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpServer {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub read_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub write_paths: Vec<PathBuf>,
 }
 
 /// The programs it runs.

@@ -152,7 +152,7 @@ pub fn spawn(
         // After the login and App env: the App sets its own git config count.
         c.arg(&cfg.me).arg("_codex");
     } else {
-        c.arg("claude");
+        c.arg(&cfg.me).arg("_claude");
     }
     c.args(&args)
         .env("PROJ_JOB", id)
@@ -223,6 +223,33 @@ pub fn codex_command(cfg: &Config, start: &Start, count: Option<&str>) -> Result
     .env(format!("GIT_CONFIG_VALUE_{count}"), &cfg.codex_hooks);
     Ok(c)
 }
+/// Resolve the same job contract in Claude's final login/App environment.
+pub fn exec_claude(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
+    use std::os::unix::process::CommandExt;
+    let id = std::env::var("PROJ_JOB").map_err(|e| crate::Fail::new(1, e.to_string()))?;
+    let capabilities = super::capabilities::resolve(
+        cfg,
+        &Job::new(cfg, &id),
+        &scratch::dir(cfg, &id),
+        &|name| std::env::var_os(name),
+        &sandbox::Machine::real(),
+    )
+    .map_err(|e| crate::Fail::new(1, e.to_string()))?;
+    let mut command = Command::new("claude");
+    if !capabilities.inherits_environment() {
+        command.env_clear();
+    }
+    let error = command
+        .args(capabilities.claude_flags())
+        .args(args)
+        .envs(capabilities.environment())
+        .exec();
+    Err(crate::Fail::new(
+        1,
+        format!("couldn't start claude: {error}"),
+    ))
+}
+
 pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
     use std::os::unix::process::CommandExt;
     let count = std::env::var("GIT_CONFIG_COUNT").ok();

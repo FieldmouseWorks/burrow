@@ -171,20 +171,20 @@ Each has an entry below, and each can be imported on its own.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
-  key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
-  small slot pool (`codex.slots`, two), a sandbox that writes only the
-  project, its scratch, its job's dir, git's metadata and a /tmp of its own,
-  and reads only those and the machine's system paths (no home, no /run/user,
-  no other projects: so no server of the user's own, wherever it listens,
-  and not Codex's login), with network, the
-  shared one-way command list, the guard as its managed hook, and git hooks
-  that mark its commits and refuse rewrites or deletes of the remote default
-  branch, which the guard keeps on. A turn on the engine that didn't run the
-  turns before it is handed what they were asked and answered. Log it in with
-  `autoland-codex-login job`, separately from `autoland-codex-login review`.
-  With `burrow.cpu.enable`, Codex sandboxes also read the configured heavy
-  slot directory so jobs can run checks through `heavy`.
-  Codex-written heads still get a Codex review and need a Claude judge.
+  key overrides the bare role for that repo, matched case-insensitively. Both engines consume the
+  [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
+  project and scratch, job state (`proj await`, `ask`, `done`), git metadata,
+  toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
+  Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
+  (`burrow.mcpServers`, including each server's socket and output paths), and
+  the network and login/App environment. The [parity check](tests/proj-capabilities.nix) runs the same
+  capability probes inside a job on each engine and removes a Codex grant to
+  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`, two)
+  and command sandbox; log it in with `autoland-codex-login job`, separately
+  from `autoland-codex-login review`. A turn on a different engine receives
+  the preceding turns' questions and answers.
+  The deliberate authorship exception: a Codex-written head is judged by
+  Claude, so its author never grades its own head.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
 
@@ -502,7 +502,7 @@ Things you'll want to set yourself: a Claude login for the sandboxes
 from sops-nix), extra allowed hosts (`burrow.agents.extraAllow`), a git
 identity for the sandboxes (`burrow.agents.guestModules`), an intro for the
 machine's CLAUDE.md (`burrow.claude.machineMd` with `lib.mkBefore`), MCP
-servers of your own for every Claude session (`burrow.claude.mcpServers`), and, to
+servers of your own for every job engine and Claude session (`burrow.mcpServers`), and, to
 run Claude Code's newest release instead of nixpkgs', a release manifest in
 your flake (`burrow.claude.manifest`, and its path for `HOST-update` to bump
 in `burrow.updates.claudeManifest`). Persist `burrow.stateDir` if `/` is

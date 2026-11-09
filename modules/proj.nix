@@ -84,6 +84,7 @@ let
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     machinery = if machineApp == null then null else machineApp.name;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
+    inherit (config.burrow) mcpServers;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;

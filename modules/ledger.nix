@@ -459,9 +459,10 @@ in
     '');
     # conary-mcp answers `why` in the session's own checkout, and asks
     # conaryd for the rest. Its own default socket is the user's runtime dir.
-    burrow.claude.mcpServers.conary = lib.mkIf cfg.daemon {
+    burrow.mcpServers.conary = lib.mkIf cfg.daemon {
       command = "/run/current-system/sw/bin/conary-mcp";
       args = [ "--socket" socket ];
+      readPaths = [ (builtins.dirOf socket) ];
     };
     # Started once the first sync has set the ledger up, and kept running.
     systemd.paths.conaryd = lib.mkIf cfg.daemon {

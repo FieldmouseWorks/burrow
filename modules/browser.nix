@@ -195,7 +195,10 @@ in
 
     environment.systemPackages = [ mcp ];
     # Claude's tools for it, in every session of burrow.user's.
-    burrow.claude.mcpServers.browser.command = "/run/current-system/sw/bin/burrow-browser-mcp";
+    burrow.mcpServers.browser = {
+      command = "/run/current-system/sw/bin/burrow-browser-mcp";
+      writePaths = [ "/run/user/${uid}/burrow-browser" ];
+    };
 
     systemd.slices.${account}.description = "The signed-in browser";
 

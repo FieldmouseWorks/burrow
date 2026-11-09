@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+mod capabilities;
 pub(crate) mod claude;
 mod claude_limit;
 mod command;
@@ -14,7 +15,7 @@ mod handoff;
 mod role;
 mod sandbox;
 mod stream;
-pub use command::{LONG, NEXT, exec_codex, spawn};
+pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
 pub use handoff::first_prompt;
 pub(crate) use role::{RoleKey, role};
 pub use stream::{Said, answer, last_result, names_session, stream_names_session};
