@@ -81,8 +81,8 @@ in pkgs.testers.runNixOSTest {
     ];
     environment.systemPackages = [ pkgs.git pkgs.jq fixture ];
     environment.etc."capability-build.nix".text = ''
-      derivation {
-        name = "job-build";
+      { job }: derivation {
+        name = "job-build-" + job;
         system = builtins.currentSystem;
         builder = (builtins.storePath "${pkgs.busybox}") + "/bin/sh";
         args = [ "-c" "echo built > $out" ];

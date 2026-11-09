@@ -182,6 +182,7 @@ fn main() {
             "heavy" => run("heavy", &["--", "true"]),
             "nix" => {
                 assert_eq!(env::var("NIX_REMOTE").unwrap(), "daemon");
+                let id = env::var("PROJ_JOB").unwrap();
                 run(
                     "heavy",
                     &[
@@ -189,6 +190,9 @@ fn main() {
                         "nix-build",
                         "--no-out-link",
                         "/etc/capability-build.nix",
+                        "--argstr",
+                        "job",
+                        &id,
                     ],
                 );
             }
