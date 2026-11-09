@@ -133,6 +133,7 @@ in pkgs.testers.runNixOSTest {
     assert expected and results(b) == expected, (a, b, expected, results(b), machine.execute(f"cat /data/dev/jobs/{b}/1.jsonl /data/dev/jobs/{b}/1.stderr"))
     assert dev(f"proj state {b}") == "done"
     for j in [a, b]:
+        assert machine.succeed("readlink /run/current-system").strip() in machine.succeed(f"cat /data/dev/jobs/{j}/host-probe")
         assert machine.execute(f"test -f /data/dev/jobs/{j}/mcp-called")[0] == 0, machine.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr /tmp/model.log")
     machine.fail("test -e /data/dev/src/web/unexpected-server")
     # Drop the heavy grant from Codex's generated profile, leaving the

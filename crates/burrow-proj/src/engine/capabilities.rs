@@ -22,6 +22,7 @@ pub enum Capability {
     GitMetadata,
     Toolchains,
     System,
+    Probe,
     Github,
     Heavy,
     Nix,
@@ -195,6 +196,7 @@ pub fn resolve(
             Capability::System,
             system.into_iter().map(|p| (p, false)).collect(),
         ),
+        Grant::new(Capability::Probe, vec![]),
         Grant::new(
             Capability::Github,
             github.into_iter().map(|p| (p, false)).collect(),
@@ -216,6 +218,19 @@ pub fn resolve(
         Grant::new(Capability::Network, vec![]),
         Grant::new(Capability::Environment, vec![]),
     ];
+    // The host transport lives in Workspace's scratch. Its address belongs
+    // to the contract even though it needs no additional filesystem grant.
+    if let Some(socket) = var(env, "PROJ_PROBE_SOCKET") {
+        items
+            .iter_mut()
+            .find(|g| g.capability == Capability::Probe)
+            .unwrap()
+            .env
+            .insert(
+                "PROJ_PROBE_SOCKET".into(),
+                socket.to_string_lossy().into_owned(),
+            );
+    }
     items
         .iter_mut()
         .find(|g| g.capability == Capability::Nix)
@@ -286,6 +301,7 @@ mod tests {
         let env = |name: &str| match name {
             "HOME" => Some(home.clone().into_os_string()),
             "SETTING" | "EXTRA" => Some("inherited".into()),
+            "PROJ_PROBE_SOCKET" => Some(dir.path().join("scratch/probe.sock").into_os_string()),
             _ => None,
         };
         let machine = sandbox::tests::machine_in(dir.path());
@@ -328,6 +344,14 @@ mod tests {
         // Both adapters take their environment from the same resolved contract.
         let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
         assert_eq!(settings["env"]["NIX_REMOTE"], "daemon");
+        assert_eq!(
+            settings["env"]["PROJ_PROBE_SOCKET"],
+            dir.path()
+                .join("scratch/probe.sock")
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(profile.contains("shell_environment_policy.set.PROJ_PROBE_SOCKET="));
         assert!(profile.contains("shell_environment_policy.set.PROJ_CAPABILITIES="));
     }
 }

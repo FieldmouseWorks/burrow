@@ -105,7 +105,7 @@ fn main() {
                     "proj",
                     &["await", "https://github.com/test/project/issues/1"],
                 );
-                run("proj", &["ask"]);
+                run("proj", &["ask", "--default", "continue the test"]);
             }
             "git-metadata" => {
                 let tree = scratch.join("tree");
@@ -157,6 +157,19 @@ fn main() {
                     "facts"
                 );
                 run("git", &["--version"]);
+            }
+            "probe" => {
+                let answer = Command::new("proj")
+                    .args(["probe", "deployed"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    answer.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&answer.stderr)
+                );
+                assert!(!answer.stdout.is_empty());
+                fs::write(job.join("host-probe"), answer.stdout).unwrap();
             }
             "github" => {
                 UnixStream::connect(env::var("GH_TOKEN_SOCKET").unwrap()).unwrap();
