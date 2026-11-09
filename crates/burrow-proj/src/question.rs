@@ -98,6 +98,29 @@ impl Drop for Resume {
     }
 }
 
+fn committed_entries(job: &Job, latest: u64) -> Result<Vec<fs::DirEntry>, String> {
+    let entries: Vec<_> = fs::read_dir(&job.dir)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        // A failed start can leave future prompts or turn artifacts behind.
+        // Only the published turn count commits history, for every recovery
+        // boundary, source and outbox operation below.
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let turn = name
+                .strip_prefix("prompt.")
+                .unwrap_or(&name)
+                .split('.')
+                .next()
+                .unwrap_or_default();
+            turn.parse::<u64>().is_ok_and(|t| t > 0 && t <= latest)
+        })
+        .collect();
+    Ok(entries)
+}
+
 /// Durable per-question outbox. An open is replayed idempotently because the
 /// notifier's zero exit is not delivery acknowledgement. A close is forgotten
 /// only when `pending` explicitly returns 1. Keys belong to turns, never reused
@@ -111,6 +134,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let Some(n) = job.turns() else {
         return Ok(false);
     };
+    let latest = n
+        .parse::<u64>()
+        .map_err(|e| format!("invalid committed turn {n}: {e}"))?;
     let stopped = job.turn(&n, "stopped").exists();
     let end = read(&job.turn(&n, "end"));
     let finished = stopped || end.as_deref() == Some("done");
@@ -118,10 +144,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
         .unwrap_or(0);
-    let entries: Vec<_> = fs::read_dir(&job.dir)
-        .map_err(|e| e.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+    let entries = committed_entries(job, latest)?;
     let last_done = entries
         .iter()
         .filter_map(|e| {
@@ -165,7 +188,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     } else {
         marker
             .as_ref()
-            .filter(|t| t.parse::<u64>().is_ok_and(|t| t > boundary))
+            .filter(|t| t.parse::<u64>().is_ok_and(|t| t > boundary && t <= latest))
             .cloned()
             .or_else(|| {
                 entries
@@ -210,8 +233,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     }
     let mut retry = false;
     let mut errors = Vec::new();
-    for entry in fs::read_dir(&job.dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
+    for entry in committed_entries(job, latest)? {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(turn) = name.strip_suffix(".question") else {
             continue;
@@ -475,6 +497,88 @@ esac
         assert!(f.deliveries().contains("Question 2?"));
         assert!(!f.deliveries().contains("Question 1?"));
         assert!(!f.deliveries().contains("Question 3?"));
+    }
+
+    #[test]
+    fn orphaned_future_turns_cannot_answer_complete_or_replace_a_question() {
+        for artifact in ["prompt", "done", "close", "closed", "replacement"] {
+            for recorded in [false, true] {
+                let f = Fixture::new();
+                f.ending(1, "ask");
+                if recorded {
+                    notify(&f.cfg, &f.job()).unwrap();
+                }
+                fs::write(f.job().path("open-question"), "ask").unwrap();
+                match artifact {
+                    "prompt" => {
+                        fs::write(f.job().path("prompt.2"), "partial human answer").unwrap()
+                    }
+                    "done" => fs::write(f.job().turn("2", "end"), "done").unwrap(),
+                    "close" => fs::write(f.job().turn("2", "question-close"), "close").unwrap(),
+                    "closed" => fs::write(f.job().turn("2", "question-closed"), "closed").unwrap(),
+                    _ => {
+                        fs::write(f.job().turn("2", "end"), "ask").unwrap();
+                        fs::write(f.job().turn("2", "ended"), "").unwrap();
+                        fs::write(f.job().turn("2", "question"), "uncommitted question").unwrap();
+                        fs::write(f.job().path("open-question"), "2").unwrap();
+                    }
+                }
+                notify(&f.cfg, &f.job()).unwrap();
+                assert!(
+                    f.deliveries().contains("Question 1?"),
+                    "{artifact}, recorded={recorded}"
+                );
+                assert!(!f.deliveries().contains("uncommitted"));
+                assert!(!f.job().turn("1", "question-close").exists());
+                assert_eq!(
+                    f.job().turn("2", "question-close").exists(),
+                    artifact == "close"
+                );
+                assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("1"));
+            }
+        }
+    }
+
+    #[test]
+    fn uncommitted_ask_cannot_create_a_question() {
+        let f = Fixture::new();
+        f.ending(1, "await");
+        fs::write(f.job().turn("2", "end"), "ask").unwrap();
+        fs::write(f.job().turn("2", "ended"), "").unwrap();
+        fs::write(f.job().turn("2", "question"), "uncommitted question").unwrap();
+        fs::write(f.job().path("open-question"), "2").unwrap();
+        assert!(!notify(&f.cfg, &f.job()).unwrap());
+        assert!(f.deliveries().is_empty());
+    }
+
+    #[test]
+    fn failed_prompt_writes_preserve_questions_for_human_and_automated_starts() {
+        for human in [false, true] {
+            let mut f = Fixture::new();
+            f.cfg.tools.systemctl = "false".into();
+            f.cfg.tools.systemd_run = "false".into();
+            f.cfg.kick.clear();
+            f.cfg.waits = None;
+            f.ending(1, "ask");
+            notify(&f.cfg, &f.job()).unwrap();
+            let prompt = f.job().path("prompt.2");
+            // A pre-existing orphan whose write fails before the new start.
+            // The cleanup also covers partial/truncated regular-file writes.
+            std::os::unix::fs::symlink(f.dir.path().join("missing/prompt"), &prompt).unwrap();
+            let result = if human {
+                crate::turn::start_answer(&f.cfg, "j1", "answer", false)
+            } else {
+                crate::turn::start(&f.cfg, "j1", "event", false)
+            };
+            assert!(result.unwrap_err().contains("prompt.2"));
+            assert!(fs::symlink_metadata(&prompt).is_err());
+            assert_eq!(f.job().turns().as_deref(), Some("1"));
+            assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("1"));
+            assert!(!f.job().path("question-answered-through").exists());
+            notify(&f.cfg, &f.job()).unwrap();
+            assert!(!f.job().turn("1", "question-close").exists());
+            assert_eq!(f.deliveries().matches("Question 1?").count(), 1);
+        }
     }
 
     #[test]

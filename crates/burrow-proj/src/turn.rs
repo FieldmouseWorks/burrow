@@ -78,8 +78,6 @@ fn start_with(
     // that can't start, or a start killed partway, leaves the job as it was.
     let prompt = job.path(&format!("prompt.{n}"));
     let couldnt = || format!("proj: turn {n} of {id} couldn't start");
-    fs::write(&prompt, format!("{msg}\n"))
-        .map_err(|e| format!("proj: {}: {e}", prompt.display()))?;
     let undo = || {
         if n == 1 {
             let _ = fs::remove_file(job.path("turns"));
@@ -88,6 +86,11 @@ fn start_with(
         }
         let _ = fs::remove_file(&prompt);
     };
+    if let Err(e) = fs::write(&prompt, format!("{msg}\n")) {
+        // write can leave a truncated or partial prompt even on failure.
+        undo();
+        return Err(format!("proj: {}: {e}", prompt.display()));
+    }
     if job.set_turns(n).is_err() {
         undo();
         return Err(couldnt());
