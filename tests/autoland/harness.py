@@ -495,8 +495,8 @@ def post(repo, pr, r, answer, description):
     return "findings" if answer["findings"] else "clean", description == C.fingerprint(pr["body"])
 
 
-STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
-HELD = {}  # what a job holds open, by id, as `proj holds` says it: nothing unless set
+STATES = {}  # a job's state, by id, as `proj lifecycle` says it: running unless set
+HELD = {}  # what a job holds open, by id, as `proj lifecycle` says it: nothing unless set
 STOPPED = []  # the jobs `proj stop` ended, in order
 UNSTOPPABLE = set()  # the jobs `proj stop` can't stop
 
@@ -658,15 +658,6 @@ def onto(repo, pr):
     return (got, True) if got else (TIP["v"], False)
 
 
-# Fake jobs have no proj process to create their lifecycle record.
-_real_job_lifecycle = C.job_lifecycle
-
-
-def job_lifecycle(jid, key):
-    os.makedirs(os.path.join(C.CFG["jobsDir"], jid), exist_ok=True)
-    return _real_job_lifecycle(jid, key)
-
-
 def stand_in():
     """gh, Claude jobs, the queue, the posting, what a merge would change
     (every merge changes something unless ALREADY says) and which earlier
@@ -676,9 +667,7 @@ def stand_in():
     C.gh = gh_stub
     C.write = write
     C.job = job
-    C.job_state = lambda jid: STATES.get(jid, "running")
-    C.job_lifecycle = job_lifecycle
-    C.holds = lambda jid: HELD.get(jid, [])
+    C.lifecycle = lambda jid: (STATES.get(jid, "running"), HELD.get(jid, []))
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
     V.queue = queue

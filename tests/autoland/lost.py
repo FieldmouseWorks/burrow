@@ -132,7 +132,7 @@ STATES.clear()
 
 
 def awaits(*targets):
-    """The latest job's turn ended awaiting targets, as `proj holds` says."""
+    """The latest job's turn ended awaiting targets, as `proj lifecycle` says."""
     HELD[ISSUED[-1]] = [f"await {t}" for t in targets]
 
 
@@ -187,16 +187,19 @@ HELD.clear()
 # both pushed to one branch (remi#881, remi#892). A one-way question past
 # its deadline is left for the owner: their answer is still owed, so
 # nothing else starts on it either.
-for held, said in (("ask", "an answer to its question"), ("owner", "Sam's answer to its one-way question")):
+# So is one whose resume failed with its question still outstanding: its
+# deadline resumes it, so it isn't a broken job to start again.
+for end, held, said in (("done", "ask", "an answer to its question"), ("done", "owner", "Sam's answer to its one-way question"),
+                        ("failed", "ask", "an answer to its question")):
     fresh_pr_state()
     run(clean(**threads), 0)
     run(clean(**threads), 7200)
     assert len(JOBS) == 1, JOBS
-    ends("done")
+    ends(end)
     HELD[ISSUED[-1]] = [held]
     for t in (7300, 7400, 7400 + 10 * 3600):
         status, digest = a_pass(clean(**threads), t)
-        assert JOBS == [] and f"its Claude job awaits {said}" in status and "state=pending" in status, (held, t, status, JOBS)
+        assert JOBS == [] and f"its Claude job awaits {said}" in status and "state=pending" in status, (end, held, t, status, JOBS)
         assert digest == [] and overdue() is None and stall()["kick"] is None, (held, t, digest, waits.FAILING)
     # Answered (or, reversible, timed out): proj resumes that same job.
     STATES[ISSUED[-1]] = "running"

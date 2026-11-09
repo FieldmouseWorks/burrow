@@ -256,33 +256,64 @@ impl<'a> Job<'a> {
             .unwrap_or(0)
     }
 
-    /// What it still holds open though its latest turn is over, one line of
-    /// `proj holds` each: `ask` while its question waits for a person (their
-    /// reply resumes it, and so does a reversible one's deadline, with its
+    /// How it stands and what it holds open, read together under
+    /// [`Job::read_lock`], so no turn starts between the two (a reply, a
+    /// question's deadline, an await's change): `proj lifecycle`, the one
+    /// word on whether a job ended, which the steward and burrow-upkeep ask
+    /// for every kind of job. Its state is what `proj state` says; what it
+    /// holds, [`Job::holds`]. An error when either can't be read: the caller
+    /// keeps the job, as one nothing can say of.
+    pub fn lifecycle(&self) -> Result<(String, Vec<String>), String> {
+        let _held = self
+            .read_lock()
+            .map_err(|e| format!("{}: {e}", self.path("lock").display()))?;
+        let state = self.state();
+        Ok((state, self.holds()?))
+    }
+
+    /// What it holds open, whatever its latest turn's outcome (a failed
+    /// resume leaves its question, and its deadline resumes it), a line
+    /// each: `ask` while its question waits for a person (their reply
+    /// resumes it, and so does a reversible one's deadline, with its
     /// default: ask::expire), `owner` once a one-way one's deadline has
     /// passed and it's left for the owner (only their reply resumes it), and
     /// `await TARGET` for each PR or issue it awaits (proj-watch resumes it
-    /// once one changes). A job that holds anything is still at work, so
-    /// whatever decides it ended reads this with its state, under
-    /// [`Job::read_lock`]; this takes no lock itself. proj stop clears all
-    /// of it.
-    pub fn holds(&self) -> Vec<String> {
+    /// once one changes). A job that holds anything is still at work. proj
+    /// stop clears all of it. An error when a record that would say can't be
+    /// read: only one that isn't there holds nothing.
+    pub fn holds(&self) -> Result<Vec<String>, String> {
+        let text = |path: &Path| match crate::state_reads::bytes(path) {
+            Ok(b) => Ok(Some(
+                String::from_utf8_lossy(&b)
+                    .trim_end_matches('\n')
+                    .to_owned(),
+            )),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        };
+        let there = |path: &Path| {
+            path.try_exists()
+                .map_err(|e| format!("{}: {e}", path.display()))
+        };
         let mut held = Vec::new();
-        let asked = self.turns().is_some_and(|n| {
-            !self.turn(&n, "stopped").exists()
-                && read(&self.turn(&n, "end")).as_deref() == Some("ask")
-        });
-        if crate::ask::host_path(self, "question-needs-owner").exists() {
+        let asked = match text(&self.path("turns"))?.filter(|n| valid_turn(n)) {
+            Some(n) => {
+                !there(&self.turn(&n, "stopped"))?
+                    && text(&self.turn(&n, "end"))?.as_deref() == Some("ask")
+            }
+            None => false,
+        };
+        if there(&crate::ask::host_path(self, "question-needs-owner"))? {
             held.push("owner".to_owned());
-        } else if asked || crate::ask::host_path(self, "question").exists() {
+        } else if asked || there(&crate::ask::host_path(self, "question"))? {
             held.push("ask".to_owned());
         }
-        for a in awaits(&read(&self.path("await")).unwrap_or_default()) {
+        for a in awaits(&text(&self.path("await"))?.unwrap_or_default()) {
             if !a.target.trim().is_empty() {
                 held.push(format!("await {}", a.target.trim()));
             }
         }
-        held
+        Ok(held)
     }
 
     /// What the stall watchdog's look reads of the latest turn; None before

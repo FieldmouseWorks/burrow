@@ -113,13 +113,14 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .is_some_and(|n| n > 1);
-        let state = p.jobs.state(jid);
+        let life = p.jobs.lifecycle(jid);
+        let state = life.state.clone();
         // A completed turn that holds something open (awaiting upstream, or
         // a person's answer to its question) is still an active job. Keep
         // its original claim (including ownership checks) until its final
         // turn; intermediate answers may be replaced when proj resumes it.
         let own = format!("{}#{}", p.repo, l.number);
-        if p.jobs.at_work(jid, state.as_deref(), Some(&own)) {
+        if life.at_work(Some(&own)) {
             if rec.head != l.head
                 && let Some(why) = stale(
                     p,

@@ -348,7 +348,7 @@ mod tests {
             let (_dir, cfg) = fixture();
             let job = asking(&cfg, one_way);
             fs::write(job.path("await"), "sam/up#3\t0\t{}\n").unwrap();
-            assert_eq!(job.holds(), ["ask", "await sam/up#3"]);
+            assert_eq!(job.holds().unwrap(), ["ask", "await sam/up#3"]);
             fs::remove_file(job.path("await")).unwrap();
             let held = job.lock().unwrap();
             expire(&cfg, &job).unwrap();
@@ -356,21 +356,64 @@ mod tests {
             if one_way {
                 // Its synthetic turn is done, but the owner's answer is owed.
                 assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
-                assert_eq!(job.holds(), ["owner"]);
+                assert_eq!(job.holds().unwrap(), ["owner"]);
             } else {
                 // Resumed with its default: the question's gone, and the
                 // turn it started is what says it's at work now.
                 assert_eq!(job.turns().as_deref(), Some("2"));
-                assert!(job.holds().is_empty(), "{:?}", job.holds());
+                assert!(
+                    job.holds().unwrap().is_empty(),
+                    "{:?}",
+                    job.holds().unwrap()
+                );
             }
             crate::cmd::halt(&cfg, &job, false).unwrap();
-            assert!(job.holds().is_empty(), "proj stop leaves nothing held");
+            assert!(
+                job.holds().unwrap().is_empty(),
+                "proj stop leaves nothing held"
+            );
         }
         let (_dir, cfg) = fixture();
         let job = asking(&cfg, false);
         fs::write(job.turn("1", "end"), "done\n").unwrap();
         clear(&job);
-        assert!(job.holds().is_empty(), "a done turn holds nothing");
+        assert!(job.holds().unwrap().is_empty(), "a done turn holds nothing");
+        // A resume that failed leaves its question, which its deadline
+        // resumes: held whatever the latest outcome.
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        job.set_turns(2).unwrap();
+        fs::write(job.turn("2", "outcome"), "failed\n").unwrap();
+        assert_eq!(
+            job.lifecycle().unwrap(),
+            ("failed".to_owned(), vec!["ask".to_owned()])
+        );
+        // A record it can't read is an error, never nothing held.
+        fs::create_dir(job.path("await")).unwrap();
+        assert!(job.holds().is_err() && job.lifecycle().is_err());
+    }
+
+    // State and holds are one snapshot: no turn starts between them, since
+    // lifecycle waits out a start holding the turn-start lock.
+    #[test]
+    fn lifecycle_reads_under_the_turn_start_lock() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        let start = job.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| tx.send(Job::new(&cfg, "j1").lifecycle()).unwrap());
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300))
+                    .is_err()
+            );
+            // The start publishes its turn and retires the question.
+            job.set_turns(2).unwrap();
+            fs::remove_file(host_path(&job, "question")).unwrap();
+            drop(start);
+            let (_, held) = rx.recv().unwrap().unwrap();
+            assert!(held.is_empty(), "{held:?}");
+        });
     }
     #[test]
     fn a_timed_out_one_way_question_requires_a_person_before_resuming() {

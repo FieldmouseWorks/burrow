@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::{Config, Webhook};
-use crate::pass::{self, DAY, Jobs, Out, Pass, repo_file};
+use crate::pass::{self, DAY, Jobs, Lifecycle, Out, Pass, repo_file};
 use crate::token::Owners;
 
 /// What a project's repo's state says when GitHub had no such repo at its
@@ -485,12 +485,8 @@ fn looked_up(p: &mut Pass) -> Result<Value, Unreached> {
 struct NoJobs;
 
 impl Jobs for NoJobs {
-    fn state(&mut self, _: &str) -> Option<String> {
-        None
-    }
-
-    fn holds(&mut self, _: &str) -> Option<Vec<String>> {
-        None
+    fn lifecycle(&mut self, _: &str) -> Lifecycle {
+        Lifecycle::default()
     }
 
     fn find(&mut self, _: &str) -> Result<Option<String>, String> {

@@ -314,14 +314,14 @@ fn externally_awaiting_jobs_still_stop_for_another_authors_push() {
 
 #[test]
 fn a_resume_cannot_clear_awaits_between_state_and_claim_completion() {
-    use crate::pass::Jobs;
+    use crate::pass::{Jobs, Lifecycle};
     use std::sync::mpsc;
     struct Resuming {
         dir: PathBuf,
         resume: Option<std::thread::JoinHandle<()>>,
     }
     impl Jobs for Resuming {
-        fn state(&mut self, _: &str) -> Option<String> {
+        fn lifecycle(&mut self, _: &str) -> Lifecycle {
             // State has just read done. A concurrent start tries to publish
             // turn 2 and exec clears awaits, before claims reads them.
             let dir = self.dir.clone();
@@ -341,16 +341,15 @@ fn a_resume_cannot_clear_awaits_between_state_and_claim_completion() {
                 std::fs::remove_file(dir.join("await")).unwrap();
             }));
             rx.recv().unwrap();
-            Some("done".into())
-        }
-        fn holds(&mut self, _: &str) -> Option<Vec<String>> {
             let text = std::fs::read_to_string(self.dir.join("await")).unwrap_or_default();
-            Some(
-                text.lines()
+            Lifecycle {
+                state: Some("done".into()),
+                holds: text
+                    .lines()
                     .filter_map(|l| l.split('\t').next())
                     .map(|t| format!("await {t}"))
                     .collect(),
-            )
+            }
         }
         fn find(&mut self, _: &str) -> Result<Option<String>, String> {
             unreachable!()

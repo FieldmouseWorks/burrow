@@ -328,7 +328,7 @@ assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 # merge whatever head the base's rules let through. A merge queued before,
 # by anyone, is taken off first, and a PR settled and queued by a steward
 # before this one is merged now rather than left queued.
-stood = (C.gh, C.write, C.job, C.job_state, V.queue, V.post)
+stood = (C.gh, C.write, C.job, C.lifecycle, V.queue, V.post)
 stand_in()
 fresh_pr_state()
 run(clean(), 600)
@@ -397,6 +397,6 @@ for pr in (clean(), clean(base="release"), clean(files=(".github/CODEOWNERS",), 
     status, _ = run(behind, 900)
     FAIL.remove("/update-branch")
     assert merges() == [] and "didn't take the update" in status and C.WAKE["sam/r"] == C.NOW + 60 + 1, (status, C.WAKE)
-(C.gh, C.write, C.job, C.job_state, V.queue, V.post) = stood
+(C.gh, C.write, C.job, C.lifecycle, V.queue, V.post) = stood
 fresh_pr_state()
 print("app: ok")

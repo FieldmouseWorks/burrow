@@ -291,10 +291,9 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
     let mut states: HashMap<String, bool> = HashMap::new();
     // Whether the job is still at work (Jobs::at_work).
     let mut working = |p: &mut Pass, jid: &str| {
-        *states.entry(jid.to_string()).or_insert_with(|| {
-            let state = p.jobs.state(jid);
-            p.jobs.at_work(jid, state.as_deref(), None)
-        })
+        *states
+            .entry(jid.to_string())
+            .or_insert_with(|| p.jobs.lifecycle(jid).at_work(None))
     };
     let timeout = p.cfg.job_timeout as f64;
     // While the last job works, what comes due waits for it: one job a

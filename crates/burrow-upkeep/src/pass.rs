@@ -86,43 +86,48 @@ pub struct Ask {
     pub at: f64,
 }
 
-/// How a Claude job stands.
-pub trait Jobs {
-    /// queued, running, or how it ended (done, failed, timed out ...); None
-    /// when nothing can say.
-    fn state(&mut self, jid: &str) -> Option<String>;
-    /// What a job whose turn is over still holds open, a line each (`proj
-    /// holds`, burrow-proj's Job::holds): `ask`, `owner`, `await TARGET`;
-    /// None when nothing can say.
-    fn holds(&mut self, jid: &str) -> Option<Vec<String>>;
-    /// The job run under the key, once it has started (`proj find`).
-    fn find(&mut self, key: &str) -> Result<Option<String>, String>;
-    /// Whether job jid, in `state` (what [`Jobs::state`] just said), is
-    /// still at work: queued, running, or nothing can say; or its turn is
-    /// done but it holds something open, a question for a person or a PR or
-    /// issue it awaits other than `own` (the PR it was handed: awaiting
-    /// that is ending its turn), which proj resumes it on. The one word on
-    /// whether a job ended, for every kind (the steward's Python asks proj
-    /// the same, common.job_lifecycle): one that holds a question taken for
-    /// ended gets a second job on the same work, and both carry on once the
-    /// question's answered or times out (remi#881).
-    fn at_work(&mut self, jid: &str, state: Option<&str>, own: Option<&str>) -> bool {
-        match state {
-            None | Some("queued" | "running") => true,
-            Some("done") => self.holds(jid).is_none_or(|held| {
-                held.iter().any(|h| match h.trim().split_once(' ') {
-                    Some(("await", target)) => {
-                        own.is_none_or(|o| !target.trim().eq_ignore_ascii_case(o))
-                    }
-                    _ => !h.trim().is_empty(),
-                })
-            }),
-            Some(_) => false,
-        }
+/// How a Claude job stands and what it holds open, read together (`proj
+/// lifecycle`, burrow-proj's Job::lifecycle, under the job's turn-start
+/// lock), so no turn starts between the two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lifecycle {
+    /// queued, running, or how its latest turn ended (done, failed, timed
+    /// out ...); None when nothing can say.
+    pub state: Option<String>,
+    /// What it holds open, a line each: `ask`, `owner`, `await TARGET`.
+    pub holds: Vec<String>,
+}
+
+impl Lifecycle {
+    /// Whether the job is still at work: queued, running, or nothing can
+    /// say; or, however its turn ended, it holds something open, a question
+    /// for a person or a PR or issue it awaits other than `own` (the PR it
+    /// was handed: awaiting that is ending its turn), which proj resumes it
+    /// on. The one word on whether a job ended, for every kind (the
+    /// steward's Python reads the same, common.job_lifecycle): one that
+    /// holds a question taken for ended gets a second job on the same work,
+    /// and both carry on once the question's answered or times out
+    /// (remi#881).
+    pub fn at_work(&self, own: Option<&str>) -> bool {
+        matches!(self.state.as_deref(), None | Some("queued" | "running"))
+            || self.holds.iter().any(|h| match h.trim().split_once(' ') {
+                Some(("await", target)) => {
+                    own.is_none_or(|o| !target.trim().eq_ignore_ascii_case(o))
+                }
+                _ => !h.trim().is_empty(),
+            })
     }
 }
 
-/// proj's own word on a job (`proj state ID`). A status run takes every
+/// How a Claude job stands.
+pub trait Jobs {
+    /// Its lifecycle, as proj reads it at once.
+    fn lifecycle(&mut self, jid: &str) -> Lifecycle;
+    /// The job run under the key, once it has started (`proj find`).
+    fn find(&mut self, key: &str) -> Result<Option<String>, String>;
+}
+
+/// proj's own word on a job (`proj lifecycle ID`). A status run takes every
 /// job for running, as the steward's own does.
 pub struct Proj {
     pub bin: PathBuf,
@@ -130,26 +135,30 @@ pub struct Proj {
 }
 
 impl Jobs for Proj {
-    fn state(&mut self, jid: &str) -> Option<String> {
+    /// Nothing can say (state None) when proj can't: it couldn't read the
+    /// job's record, or isn't there to ask.
+    fn lifecycle(&mut self, jid: &str) -> Lifecycle {
         if self.dry {
-            return Some("running".into());
+            return Lifecycle {
+                state: Some("running".into()),
+                holds: vec![],
+            };
         }
-        let out = Command::new(&self.bin).args(["state", jid]).output().ok()?;
-        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        (!said.is_empty()).then_some(said)
-    }
-
-    fn holds(&mut self, jid: &str) -> Option<Vec<String>> {
-        if self.dry {
-            return Some(vec![]);
+        let Ok(out) = Command::new(&self.bin).args(["lifecycle", jid]).output() else {
+            return Lifecycle::default();
+        };
+        let said = String::from_utf8_lossy(&out.stdout);
+        let mut lines = said.lines().map(str::trim);
+        match lines
+            .next()
+            .filter(|s| out.status.success() && !s.is_empty())
+        {
+            Some(state) => Lifecycle {
+                state: Some(state.into()),
+                holds: lines.map(String::from).collect(),
+            },
+            None => Lifecycle::default(),
         }
-        let out = Command::new(&self.bin).args(["holds", jid]).output().ok()?;
-        out.status.success().then(|| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(String::from)
-                .collect()
-        })
     }
 
     /// A status run's own jobs are all `dry`, as the steward's are.

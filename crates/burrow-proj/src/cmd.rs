@@ -70,10 +70,17 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
-        Some("holds") => {
-            let id = arg(args, 1, "usage: proj holds ID")?;
-            let held = Job::new(cfg, id).holds();
-            put(&held.iter().map(|h| format!("{h}\n")).collect::<String>());
+        Some("lifecycle") => {
+            let id = arg(args, 1, "usage: proj lifecycle ID")?;
+            let job = Job::new(cfg, id);
+            if !job.dir.is_dir() {
+                return Err(Fail::new(1, format!("no job {id}")));
+            }
+            let (state, held) = job.lifecycle().map_err(|e| Fail::new(1, e))?;
+            put(&std::iter::once(state)
+                .chain(held)
+                .map(|l| format!("{l}\n"))
+                .collect::<String>());
             Ok(())
         }
         Some("find") => {
