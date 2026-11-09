@@ -5,10 +5,10 @@ use std::fs;
 
 use super::{Pass, dirs};
 use crate::job::Job;
-use crate::read;
+use crate::{filled, read};
 
 impl Pass<'_> {
-    /// Issue numbers handed to running or queued inbox jobs in this repo.
+    /// Issue numbers handed to queued, running or awaiting inbox jobs in this repo.
     /// Read the handed snapshot, never newer text that the job hasn't seen.
     pub(super) fn claimed(&self, repo: &str) -> BTreeSet<String> {
         let mut claimed = BTreeSet::new();
@@ -24,7 +24,16 @@ impl Pass<'_> {
                 continue;
             };
             let job = Job::new(self.cfg, &id);
-            if !job.dir.is_dir() || !matches!(job.state().as_str(), "queued" | "running") {
+            if !job.dir.is_dir() {
+                continue;
+            }
+            let state = job.state();
+            // A finished turn parked on GitHub still owns its brief. Only
+            // the live await counts, as in the watcher; await.next is a
+            // declaration that has not been published by the turn's end.
+            if !matches!(state.as_str(), "queued" | "running")
+                && !(state == "done" && filled(&job.path("await")))
+            {
                 continue;
             }
             let input = fs::read_to_string(d.join("input")).unwrap_or_default();
