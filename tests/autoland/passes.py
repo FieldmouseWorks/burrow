@@ -345,11 +345,7 @@ for where in ("discovery", "prs", "after"):
     # (its settings, hooks and the owner's issue are its own).
     for argv_now in (["steward", "kick", "sam/r"],) + ((["steward"],) if where != "prs" else ()):
         sys.argv = argv_now
-        try:
-            S.main()
-            assert where != "discovery", "found its repos with GitHub turning it away"
-        except RuntimeError as e:
-            assert isinstance(e, C.Unavailable) and where != "prs", (where, e)
+        S.main()  # ends cleanly: no failed unit for what only the reset fixes
         assert C.LIMITED == [T + 1800], (where, C.LIMITED)
         woke = C.load("wake.json", None)
         if len(argv_now) > 1:
@@ -367,6 +363,72 @@ fresh_pr_state()
 run(mkpr(), 10)
 assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
 print("rate limit: ok")
+
+# GitHub not answering where no repo's own pass catches it (finding the
+# repos, the owner's issue) ends the pass cleanly, so the watchdog hands no
+# job a failed unit (autoland@tusanhomichi-psiv, remi#892): GraphQL's own
+# server error counts, as an HTTP 5xx does. It comes back in five minutes,
+# a full pass as one, a kicked one for its repos; a sooner wake-up stays.
+# What GitHub refused outright still fails it.
+down = os.path.join(tmp, "graphql-down-bin")
+os.makedirs(down)
+with open(f"{down}/gh", "w") as f:
+    f.write("""#!/bin/sh
+echo 'gh: Something went wrong while executing your query on 2026-11-09T15:31:48Z. Please include `B8EE:3FB38C` when reporting this issue.' >&2
+exit 1
+""")
+os.chmod(f"{down}/gh", 0o755)
+
+
+def unanswered(*a, **k):
+    with C.acting_for("sam"):
+        return REAL_GH("api", "graphql", "-f", "query={ viewer { login } }")
+
+
+def refused(*a, **k):
+    raise RuntimeError("gh api graphql: Could not resolve to a Repository")
+
+
+kept_fns = (S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish)
+S.R.settle_repo = lambda r, known: False
+S.open_prs = lambda owner, name: (info, [mkpr()])
+path, os.environ["PATH"] = os.environ["PATH"], down + os.pathsep + os.environ["PATH"]
+for where in ("discovery", "after"):
+    S.R.discover = unanswered if where == "discovery" else (lambda: [{"repo": "sam/r", "default": "main"}])
+    S.R.publish = unanswered if where == "after" else (lambda lines: None)
+    for argv_now in (["steward", "kick", "Sam/R"], ["steward"]):
+        fresh_pr_state()
+        C.NOW = T
+        C.WAKE.clear()
+        C.LIMITED.clear()
+        C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000, "": T + 30, "sam/q": T - 5})
+        sys.argv = argv_now
+        S.main()
+        woke = C.load("wake.json", None)
+        assert not C.LIMITED and woke["sam/other"] == T + 60 and "sam/q" not in woke, (where, woke)
+        if len(argv_now) > 2:
+            # After its PRs, the pass's own wake-up for the repo (its
+            # settle delay) is sooner, and stays.
+            back = T + 5 * 60 if where == "discovery" else T + 3 * 60 + 1
+            assert woke["sam/r"] == back and "Sam/R" not in woke and woke[""] == T + 30, (where, woke)
+        else:
+            assert woke[""] == T + 30, (where, woke)  # sooner than five minutes: it stays
+            C.save("wake.json", {})
+            S.main()
+            assert C.load("wake.json", None)[""] == T + 5 * 60, (where, C.load("wake.json", None))
+S.R.discover = refused
+sys.argv = ["steward"]
+try:
+    S.main()
+    raise AssertionError("a pass GitHub refused ended cleanly")
+except C.Unavailable:
+    raise AssertionError("a refusal read as GitHub not answering")
+except RuntimeError:
+    pass
+os.environ["PATH"] = path
+sys.argv = argv
+S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish = kept_fns
+print("github unanswered: ok")
 
 # A long PR's older reviews and comments are read too, a page at a time,
 # oldest first: its verdicts, markers and rounds can be past the last 100.

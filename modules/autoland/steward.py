@@ -128,6 +128,15 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
     try:
         run_pass(kick)
+    except C.Unavailable as e:
+        # GitHub didn't answer where no repo's own pass catches it (finding
+        # the repos, the owner's issue): no failed unit for the watchdog to
+        # hand a job, which could do nothing about it. The pass comes back
+        # once GitHub may answer: at a rate limit's reset (below), else in
+        # five minutes.
+        log(f"GitHub didn't answer the pass: {e}")
+        if not (C.LIMITED and C.LIMITED[0] > C.NOW):
+            C.come_back(kick, C.NOW + 5 * MIN)  # ends: the next pass finds GitHub answering, or books this again
     finally:
         if C.LIMITED and C.LIMITED[0] > C.NOW:
             C.after_limit(kick)
