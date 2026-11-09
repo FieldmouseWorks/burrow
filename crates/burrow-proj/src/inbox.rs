@@ -389,10 +389,10 @@ impl Pass<'_> {
         // Handed on by the drain, nobody's waiting on it: it takes its place
         // in line.
         let drained = self.drained(repo, &raw(&issue["number"]));
-        let role = self.machine_role(issue);
+        let (role, engine) = self.routing(issue);
         let new = New {
             vm: self.inbox.vm,
-            engine: role.is_none().then(|| self.engine(issue)).flatten(),
+            engine,
             role,
             first: !pipeline && !drained,
             pipeline,
@@ -408,6 +408,12 @@ impl Pass<'_> {
             &self.project[repo],
             &self.task(repo, issue, comments),
         )
+    }
+
+    fn routing(&self, issue: &Value) -> (Option<String>, Option<crate::engine::Engine>) {
+        let role = self.machine_role(issue);
+        let pinned = role.is_none().then(|| self.engine(issue)).flatten();
+        (role, pinned)
     }
 
     /// Machine labels route by role even without an App; other bot issues

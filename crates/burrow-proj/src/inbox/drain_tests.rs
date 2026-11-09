@@ -393,3 +393,223 @@ fn running_handed_references_are_not_drained() {
     b.pass().drain().unwrap();
     assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
 }
+
+fn hold_engine(b: &Box, engine: Engine) -> Vec<fs::File> {
+    let (dir, count) = match engine {
+        Engine::Claude => (".slots", b.cfg.max_jobs),
+        Engine::Codex => (".codex-slots", b.cfg.codex_slots),
+    };
+    let dir = b.cfg.jobs.join(dir);
+    fs::create_dir_all(&dir).unwrap();
+    (1..=count)
+        .map(|n| {
+            let f = fs::File::create(dir.join(n.to_string())).unwrap();
+            f.lock().unwrap();
+            f
+        })
+        .collect()
+}
+
+#[test]
+fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
+    for (opener, labels, roles, mapping, selected) in [
+        ("worker[bot]", vec!["ready"], "", None, Engine::Claude),
+        (
+            "worker[bot]",
+            vec!["ready"],
+            "machine-inbox codex",
+            None,
+            Engine::Codex,
+        ),
+        (
+            "worker[bot]",
+            vec!["ready"],
+            "machine-inbox claude\nmachine-inbox@SAM/GAME codex",
+            None,
+            Engine::Codex,
+        ),
+        (
+            "sam",
+            vec!["ready", "kind"],
+            "special claude\nspecial@sam/game codex",
+            Some("kind"),
+            Engine::Codex,
+        ),
+        // The label the drain is about to add can itself select a role.
+        (
+            "sam",
+            vec!["ready"],
+            "special claude",
+            Some("codex"),
+            Engine::Claude,
+        ),
+        // Ordinary human issues keep the enrollment label's engine.
+        (
+            "sam",
+            vec!["ready"],
+            "machine-inbox claude",
+            None,
+            Engine::Codex,
+        ),
+    ] {
+        for full in [Engine::Claude, Engine::Codex] {
+            let mut b = Box::new();
+            b.cfg.roles = b.path("roles");
+            fs::write(&b.cfg.roles, roles).unwrap();
+            let inbox = b.cfg.inbox.as_mut().unwrap();
+            inbox.authors.push("worker[bot]".into());
+            if let Some(label) = mapping {
+                inbox.roles.insert(label.into(), "special".into());
+            }
+            let i = found("sam/game", 4, opener, &labels, "2026-10-01T00:00:00Z");
+            b.pass()
+                .note_ready("sam/game", std::slice::from_ref(&i))
+                .unwrap();
+            on_github(&b, &i);
+            let _held = hold_engine(&b, full);
+            b.pass().drain().unwrap();
+            let admitted = b.log().contains("issues/4/labels -f labels[]=codex");
+            assert_eq!(
+                admitted,
+                selected != full,
+                "{roles:?}, {mapping:?}, {opener}, full={full:?}: {}",
+                b.log()
+            );
+            assert_eq!(
+                b.cfg
+                    .inbox
+                    .as_ref()
+                    .unwrap()
+                    .state
+                    .join(super::WAITING)
+                    .exists(),
+                !admitted
+            );
+        }
+    }
+}
+
+#[test]
+fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
+    for (roles, selected) in [
+        ("machine-inbox claude", Engine::Claude),
+        (
+            "machine-inbox claude\nmachine-inbox@sam/game codex",
+            Engine::Codex,
+        ),
+        ("machine-inbox claude over 80 codex", Engine::Codex),
+    ] {
+        for full_codex in [false, true] {
+            let mut b = Box::new();
+            b.cfg.roles = b.path("roles");
+            fs::write(&b.cfg.roles, roles).unwrap();
+            b.cfg
+                .inbox
+                .as_mut()
+                .unwrap()
+                .authors
+                .push("worker[bot]".into());
+            fs::create_dir_all(&b.cfg.jobs).unwrap();
+            let until = crate::now() + 3600;
+            fs::write(
+                b.cfg.jobs.join(crate::usage::FILE),
+                json!({"at":crate::now(), "until":until, "said":"spent", "job":"old"}).to_string(),
+            )
+            .unwrap();
+            let meters = b.path("meters");
+            fs::create_dir_all(&meters).unwrap();
+            fs::write(
+                meters.join("codex.json"),
+                json!({"windows":{}, "credits":true, "read_at":crate::now()}).to_string(),
+            )
+            .unwrap();
+            b.cfg.meters = Some(meters);
+            let i = found(
+                "sam/game",
+                4,
+                "worker[bot]",
+                &["ready"],
+                "2026-10-01T00:00:00Z",
+            );
+            b.pass()
+                .note_ready("sam/game", std::slice::from_ref(&i))
+                .unwrap();
+            on_github(&b, &i);
+            let _held = full_codex.then(|| hold_engine(&b, Engine::Codex));
+            let mut p = b.pass();
+            p.drain().unwrap();
+            let admitted = b.log().contains("issues/4/labels -f labels[]=codex");
+            assert_eq!(
+                admitted,
+                selected == Engine::Codex && !full_codex,
+                "{roles}: {}",
+                b.log()
+            );
+            if selected == Engine::Claude {
+                assert_eq!(p.wake.get("sam/game"), Some(&until));
+            } else {
+                assert_ne!(p.wake.get("sam/game"), Some(&until));
+            }
+            assert_eq!(
+                b.cfg
+                    .inbox
+                    .as_ref()
+                    .unwrap()
+                    .state
+                    .join(super::WAITING)
+                    .exists(),
+                !admitted
+            );
+        }
+    }
+}
+
+#[test]
+fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
+    let mut b = Box::new();
+    b.cfg.roles = b.path("roles");
+    fs::write(&b.cfg.roles, "").unwrap();
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .authors
+        .push("worker[bot]".into());
+    let older = found(
+        "sam/game",
+        4,
+        "worker[bot]",
+        &["ready"],
+        "2026-10-01T00:00:00Z",
+    );
+    let newer = found("sam/game", 5, "sam", &["ready"], "2026-11-01T00:00:00Z");
+    b.pass()
+        .note_ready("sam/game", &[older.clone(), newer.clone()])
+        .unwrap();
+    on_github(&b, &older);
+    on_github(&b, &newer);
+    let held = hold_engine(&b, Engine::Claude);
+    b.pass().drain().unwrap();
+    assert!(
+        !b.log().contains("issues/4/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
+    assert!(
+        b.log().contains("issues/5/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
+    let state = &b.cfg.inbox.as_ref().unwrap().state;
+    assert!(
+        state.join(super::WAITING).exists(),
+        "the blocked engine still needs a wake-up"
+    );
+    drop(held);
+    b.pass().drain().unwrap();
+    assert!(
+        !b.log().contains("issues/4/labels -f labels[]=codex"),
+        "drainJobs remains one: {}",
+        b.log()
+    );
+}

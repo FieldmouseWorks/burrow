@@ -126,9 +126,9 @@ JOBS, LOGGED = [], []
 NEXT = {}  # what C.job gives next, when set ("jid"): None for no job; or raises ("raise")
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):
     """proj run, which keeps the job under its key."""
-    JOBS.append({"repo": repo, "task": task, "clone": clone, "pipeline": pipeline, "timeout": timeout, "key": key})
+    JOBS.append({"repo": repo, "task": task, "clone": clone, "pipeline": pipeline, "timeout": timeout, "key": key, "role": role})
     if "raise" in NEXT:
         raise NEXT.pop("raise")
     jid = NEXT.pop("jid") if "jid" in NEXT else f"up-{len(JOBS)}"
@@ -179,7 +179,7 @@ proj()
 mine = look(0)
 assert mine == [("Flaky tests someone else quarantined", "sam/r#8", "`unit/disk`, by eve")], mine
 assert all(x[0] in R.OWNERS for x in mine), mine
-assert [(j["pipeline"], j["timeout"], j["clone"]) for j in JOBS] == [(False, 240, True)], JOBS
+assert [(j["pipeline"], j["timeout"], j["clone"], j["role"]) for j in JOBS] == [(False, 240, True, "flaky")], JOBS
 assert "`browser/stream`: https://github.com/sam/r/issues/4" in JOBS[0]["task"], JOBS
 assert JOBS[0]["key"] == f"upkeep/sam/r/flaky/{T}", JOBS
 assert state("flaky")["asked"] == [4] and state("flaky")["ask"] == {"key": f"upkeep/sam/r/flaky/{T}", "at": T}, state("flaky")
@@ -197,7 +197,7 @@ assert "sam/r" not in waits.FAILED, LOGGED
 github()
 mine = look(DAY)
 assert state("flaky")["issues"]["4"] == {"test": "browser/stream", "handed": T, "job": "up-1"}, state("flaky")
-assert [(j["pipeline"], j["timeout"]) for j in JOBS] == [(True, 60)], JOBS
+assert [(j["pipeline"], j["timeout"], j["role"]) for j in JOBS] == [(True, 60, "dependency-dashboard")], JOBS
 assert "Errored: chore(deps): update npm packages (branch renovate/npm-packages)" in JOBS[0]["task"], JOBS
 assert S.SEARCHED == [0] and ["repos/sam/r/issues/7", 'W/"d"'] in [[c["path"], c["etag"]] for c in called()], called()
 assert C.WAKE == {"sam/r": T + DAY + 15 * 60}, C.WAKE
