@@ -53,6 +53,20 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         if crate::ask::host_path(&job, "question-needs-owner").exists() {
             continue;
         }
+        // Notifications are independent of GitHub waits and include stopped
+        // and completed jobs. Serialize with starts so rollback stays atomic.
+        {
+            let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            match crate::question::notify(cfg, &job) {
+                Ok(false) => (),
+                Ok(true) => retry.push((String::new(), now() + RETRY)),
+                Err(e) => {
+                    eprintln!("proj: {e}");
+                    retry.push((String::new(), now() + RETRY));
+                }
+            }
+            drop(held);
+        }
         let f = job.path("await");
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;

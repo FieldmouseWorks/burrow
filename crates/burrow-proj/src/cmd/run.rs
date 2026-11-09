@@ -816,6 +816,11 @@ mod tests {
                 assert_eq!(result.is_ok(), succeeds, "{source}: {result:?}");
                 let answered = matches!(source, "operator" | "issue-author") && succeeds;
                 assert_eq!(
+                    job.path("question-answered-through").exists(),
+                    answered,
+                    "{source}, succeeds={succeeds}"
+                );
+                assert_eq!(
                     job.path("open-question").exists(),
                     !answered,
                     "{source}, succeeds={succeeds}"

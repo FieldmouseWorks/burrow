@@ -43,10 +43,12 @@ pub fn pass(
             "{repo} isn't private, so no probe is answered there: its answers are the machine's own"
         ));
     }
+    let mut authors = cfg.authors.clone();
+    authors.extend(cfg.machinery.iter().cloned());
     let door = Door {
         repo,
         label: &cfg.label,
-        authors: &cfg.authors,
+        authors: &authors,
         what: "this machine's probe",
     };
     let mut done = Done::default();

@@ -54,6 +54,7 @@ impl Run for Fake {
 fn config(state: &Path) -> Config {
     Config {
         projects: None,
+        machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
         authors: vec!["sam".into()],

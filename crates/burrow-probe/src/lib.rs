@@ -33,6 +33,9 @@ pub struct Config {
     pub label: String,
     /// Who may ask (GitHub logins, any case).
     pub authors: Vec<String>,
+    /// The configured machinery App, using the same read-only door.
+    #[serde(default)]
+    pub machinery: Option<String>,
     /// The machine's name, for the answer's first line.
     pub host: String,
     /// The user it runs as, whose user manager `units`, `rc` and `queue`

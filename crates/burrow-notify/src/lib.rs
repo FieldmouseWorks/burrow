@@ -5,9 +5,13 @@
 //!
 //! ```text
 //! HOST-notify open KEY TITLE BODY
+//! HOST-notify ensure KEY TITLE BODY
 //! HOST-notify close KEY [WHAT FIXED IT]
 //! HOST-notify pending KEY
 //! ```
+//!
+//! `ensure` opens an absent notice without the daily reminder that `open`
+//! sends for a continuing problem. It is safe to retry after an ambiguous reply.
 //!
 //! GitHub never fails the caller: a notice that can't be sent goes to the
 //! journal and is dropped. With no repo, every notice only goes to the
@@ -59,6 +63,12 @@ pub enum Ask {
         title: String,
         body: String,
     },
+    /// Open if absent, with no daily reminders on retries.
+    Ensure {
+        key: String,
+        title: String,
+        body: String,
+    },
     Close {
         key: String,
         what: String,
@@ -68,7 +78,8 @@ pub enum Ask {
     },
 }
 
-pub const USAGE: &str = "open KEY TITLE BODY | close KEY [WHAT] | pending KEY";
+pub const USAGE: &str =
+    "open KEY TITLE BODY | ensure KEY TITLE BODY | close KEY [WHAT] | pending KEY";
 
 impl Ask {
     /// The words after the config. A key names a file of its own, so it's
@@ -84,6 +95,11 @@ impl Ask {
         let nonempty = |s: &String| !s.is_empty();
         match (op.as_str(), rest) {
             ("open", [title, body]) if nonempty(title) && nonempty(body) => Ok(Ask::Open {
+                key,
+                title: title.clone(),
+                body: body.clone(),
+            }),
+            ("ensure", [title, body]) if nonempty(title) && nonempty(body) => Ok(Ask::Ensure {
                 key,
                 title: title.clone(),
                 body: body.clone(),
@@ -107,13 +123,17 @@ impl Ask {
 
     pub fn key(&self) -> &str {
         match self {
-            Ask::Open { key, .. } | Ask::Close { key, .. } | Ask::Pending { key } => key,
+            Ask::Open { key, .. }
+            | Ask::Ensure { key, .. }
+            | Ask::Close { key, .. }
+            | Ask::Pending { key } => key,
         }
     }
 
     fn op(&self) -> &'static str {
         match self {
             Ask::Open { .. } => "open",
+            Ask::Ensure { .. } => "ensure",
             Ask::Close { .. } => "close",
             Ask::Pending { .. } => "pending",
         }
@@ -145,12 +165,14 @@ pub fn pending(cfg: &Config, key: &str) -> bool {
 pub fn run(cfg: &Config, ask: &Ask, api: &mut dyn Api, journal: &mut dyn Journal, now: u64) {
     let Some(repo) = cfg.repo.as_deref().filter(|r| !r.is_empty()) else {
         let words = match ask {
-            Ask::Open { key, title, body } => vec![key.as_str(), title, body],
+            Ask::Open { key, title, body } | Ask::Ensure { key, title, body } => {
+                vec![key.as_str(), title, body]
+            }
             Ask::Close { key, what } => vec![key.as_str(), what],
             Ask::Pending { key } => vec![key.as_str()],
         };
         let priority = match ask {
-            Ask::Open { .. } => Priority::Warning,
+            Ask::Open { .. } | Ask::Ensure { .. } => Priority::Warning,
             _ => Priority::Notice,
         };
         journal.log(
@@ -161,7 +183,8 @@ pub fn run(cfg: &Config, ask: &Ask, api: &mut dyn Api, journal: &mut dyn Journal
     };
     let notices = Notices { cfg, repo, api };
     let done = match ask {
-        Ask::Open { key, title, body } => notices.open(key, title, body, now),
+        Ask::Open { key, title, body } => notices.open(key, title, body, now, true),
+        Ask::Ensure { key, title, body } => notices.open(key, title, body, now, false),
         Ask::Close { key, what } => notices.close(key, what),
         Ask::Pending { .. } => Ok(()),
     };
@@ -185,7 +208,7 @@ struct Notices<'a> {
 }
 
 impl Notices<'_> {
-    fn open(self, key: &str, title: &str, body: &str, now: u64) -> Result<(), Error> {
+    fn open(self, key: &str, title: &str, body: &str, now: u64, remind: bool) -> Result<(), Error> {
         let Notices { cfg, repo, api } = self;
         let stamp = cfg.dir.join(key);
         // Fails when GitHub can't be asked, so that's never taken for "no
@@ -207,7 +230,7 @@ impl Notices<'_> {
                 cfg.assignee.as_deref().filter(|a| !a.is_empty()),
             );
         };
-        if now.saturating_sub(said(&stamp)) > DAY {
+        if remind && now.saturating_sub(said(&stamp)) > DAY {
             github::comment(api, repo, first, &format!("Still happening: {body}"))?;
             write_stamp(&stamp, now)?;
         }

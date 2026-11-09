@@ -8,6 +8,7 @@ use crate::{Config, Journal, Tools};
 fn config() -> Config {
     Config {
         projects: None,
+        machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
         authors: vec!["Sam".into()],
@@ -591,4 +592,38 @@ fn a_comment_always_fits() {
     let body = &bodies(&gh)[0];
     assert!(body.len() <= 60_000, "{}", body.len());
     assert!(body.ends_with("(cut here, past what a comment holds)"));
+}
+
+#[test]
+fn machinery_can_read_deployed_but_other_apps_cannot() {
+    for allowed in [false, true] {
+        let login = "workers[bot]";
+        let mut cfg = config();
+        cfg.machinery = allowed.then(|| login.into());
+        let mut gh = github(true, json!([issue(7, login, "deployed", json!(""))]));
+        gh.on(
+            "POST",
+            "graphql",
+            vec![ok(
+                200,
+                writers(login, "deployed", json!(""), &[], &[]),
+                &[],
+            )],
+        );
+        let mut calls = 0;
+        let done = pass(
+            &mut gh,
+            &cfg,
+            &mut |q| {
+                assert_eq!(q, &Query::Deployed);
+                calls += 1;
+                Ok("configuration revision abc123".into())
+            },
+            "now",
+        )
+        .unwrap();
+        assert_eq!(calls, usize::from(allowed));
+        assert_eq!(done.answered == vec![7], allowed);
+        assert_eq!(bodies(&gh)[0].contains("abc123"), allowed);
+    }
 }
