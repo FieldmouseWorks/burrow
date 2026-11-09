@@ -397,7 +397,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
         ));
     }
     rewatch(cfg, &[id]);
-    if cfg.notify.is_some() {
+    if crate::question::needs_watch(job) {
         kick(cfg, ["proj-watch".to_owned()]);
     }
     if let Err(e) = crate::question::notify(cfg, job) {
@@ -557,7 +557,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     job.mark_ended();
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
-    if cfg.notify.is_some() {
+    if crate::question::needs_watch(&job) {
         names.push("proj-watch".into());
     }
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {

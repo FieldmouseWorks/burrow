@@ -37,6 +37,16 @@ pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Re
     start_with(cfg, id, msg, first, true)
 }
 
+/// A failed write may leave a truncated file. Never leave that prompt in
+/// the live history, even when the caller cannot publish the new turn.
+pub(crate) fn write_prompt(path: &Path, message: &str) -> std::io::Result<()> {
+    if let Err(e) = fs::write(path, format!("{message}\n")) {
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn start_with(
     cfg: &Config,
     id: &str,
@@ -71,6 +81,8 @@ fn start_with(
             .parse()
             .map_err(|_| format!("proj: {id}'s turns isn't a number: {t}"))?,
     };
+    job.quarantine_unstarted(last)
+        .map_err(|e| format!("proj: quarantine unstarted turns: {e}"))?;
     let question = crate::question::Resume::prepare(&job, answered)?;
     let msg = question.prompt(msg);
     let n = last + 1;
@@ -86,7 +98,7 @@ fn start_with(
         }
         let _ = fs::remove_file(&prompt);
     };
-    if let Err(e) = fs::write(&prompt, format!("{msg}\n")) {
+    if let Err(e) = write_prompt(&prompt, &msg) {
         // write can leave a truncated or partial prompt even on failure.
         undo();
         return Err(format!("proj: {}: {e}", prompt.display()));
@@ -126,7 +138,7 @@ fn start_with(
         return Err(couldnt());
     }
     question.commit();
-    if cfg.notify.is_some() {
+    if crate::question::needs_watch(&job) {
         kick(cfg, ["proj-watch".to_owned()]);
     }
     rewatch(cfg, &[id]);
