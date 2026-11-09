@@ -318,35 +318,10 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
         let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
-        unit_role(&new, std::env::var_os("INVOCATION_ID").is_some())?;
         start_job(cfg, &new, p, &args[i + 1])?
     };
     put(&format!("{id}\n"));
     Ok(())
-}
-
-/// Units are machinery: their jobs must be addressable by the roles file.
-fn unit_role(new: &New, in_unit: bool) -> Result<(), Fail> {
-    if in_unit && new.role.is_none() {
-        return Err(Fail::new(2, "proj run from a unit needs --role NAME"));
-    }
-    Ok(())
-}
-
-#[test]
-fn a_unit_cannot_start_a_roleless_job() {
-    assert!(unit_role(&New::default(), true).is_err());
-    assert!(unit_role(&New::default(), false).is_ok());
-    assert!(
-        unit_role(
-            &New {
-                role: Some("flaky".into()),
-                ..New::default()
-            },
-            true
-        )
-        .is_ok()
-    );
 }
 
 /// A new job in the project, its first turn started with the task: its id.
@@ -565,8 +540,8 @@ fn id_name(project: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply, reply_answer,
-        since_time, start, start_job,
+        Command, Fail, Job, New, find, fs, id_name, key_lock, key_name, kick_name, reply,
+        reply_answer, run, since_time, start, start_job,
     };
 
     #[test]
@@ -580,6 +555,63 @@ mod tests {
             ("-x", "dot-x"),
         ] {
             assert_eq!(id_name(project), name, "{project}");
+        }
+    }
+
+    // Use child processes so inherited systemd environments cannot race with
+    // other tests. Reaching project validation proves CLI admission succeeded,
+    // without launching a real job or contacting systemd.
+    #[test]
+    fn roleless_starts_from_sessions_and_jobs_reach_project_validation() {
+        const CHILD: &str = "PROJ_ROLELESS_START_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg = keyed(tmp.path(), "not-found");
+            for flags in [vec![], vec!["--role", "flaky"]] {
+                let args: Vec<String> = flags
+                    .into_iter()
+                    .chain(["missing-project", "task"])
+                    .map(str::to_owned)
+                    .collect();
+                let fail = run(&cfg, false, &args).unwrap_err();
+                assert_eq!(fail.code, 1);
+                assert_eq!(
+                    fail.say,
+                    Some(format!(
+                        "no such project: {}/missing-project",
+                        cfg.projects.display()
+                    ))
+                );
+                assert!(!cfg.jobs.exists(), "no job created by validation");
+            }
+            return;
+        }
+        for unit in [
+            None,
+            Some("claude-rc@project.service"),
+            Some("proj-project-123.service"),
+        ] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "cmd::run::tests::roleless_starts_from_sessions_and_jobs_reach_project_validation", "--nocapture"])
+                .env(CHILD, "1")
+                .env_remove("INVOCATION_ID")
+                .env_remove("SYSTEMD_EXEC_PID")
+                .env_remove("PROJ_JOB");
+            if let Some(unit) = unit {
+                child
+                    .env("INVOCATION_ID", "0123456789abcdef0123456789abcdef")
+                    .env("SYSTEMD_EXEC_PID", "123");
+                if unit.starts_with("proj-") {
+                    child.env("PROJ_JOB", "project-123");
+                }
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{unit:?}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
