@@ -22,7 +22,7 @@ let
     done
     "$configured"
     cat >/dev/null
-    ${fixture}/bin/capabilities
+    ${fixture}/bin/capabilities 2>&1
     echo '{"type":"result","session_id":"reach","result":"done","is_error":false}'
   '';
   fakeGh = pkgs.writeShellScriptBin "gh" ''
@@ -75,7 +75,7 @@ in pkgs.testers.runNixOSTest {
       derivation {
         name = "job-build";
         system = builtins.currentSystem;
-        builder = "${pkgs.busybox}/bin/sh";
+        builder = (builtins.storePath "${pkgs.busybox}") + "/bin/sh";
         args = [ "-c" "echo built > $out" ];
       }
     '';
