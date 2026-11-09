@@ -857,7 +857,7 @@ impl Sweep<'_> {
         };
         Ok(Some(Handed {
             line: format!("- #{n} \"{title}\" (branch {branch}): {why}{request}\n"),
-            major: major.then(|| Major { n, sha, base }),
+            major: major.then_some(Major { n, sha, base }),
             key,
             want,
         }))
