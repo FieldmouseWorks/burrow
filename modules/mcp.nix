@@ -1,13 +1,14 @@
-# The MCP servers burrow's modules give Claude: every session of burrow.user
-# gets them, in its user-scope config (~/.claude.json), through Claude's own
-# CLI, the one way to change that config while sessions are reading it.
+# The machine's engine-neutral MCP registry. proj renders it per turn for
+# both engines; live Claude sessions receive it through Claude's own CLI,
+# so an update never rewrites ~/.claude.json while a session is reading it.
 { config, lib, pkgs, ... }:
 let
   inherit (lib) mkOption types;
   inherit (config.burrow) user;
-  servers = config.burrow.claude.mcpServers;
+  servers = config.burrow.mcpServers;
   # Each as Claude keeps it, to tell one that's already there.
-  json = builtins.toJSON (lib.mapAttrs (_: s: { type = "stdio"; inherit (s) command args; }) servers);
+  json = builtins.toJSON (lib.mapAttrs (_: s: { type = "stdio"; inherit (s) command args; }
+    // lib.optionalAttrs (s.env != { }) { inherit (s) env; }) servers);
   register = pkgs.writeShellApplication {
     name = "burrow-claude-mcp";
     runtimeInputs = [ config.burrow.claude.package pkgs.jq pkgs.systemd ];
@@ -36,14 +37,14 @@ let
   home = config.users.users.${user}.home;
 in
 {
-  options.burrow.claude.mcpServers = mkOption {
+  options.burrow.mcpServers = mkOption {
     type = types.attrsOf (types.submodule {
       options = {
         command = mkOption {
           type = types.str;
           example = "/run/current-system/sw/bin/burrow-browser-mcp";
           description = ''
-            What Claude starts, over stdio: a path that stays put when its
+            What a job engine starts, over stdio: a path that stays put when its
             package changes, so Claude's config doesn't.
           '';
         };
@@ -51,11 +52,31 @@ in
           type = types.listOf types.str;
           default = [ ];
         };
+        env = mkOption {
+          type = types.attrsOf types.str;
+          default = { };
+          description = "Environment given to this server by every engine.";
+        };
+        envVars = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "Additional environment names copied from the job into each engine's server config.";
+        };
+        readPaths = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "Host paths (including socket directories) job commands may read for this server.";
+        };
+        writePaths = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "Host paths job commands may write for this server.";
+        };
       };
     });
     default = { };
     description = ''
-      MCP servers every Claude session of burrow.user gets, by name. Added
+      Machine MCP servers for every job engine and Claude session, by name. Added
       once Claude has a config, and removed once they leave this option.
     '';
   };

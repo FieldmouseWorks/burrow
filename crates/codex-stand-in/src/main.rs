@@ -4,11 +4,13 @@
 //! read afresh for each request), one per request, then answers. A
 //! `"SID"` session_id stands for the session the last call left running.
 //! apply_patch is Codex's freeform tool: its ARGS' input is the patch.
+//! A NAME of `namespace.tool` calls a namespaced function (including MCP).
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use serde_json::{Value, json};
+mod anthropic;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -37,6 +39,7 @@ fn serve(stream: TcpStream, calls: &str) -> io::Result<()> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let post = line.starts_with("POST ");
+    let count_tokens = line.contains("/count_tokens");
     let mut length = 0;
     loop {
         line.clear();
@@ -60,9 +63,19 @@ fn serve(stream: TcpStream, calls: &str) -> io::Result<()> {
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     let request: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    if count_tokens {
+        return out.write_all(
+            b"HTTP/1.0 200 OK\r\ncontent-type: application/json\r\n\r\n{\"input_tokens\":1}",
+        );
+    }
     let calls: Vec<(String, Value)> = serde_json::from_str(&std::fs::read_to_string(calls)?)?;
     let mut text = String::from("HTTP/1.0 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
-    for event in events(&request, &calls) {
+    let events = if request.get("messages").is_some() {
+        anthropic::events(&request, &calls)
+    } else {
+        events(&request, &calls)
+    };
+    for event in events {
         let kind = event["type"].as_str().unwrap_or_default();
         text.push_str(&format!("event: {kind}\ndata: {event}\n\n"));
     }
@@ -94,6 +107,8 @@ fn events(request: &Value, calls: &[(String, Value)]) -> Vec<Value> {
             let call_id = format!("c{}", outputs.len());
             if name == "apply_patch" {
                 json!({"type": "custom_tool_call", "name": name, "input": args["input"], "call_id": call_id})
+            } else if let Some((namespace, name)) = name.rsplit_once('.') {
+                json!({"type": "function_call", "namespace": namespace, "name": name, "arguments": args.to_string(), "call_id": call_id})
             } else {
                 json!({"type": "function_call", "name": name, "arguments": args.to_string(), "call_id": call_id})
             }
@@ -160,6 +175,15 @@ mod tests {
         let last = item(json!({"input": [ran, typed, patched]}), &calls);
         assert_eq!(last["type"], "message");
         assert_eq!(last["content"][0]["text"], "done");
+    }
+
+    #[test]
+    fn a_namespaced_function_preserves_its_namespace() {
+        let calls = vec![("mcp__reach.ping".to_owned(), json!({}))];
+        let call = item(json!({"input": []}), &calls);
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(call["namespace"], "mcp__reach");
+        assert_eq!(call["name"], "ping");
     }
 
     #[test]

@@ -1,0 +1,240 @@
+diff --git a/config/src/config_toml.rs b/config/src/config_toml.rs
+index 2578c59..fe7c67b 100644
+--- a/config/src/config_toml.rs
++++ b/config/src/config_toml.rs
+@@ -300,6 +300,10 @@ pub struct ConfigToml {
+     #[schemars(schema_with = "crate::schema::mcp_servers_schema")]
+     pub mcp_servers: HashMap<String, McpServerConfig>,
+
++    /// Use only MCP servers supplied by CLI overrides; managed MCP constraints still apply.
++    #[serde(default)]
++    pub strict_mcp_config: bool,
++
+     /// Trusted enterprise IdP shared by EMA-enabled MCP servers and plugins.
+     #[serde(default)]
+     pub mcp_enterprise_managed_auth: Option<McpEnterpriseManagedAuthConfig>,
+diff --git a/config/src/state.rs b/config/src/state.rs
+index 20df8a2..8434705 100644
+--- a/config/src/state.rs
++++ b/config/src/state.rs
+@@ -601,6 +601,18 @@ impl ConfigLayerStack {
+         for layer in self.layers_low_to_high() {
+             merge_toml_values(&mut merged, &layer.config);
+         }
++        if merged.get("strict_mcp_config").and_then(TomlValue::as_bool) == Some(true) {
++            let servers = self
++                .layers_high_to_low()
++                .filter(|layer| matches!(layer.name, ConfigLayerSource::SessionFlags))
++                .find_map(|layer| layer.config.get("mcp_servers"))
++                .cloned()
++                .unwrap_or_else(|| TomlValue::Table(Default::default()));
++            merged
++                .as_table_mut()
++                .expect("config with named keys is a table")
++                .insert("mcp_servers".to_string(), servers);
++        }
+         if let Some(requirements) = &self.model_provider_requirements {
+             crate::model_provider_requirements::apply(&mut merged, requirements);
+         }
+diff --git a/core/config.schema.json b/core/config.schema.json
+index 0e741b6..35c6f1e 100644
+--- a/core/config.schema.json
++++ b/core/config.schema.json
+@@ -8536,6 +8536,11 @@
+       ],
+       "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
+     },
++    "strict_mcp_config": {
++      "default": false,
++      "description": "Use only MCP servers supplied by CLI overrides; managed MCP constraints still apply.",
++      "type": "boolean"
++    },
+     "suppress_unstable_features_warning": {
+       "description": "Suppress warnings about unstable (under development) features.",
+       "type": "boolean"
+@@ -8596,4 +8601,4 @@
+   },
+   "title": "ConfigToml",
+   "type": "object"
+-}
+\ No newline at end of file
++}
+diff --git a/core/src/config/mod.rs b/core/src/config/mod.rs
+index eb949b8..8a4feed 100644
+--- a/core/src/config/mod.rs
++++ b/core/src/config/mod.rs
+@@ -1856,6 +1856,18 @@ impl Config {
+         filter_mcp_servers_by_requirements(mcp_servers, empty_mcp_allowlist);
+     }
+
++    fn strict_mcp_config(&self) -> bool {
++        self.config_layer_stack
++            .layers_high_to_low()
++            .find_map(|layer| {
++                layer
++                    .config
++                    .get("strict_mcp_config")
++                    .and_then(toml::Value::as_bool)
++            })
++            .unwrap_or(false)
++    }
++
+     pub async fn to_mcp_config(
+         &self,
+         plugins_manager: &codex_core_plugins::PluginsManager,
+@@ -1882,6 +1894,7 @@ impl Config {
+         loaded_plugins: &PluginLoadOutcome,
+         additional_plugin_registrations: impl IntoIterator<Item = McpServerRegistration>,
+     ) -> McpConfig {
++        let strict_mcp_config = self.strict_mcp_config();
+         let mut catalog = ResolvedMcpCatalog::builder();
+         if self.features.enabled(Feature::UseXaa)
+             && let Some(auth) = &self.mcp_enterprise_managed_auth
+@@ -1891,7 +1904,7 @@ impl Config {
+         for (plugin_order, plugin) in loaded_plugins
+             .plugins()
+             .iter()
+-            .filter(|plugin| plugin.is_active())
++            .filter(|plugin| !strict_mcp_config && plugin.is_active())
+             .enumerate()
+         {
+             let mut plugin_mcp_servers = plugin.mcp_servers.clone();
+@@ -1917,7 +1930,10 @@ impl Config {
+                 ));
+             }
+         }
+-        for registration in additional_plugin_registrations {
++        for registration in additional_plugin_registrations
++            .into_iter()
++            .filter(|_| !strict_mcp_config)
++        {
+             catalog.register(registration);
+         }
+         for (name, server) in self.mcp_servers.get() {
+@@ -1962,7 +1978,7 @@ impl Config {
+             codex_self_exe: self.codex_self_exe.clone(),
+             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
+             use_legacy_landlock: self.features.use_legacy_landlock(),
+-            apps_enabled: self.features.enabled(Feature::Apps),
++            apps_enabled: self.features.enabled(Feature::Apps) && !strict_mcp_config,
+             apps_early_resource_discovery: self
+                 .features
+                 .enabled(Feature::AppsEarlyResourceDiscovery),
+@@ -1975,7 +1991,8 @@ impl Config {
+                 Vec::new()
+             },
+             protocol_mode: self.mcp_protocol_mode(),
+-            discover_local_stdio: self.features.enabled(Feature::McpConnectionSharing),
++            discover_local_stdio: self.features.enabled(Feature::McpConnectionSharing)
++                && !strict_mcp_config,
+             host_owned_apps_protocol_mode: if self.features.enabled(Feature::CodexAppsMcp20260728) {
+                 McpProtocolMode::V20260728
+             } else {
+diff --git a/linux-sandbox/src/bwrap.rs b/linux-sandbox/src/bwrap.rs
+index 11959d0..a4847c7 100644
+--- a/linux-sandbox/src/bwrap.rs
++++ b/linux-sandbox/src/bwrap.rs
+@@ -24,6 +24,7 @@ use std::fs::Metadata;
+ use std::io;
+ use std::os::fd::AsRawFd;
+ use std::os::unix::ffi::OsStringExt;
++use std::os::unix::fs::FileTypeExt;
+ use std::os::unix::fs::MetadataExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+@@ -643,7 +644,14 @@ fn create_filesystem_args(
+         let redundant_root_alias =
+             binds_file_system_root && root != Path::new("/") && mount_root == Path::new("/");
+         if !redundant_root_alias {
+-            bwrap_args.args.push("--bind".to_string());
++            // A normal bind adds nodev. Honour explicit device grants without
++            // allowing devices anywhere else in the filesystem policy.
++            let device = fs::metadata(mount_root).is_ok_and(|metadata| {
++                metadata.file_type().is_char_device() || metadata.file_type().is_block_device()
++            });
++            bwrap_args
++                .args
++                .push(if device { "--dev-bind" } else { "--bind" }.to_string());
+             bwrap_args.args.push(path_to_string(mount_root));
+             bwrap_args.args.push(path_to_string(mount_root));
+             if mount_root == Path::new("/") {
+diff --git a/protocol/src/permissions.rs b/protocol/src/permissions.rs
+index bd67575..89cd14a 100644
+--- a/protocol/src/permissions.rs
++++ b/protocol/src/permissions.rs
+@@ -2528,6 +2528,15 @@ fn protected_metadata_names_for_writable_root(
+     root: &AbsolutePathBuf,
+     raw_writable_roots: &[&AbsolutePathBuf],
+ ) -> Vec<String> {
++    // Explicit writable files and device nodes cannot contain metadata.
++    // Missing roots can still become directories, so keep their protection.
++    if root
++        .as_path()
++        .metadata()
++        .is_ok_and(|metadata| !metadata.is_dir())
++    {
++        return Vec::new();
++    }
+     let mut protected_names = Vec::new();
+     for metadata_name in PROTECTED_METADATA_PATH_NAMES {
+         let mut metadata_paths = vec![root.join(*metadata_name)];
+diff --git a/config/src/state_tests.rs b/config/src/state_tests.rs
+index 8dad010..05f7973 100644
+--- a/config/src/state_tests.rs
++++ b/config/src/state_tests.rs
+@@ -9,0 +10,23 @@ fn test_user_config_path(temp_dir: &TempDir, file_name: &str) -> AbsolutePathBuf
++#[test]
++fn job_capabilities_strict_mcp_uses_only_session_servers_and_fields() {
++    let directory = TempDir::new().unwrap();
++    let user = ConfigLayerEntry::new(
++        ConfigLayerSource::User { file: test_user_config_path(&directory, "config.toml"), profile: None },
++        toml::from_str("[mcp_servers.outside]\ncommand = 'outside'\n[mcp_servers.inside]\ncommand = 'old'\nenabled = false\n[mcp_servers.inside.env]\nOLD = 'outside'\n").unwrap(),
++    );
++    let session: TomlValue =
++        toml::from_str("strict_mcp_config = true\n[mcp_servers.inside]\ncommand = 'inside'\n")
++            .unwrap();
++    let expected = session.get("mcp_servers").unwrap().clone();
++    let stack = ConfigLayerStack::new(
++        vec![
++            user,
++            ConfigLayerEntry::new(ConfigLayerSource::SessionFlags, session),
++        ],
++        ConfigRequirements::default(),
++        ConfigRequirementsToml::default(),
++    )
++    .unwrap();
++    assert_eq!(stack.effective_config().get("mcp_servers"), Some(&expected));
++}
++
+diff --git a/linux-sandbox/src/bwrap_tests.rs b/linux-sandbox/src/bwrap_tests.rs
+index 9f53e2c..d4200ef 100644
+--- a/linux-sandbox/src/bwrap_tests.rs
++++ b/linux-sandbox/src/bwrap_tests.rs
+@@ -14,0 +15,27 @@ use tempfile::TempDir;
++#[test]
++fn job_capabilities_device_roots_are_devices_without_directory_metadata() {
++    let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
++        AbsolutePathBuf::from_absolute_path("/dev/null")
++            .unwrap()
++            .into(),
++        FileSystemAccessMode::Write,
++    )]);
++    let roots = policy.get_writable_roots_with_cwd_inheriting_root_metadata(Path::new("/"));
++    assert_eq!(roots.len(), 1);
++    assert!(roots[0].protected_metadata_names.is_empty());
++    let args = create_bwrap_command_args(
++        vec!["/bin/true".to_string()],
++        &policy,
++        Path::new("/"),
++        Path::new("/"),
++        BwrapOptions::default(),
++    )
++    .unwrap()
++    .args;
++    assert!(
++        args.windows(3)
++            .any(|args| args == ["--dev-bind", "/dev/null", "/dev/null"])
++    );
++    assert!(!args.iter().any(|arg| arg.starts_with("/dev/null/")));
++}
++

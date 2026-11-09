@@ -16,7 +16,7 @@ let
   });
   rules = pkgs.writeText "r2.rules" policy.text;
   missing = pkgs.writeText "missing-rule.rules" (policy.render (builtins.tail policy.rules));
-  agents = import ../modules/autoland/agents/package.nix { inherit pkgs; };
+  agents = import ../modules/autoland/agents/package.nix { inherit pkgs; inherit (self.inputs) nixpkgs-unstable; };
   checker = "${self.packages.${system}.burrow-codex}/bin/burrow-codex-policy-check";
 in
 pkgs.runCommand "codex-r2" { } ''

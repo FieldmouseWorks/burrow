@@ -1,6 +1,6 @@
 # browser: a Chromium that stays up on the machine, signed in to the owner's
-# accounts by the owner, that every Claude on the machine can drive. The owner
-# watches it and signs in through noVNC in their own browser; Claude drives it
+# accounts by the owner, that job engines on the machine can drive. The owner
+# watches it and signs in through noVNC in their own browser; agents drive it
 # with Playwright's MCP server over the Chrome DevTools Protocol (CDP).
 #
 # Its profile holds the owner's sessions, so it's kept like a secret: its own
@@ -195,7 +195,11 @@ in
 
     environment.systemPackages = [ mcp ];
     # Claude's tools for it, in every session of burrow.user's.
-    burrow.claude.mcpServers.browser.command = "/run/current-system/sw/bin/burrow-browser-mcp";
+    burrow.mcpServers.browser = {
+      command = "/run/current-system/sw/bin/burrow-browser-mcp";
+      envVars = [ "XDG_RUNTIME_DIR" ];
+      writePaths = [ "/run/user/${uid}/burrow-browser" ];
+    };
 
     systemd.slices.${account}.description = "The signed-in browser";
 

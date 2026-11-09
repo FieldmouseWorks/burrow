@@ -28,7 +28,7 @@ let
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
-  agents = import ./autoland/agents/package.nix { inherit pkgs; };
+  agents = import ./autoland/agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj;
   hooks = pkgs.runCommand "proj-codex-git-hooks" { } ''
     mkdir -p $out
@@ -90,6 +90,7 @@ let
     machinery = if machineApp == null then null else machineApp.name;
     stewardLogin = if config.burrow.autoland.enable or false then "${config.burrow.autoland.app.slug}[bot]" else null;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
+    inherit (config.burrow) mcpServers;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;

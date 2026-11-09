@@ -192,20 +192,21 @@ Each has an entry below, and each can be imported on its own.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
   proj jobs retain the roleless form for work an agent hands on.
-  Codex uses its own
-  small slot pool (`codex.slots`, two), a sandbox that writes only the
-  project, its scratch, its job's dir, git's metadata and a /tmp of its own,
-  and reads only those and the machine's system paths (no home, no /run/user,
-  no other projects: so no server of the user's own, wherever it listens,
-  and not Codex's login), with network, the
-  shared one-way command list, the guard as its managed hook, and git hooks
-  that mark its commits and refuse rewrites or deletes of the remote default
-  branch, which the guard keeps on. A turn on the engine that didn't run the
-  turns before it is handed what they were asked and answered. Log it in with
-  `autoland-codex-login job`, separately from `autoland-codex-login review`.
-  With `burrow.cpu.enable`, Codex sandboxes also read the configured heavy
-  slot directory so jobs can run checks through `heavy`.
-  Codex-written heads still get a Codex review and need a Claude judge.
+  Both engines consume the
+  [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
+  project and scratch, job state (`proj await`, `ask`, `done`), host facts (`proj probe`),
+  git metadata,
+  toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
+  Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
+  (`burrow.mcpServers`, including each server's socket and output paths), and
+  the network and login/App environment. The [parity check](tests/proj-capabilities.nix) runs the same
+  capability probes inside a job on each engine and removes a Codex grant to
+  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`, two)
+  and command sandbox; log it in with `autoland-codex-login job`, separately
+  from `autoland-codex-login review`. A turn on a different engine receives
+  the preceding turns' questions and answers.
+  The deliberate authorship exception: a Codex-written head is judged by
+  Claude, so its author never grades its own head.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
 
@@ -348,10 +349,10 @@ Each has an entry below, and each can be imported on its own.
   Idle ones stop after a day and are saved and deleted after a week. Opt-in
   per task.
 - **`browser`** (`burrow.browser`): A Chromium that stays up on the machine,
-  signed in to your accounts by you, that every Claude there drives through
-  Playwright's MCP server (`browser`, in the user's Claude config), which
-  saves what Claude asks of it (a screenshot, a page's text) in the user's
-  runtime dir, in RAM, rather than the checkout Claude works in. You watch it
+  signed in to your accounts by you, that job engines drive through
+  Playwright's MCP server (`browser`, in the [shared registry](modules/mcp.nix)), which
+  saves what an agent asks of it (a screenshot, a page's text) in the user's
+  runtime dir, in RAM, outside the checkout. You watch it
   and sign in through noVNC on `viewer.interfaces` (a tailnet's, say), and
   nowhere else even where the firewall trusts an interface: no password, so
   only name interfaces that reach only you, and its WebSocket takes only pages
@@ -523,7 +524,7 @@ Things you'll want to set yourself: a Claude login for the sandboxes
 from sops-nix), extra allowed hosts (`burrow.agents.extraAllow`), a git
 identity for the sandboxes (`burrow.agents.guestModules`), an intro for the
 machine's CLAUDE.md (`burrow.claude.machineMd` with `lib.mkBefore`), MCP
-servers of your own for every Claude session (`burrow.claude.mcpServers`), and, to
+servers of your own for every job engine and Claude session (`burrow.mcpServers`), and, to
 run Claude Code's newest release instead of nixpkgs', a release manifest in
 your flake (`burrow.claude.manifest`, and its path for `HOST-update` to bump
 in `burrow.updates.claudeManifest`). Persist `burrow.stateDir` if `/` is

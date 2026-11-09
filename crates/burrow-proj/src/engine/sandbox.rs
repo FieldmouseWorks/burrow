@@ -3,26 +3,21 @@
 //! environment Codex itself starts in, so the paths it names are the ones
 //! Codex and the job's commands find.
 //!
-//! The project, scratch, the job's own dir and git's common dir (worktrees
-//! made in scratch write there; an explicit grant also lifts the automatic
-//! .git protection) are writable, and so is /tmp, which is the job's own
-//! ([`private_tmp`]) but for the machine's paths under it that Codex or the
-//! job uses, which it keeps ([`Sandbox::kept`]). Of the rest, commands see
-//! only what [`readable`] lists, read-only: the profile has no `:root`, so
-//! the CLI starts each command's mounts from an empty root. The network is
-//! on, which is also what lets a command connect() to the gh-token socket
-//! under /run/gh-token: the pinned CLI's seccomp has no finer switch for
-//! unix sockets, so which sockets a command can reach is decided by which
-//! paths it can see, never by a list of sockets to hide. Commands keep
-//! no_new_privs, since the filesystem isn't all writable, so sudo can't
-//! elevate.
+//! The shared [`super::capabilities`] contract owns all grants. This adapter
+//! renders them into a profile with no `:root`: each command's mounts start
+//! from an empty root. Its /tmp is private ([`private_tmp`]), retaining only
+//! declared paths the engine or job uses ([`Sandbox::kept`]). Unix socket
+//! reach follows the granted paths: the CLI's network switch also covers
+//! unix sockets, with no finer seccomp switch. Commands keep no_new_privs,
+//! since the filesystem isn't all writable, so sudo can't elevate.
 
-use crate::{config::Config, job::Job, read};
+use crate::{config::Config, job::Job};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 /// The environment Codex starts in, a variable at a time.
@@ -54,7 +49,7 @@ fn codex_home(env: Env) -> io::Result<PathBuf> {
 }
 
 /// The machine's own paths a job's commands read: its programs, libraries
-/// and config, the nix daemon's socket (for builds) and sysfs. Only root
+/// and config, and sysfs. Only root
 /// and system services write in these, so no process of the user's can
 /// bind a socket there to run something for the job. The CLI's own helpers
 /// (the one that reads AGENTS.md, for one) mount its platform defaults
@@ -70,7 +65,6 @@ pub const SYSTEM: &[&str] = &[
     "/etc",
     "/nix/store",
     "/run/current-system/sw",
-    "/nix/var/nix/daemon-socket",
     "/sys",
 ];
 
@@ -130,29 +124,21 @@ impl Access {
 }
 
 /// What the job's commands may read, besides their grants: the machine's
-/// own paths that are there, the configured root-owned heavy slot directory,
-/// the resolver's file, the dir of the App's
-/// token socket, rustup's toolchains (RUSTUP_HOME, else HOME's `.rustup`)
+/// own paths that are there, the resolver's file,
+/// rustup's toolchains (RUSTUP_HOME, else HOME's `.rustup`)
 /// and git's global config file (GIT_CONFIG_GLOBAL, else HOME's and XDG's),
-/// as a regular file, which no socket can be. Nothing else of the machine
-/// is mounted in the sandbox, so a server of the user's, wherever it binds
-/// its socket and whenever it starts (a tmux, the systemd manager or D-Bus
-/// in the runtime dir, a compile-cache daemon in a network namespace of its
-/// own), isn't there to connect() to. Nor are the user's keys and logins
-/// (ssh, gh, rclone, the browser's profile), other projects or other jobs.
-fn readable(env: Env, machine: &Machine, heavy: Option<&Path>) -> io::Result<Vec<PathBuf>> {
+/// as a regular file, which no socket can be. Other capabilities add their
+/// own paths. This base grant excludes broad home and runtime directories:
+/// they expose user servers (tmux, systemd, D-Bus and the compile cache),
+/// keys, logins, other projects and other jobs.
+pub(super) fn readable(env: Env, machine: &Machine) -> io::Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = machine
         .system
         .iter()
         .filter(|p| p.exists())
         .cloned()
         .collect();
-    // flock works on read-only descriptors; no write grant is needed for slots.
-    paths.extend(heavy.filter(|p| p.is_dir()).map(Path::to_owned));
     paths.extend(machine.resolver.canonicalize().ok().filter(|p| p.is_file()));
-    if let Some(socket) = var(env, "GH_TOKEN_SOCKET") {
-        paths.extend(std::path::absolute(socket)?.parent().map(Path::to_owned));
-    }
     let home = home(env)?;
     let rustup = match var(env, "RUSTUP_HOME") {
         Some(dir) => std::path::absolute(dir)?,
@@ -422,50 +408,25 @@ pub fn flags(
     env: Env,
     machine: &Machine,
 ) -> io::Result<Sandbox> {
-    let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
-    // proj await/done and commands' wait files write only this job's state.
-    let mut roots = vec![project.clone(), scratch.to_owned(), job.dir.clone()];
-    let git = Command::new(&cfg.tools.git)
-        .arg("-C")
-        .arg(&project)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()?;
-    let (metadata, mut flags) = if git.status.success() {
-        let common = String::from_utf8_lossy(&git.stdout).trim().to_owned();
-        (PathBuf::from(common), Vec::new())
-    } else {
-        (
-            project.join(".git"),
-            vec!["--skip-git-repo-check".to_owned()],
-        )
-    };
-    let home = home(env)?;
-    for (name, default) in [
-        ("CARGO_HOME", home.join(".cargo")),
-        ("XDG_CACHE_HOME", home.join(".cache")),
-    ] {
-        let root = std::path::absolute(var(env, name).unwrap_or(default))?;
-        std::fs::create_dir_all(&root)?;
-        roots.push(if name == "XDG_CACHE_HOME" {
-            root.join("nix")
-        } else {
-            root
-        });
-    }
-    for root in &roots {
-        std::fs::create_dir_all(root)?;
-    }
-    roots.push(metadata);
+    let capabilities = super::capabilities::resolve(cfg, job, scratch, env, machine)?;
+    let mut flags = capabilities.codex_flags();
     let mut entries = BTreeMap::new();
     let grant = |entries: &mut BTreeMap<PathBuf, Access>, path: PathBuf, access: Access| {
         let given = entries.entry(path).or_insert(access);
         *given = access.max(*given);
     };
-    for path in readable(env, machine, cfg.heavy_dir.as_deref())? {
-        grant(&mut entries, path, Access::Read);
-    }
-    for path in roots {
-        grant(&mut entries, path, Access::Write);
+    for item in &capabilities.items {
+        for (path, write) in &item.paths {
+            if item.capability == super::capabilities::Capability::Workspace && *path == machine.tmp
+            {
+                continue;
+            }
+            grant(
+                &mut entries,
+                path.clone(),
+                if *write { Access::Write } else { Access::Read },
+            );
+        }
     }
     let control = crate::ask::control_root(cfg);
     std::fs::create_dir_all(&control)?;
@@ -482,7 +443,17 @@ pub fn flags(
     for (path, access) in &kept {
         grant(&mut entries, path.clone(), *access);
     }
-    grant(&mut entries, machine.tmp.clone(), Access::Write);
+    for item in &capabilities.items {
+        for (path, write) in &item.paths {
+            if *path == machine.tmp {
+                grant(
+                    &mut entries,
+                    path.clone(),
+                    if *write { Access::Write } else { Access::Read },
+                );
+            }
+        }
+    }
     // A deny under another the CLI would mount in a mask already made.
     let denies: Vec<PathBuf> = entries
         .iter()
@@ -502,12 +473,23 @@ pub fn flags(
         r#"approval_policy="never""#.to_owned(),
         format!("default_permissions=\"{name}\""),
         format!("permissions.{name}.filesystem={{{entries}}}"),
-        format!("permissions.{name}.network.enabled=true"),
+        format!(
+            "permissions.{name}.network.enabled={}",
+            capabilities.network()
+        ),
         // The login shell's App env and git hook config must reach commands.
-        r#"shell_environment_policy.inherit="all""#.to_owned(),
-        // The store is read-only in here: only the daemon builds.
-        r#"shell_environment_policy.set.NIX_REMOTE="daemon""#.to_owned(),
-        "shell_environment_policy.ignore_default_excludes=true".to_owned(),
+        format!(
+            "shell_environment_policy.inherit=\"{}\"",
+            if capabilities.inherits_environment() {
+                "all"
+            } else {
+                "none"
+            }
+        ),
+        format!(
+            "shell_environment_policy.ignore_default_excludes={}",
+            capabilities.inherits_environment()
+        ),
     ] {
         flags.extend(["-c".into(), config]);
     }

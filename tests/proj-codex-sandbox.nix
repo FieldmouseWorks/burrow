@@ -23,7 +23,7 @@ let
     base_url = "http://127.0.0.1:18555/v1"
     wire_api = "responses"
   '';
-  agents = import ../modules/autoland/agents/package.nix { inherit pkgs; };
+  agents = import ../modules/autoland/agents/package.nix { inherit pkgs; inherit (self.inputs) nixpkgs-unstable; };
   hook = "${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj-git-hook";
   hooks = pkgs.runCommand "codex-test-hooks" { } ''
     mkdir -p $out
