@@ -656,6 +656,15 @@ def onto(repo, pr):
     return (got, True) if got else (TIP["v"], False)
 
 
+# Fake jobs have no proj process to create their lifecycle record.
+_real_job_lifecycle = C.job_lifecycle
+
+
+def job_lifecycle(jid, key):
+    os.makedirs(os.path.join(C.CFG["jobsDir"], jid), exist_ok=True)
+    return _real_job_lifecycle(jid, key)
+
+
 def stand_in():
     """gh, Claude jobs, the queue, the posting, what a merge would change
     (every merge changes something unless ALREADY says) and which earlier
@@ -666,6 +675,7 @@ def stand_in():
     C.write = write
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
+    C.job_lifecycle = job_lifecycle
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
     V.queue = queue

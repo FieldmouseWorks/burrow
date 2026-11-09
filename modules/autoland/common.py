@@ -11,6 +11,7 @@ user's own gh login, which every Claude session on the machine shares.
 
 import contextlib
 import hashlib
+import fcntl
 import hmac
 import json
 import os
@@ -719,6 +720,20 @@ def job_state(jid):
         return build_state(jid)
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+def job_lifecycle(jid, key):
+    """Read state and awaits under proj's turn-start lock, like Rust claims.
+    If the record is unavailable, retain the job until a later pass."""
+    if DRY or jid.startswith(BUILD):
+        return job_state(jid), None
+    try:
+        with open(os.path.join(CFG["jobsDir"], jid, "lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            state = job_state(jid)
+            return state, awaiting(jid, key) if state == "done" else None
+    except OSError:
+        return None, None
 
 
 def awaiting(jid, key):

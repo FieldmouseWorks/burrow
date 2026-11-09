@@ -43,8 +43,8 @@ class Jobs:
 
     def look(self, kind, jid):
         """running's look at the job: what proj says of it, once."""
-        state = C.job_state(jid)
-        if state == "done" and kind in ON and (target := C.awaiting(jid, self.tag)):
+        state, target = C.job_lifecycle(jid, self.tag) if kind in ON else (C.job_state(jid), None)
+        if target:
             # No deadline: its wake is proj's resume, whose end kicks a pass.
             self.awaits[kind] = target
             return "awaiting"
