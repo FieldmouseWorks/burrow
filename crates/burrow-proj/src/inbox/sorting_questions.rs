@@ -7,7 +7,12 @@ use std::{fs, path::Path};
 impl Pass<'_> {
     pub(super) fn sorting_slot(&self, d: &Path) -> bool {
         read(&d.join("job")).is_some_and(|id| {
-            !ask::host_path(&Job::new(self.cfg, &id), "question-needs-owner").exists()
+            let job = Job::new(self.cfg, &id);
+            let Ok(_held) = job.lock() else { return true };
+            if crate::question::recover(&job).is_err() {
+                return true;
+            }
+            !ask::host_path(&job, "question-needs-owner").exists()
         })
     }
 
@@ -22,6 +27,16 @@ impl Pass<'_> {
         open: Option<&Value>,
         busy: bool,
     ) -> Result<bool, Fail> {
+        {
+            let _held = job
+                .lock()
+                .map_err(|e| crate::io_fail(&job.path("lock"), e))?;
+            if let Err(e) = crate::question::recover(job) {
+                eprintln!("proj sorting question recovery: {e}");
+                self.retry(repo);
+                return Ok(true);
+            }
+        }
         let pending = ask::host_path(job, "question-needs-owner").exists();
         if ask::load(job).is_none() && !pending {
             return Ok(false);

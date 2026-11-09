@@ -37,6 +37,11 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         let job = Job::new(cfg, &id);
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            if let Err(e) = crate::question::recover(&job) {
+                eprintln!("proj question recovery: {e}");
+                retry.push((String::new(), now() + RETRY));
+                continue 'jobs;
+            }
             match crate::ask::expire(cfg, &job) {
                 Ok(Some(at)) => retry.push((String::new(), at)),
                 Ok(None) => (),

@@ -49,6 +49,14 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
+            {
+                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                if let Err(e) = crate::question::recover(&job) {
+                    eprintln!("proj question recovery: {e}");
+                    self.retry(repo);
+                    continue;
+                }
+            }
             // Adopt existing machine issues too: a deployment must not leave
             // the long-lived stuck job pinned to its old label's engine.
             if let Some(role) = open

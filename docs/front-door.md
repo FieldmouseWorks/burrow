@@ -357,7 +357,14 @@ when configured. The open-question state survives automated resumes (#549).
 Each question has its own notification key and durable outbox beside the turn
 log. `proj-watch` retries opens with `notify ensure` (no daily reminders),
 since the notifier's zero exit does not acknowledge delivery. It retains closes
-until `notify pending` confirms closure. An authorized human reply, completion (native or VM), or
-explicit stop closes the notice; a later question gets its own key even if
+until `notify pending` confirms closure. A human reply closes the notice only
+after its new turn is accepted: host-owned resume receipts distinguish preparatory
+prompts and turn counts from acceptance. The launcher and `_exec` can both
+record acceptance; interrupted cleanup is replayed before the watcher acts.
+Failed or killed starters leave the outstanding question and its authority intact.
+When its unit is known gone, an unaccepted preparation is retained as a failed
+turn with its undelivered prompt; it no longer defers the original question
+deadline. Active units and unknown lifecycle states stay protected.
+Completion (native or VM) or an explicit stop also closes the notice; a later question gets its own key even if
 an older close is still pending. Notification errors do not interrupt turn
 finalization, watchdog updates, completion kicks or scratch cleanup.

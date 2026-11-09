@@ -326,31 +326,60 @@ fn asking_job_resumes_on_steward_entry_without_posting_the_question_again() {
 
 #[test]
 fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
-    let had = issue(7, "sam", &["claude"]);
-    let comments = [said(1, "The owner answered the question.")];
-    let mut b = Box::new();
-    let d = finished(&mut b, &had, 0, &comments, &had);
-    let job = b.cfg.jobs.join("j1");
-    fs::write(job.join("1.end"), "ask\n").unwrap();
-    fs::write(job.join("open-question"), "ask\n").unwrap();
-    b.cfg.tools.systemd_run = "false".into();
-    b.pass()
-        .jobs("sam/box", "box", std::slice::from_ref(&had))
-        .unwrap();
-    assert!(job.join("open-question").exists());
-    assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "0\n");
-    b.cfg.tools.systemd_run = "true".into();
-    b.pass().jobs("sam/box", "box", &[had]).unwrap();
-    assert!(!job.join("open-question").exists());
-    assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
-    assert!(
-        !fs::read_to_string(job.join("prompt.2"))
-            .unwrap()
-            .contains("Do not repeat")
-    );
-    assert!(
-        crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask").contains("with your question")
-    );
+    for fault in ["none", "receipt", "cleanup"] {
+        let had = issue(7, "sam", &["claude"]);
+        let comments = [said(1, "The owner answered the question.")];
+        let mut b = Box::new();
+        let d = finished(&mut b, &had, 0, &comments, &had);
+        let job = b.cfg.jobs.join("j1");
+        fs::write(job.join("1.end"), "ask\n").unwrap();
+        fs::write(job.join("open-question"), "ask\n").unwrap();
+        b.cfg.tools.systemd_run = "false".into();
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&had))
+            .unwrap();
+        assert!(job.join("open-question").exists());
+        assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "0\n");
+        let blocked = if fault == "receipt" {
+            crate::ask::host_path(&crate::job::Job::new(&b.cfg, "j1"), "resume-2.new")
+        } else {
+            job.join("question-answered-through.new")
+        };
+        let runner = b.path("runner");
+        burrow_test::executable(
+            &runner,
+            if fault == "none" {
+                "#!/bin/sh\nexit 0\n".to_owned()
+            } else {
+                format!("#!/bin/sh\nmkdir -p '{}'\nexit 0\n", blocked.display())
+            },
+        );
+        b.cfg.tools.systemd_run = runner;
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&had))
+            .unwrap();
+        assert_eq!(job.join("open-question").exists(), fault != "none");
+        assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
+        assert!(
+            !fs::read_to_string(job.join("prompt.2"))
+                .unwrap()
+                .contains("Do not repeat")
+        );
+        if fault != "none" {
+            fs::remove_dir(blocked).unwrap();
+            let j = crate::job::Job::new(&b.cfg, "j1");
+            crate::question::accept(&j, "2").unwrap();
+            b.pass()
+                .jobs("sam/box", "box", std::slice::from_ref(&had))
+                .unwrap();
+            assert_eq!(fs::read_to_string(job.join("turns")).unwrap().trim(), "2");
+            assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "1\n");
+        }
+        assert!(
+            crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask")
+                .contains("with your question")
+        );
+    }
 }
 
 #[test]

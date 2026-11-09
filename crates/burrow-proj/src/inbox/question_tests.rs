@@ -1,4 +1,5 @@
 use super::sorting_tests::{Box, issue};
+use crate::read;
 use serde_json::json;
 use std::fs;
 
@@ -165,7 +166,8 @@ fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
     assert!(!crate::scratch::over(&job), "owned questions keep scratch");
     crate::question::Resume::prepare(&job, true)
         .unwrap()
-        .commit();
+        .commit()
+        .unwrap();
     job.set_turns(2).unwrap();
     fs::write(job.turn("2", "end"), "done\n").unwrap();
     fs::write(job.turn("2", "outcome"), "done\n").unwrap();
@@ -278,7 +280,8 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
         assert_eq!(b.posted().matches("First question?").count(), 1);
         crate::question::Resume::prepare(&job, false)
             .unwrap()
-            .commit();
+            .commit()
+            .unwrap();
         job.set_turns(2).unwrap();
         fs::write(job.turn("2", "outcome"), "done\n").unwrap();
         fs::write(job.turn("2", "result"), "Unrelated update handled.").unwrap();
@@ -289,7 +292,8 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
         match resolution {
             "human" => crate::question::Resume::prepare(&job, true)
                 .unwrap()
-                .commit(),
+                .commit()
+                .unwrap(),
             "explicit" => crate::ask::finish(&b.cfg, &job, "done").unwrap(),
             _ => {
                 let mut q = crate::ask::load(&job).unwrap();
@@ -306,7 +310,8 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
                     assert_eq!(b.posted().matches("No answer by").count(), 1);
                     crate::question::Resume::prepare(&job, true)
                         .unwrap()
-                        .commit();
+                        .commit()
+                        .unwrap();
                 }
             }
         }
@@ -329,5 +334,59 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
             2,
             "{resolution}"
         );
+    }
+}
+
+#[test]
+fn sorting_reply_is_consumed_once_despite_accepted_reconciliation_errors() {
+    for fault in ["receipt", "cleanup"] {
+        let mut b = Box::new();
+        burrow_test::executable(
+            &b.cfg.tools.systemctl,
+            "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+        );
+        let d = super::sorting_tests::sorting(&b, "Which release?");
+        let job = crate::job::Job::new(&b.cfg, "s1");
+        fs::write(job.path("session"), "s1").unwrap();
+        fs::write(job.turn("1", "end"), "ask\n").unwrap();
+        fs::write(
+            crate::ask::host_path(&job, "question-since"),
+            (crate::now() - 2).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            crate::ask::host_path(&job, "question"),
+            json!({
+                "recommendation":{"default":"keep it", "one_way":false}, "due":crate::now()+3600,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let blocked = if fault == "receipt" {
+            crate::ask::host_path(&job, "resume-2.new")
+        } else {
+            job.path("question-answered-through.new")
+        };
+        let runner = b.path("runner");
+        burrow_test::executable(
+            &runner,
+            format!("#!/bin/sh\nmkdir -p '{}'\nexit 0\n", blocked.display()),
+        );
+        b.cfg.tools.systemd_run = runner;
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        fs::write(b.path("comments"), json!([{"id":19,"user":{"login":"sam","type":"User"},"body":"Use the new release.","created_at":burrow_probe::answer::utc(crate::now())}]).to_string()).unwrap();
+        b.pass()
+            .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+            .unwrap();
+        assert_eq!(read(&d.join("seen")).as_deref(), Some("19"));
+        let job = crate::job::Job::new(&b.cfg, "s1");
+        assert_eq!(job.turns().as_deref(), Some("2"));
+        fs::remove_dir(blocked).unwrap();
+        crate::question::accept(&job, "2").unwrap();
+        b.pass()
+            .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+            .unwrap();
+        assert_eq!(job.turns().as_deref(), Some("2"));
+        assert_eq!(read(&d.join("seen")).as_deref(), Some("19"));
     }
 }
