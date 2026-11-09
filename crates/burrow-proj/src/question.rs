@@ -118,9 +118,14 @@ pub(crate) fn recover(job: &Job) -> Result<(), String> {
             // The caller owns the launcher lock. A live unit or unknown
             // lifecycle can still accept a preparation; a vanished unit cannot.
             if !r.applied {
+                // Read the queued job before the unit state: a queued start
+                // may become active between observations. The launcher lock
+                // prevents a new launch from racing a known empty queue.
+                let pending = crate::systemd::pending(job.cfg, &job.unit());
                 let load = crate::systemd::show(job.cfg, &job.unit(), "LoadState");
                 let active = crate::systemd::show(job.cfg, &job.unit(), "ActiveState");
-                if (load == "not-found" || matches!(active.as_str(), "inactive" | "failed"))
+                if pending == Some(false)
+                    && (load == "not-found" || matches!(active.as_str(), "inactive" | "failed"))
                     && !job.end_pending()
                 {
                     // Reconcile as abandoned, never as answered. Keep the

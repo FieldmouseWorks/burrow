@@ -14,16 +14,20 @@ fn watched() -> Fixture {
 state=$(cat '{state}')
 case "$*" in
 *LoadState*) if test "$state" = absent; then echo not-found; else echo loaded; fi ;;
+*Job*proj-ended@*) ;;
+*Job*) cat '{pending}' ;;
 *ActiveState*) if test "$state" = absent; then echo inactive; else echo "$state"; fi ;;
 *is-active*) test "$state" = active || test "$state" = activating ;;
 esac
 "#,
-            state = f.dir.path().join("unit-state").display()
+            state = f.dir.path().join("unit-state").display(),
+            pending = f.dir.path().join("unit-job").display()
         ),
     );
     f.cfg.tools.systemctl = control;
     f.cfg.tools.systemd_run = "true".into();
     fs::write(f.dir.path().join("unit-state"), "absent").unwrap();
+    fs::write(f.dir.path().join("unit-job"), "").unwrap();
     f
 }
 
@@ -199,4 +203,36 @@ fn next_start_preserves_the_abandoned_turn_identity() {
         read(&f.job().turn("2", "outcome")).as_deref(),
         Some("failed")
     );
+}
+
+#[test]
+fn queued_starts_and_unknown_jobs_preserve_replies_until_exec() {
+    for state in ["inactive", "failed", "active", "unknown"] {
+        for pending in [Some("42"), Some("42/start"), None] {
+            for one_way in [false, true] {
+                let f = watched();
+                question(&f, one_way, crate::now() - 1);
+                publish(&f, true, false);
+                fs::write(f.dir.path().join("unit-state"), state).unwrap();
+                let path = f.dir.path().join("unit-job");
+                if let Some(value) = pending {
+                    fs::write(path, value).unwrap();
+                } else {
+                    fs::remove_file(path).unwrap();
+                }
+                crate::watch::look(&f.cfg, "").unwrap();
+                assert_eq!(f.job().turns().as_deref(), Some("2"), "{state} {pending:?}");
+                assert!(acceptance_pending(&f.job()).unwrap());
+                assert!(crate::ask::load(&f.job()).is_some());
+                assert!(!crate::ask::host_path(&f.job(), "question-needs-owner").exists());
+                assert!(!f.job().turn("1", "question-closed").exists());
+                // The queued unit eventually enters _exec on this same receipt.
+                accept(&f.job(), "2").unwrap();
+                crate::watch::look(&f.cfg, "").unwrap();
+                assert_eq!(f.job().turns().as_deref(), Some("2"));
+                assert!(crate::ask::load(&f.job()).is_none());
+                assert!(f.job().turn("1", "question-closed").exists());
+            }
+        }
+    }
 }
