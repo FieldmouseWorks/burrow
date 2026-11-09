@@ -60,10 +60,6 @@ fn read_bytes(file: File) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Bounded UTF-8 state, with the same confinement as transcript reads.
-pub fn text(path: &Path) -> io::Result<String> {
-    to_text(bytes(path)?)
-}
 fn to_text(bytes: Vec<u8>) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
