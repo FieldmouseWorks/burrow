@@ -355,7 +355,7 @@ print("clones: ok")
 
 # The machine starter cannot omit its routing role, even before a clone exists.
 try:
-    C.job("sam/absent", "task")
+    REAL["job"]("sam/absent", "task")
 except TypeError as e:
     assert "role" in str(e), e
 else:

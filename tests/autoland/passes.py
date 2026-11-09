@@ -136,21 +136,21 @@ os.makedirs(f"{tmp}/src/r", exist_ok=True)
 kept = dict(S.CFG)
 S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
-assert REAL["job"]("sam/r", "the task") == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+assert REAL["job"]("sam/r", "the task", role="steward-handed") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--role", "steward-handed", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # One that's project work, with a timeout of its own (a flaky test's).
-assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240) == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240, role="flaky") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--role", "flaky", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # With a machinery App, the job is the machine's own work, and acts as it.
 S.CFG["machinery"] = "workers"
-assert REAL["job"]("sam/r", "the task") == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--app", "workers", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+assert REAL["job"]("sam/r", "the task", role="steward-handed") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--app", "workers", "--role", "steward-handed", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # A PR's job stands in line from when the PR was opened (--since, whole
 # seconds), and never from after now, which proj refuses.
-assert REAL["job"]("sam/r", "the task", since=1792800000.7) == "job-9"
+assert REAL["job"]("sam/r", "the task", since=1792800000.7, role="steward-handed") == "job-9"
 assert open(f"{tmp}/proj-args").read().split()[:5] == ["run", "--pipeline", "--app", "workers", "--since"], open(f"{tmp}/proj-args").read()
 assert open(f"{tmp}/proj-args").read().split()[5] == "1792800000"
-REAL["job"]("sam/r", "the task", since=time.time() + 3600)
+REAL["job"]("sam/r", "the task", since=time.time() + 3600, role="steward-handed")
 assert int(open(f"{tmp}/proj-args").read().split()[5]) <= time.time()
 C.project_dir = project_dir
 S.CFG.clear()
