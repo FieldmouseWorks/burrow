@@ -6,8 +6,8 @@ let
   unstable = nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system};
 in unstable.codex.overrideAttrs (old: {
   patches = (old.patches or [ ]) ++ [ ../../../patches/codex-job-capabilities.patch ];
-  # The Rust setup hook requires system AWS-LC; OpenSSL cannot supply it.
-  buildInputs = (old.buildInputs or [ ]) ++ [ unstable.aws-lc ];
+  # The Rust setup hook requires system libraries for these vendored crates.
+  buildInputs = (old.buildInputs or [ ]) ++ (with unstable; [ aws-lc zstd sqlite oniguruma ]);
   doCheck = true;
   cargoTestFlags = [
     "--package" "codex-config"
