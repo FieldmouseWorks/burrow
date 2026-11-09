@@ -137,10 +137,10 @@ in pkgs.testers.runNixOSTest {
     # Drop the heavy grant from Codex's generated profile, leaving the
     # declaration and probe unchanged. The same comparison must go red.
     original = dev("sed -n 's/^export PROJ_CONFIG=\\([^ ]*\\).*/\\1/p' $(command -v proj)")
-    dev("jq '.tools.codex = \"${drop}\" | .deployed = \"/data/dev/proj-negative\"' " + original + " >/data/dev/proj-negative.json")
-    wrapper = "#!/bin/sh\nexport PROJ_CONFIG=/data/dev/proj-negative.json PROJ_SELF=/data/dev/proj-negative\nexec ${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj \"$@\"\n"
-    machine.succeed("printf %s " + shlex.quote(wrapper) + " >/data/dev/proj-negative && chmod +x /data/dev/proj-negative && chown dev:dev /data/dev/proj-negative*")
-    n = dev('/data/dev/proj-negative run --role second --app workers web go')
+    dev("jq '.tools.codex = \"${drop}\" | .deployed = \"/home/dev/proj-negative\"' " + original + " >/home/dev/proj-negative.json")
+    wrapper = "#!/bin/sh\nexport PROJ_CONFIG=/home/dev/proj-negative.json PROJ_SELF=/home/dev/proj-negative\nexec ${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj \"$@\"\n"
+    dev("printf %s " + shlex.quote(wrapper) + " >/home/dev/proj-negative && chmod +x /home/dev/proj-negative")
+    n = dev('/home/dev/proj-negative run --role second --app workers web go')
     machine.wait_until_succeeds(f"su - dev -c 'proj state {n}' | grep -Evx 'queued|running'", timeout=300)
     assert results(n) != expected, "dropping heavy did not break parity"
     assert machine.succeed(f"cat /data/dev/jobs/{n}/capability-running").strip() == "heavy"
