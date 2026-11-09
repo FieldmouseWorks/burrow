@@ -7,7 +7,10 @@
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
-//! stop it while it waits), `N.slot` (the slot it took, once it has one), `N.jsonl` (its stream), `N.result` (its answer), `N.outcome`
+//! stop it while it waits), `N.slot` (the slot it took, once it has one),
+//! `N.started` (immutable first execution time, Unix seconds), `N.jsonl`
+//! (its stream, with host-written `burrow.run` boundaries), `N.result`
+//! (its answer), `N.outcome`
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
 //! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
 //! one of its commands waits in line for), `N.waits` (where they say so),
@@ -59,6 +62,21 @@ impl<'a> Job<'a> {
     pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
         let n = if valid_turn(n) { n } else { "invalid-turn" };
         self.dir.join(format!("{n}.{kind}"))
+    }
+
+    /// Record each actual invocation, retaining the first execution time across
+    /// slot removal, allowance waits and retries of this turn.
+    pub(crate) fn record_run(&self, n: &str, at: i64) -> io::Result<()> {
+        let dir = burrow_process::state_reads::Dir::open(&self.dir)?;
+        match dir.create(&format!("{n}.started"), format!("{at}\n").as_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        dir.append(
+            &format!("{n}.jsonl"),
+            format!("{{\"type\":\"burrow.run\",\"at\":{at}}}\n").as_bytes(),
+        )
     }
 
     /// The engine recorded for this turn, including jobs that changed engines.
@@ -628,5 +646,34 @@ mod tests {
         assert_eq!(got[0].was, "{\"state\":\"open\"}");
         assert_eq!(got[1].line(), "x/y#1\t200\t\n");
         assert_eq!((got[2].target.as_str(), got[2].since.as_str()), ("bad", ""));
+    }
+}
+
+#[cfg(test)]
+mod usage_start_tests {
+    #[test]
+    fn first_execution_is_recorded_once_across_later_waits_and_runs() {
+        use super::super::{
+            config::{Config, tests::example},
+            job::Job,
+        };
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.jobs = tmp.path().join("jobs");
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(job.turn("1", "jsonl"), "").unwrap();
+        assert!(!job.turn("1", "started").exists());
+        job.record_run("1", 100).unwrap();
+        fs::write(job.turn("1", "slot"), "slot").unwrap();
+        fs::remove_file(job.turn("1", "slot")).unwrap();
+        job.record_run("1", 300).unwrap();
+        assert_eq!(
+            fs::read_to_string(job.turn("1", "started")).unwrap(),
+            "100\n"
+        );
+        let lines = fs::read_to_string(job.turn("1", "jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2);
     }
 }

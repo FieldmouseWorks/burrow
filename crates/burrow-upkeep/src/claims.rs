@@ -107,7 +107,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             continue;
         }
         let path = l.jobs.join(jid).join("answers.json");
-        let answers = match std::fs::read_to_string(&path) {
+        let answers = match burrow_process::state_reads::text(&path) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
@@ -121,8 +121,17 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             }
         };
         let dir = l.jobs.join(jid);
-        let turn = std::fs::read_to_string(dir.join("turns")).unwrap_or_default();
-        let engine = std::fs::read_to_string(dir.join(format!("{}.engine", turn.trim())))
+        let turn = burrow_process::state_reads::text(&dir.join("turns")).unwrap_or_default();
+        let turn = turn.trim();
+        let turn = if !turn.is_empty()
+            && turn.bytes().all(|b| b.is_ascii_digit())
+            && turn.parse::<u64>().is_ok_and(|n| n > 0)
+        {
+            turn
+        } else {
+            "invalid-turn"
+        };
+        let engine = burrow_process::state_reads::text(&dir.join(format!("{turn}.engine")))
             .unwrap_or_default();
         let engine = match engine.trim() {
             "codex" => "Codex",

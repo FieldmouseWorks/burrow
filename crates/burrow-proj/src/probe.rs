@@ -272,6 +272,24 @@ mod tests {
         cfg
     }
     #[test]
+    fn sandbox_usage_answers_do_not_follow_host_secret_symlinks() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut cfg = fixture(root);
+        cfg.probe.as_mut().unwrap().jobs = Some(cfg.jobs.clone());
+        let job = Job::new(&cfg, "local");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(root.join("private"), "ordinary confidential text").unwrap();
+        symlink(root.join("private"), job.path("usage-kind")).unwrap();
+        fs::write(job.turn("1", "started"), crate::now().to_string()).unwrap();
+        fs::write(job.turn("1", "jsonl"), "{}\n").unwrap();
+        let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+        let got = exchange(&socket(&cfg, &job, "1"), &["usage -5h".into()]).unwrap();
+        assert!(got.contains("claude: 1 turns"), "{got}");
+        assert!(!got.contains("ordinary confidential text"));
+    }
+    #[test]
     fn local_job_gets_host_answers_and_invalid_queries_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = fixture(dir.path());

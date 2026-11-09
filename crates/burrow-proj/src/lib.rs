@@ -289,7 +289,10 @@ pub fn nanos(d: &str) -> Option<i64> {
     Some(s.ceil().min(1e18) as i64)
 }
 
-mod state_reads;
+pub(crate) use burrow_process::state_reads;
+#[cfg(test)]
+#[path = "state_reads/tests.rs"]
+mod state_reads_tests;
 
 #[cfg(test)]
 mod tests {

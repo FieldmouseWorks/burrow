@@ -2,83 +2,39 @@
 use super::{Machine, utc};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-fn read(p: &Path, name: &str) -> String {
-    fs::read_to_string(p.join(name))
-        .unwrap_or_default()
-        .trim()
-        .into()
+mod accounting;
+use accounting::{Session, decode};
+use burrow_process::state_reads::Dir;
+fn read(dir: &Dir, name: &str) -> String {
+    dir.text(name).unwrap_or_default().trim().into()
 }
-fn records(p: &Path) -> impl Iterator<Item = Value> {
-    File::open(p)
-        .ok()
-        .into_iter()
+fn records(file: Option<File>) -> impl Iterator<Item = Value> {
+    file.into_iter()
         .flat_map(|f| BufReader::new(f).lines().map_while(Result::ok))
         .filter_map(|l| serde_json::from_str(&l).ok())
 }
-fn time(p: &Path) -> Option<i64> {
-    Some(
-        p.metadata()
-            .ok()?
-            .modified()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_secs() as i64,
-    )
-}
-fn turn_time(dir: &Path, n: u64) -> Option<i64> {
-    time(&dir.join(format!("{n}.slot"))).or_else(|| time(&dir.join(format!("{n}.jsonl"))))
-}
-const FIELDS: [&str; 4] = [
-    "input_tokens",
-    "output_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-];
-#[derive(Default)]
-struct Spent {
-    tokens: [u64; 4],
-    cost: f64,
-}
-impl Spent {
-    fn result(v: &Value) -> Self {
-        Self {
-            tokens: FIELDS.map(|k| v["usage"][k].as_u64().unwrap_or(0)),
-            cost: v["total_cost_usd"].as_f64().unwrap_or(0.0),
-        }
-    }
-    fn delta(&self, old: &Self) -> Self {
-        Self {
-            tokens: std::array::from_fn(|i| self.tokens[i].saturating_sub(old.tokens[i])),
-            cost: (self.cost - old.cost).max(0.0),
-        }
-    }
-    fn add(&mut self, other: &Self) {
-        for (sum, value) in self.tokens.iter_mut().zip(other.tokens) {
-            *sum += value;
-        }
-        self.cost += other.cost;
-    }
-    fn show(&self) -> String {
-        format!(
-            "input={} output={} cache-read={} cache-write={}",
-            self.tokens[0], self.tokens[1], self.tokens[2], self.tokens[3]
-        )
-    }
+fn turn_time(dir: &Dir, n: u64) -> Option<i64> {
+    read(dir, &format!("{n}.started")).parse().ok()
 }
 pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
     let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unstarted: BTreeMap<String, usize> = BTreeMap::new();
     if let Some(jobs) = &m.cfg.jobs {
         let root = m.path(&jobs.to_string_lossy());
-        for entry in fs::read_dir(&root).map_err(|e| format!("{}: {e}", root.display()))? {
-            let dir = entry.map_err(|e| e.to_string())?.path();
-            if !dir.is_dir() {
+        let root = Dir::open(&root).map_err(|e| e.to_string())?;
+        for name in root.names().map_err(|e| e.to_string())? {
+            // Hidden directories hold proj control state, not job turns.
+            if name.to_string_lossy().starts_with('.') {
                 continue;
             }
+            let Ok(dir) = root.dir(Path::new(&name)) else {
+                continue;
+            };
             let link = read(&dir, "link");
             let reference = link
                 .strip_prefix("https://github.com/")
@@ -111,77 +67,65 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
                     }
                 );
             }
-            let mut turns: Vec<u64> = fs::read_dir(&dir)
+            let mut turns: Vec<u64> = dir
+                .names()
                 .map_err(|e| e.to_string())?
-                .filter_map(Result::ok)
-                .filter_map(|e| e.file_name().to_str()?.strip_suffix(".jsonl")?.parse().ok())
+                .into_iter()
+                .filter_map(|name| name.to_str()?.strip_suffix(".jsonl")?.parse().ok())
                 .collect();
             turns.sort_unstable();
-            // Historical jobs need no stream reads. For a selected job, earlier
-            // turns establish the session totals before the requested span.
+            for n in &turns {
+                if turn_time(&dir, *n).is_none() {
+                    let engine = read(&dir, &format!("{n}.engine"));
+                    let empty = dir
+                        .file(Path::new(&format!("{n}.jsonl")))
+                        .ok()
+                        .and_then(|f| f.metadata().ok())
+                        .is_some_and(|m| m.len() == 0);
+                    let counts = if empty { &mut unstarted } else { &mut unknown };
+                    *counts
+                        .entry(if engine.is_empty() {
+                            "claude".into()
+                        } else {
+                            engine
+                        })
+                        .or_default() += 1;
+                }
+            }
             if !turns
                 .iter()
                 .any(|n| turn_time(&dir, *n).is_some_and(|at| at >= since && at <= m.now))
             {
                 continue;
             }
-            let mut sessions: BTreeMap<String, Spent> = BTreeMap::new();
+            let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
             for n in turns {
-                let stream = dir.join(format!("{n}.jsonl"));
-                let at = turn_time(&dir, n).unwrap_or(0);
+                let at = turn_time(&dir, n);
                 let engine = read(&dir, &format!("{n}.engine"));
                 let engine = if engine.is_empty() { "claude" } else { &engine };
-                let mut session = format!("turn-{n}");
-                let mut spent = Spent::default();
-                let mut has_result = false;
-                let mut messages = BTreeMap::new();
-                if engine == "claude" {
-                    for v in records(&stream) {
-                        if let Some(id) = v["session_id"].as_str() {
-                            session = id.into();
-                        }
-                        if v["type"] == "result"
-                            && v["usage"].is_object()
-                            && v["total_cost_usd"].is_number()
-                        {
-                            let result = Spent::result(&v);
-                            spent.add(&result.delta(sessions.entry(session.clone()).or_default()));
-                            sessions.insert(session.clone(), result);
-                            has_result = true;
-                        }
-                        if v["type"] == "assistant"
-                            && let Some(id) = v["message"]["id"].as_str()
-                        {
-                            messages.insert(
-                                id.to_owned(),
-                                FIELDS.map(|k| v["message"]["usage"][k].as_u64().unwrap_or(0)),
-                            );
-                        }
-                    }
-                }
+                let report = if engine == "claude" {
+                    Some(decode(
+                        records(dir.file(Path::new(&format!("{n}.jsonl"))).ok()),
+                        &mut sessions,
+                        &format!("turn-{n}"),
+                    ))
+                } else {
+                    None
+                };
+                let Some(at) = at else {
+                    continue;
+                };
                 if at < since || at > m.now {
                     continue;
                 }
                 *counts.entry(engine.into()).or_default() += 1;
-                let detail = if engine != "claude" {
-                    String::new()
-                } else if has_result {
-                    format!("{} cost=${:.6}", spent.show(), spent.cost)
-                } else {
-                    let mut s = Spent::default();
-                    for t in messages.values() {
-                        for (sum, v) in s.tokens.iter_mut().zip(t) {
-                            *sum += v;
-                        }
-                    }
-                    format!("{}; no result: partial tokens, cost unavailable", s.show())
-                };
+                let detail = report.map(|r| r.show()).unwrap_or_default();
                 groups
                     .entry((engine.into(), kind.clone()))
                     .or_default()
                     .push(format!(
                         "  {}{reference} turn {n} {} {detail}\n",
-                        dir.file_name().unwrap_or_default().to_string_lossy(),
+                        name.to_string_lossy(),
                         utc(at)
                     ));
             }
@@ -194,6 +138,16 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
     );
     for engine in ["claude", "codex"] {
         out += &format!("{engine}: {} turns\n", counts.get(engine).unwrap_or(&0));
+    }
+    for (engine, n) in unknown {
+        out += &format!(
+            "{engine}: {n} historical turns with unknown first start (excluded from span totals)\n"
+        );
+    }
+    for (engine, n) in unstarted {
+        out += &format!(
+            "{engine}: {n} turns without recorded execution (empty stream; excluded from span totals)\n"
+        );
     }
     for ((engine, kind), turns) in groups {
         out += &format!("{engine} / {kind}: {} turns\n", turns.len());
@@ -208,10 +162,11 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
             .join("usage-reset/meters/log")
             .to_string_lossy(),
     );
-    if !log.exists() {
+    let log = burrow_process::state_reads::open(&log).ok();
+    if log.is_none() {
         out += "unavailable (no meter log)\n";
     }
-    for v in records(&log) {
+    for v in records(log) {
         let Some(at) = v["read_at"].as_f64() else {
             continue;
         };

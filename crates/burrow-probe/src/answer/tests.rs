@@ -402,9 +402,10 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     fs::create_dir_all(&job).unwrap();
     fs::write(job.join("role"), "repair").unwrap();
     fs::write(job.join("usage-kind"), "inbox labels=codex opener=owner").unwrap();
-    let put = |n, engine, at, text: &str| {
+    let put = |n: u64, engine: &str, at: u64, text: &str| {
         fs::write(job.join(format!("{n}.engine")), engine).unwrap();
         fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
+        fs::write(job.join(format!("{n}.started")), at.to_string()).unwrap();
         let f = fs::File::create(job.join(format!("{n}.slot"))).unwrap();
         f.set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(at)))
             .unwrap();
@@ -424,6 +425,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     fs::write(other.join("starter"), "operator-session").unwrap();
     fs::write(other.join("1.engine"), "codex").unwrap();
     fs::write(other.join("1.jsonl"), "{}\n").unwrap();
+    fs::write(other.join("1.started"), "275").unwrap();
     fs::File::create(other.join("1.slot"))
         .unwrap()
         .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(275)))
@@ -449,9 +451,9 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     assert!(answer.contains("claude: 2 turns"), "{answer}");
     assert!(answer.contains("codex: 2 turns"));
     assert!(answer.contains("role repair; inbox labels=codex opener=owner"));
-    assert!(answer.contains("input=0 output=0 cache-read=0 cache-write=0 cost=$0.000000"));
+    assert!(answer.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$0.000000"));
     assert!(answer.contains(
-        "input=7 output=9 cache-read=0 cache-write=0; no result: partial tokens, cost unavailable"
+        "input=7 output=0 cache-read=0 cache-write=0 known-cost=$0.000000; partial tokens (output counts completed runs only); additional cost unavailable"
     ));
     assert!(answer.contains("claude five_hour: 100% HIT 100%"));
     assert!(answer.contains("codex seven_day: 40%"));
@@ -471,4 +473,153 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         }
     );
     assert!(Query::parse("usage -1h extra").is_err());
+}
+
+#[test]
+fn usage_cannot_read_symlinked_metadata_transcripts_or_job_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let jobs = root.join("jobs");
+    let job = jobs.join("job");
+    fs::create_dir_all(&job).unwrap();
+    let secret = "ordinary confidential text";
+    fs::write(root.join("secret"), secret).unwrap();
+    fs::write(root.join("stream-secret"),format!("{{\"type\":\"result\",\"session_id\":\"s\",\"usage\":{{\"input_tokens\":9999}},\"total_cost_usd\":9999}}\n")).unwrap();
+    fs::write(job.join("1.started"), "200").unwrap();
+    fs::File::create(job.join("1.slot"))
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(200)),
+        )
+        .unwrap();
+    fs::write(job.join("1.jsonl"), "{}\n").unwrap();
+    let mut cfg = config(&root.join("state"));
+    cfg.jobs = Some(jobs.clone());
+    let fake = Fake::default();
+    let m = Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 400,
+        uid: 1,
+        run: &fake,
+    };
+    for field in ["role", "usage-kind", "starter", "link", "1.engine"] {
+        symlink(root.join("secret"), job.join(field)).unwrap();
+        let got = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
+        assert!(!got.contains(secret), "{field}: {got}");
+        fs::remove_file(job.join(field)).unwrap();
+    }
+    fs::remove_file(job.join("1.jsonl")).unwrap();
+    symlink(root.join("stream-secret"), job.join("1.jsonl")).unwrap();
+    let got = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
+    assert!(!got.contains("9999"));
+    fs::remove_file(job.join("1.jsonl")).unwrap();
+    fs::write(job.join("1.jsonl"), "{}\n").unwrap();
+    fs::rename(&job, root.join("private-job")).unwrap();
+    symlink(root.join("private-job"), &job).unwrap();
+    let got = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
+    assert!(got.contains("claude: 0 turns"));
+}
+
+#[test]
+fn usage_retains_baselines_outside_the_span_and_marks_a_later_unfinished_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let jobs = root.join("jobs");
+    let job = jobs.join("job");
+    fs::create_dir_all(&job).unwrap();
+    let result = |input, cost| {
+        serde_json::json!({"type":"result","session_id":"s","usage":{"input_tokens":input,"output_tokens":3},"total_cost_usd":cost}).to_string()
+    };
+    let put = |n, at, text: String| {
+        fs::write(job.join(format!("{n}.started")), format!("{at}")).unwrap();
+        fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
+    };
+    put(1, 100, result(100, 1.5));
+    put(
+        2,
+        200,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"assistant","session_id":"s","message":{"id":"m","usage":{"input_tokens":7}}}),
+            serde_json::json!({"type":"result","session_id":"s","subtype":"error_during_execution","usage":{"input_tokens":0},"total_cost_usd":0})
+        ),
+    );
+    put(
+        3,
+        300,
+        format!(
+            "{}\n{}\n{}\n",
+            result(80, 2.0),
+            serde_json::json!({"type":"system","subtype":"init","session_id":"s"}),
+            serde_json::json!({"type":"assistant","session_id":"s","message":{"id":"last","usage":{"input_tokens":9}}})
+        ),
+    );
+    let mut cfg = config(&root.join("state"));
+    cfg.jobs = Some(jobs);
+    let fake = Fake::default();
+    let m = Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 400,
+        uid: 1,
+        run: &fake,
+    };
+    let got = m.answer(&Query::parse("usage @150").unwrap()).unwrap();
+    assert!(
+        got.contains("input=89 output=3 cache-read=0 cache-write=0 known-cost=$0.500000"),
+        "{got}"
+    );
+    assert!(got.contains("cost may include unreported earlier runs"));
+    assert!(got.contains("additional cost unavailable"));
+    assert!(!got.contains("cost=$2.000000"));
+}
+
+#[test]
+fn usage_first_start_survives_slot_recreation_and_unknown_history_is_explicit() {
+    use std::fs::FileTimes;
+    use std::time::{Duration, UNIX_EPOCH};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let jobs = root.join("jobs");
+    let job = jobs.join("job");
+    fs::create_dir_all(&job).unwrap();
+    fs::write(job.join("1.started"), "100").unwrap();
+    fs::write(job.join("1.jsonl"), "{}\n").unwrap();
+    fs::write(job.join("2.jsonl"), "{}\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(job.join("1.jsonl"))
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(300)))
+        .unwrap();
+    fs::write(job.join("3.jsonl"), "").unwrap();
+    let mut cfg = config(&root.join("state"));
+    cfg.jobs = Some(jobs);
+    let fake = Fake::default();
+    let m = Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 400,
+        uid: 1,
+        run: &fake,
+    };
+    for has_slot in [false, true] {
+        if has_slot {
+            fs::File::create(job.join("1.slot"))
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(300)))
+                .unwrap();
+        }
+        let got = m.answer(&Query::parse("usage @150").unwrap()).unwrap();
+        assert!(got.contains("claude: 0 turns"), "{got}");
+        assert!(got.contains("1 turns without recorded execution"));
+        assert!(got.contains("1 historical turns with unknown first start"));
+    }
+    assert!(
+        m.answer(&Query::parse("usage @0").unwrap())
+            .unwrap()
+            .contains("claude: 1 turns")
+    );
 }
