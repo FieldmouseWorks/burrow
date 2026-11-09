@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::config::{
     App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Snapshot, Stage, Webhook,
 };
-use crate::pass::{Jobs, Out, Pass};
+use crate::pass::{Jobs, Lifecycle, Out, Pass};
 
 pub const T: f64 = 1_800_000_000.0;
 /// A time with a fraction that serde_json reads back a hair off, as about
@@ -234,6 +234,10 @@ pub struct States {
     pub found: HashMap<String, String>,
     pub unfound: Option<String>,
     pub finds: Vec<String>,
+    /// What `proj lifecycle` says a job holds, by id; else, with `record`,
+    /// the PRs and issues its await file there lists, as proj reads them.
+    pub held: HashMap<String, Vec<String>>,
+    pub record: Option<std::path::PathBuf>,
 }
 
 impl States {
@@ -245,6 +249,8 @@ impl States {
             found: HashMap::new(),
             unfound: None,
             finds: vec![],
+            held: HashMap::new(),
+            record: None,
         }
     }
 
@@ -263,9 +269,24 @@ impl States {
 }
 
 impl Jobs for States {
-    fn state(&mut self, jid: &str) -> Option<String> {
+    fn lifecycle(&mut self, jid: &str) -> Lifecycle {
         self.asked.push(jid.into());
-        self.of.get(jid).cloned().or_else(|| self.default.clone())
+        let state = self.of.get(jid).cloned().or_else(|| self.default.clone());
+        let holds = match self.held.get(jid) {
+            Some(held) => held.clone(),
+            None => {
+                let text = self
+                    .record
+                    .as_ref()
+                    .and_then(|r| fs::read_to_string(r.join(jid).join("await")).ok())
+                    .unwrap_or_default();
+                text.lines()
+                    .filter_map(|l| l.split('\t').next())
+                    .map(|t| format!("await {t}"))
+                    .collect()
+            }
+        };
+        Lifecycle { state, holds }
     }
 
     fn find(&mut self, key: &str) -> Result<Option<String>, String> {

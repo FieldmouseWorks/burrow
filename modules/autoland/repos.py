@@ -202,7 +202,7 @@ def watch_default(r, info, prs, digest):
     key = f"repo-{repo.replace('/', '_')}.json"
     st = load(key, {})
     red = st.get("red") or {}
-    working = red.get("job") and C.job_state(red["job"]) in (None, "queued", "running")
+    working = red.get("job") and C.at_work(red["job"])
     fixes = [pr for pr in prs if red_fix(pr, default, red.get("undos", ()))]
     if state not in ("FAILURE", "ERROR", "SUCCESS"):
         # CI on the branch hasn't said (it's running, or has nothing on the

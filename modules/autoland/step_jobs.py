@@ -24,14 +24,17 @@ class Jobs:
         the fix it asks for) while it's still queued or running, or proj
         can't say: "queued", "running" or "unknown"; else "", and how it
         ended goes in ends. One that is keeps its deadline, since each pass
-        replaces the repo's wake-ups. A fix job (ON) whose turn ended
-        awaiting a PR or issue other than this one (the upstream fix it
-        needs, say) is "awaiting", what it awaits in awaits: still at work
-        here, since proj resumes it once that changes, so it's neither
-        lost nor handed again (remi#881 went to the stuck issue as two
-        jobs that ended without fixing it, while both waited on burrow's
-        PR with the fix). One look a job a pass: asked again, it says the
-        same, and a run of broken jobs is counted once (breaking)."""
+        replaces the repo's wake-ups. A job of any kind whose turn ended
+        holding something open (C.job_lifecycle: a question for a person,
+        or a PR or issue other than this one it awaits, the upstream fix it
+        needs, say) is "awaiting", what it waits on in awaits: still at work
+        here, since proj resumes it once that's answered or changes, so it's
+        neither lost nor started again (remi#881: two jobs that ended
+        without fixing it, while both waited on burrow's PR with the fix,
+        and a question's job taken for ended, so a second fixed the same
+        branch while the first's question timed out and resumed it). One
+        look a job a pass: asked again, it says the same, and a run of
+        broken jobs is counted once (breaking)."""
         if at is _HEAD:
             at = self.head
         jid = self.st.get(kind + "Job")
@@ -43,7 +46,7 @@ class Jobs:
 
     def look(self, kind, jid):
         """running's look at the job: what proj says of it, once."""
-        state, target = C.job_lifecycle(jid, self.tag) if kind in ON else (C.job_state(jid), None)
+        state, target = C.job_lifecycle(jid, self.tag)
         if target:
             # No deadline: its wake is proj's resume, whose end kicks a pass.
             self.awaits[kind] = target
@@ -61,11 +64,16 @@ class Jobs:
     def at_work(self, kind, doing, at=_HEAD):
         """What the status says of this head's job of the kind: queued for
         its work until proj starts it (a job can wait hours for a slot, and
-        proj kicks a pass when it starts), at it from then on."""
+        proj kicks a pass when it starts), at it from then on, and what it
+        waits on while its turn is over but it's still at work (running's
+        "awaiting")."""
         if at is _HEAD:
             at = self.head
-        if self.running(kind, at) == "queued":
+        state = self.running(kind, at)
+        if state == "queued":
             return f"a Claude job is queued for {doing}"
+        if state == "awaiting":
+            return f"the Claude job {doing} awaits {self.awaits[kind]}"
         return f"a Claude job is {doing}"
 
     def started(self, kind, task, at=_HEAD, broken=False, begin=None):
@@ -185,8 +193,8 @@ class Jobs:
             )
 
     def fixing(self):
-        """The kind of fix job still queued or running (or that proj can't
-        say about), else None: whatever head or base it was handed on, since
+        """The kind of fix job still at work (running: queued, running,
+        awaiting, or that proj can't say about), else None: whatever head or base it was handed on, since
         each pushes to the branch, and a new head or base doesn't stop it."""
         for k in ON:
             if self.st.get(k + "Job") and self.running(k, self.st.get(k)):

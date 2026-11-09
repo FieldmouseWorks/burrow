@@ -1,24 +1,27 @@
-"""Focused real Python lifecycle reader and handoff regression tests.
+"""Focused real Python lifecycle reader and handoff regression tests: what
+the steward takes a job's lifecycle (`proj lifecycle`, which reads its state
+and what it holds under the job's turn-start lock: crates/burrow-proj's
+lifecycle_reads_under_the_turn_start_lock) to say, for every kind of job.
 Run: python3 tests/autoland/lifecycle.py
 """
-import fcntl
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
-import threading
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
                 str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
-    cfg.write_text(json.dumps(dict(context='test', stateDir=tmp, jobsDir=tmp,
+    cfg.write_text(json.dumps(dict(context='test', stateDir=tmp, jobsDir=tmp, owner='Sam', proj=f'{tmp}/proj',
                                   conary='cn', trainContext='train', snapDir=tmp)))
     os.environ['AUTOLAND_CONFIG'] = str(cfg)
     import common as C
     from step_jobs import Jobs
     from step_context import ON
+
+    KINDS = (*ON, 'judged', 'proved')
 
     class Reader(Jobs):
         def __init__(self, kind, head):
@@ -31,49 +34,56 @@ with tempfile.TemporaryDirectory() as tmp:
         def breaking(self, kind):
             pass
 
-    job = Path(tmp) / 'job'
-    job.mkdir()
-    (job / 'lock').touch()
+    def says(state, *held):
+        C.lifecycle = lambda jid: (state, list(held))
+
+    # A fix job awaiting upstream is still at work, on the head it was handed
+    # or its own push, until proj resumes it; queued or running, it is.
     for kind in ON:
         for head in ('original', 'own-push'):
-            for turn in (1, 2, 3):
-                (job / 'turns').write_text(str(turn))
-                (job / 'await').write_text('sam/up#3\t0\t{}\n')
-                attempted = threading.Event()
-                errors = []
-                def resume():
-                    with (job / 'lock').open('a') as lock:
-                        try:
-                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        except BlockingIOError:
-                            pass
-                        else:
-                            errors.append('resume was not excluded')
-                        attempted.set()
-                        fcntl.flock(lock, fcntl.LOCK_EX)
-                        (job / 'turns').write_text(str(turn + 1))
-                        (job / 'await').unlink()
-                threads = []
-                def state(jid):
-                    t = threading.Thread(target=resume)
-                    threads.append(t)
-                    t.start()
-                    assert attempted.wait(5)
-                    return 'done'
-                C.job_state = state
-                reader = Reader(kind, head)
-                assert reader.fixing() == kind
-                assert reader.awaits == {kind: 'sam/up#3'}
-                assert not reader.ends
-                threads[0].join(5)
-                assert not threads[0].is_alive() and not errors, errors
-                for live in ('queued', 'running'):
-                    C.job_state = lambda jid: live
-                    assert Reader(kind, head).fixing() == kind
-            C.job_state = lambda jid: 'done'
-            for targets in ('', 'SAM/R#5\t0\t{}\n'):
-                (job / 'await').write_text(targets)
+            says('done', 'await sam/r#5', 'await sam/up#3')
+            reader = Reader(kind, head)
+            assert reader.fixing() == kind
+            assert reader.awaits == {kind: 'sam/up#3'} and not reader.ends
+            for live in ('queued', 'running', None):
+                says(live)
+                assert Reader(kind, head).fixing() == kind
+            for held in ((), ('await SAM/R#5',)):
+                says('done', *held)
                 reader = Reader(kind, head)
                 assert reader.fixing() is None
                 assert reader.ends == {kind: 'done'}
+
+    # A job of any kind holding a question (or a one-way one left for the
+    # owner) is still at work, however its turn ended (a failed resume
+    # leaves its question, whose deadline resumes it): never lost, never
+    # handed again (remi#881). So is one awaiting anything after a failed
+    # turn. A turn that broke holding nothing is how it ended.
+    for state in ('done', 'failed', 'error', 'timed out after 60m'):
+        for held, said in (('ask', 'an answer to its question'), ('owner', "Sam's answer to its one-way question"),
+                           ('await sam/up#3', 'sam/up#3')):
+            says(state, 'await sam/r#5', held)
+            for kind in KINDS:
+                reader = Reader(kind, 'original')
+                assert reader.running(kind, 'original') == 'awaiting', (state, held, kind)
+                assert reader.awaits == {kind: said} and not reader.ends, (state, held, kind, reader.awaits)
+            assert C.at_work('job') and C.at_work('job', 'sam/r#5'), (state, held)
+        says(state, 'await sam/r#5')
+        for kind in KINDS:
+            reader = Reader(kind, 'original')
+            assert reader.running(kind, 'original') == '' and reader.ends == {kind: state}, (state, kind)
+        assert not C.at_work('job', 'sam/r#5') and C.at_work('job'), 'awaiting only its own PR is ending its turn'
+
+    # What proj says: its state, then each thing held; one it can't read the
+    # record of (it exits non-zero) is kept, as one nothing can say of.
+    del C.lifecycle
+    import importlib
+    importlib.reload(C)
+    proj = Path(tmp) / 'proj'
+    for out, code, want in (('failed\nask\n', 0, ('failed', ['ask'])), ('done\n', 0, ('done', [])),
+                            ('', 1, (None, [])), ('done\n', 1, (None, []))):
+        proj.write_text(f"#!/bin/sh\nprintf '{out}'\nexit {code}\n")
+        proj.chmod(0o755)
+        assert C.lifecycle('job') == want, (out, code, C.lifecycle('job'))
+    assert C.at_work('job') is True, 'unknown is kept'
 print('Python lifecycle and handoff: ok')

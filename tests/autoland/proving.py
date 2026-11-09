@@ -6,7 +6,7 @@ kicks its repo's pass. That pass posts each check as its realise passed or
 failed, naming its derivation, and a failure's log tail goes on the PR once. A build
 that stopped short (killed, nix couldn't build at all, past proofTimeout) is
 the machine failing: built again later, never a failure on the PR. It's
-asked after and stopped like a job (common.job_state, stop_job)."""
+asked after and stopped like a job (common.lifecycle, stop_job)."""
 
 import json
 import os
