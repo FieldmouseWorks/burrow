@@ -182,8 +182,9 @@ Each has an entry below, and each can be imported on its own.
   career drift), including machines without an App. Engine labels enroll
   these issues but their roles choose
   the engine each turn, defaulting to Claude when no line matches.
-  A unit invoking `proj run` must supply `--role`, including units
-  declared by the machine itself.
+  A machine unit invoking `proj run` must supply `--role`, including units
+  declared by the machine itself. Remote Control sessions and existing
+  proj jobs retain the roleless form for work an agent hands on.
   Codex uses its own
   small slot pool (`codex.slots`, two), a sandbox that writes only the
   project, its scratch, its job's dir, git's metadata and a /tmp of its own,
