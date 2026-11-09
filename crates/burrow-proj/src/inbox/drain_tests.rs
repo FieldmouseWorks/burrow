@@ -613,3 +613,40 @@ fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
         b.log()
     );
 }
+
+// A finished turn parked on GitHub still owns its brief until its live wait goes.
+#[test]
+fn awaiting_handed_references_are_not_drained() {
+    let b = Box::new();
+    b.job("lane", "done", "waiting for review");
+    let d = b.record("lane");
+    let lane = d.with_file_name("sam_box-100");
+    fs::rename(d, &lane).unwrap();
+    fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
+    super::Pass::hand(&lane, "Deliver #7").unwrap();
+    let job = b.cfg.jobs.join("lane");
+    fs::write(job.join("1.end"), "await\n").unwrap();
+    let wait = format!("sam/box#200\t{}\t{{\"state\":\"open\"}}\n", crate::now());
+    let seven = found("sam/box", 7, "sam", &["ready"], "2026-10-01T00:00:00Z");
+    let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+    let p = b.pass();
+    // A declaration for a future turn and an empty live wait do not own work.
+    fs::write(job.join("await.next"), &wait).unwrap();
+    fs::write(job.join("await"), "").unwrap();
+    assert!(p.pick_ready(t, std::slice::from_ref(&seven)).is_some());
+    fs::write(job.join("await"), &wait).unwrap();
+    assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
+    let mut unsorted = seven.clone();
+    unsorted["labels"] = json!([]);
+    assert!(p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    p.note_ready("sam/box", std::slice::from_ref(&seven))
+        .unwrap();
+    on_github(&b, &seven);
+    b.pass().drain().unwrap();
+    assert!(!b.log().contains("labels[]=codex"));
+    // Stopping or finishing the job removes its live wait, releasing the brief.
+    fs::remove_file(job.join("await")).unwrap();
+    assert!(!p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    b.pass().drain().unwrap();
+    assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
+}
