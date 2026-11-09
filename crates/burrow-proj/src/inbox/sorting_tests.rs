@@ -889,9 +889,15 @@ fn unattended_question_is_labelled_and_one_way_timeout_keeps_issue_open_and_rele
     )
     .unwrap();
     let now = issue(7, "sam", &["claude"]);
-    b.pass()
+    let mut initial = b.pass();
+    initial
         .jobs("sam/box", "box", std::slice::from_ref(&now))
         .unwrap();
+    assert!(
+        initial.wake.is_empty(),
+        "question deadlines belong to proj-watch alone: {:?}",
+        initial.wake
+    );
     assert!(b.log().contains(&b.cfg.waiting_owner_label), "{}", b.log());
     assert!(job.path("question-label").exists());
     assert!(!b.log().contains("state=closed"));

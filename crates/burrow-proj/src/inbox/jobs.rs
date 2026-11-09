@@ -152,9 +152,6 @@ impl Pass<'_> {
                 eprintln!("proj question: {error}");
                 self.retry(repo);
             }
-            if let Some(q) = crate::ask::load(&job) {
-                self.book(repo, q.due.max(crate::now() + 1));
-            }
             let needs_owner = job.path("question-needs-owner").exists();
             // Labelled to wait in no line: the job is made one that doesn't
             // (proj unstick), whatever it's doing, and again every pass. That
