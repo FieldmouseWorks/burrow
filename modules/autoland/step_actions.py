@@ -52,9 +52,10 @@ class Actions:
         broke (it crashed, timed out or went quiet) is handed again once its
         retry is due, and doesn't count toward the two (retry_at). Never
         while another fix job is still working on this head: two on one
-        branch push over each other. One whose turn ended awaiting a fix
-        elsewhere (running's "awaiting") still is: the PR waits on that, as
-        on a hold (waits.HOLD), until proj resumes the job. describe: only
+        branch push over each other. One whose turn ended holding something
+        open (running's "awaiting": a fix elsewhere, or a person's answer to
+        its question) still is: the PR waits on that, as on a hold
+        (waits.HOLD), until proj resumes the job. describe: only
         its description is to fix, with no push (tasks.describe_task)."""
         if at is _HEAD:
             at = self.head
@@ -307,7 +308,9 @@ class Actions:
         elif self.st.get("judged") == self.judged_at or self.started(
             "judged", judge_task(self.repo, self.pr, why, self.ci == "none", seen), self.judged_at
         ):
-            self.settle("pending", f"Settled; {self.at_work('judged', 'judging it', self.judged_at)} ({why})", stage=S.REVIEW)
+            held = self.running("judged", self.judged_at) == "awaiting"
+            busy = self.at_work("judged", "judging it", self.judged_at)
+            self.settle("pending", f"Settled; {busy} ({why})", stage=S.REVIEW, wait=waits.HOLD if held else waits.STEWARD)
         else:
             self.settle(
                 "pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it", stage=S.REVIEW
@@ -344,7 +347,8 @@ class Actions:
         def running_now():
             skipped = "; nothing new to build, so it skipped the line" if self.st.get("provedFree") == self.head else ""
             busy = f"{VERB[unit]} {names} here" if unit else self.at_work("proved", doing)
-            self.settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140], stage=S.PROOF)
+            held = not unit and self.running("proved") == "awaiting"
+            self.settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140], stage=S.PROOF, wait=waits.HOLD if held else waits.STEWARD)
 
         # What this proof is: a build, a run or a Claude job, of which
         # checks, each built from which attribute or run as which command.

@@ -289,14 +289,11 @@ pub fn day(t: f64) -> String {
 fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
     let ended = runs(p.repo, cfg);
     let mut states: HashMap<String, bool> = HashMap::new();
-    // Whether the job is still queued or running, or nothing can say.
+    // Whether the job is still at work (Jobs::at_work).
     let mut working = |p: &mut Pass, jid: &str| {
-        *states.entry(jid.to_string()).or_insert_with(|| {
-            matches!(
-                p.jobs.state(jid).as_deref(),
-                None | Some("queued" | "running")
-            )
-        })
+        *states
+            .entry(jid.to_string())
+            .or_insert_with(|| p.jobs.lifecycle(jid).at_work(None))
     };
     let timeout = p.cfg.job_timeout as f64;
     // While the last job works, what comes due waits for it: one job a

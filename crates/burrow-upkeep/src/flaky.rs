@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::Flaky;
-use crate::pass::{Ask, DAY, Job, MIN, Pass};
+use crate::pass::{Ask, DAY, Job, Lifecycle, MIN, Pass};
 
 /// A look that keeps failing this long goes to the stuck issue: once is
 /// GitHub, often; every pass for an hour is a bug.
@@ -168,20 +168,19 @@ fn look(p: &mut Pass, cfg: &Flaky, listed: Result<Vec<Quarantined>, Error>) -> R
 }
 
 fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
-    let mut states: HashMap<String, Option<String>> = HashMap::new();
-    let mut state = |p: &mut Pass, jid: &str| {
+    // Each job's lifecycle, read once a pass, whole (Lifecycle::at_work).
+    let mut states: HashMap<String, Lifecycle> = HashMap::new();
+    let mut life = |p: &mut Pass, jid: &str| {
         states
             .entry(jid.to_string())
-            .or_insert_with(|| p.jobs.state(jid))
+            .or_insert_with(|| p.jobs.lifecycle(jid))
             .clone()
     };
-    // Whether the job is still queued or running, or nothing can say.
-    let working = |s: &Option<String>| matches!(s.as_deref(), None | Some("queued" | "running"));
     let timeout = cfg.job_timeout as f64;
     // One job a repo at a time: its flaky tests often share a cause (a slow
     // start, a shared port), and two jobs would race on the same fix.
     let busy = match st.job.as_deref().filter(|j| !j.is_empty()) {
-        Some(j) => working(&state(p, j)),
+        Some(j) => life(p, j).at_work(None),
         None => false,
     };
     if busy {
@@ -196,9 +195,9 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
             todo.push(n);
             continue;
         };
-        let now = state(p, &jid);
-        if working(&now) {
-            if now.is_some() {
+        let now = life(p, &jid);
+        if now.at_work(None) {
+            if now.state.is_some() {
                 // Resumed (proj await, proj reply): its day starts again
                 // when this turn ends.
                 it.ended = None;
@@ -214,7 +213,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
         let ended = *it.ended.get_or_insert(p.now);
         // How its latest turn ended, read each pass: a resumed job's next
         // ending is the one that counts.
-        let outcome = now.unwrap_or_default();
+        let outcome = now.state.unwrap_or_default();
         if outcome != "done" {
             // Stopped (its timeout, gone quiet), killed or crashed: it never
             // got to say what it found, so waiting a day for its fix to land

@@ -24,7 +24,7 @@ unit of the machine user's own that runs `nix-store --realise` on each of
 its derivations in a heavy slot (run, realise). Each check's verdict is
 how its derivation's realise ended, kept the moment the build ends
 (verdicts), and a failure's log tail goes on the PR. A build holds a slot
-as a job does, and is asked after and stopped like one (common.job_state,
+as a job does, and is asked after and stopped like one (common.lifecycle,
 stop_job). Checks without an attribute are a Claude job's, after the
 builds: a failed build needs no job.
 
@@ -116,7 +116,7 @@ def jobs(st):
 
 
 def running(jid):
-    return C.job_state(jid) in (None, "queued", "running")
+    return C.at_work(jid)
 
 
 def live(st):

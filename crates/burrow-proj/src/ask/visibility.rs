@@ -31,6 +31,8 @@ pub(super) fn issue(cfg: &Config, job: &Job) -> Option<(String, String)> {
 /// A failed write stays pending and the watcher books a retry. Remember exactly
 /// which label we own, so an answered question clears that label alone.
 pub(crate) fn tend(cfg: &Config, job: &Job) -> Result<(), String> {
+    let _held = job.lock().map_err(|e| e.to_string())?;
+    crate::question::recover(job)?;
     let needs_owner = super::host_path(job, "question-needs-owner").exists();
     let active =
         needs_owner || (load(job).is_some() && !super::host_path(job, "question-reader").exists());

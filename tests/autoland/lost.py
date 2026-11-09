@@ -12,7 +12,7 @@ import os
 
 import proofs as P
 import waits
-from harness import CI_GREEN, JOBS, STATES, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
+from harness import CI_GREEN, HELD, JOBS, STATES, STOPPED, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
 
 stand_in()
 kept = C.job
@@ -132,11 +132,8 @@ STATES.clear()
 
 
 def awaits(*targets):
-    """The latest job's turn ended awaiting targets, as proj keeps them
-    (the target, when it began, what it was)."""
-    os.makedirs(f"{tmp}/jobs/{ISSUED[-1]}", exist_ok=True)
-    with open(f"{tmp}/jobs/{ISSUED[-1]}/await", "w") as f:
-        f.writelines(f"{t}\t1794200000\t{{}}\n" for t in targets)
+    """The latest job's turn ended awaiting targets, as `proj lifecycle` says."""
+    HELD[ISSUED[-1]] = [f"await {t}" for t in targets]
 
 
 # A fix job whose turn ended awaiting the fix it needs elsewhere (a PR in
@@ -171,7 +168,7 @@ awaits("sam/up#3")
 status, _ = run(clean(**threads), 7300)
 assert JOBS == [] and "awaits sam/up#3" in status, status
 STATES[ISSUED[-1]] = "running"
-os.remove(f"{tmp}/jobs/{ISSUED[-1]}/await")
+HELD.pop(ISSUED[-1])
 status, _ = run(clean(**threads), 7400)
 assert JOBS == [] and "a Claude job has it since" in status, status
 ends("done")
@@ -180,6 +177,58 @@ run(clean(**threads), 7500)
 status, digest = run(clean(**threads), 7600)
 assert len(JOBS) == 1 and "awaits" not in status and digest == [], (status, JOBS)
 STATES.clear()
+HELD.clear()
+
+
+# A job whose turn ended with a question for a person (proj ask --default)
+# is still at work, whatever its kind: their reply resumes it, and so does a
+# reversible question's deadline, with its default. Taken for one that
+# ended, a second job got the same work, and once the question timed out
+# both pushed to one branch (remi#881, remi#892). A one-way question past
+# its deadline is left for the owner: their answer is still owed, so
+# nothing else starts on it either.
+# So is one whose resume failed with its question still outstanding: its
+# deadline resumes it, so it isn't a broken job to start again.
+for end, held, said in (("done", "ask", "an answer to its question"), ("done", "owner", "Sam's answer to its one-way question"),
+                        ("failed", "ask", "an answer to its question")):
+    fresh_pr_state()
+    run(clean(**threads), 0)
+    run(clean(**threads), 7200)
+    assert len(JOBS) == 1, JOBS
+    ends(end)
+    HELD[ISSUED[-1]] = [held]
+    for t in (7300, 7400, 7400 + 10 * 3600):
+        status, digest = a_pass(clean(**threads), t)
+        assert JOBS == [] and f"its Claude job awaits {said}" in status and "state=pending" in status, (end, held, t, status, JOBS)
+        assert digest == [] and overdue() is None and stall()["kick"] is None, (held, t, digest, waits.FAILING)
+    # Answered (or, reversible, timed out): proj resumes that same job.
+    STATES[ISSUED[-1]] = "running"
+    del HELD[ISSUED[-1]]
+    status, _ = run(clean(**threads), 7400 + 11 * 3600)
+    assert JOBS == [] and "a Claude job has it since" in status, (held, status, JOBS)
+    # Its turn over, holding nothing: it ended without fixing it.
+    ends("done")
+    run(clean(**threads), 7400 + 12 * 3600)
+    status, _ = run(clean(**threads), 7400 + 13 * 3600)
+    assert len(JOBS) == 1 and "awaits" not in status, (held, status, JOBS)
+STATES.clear()
+
+# A judge holding a question isn't lost either: no second judge, and the
+# PR waits on its answer as on a hold. A new head stops it, as one at work.
+fresh_pr_state()
+run(clean(**gated), 700)
+judge = ISSUED[-1]
+ends("done")
+HELD[judge] = ["ask"]
+for t in (5000, 5100, 5100 + 10 * 3600):
+    status, digest = a_pass(clean(**gated), t)
+    assert JOBS == [] and "the Claude job judging it awaits an answer to its question" in status, (t, status, JOBS)
+    assert digest == [] and overdue(6) is None and stall(6)["kick"] is None, (t, digest, stall(6))
+STOPPED.clear()
+run(clean(sha=newer, **gated), 5100 + 11 * 3600)
+assert judge in STOPPED, STOPPED
+STATES.clear()
+HELD.clear()
 print("jobs without their answer: ok")
 
 # A proof job that stops before it finishes, however it stops: started again

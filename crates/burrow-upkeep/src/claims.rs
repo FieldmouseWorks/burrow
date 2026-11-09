@@ -1,7 +1,8 @@
 //! The steward's Claude jobs that settle a PR, as the PR's pass sees to
 //! them (claims.py hands over what it keeps of each, and keeps what this
 //! gives back): what each that's over left, posted (answer.rs) or why not;
-//! a done turn awaiting upstream stays claimed until its final turn, with
+//! a done turn holding something open (awaiting upstream, or a person's
+//! answer to its question) stays claimed until its final turn, with
 //! any intermediate answers left unposted for that turn to replace;
 //! and each still at work on a head someone else has moved the PR past,
 //! named to be stopped, since whatever it does next is for a head the PR no
@@ -112,12 +113,14 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .is_some_and(|n| n > 1);
-        let state = p.jobs.state(jid);
-        // A completed turn awaiting upstream is still an active job. Keep its
-        // original claim (including ownership checks) until its final turn;
-        // intermediate answers may be replaced when proj resumes it.
-        let awaiting = state.as_deref() == Some("done") && awaits_elsewhere(p, l, &dir);
-        if awaiting || matches!(state.as_deref(), None | Some("queued" | "running")) {
+        let life = p.jobs.lifecycle(jid);
+        let state = life.state.clone();
+        // A completed turn that holds something open (awaiting upstream, or
+        // a person's answer to its question) is still an active job. Keep
+        // its original claim (including ownership checks) until its final
+        // turn; intermediate answers may be replaced when proj resumes it.
+        let own = format!("{}#{}", p.repo, l.number);
+        if life.at_work(Some(&own)) {
             if rec.head != l.head
                 && let Some(why) = stale(
                     p,
@@ -196,15 +199,6 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         }
     }
     seen
-}
-
-fn awaits_elsewhere(p: &Pass, l: &Look, dir: &burrow_process::state_reads::Dir) -> bool {
-    let own = format!("{}#{}", p.repo, l.number);
-    dir.text("await")
-        .unwrap_or_default()
-        .lines()
-        .map(|line| line.split('\t').next().unwrap_or_default().trim())
-        .any(|target| !target.is_empty() && !target.eq_ignore_ascii_case(&own))
 }
 
 fn short(c: &str) -> &str {

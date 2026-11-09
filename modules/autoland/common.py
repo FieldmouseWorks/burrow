@@ -11,7 +11,6 @@ user's own gh login, which every Claude session on the machine shares.
 
 import contextlib
 import hashlib
-import fcntl
 import hmac
 import json
 import os
@@ -711,51 +710,79 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=No
     return p.stdout.strip() or None
 
 
-def job_state(jid):
-    """queued, running, or how it ended (done, error, failed, timed out ...);
-    None when proj can't say. A proof build's (build_state) as well."""
+def lifecycle(jid):
+    """How job jid stands and what it holds open, read together: (state,
+    lines). A Claude job's from `proj lifecycle` (crates/burrow-proj's
+    Job::lifecycle), which reads both under the job's turn-start lock, so no
+    turn starts between the two: state as its latest turn ended (done,
+    error, failed, timed out ...) or queued or running, and a line for each
+    thing it holds (ask, owner, await TARGET). A proof build's from
+    build_state, holding nothing. state None when nothing can say (proj
+    couldn't read the job's record, say)."""
     if DRY:
-        return "running"
+        return "running", []
     if jid.startswith(BUILD):
-        return build_state(jid)
-    p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
-    return p.stdout.strip() or None
+        return build_state(jid), []
+    p = subprocess.run([CFG["proj"], "lifecycle", jid], capture_output=True, text=True)
+    lines = p.stdout.splitlines()
+    if p.returncode or not lines or not lines[0].strip():
+        return None, []
+    return lines[0].strip(), lines[1:]
 
 
-def job_lifecycle(jid, key):
-    """Read state and awaits under proj's turn-start lock, like Rust claims.
-    If the record is unavailable, retain the job until a later pass."""
-    if DRY or jid.startswith(BUILD):
-        return job_state(jid), None
-    try:
-        with open(os.path.join(CFG["jobsDir"], jid, "lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_SH)
-            state = job_state(jid)
-            return state, awaiting(jid, key) if state == "done" else None
-    except OSError:
-        return None, None
+def job_lifecycle(jid, key=None):
+    """How job jid stands, and what keeps it at work though its turn is
+    over: (state, held). state is lifecycle's; held, once it's not queued
+    or running, what it still holds open, however its turn ended (a failed
+    resume leaves its question, whose deadline resumes it), said for a PR's
+    status: an answer to its question (a reply resumes it, and so does a
+    reversible one's deadline, with its default), the owner's to a one-way
+    one whose deadline passed, or a PR or issue it awaits other than key
+    (OWNER/REPO#N, the PR it was handed: awaiting only that is ending its
+    turn). None when it holds nothing: it ended. This is the one word on
+    whether a job ended, for every kind of job and every path that asks
+    (at_work; burrow-upkeep's Lifecycle::at_work reads proj the same): one
+    that holds a question and is taken for ended gets a second job on its
+    branch, and both push once the question's answered or times out
+    (remi#881). One nothing can say of (state None) is kept until a later
+    pass."""
+    state, lines = lifecycle(jid)
+    if state in (None, "queued", "running"):
+        return state, None
+    return state, holding(lines, key)
 
 
-def awaiting(jid, key):
-    """What job jid, its turn over, awaits on GitHub besides key (OWNER/REPO#N,
-    the PR it was handed): a PR or issue elsewhere, the upstream fix it waits
-    to land, or None. proj keeps each target a line of the job's record's
-    `await`, the target first (crates/burrow-proj/src/job.rs, awaits), and
-    resumes the job once one changes."""
-    try:
-        with open(os.path.join(CFG["jobsDir"], jid, "await")) as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return None
-    targets = (line.split("\t", 1)[0].strip() for line in lines)
-    return next((t for t in targets if t and t.lower() != key.lower()), None)
+def at_work(jid, key=None):
+    """Whether job jid (or a proof build) is still at work: queued, running,
+    nothing can say, or its turn is over but it holds something open
+    (job_lifecycle)."""
+    state, held = job_lifecycle(jid, key)
+    return state in (None, "queued", "running") or held is not None
+
+
+def holding(lines, key):
+    """What of lifecycle's lines keeps the job at work, for a PR's status,
+    or None (job_lifecycle). A line proj says that this doesn't know is
+    held as it says it."""
+    for line in lines:
+        what, _, target = line.strip().partition(" ")
+        if what == "ask":
+            return "an answer to its question"
+        if what == "owner":
+            return f"{CFG['owner']}'s answer to its one-way question"
+        if what == "await":
+            if target and (key is None or target.lower() != key.lower()):
+                return target
+        elif what:
+            return line.strip()
+    return None
 
 
 # A proof build (proofs.build): no Claude job, but a unit of the machine
 # user's own that builds a proof's derivations. Its id starts with this and
 # names its folder under the state dir's builds/, where it says how it
 # ended (end.json); everything that asks after a job asks after it the same
-# way (job_state, stop_job).
+# way (lifecycle, stop_job).
 BUILD = "proof-"
 
 
@@ -783,7 +810,7 @@ def user_systemctl_run(unit, cmd):
 
 
 def build_state(jid):
-    """A proof build's state, as job_state says a job's: running while its
+    """A proof build's state, as lifecycle says a job's: running while its
     unit is; done once it built all it could, each check's verdict then in
     whether its outputs are valid (proofs.verdicts); failed when it stopped
     short of that (stopped, killed, or nix couldn't build at all), timed out

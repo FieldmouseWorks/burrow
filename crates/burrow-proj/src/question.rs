@@ -1,6 +1,6 @@
 //! Outstanding questions belong to the job, across every source of resumes.
-//! Prepare the state before launching an engine, and restore it if the turn
-//! cannot start. A new engine must never see yesterday's question as open
+//! Prepare a host-owned intent before launching, and retire question state
+//! only after a durable acceptance receipt. A new engine must never see yesterday's question as open
 //! after a human answered, or lose one because a machinery start failed.
 
 use std::fs;
@@ -22,75 +22,217 @@ fn read_state(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+// The host owns the resume receipt. A prompt and a published turn number are
+// preparations, not evidence that systemd accepted the reply. The launcher or
+// _exec accepts the receipt; either can finish its idempotent cleanup later.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Receipt {
+    through: u64,
+    answered: bool,
+    clear: bool,
+    accepted: bool,
+    // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
+    applied: bool,
+}
+
+const METADATA: &[&str] = &[
+    "question",
+    "question-needs-owner",
+    "question-text",
+    "question-since",
+    "question-id",
+];
+
+fn receipt_path(job: &Job, n: &str) -> PathBuf {
+    crate::ask::host_path(job, &format!("resume-{n}"))
+}
+
+fn save_receipt(path: &Path, receipt: &Receipt) -> Result<(), String> {
+    swap(
+        path,
+        &serde_json::to_string(receipt).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn apply_receipt(path: &Path, job_dir: &Path) -> Result<(), String> {
+    let Some(text) = read_state(path)? else {
+        return Ok(());
+    };
+    let mut r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !r.accepted || r.applied {
+        return Ok(());
+    }
+    if r.answered {
+        swap(
+            &job_dir.join("question-answered-through"),
+            &r.through.to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if r.clear {
+        for path in METADATA
+            .iter()
+            .map(|name| path.parent().unwrap().join(name))
+            .chain(std::iter::once(job_dir.join("open-question")))
+        {
+            match fs::remove_file(path) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+    r.applied = true;
+    save_receipt(path, &r)
+}
+
+/// Caller holds the job lock. Only accepted receipts can retire a question.
+pub(crate) fn recover(job: &Job) -> Result<(), String> {
+    let dir = crate::ask::host_path(job, "");
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut receipts = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(n) = name
+            .strip_prefix("resume-")
+            .and_then(|n| n.parse::<u64>().ok())
+        {
+            receipts.push((n, entry.path()));
+        }
+    }
+    receipts.sort_by_key(|(n, _)| *n);
+    for (n, path) in receipts {
+        let Some(text) = read_state(&path)? else {
+            continue;
+        };
+        let mut r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        if r.accepted {
+            apply_receipt(&path, &job.dir)?;
+        } else if job.turns().as_deref() == Some(n.to_string().as_str()) {
+            // The caller owns the launcher lock. A live unit or unknown
+            // lifecycle can still accept a preparation; a vanished unit cannot.
+            if !r.applied {
+                // Read the queued job before the unit state: a queued start
+                // may become active between observations. The launcher lock
+                // prevents a new launch from racing a known empty queue.
+                let pending = crate::systemd::pending(job.cfg, &job.unit());
+                let load = crate::systemd::show(job.cfg, &job.unit(), "LoadState");
+                let active = crate::systemd::show(job.cfg, &job.unit(), "ActiveState");
+                if pending == Some(false)
+                    && (load == "not-found" || matches!(active.as_str(), "inactive" | "failed"))
+                    && !job.end_pending()
+                {
+                    // Reconcile as abandoned, never as answered. Keep the
+                    // failed turn's identity and prompt without touching any
+                    // question authority, its original deadline or its outbox.
+                    r.applied = true;
+                    save_receipt(&path, &r)?;
+                }
+            }
+            if r.applied
+                && !job.turn(&n.to_string(), "stopped").exists()
+                && read_state(&job.turn(&n.to_string(), "outcome"))?.is_none()
+            {
+                swap(&job.turn(&n.to_string(), "outcome"), "failed\n")
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Also called at _exec entry: a killed launcher may never return from
+/// systemd-run to commit, even though the reply's unit was accepted.
+pub(crate) fn accept(job: &Job, n: &str) -> Result<(), String> {
+    let path = receipt_path(job, n);
+    let Some(text) = read_state(&path)? else {
+        return Ok(());
+    };
+    let mut receipt: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !receipt.accepted && receipt.applied {
+        return Err(format!("prepared turn {n} was abandoned before acceptance"));
+    }
+    receipt.accepted = true;
+    save_receipt(&path, &receipt)?;
+    apply_receipt(&path, &job.dir)
+}
+
+/// A published prompt whose unit has not recorded acceptance must not let
+/// an expired older question execute its default while _exec reconciles.
+pub(crate) fn acceptance_pending(job: &Job) -> Result<bool, String> {
+    let Some(n) = job.turns() else {
+        return Ok(false);
+    };
+    let Some(text) = read_state(&receipt_path(job, &n))? else {
+        return Ok(false);
+    };
+    let r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(!r.accepted && !r.applied)
+}
+
 pub(crate) struct Resume {
     path: PathBuf,
     before: Option<String>,
-    boundary: PathBuf,
-    boundary_before: Option<String>,
+    receipt: PathBuf,
+    job_dir: PathBuf,
     asking: bool,
     committed: bool,
-    metadata: Vec<(PathBuf, String)>,
 }
 
 impl Resume {
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
+        recover(job)?;
         if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
         }
         let path = job.path("open-question");
-        let before = match crate::state_reads::bytes(&path)
-            .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
-        {
-            Ok(s) => Some(s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
+        let before = read_state(&path)?;
         let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
         let asking = !answered
             && (crate::ask::load(job).is_some()
                 || (end.as_deref() != Some("done")
                     && (before.is_some() || end.as_deref() == Some("ask"))));
-        let mut metadata = Vec::new();
-        if !asking {
-            for name in [
-                "question",
-                "question-needs-owner",
-                "question-text",
-                "question-since",
-                "question-id",
-            ] {
-                let path = crate::ask::host_path(job, name);
-                match crate::state_reads::bytes(&path)
-                    .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
-                {
-                    Ok(text) => metadata.push((path, text)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(format!("{}: {e}", path.display())),
-                }
-            }
+        // Validate existing authority before publishing any intent. Leave it
+        // untouched until acceptance, so abrupt process death needs no undo.
+        read_state(&job.path("question-answered-through"))?;
+        for name in METADATA {
+            read_state(&crate::ask::host_path(job, name))?;
         }
-        let boundary = job.path("question-answered-through");
-        let boundary_before = read_state(&boundary)?;
+        crate::ask::ensure(job)?;
+        let through = job
+            .turns()
+            .map(|n| n.parse::<u64>())
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        let receipt = receipt_path(job, &(through + 1).to_string());
+        save_receipt(
+            &receipt,
+            &Receipt {
+                through,
+                answered,
+                clear: !asking,
+                accepted: false,
+                applied: false,
+            },
+        )?;
         let state = Self {
-            boundary,
-            boundary_before,
             path,
-            before: before.clone(),
+            before,
+            receipt,
+            job_dir: job.dir.clone(),
             asking,
             committed: false,
-            metadata,
         };
-        for (path, _) in &state.metadata {
-            fs::remove_file(path).map_err(|e| e.to_string())?;
+        if asking {
+            state.write(state.before.as_deref().or(Some("ask\n")))?;
         }
-        if answered && let Some(n) = job.turns() {
-            swap(&state.boundary, &n).map_err(|e| e.to_string())?;
-        }
-        state.write(if asking {
-            state.before.as_deref().or(Some("ask\n"))
-        } else {
-            None
-        })?;
         Ok(state)
     }
 
@@ -102,8 +244,14 @@ impl Resume {
         }
     }
 
-    pub(crate) fn commit(mut self) {
+    pub(crate) fn commit(mut self) -> Result<(), String> {
+        let text = read_state(&self.receipt)?.ok_or("missing resume receipt")?;
+        let mut r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        r.accepted = true;
+        save_receipt(&self.receipt, &r)?;
+        // An accepted receipt must survive even when its cleanup fails.
         self.committed = true;
+        apply_receipt(&self.receipt, &self.job_dir)
     }
 
     fn write(&self, value: Option<&str>) -> Result<(), String> {
@@ -121,19 +269,8 @@ impl Resume {
 
 impl Drop for Resume {
     fn drop(&mut self) {
-        if !self.committed {
-            for (path, text) in &self.metadata {
-                if let Err(e) = swap(path, text) {
-                    eprintln!("proj: could not restore {}: {e}", path.display());
-                }
-            }
-            if let Some(before) = &self.boundary_before {
-                let _ = swap(&self.boundary, before);
-            } else {
-                let _ = fs::remove_file(&self.boundary);
-            }
-        }
         if !self.committed
+            && self.asking
             && let Err(e) = self.write(self.before.as_deref())
         {
             eprintln!("proj: couldn't restore outstanding question: {e}");
@@ -188,6 +325,7 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
 /// Caller holds the job lock, including during resume rollback.
 pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, String> {
     use std::process::{Command, Stdio};
+    recover(job)?;
     let Some(notifier) = &cfg.notify else {
         return Ok(false);
     };
@@ -221,6 +359,12 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let t = name.strip_prefix("prompt.")?.parse::<u64>().ok()?;
+            // New resumes have host-owned intent records. Preparatory prompts
+            // must not acknowledge a reply before the unit accepts it.
+            if let Some(text) = read_state(&receipt_path(job, &t.to_string())).ok()? {
+                let r: Receipt = serde_json::from_str(&text).ok()?;
+                return (r.accepted && r.answered).then_some(r.through);
+            }
             let prompt = read(&e.path())?;
             (!prompt.ends_with(OPEN_UPDATE) && !prompt.ends_with(LEGACY_OPEN_UPDATE))
                 .then_some(t.saturating_sub(1))
@@ -308,8 +452,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             continue;
         }
         let key = format!("proj-question-{}-{turn}", job.id);
-        // A successful human resume clears the marker and advances turns.
-        // Failed starts roll both back under the same lock. VM done doesn't
+        // Only an accepted human resume clears the marker. Preparatory
+        // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
         if (finished || active.as_deref() != Some(turn))
             && let Err(e) = swap(&closing, "close\n")

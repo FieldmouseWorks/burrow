@@ -49,6 +49,21 @@ pub fn show(cfg: &Config, unit: &str, property: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a start or stop job is queued. Failure to observe is distinct
+/// from a successfully observed empty Job property.
+pub fn pending(cfg: &Config, unit: &str) -> Option<bool> {
+    let output = systemctl(cfg)
+        .args(["show", "-P", "Job", unit])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    Some(!matches!(value.trim(), "" | "0"))
+}
+
 /// Known not to be running: not "can't say".
 pub fn gone(cfg: &Config, unit: &str) -> bool {
     matches!(
