@@ -52,33 +52,36 @@ fn main() {
             .collect();
         panic!(
             "{}",
-            Command::new(&env::args().nth(2).unwrap()).args(args).exec()
+            Command::new(env::args().nth(2).unwrap()).args(args).exec()
         );
+    }
+    if args.first().is_some_and(|s| s == "drop-claude-mcp") {
+        let mut forwarded = args[2..].to_vec();
+        let index = forwarded
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .unwrap();
+        forwarded[index + 1] = r#"{"mcpServers":{}}"#.into();
+        panic!("{}", Command::new(&args[1]).args(forwarded).exec());
     }
     if args.first().is_some_and(|s| s == "server") {
         for line in std::io::stdin().lock().lines() {
             let line = line.unwrap();
-            // Our clients send integer JSON-RPC ids, and notifications have none.
-            let Some(id) = line.split("\"id\":").nth(1) else {
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let Some(id) = request.get("id") else {
                 continue;
             };
-            let id = id.trim_start().split([',', '}']).next().unwrap();
-            let result = if line.contains("initialize") {
-                r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"reach","version":"1"}}"#
-            } else if line.contains("tools/list") {
-                r#"{"tools":[{"name":"ping","description":"Check the job's machine MCP","inputSchema":{"type":"object","properties":{}}}]}"#
-            } else {
-                let job = env::var("PROJ_JOB").unwrap();
-                let marker = if env::var("MCP_ENGINE").as_deref() == Ok("1") {
-                    assert!(env::var_os("EXTRA_SERVER_ONLY").is_none());
-                    "mcp-called"
-                } else {
-                    "mcp-direct"
-                };
-                fs::write(format!("/data/dev/jobs/{job}/{marker}"), "yes").unwrap();
-                r#"{"content":[{"type":"text","text":"reachable"}]}"#
-            };
-            println!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}");
+            let directory =
+                PathBuf::from(format!("/data/dev/jobs/{}", env::var("PROJ_JOB").unwrap()));
+            let engine = env::var("MCP_ENGINE").as_deref() == Ok("1");
+            if engine {
+                assert!(env::var_os("EXTRA_SERVER_ONLY").is_none());
+            }
+            let response = mcp_reply(&request, &directory, engine);
+            println!(
+                "{}",
+                serde_json::json!({"jsonrpc":"2.0", "id":id, "result":response})
+            );
         }
         return;
     }
@@ -210,23 +213,14 @@ fn main() {
                 );
             }
             "kvm" => {
-                use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-                unsafe extern "C" {
-                    fn ioctl(fd: i32, request: usize, ...) -> i32;
+                #[cfg(target_os = "linux")]
+                {
+                    let device = kvm_ioctls::Kvm::new().unwrap();
+                    assert_eq!(device.get_api_version(), 12);
+                    let _vm = device.create_vm().unwrap();
                 }
-                let device = fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open("/dev/kvm")
-                    .unwrap();
-                assert_eq!(unsafe { ioctl(device.as_raw_fd(), 0xae00) }, 12);
-                let vm = unsafe { ioctl(device.as_raw_fd(), 0xae01, 0usize) };
-                assert!(
-                    vm >= 0,
-                    "KVM_CREATE_VM: {}",
-                    std::io::Error::last_os_error()
-                );
-                let _vm = unsafe { OwnedFd::from_raw_fd(vm) };
+                #[cfg(not(target_os = "linux"))]
+                panic!("KVM capabilities require Linux");
             }
             "mcp" => {
                 UnixStream::connect("/run/reach/socket").unwrap();
@@ -240,7 +234,7 @@ fn main() {
                     .stdin
                     .take()
                     .unwrap()
-                    .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}\n")
+                    .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"ping\"}}\n")
                     .unwrap();
                 assert!(child.wait_with_output().unwrap().status.success());
             }
@@ -259,4 +253,51 @@ fn main() {
     }
     fs::write(job.join("capabilities-passed"), passed.join("\n")).unwrap();
     run("proj", &["done"]);
+}
+
+fn mcp_reply(
+    request: &serde_json::Value,
+    directory: &std::path::Path,
+    engine: bool,
+) -> serde_json::Value {
+    use serde_json::json;
+    match request["method"].as_str() {
+        Some("initialize") => {
+            json!({"protocolVersion":"2024-11-05", "capabilities":{"tools":{}}, "serverInfo":{"name":"reach","version":"1"}})
+        }
+        Some("tools/list") => {
+            json!({"tools":[{"name":"ping","description":"Check the job's machine MCP","inputSchema":{"type":"object","properties":{}}}]})
+        }
+        Some("tools/call") if request["params"]["name"] == "ping" => {
+            fs::write(
+                directory.join(if engine { "mcp-called" } else { "mcp-direct" }),
+                "yes",
+            )
+            .unwrap();
+            json!({"content":[{"type":"text","text":"reachable"}]})
+        }
+        _ => json!({}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn only_the_engine_tool_call_can_create_its_success_marker() {
+        let directory = env::temp_dir().join(format!("mcp-evidence-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        for method in ["initialize", "tools/list", "ping", "resources/list"] {
+            mcp_reply(&json!({"method":method}), &directory, true);
+            assert!(!directory.join("mcp-called").exists());
+        }
+        let call = json!({"method":"tools/call", "params":{"name":"ping"}});
+        mcp_reply(&call, &directory, false);
+        assert!(directory.join("mcp-direct").exists());
+        assert!(!directory.join("mcp-called").exists());
+        mcp_reply(&call, &directory, true);
+        assert!(directory.join("mcp-called").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

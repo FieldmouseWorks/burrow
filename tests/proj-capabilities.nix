@@ -1,31 +1,19 @@
 { self, pkgs }:
 let
-  fixture = pkgs.runCommand "job-capability-fixture" { nativeBuildInputs = [ pkgs.rustc pkgs.stdenv.cc ]; } ''
-    mkdir -p $out/bin
-    rustc --edition=2024 ${./proj/capabilities.rs} -o $out/bin/capabilities
-  '';
+  fixture = self.packages.${pkgs.stdenv.hostPlatform.system}.codex-stand-in;
   agents = import ../modules/autoland/agents/package.nix { inherit pkgs; inherit (self.inputs) nixpkgs-unstable; };
   model = "${self.packages.${pkgs.stdenv.hostPlatform.system}.codex-stand-in}/bin/codex-stand-in";
-  # Claude's CLI stand-in runs the very same tool executable as Codex's
-  # stand-in provider. Its argv checks the engine's MCP configuration too.
-  claude = pkgs.writeShellScriptBin "claude" ''
-    set -e
-    [[ " $* " == *" --strict-mcp-config "* ]]
-    configured=false
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = --mcp-config ]; then
-        configured=true
-        shift
-        jq -e --arg job "$PROJ_JOB" '.mcpServers.reach.command == "${fixture}/bin/capabilities" and .mcpServers.reach.args == ["server"] and .mcpServers.reach.env.PROJ_JOB == $job and .mcpServers.reach.env.MCP_ENGINE == "1"' <<<"$1" >/dev/null
-      fi
-      shift
-    done
-    "$configured"
-    cat >/dev/null
-    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call"}' | MCP_ENGINE=1 ${fixture}/bin/capabilities server >/dev/null
-    ${fixture}/bin/capabilities 2>&1
-    echo '{"type":"result","session_id":"reach","result":"done","is_error":false}'
+  claudeClient = import ../modules/claude/package.nix {
+    inputs = self.inputs;
+    system = pkgs.stdenv.hostPlatform.system;
+  };
+  dropClaude = pkgs.writeShellScriptBin "claude" ''
+    exec ${fixture}/bin/capabilities drop-claude-mcp ${claudeClient}/bin/claude "$@"
   '';
+  claudeCalls = pkgs.writeText "claude-capability-calls.json" (builtins.toJSON [
+    [ "Bash" { command = "${fixture}/bin/capabilities"; timeout = 300000; } ]
+    [ "mcp__reach__ping" { } ]
+  ]);
   fakeGh = pkgs.writeShellScriptBin "gh" ''
     exec ${fixture}/bin/capabilities github "$@"
   '';
@@ -58,7 +46,7 @@ in pkgs.testers.runNixOSTest {
   nodes.machine = {
     imports = [ self.nixosModules.proj self.nixosModules.cpu ];
     burrow = {
-      claude.package = claude;
+      claude.enable = true;
       cpu.enable = true;
       proj = { enable = true; minFreeMemory = 0; gh = fakeGh; meters = "/var/lib/job-meters"; };
       mcpServers.reach = {
@@ -112,6 +100,8 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(9418)
     machine.succeed("${model} 18555 ${calls} >/tmp/model.log 2>&1 &")
     machine.wait_for_open_port(18555)
+    machine.succeed("${model} 18556 ${claudeCalls} >/tmp/claude-provider.log 2>&1 &")
+    machine.wait_for_open_port(18556)
     dev("mkdir -p ~/.codex ~/.config/proj && printf 'first claude\\nsecond codex\\n' >~/.config/proj/roles")
     catalog = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
     dev("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(catalog) + " >~/catalog.json")
@@ -119,7 +109,7 @@ in pkgs.testers.runNixOSTest {
     dev("""echo '{"OPENAI_API_KEY":"sk-stand-in"}' >~/.codex/auth.json""")
     # This check is about reach, not GitHub's remote API: keep the real
     # App environment and token socket and stand in only for gh's endpoint.
-    dev("echo 'export PATH=${fakeGh}/bin:$PATH' >>~/.bash_profile")
+    dev("echo 'export PATH=${fakeGh}/bin:$PATH ANTHROPIC_BASE_URL=http://127.0.0.1:18556 ANTHROPIC_API_KEY=sk-stand-in ANTHROPIC_MODEL=stand-in CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' >>~/.bash_profile")
     def job(role):
         j = dev(f'proj run --role {role} --app workers web go')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
@@ -134,8 +124,16 @@ in pkgs.testers.runNixOSTest {
     assert dev(f"proj state {b}") == "done"
     for j in [a, b]:
         assert machine.succeed("readlink /run/current-system").strip() in machine.succeed(f"cat /data/dev/jobs/{j}/host-probe")
-        assert machine.execute(f"test -f /data/dev/jobs/{j}/mcp-called")[0] == 0, machine.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr /tmp/model.log")
+        assert machine.execute(f"test -f /data/dev/jobs/{j}/mcp-called")[0] == 0, machine.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr /tmp/model.log /tmp/claude-provider.log")
     machine.fail("test -e /data/dev/src/web/unexpected-server")
+    # The real client must supply the evidence: the direct probe still runs
+    # when its engine registry is empty, but cannot satisfy mcp-called.
+    dev("echo 'export PATH=${dropClaude}/bin:$PATH' >>~/.bash_profile")
+    missing_mcp = job("first")
+    assert results(missing_mcp) == expected
+    machine.succeed(f"test -f /data/dev/jobs/{missing_mcp}/mcp-direct")
+    machine.fail(f"test -f /data/dev/jobs/{missing_mcp}/mcp-called")
+    print("Negative control passed: removing Claude's rendered MCP registry broke engine-call evidence despite the direct probe succeeding")
     # Drop the heavy grant from Codex's generated profile, leaving the
     # declaration and probe unchanged. The same comparison must go red.
     original = dev("sed -n 's/^export PROJ_CONFIG=\\([^ ]*\\).*/\\1/p' $(command -v proj)")

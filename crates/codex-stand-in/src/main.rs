@@ -10,6 +10,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use serde_json::{Value, json};
+mod anthropic;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -38,6 +39,7 @@ fn serve(stream: TcpStream, calls: &str) -> io::Result<()> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let post = line.starts_with("POST ");
+    let count_tokens = line.contains("/count_tokens");
     let mut length = 0;
     loop {
         line.clear();
@@ -61,9 +63,19 @@ fn serve(stream: TcpStream, calls: &str) -> io::Result<()> {
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     let request: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    if count_tokens {
+        return out.write_all(
+            b"HTTP/1.0 200 OK\r\ncontent-type: application/json\r\n\r\n{\"input_tokens\":1}",
+        );
+    }
     let calls: Vec<(String, Value)> = serde_json::from_str(&std::fs::read_to_string(calls)?)?;
     let mut text = String::from("HTTP/1.0 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
-    for event in events(&request, &calls) {
+    let events = if request.get("messages").is_some() {
+        anthropic::events(&request, &calls)
+    } else {
+        events(&request, &calls)
+    };
+    for event in events {
         let kind = event["type"].as_str().unwrap_or_default();
         text.push_str(&format!("event: {kind}\ndata: {event}\n\n"));
     }

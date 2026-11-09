@@ -1,6 +1,6 @@
 [package]
 name = "codex-stand-in"
-description = "A Responses API stand-in for the pinned Codex CLI, for VM tests"
+description = "Deterministic API providers and capability probes for engine VM tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.25.1"
 
 [lints]
 workspace = true
