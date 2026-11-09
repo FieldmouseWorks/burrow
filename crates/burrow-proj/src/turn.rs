@@ -291,7 +291,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 break (None, 1);
             }
         };
-        let mut child = match engine::spawn(
+        let child = match engine::spawn(
             cfg,
             &job,
             &n,
@@ -308,11 +308,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 break (None, 1);
             }
         };
-        if let Err(e) = job.record_run(&n, now()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Fail::new(1, format!("proj: cannot record invocation: {e}")));
-        }
         let (status, cut) = Run {
             cfg,
             job: &job,

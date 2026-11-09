@@ -484,7 +484,7 @@ fn usage_cannot_read_symlinked_metadata_transcripts_or_job_directories() {
     fs::create_dir_all(&job).unwrap();
     let secret = "ordinary confidential text";
     fs::write(root.join("secret"), secret).unwrap();
-    fs::write(root.join("stream-secret"),format!("{{\"type\":\"result\",\"session_id\":\"s\",\"usage\":{{\"input_tokens\":9999}},\"total_cost_usd\":9999}}\n")).unwrap();
+    fs::write(root.join("stream-secret"), "{\"type\":\"result\",\"session_id\":\"s\",\"usage\":{\"input_tokens\":9999},\"total_cost_usd\":9999}\n").unwrap();
     fs::write(job.join("1.started"), "200").unwrap();
     fs::File::create(job.join("1.slot"))
         .unwrap()

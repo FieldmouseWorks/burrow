@@ -122,14 +122,21 @@ impl Dir {
     pub fn create(&self, name: &str, value: &[u8]) -> io::Result<()> {
         use std::io::Write;
         child_name(Path::new(name))?;
-        let file = fs::openat2(
+        self.create_new(name)?.write_all(value)
+    }
+    pub fn create_new(&self, name: &str) -> io::Result<File> {
+        child_name(Path::new(name))?;
+        Ok(File::from(fs::openat2(
             &self.0,
             name,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-        )?;
-        File::from(file).write_all(value)
+        )?))
+    }
+    pub fn remove(&self, name: &str) -> io::Result<()> {
+        child_name(Path::new(name))?;
+        Ok(fs::unlinkat(&self.0, name, fs::AtFlags::empty())?)
     }
     /// Open or create a pinned regular lock file; never follow an alias.
     pub fn read_lock(&self, name: &str) -> io::Result<File> {
@@ -140,13 +147,11 @@ impl Dir {
         }
         self.file(Path::new(name))
     }
-    pub fn append(&self, name: &str, value: &[u8]) -> io::Result<()> {
-        use std::io::Write;
+    pub fn append_file(&self, name: &str) -> io::Result<File> {
         let pinned = self.pin(Path::new(name))?;
         std::fs::OpenOptions::new()
             .append(true)
-            .open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))?
-            .write_all(value)
+            .open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
     }
 }
 fn child_name(path: &Path) -> io::Result<()> {

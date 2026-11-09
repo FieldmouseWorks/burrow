@@ -44,7 +44,7 @@ fn pinned_regular_files_survive_replacement_and_first_observations_are_immutable
     pinned.read_to_string(&mut text).unwrap();
     assert_eq!(text, "public");
     assert!(dir.file(Path::new("stream")).is_err());
-    assert!(dir.append("stream", b"bad").is_err());
+    assert!(dir.append_file("stream").is_err());
     assert_eq!(
         fs::read_to_string(root.join("secret")).unwrap(),
         "confidential text"

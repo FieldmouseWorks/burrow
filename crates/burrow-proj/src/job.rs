@@ -24,6 +24,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod start;
+
 use crate::config::Config;
 use crate::engine::last_result;
 use crate::waits::Facts;
@@ -62,21 +64,6 @@ impl<'a> Job<'a> {
     pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
         let n = if valid_turn(n) { n } else { "invalid-turn" };
         self.dir.join(format!("{n}.{kind}"))
-    }
-
-    /// Record each actual invocation, retaining the first execution time across
-    /// slot removal, allowance waits and retries of this turn.
-    pub(crate) fn record_run(&self, n: &str, at: i64) -> io::Result<()> {
-        let dir = burrow_process::state_reads::Dir::open(&self.dir)?;
-        match dir.create(&format!("{n}.started"), format!("{at}\n").as_bytes()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-        dir.append(
-            &format!("{n}.jsonl"),
-            format!("{{\"type\":\"burrow.run\",\"at\":{at}}}\n").as_bytes(),
-        )
     }
 
     /// The engine recorded for this turn, including jobs that changed engines.
@@ -665,10 +652,10 @@ mod usage_start_tests {
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.turn("1", "jsonl"), "").unwrap();
         assert!(!job.turn("1", "started").exists());
-        job.record_run("1", 100).unwrap();
+        job.start_run("1", 100, || Ok(())).unwrap();
         fs::write(job.turn("1", "slot"), "slot").unwrap();
         fs::remove_file(job.turn("1", "slot")).unwrap();
-        job.record_run("1", 300).unwrap();
+        job.start_run("1", 300, || Ok(())).unwrap();
         assert_eq!(
             fs::read_to_string(job.turn("1", "started")).unwrap(),
             "100\n"

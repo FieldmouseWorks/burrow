@@ -77,7 +77,9 @@ own, say), in seconds and without starting a Claude.
     Meter readings over the same span show five-hour and weekly utilization, including readings at 100%.
     No prompts or issue titles are reported. Attribution predating structured
     job metadata is marked unknown where unavailable. Filtering uses immutable
-    first-execution records across allowance waits and retries. Historical
+    first-execution records across allowance waits and retries. Invocation
+    boundaries are written before the child starts; failed spawns undo their
+    records without disturbing earlier executions. Historical
     turns without those records are counted separately, outside span totals;
     an empty stream without a start record is reported as having no recorded
     execution. All job-state reads pin regular files and directories without

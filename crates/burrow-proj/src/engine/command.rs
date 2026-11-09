@@ -114,7 +114,7 @@ pub fn spawn(
             ])
             .args(&args)
             .stdin(File::open(prompt)?);
-        return c.spawn();
+        return job.start_run(n, crate::now(), || c.spawn());
     }
     let id = job.id;
     let scratch = scratch::dir(cfg, id);
@@ -163,8 +163,8 @@ pub fn spawn(
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)
         .env("PROJ_APP_ENV", app_env)
-        .stdin(Stdio::null())
-        .spawn()
+        .stdin(Stdio::null());
+    job.start_run(n, crate::now(), || c.spawn())
 }
 
 /// Codex's argv, the job's own /tmp it runs over, and the machine's paths
@@ -244,6 +244,86 @@ pub fn exec_codex(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_engine_and_vm_start_orders_the_marker_before_immediate_output() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = tmp.path().join("jobs");
+        cfg.scratch = tmp.path().join("scratch");
+        cfg.tools.timeout = tmp.path().join("immediate-child");
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        let prompt = job.path("prompt.1");
+        fs::write(&prompt, "prompt").unwrap();
+        let stream = job.turn("1", "jsonl");
+        fs::write(&stream, "").unwrap();
+        let fixture = tmp.path().join("immediate-child");
+        // Stand in for timeout at the common process boundary, including the
+        // VM command. It emits immediately without buffering or initialization.
+        fs::write(
+            &fixture,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+        for engine in [Engine::Claude, Engine::Codex] {
+            for agent in [None, Some("vm")] {
+                for _ in 0..2 {
+                    let mut child = spawn(
+                        &cfg,
+                        &job,
+                        "1",
+                        &prompt,
+                        &job.path("waits"),
+                        agent,
+                        false,
+                        "",
+                        &Choice {
+                            engine,
+                            model: None,
+                        },
+                    )
+                    .unwrap();
+                    assert!(child.wait().unwrap().success());
+                }
+            }
+        }
+        let lines = fs::read_to_string(&stream).unwrap();
+        let kinds: Vec<_> = lines
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(kinds, ["burrow.run", "result"].repeat(8));
+        fs::remove_file(job.turn("1", "started")).unwrap();
+        fs::write(&stream, "").unwrap();
+        cfg.tools.timeout = tmp.path().join("missing-engine");
+        let job = Job::new(&cfg, "job");
+        for agent in [None, Some("vm")] {
+            assert!(
+                spawn(
+                    &cfg,
+                    &job,
+                    "1",
+                    &prompt,
+                    &job.path("waits"),
+                    agent,
+                    false,
+                    "",
+                    &Choice::default()
+                )
+                .is_err()
+            );
+            assert!(!job.turn("1", "started").exists());
+            assert_eq!(fs::read_to_string(&stream).unwrap(), "");
+        }
+    }
+
     #[test]
     fn the_profile_alone_is_the_sandbox_and_resume_flags_are_in_the_parent_command() {
         let c = Choice {
