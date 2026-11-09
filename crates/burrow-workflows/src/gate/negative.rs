@@ -740,7 +740,7 @@ fn its_dependencies_wait_for_the_slot_too() {
     assert!(
         in_slot
             .iter()
-            .any(|b| b.contains("-dep.drv^out") && b.contains("--max-jobs")),
+            .any(|b| b.contains("-dep.drv^out") && !b.contains("--max-jobs")),
         "{in_slot:?}\n{}",
         ran.out
     );

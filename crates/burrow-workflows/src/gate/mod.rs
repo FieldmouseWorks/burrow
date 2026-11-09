@@ -148,7 +148,11 @@ printf '%s\n' '{}'
                 r#"case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
-    [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
+    if [ -n "$HEAVY_SLOT" ]; then
+      echo "$*" >> "$NIX_LOG.slot"
+      echo "$HEAVY_JOBS" > "$NIX_LOG.jobs"
+      {real_nix} config show --json > "$NIX_LOG.settings"
+    fi
     {real_bin}/nix-store --gc > /dev/null 2>&1
     prev=
     for a in "$@"; do
@@ -200,7 +204,11 @@ printf '%s\n' '{}'
     exit $failed ;;
   flake) [ "$2" = check ] && {{
     echo "$*" >> "$NIX_LOG"
-    [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
+    if [ -n "$HEAVY_SLOT" ]; then
+      echo "$*" >> "$NIX_LOG.slot"
+      echo "$HEAVY_JOBS" > "$NIX_LOG.jobs"
+      {real_nix} config show --json > "$NIX_LOG.settings"
+    fi
     if [ -e "$NIX_LOG.links" ]; then
       while read -r link; do [ -d "${{link%/*}}" ] || {{ echo "the built checks' roots went before nix flake check"; exit 1; }}; done < "$NIX_LOG.links"
     fi

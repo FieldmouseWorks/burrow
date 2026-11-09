@@ -91,11 +91,17 @@ impl Slotted {
 
     /// The builds nix ran in a slot.
     fn in_slot(&self) -> Vec<String> {
-        lines(&self.g.s.join("nix.log.slot"))
+        let calls = lines(&self.g.s.join("nix.log.slot"));
+        assert!(calls.iter().all(|c| !c.contains("--max-jobs")), "{calls:?}");
+        calls
+    }
+
+    fn settings(&self) -> serde_json::Value {
+        serde_json::from_str(&read(&self.g.s.join("nix.log.settings"))).unwrap()
     }
 
     /// The check with no VM built first and with no slot, the VM tests after
-    /// it, in one build, in the slot, with as many jobs as the slot's share.
+    /// it, in one build, inheriting heavy's Nix settings in the slot.
     fn split(&self, r: &Ran) {
         let [plain, vm] = r.builds()[..] else {
             panic!("not two builds: {:?}\n{}", r.builds(), r.out)
@@ -109,11 +115,10 @@ impl Slotted {
             "{vm}"
         );
         assert_eq!(self.in_slot(), [vm]);
-        let jobs = vm.split("--max-jobs ").nth(1).unwrap_or_default();
-        assert!(
-            !jobs.is_empty() && jobs.bytes().all(|b| b.is_ascii_digit()),
-            "{vm}"
-        );
+        let settings = self.settings();
+        assert_eq!(settings["max-jobs"]["value"], 1);
+        let share: u64 = read(&self.g.s.join("nix.log.jobs")).trim().parse().unwrap();
+        assert_eq!(settings["cores"]["value"], share);
         assert!(
             r.out.contains("waiting for a heavy slot for 4 checks"),
             "{}",
@@ -381,4 +386,42 @@ fn slots_none_on_a_hosted_runner() {
         "{}",
         r.out
     );
+}
+
+/// The gate inherits defaults in ordinary and nested all-slot contexts,
+/// while keeping explicit caller overrides in either context.
+#[test]
+fn slots_inherit_defaults_and_keep_caller_overrides() {
+    for nested in [false, true] {
+        for overrides in [false, true] {
+            let t = Slotted::new();
+            let mut config = t.g.nix_config.clone();
+            if nested {
+                config = format!("max-jobs = 1\ncores = 4\n{config}");
+            }
+            if overrides {
+                config.push_str("\nmax-jobs = 2\ncores = 1");
+            }
+            let mut env = vec![("NIX_CONFIG", config.as_str())];
+            if nested {
+                env.extend([("HEAVY_SLOT", "all"), ("HEAVY_JOBS", "4")]);
+            }
+            let r = t.run(
+                &t.vms,
+                Run {
+                    env: &env,
+                    ..Run::default()
+                },
+            );
+            assert_eq!(r.code, 0, "{}", r.out);
+            assert_eq!(t.in_slot().len(), if nested { 2 } else { 1 });
+            let share: u64 = read(&t.g.s.join("nix.log.jobs")).trim().parse().unwrap();
+            let settings = t.settings();
+            assert_eq!(settings["max-jobs"]["value"], if overrides { 2 } else { 1 });
+            assert_eq!(
+                settings["cores"]["value"],
+                if overrides { 1 } else { share }
+            );
+        }
+    }
 }

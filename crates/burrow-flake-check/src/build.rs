@@ -6,17 +6,8 @@ fn has_slots() -> bool {
 }
 fn in_slot(args: &[String]) -> Result<bool> {
     if has_slots() {
-        let mut c = cmd(
-            "heavy",
-            &[
-                "--",
-                "bash",
-                "-c",
-                "exec \"$@\" --max-jobs \"$HEAVY_JOBS\"",
-                "bash",
-                "nix",
-            ],
-        );
+        // Heavy owns the Nix defaults; a CLI max-jobs would override them.
+        let mut c = cmd("heavy", &["--", "nix"]);
         c.args(args);
         run(c)
     } else {
