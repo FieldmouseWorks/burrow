@@ -18,7 +18,7 @@ pub(crate) struct Resume {
 
 impl Resume {
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
-        if !answered && job.path("question-needs-owner").exists() {
+        if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
         }
         let path = job.path("open-question");
@@ -29,12 +29,13 @@ impl Resume {
         };
         let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
         let asking = !answered
-            && end.as_deref() != Some("done")
-            && (before.is_some() || end.as_deref() == Some("ask"));
+            && (crate::ask::load(job).is_some()
+                || (end.as_deref() != Some("done")
+                    && (before.is_some() || end.as_deref() == Some("ask"))));
         let mut metadata = Vec::new();
         if !asking {
             for name in ["question", "question-needs-owner"] {
-                let path = job.path(name);
+                let path = crate::ask::host_path(job, name);
                 match fs::read_to_string(&path) {
                     Ok(text) => metadata.push((path, text)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),

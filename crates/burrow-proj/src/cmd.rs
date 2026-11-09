@@ -416,7 +416,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
         ));
     }
     crate::ask::clear(job);
-    if job.path("question-label").exists() {
+    if crate::ask::host_path(job, "label").exists() {
         kick(cfg, ["proj-watch".into()]);
     }
     rewatch(cfg, &[id]);
@@ -578,7 +578,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     job.mark_ended();
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
-    if crate::ask::load(&job).is_some() || job.path("question-label").exists() {
+    if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {
         names.extend(["proj-watch".into(), "autoland".into()]);
     }
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {

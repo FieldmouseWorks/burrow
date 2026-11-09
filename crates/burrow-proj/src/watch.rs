@@ -50,7 +50,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             eprintln!("proj question: {error}");
             retry.push((String::new(), now() + RETRY));
         }
-        if job.path("question-needs-owner").exists() {
+        if crate::ask::host_path(&job, "question-needs-owner").exists() {
             continue;
         }
         let f = job.path("await");

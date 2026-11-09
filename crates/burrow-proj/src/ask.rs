@@ -3,6 +3,8 @@ use crate::{config::Config, job::Job, read, swap};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+mod host;
+pub(crate) use host::{control_root, ensure, host_path, initialize};
 mod visibility;
 pub(crate) use visibility::tend as visibility;
 
@@ -44,7 +46,7 @@ pub(crate) struct Question {
     pub due: i64,
 }
 pub(crate) fn load(job: &Job) -> Option<Question> {
-    serde_json::from_str(&read(&job.path("question"))?).ok()
+    serde_json::from_str(&read(&host_path(job, "question"))?).ok()
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
@@ -58,9 +60,13 @@ pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), S
 }
 pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
     if end == "ask" {
-        let recommendation: Recommendation =
+        ensure(job)?;
+        let mut recommendation: Recommendation =
             serde_json::from_str(&read(&job.path("ask.next")).ok_or(USAGE)?)
                 .map_err(|e| e.to_string())?;
+        if load(job).is_some_and(|q| q.recommendation.one_way) {
+            recommendation.one_way = true;
+        }
         let due = load(job)
             .map(|q| q.due)
             .unwrap_or_else(|| crate::now().saturating_add(cfg.ask_timeout as i64));
@@ -69,7 +75,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             due,
         };
         swap(
-            &job.path("question"),
+            &host_path(job, "question"),
             &serde_json::to_string(&q).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
@@ -81,7 +87,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
 }
 pub(crate) fn clear(job: &Job) {
     for name in ["question", "question-needs-owner"] {
-        let _ = fs::remove_file(job.path(name));
+        let _ = fs::remove_file(host_path(job, name));
     }
 }
 
@@ -108,8 +114,11 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         // its default. Record a completed host turn for the normal issue writer.
         let n = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
         let ntext = n.to_string();
-        fs::write(job.path("question-needs-owner"), &q.recommendation.default)
-            .map_err(|e| e.to_string())?;
+        fs::write(
+            host_path(job, "question-needs-owner"),
+            &q.recommendation.default,
+        )
+        .map_err(|e| e.to_string())?;
         let text = format!(
             "No answer by {time}. The recommended answer was: {}\n\nThis action is one-way. I left the question open for the owner under the owner label and released the job's claim.\n",
             q.recommendation.default
@@ -123,8 +132,12 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         }
         fs::write(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
         job.set_turns(n).map_err(|e| e.to_string())?;
-        for name in ["question", "open-question", "await"] {
-            let _ = fs::remove_file(job.path(name));
+        for path in [
+            host_path(job, "question"),
+            job.path("open-question"),
+            job.path("await"),
+        ] {
+            let _ = fs::remove_file(path);
         }
         if let Some(inbox) = &cfg.inbox {
             for entry in fs::read_dir(&inbox.state).into_iter().flatten().flatten() {
@@ -157,11 +170,12 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
             continue;
         }
         let job = Job::new(cfg, &id);
-        let pending = job.path("question-needs-owner").exists();
-        if !pending && (job.path("question-reader").exists() || load(&job).is_none()) {
+        let pending = host_path(&job, "question-needs-owner").exists();
+        if !pending && (host_path(&job, "question-reader").exists() || load(&job).is_none()) {
             continue;
         }
-        let link = read(&job.path("link")).filter(|s| crate::github::target(s).is_some());
+        let link = visibility::issue(cfg, &job)
+            .map(|(repo, n)| format!("https://github.com/{repo}/issues/{n}"));
         let last = job.turns();
         // A one-way timeout records a host completion turn. Its question
         // remains the preceding engine turn's, including in the owner digest.
@@ -188,7 +202,7 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
             .unwrap_or_else(|| {
                 format!(
                     "job {id}: one-way question remains open: {question}; recommended {}",
-                    summary(&read(&job.path("question-needs-owner")).unwrap_or_default())
+                    summary(&read(&host_path(&job, "question-needs-owner")).unwrap_or_default())
                 )
             });
         let line = link.map(|url| format!("[{id}]({url})")).unwrap_or(id);
@@ -229,6 +243,7 @@ mod tests {
     fn asking(cfg: &Config, one_way: bool) -> Job<'_> {
         let job = Job::new(cfg, "j1");
         fs::create_dir_all(&job.dir).unwrap();
+        ensure(&job).unwrap();
         job.set_turns(1).unwrap();
         fs::write(job.path("session"), "s1\n").unwrap();
         fs::write(job.turn("1", "end"), "ask\n").unwrap();
@@ -240,7 +255,11 @@ mod tests {
             },
             due: crate::now() - 1,
         };
-        fs::write(job.path("question"), serde_json::to_string(&q).unwrap()).unwrap();
+        fs::write(
+            host_path(&job, "question"),
+            serde_json::to_string(&q).unwrap(),
+        )
+        .unwrap();
         job
     }
     #[test]
@@ -284,7 +303,7 @@ mod tests {
                 .unwrap()
                 .contains("one-way")
         );
-        assert!(job.path("question-needs-owner").exists());
+        assert!(host_path(&job, "question-needs-owner").exists());
         assert!(load(&job).is_none());
         assert_eq!(owner_lines(&cfg).len(), 1);
     }
@@ -292,37 +311,55 @@ mod tests {
     fn a_timed_out_one_way_question_requires_a_person_before_resuming() {
         let (_dir, cfg) = fixture();
         let job = asking(&cfg, true);
-        fs::remove_file(job.path("question")).unwrap();
-        fs::write(job.path("question-needs-owner"), "keep the change").unwrap();
+        fs::remove_file(host_path(&job, "question")).unwrap();
+        fs::write(host_path(&job, "question-needs-owner"), "keep the change").unwrap();
         fs::write(job.turn("1", "end"), "done\n").unwrap();
         assert!(crate::turn::start(&cfg, "j1", "machine news", false).is_err());
-        assert!(job.path("question-needs-owner").exists());
+        assert!(host_path(&job, "question-needs-owner").exists());
         crate::turn::start_answer(&cfg, "j1", "the owner answered", false).unwrap();
-        assert!(!job.path("question-needs-owner").exists());
+        assert!(!host_path(&job, "question-needs-owner").exists());
+    }
+    #[test]
+    fn repeating_a_question_cannot_drop_its_one_way_requirement() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, true);
+        let due = load(&job).unwrap().due;
+        record(
+            &job,
+            &Recommendation {
+                default: "keep it".into(),
+                one_way: false,
+            },
+        )
+        .unwrap();
+        finish(&cfg, &job, "ask").unwrap();
+        let question = load(&job).unwrap();
+        assert!(question.recommendation.one_way);
+        assert_eq!(question.due, due);
     }
     #[test]
     fn failed_timeout_start_keeps_the_default_and_deadline() {
         let (_dir, mut cfg) = fixture();
         cfg.tools.systemd_run = "false".into();
         let job = asking(&cfg, false);
-        let before = read(&job.path("question"));
+        let before = read(&host_path(&job, "question"));
         assert!(expire(&cfg, &job).is_err());
-        assert_eq!(read(&job.path("question")), before);
+        assert_eq!(read(&host_path(&job, "question")), before);
     }
     #[test]
     fn unrelated_resume_preserves_deadline_but_human_reply_clears_it() {
         let (_dir, cfg) = fixture();
         let job = asking(&cfg, false);
-        let before = read(&job.path("question"));
+        let before = read(&host_path(&job, "question"));
         crate::question::Resume::prepare(&job, false)
             .unwrap()
             .commit();
-        assert_eq!(read(&job.path("question")), before);
+        assert_eq!(read(&host_path(&job, "question")), before);
         {
             let _resume = crate::question::Resume::prepare(&job, true).unwrap();
             assert!(load(&job).is_none());
         }
-        assert_eq!(read(&job.path("question")), before);
+        assert_eq!(read(&host_path(&job, "question")), before);
         crate::question::Resume::prepare(&job, true)
             .unwrap()
             .commit();

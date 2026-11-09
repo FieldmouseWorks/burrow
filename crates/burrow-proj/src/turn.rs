@@ -123,7 +123,7 @@ fn start_with(
         return Err(couldnt());
     }
     question.commit();
-    if job.path("question-label").exists() {
+    if crate::ask::host_path(&job, "label").exists() {
         crate::job::kick(cfg, ["proj-watch".into(), "autoland".into()]);
     }
     rewatch(cfg, &[id]);

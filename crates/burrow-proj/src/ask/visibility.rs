@@ -11,11 +11,13 @@ struct Label {
     name: String,
 }
 
-fn issue(cfg: &Config, job: &Job) -> Option<(String, String)> {
-    if let Some(target) = read(&job.path("link")).and_then(|s| crate::github::target(&s)) {
+pub(super) fn issue(cfg: &Config, job: &Job) -> Option<(String, String)> {
+    if let Some(target) =
+        read(&super::host_path(job, "source")).and_then(|s| crate::github::target(&s))
+    {
         return Some(target);
     }
-    // Records predating --link keep the same source in the inbox.
+    // Legacy inbox records are also host-owned. Never trust job/link.
     let inbox = cfg.inbox.as_ref()?;
     for entry in fs::read_dir(&inbox.state).ok()?.flatten() {
         let dir = entry.path();
@@ -29,8 +31,9 @@ fn issue(cfg: &Config, job: &Job) -> Option<(String, String)> {
 /// A failed write stays pending and the watcher books a retry. Remember exactly
 /// which label we own, so an answered question clears that label alone.
 pub(crate) fn tend(cfg: &Config, job: &Job) -> Result<(), String> {
-    let needs_owner = job.path("question-needs-owner").exists();
-    let active = needs_owner || (load(job).is_some() && !job.path("question-reader").exists());
+    let needs_owner = super::host_path(job, "question-needs-owner").exists();
+    let active =
+        needs_owner || (load(job).is_some() && !super::host_path(job, "question-reader").exists());
     let desired = if active {
         issue(cfg, job).map(|(repo, number)| Label {
             repo,
@@ -45,13 +48,14 @@ pub(crate) fn tend(cfg: &Config, job: &Job) -> Result<(), String> {
     } else {
         None
     };
-    let path = job.path("question-label");
+    let path = super::host_path(job, "label");
     let before: Option<Label> = read(&path)
         .map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
         .transpose()?;
     if before == desired {
         return Ok(());
     }
+    super::ensure(job)?;
     let mut client = crate::github::client(cfg);
     if let Some(old) = before {
         let endpoint = format!("repos/{}/issues/{}", old.repo, old.number);

@@ -16,6 +16,9 @@ pub struct Config {
     pub projects: PathBuf,
     /// Each job's prompts, streams and answers, a folder a job.
     pub jobs: PathBuf,
+    /// Host-owned question state; not a guest writable root.
+    #[serde(default)]
+    pub host_state: Option<PathBuf>,
     /// Where each job's scratch goes, under jobs/ (burrow.scratchDir).
     pub scratch: PathBuf,
     /// The slice every turn runs in, which the machine caps.

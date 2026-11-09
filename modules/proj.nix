@@ -72,6 +72,7 @@ let
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
+    hostState = "${stateDir}/proj-questions";
     scratch = config.burrow.scratchDir;
     slice = "claude-jobs.slice";
     inherit (cfg) maxJobs pipelineSlots maxJobsPerProject minFreeMemory jobMemoryMax timeout maxWait stallAfterMinutes awaitHours;
@@ -480,6 +481,7 @@ in
       "L+ ${codexHome}/AGENTS.md - - - - ${instructions}"
       "L+ ${codexHome}/rules/burrow.rules - - - - ${rulesFile}"
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
+      "d ${stateDir}/proj-questions 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
       # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
       # job is over: no age here.

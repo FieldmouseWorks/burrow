@@ -21,10 +21,11 @@ fn asking(cfg: &Config, one_way: bool, due: i64) -> Job<'_> {
     let job = Job::new(cfg, "j1");
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
+    fs::create_dir_all(cfg.jobs.join(".question-control").join(job.id)).unwrap();
     fs::write(job.path("session"), "s1\n").unwrap();
     fs::write(job.turn("1", "end"), "ask\n").unwrap();
     fs::write(job.turn("1", "outcome"), "done\n").unwrap();
-    fs::write(job.path("question"), serde_json::json!({"recommendation":{"default":"keep the change","one_way":one_way},"due":due}).to_string()).unwrap();
+    fs::write(cfg.jobs.join(".question-control").join(job.id).join("question"), serde_json::json!({"recommendation":{"default":"keep the change","one_way":one_way},"due":due}).to_string()).unwrap();
     job
 }
 fn expired(one_way: bool) {
@@ -38,7 +39,13 @@ fn expired(one_way: bool) {
     );
     if one_way {
         assert_eq!(crate::read(&job.turn("2", "end")).as_deref(), Some("done"));
-        assert!(job.path("question-needs-owner").exists());
+        assert!(
+            cfg.jobs
+                .join(".question-control")
+                .join(job.id)
+                .join("question-needs-owner")
+                .exists()
+        );
     } else {
         let prompt = crate::read(&job.path("prompt.2")).unwrap();
         assert!(prompt.contains("No answer by"));

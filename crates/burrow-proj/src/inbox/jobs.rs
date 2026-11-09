@@ -152,7 +152,7 @@ impl Pass<'_> {
                 eprintln!("proj question: {error}");
                 self.retry(repo);
             }
-            let needs_owner = job.path("question-needs-owner").exists();
+            let needs_owner = crate::ask::host_path(&job, "question-needs-owner").exists();
             // Labelled to wait in no line: the job is made one that doesn't
             // (proj unstick), whatever it's doing, and again every pass. That
             // tells the watchdog afresh, since a turn begun before the switch
