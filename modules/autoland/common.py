@@ -721,6 +721,21 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
+def awaiting(jid, key):
+    """What job jid, its turn over, awaits on GitHub besides key (OWNER/REPO#N,
+    the PR it was handed): a PR or issue elsewhere, the upstream fix it waits
+    to land, or None. proj keeps each target a line of the job's record's
+    `await`, the target first (crates/burrow-proj/src/job.rs, awaits), and
+    resumes the job once one changes."""
+    try:
+        with open(os.path.join(CFG["jobsDir"], jid, "await")) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    targets = (line.split("\t", 1)[0].strip() for line in lines)
+    return next((t for t in targets if t and t.lower() != key.lower()), None)
+
+
 # A proof build (proofs.build): no Claude job, but a unit of the machine
 # user's own that builds a proof's derivations. Its id starts with this and
 # names its folder under the state dir's builds/, where it says how it
