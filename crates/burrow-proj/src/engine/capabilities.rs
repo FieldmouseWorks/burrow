@@ -95,6 +95,8 @@ impl Capabilities {
             .servers()
             .into_iter()
             .map(|(name, server)| {
+                // Granting a machine server includes calling it headlessly;
+                // approve only these declared servers, never a wildcard.
                 let env = server
                     .env
                     .iter()

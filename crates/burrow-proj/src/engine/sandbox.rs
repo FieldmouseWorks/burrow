@@ -3,19 +3,13 @@
 //! environment Codex itself starts in, so the paths it names are the ones
 //! Codex and the job's commands find.
 //!
-//! The project, scratch, the job's own dir and git's common dir (worktrees
-//! made in scratch write there; an explicit grant also lifts the automatic
-//! .git protection) are writable, and so is /tmp, which is the job's own
-//! ([`private_tmp`]) but for the machine's paths under it that Codex or the
-//! job uses, which it keeps ([`Sandbox::kept`]). Of the rest, commands see
-//! only what [`readable`] lists, read-only: the profile has no `:root`, so
-//! the CLI starts each command's mounts from an empty root. The network is
-//! on, which is also what lets a command connect() to the gh-token socket
-//! under /run/gh-token: the pinned CLI's seccomp has no finer switch for
-//! unix sockets, so which sockets a command can reach is decided by which
-//! paths it can see, never by a list of sockets to hide. Commands keep
-//! no_new_privs, since the filesystem isn't all writable, so sudo can't
-//! elevate.
+//! The shared [`super::capabilities`] contract owns all grants. This adapter
+//! renders them into a profile with no `:root`: each command's mounts start
+//! from an empty root. Its /tmp is private ([`private_tmp`]), retaining only
+//! declared paths the engine or job uses ([`Sandbox::kept`]). Unix socket
+//! reach follows the granted paths: the CLI's network switch also covers
+//! unix sockets, with no finer seccomp switch. Commands keep no_new_privs,
+//! since the filesystem isn't all writable, so sudo can't elevate.
 
 use crate::{config::Config, job::Job};
 use std::collections::BTreeMap;
@@ -133,12 +127,10 @@ impl Access {
 /// own paths that are there, the resolver's file,
 /// rustup's toolchains (RUSTUP_HOME, else HOME's `.rustup`)
 /// and git's global config file (GIT_CONFIG_GLOBAL, else HOME's and XDG's),
-/// as a regular file, which no socket can be. Nothing else of the machine
-/// is mounted in the sandbox, so a server of the user's, wherever it binds
-/// its socket and whenever it starts (a tmux, the systemd manager or D-Bus
-/// in the runtime dir, a compile-cache daemon in a network namespace of its
-/// own), isn't there to connect() to. Nor are the user's keys and logins
-/// (ssh, gh, rclone, the browser's profile), other projects or other jobs.
+/// as a regular file, which no socket can be. Other capabilities add their
+/// own paths. This base grant excludes broad home and runtime directories:
+/// they expose user servers (tmux, systemd, D-Bus and the compile cache),
+/// keys, logins, other projects and other jobs.
 pub(super) fn readable(env: Env, machine: &Machine) -> io::Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = machine
         .system
