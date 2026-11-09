@@ -340,9 +340,9 @@ slow.
 A job ending with `proj ask` sends its question through `burrow.tools.notify`
 when configured. The open-question state survives automated resumes (#549).
 Each question has its own notification key and durable outbox beside the turn
-log. `proj-watch` retries opens idempotently, since the notifier's zero exit
-does not acknowledge delivery. It retains closes until `notify pending`
-confirms closure. An authorized human reply, completion (native or VM), or
+log. `proj-watch` retries opens with `notify ensure` (no daily reminders),
+since the notifier's zero exit does not acknowledge delivery. It retains closes
+until `notify pending` confirms closure. An authorized human reply, completion (native or VM), or
 explicit stop closes the notice; a later question gets its own key even if
 an older close is still pending. Notification errors do not interrupt turn
 finalization, watchdog updates, completion kicks or scratch cleanup.

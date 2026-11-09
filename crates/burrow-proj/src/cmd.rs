@@ -397,7 +397,9 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
         ));
     }
     rewatch(cfg, &[id]);
-    kick(cfg, ["proj-watch".to_owned()]);
+    if cfg.notify.is_some() {
+        kick(cfg, ["proj-watch".to_owned()]);
+    }
     if let Err(e) = crate::question::notify(cfg, job) {
         eprintln!("proj: {e}");
     }
@@ -553,9 +555,11 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     job.mark_ended();
-    rewatch(cfg, &[&id]);
+    rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
-    names.push("proj-watch".into());
+    if cfg.notify.is_some() {
+        names.push("proj-watch".into());
+    }
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
         names.push(watch::kick_for(&a.target));
     }
@@ -571,9 +575,13 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     // nothing waits on it; its next turn (a reply) starts only once this has
     // ended, and makes its own afresh.
     if scratch::over(&job) {
-        scratch::clear(cfg, &id);
+        scratch::clear(cfg, id);
     }
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    // A resume may own the lock while waiting for this oneshot to finish.
+    // The watcher kick above retains reconciliation when it cannot run here.
+    let Some(_held) = job.try_lock().map_err(|e| io_fail(&job.path("lock"), e))? else {
+        return Ok(());
+    };
     crate::question::notify(cfg, &job).map_err(|e| Fail::new(1, e))?;
     Ok(())
 }

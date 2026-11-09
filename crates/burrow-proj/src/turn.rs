@@ -123,7 +123,9 @@ fn start_with(
         return Err(couldnt());
     }
     question.commit();
-    kick(cfg, ["proj-watch".to_owned()]);
+    if cfg.notify.is_some() {
+        kick(cfg, ["proj-watch".to_owned()]);
+    }
     rewatch(cfg, &[id]);
     Ok(())
 }

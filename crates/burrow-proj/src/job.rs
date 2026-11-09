@@ -86,6 +86,15 @@ impl<'a> Job<'a> {
         Ok(f)
     }
 
+    pub(crate) fn try_lock(&self) -> io::Result<Option<File>> {
+        let f = self.lock_file()?;
+        match f.try_lock() {
+            Ok(()) => Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
     fn lock_file(&self) -> io::Result<File> {
         OpenOptions::new()
             .append(true)

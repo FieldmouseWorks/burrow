@@ -4,13 +4,25 @@
 //! after a human answered, or lose one because a machinery start failed.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{job::Job, read, swap};
+
+const OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer.";
+
+fn read_state(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
 
 pub(crate) struct Resume {
     path: PathBuf,
     before: Option<String>,
+    boundary: PathBuf,
+    boundary_before: Option<String>,
     asking: bool,
     committed: bool,
 }
@@ -18,21 +30,24 @@ pub(crate) struct Resume {
 impl Resume {
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
         let path = job.path("open-question");
-        let before = match fs::read_to_string(&path) {
-            Ok(s) => Some(s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
+        let before = read_state(&path)?;
         let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
         let asking = !answered
             && end.as_deref() != Some("done")
             && (before.is_some() || end.as_deref() == Some("ask"));
+        let boundary = job.path("question-answered-through");
+        let boundary_before = read_state(&boundary)?;
         let state = Self {
+            boundary,
+            boundary_before,
             path,
             before: before.clone(),
             asking,
             committed: false,
         };
+        if answered && let Some(n) = job.turns() {
+            swap(&state.boundary, &n).map_err(|e| e.to_string())?;
+        }
         state.write(if asking {
             state.before.as_deref().or(Some("ask\n"))
         } else {
@@ -43,9 +58,7 @@ impl Resume {
 
     pub(crate) fn prompt(&self, msg: &str) -> String {
         if self.asking {
-            format!(
-                "{msg}\n\nYour open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer."
-            )
+            format!("{msg}\n\n{OPEN_UPDATE}")
         } else {
             msg.to_owned()
         }
@@ -70,6 +83,13 @@ impl Resume {
 
 impl Drop for Resume {
     fn drop(&mut self) {
+        if !self.committed {
+            if let Some(before) = &self.boundary_before {
+                let _ = swap(&self.boundary, before);
+            } else {
+                let _ = fs::remove_file(&self.boundary);
+            }
+        }
         if !self.committed
             && let Err(e) = self.write(self.before.as_deref())
         {
@@ -95,38 +115,71 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let end = read(&job.turn(&n, "end"));
     let finished = stopped || end.as_deref() == Some("done");
     let marker = read(&job.path("open-question"));
-    let was_open = marker.is_some();
+    let answered = read_state(&job.path("question-answered-through"))?
+        .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
+        .unwrap_or(0);
     let entries: Vec<_> = fs::read_dir(&job.dir)
         .map_err(|e| e.to_string())?
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
-    let recorded = entries.iter().any(|e| {
-        let name = e.file_name().to_string_lossy().into_owned();
-        name.strip_suffix(".question")
-            .is_some_and(|t| !job.turn(t, "question-closed").exists())
-    });
-    // Migrate legacy #549 markers too: an outstanding question is not proof
-    // that its notification was delivered. Recover its source from turn logs.
+    let last_done = entries
+        .iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
+            (read(&e.path()).as_deref() == Some("done")).then_some(t)
+        })
+        .max()
+        .unwrap_or(0);
+    // Legacy jobs have no answered-through file. Their saved prompts still
+    // distinguish a new conversation turn from our automated continuation.
+    let legacy_boundary = entries
+        .iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let t = name.strip_prefix("prompt.")?.parse::<u64>().ok()?;
+            let prompt = read(&e.path())?;
+            (!prompt.ends_with(OPEN_UPDATE)).then_some(t.saturating_sub(1))
+        })
+        .max()
+        .unwrap_or(0);
+    let closed_through = entries
+        .iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".question-close")
+                .or_else(|| name.strip_suffix(".question-closed"))?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0);
+    let boundary = answered
+        .max(last_done)
+        .max(legacy_boundary)
+        .max(closed_through);
+    // Recover the FIRST outstanding ask, including when no outbox could be
+    // written before automated continuations. Older closes are independent.
     let source = if finished {
         None
-    } else if marker.as_deref() == Some("ask") && !recorded {
-        entries
-            .iter()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let t = name.strip_suffix(".end")?;
-                (read(&e.path()).as_deref() == Some("ask"))
-                    .then(|| t.parse::<u64>().ok())
-                    .flatten()
-            })
-            .max()
-            .map(|t| t.to_string())
-    } else if let Some(t) = &marker {
-        (!job.turn(t, "question").exists() && t.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| t.clone())
     } else {
-        (end.as_deref() == Some("ask")).then(|| n.clone())
+        marker
+            .as_ref()
+            .filter(|t| t.parse::<u64>().is_ok_and(|t| t > boundary))
+            .cloned()
+            .or_else(|| {
+                entries
+                    .iter()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
+                        (t > boundary && read(&e.path()).as_deref() == Some("ask")).then_some(t)
+                    })
+                    .min()
+                    .map(|t| t.to_string())
+            })
     };
+    let active = source.clone();
     if let Some(source) =
         source.filter(|t| job.turn(t, "ended").exists() || job.turn(t, "outcome").exists())
     {
@@ -172,11 +225,11 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // A successful human resume clears the marker and advances turns.
         // Failed starts roll both back under the same lock. VM done doesn't
         // clear the marker, so completion is also checked independently.
-        if finished || (!was_open && turn != n) {
-            if let Err(e) = swap(&closing, "close\n") {
-                errors.push(e.to_string());
-                continue;
-            }
+        if (finished || active.as_deref() != Some(turn))
+            && let Err(e) = swap(&closing, "close\n")
+        {
+            errors.push(e.to_string());
+            continue;
         }
         retry = true;
         let result = if closing.exists() {
@@ -192,7 +245,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 }
             };
             Command::new(notifier)
-                .args(["open", &key, "A project job needs an answer", &body])
+                .args(["ensure", &key, "A project job needs an answer", &body])
                 .status()
         };
         match result {
@@ -208,10 +261,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 .stdout(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.code() == Some(1))
+            && let Err(e) = swap(&closed, "closed\n")
         {
-            if let Err(e) = swap(&closed, "closed\n") {
-                errors.push(e.to_string());
-            }
+            errors.push(e.to_string());
         }
     }
     if errors.is_empty() {
@@ -235,19 +287,18 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let mut cfg: Config = serde_json::from_value(example()).unwrap();
             cfg.jobs = dir.path().join("jobs");
             let script = dir.path().join("notify");
-            fs::write(
+            burrow_test::executable(
                 &script,
                 format!(
                     r#"#!/bin/sh
 cd '{}'
 printf '%s %s\n' "$1" "$2" >> calls
 case "$1" in
-open)
+ensure)
   touch "pending-$2"
   test -f fail-open && exit 0
   test -f "remote-$2" || printf '%s\n' "$4" >> deliveries
@@ -261,9 +312,7 @@ esac
 "#,
                     dir.path().display()
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            );
             cfg.notify = Some(script);
             let job = Job::new(&cfg, "j1");
             fs::create_dir_all(&job.dir).unwrap();
@@ -295,6 +344,161 @@ esac
         fn deliveries(&self) -> String {
             fs::read_to_string(self.dir.path().join("deliveries")).unwrap_or_default()
         }
+    }
+
+    #[test]
+    fn notifications_disabled_do_not_add_watcher_kicks() {
+        use std::sync::{Arc, Mutex};
+        let mut f = Fixture::new();
+        f.cfg.notify = None;
+        f.cfg.waits = None;
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let seen = got.clone();
+        let (port, _) = burrow_events::http::listen(
+            0,
+            Arc::new(move |req| {
+                seen.lock().unwrap().push(req.target.clone());
+                202
+            }),
+        )
+        .unwrap();
+        f.cfg.kick = format!("http://127.0.0.1:{port}/kick");
+        f.cfg.tools.systemctl = "false".into();
+        f.cfg.tools.systemd_run = "true".into();
+        f.ending(1, "ask");
+        crate::turn::start_answer(&f.cfg, "j1", "answer", false).unwrap();
+        f.ending(2, "ask");
+        fs::write(f.job().path("kick"), "completion").unwrap();
+        crate::cmd::finish(&f.cfg, "j1").unwrap();
+        f.cfg.tools.systemctl = "true".into();
+        crate::cmd::stop(&f.cfg, "j1", false).unwrap();
+        assert_eq!(*got.lock().unwrap(), ["/kick/completion"]);
+    }
+
+    #[test]
+    fn finalization_defers_instead_of_waiting_on_resume_lock() {
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+        let mut f = Fixture::new();
+        f.cfg.wake = f.dir.path().join("wake.json");
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let seen = got.clone();
+        let (port, _) = burrow_events::http::listen(
+            0,
+            Arc::new(move |req| {
+                seen.lock().unwrap().push(req.target.clone());
+                202
+            }),
+        )
+        .unwrap();
+        f.cfg.kick = format!("http://127.0.0.1:{port}/kick");
+        f.cfg.waits = None;
+        f.ending(1, "ask");
+        let held = f.job().lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                tx.send(crate::cmd::finish(&f.cfg, "j1").is_ok()).unwrap();
+            });
+            let completed = rx.recv_timeout(Duration::from_secs(5));
+            drop(held);
+            assert!(completed.unwrap());
+        });
+        assert!(got.lock().unwrap().iter().any(|s| s == "/kick/proj-watch"));
+        assert!(f.deliveries().is_empty());
+        crate::watch::look(&f.cfg, "").unwrap();
+        assert!(f.deliveries().contains("Question 1?"));
+    }
+
+    #[test]
+    fn newer_marker_cannot_erase_an_older_failed_close_write() {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        notify(&f.cfg, &f.job()).unwrap();
+        Resume::prepare(&f.job(), true).unwrap().commit();
+        f.ending(2, "ask");
+        fs::create_dir(f.job().turn("1", "question-close")).unwrap();
+        assert!(notify(&f.cfg, &f.job()).is_err());
+        assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("2"));
+        fs::remove_dir(f.job().turn("1", "question-close")).unwrap();
+        notify(&f.cfg, &f.job()).unwrap();
+        assert!(f.job().turn("1", "question-closed").exists());
+        assert_eq!(f.deliveries().matches("Question 1?").count(), 1);
+        assert!(f.dir.path().join("remote-proj-question-j1-2").exists());
+    }
+
+    #[test]
+    fn recovery_keeps_origin_across_automated_updates_and_unrelated_closes() {
+        for legacy in [false, true] {
+            let f = Fixture::new();
+            f.ending(1, "ask");
+            notify(&f.cfg, &f.job()).unwrap();
+            f.flag("fail-close");
+            Resume::prepare(&f.job(), true).unwrap().commit();
+            f.ending(2, "ask");
+            fs::write(f.job().turn("1", "question-close"), "close").unwrap();
+            fs::remove_file(f.job().path("question-answered-through")).unwrap();
+            if legacy {
+                fs::write(f.job().path("open-question"), "ask").unwrap();
+            } else {
+                fs::create_dir(f.job().turn("2", "question.new")).unwrap();
+                assert!(notify(&f.cfg, &f.job()).is_err());
+                fs::remove_dir(f.job().turn("2", "question.new")).unwrap();
+            }
+            Resume::prepare(&f.job(), false).unwrap().commit();
+            f.ending(3, "ask");
+            notify(&f.cfg, &f.job()).unwrap();
+            assert!(f.deliveries().contains("Question 2?"));
+            assert!(!f.deliveries().contains("Question 3?"));
+            assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("2"));
+        }
+    }
+
+    #[test]
+    fn legacy_recovery_excludes_previously_answered_questions() {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        f.ending(2, "ask");
+        fs::write(
+            f.job().path("prompt.2"),
+            "A human answers the earlier question",
+        )
+        .unwrap();
+        fs::write(
+            f.job().path("prompt.3"),
+            format!("event\n\n{OPEN_UPDATE}\n"),
+        )
+        .unwrap();
+        fs::write(f.job().path("open-question"), "ask").unwrap();
+        f.ending(3, "ask");
+        notify(&f.cfg, &f.job()).unwrap();
+        assert!(f.deliveries().contains("Question 2?"));
+        assert!(!f.deliveries().contains("Question 1?"));
+        assert!(!f.deliveries().contains("Question 3?"));
+    }
+
+    #[test]
+    fn failed_answer_start_restores_closure_boundary_atomically() {
+        let f = Fixture::new();
+        f.ending(1, "ask");
+        notify(&f.cfg, &f.job()).unwrap();
+        fs::write(f.job().path("question-answered-through"), [0xff]).unwrap();
+        assert!(Resume::prepare(&f.job(), true).is_err());
+        assert_eq!(
+            fs::read(f.job().path("question-answered-through")).unwrap(),
+            [0xff]
+        );
+        assert!(notify(&f.cfg, &f.job()).is_err());
+        assert!(f.job().path("open-question").exists());
+        fs::remove_file(f.job().path("question-answered-through")).unwrap();
+        fs::create_dir(f.job().path("question-answered-through.new")).unwrap();
+        assert!(Resume::prepare(&f.job(), true).is_err());
+        fs::remove_dir(f.job().path("question-answered-through.new")).unwrap();
+        assert!(f.job().path("open-question").exists());
+        drop(Resume::prepare(&f.job(), true).unwrap());
+        assert!(!f.job().path("question-answered-through").exists());
+        notify(&f.cfg, &f.job()).unwrap();
+        assert!(!f.job().turn("1", "question-close").exists());
     }
 
     #[test]
