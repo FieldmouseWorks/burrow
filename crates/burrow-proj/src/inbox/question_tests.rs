@@ -159,6 +159,8 @@ fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
         .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
         .unwrap();
     assert!(d.exists(), "a question is not a verdict");
+    assert!(b.posted().contains("Without an answer by"));
+    assert!(b.posted().contains("reversible default"));
     assert!(crate::ask::load(&job).is_some());
     assert!(!crate::scratch::over(&job), "owned questions keep scratch");
     crate::question::Resume::prepare(&job, true)

@@ -281,16 +281,7 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     if read(&job.turn(n, "end")).as_deref() == Some("ask")
         && let Some(q) = crate::ask::load(&job)
     {
-        said.push_str(&format!(
-            "\n\nWithout an answer by {}: {}. {}",
-            burrow_probe::answer::utc(q.due),
-            q.recommendation.default,
-            if q.recommendation.one_way {
-                "This is one-way: the job will finish and leave this question open for the owner."
-            } else {
-                "The job will take this reversible default and report the outcome."
-            }
-        ));
+        said.push_str(&q.notice());
     }
     let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {

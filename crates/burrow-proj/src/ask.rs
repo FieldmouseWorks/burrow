@@ -45,6 +45,20 @@ pub(crate) struct Question {
     pub recommendation: Recommendation,
     pub due: i64,
 }
+impl Question {
+    pub(crate) fn notice(&self) -> String {
+        format!(
+            "\n\nWithout an answer by {}: {}. {}",
+            burrow_probe::answer::utc(self.due),
+            self.recommendation.default,
+            if self.recommendation.one_way {
+                "This is one-way: the job will finish and leave this question open for the owner."
+            } else {
+                "The job will take this reversible default and report the outcome."
+            }
+        )
+    }
+}
 pub(crate) fn load(job: &Job) -> Option<Question> {
     serde_json::from_str(&read(&host_path(job, "question"))?).ok()
 }

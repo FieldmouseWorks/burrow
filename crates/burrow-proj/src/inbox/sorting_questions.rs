@@ -41,7 +41,10 @@ impl Pass<'_> {
                         .unwrap_or_default()
                 )
             } else {
-                question
+                format!(
+                    "{question}{}",
+                    ask::load(job).map(|q| q.notice()).unwrap_or_default()
+                )
             };
             if self.post(repo, n, &body) {
                 fs::write(d.join("question-notice"), notice).map_err(|e| crate::io_fail(d, e))?;
