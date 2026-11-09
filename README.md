@@ -179,6 +179,11 @@ Each has an entry below, and each can be imported on its own.
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
   key overrides the bare role for that repo, matched case-insensitively.
+  Claude's default model comes from the job user's `~/.claude/settings.json`
+  `model` setting. A role's `:MODEL` overrides it for that role. New sandbox
+  guests (`agent new`, `proj run --vm`) copy that setting at creation;
+  without it they use Claude Code's default. The model is never baked into
+  the guest image.
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
   `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the

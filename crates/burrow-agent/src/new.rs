@@ -116,6 +116,7 @@ pub fn new(agent: &Agent, args: &[String]) -> Result<String, String> {
 /// its VM started. Returns its id.
 pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
     let cfg = agent.cfg;
+    let settings = claude_settings(&cfg.home)?;
     let n = next_number(&cfg.root)?;
     let id = format!("{}-{n}", slug(&ask.project));
     let d = cfg.root.join(&id);
@@ -161,6 +162,25 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
     let owner = format!("{user}:{group}");
     agent.run("chown", &[&owner, &claude.to_string_lossy().into_owned()])?;
 
+    let settings_dir = home.join(".claude");
+    agent.run(
+        "install",
+        &[
+            "-d",
+            "-m",
+            "0700",
+            "-o",
+            user,
+            "-g",
+            group,
+            &settings_dir.to_string_lossy(),
+        ],
+    )?;
+    let settings_path = settings_dir.join("settings.json");
+    fs::write(&settings_path, settings.to_string())
+        .map_err(|e| format!("{}: {e}", settings_path.display()))?;
+    agent.run("chown", &[owner.as_str(), &settings_path.to_string_lossy()])?;
+
     let at = |name: &str| d.join(name);
     write_line(&at(sandbox::PROJECT), &ask.project)?;
     write_line(&at(sandbox::CID), &(1000 + n).to_string())?;
@@ -191,6 +211,27 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
     sb.write_args(agent)?;
     agent.run("systemctl", &["start", &sb.unit()])?;
     Ok(id)
+}
+
+/// Only the host's model belongs in the guest, never its permissions or hooks.
+fn claude_settings(host_home: &Path) -> Result<serde_json::Value, String> {
+    let path = host_home.join(".claude/settings.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let settings: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut guest = serde_json::json!({});
+    if let Some(model) = settings
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        guest["model"] = model.into();
+    }
+    Ok(guest)
 }
 
 /// The next sandbox's number, one past the last one made.
@@ -263,6 +304,25 @@ pub(crate) mod tests {
             "path": "/nix/store/x/bin"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn guest_inherits_only_the_model_at_creation() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(claude_settings(home.path()).unwrap(), serde_json::json!({}));
+        fs::create_dir(home.path().join(".claude")).unwrap();
+        let settings = home.path().join(".claude/settings.json");
+        fs::write(
+            &settings,
+            r#"{"model":"sandbox-test-id","hooks":{"unsafe":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_settings(home.path()).unwrap(),
+            serde_json::json!({"model":"sandbox-test-id"})
+        );
+        fs::write(&settings, r#"{"effortLevel":"high"}"#).unwrap();
+        assert_eq!(claude_settings(home.path()).unwrap(), serde_json::json!({}));
     }
 
     #[test]

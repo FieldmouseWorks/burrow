@@ -272,6 +272,12 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
+Claude's default model comes from the job user's `~/.claude/settings.json`
+`model` setting. A role's `:MODEL` overrides it for that role. New sandbox
+guests (`agent new`, `proj run --vm`) copy the user's model at creation;
+without it they use Claude Code's default. This is runtime data, not part
+of the guest image.
+
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
 with `ENGINE` either `claude` or `codex`. Scope a key to one repo with
 `ROLE@OWNER/REPO`:

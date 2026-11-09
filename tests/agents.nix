@@ -108,6 +108,9 @@ pkgs.testers.runNixOSTest {
     dev("cd /data/dev/src && mkdir demo && cd demo && git init -q -b main && echo one >a && git add a && git commit -qm one")
     dev("echo lab >/data/lab/disk.img")
 
+    dev("mkdir -p ~/.claude")
+    dev("echo '{\"model\":\"sandbox-test-id\",\"hooks\":{\"unsafe\":true}}' > ~/.claude/settings.json")
+
     with subtest("one command gives a running sandbox"):
         t = time.time()
         status, out = host.execute("su - dev -c 'agent new demo --with /data/lab' 2>&1")
@@ -138,6 +141,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("Claude is there and never asks"):
         vm(a, "claude --version")
+        assert json.loads(vm(a, "cat ~/.claude/settings.json")) == {"model": "sandbox-test-id"}
         vm(a, "test ! -L /etc/claude-code/managed-settings.json")
         settings = json.loads(vm(a, "cat /etc/claude-code/managed-settings.json"))
         assert settings["permissions"]["defaultMode"] == "bypassPermissions"
@@ -171,7 +175,9 @@ pkgs.testers.runNixOSTest {
         vm(a, "! getent hosts github.com")
 
     with subtest("--open lifts the allowlist"):
+        dev("echo '{}' > ~/.claude/settings.json")
         o = dev("agent new demo --open").strip()
+        assert json.loads(vm(o, "cat ~/.claude/settings.json")) == {}
         assert vm(o, "curl -s -o /dev/null --max-time 10 -w '%{http_connect}' https://example.com/ || true").strip() != "403"
 
     with subtest("a second sandbox costs only its own changes"):
