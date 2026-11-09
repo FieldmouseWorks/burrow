@@ -11,6 +11,7 @@ pkgs.runCommand "autoland-check" {
   # The stages labels.nix has a label for, which must be the steward's own.
   AUTOLAND_STAGES = builtins.toJSON (builtins.attrNames self.nixosConfigurations.example.config.burrow.autoland.labels.waiting);
 } ''
+  python3 ${../tests/autoland}/lifecycle.py ${../modules/autoland}
   python3 -I ${../tests/autoland}/check.py ${../modules/autoland}/steward.py \
     ${self.nixosConfigurations.example.config.burrow.ledger.env.CONARY_POLICY} \
     ${self.packages.${system}.burrow-review}/bin/burrow-review ${../crates/burrow-review/tests/fakes} \

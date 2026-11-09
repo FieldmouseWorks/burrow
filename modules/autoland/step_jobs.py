@@ -24,9 +24,14 @@ class Jobs:
         the fix it asks for) while it's still queued or running, or proj
         can't say: "queued", "running" or "unknown"; else "", and how it
         ended goes in ends. One that is keeps its deadline, since each pass
-        replaces the repo's wake-ups. One look a job a pass: asked again,
-        it says the same, and a run of broken jobs is counted once
-        (breaking)."""
+        replaces the repo's wake-ups. A fix job (ON) whose turn ended
+        awaiting a PR or issue other than this one (the upstream fix it
+        needs, say) is "awaiting", what it awaits in awaits: still at work
+        here, since proj resumes it once that changes, so it's neither
+        lost nor handed again (remi#881 went to the stuck issue as two
+        jobs that ended without fixing it, while both waited on burrow's
+        PR with the fix). One look a job a pass: asked again, it says the
+        same, and a run of broken jobs is counted once (breaking)."""
         if at is _HEAD:
             at = self.head
         jid = self.st.get(kind + "Job")
@@ -38,7 +43,11 @@ class Jobs:
 
     def look(self, kind, jid):
         """running's look at the job: what proj says of it, once."""
-        state = C.job_state(jid)
+        state, target = C.job_lifecycle(jid, self.tag) if kind in ON else (C.job_state(jid), None)
+        if target:
+            # No deadline: its wake is proj's resume, whose end kicks a pass.
+            self.awaits[kind] = target
+            return "awaiting"
         live = state in (None, "queued", "running")
         if not live:
             self.ends[kind] = state

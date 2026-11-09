@@ -52,8 +52,10 @@ class Actions:
         broke (it crashed, timed out or went quiet) is handed again once its
         retry is due, and doesn't count toward the two (retry_at). Never
         while another fix job is still working on this head: two on one
-        branch push over each other. describe: only its description is to
-        fix, with no push (tasks.describe_task)."""
+        branch push over each other. One whose turn ended awaiting a fix
+        elsewhere (running's "awaiting") still is: the PR waits on that, as
+        on a hold (waits.HOLD), until proj resumes the job. describe: only
+        its description is to fix, with no push (tasks.describe_task)."""
         if at is _HEAD:
             at = self.head
         ours = ours and not self.requested  # Renovate would redo its branch
@@ -66,7 +68,11 @@ class Actions:
                 "failure", f"Two Claude jobs ended without fixing it: {desc}"[:140], "Two Claude jobs ended without fixing it", stage=S.FIX
             )
             return
-        if state:
+        awaited = None  # what the fix job on it awaits elsewhere (running)
+        if state == "awaiting":
+            awaited = self.awaits[kind]
+            who = f"its Claude job awaits {awaited}"
+        elif state:
             who = f"a Claude job {'is queued for it' if state == 'queued' else 'has it'} since {clock(self.st[kind + 'At'])}"
         elif retry and not gone:
             who = "its Claude job just ended"  # the second look is booked
@@ -74,13 +80,16 @@ class Actions:
             who = f"the last Claude job on it {how}, so another takes it at {clock(due)}"
         elif not ours:
             who = ""
+        elif (busy := self.fixing()) in self.awaits:
+            awaited = self.awaits[busy]
+            who = f"its Claude job on {ON[busy]} awaits {awaited}"
         elif wait and (due := self.handoff_at()) >= C.NOW:
             who = (
                 f"the Claude session that opened it has it until {clock(due)}, then a Claude job"
                 if self.session
                 else f"a Claude job takes it at {clock(due)}"
             )
-        elif busy := self.fixing():
+        elif busy:
             log(f"{self.tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
@@ -104,7 +113,7 @@ class Actions:
             else:
                 self.digest.append(("Couldn't start a Claude job to fix it", self.line, why))
                 who = "no Claude job could start"
-        self.settle("pending", f"{desc}; {who}" if who else desc, stage=S.FIX)
+        self.settle("pending", f"{desc}; {who}" if who else desc, stage=S.FIX, wait=waits.HOLD if awaited else waits.STEWARD)
 
     def merge(self):
         # Marked landed only once GitHub has done the merge, so a failed one

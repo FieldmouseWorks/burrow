@@ -281,7 +281,7 @@ impl Jobs for States {
 pub fn look<R>(
     cfg: &Config,
     hub: &mut Hub,
-    jobs: &mut States,
+    jobs: &mut dyn Jobs,
     at: f64,
     f: impl FnOnce(&mut Pass) -> Result<R, String>,
 ) -> (Out, Result<R, String>) {

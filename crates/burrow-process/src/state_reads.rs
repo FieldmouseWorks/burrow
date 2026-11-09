@@ -135,6 +135,15 @@ impl Dir {
         )?;
         File::from(file).write_all(value)
     }
+    /// Open or create a pinned regular lock file; never follow an alias.
+    pub fn read_lock(&self, name: &str) -> io::Result<File> {
+        match self.create(name, b"") {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        self.file(Path::new(name))
+    }
     pub fn append(&self, name: &str, value: &[u8]) -> io::Result<()> {
         use std::io::Write;
         let pinned = self.pin(Path::new(name))?;

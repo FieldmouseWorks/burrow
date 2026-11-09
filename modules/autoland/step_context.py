@@ -93,6 +93,7 @@ class Context:
         self.struck = {}  # the steps that failed this pass, and when each is tried again
         self.ends = {}  # how this head's job of each kind ended, as proj says (running)
         self.looked = {}  # what running said of each job this pass, by its id
+        self.awaits = {}  # what each kind's fix job, its turn over, awaits elsewhere (running)
 
     def after(self, t, minutes):
         """A wait that ends `minutes` after t: this repo gets a pass then."""

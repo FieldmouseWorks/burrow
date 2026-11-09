@@ -10,12 +10,14 @@ fn pinned_directories_reject_escape_paths_links_and_special_files() {
     symlink(root.join("secret"), root.join("job/role")).unwrap();
     symlink(root.join("job"), root.join("alias")).unwrap();
     assert!(job.text("role").is_err());
+    assert!(job.read_lock("role").is_err());
     assert!(Dir::open(&root.join("alias")).is_err());
     assert!(job.file(Path::new("../secret")).is_err());
     assert!(job.file(&root.join("secret")).is_err());
     assert!(open(&root.join("job/../secret")).is_err());
     rustix::fs::mkfifoat(rustix::fs::CWD, root.join("job/fifo"), Mode::RUSR).unwrap();
     assert!(job.text("fifo").is_err());
+    assert!(job.read_lock("fifo").is_err());
     assert!(open(Path::new("/dev/zero")).is_err());
     assert!(job.file(Path::new(".")).is_err());
     // Replace the entire job directory after pinning it: lookups retain the

@@ -10,7 +10,7 @@ publish.workspace = true
 # package.
 [dev-dependencies]
 proc-macro2 = "1"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 burrow-test = { path = "../burrow-test" }
 regex = { version = "1.13.1", default-features = false, features = ["std"] }
 serde_json.workspace = true

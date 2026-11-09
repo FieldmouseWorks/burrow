@@ -148,7 +148,9 @@ root only.
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a
    PR whose body links the Claude session that opened it, since that session
-   is fixing them itself.
+   is fixing them itself. A job whose fix belongs in another repo makes it
+   there and ends its turn with `proj await` on that PR: the PR waits on it,
+   as on a hold, until proj resumes the job to bring the fix in.
 4. The reviewers look again, until none of them finds anything on the head, or
    on an earlier one whose own change was the same: a merge of the base that
    leaves the PR's lines alone isn't looked at again, while CI still runs on it.

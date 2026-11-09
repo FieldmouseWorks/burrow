@@ -3,12 +3,20 @@
 use super::{Config, HELD, OK};
 
 /// What the job is told: the PRs (`todo`, a line each), how the steward's
-/// proofs there run (`proofs`), and the token it seals its verdicts on
-/// majors with (major-seal).
-pub(crate) fn task(cfg: &Config, repo: &str, todo: &str, proofs: &str, token: &str) -> String {
+/// proofs there run (`proofs`), and each major's verdicts, sealed on the
+/// head and base it's handed over on (`seals`, a line each). The job runs
+/// nothing of the sweep's to seal one, so its sandbox needn't see the
+/// sweep's state.
+pub(crate) fn task(cfg: &Config, repo: &str, todo: &str, proofs: &str, seals: &str) -> String {
     let owner = &cfg.owner;
-    let seal = cfg.tools.seal.display();
     let (ok, held) = (OK, HELD);
+    let seals = if seals.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nEach major's verdict markers, sealed on the head and base it was handed to you on:\n{seals}"
+        )
+    };
     format!(
         "Renovate's PRs in {repo} can't merge themselves:\n\
          {todo}\n\
@@ -30,21 +38,20 @@ pub(crate) fn task(cfg: &Config, repo: &str, todo: &str, proofs: &str, token: &s
          is on the branch: the autoland steward has its reviewers review the ones you fixed \
          and merges them. Don't merge a major one yourself: leave a short comment on the PR \
          with the breaking changes that touch this project and what you changed for them. \
-         Then give every major PR a verdict, once its CI is green or you've given up on it \
-         (don't wait for CI you pushed or reran: once it finishes green on a head with no \
-         verdict, another job is handed that PR): ok if it can merge as it is, or held if it \
-         needs a decision from {owner} or more work first (a support floor to drop, a \
-         migration, a regression), with the reason in your comment. End that comment with the \
-         marker line that `{seal} {token} N ok SHA BASE` (or held) prints, where N is the \
-         PR's number, SHA the commit you read it on, your worktree's HEAD (git rev-parse \
-         HEAD) after your last push, never the PR's head as GitHub shows it, which may be a \
-         push you never read, and BASE the branch it targets (gh pr view N --json \
-         baseRefName): it seals your verdict on that head, so one whose push was refused \
-         counts for nothing, and a marker written any other way doesn't count. Label the PR \
-         {ok} or {held} to match. The autoland steward merges an ok one on that marker once \
-         its CI is green, so never mark one ok that you'd argue against merging. If one can't \
-         or shouldn't be done (an upstream regression, a migration that needs a decision), \
-         comment on the PR saying why, in one or two lines, and close it only if it's a dead \
-         end."
+         Then give a verdict on every major PR you pushed nothing to, once its CI is green or \
+         you've given up on it: ok if it can merge as it is, or held if it needs a decision \
+         from {owner} or more work first (a support floor to drop, a migration, a regression), \
+         with the reason in your comment. End that comment with that verdict's marker from the \
+         list below, as it is between the backticks: each is sealed on the head the PR was handed to you on, \
+         for the base it targeted, so give one only if your worktree's HEAD (git rev-parse \
+         HEAD) is that head, never going by the PR's head as GitHub shows it, which may be a \
+         push you never read. A marker written any other way doesn't count. One you pushed to \
+         gets no verdict from you (don't wait for CI you pushed or reran: once it finishes \
+         green on a head with no verdict, another job is handed that PR, with markers for that \
+         head). Label the PR {ok} or {held} to match the verdict. The autoland steward merges \
+         an ok one on that marker once its CI is green, so never mark one ok that you'd argue \
+         against merging. If one can't or shouldn't be done (an upstream regression, a \
+         migration that needs a decision), comment on the PR saying why, in one or two lines, \
+         and close it only if it's a dead end.{seals}"
     )
 }

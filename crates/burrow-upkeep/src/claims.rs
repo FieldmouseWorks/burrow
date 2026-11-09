@@ -1,6 +1,8 @@
 //! The steward's Claude jobs that settle a PR, as the PR's pass sees to
 //! them (claims.py hands over what it keeps of each, and keeps what this
 //! gives back): what each that's over left, posted (answer.rs) or why not;
+//! a done turn awaiting upstream stays claimed until its final turn, with
+//! any intermediate answers left unposted for that turn to replace;
 //! and each still at work on a head someone else has moved the PR past,
 //! named to be stopped, since whatever it does next is for a head the PR no
 //! longer has. One still waiting for its slot can't have pushed. One at
@@ -92,10 +94,38 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
     };
     for (jid, rec) in &l.answering {
         let mut rec = rec.clone();
+        // proj starts turns under this lock. Keep state, turn identity,
+        // awaits and final answer collection in the same lifecycle snapshot.
+        let opened = burrow_process::state_reads::Dir::open(&l.jobs)
+            .and_then(|root| root.dir(std::path::Path::new(jid)))
+            .and_then(|dir| dir.read_lock("lock").map(|lock| (dir, lock)));
+        let Ok((dir, lock)) = opened else {
+            seen.answering.insert(jid.clone(), rec);
+            continue;
+        };
+        if lock.lock_shared().is_err() {
+            seen.answering.insert(jid.clone(), rec);
+            continue;
+        }
+        let resumed = dir
+            .text("turns")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|n| n > 1);
         let state = p.jobs.state(jid);
-        if matches!(state.as_deref(), None | Some("queued" | "running")) {
+        // A completed turn awaiting upstream is still an active job. Keep its
+        // original claim (including ownership checks) until its final turn;
+        // intermediate answers may be replaced when proj resumes it.
+        let awaiting = state.as_deref() == Some("done") && awaits_elsewhere(p, l, &dir);
+        if awaiting || matches!(state.as_deref(), None | Some("queued" | "running")) {
             if rec.head != l.head
-                && let Some(why) = stale(p, l, &mut seen, state.as_deref(), &mut rec)
+                && let Some(why) = stale(
+                    p,
+                    l,
+                    &mut seen,
+                    if resumed { None } else { state.as_deref() },
+                    &mut rec,
+                )
             {
                 seen.stop.push(Stop {
                     jid: jid.clone(),
@@ -106,8 +136,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             }
             continue;
         }
-        let path = l.jobs.join(jid).join("answers.json");
-        let answers = match burrow_process::state_reads::text(&path) {
+        let answers = match dir.text("answers.json") {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
@@ -120,8 +149,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 continue;
             }
         };
-        let dir = l.jobs.join(jid);
-        let turn = burrow_process::state_reads::text(&dir.join("turns")).unwrap_or_default();
+        let turn = dir.text("turns").unwrap_or_default();
         let turn = turn.trim();
         let turn = if !turn.is_empty()
             && turn.bytes().all(|b| b.is_ascii_digit())
@@ -131,8 +159,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         } else {
             "invalid-turn"
         };
-        let engine = burrow_process::state_reads::text(&dir.join(format!("{turn}.engine")))
-            .unwrap_or_default();
+        let engine = dir.text(&format!("{turn}.engine")).unwrap_or_default();
         let engine = match engine.trim() {
             "codex" => "Codex",
             "claude" | "" => "Claude",
@@ -169,6 +196,15 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         }
     }
     seen
+}
+
+fn awaits_elsewhere(p: &Pass, l: &Look, dir: &burrow_process::state_reads::Dir) -> bool {
+    let own = format!("{}#{}", p.repo, l.number);
+    dir.text("await")
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.split('\t').next().unwrap_or_default().trim())
+        .any(|target| !target.is_empty() && !target.eq_ignore_ascii_case(&own))
 }
 
 fn short(c: &str) -> &str {
