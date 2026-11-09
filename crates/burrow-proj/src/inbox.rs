@@ -907,6 +907,7 @@ mod retirement;
 mod written;
 
 pub(crate) use drain::WAITING;
+mod sorting_questions;
 mod triage;
 mod write;
 

@@ -74,6 +74,23 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             recommendation,
             due,
         };
+        if !host_path(job, "question-text").exists() {
+            swap(&host_path(job, "question-since"), &crate::now().to_string())
+                .map_err(|e| e.to_string())?;
+            let text = job
+                .turns()
+                .and_then(|n| read(&job.turn(&n, "result")))
+                .unwrap_or_default();
+            swap(
+                &host_path(job, "question-text"),
+                &burrow_probe::scrub::scrub(&text)
+                    .as_str()
+                    .chars()
+                    .take(16000)
+                    .collect::<String>(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
         swap(
             &host_path(job, "question"),
             &serde_json::to_string(&q).map_err(|e| e.to_string())?,
@@ -86,7 +103,12 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
     Ok(())
 }
 pub(crate) fn clear(job: &Job) {
-    for name in ["question", "question-needs-owner"] {
+    for name in [
+        "question",
+        "question-needs-owner",
+        "question-text",
+        "question-since",
+    ] {
         let _ = fs::remove_file(host_path(job, name));
     }
 }
@@ -95,13 +117,6 @@ pub(crate) fn clear(job: &Job) {
 /// with no GitHub target. An unavailable starter is retried without losing intent.
 pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     let Some(q) = load(job) else { return Ok(None) };
-    if job
-        .turns()
-        .is_some_and(|n| job.turn(&n, "stopped").exists())
-    {
-        clear(job);
-        return Ok(None);
-    }
     if job.end_pending() || matches!(job.state().as_str(), "queued" | "running") {
         return Ok(Some(q.due.max(crate::now() + 60)));
     }
@@ -176,19 +191,7 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
         }
         let link = visibility::issue(cfg, &job)
             .map(|(repo, n)| format!("https://github.com/{repo}/issues/{n}"));
-        let last = job.turns();
-        // A one-way timeout records a host completion turn. Its question
-        // remains the preceding engine turn's, including in the owner digest.
-        let asked = if pending && load(&job).is_none() {
-            last.as_deref()
-                .and_then(|n| n.parse::<u64>().ok())
-                .and_then(|n| n.checked_sub(1))
-                .map(|n| n.to_string())
-        } else {
-            last
-        };
-        let question = asked
-            .and_then(|n| read(&job.turn(&n, "result")))
+        let question = read(&host_path(&job, "question-text"))
             .map(|text| summary(&text))
             .unwrap_or_default();
         let description = load(&job)
@@ -336,6 +339,81 @@ mod tests {
         let question = load(&job).unwrap();
         assert!(question.recommendation.one_way);
         assert_eq!(question.due, due);
+    }
+    #[test]
+    fn writable_stop_markers_and_turn_selectors_do_not_cancel_question_authority() {
+        for n in ["1", "9"] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, true);
+            let mut q = load(&job).unwrap();
+            q.due = crate::now() + 3600;
+            fs::write(
+                host_path(&job, "question"),
+                serde_json::to_string(&q).unwrap(),
+            )
+            .unwrap();
+            fs::write(job.turn("1", "stopped"), "").unwrap();
+            job.set_turns(n.parse::<u64>().unwrap()).unwrap();
+            fs::write(job.turn(n, "stopped"), "").unwrap();
+            assert_eq!(expire(&cfg, &job).unwrap(), Some(q.due));
+            crate::question::Resume::prepare(&job, false)
+                .unwrap()
+                .commit();
+            record(
+                &job,
+                &Recommendation {
+                    default: "keep it".into(),
+                    one_way: false,
+                },
+            )
+            .unwrap();
+            finish(&cfg, &job, "ask").unwrap();
+            assert!(load(&job).unwrap().recommendation.one_way);
+            assert_eq!(load(&job).unwrap().due, q.due);
+            crate::cmd::stop(&cfg, "j1", false).unwrap();
+            assert!(
+                load(&job).is_none(),
+                "authenticated operator stop clears the question"
+            );
+        }
+    }
+    #[test]
+    fn original_question_survives_unrelated_and_repeated_ask_turns_and_timeout() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, true);
+        fs::remove_file(host_path(&job, "question")).unwrap();
+        fs::write(job.turn("1", "result"), "Which release should run?").unwrap();
+        let recommendation = Recommendation {
+            default: "keep it".into(),
+            one_way: true,
+        };
+        record(&job, &recommendation).unwrap();
+        finish(&cfg, &job, "ask").unwrap();
+        for n in 2..5 {
+            job.set_turns(n).unwrap();
+            assert!(owner_lines(&cfg)[0].2.contains("Which release should run?"));
+            fs::write(
+                job.turn(&n.to_string(), "result"),
+                "The unrelated update is handled.",
+            )
+            .unwrap();
+            record(&job, &recommendation).unwrap();
+            finish(&cfg, &job, "ask").unwrap();
+            assert!(owner_lines(&cfg)[0].2.contains("Which release should run?"));
+        }
+        let mut q = load(&job).unwrap();
+        q.due = crate::now() - 1;
+        fs::write(
+            host_path(&job, "question"),
+            serde_json::to_string(&q).unwrap(),
+        )
+        .unwrap();
+        expire(&cfg, &job).unwrap();
+        assert!(owner_lines(&cfg)[0].2.contains("Which release should run?"));
+        crate::question::Resume::prepare(&job, true)
+            .unwrap()
+            .commit();
+        assert!(!host_path(&job, "question-text").exists());
     }
     #[test]
     fn failed_timeout_start_keeps_the_default_and_deadline() {

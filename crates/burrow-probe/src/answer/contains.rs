@@ -34,9 +34,16 @@ pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, St
         let path = entry.path();
         let Some(dir) = path.to_str() else { continue };
         let history = |args: &[&str]| {
-            let mut words = vec!["--no-lazy-fetch", "--no-replace-objects", "-C", dir];
+            let mut words = vec![
+                "--no-lazy-fetch",
+                "--no-replace-objects",
+                "-c",
+                "core.commitGraph=false",
+                "-C",
+                dir,
+            ];
             words.extend_from_slice(args);
-            m.run.run(git, &words, false, m.uid)
+            m.run.history(git, &words, m.uid)
         };
         let remote = history(&["remote", "get-url", "origin"])?;
         let origin = remote.stdout.trim().trim_end_matches(".git");
@@ -55,16 +62,31 @@ pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, St
             if rev.len() != 40 || !rev.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("invalid running revision".into());
             }
-            // Missing or ambiguous history is unknown, never a false negative.
-            for hash in [commit, *rev] {
-                let found = history(&["rev-parse", "--verify", &format!("{hash}^{{commit}}")])?;
-                if found.code != Some(0) {
+            // Object disambiguation never consults hexadecimal branch or tag names.
+            let resolve = |hash: &str| -> Result<String, String> {
+                let found = history(&["rev-parse", &format!("--disambiguate={hash}")])?;
+                let objects: Vec<_> = found.stdout.lines().collect();
+                if found.code != Some(0)
+                    || objects.len() != 1
+                    || objects[0].len() != 40
+                    || !objects[0].bytes().all(|b| b.is_ascii_hexdigit())
+                {
                     return Err(format!(
                         "history for {hash} is unavailable or ambiguous in {repo}"
                     ));
                 }
-            }
-            let verdict = history(&["merge-base", "--is-ancestor", commit, rev])?;
+                let object = objects[0];
+                let kind = history(&["cat-file", "-t", object])?;
+                if kind.code != Some(0) || kind.stdout.trim() != "commit" {
+                    return Err(format!(
+                        "{hash} is not an unambiguous commit object in {repo}"
+                    ));
+                }
+                Ok(object.to_owned())
+            };
+            let commit_id = resolve(commit)?;
+            let running_id = resolve(rev)?;
+            let verdict = history(&["merge-base", "--is-ancestor", &commit_id, &running_id])?;
             let verdict = match verdict.code {
                 Some(0) => "yes",
                 Some(1) => {
@@ -98,6 +120,7 @@ mod tests {
         code: i32,
         shallow: bool,
         missing: bool,
+        ambiguous: bool,
         calls: RefCell<Vec<Vec<String>>>,
     }
     impl Run for History {
@@ -106,13 +129,38 @@ mod tests {
                 .borrow_mut()
                 .push(args.iter().map(|s| s.to_string()).collect());
             assert_eq!(&args[..2], &["--no-lazy-fetch", "--no-replace-objects"]);
-            let (code, stdout) = match args[4] {
+            assert_eq!(&args[2..4], &["-c", "core.commitGraph=false"]);
+            let (code, stdout) = match args[6] {
                 "remote" => (0, "https://github.com/sam/tool.git"),
                 "merge-base" => (self.code, ""),
-                "rev-parse" if args[5] == "--is-shallow-repository" => {
+                "rev-parse" if args[7] == "--is-shallow-repository" => {
                     (0, if self.shallow { "true" } else { "false" })
                 }
-                "rev-parse" => (if self.missing { 128 } else { 0 }, ""),
+                "rev-parse" => {
+                    if self.missing {
+                        (128, "")
+                    } else {
+                        let prefix = args[7].strip_prefix("--disambiguate=").unwrap();
+                        return Ok(Ran {
+                            code: Some(0),
+                            stdout: format!(
+                                "{}\n{}",
+                                if prefix.len() == 40 {
+                                    prefix.to_owned()
+                                } else {
+                                    "a".repeat(40)
+                                },
+                                if self.ambiguous {
+                                    format!("{}\n", "c".repeat(40))
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                            stderr: String::new(),
+                        });
+                    }
+                }
+                "cat-file" => (0, "commit"),
                 _ => panic!("unexpected {args:?}"),
             };
             Ok(Ran {
@@ -121,6 +169,131 @@ mod tests {
                 stderr: String::new(),
             })
         }
+    }
+    #[test]
+    fn real_history_ignores_grafts_and_caches() {
+        real_history(false);
+    }
+    #[test]
+    fn real_history_resolves_object_prefixes_without_hexadecimal_refs() {
+        real_history(true);
+    }
+    #[test]
+    fn history_environment_is_host_owned() {
+        if std::env::var_os("BURROW_HISTORY_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "answer::contains::tests::history_environment_is_host_owned",
+                ])
+                .env("BURROW_HISTORY_CHILD", "1")
+                .env("GIT_DIR", "/untrusted")
+                .env("GIT_GRAFT_FILE", "/untrusted/grafts")
+                .env("GIT_CONFIG_PARAMETERS", "'core.commitGraph=true'")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "core.commitGraph")
+                .env("GIT_CONFIG_VALUE_0", "true")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let got = crate::answer::Commands
+            .history(Path::new("env"), &[], 1001)
+            .unwrap();
+        let git: Vec<_> = got
+            .stdout
+            .lines()
+            .filter(|s| s.starts_with("GIT_"))
+            .collect();
+        assert_eq!(git.len(), 4, "{git:?}");
+        for expected in [
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_NO_REPLACE_OBJECTS=1",
+            "GIT_GRAFT_FILE=/dev/null",
+        ] {
+            assert!(git.contains(&expected), "{git:?}");
+        }
+    }
+    fn real_history(refs_only: bool) {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repo = root.join("projects/tool");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {:?}", out.stderr);
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["remote", "add", "origin", "https://github.com/sam/tool.git"]);
+        git(&["commit", "--allow-empty", "-qm", "first"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "--allow-empty", "-qm", "second"]);
+        let second = git(&["rev-parse", "HEAD"]);
+        fs::create_dir_all(root.join("etc/burrow")).unwrap();
+        let cfg: Config = serde_json::from_value(serde_json::json!({"repo":"sam/host","label":"probe","authors":[],"host":"host","user":"dev","stateDir":root,"projects":root.join("projects"),"proj":null,"journal":{"units":[],"userUnits":[]},"tools":{"journalctl":"false","systemctl":"false"}})).unwrap();
+        let commands = crate::answer::Commands;
+        let machine = Machine {
+            cfg: &cfg,
+            root: root.to_owned(),
+            now: 0,
+            uid: 1001,
+            run: &commands,
+        };
+        let running = |rev: &str| {
+            fs::write(
+                root.join("etc/burrow/inputs.json"),
+                serde_json::json!({"alias":{"repo":"sam/tool","rev":rev}}).to_string(),
+            )
+            .unwrap()
+        };
+        running(&second);
+        if !refs_only {
+            git(&["commit-graph", "write", "--reachable"]);
+            fs::write(repo.join(".git/info/grafts"), format!("{second}\n")).unwrap();
+            assert!(
+                answer(&machine, "sam/tool", &first)
+                    .unwrap()
+                    .ends_with(": yes\n")
+            );
+            fs::write(
+                repo.join(".git/info/grafts"),
+                format!("{first} {second}\n{second}\n"),
+            )
+            .unwrap();
+            running(&first);
+            assert!(
+                answer(&machine, "sam/tool", &second)
+                    .unwrap()
+                    .ends_with(": no\n")
+            );
+        }
+        let _ = fs::remove_file(repo.join(".git/info/grafts"));
+        running(&first);
+        git(&["branch", "deadbee", &first]);
+        assert!(answer(&machine, "sam/tool", "deadbee").is_err());
+        // A hexadecimal ref must not shadow a real object prefix either.
+        git(&["branch", &second[..10], &first]);
+        assert!(
+            answer(&machine, "sam/tool", &second[..10])
+                .unwrap()
+                .ends_with(": no\n")
+        );
     }
     #[test]
     fn ancestry_is_of_the_running_input_and_missing_history_is_never_no() {
@@ -135,17 +308,19 @@ mod tests {
         )
         .unwrap();
         let cfg: Config = serde_json::from_value(serde_json::json!({"repo":"sam/host","label":"probe","authors":[],"host":"host","user":"dev","stateDir":root,"projects":root.join("projects"),"proj":null,"journal":{"units":[],"userUnits":[]},"tools":{"journalctl":"false","systemctl":"false"}})).unwrap();
-        for (code, shallow, missing, expected) in [
-            (0, false, false, Some("yes")),
-            (1, false, false, Some("no")),
-            (1, true, false, None),
-            (0, false, true, None),
-            (128, false, false, None),
+        for (code, shallow, missing, ambiguous, expected) in [
+            (0, false, false, false, Some("yes")),
+            (1, false, false, false, Some("no")),
+            (1, true, false, false, None),
+            (0, false, true, false, None),
+            (128, false, false, false, None),
+            (0, false, false, true, None),
         ] {
             let history = History {
                 code,
                 shallow,
                 missing,
+                ambiguous,
                 calls: RefCell::new(Vec::new()),
             };
             let machine = Machine {
@@ -165,7 +340,7 @@ mod tests {
                 .calls
                 .borrow()
                 .iter()
-                .filter(|a| a[4] == "merge-base")
+                .filter(|a| a[6] == "merge-base")
             {
                 assert_eq!(call.last().unwrap(), &rev);
                 assert!(!call.iter().any(|s| s == "HEAD"));

@@ -186,7 +186,7 @@ impl Pass<'_> {
         let claimed = self.claimed(repo);
         let going = dirs(&root, "")
             .iter()
-            .filter(|d| d.join("job").exists())
+            .filter(|d| self.sorting_slot(d))
             .count();
         let mut room = t.at_once.saturating_sub(going);
         for issue in all {
@@ -211,7 +211,7 @@ impl Pass<'_> {
             if d.exists() {
                 continue;
             }
-            let (id, input) = match self.sort(repo, issue) {
+            let (id, input, seen) = match self.sort(repo, issue) {
                 Ok(started) => started,
                 Err(f) => {
                     say(f);
@@ -224,6 +224,7 @@ impl Pass<'_> {
                 fs::write(d.join(f), format!("{v}\n")).map_err(|e| io_fail(&d.join(f), e))?;
             }
             Self::hand(&d, &input)?;
+            fs::write(d.join("seen"), seen.to_string()).map_err(|e| io_fail(&d, e))?;
             room -= 1;
         }
         Ok(())
@@ -240,14 +241,21 @@ impl Pass<'_> {
 
     /// A sorting job for the issue: its id, and what it was given to read
     /// ([`Pass::input`]).
-    fn sort(&self, repo: &str, issue: &Value) -> Result<(String, String), Fail> {
+    fn sort(&self, repo: &str, issue: &Value) -> Result<(String, String, i64), Fail> {
         let n = raw(&issue["number"]);
-        let input = self.input(repo, issue).ok_or_else(|| {
+        let written = self.written(repo, issue).ok_or_else(|| {
             Fail::new(
                 1,
                 format!("proj-inbox: couldn't read {repo}#{n}'s comments"),
             )
         })?;
+        let input = self.issue_text(repo, &written.issue, &written.comments);
+        let seen = written
+            .comments
+            .iter()
+            .filter_map(|c| c["id"].as_i64())
+            .max()
+            .unwrap_or(0);
         let labels: Vec<String> = issue["labels"]
             .as_array()
             .map(|ls| ls.iter().map(|l| raw(&l["name"])).collect())
@@ -273,7 +281,7 @@ impl Pass<'_> {
             role: Some("triage".into()),
             ..New::default()
         };
-        start_job(self.cfg, &new, &self.project[repo], &task).map(|id| (id, input))
+        start_job(self.cfg, &new, &self.project[repo], &task).map(|id| (id, input, seen))
     }
 
     /// Each of the repo's sorting jobs that has ended, carried out: its
@@ -328,7 +336,29 @@ impl Pass<'_> {
             } else {
                 false
             };
+            if !barred && self.sorting_question(repo, n, &d, &job, open, busy)? {
+                handled.insert(n.to_owned());
+                continue;
+            }
             if !barred && busy {
+                continue;
+            }
+            // A resolved one-way question's owner label was ours, not an
+            // independent sorting verdict. Clear it and ignore a stale list
+            // snapshot of that label when consuming the resumed verdict.
+            let answered = read(&d.join("question-notice")).as_deref() == Some("one-way");
+            let resolved = open.cloned().map(|mut issue| {
+                if answered && let Some(labels) = issue["labels"].as_array_mut() {
+                    labels.retain(|l| {
+                        l["name"].as_str() != Some(self.cfg.needs_owner_label.as_str())
+                    });
+                }
+                issue
+            });
+            let open = resolved.as_ref();
+            if answered && let Err(e) = crate::ask::visibility(self.cfg, &job) {
+                eprintln!("proj sorting question: {e}");
+                self.retry(repo);
                 continue;
             }
             // The issue as the job read it, its text and its authors'
@@ -345,7 +375,7 @@ impl Pass<'_> {
             }
             let mut failed = false;
             if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i, &claimed)) {
-                match told(self.cfg, &id, "1") {
+                match told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into())) {
                     Ok(answer) => {
                         let Some(plan) = self.plan(&d, t, &id, &answer) else {
                             self.retry(repo);

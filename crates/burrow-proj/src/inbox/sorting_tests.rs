@@ -165,6 +165,11 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         let d = self.cfg.jobs.join(id);
         fs::create_dir_all(&d).unwrap();
         crate::ask::ensure(&crate::job::Job::new(&self.cfg, id)).unwrap();
+        fs::write(
+            crate::ask::host_path(&crate::job::Job::new(&self.cfg, id), "question-text"),
+            said,
+        )
+        .unwrap();
         fs::write(d.join("turns"), "1\n").unwrap();
         fs::write(d.join("1.outcome"), format!("{outcome}\n")).unwrap();
         if let Some(end) = end {
@@ -545,7 +550,7 @@ fn a_job_lets_go_of_an_issue_it_may_no_longer_read() {
 
 /// A sorting job s1 for issue 7 that answered `said`, its record made as
 /// of [`UPDATED`]: the record.
-fn sorting(b: &Box, said: &str) -> PathBuf {
+pub(super) fn sorting(b: &Box, said: &str) -> PathBuf {
     b.job("s1", "done", said);
     let d = b
         .cfg

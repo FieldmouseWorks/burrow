@@ -44,10 +44,7 @@ let
   # the store, which a read-only evaluation (`nix flake check --no-build`)
   # can't do.
   lock = lib.importJSON (flakeInputs.self.outPath + "/flake.lock");
-  lockedRepo = locked:
-    if (locked.type or "") == "github" then "${locked.owner}/${locked.repo}"
-    else let m = builtins.match "https://github.com/([^/]+)/([^/?#]+).*" (locked.url or "");
-    in if m == null then null else "${lib.elemAt m 0}/${lib.removeSuffix ".git" (lib.elemAt m 1)}";
+  lockedRepo = import ../lib/locked-repo.nix { inherit lib; };
   same = a: b: a != null && lib.toLower a == lib.toLower b;
   runningOf = repo: let
     roots = lib.filterAttrs (_: lib.isString) lock.nodes.${lock.root}.inputs;

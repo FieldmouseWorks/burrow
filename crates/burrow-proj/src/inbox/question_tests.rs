@@ -140,3 +140,106 @@ fn writable_job_metadata_cannot_redirect_host_label_authority() {
         b.log()
     );
 }
+
+#[test]
+fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
+    let b = Box::new();
+    let d = super::sorting_tests::sorting(&b, "Which release?");
+    let job = crate::job::Job::new(&b.cfg, "s1");
+    fs::write(job.turn("1", "end"), "ask\n").unwrap();
+    fs::write(job.path("owned"), "").unwrap();
+    fs::write(
+        crate::ask::host_path(&job, "question"),
+        json!({"recommendation":{"default":"ready", "one_way":false},"due":crate::now()+3600})
+            .to_string(),
+    )
+    .unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert!(d.exists(), "a question is not a verdict");
+    assert!(crate::ask::load(&job).is_some());
+    assert!(!crate::scratch::over(&job), "owned questions keep scratch");
+    crate::question::Resume::prepare(&job, true)
+        .unwrap()
+        .commit();
+    job.set_turns(2).unwrap();
+    fs::write(job.turn("2", "end"), "done\n").unwrap();
+    fs::write(job.turn("2", "outcome"), "done\n").unwrap();
+    fs::write(
+        job.turn("2", "jsonl"),
+        json!({"type":"result","result":"ready\nThe owner answered."}).to_string(),
+    )
+    .unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert!(!d.exists());
+    assert!(b.log().contains("labels[]=ready"), "{}", b.log());
+    assert!(!b.log().contains("labels[]=later"));
+}
+
+#[test]
+fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
+    let mut b = Box::new();
+    b.cfg.tools.systemd_run = "true".into();
+    b.cfg.needs_owner_label = "needs-owner".into();
+    burrow_test::executable(
+        &b.cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+    );
+    let d = super::sorting_tests::sorting(&b, "Which release?");
+    let job = crate::job::Job::new(&b.cfg, "s1");
+    crate::ask::initialize(&job, Some("https://github.com/sam/box/issues/7")).unwrap();
+    fs::write(job.path("session"), "s1").unwrap();
+    fs::write(job.turn("1", "end"), "ask\n").unwrap();
+    fs::write(
+        crate::ask::host_path(&job, "question-since"),
+        (crate::now() - 2).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        crate::ask::host_path(&job, "question"),
+        json!({"recommendation":{"default":"keep it", "one_way":true},"due":crate::now()-1})
+            .to_string(),
+    )
+    .unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    crate::ask::expire(&b.cfg, &job).unwrap();
+    let pending = crate::ask::host_path(&job, "question-needs-owner");
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+        .unwrap();
+    assert!(pending.exists());
+    assert!(d.join("job").exists(), "retain the human reply route");
+    assert!(!b.posted().contains("Sorted:"));
+    assert!(b.posted().contains("No answer by"));
+    // The same predicate used to budget sorting slots excludes this claim.
+    assert!(!b.pass().sorting_slot(&d));
+    for (login, kind, accepted) in [
+        ("stranger", "User", false),
+        ("sam", "Bot", false),
+        ("sam", "User", true),
+    ] {
+        fs::write(b.path("comments"), json!([{"id":19,"user":{"login":login,"__typename":kind,"type":kind},"body":"Use the new release.","created_at":burrow_probe::answer::utc(crate::now())}]).to_string()).unwrap();
+        b.pass()
+            .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+            .unwrap();
+        assert_eq!(!pending.exists(), accepted, "{login} {kind}: {}", b.log());
+    }
+    assert_eq!(job.turns().as_deref(), Some("3"));
+    assert!(b.pass().sorting_slot(&d));
+    fs::write(job.turn("3", "end"), "done\n").unwrap();
+    fs::write(job.turn("3", "outcome"), "done\n").unwrap();
+    fs::write(
+        job.turn("3", "jsonl"),
+        json!({"type":"result","result":"ready\nThe owner answered."}).to_string(),
+    )
+    .unwrap();
+    b.pass()
+        .verdicts("sam/box", &t, &[issue(7, "sam", &["needs-owner"])])
+        .unwrap();
+    assert!(!d.exists());
+    assert!(b.log().contains("labels[]=ready"), "{}", b.log());
+}

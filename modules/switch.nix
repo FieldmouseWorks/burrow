@@ -244,7 +244,7 @@ in
               lock = if lockPath != null && builtins.pathExists lockPath then builtins.fromJSON (builtins.readFile lockPath) else { };
               node = lock.nodes.${lock.root or "root"}.inputs.${name} or null;
               source = if builtins.isString node then lock.nodes.${node}.locked or { } else { };
-            in if source.type or "" == "github" then "${source.owner}/${source.repo}" else null;
+            in (import ../lib/locked-repo.nix { inherit lib; }) source;
           })
             (removeAttrs cfg.flakeInputs [ "self" ])
         );

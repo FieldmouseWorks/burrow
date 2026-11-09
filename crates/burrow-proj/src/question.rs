@@ -34,7 +34,12 @@ impl Resume {
                     && (before.is_some() || end.as_deref() == Some("ask"))));
         let mut metadata = Vec::new();
         if !asking {
-            for name in ["question", "question-needs-owner"] {
+            for name in [
+                "question",
+                "question-needs-owner",
+                "question-text",
+                "question-since",
+            ] {
                 let path = crate::ask::host_path(job, name);
                 match fs::read_to_string(&path) {
                     Ok(text) => metadata.push((path, text)),
