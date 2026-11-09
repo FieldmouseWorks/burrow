@@ -116,7 +116,7 @@ def jobs(st):
 
 
 def running(jid):
-    return C.job_state(jid) in (None, "queued", "running")
+    return C.at_work(jid)
 
 
 def live(st):

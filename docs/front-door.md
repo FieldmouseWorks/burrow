@@ -93,7 +93,12 @@ to take that recommendation and report it on the issue. A one-way default
 completes without executing the recommendation: its issue stays open under
 the owner label and its drain claim is released. Questions from drained,
 bot-started or stuck-issue jobs carry the owner's waiting label and are listed
-in the pipeline's owner issue, so they have a reader.
+in the pipeline's owner issue, so they have a reader. Until a reply or a
+reversible default resumes it, or `proj stop` ends it, the job is still at work:
+`proj holds ID` says what a job whose turn is over still holds open (its
+question, a one-way one left for the owner, the PRs and issues it awaits), and
+the steward never takes one that holds anything for ended or starts a second
+job on its work.
 
 ## Engines with no agent
 

@@ -256,6 +256,35 @@ impl<'a> Job<'a> {
             .unwrap_or(0)
     }
 
+    /// What it still holds open though its latest turn is over, one line of
+    /// `proj holds` each: `ask` while its question waits for a person (their
+    /// reply resumes it, and so does a reversible one's deadline, with its
+    /// default: ask::expire), `owner` once a one-way one's deadline has
+    /// passed and it's left for the owner (only their reply resumes it), and
+    /// `await TARGET` for each PR or issue it awaits (proj-watch resumes it
+    /// once one changes). A job that holds anything is still at work, so
+    /// whatever decides it ended reads this with its state, under
+    /// [`Job::read_lock`]; this takes no lock itself. proj stop clears all
+    /// of it.
+    pub fn holds(&self) -> Vec<String> {
+        let mut held = Vec::new();
+        let asked = self.turns().is_some_and(|n| {
+            !self.turn(&n, "stopped").exists()
+                && read(&self.turn(&n, "end")).as_deref() == Some("ask")
+        });
+        if crate::ask::host_path(self, "question-needs-owner").exists() {
+            held.push("owner".to_owned());
+        } else if asked || crate::ask::host_path(self, "question").exists() {
+            held.push("ask".to_owned());
+        }
+        for a in awaits(&read(&self.path("await")).unwrap_or_default()) {
+            if !a.target.trim().is_empty() {
+                held.push(format!("await {}", a.target.trim()));
+            }
+        }
+        held
+    }
+
     /// What the stall watchdog's look reads of the latest turn; None before
     /// the first.
     pub fn facts(&self) -> Option<Facts> {

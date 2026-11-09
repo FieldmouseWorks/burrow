@@ -722,33 +722,62 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
-def job_lifecycle(jid, key):
-    """Read state and awaits under proj's turn-start lock, like Rust claims.
-    If the record is unavailable, retain the job until a later pass."""
+def job_lifecycle(jid, key=None):
+    """How job jid stands, and what keeps it at work once its turn is over:
+    (state, held). state is job_state's; held, when that's done, what the
+    job still holds open (`proj holds`, crates/burrow-proj's Job::holds),
+    said for a PR's status: an answer to its question (a reply resumes it,
+    and so does a reversible one's deadline, with its default), the owner's
+    to a one-way one whose deadline passed, or a PR or issue it awaits other
+    than key (OWNER/REPO#N, the PR it was handed: awaiting only that is
+    ending its turn). None when it holds nothing: it ended. This is the one
+    word on whether a job ended, for every kind of job and every path that
+    asks (at_work; claims.rs asks proj the same): one that holds a question
+    and is taken for ended gets a second job on its branch, and both push
+    once the question's answered or times out (remi#881). Read under proj's
+    turn-start lock, so no turn starts between the two; a job whose record
+    can't be read, or that proj can't say what it holds of, is kept (state
+    None) until a later pass."""
     if DRY or jid.startswith(BUILD):
         return job_state(jid), None
     try:
         with open(os.path.join(CFG["jobsDir"], jid, "lock"), "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_SH)
             state = job_state(jid)
-            return state, awaiting(jid, key) if state == "done" else None
-    except OSError:
+            return state, holding(holds(jid), key) if state == "done" else None
+    except (OSError, RuntimeError):
         return None, None
 
 
-def awaiting(jid, key):
-    """What job jid, its turn over, awaits on GitHub besides key (OWNER/REPO#N,
-    the PR it was handed): a PR or issue elsewhere, the upstream fix it waits
-    to land, or None. proj keeps each target a line of the job's record's
-    `await`, the target first (crates/burrow-proj/src/job.rs, awaits), and
-    resumes the job once one changes."""
-    try:
-        with open(os.path.join(CFG["jobsDir"], jid, "await")) as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return None
-    targets = (line.split("\t", 1)[0].strip() for line in lines)
-    return next((t for t in targets if t and t.lower() != key.lower()), None)
+def at_work(jid, key=None):
+    """Whether job jid (or a proof build) is still at work: queued, running,
+    proj can't say, or its turn is over but it holds something open
+    (job_lifecycle)."""
+    state, held = job_lifecycle(jid, key)
+    return state in (None, "queued", "running") or held is not None
+
+
+def holds(jid):
+    """What `proj holds` says job jid holds open, a line each: ask, owner,
+    await TARGET. Raises when proj can't say."""
+    p = subprocess.run([CFG["proj"], "holds", jid], capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"proj holds {jid}: {p.stderr.strip() or f'exit {p.returncode}'}")
+    return p.stdout.splitlines()
+
+
+def holding(lines, key):
+    """What of holds' lines keeps the job at work, for a PR's status, or
+    None (job_lifecycle)."""
+    for line in lines:
+        what, _, target = line.strip().partition(" ")
+        if what == "ask":
+            return "an answer to its question"
+        if what == "owner":
+            return f"{CFG['owner']}'s answer to its one-way question"
+        if what == "await" and target and (key is None or target.lower() != key.lower()):
+            return target
+    return None
 
 
 # A proof build (proofs.build): no Claude job, but a unit of the machine

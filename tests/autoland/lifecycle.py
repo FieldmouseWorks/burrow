@@ -34,6 +34,15 @@ with tempfile.TemporaryDirectory() as tmp:
     job = Path(tmp) / 'job'
     job.mkdir()
     (job / 'lock').touch()
+
+    def holds(jid):
+        """`proj holds`, as proj reads the job's record: its awaits, and a
+        question while QUESTION has one."""
+        lines = [] if not (job / 'await').exists() else \
+            [f"await {l.split(chr(9))[0]}" for l in (job / 'await').read_text().splitlines()]
+        return QUESTION + lines
+    QUESTION = []
+    C.holds = holds
     for kind in ON:
         for head in ('original', 'own-push'):
             for turn in (1, 2, 3):
@@ -76,4 +85,27 @@ with tempfile.TemporaryDirectory() as tmp:
                 reader = Reader(kind, head)
                 assert reader.fixing() is None
                 assert reader.ends == {kind: 'done'}
+    # A job of any kind holding a question (or a one-way one left for the
+    # owner) is still at work, however its turn ended: never lost, never
+    # handed again (remi#881).
+    C.job_state = lambda jid: 'done'
+    (job / 'await').write_text('SAM/R#5\t0\t{}\n')
+    for held, said in (('ask', 'an answer to its question'), ('owner', "Sam's answer to its one-way question")):
+        QUESTION[:] = [held]
+        C.CFG['owner'] = 'Sam'
+        for kind in (*ON, 'judged', 'proved'):
+            reader = Reader(kind, 'original')
+            assert reader.running(kind, 'original') == 'awaiting', (held, kind)
+            assert reader.awaits == {kind: said} and not reader.ends, (held, kind, reader.awaits)
+            assert C.at_work('job') and C.at_work('job', 'sam/r#5'), held
+    QUESTION[:] = []
+    for kind in (*ON, 'judged', 'proved'):
+        reader = Reader(kind, 'original')
+        assert reader.running(kind, 'original') == '' and reader.ends == {kind: 'done'}, kind
+    assert not C.at_work('job', 'sam/r#5') and C.at_work('job'), 'awaiting only its own PR is ending its turn'
+    # proj that can't say what it holds keeps the job, as one it can't say the state of.
+    def fails(jid):
+        raise RuntimeError('proj holds job: exit 1')
+    C.holds = fails
+    assert C.job_lifecycle('job', 'sam/r#5') == (None, None) and C.at_work('job', 'sam/r#5')
 print('Python lifecycle and handoff: ok')

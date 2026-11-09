@@ -47,6 +47,8 @@ os.makedirs(f"{tmp}/answer-bin")
 with open(f"{tmp}/answer-bin/proj", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, sys
+if sys.argv[1] == "holds":
+    sys.exit(0)  # nothing held open: proj's word on a done job that ended
 print(json.load(open({PROJ_SAYS!r})).get(sys.argv[2], "running"))
 """)
 os.chmod(f"{tmp}/answer-bin/proj", 0o755)

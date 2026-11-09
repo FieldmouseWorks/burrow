@@ -70,6 +70,12 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
+        Some("holds") => {
+            let id = arg(args, 1, "usage: proj holds ID")?;
+            let held = Job::new(cfg, id).holds();
+            put(&held.iter().map(|h| format!("{h}\n")).collect::<String>());
+            Ok(())
+        }
         Some("find") => {
             let key = arg(args, 1, "usage: proj find KEY")?;
             if let Some(id) = run::find(cfg, key)? {

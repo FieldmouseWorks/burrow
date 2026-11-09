@@ -489,6 +489,10 @@ impl Jobs for NoJobs {
         None
     }
 
+    fn holds(&mut self, _: &str) -> Option<Vec<String>> {
+        None
+    }
+
     fn find(&mut self, _: &str) -> Result<Option<String>, String> {
         Ok(None)
     }

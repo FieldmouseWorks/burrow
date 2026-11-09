@@ -61,6 +61,8 @@ PROJ_STATES, PROJ_KEYS = f"{tmp}/upkeep-proj.json", f"{tmp}/upkeep-keys.json"
 with open(f"{tmp}/upkeep-bin/proj", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, sys
+if sys.argv[1] == "holds":
+    sys.exit(0)  # nothing held open: proj's word on a done job that ended
 if sys.argv[1] == "find":
     keys = json.load(open({PROJ_KEYS!r}))
     if keys.get("fail"):

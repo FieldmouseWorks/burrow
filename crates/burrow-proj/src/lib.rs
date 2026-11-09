@@ -45,6 +45,8 @@
 //! proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 //!                             the full stream); fails when there's none
 //! proj state ID               queued, running, done, error or failed
+//! proj holds ID               what a job whose turn is over still holds open,
+//!                             a line each (Job::holds): ask, owner, await TARGET
 //! proj find KEY               the id of the job run --key KEY, once it has
 //!                             started a turn; nothing for none, and one
 //!                             that never started lets its key go

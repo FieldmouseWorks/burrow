@@ -43,6 +43,7 @@ fn seen_as(hub: &mut Hub, state: Option<&str>, l: &Look) -> (Seen, Out) {
     let cfg = config(dir.path());
     let mut jobs = States::new("running");
     jobs.default = state.map(String::from);
+    jobs.record = Some(l.jobs.clone());
     let (out, got) = look(&cfg, hub, &mut jobs, 0.0, |p| Ok(claims(p, l)));
     (got.unwrap(), out)
 }
@@ -342,6 +343,15 @@ fn a_resume_cannot_clear_awaits_between_state_and_claim_completion() {
             rx.recv().unwrap();
             Some("done".into())
         }
+        fn holds(&mut self, _: &str) -> Option<Vec<String>> {
+            let text = std::fs::read_to_string(self.dir.join("await")).unwrap_or_default();
+            Some(
+                text.lines()
+                    .filter_map(|l| l.split('\t').next())
+                    .map(|t| format!("await {t}"))
+                    .collect(),
+            )
+        }
         fn find(&mut self, _: &str) -> Result<Option<String>, String> {
             unreachable!()
         }
@@ -365,5 +375,40 @@ fn a_resume_cannot_clear_awaits_between_state_and_claim_completion() {
         jobs.resume.take().unwrap().join().unwrap();
         assert_eq!(s.answering, l.answering);
         assert!(s.answered.is_empty() && s.stop.is_empty() && hub.asked.is_empty());
+    }
+}
+
+// A fix job whose turn ended with a question for a person (or a one-way
+// one left for the owner) holds its claim as one awaiting upstream does:
+// its answers wait for the turn its answer resumes, never posted as its
+// last (remi#881). Once it holds nothing, they go up.
+#[test]
+fn a_question_keeps_the_claim_until_its_final_answers() {
+    for held in ["ask", "owner"] {
+        let jobs = tempfile::tempdir().unwrap();
+        let dir = jobs.path().join("job-1");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("answers.json"), "intermediate answers").unwrap();
+        let l = at(HANDED, jobs.path(), true);
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let cfg = config(cfg_dir.path());
+        let mut states = States::new("done");
+        states.held.insert("job-1".into(), vec![held.into()]);
+        let mut hub = Hub::default();
+        let (_, got) = look(&cfg, &mut hub, &mut states, 0.0, |p| Ok(claims(p, &l)));
+        let s = got.unwrap();
+        assert_eq!(s.answering, l.answering, "{held}");
+        assert!(
+            s.answered.is_empty() && s.stop.is_empty() && hub.asked.is_empty(),
+            "{held}"
+        );
+        states.held.insert("job-1".into(), vec![]);
+        let (_, got) = look(&cfg, &mut hub, &mut states, 0.0, |p| Ok(claims(p, &l)));
+        let s = got.unwrap();
+        assert!(
+            s.answering.is_empty() && s.answered[0].outcome == "wrong",
+            "{held}: {:?}",
+            s.answered
+        );
     }
 }

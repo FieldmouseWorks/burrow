@@ -175,13 +175,17 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
             .or_insert_with(|| p.jobs.state(jid))
             .clone()
     };
-    // Whether the job is still queued or running, or nothing can say.
-    let working = |s: &Option<String>| matches!(s.as_deref(), None | Some("queued" | "running"));
+    // Whether the job is still at work (Jobs::at_work).
+    let working =
+        |p: &mut Pass, jid: &str, s: &Option<String>| p.jobs.at_work(jid, s.as_deref(), None);
     let timeout = cfg.job_timeout as f64;
     // One job a repo at a time: its flaky tests often share a cause (a slow
     // start, a shared port), and two jobs would race on the same fix.
     let busy = match st.job.as_deref().filter(|j| !j.is_empty()) {
-        Some(j) => working(&state(p, j)),
+        Some(j) => {
+            let s = state(p, j);
+            working(p, j, &s)
+        }
         None => false,
     };
     if busy {
@@ -197,7 +201,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
             continue;
         };
         let now = state(p, &jid);
-        if working(&now) {
+        if working(p, &jid, &now) {
             if now.is_some() {
                 // Resumed (proj await, proj reply): its day starts again
                 // when this turn ends.

@@ -234,6 +234,10 @@ pub struct States {
     pub found: HashMap<String, String>,
     pub unfound: Option<String>,
     pub finds: Vec<String>,
+    /// What `proj holds` says of a job, by id; else, with `record`, the
+    /// PRs and issues its await file there lists, as proj reads them.
+    pub held: HashMap<String, Vec<String>>,
+    pub record: Option<std::path::PathBuf>,
 }
 
 impl States {
@@ -245,6 +249,8 @@ impl States {
             found: HashMap::new(),
             unfound: None,
             finds: vec![],
+            held: HashMap::new(),
+            record: None,
         }
     }
 
@@ -266,6 +272,23 @@ impl Jobs for States {
     fn state(&mut self, jid: &str) -> Option<String> {
         self.asked.push(jid.into());
         self.of.get(jid).cloned().or_else(|| self.default.clone())
+    }
+
+    fn holds(&mut self, jid: &str) -> Option<Vec<String>> {
+        if let Some(held) = self.held.get(jid) {
+            return Some(held.clone());
+        }
+        let text = self
+            .record
+            .as_ref()
+            .and_then(|r| fs::read_to_string(r.join(jid).join("await")).ok())
+            .unwrap_or_default();
+        Some(
+            text.lines()
+                .filter_map(|l| l.split('\t').next())
+                .map(|t| format!("await {t}"))
+                .collect(),
+        )
     }
 
     fn find(&mut self, key: &str) -> Result<Option<String>, String> {

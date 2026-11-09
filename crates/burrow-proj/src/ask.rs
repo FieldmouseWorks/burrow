@@ -339,6 +339,39 @@ mod tests {
         assert!(load(&job).is_none());
         assert_eq!(owner_lines(&cfg).len(), 1);
     }
+    // What a job still holds open (Job::holds), through each end its
+    // question can come to: the steward and claims take one that holds
+    // anything for one still at work, never as ended (remi#881).
+    #[test]
+    fn a_question_is_held_until_its_job_resumes_or_stops() {
+        for one_way in [false, true] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, one_way);
+            fs::write(job.path("await"), "sam/up#3\t0\t{}\n").unwrap();
+            assert_eq!(job.holds(), ["ask", "await sam/up#3"]);
+            fs::remove_file(job.path("await")).unwrap();
+            let held = job.lock().unwrap();
+            expire(&cfg, &job).unwrap();
+            drop(held);
+            if one_way {
+                // Its synthetic turn is done, but the owner's answer is owed.
+                assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
+                assert_eq!(job.holds(), ["owner"]);
+            } else {
+                // Resumed with its default: the question's gone, and the
+                // turn it started is what says it's at work now.
+                assert_eq!(job.turns().as_deref(), Some("2"));
+                assert!(job.holds().is_empty(), "{:?}", job.holds());
+            }
+            crate::cmd::halt(&cfg, &job, false).unwrap();
+            assert!(job.holds().is_empty(), "proj stop leaves nothing held");
+        }
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(job.turn("1", "end"), "done\n").unwrap();
+        clear(&job);
+        assert!(job.holds().is_empty(), "a done turn holds nothing");
+    }
     #[test]
     fn a_timed_out_one_way_question_requires_a_person_before_resuming() {
         let (_dir, cfg) = fixture();

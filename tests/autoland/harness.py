@@ -496,6 +496,7 @@ def post(repo, pr, r, answer, description):
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+HELD = {}  # what a job holds open, by id, as `proj holds` says it: nothing unless set
 STOPPED = []  # the jobs `proj stop` ended, in order
 UNSTOPPABLE = set()  # the jobs `proj stop` can't stop
 
@@ -508,6 +509,7 @@ def stop_job(jid):
         return False
     STOPPED.append(jid)
     STATES[jid] = "failed"
+    HELD.pop(jid, None)  # proj stop clears what it held
     return True
 
 
@@ -676,6 +678,7 @@ def stand_in():
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
     C.job_lifecycle = job_lifecycle
+    C.holds = lambda jid: HELD.get(jid, [])
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
     V.queue = queue
