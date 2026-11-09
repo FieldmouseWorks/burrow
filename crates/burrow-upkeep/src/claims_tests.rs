@@ -38,6 +38,7 @@ fn at(head: &str, jobs: &std::path::Path, machinery: bool) -> Look {
 /// One look at the PR, job-1 `state` (proj can't say, if none): what it
 /// gave back, and the pass's own.
 fn seen_as(hub: &mut Hub, state: Option<&str>, l: &Look) -> (Seen, Out) {
+    std::fs::create_dir_all(l.jobs.join("job-1")).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let mut jobs = States::new("running");
@@ -152,7 +153,7 @@ fn a_job_thats_over_is_answered_for_once() {
     assert_eq!(s, Seen::default());
     // It left answers on a push someone else's head is past: forgotten,
     // and why.
-    std::fs::create_dir(jobs.path().join("job-1")).unwrap();
+    std::fs::create_dir_all(jobs.path().join("job-1")).unwrap();
     let left = json!({"pushed": PUSHED, "threads": []}).to_string();
     std::fs::write(jobs.path().join("job-1/answers.json"), &left).unwrap();
     let pr = |head: &str| {
@@ -198,4 +199,171 @@ fn a_job_thats_over_is_answered_for_once() {
             .unwrap()
             .starts_with("its answers file can't be read")
     );
+}
+
+#[test]
+fn external_awaits_keep_every_fix_claim_until_its_final_answers() {
+    for kind in ["handed", "redFixed", "failFixed", "conflictFixed"] {
+        for own_push in [false, true] {
+            for intermediate_answers in [false, true] {
+                let jobs = tempfile::tempdir().unwrap();
+                let dir = jobs.path().join("job-1");
+                std::fs::create_dir(&dir).unwrap();
+                let head = if own_push { PUSHED } else { HANDED };
+                let mut l = at(HANDED, jobs.path(), true);
+                l.answering.get_mut("job-1").unwrap().kind = kind.into();
+                if intermediate_answers {
+                    std::fs::write(dir.join("answers.json"), "intermediate answers").unwrap();
+                }
+                for (turn, upstream) in ["sam/up#3", "sam/other#9", "sam/up#3"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    std::fs::write(dir.join("turns"), (turn + 1).to_string()).unwrap();
+                    std::fs::write(
+                        dir.join("await"),
+                        format!("SAM/R#5\t0\t{{}}\n{upstream}\t0\t{{}}\n"),
+                    )
+                    .unwrap();
+                    l.head = head.into();
+                    let mut hub = Hub::default();
+                    hub.on("GET", ACTIVITY, reply(200, pushes("workers[bot]", head)));
+                    let (s, _) = seen(&mut hub, "done", &l);
+                    assert_eq!(s.answering.len(), 1, "{kind}");
+                    assert!(s.stop.is_empty() && s.answered.is_empty());
+                    l.answering = s.answering;
+                    l.pushed_by = s.pushed_by;
+                    std::fs::write(dir.join("turns"), (turn + 2).to_string()).unwrap();
+                    for cached in [false, true] {
+                        if !cached {
+                            l.pushed_by = None;
+                        }
+                        let mut hub = Hub::default();
+                        hub.on("GET", ACTIVITY, reply(200, pushes("workers[bot]", head)));
+                        for state in ["queued", "running"] {
+                            let (s, _) = seen(&mut hub, state, &l);
+                            assert_eq!(s.answering, l.answering, "{kind} {state} cached={cached}");
+                            assert!(s.stop.is_empty());
+                            l.pushed_by = s.pushed_by;
+                        }
+                    }
+                }
+                // Final answers replace any intermediate file, and go up.
+                std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+                std::fs::write(dir.join("answers.json"), json!({
+                    "pushed": own_push.then_some(head), "threads": [], "comment": "Finished the fix."
+                }).to_string()).unwrap();
+                let mut hub = Hub {
+                    graphql: vec![(
+                        "reviewThreads(first: 100)".into(),
+                        reply(
+                            200,
+                            json!({
+                                "data": {"repository": {"pullRequest": {
+                                    "state": "OPEN", "headRefOid": head, "headRefName": "feat", "body": "Does it.",
+                                    "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": []}
+                                }}}
+                            }),
+                        ),
+                    )],
+                    ..Hub::default()
+                };
+                hub.on(
+                    "GET",
+                    "repos/sam/r/issues/5/comments?",
+                    reply(200, json!([])),
+                );
+                hub.on(
+                    "POST",
+                    "repos/sam/r/issues/5/comments$",
+                    reply(201, json!({"id": 1})),
+                );
+                let (s, _) = seen(&mut hub, "done", &l);
+                assert!(s.answering.is_empty());
+                assert_eq!(s.answered[0].outcome, "posted");
+                assert!(hub.paths().iter().any(|p| p.contains("issues/5/comments")));
+            }
+        }
+    }
+}
+
+#[test]
+fn externally_awaiting_jobs_still_stop_for_another_authors_push() {
+    let jobs = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(jobs.path().join("job-1")).unwrap();
+    std::fs::write(jobs.path().join("job-1/await"), "sam/up#3\t0\t{}\n").unwrap();
+    for kind in ["handed", "redFixed", "failFixed", "conflictFixed"] {
+        for state in ["done", "queued", "running"] {
+            for cached in [false, true] {
+                let mut l = at(THEIRS, jobs.path(), true);
+                l.answering.get_mut("job-1").unwrap().kind = kind.into();
+                if cached {
+                    l.pushed_by = Some((THEIRS.into(), "sam".into()));
+                }
+                let mut hub = Hub::default();
+                hub.on("GET", ACTIVITY, reply(200, pushes("sam", THEIRS)));
+                std::fs::write(jobs.path().join("job-1/turns"), "2").unwrap();
+                let (s, _) = seen(&mut hub, state, &l);
+                assert_eq!(s.stop.len(), 1);
+                assert!(s.answering.is_empty() && s.answered.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_resume_cannot_clear_awaits_between_state_and_claim_completion() {
+    use crate::pass::Jobs;
+    use std::sync::mpsc;
+    struct Resuming {
+        dir: PathBuf,
+        resume: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Jobs for Resuming {
+        fn state(&mut self, _: &str) -> Option<String> {
+            // State has just read done. A concurrent start tries to publish
+            // turn 2 and exec clears awaits, before claims reads them.
+            let dir = self.dir.clone();
+            let (tx, rx) = mpsc::channel();
+            self.resume = Some(std::thread::spawn(move || {
+                let lock = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(dir.join("lock"))
+                    .unwrap();
+                assert!(
+                    lock.try_lock().is_err(),
+                    "claims must exclude concurrent starts"
+                );
+                tx.send(()).unwrap();
+                lock.lock().unwrap();
+                std::fs::write(dir.join("turns"), "2").unwrap();
+                std::fs::remove_file(dir.join("await")).unwrap();
+            }));
+            rx.recv().unwrap();
+            Some("done".into())
+        }
+        fn find(&mut self, _: &str) -> Result<Option<String>, String> {
+            unreachable!()
+        }
+    }
+    for kind in ["handed", "redFixed", "failFixed", "conflictFixed"] {
+        let jobs = tempfile::tempdir().unwrap();
+        let dir = jobs.path().join("job-1");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("turns"), "1").unwrap();
+        std::fs::write(dir.join("lock"), "").unwrap();
+        std::fs::write(dir.join("await"), "sam/up#3\t0\t{}\n").unwrap();
+        std::fs::write(dir.join("answers.json"), "intermediate answers").unwrap();
+        let mut l = at(HANDED, jobs.path(), true);
+        l.answering.get_mut("job-1").unwrap().kind = kind.into();
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let cfg = config(cfg_dir.path());
+        let mut jobs = Resuming { dir, resume: None };
+        let mut hub = Hub::default();
+        let (_, got) = look(&cfg, &mut hub, &mut jobs, 0.0, |p| Ok(claims(p, &l)));
+        let s = got.unwrap();
+        jobs.resume.take().unwrap().join().unwrap();
+        assert_eq!(s.answering, l.answering);
+        assert!(s.answered.is_empty() && s.stop.is_empty() && hub.asked.is_empty());
+    }
 }

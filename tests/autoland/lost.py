@@ -8,6 +8,7 @@ until a job finishes its turn, so the watchdog takes it."""
 
 import itertools
 import json
+import os
 
 import proofs as P
 import waits
@@ -127,6 +128,57 @@ for mk, kw in ((clean, {"threads": [False]}), (clean, {"checks": ci_red}),
     assert "state=failure" not in status and digest == [], (kw, status, digest)
     status, digest = run(mk(**{**kw, "sha": newer}), 7800)
     assert "state=failure" not in status and digest == [], (kw, status, digest)
+STATES.clear()
+
+
+def awaits(*targets):
+    """The latest job's turn ended awaiting targets, as proj keeps them
+    (the target, when it began, what it was)."""
+    os.makedirs(f"{tmp}/jobs/{ISSUED[-1]}", exist_ok=True)
+    with open(f"{tmp}/jobs/{ISSUED[-1]}/await", "w") as f:
+        f.writelines(f"{t}\t1794200000\t{{}}\n" for t in targets)
+
+
+# A fix job whose turn ended awaiting the fix it needs elsewhere (a PR in
+# the repo this one pins, say) is still at work on it: proj resumes it once
+# that changes. Not lost, not handed again however long that takes, and
+# never two that failed (remi#881: three jobs on one head, each waiting on
+# burrow's PR with the fix, and the PR on the stuck issue). It waits as on a
+# hold, which nothing here moves. Awaiting only this PR is ending its turn.
+threads = {"threads": [False]}
+fresh_pr_state()
+run(clean(**threads), 0)
+run(clean(**threads), 7200)
+assert len(JOBS) == 1, JOBS
+ends("done")
+awaits("sam/r#5", "sam/up#3")
+for t in (7300, 7400, 7400 + 10 * 3600):
+    status, digest = a_pass(clean(**threads), t)
+    assert JOBS == [] and "its Claude job awaits sam/up#3" in status and "state=pending" in status, (t, status, JOBS)
+    assert digest == [] and overdue() is None, (t, digest, waits.FAILING)
+    it = stall()
+    assert it["kick"] is None and it["due"] == it["since"] + 480 * 60 and it["claude"] is False, (t, it)
+# It pushes a head of its own, then awaits again: the new head is its.
+status, digest = a_pass(clean(sha=newer, **threads), 7400 + 11 * 3600)
+assert JOBS == [] and "its Claude job on its findings awaits sam/up#3" in status and digest == [], (status, JOBS)
+# Resumed, it's at work as any other is; ending with no await elsewhere, it
+# counts as one that ended without fixing it, and the second is handed.
+fresh_pr_state()
+run(clean(**threads), 0)
+run(clean(**threads), 7200)
+ends("done")
+awaits("sam/up#3")
+status, _ = run(clean(**threads), 7300)
+assert JOBS == [] and "awaits sam/up#3" in status, status
+STATES[ISSUED[-1]] = "running"
+os.remove(f"{tmp}/jobs/{ISSUED[-1]}/await")
+status, _ = run(clean(**threads), 7400)
+assert JOBS == [] and "a Claude job has it since" in status, status
+ends("done")
+awaits("SAM/R#5")  # only this PR, however GitHub's names are cased
+run(clean(**threads), 7500)
+status, digest = run(clean(**threads), 7600)
+assert len(JOBS) == 1 and "awaits" not in status and digest == [], (status, JOBS)
 STATES.clear()
 print("jobs without their answer: ok")
 

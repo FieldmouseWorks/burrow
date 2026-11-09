@@ -11,6 +11,7 @@ user's own gh login, which every Claude session on the machine shares.
 
 import contextlib
 import hashlib
+import fcntl
 import hmac
 import json
 import os
@@ -719,6 +720,35 @@ def job_state(jid):
         return build_state(jid)
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+def job_lifecycle(jid, key):
+    """Read state and awaits under proj's turn-start lock, like Rust claims.
+    If the record is unavailable, retain the job until a later pass."""
+    if DRY or jid.startswith(BUILD):
+        return job_state(jid), None
+    try:
+        with open(os.path.join(CFG["jobsDir"], jid, "lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            state = job_state(jid)
+            return state, awaiting(jid, key) if state == "done" else None
+    except OSError:
+        return None, None
+
+
+def awaiting(jid, key):
+    """What job jid, its turn over, awaits on GitHub besides key (OWNER/REPO#N,
+    the PR it was handed): a PR or issue elsewhere, the upstream fix it waits
+    to land, or None. proj keeps each target a line of the job's record's
+    `await`, the target first (crates/burrow-proj/src/job.rs, awaits), and
+    resumes the job once one changes."""
+    try:
+        with open(os.path.join(CFG["jobsDir"], jid, "await")) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    targets = (line.split("\t", 1)[0].strip() for line in lines)
+    return next((t for t in targets if t and t.lower() != key.lower()), None)
 
 
 # A proof build (proofs.build): no Claude job, but a unit of the machine
