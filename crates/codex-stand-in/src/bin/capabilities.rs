@@ -176,24 +176,19 @@ fn main() {
             }
             "github" => {
                 UnixStream::connect(env::var("GH_TOKEN_SOCKET").unwrap()).unwrap();
-                run(
-                    "gh",
-                    &[
-                        "api",
+                let mut github = burrow_github::Gh::default();
+                for (path, body) in [
+                    (
                         "repos/test/project/issues/1/comments",
-                        "-f",
-                        "body=capabilities",
-                    ],
-                );
-                run(
-                    "gh",
-                    &[
-                        "api",
+                        serde_json::json!({"body":"capabilities"}),
+                    ),
+                    (
                         "repos/test/project/issues/1/labels",
-                        "-f",
-                        "labels[]=tested",
-                    ],
-                );
+                        serde_json::json!({"labels":["tested"]}),
+                    ),
+                ] {
+                    burrow_github::call(&mut github, "POST", path, Some(&body), None).unwrap();
+                }
             }
             "heavy" => run("heavy", &["--", "true"]),
             "nix" => {
