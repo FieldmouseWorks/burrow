@@ -124,3 +124,23 @@ fn turn_selectors_never_name_paths() {
         );
     }
 }
+
+#[test]
+fn configured_app_environment_may_be_a_system_symlink_without_allowing_job_symlinks() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    fs::write(
+        p.join("immutable-env"),
+        "GH_TOKEN_SOCKET=/run/gh-token/workers.sock\n",
+    )
+    .unwrap();
+    symlink(p.join("immutable-env"), p.join("system-env")).unwrap();
+    cfg.apps.insert("workers".into(), p.join("system-env"));
+    assert_eq!(
+        cfg.app_environment("workers").as_deref(),
+        Some("GH_TOKEN_SOCKET=/run/gh-token/workers.sock")
+    );
+    assert!(crate::read(&p.join("system-env")).is_none());
+    assert!(cfg.app_environment("../workers").is_none());
+}

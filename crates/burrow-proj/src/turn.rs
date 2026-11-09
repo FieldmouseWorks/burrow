@@ -177,11 +177,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let mut app_env = String::new();
     match github_app(cfg, read(&job.path("app")), choice.engine) {
         Ok(None) => {}
-        Ok(Some(app)) => match cfg
-            .app_env(&app)
-            .and_then(|f| read(f))
-            .filter(|e| !e.is_empty())
-        {
+        Ok(Some(app)) => match cfg.app_environment(&app).filter(|e| !e.is_empty()) {
             Some(e) => app_env = e,
             None => {
                 outcome(&format!("no GitHub App {app} on this machine to act as"));

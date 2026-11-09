@@ -187,6 +187,16 @@ impl Config {
         ok.then(|| self.apps.get(name)).flatten()
     }
 
+    /// An explicit host-configured resource, not a pathname supplied by a job.
+    pub(crate) fn app_environment(&self, name: &str) -> Option<String> {
+        // NixOS installs this configured capability through an /etc symlink.
+        // Only a key in the host's immutable app map selects it; job state
+        // and all paths derived from job state use the confined reader.
+        self.app_env(name)
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.trim_end_matches('\n').to_owned())
+    }
+
     /// Resolve one role once per turn. Every non-comment line must parse,
     /// so a typo never silently sends work to a different engine. Repo scopes
     /// beat bare roles; duplicate keys fail with both lines, even on other roles.
