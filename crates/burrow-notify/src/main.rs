@@ -1,4 +1,4 @@
-//! `burrow-notify CONFIG open|close|pending KEY ...`, which is HOST-notify
+//! `burrow-notify CONFIG open|ensure|close|pending KEY ...`, which is HOST-notify
 //! (lib.rs) once modules/notify.nix builds the config in. It exits 0 whatever
 //! GitHub does, 2 on a usage error, and `pending` answers 0 or 1.
 

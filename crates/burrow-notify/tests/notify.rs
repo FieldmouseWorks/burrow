@@ -720,3 +720,29 @@ fn with_no_repo_every_notice_goes_to_the_journal() {
         assert!(!b.pending("k5"));
     }
 }
+
+#[test]
+fn ensure_retries_ambiguous_creation_without_daily_reminders() {
+    let mut b = machine(Some("sam/homelab"));
+    b.github.down = true;
+    b.notify(
+        &["ensure", "question", "Answer needed", "Original question"],
+        NOW,
+    );
+    assert!(b.github.issues.is_empty());
+    b.github.down = false;
+    b.github.lose = true;
+    b.notify(
+        &["ensure", "question", "Answer needed", "Original question"],
+        NOW,
+    );
+    assert_eq!(b.github.issues.len(), 1);
+    for days in [0, 1, 2, 30] {
+        b.notify(
+            &["ensure", "question", "Answer needed", "Original question"],
+            NOW + days * DAY + 1,
+        );
+        assert_eq!(b.github.issues.len(), 1);
+        assert!(b.github.issues[0].comments.is_empty());
+    }
+}

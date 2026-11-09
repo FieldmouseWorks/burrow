@@ -26,6 +26,16 @@ use crate::engine::{last_result, names_session};
 use crate::waits::Facts;
 use crate::{filled, mtime, now, read, swap, systemd, usage};
 
+/// Numeric owner of a per-turn artifact, including temporary writes.
+pub(crate) fn turn_number(name: &str) -> Option<u64> {
+    name.strip_prefix("prompt.")
+        .unwrap_or(name)
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 pub struct Job<'a> {
     pub cfg: &'a Config,
     pub id: &'a str,
@@ -60,6 +70,32 @@ impl<'a> Job<'a> {
         swap(&self.path("turns"), &format!("{n}\n"))
     }
 
+    /// Before publishing another turn, remove every artifact beyond the last
+    /// committed turn from the live namespace. Failed attempts can leave more
+    /// than a prompt; none may become facts when its number is reused. Keep
+    /// them for diagnosis, without overwriting an earlier failed attempt.
+    /// The caller holds the job lock and has waited out the previous unit.
+    pub(crate) fn quarantine_unstarted(&self, last: u64) -> io::Result<()> {
+        let future = fs::read_dir(&self.dir)?
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|e| turn_number(&e.file_name().to_string_lossy()).is_some_and(|n| n > last))
+            .collect::<Vec<_>>();
+        if future.is_empty() {
+            return Ok(());
+        }
+        let root = self.path(".unstarted");
+        fs::create_dir_all(&root)?;
+        let attempt = tempfile::Builder::new()
+            .prefix("attempt-")
+            .tempdir_in(root)?
+            .keep();
+        for entry in future {
+            fs::rename(entry.path(), attempt.join(entry.file_name()))?;
+        }
+        Ok(())
+    }
+
     /// The job's systemd unit, which runs its turns one at a time.
     pub fn unit(&self) -> String {
         format!("proj-{}.service", escape(self.id))
@@ -84,6 +120,15 @@ impl<'a> Job<'a> {
         let f = self.lock_file()?;
         f.lock_shared()?;
         Ok(f)
+    }
+
+    pub(crate) fn try_lock(&self) -> io::Result<Option<File>> {
+        let f = self.lock_file()?;
+        match f.try_lock() {
+            Ok(()) => Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
     }
 
     fn lock_file(&self) -> io::Result<File> {
