@@ -35,6 +35,24 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
+        {
+            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            match crate::ask::expire(cfg, &job) {
+                Ok(Some(at)) => retry.push((String::new(), at)),
+                Ok(None) => (),
+                Err(e) => {
+                    eprintln!("proj question: {e}");
+                    retry.push((String::new(), now() + RETRY));
+                }
+            }
+        }
+        if let Err(error) = crate::ask::visibility(cfg, &job) {
+            eprintln!("proj question: {error}");
+            retry.push((String::new(), now() + RETRY));
+        }
+        if job.path("question-needs-owner").exists() {
+            continue;
+        }
         let f = job.path("await");
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;

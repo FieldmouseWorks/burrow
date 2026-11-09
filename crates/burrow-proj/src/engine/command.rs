@@ -11,7 +11,9 @@ use std::process::{Child, Command, Stdio};
 pub const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
 
 /// How a turn says what comes next: what resumes the job, if anything.
-pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
+pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask --default \"TEXT\" [--one-way]` when your answer is a question only a person can settle (their reply resumes it; after the deadline a reversible default is taken, a one-way default is left for the owner), or `proj done` when the work is finished";
+
+pub const FACTS: &str = "Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.";
 
 /// Parent exec flags precede resume: its subcommand accepts model and JSON,
 /// but not the parent's own flags (pinned CLI's exec/resume help).
@@ -100,7 +102,7 @@ pub fn spawn(
                 .into()
         };
         args.extend(["--append-system-prompt".into(), format!(
-            "This is a sandboxed proj job, running headless. {next} The sandbox's proj records your declaration locally; the host registers GitHub waits when your run ends. Anything left running is stopped with the VM at the end of the turn. {LONG}"
+            "This is a sandboxed proj job, running headless. {next} The sandbox's proj records your declaration locally; the host registers GitHub waits when your run ends. Anything left running is stopped with the VM at the end of the turn. {LONG} {FACTS}"
         )]);
         c.args(["agent", "sh", agent, "env"])
             .arg(format!("PROJ_VM_NEXT={}", crate::guest::path(job, n)))
@@ -130,6 +132,7 @@ pub fn spawn(
             "This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped."
         )
     };
+    let instructions = format!("{instructions} {FACTS}");
     if choice.engine == Engine::Claude {
         args.extend(["--append-system-prompt".into(), instructions]);
     } else {
@@ -155,6 +158,7 @@ pub fn spawn(
         c.arg("claude");
     }
     c.args(&args)
+        .env("PROJ_PROBE_SOCKET", crate::probe::socket(cfg, job, n))
         .env("PROJ_JOB", id)
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)

@@ -13,10 +13,14 @@ pub(crate) struct Resume {
     before: Option<String>,
     asking: bool,
     committed: bool,
+    metadata: Vec<(PathBuf, String)>,
 }
 
 impl Resume {
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
+        if !answered && job.path("question-needs-owner").exists() {
+            return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
+        }
         let path = job.path("open-question");
         let before = match fs::read_to_string(&path) {
             Ok(s) => Some(s),
@@ -27,12 +31,27 @@ impl Resume {
         let asking = !answered
             && end.as_deref() != Some("done")
             && (before.is_some() || end.as_deref() == Some("ask"));
+        let mut metadata = Vec::new();
+        if !asking {
+            for name in ["question", "question-needs-owner"] {
+                let path = job.path(name);
+                match fs::read_to_string(&path) {
+                    Ok(text) => metadata.push((path, text)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(format!("{}: {e}", path.display())),
+                }
+            }
+        }
         let state = Self {
             path,
             before,
             asking,
             committed: false,
+            metadata,
         };
+        for (path, _) in &state.metadata {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
         state.write(if asking { Some("ask\n") } else { None })?;
         Ok(state)
     }
@@ -40,7 +59,7 @@ impl Resume {
     pub(crate) fn prompt(&self, msg: &str) -> String {
         if self.asking {
             format!(
-                "{msg}\n\nYour open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer."
+                "{msg}\n\nYour open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask --default \"TEXT\" [--one-way]` again with the same recommendation without restating the question if it still needs an answer."
             )
         } else {
             msg.to_owned()
@@ -66,6 +85,13 @@ impl Resume {
 
 impl Drop for Resume {
     fn drop(&mut self) {
+        if !self.committed {
+            for (path, text) in &self.metadata {
+                if let Err(e) = swap(path, text) {
+                    eprintln!("proj: could not restore {}: {e}", path.display());
+                }
+            }
+        }
         if !self.committed
             && let Err(e) = self.write(self.before.as_deref())
         {

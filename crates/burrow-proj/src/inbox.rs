@@ -400,12 +400,21 @@ impl Pass<'_> {
             app,
             ..New::default()
         };
-        start_job(
+        let id = start_job(
             self.cfg,
             &new,
             &self.project[repo],
             &self.task(repo, issue, comments),
-        )
+        )?;
+        if !drained
+            && !self.lane(issue)
+            && issue["user"]["type"] != "Bot"
+            && !raw(&issue["user"]["login"]).ends_with("[bot]")
+        {
+            let path = crate::job::Job::new(self.cfg, &id).path("question-reader");
+            fs::write(&path, "issue author\n").map_err(|e| io_fail(&path, e))?;
+        }
+        Ok(id)
     }
 
     /// A Codex label takes precedence when an issue has both labels.

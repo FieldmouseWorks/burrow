@@ -293,7 +293,7 @@ fn asking_job_resumes_on_steward_entry_without_posting_the_question_again() {
         .unwrap();
     let prompt = fs::read_to_string(job.join("prompt.2")).unwrap();
     assert!(prompt.contains("Do not repeat the question"), "{prompt}");
-    assert!(prompt.contains("`proj ask` again without restating"));
+    assert!(prompt.contains("`proj ask --default \"TEXT\" [--one-way]` again with the same recommendation without restating"));
     let job_state = crate::job::Job::new(&b.cfg, "j1");
     let response = crate::cmd::declaration_tests::response(&b.cfg, "j1", "ask");
     assert!(

@@ -4,6 +4,7 @@
 //! writes anything. What it says goes through the scrubber before it leaves
 //! (pass.rs); here it's as the machine said it.
 
+mod contains;
 mod memory;
 mod system;
 #[cfg(test)]
@@ -126,6 +127,7 @@ impl Machine<'_> {
             }
             Query::Rc => system::rc(self),
             Query::Queue => system::queue(self),
+            Query::Contains { repo, commit } => contains::answer(self, repo, commit),
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),
         }

@@ -236,7 +236,16 @@ in
 
       environment.etc."burrow/inputs.json" = lib.mkIf (cfg.flakeInputs != { }) {
         text = builtins.toJSON (
-          lib.mapAttrs (_: i: { rev = i.rev or null; lastModified = i.lastModified or null; })
+          lib.mapAttrs (name: i: {
+            rev = i.rev or null;
+            lastModified = i.lastModified or null;
+            repo = let
+              lockPath = if cfg.flakeInputs ? self then cfg.flakeInputs.self.outPath + "/flake.lock" else null;
+              lock = if lockPath != null && builtins.pathExists lockPath then builtins.fromJSON (builtins.readFile lockPath) else { };
+              node = lock.nodes.${lock.root or "root"}.inputs.${name} or null;
+              source = if builtins.isString node then lock.nodes.${node}.locked or { } else { };
+            in if source.type or "" == "github" then "${source.owner}/${source.repo}" else null;
+          })
             (removeAttrs cfg.flakeInputs [ "self" ])
         );
       };

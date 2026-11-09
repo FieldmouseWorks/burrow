@@ -37,6 +37,14 @@ pub struct Config {
     pub stall_after_minutes: u64,
     /// How long an await waits on a PR or issue that doesn't change.
     pub await_hours: u64,
+    #[serde(default = "ask_timeout")]
+    pub ask_timeout: u64,
+    #[serde(default)]
+    pub probe: Option<burrow_probe::Config>,
+    #[serde(default = "waiting_owner_label")]
+    pub waiting_owner_label: String,
+    #[serde(default = "needs_owner_label")]
+    pub needs_owner_label: String,
     /// burrow-events' kick port: `http://127.0.0.1:PORT/kick`.
     pub kick: String,
     /// proj-watch's wake file, where it books its next look at each repo.
@@ -208,6 +216,17 @@ impl Config {
     pub fn stall_queued(&self) -> i64 {
         (self.stall_after_minutes * 60) as i64
     }
+}
+
+fn ask_timeout() -> u64 {
+    6 * 3600
+}
+
+fn waiting_owner_label() -> String {
+    "waiting: owner".into()
+}
+fn needs_owner_label() -> String {
+    "needs-owner".into()
 }
 
 #[cfg(test)]

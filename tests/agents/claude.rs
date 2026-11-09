@@ -26,6 +26,12 @@ fn main() -> ExitCode {
     }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt).unwrap();
+    let mut result = "answered".to_owned();
+    if prompt.trim() == "probe" {
+        let answer = Command::new("proj").args(["probe", "deployed"]).output().unwrap();
+        if !answer.status.success() { return ExitCode::FAILURE; }
+        result = String::from_utf8(answer.stdout).unwrap();
+    }
     if let Some(args) = declaration(&prompt) {
         let status = Command::new("proj")
             .args(args)
@@ -37,7 +43,8 @@ fn main() -> ExitCode {
         }
     }
     println!(r#"{{"type":"system","subtype":"init","session_id":"vm-test"}}"#);
-    println!(r#"{{"type":"result","session_id":"vm-test","result":"answered","is_error":false}}"#);
+    let result = result.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    println!(r#"{{"type":"result","session_id":"vm-test","result":"{result}","is_error":false}}"#);
     ExitCode::SUCCESS
 }
 

@@ -122,7 +122,11 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
         },
         Some("await") => wait_on(cfg, &args[1..]),
-        Some(how @ ("ask" | "done")) => ends(cfg, how, args.len()),
+        Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("_questions") => {
+            put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
+            Ok(())
+        }
         Some("_watch") => watch::look(cfg, args.get(1).map_or("", String::as_str)),
         Some("_ended") => ended(cfg),
         Some("_handover_format") => {
@@ -273,7 +277,22 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     let stream = job.turn(n, "jsonl");
     let text = String::from_utf8_lossy(&fs::read(&stream).unwrap_or_default()).into_owned();
     let last = last_result(&stream, 0);
-    let said = Some(answer(&stream)).filter(|a| !a.is_empty());
+    let mut said = answer(&stream);
+    if read(&job.turn(n, "end")).as_deref() == Some("ask")
+        && let Some(q) = crate::ask::load(&job)
+    {
+        said.push_str(&format!(
+            "\n\nWithout an answer by {}: {}. {}",
+            burrow_probe::answer::utc(q.due),
+            q.recommendation.default,
+            if q.recommendation.one_way {
+                "This is one-way: the job will finish and leave this question open for the owner."
+            } else {
+                "The job will take this reversible default and report the outcome."
+            }
+        ));
+    }
+    let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
         let mut out = format!("{said}\n");
         // An answer, then an error, or a run told to answer again that ended
@@ -396,6 +415,10 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             format!("proj: couldn't stop {id}"),
         ));
     }
+    crate::ask::clear(job);
+    if job.path("question-label").exists() {
+        kick(cfg, ["proj-watch".into()]);
+    }
     rewatch(cfg, &[id]);
     if idle {
         scratch::clear(cfg, id);
@@ -480,13 +503,13 @@ fn baselines(
     let mut text = String::new();
     for ((repo, n), t) in found.iter().zip(targets) {
         let fp = fingerprint_until(cfg, repo, n, until).ok_or_else(|| {
-            Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask"))
+            Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask --default TEXT [--one-way]"))
         })?;
         if let Some(how) = over(&fp) {
             return Err(Fail::new(
                 1,
                 format!(
-                    "proj: {t} is {how} already, so nothing is awaited: go on with what comes after it, then end the turn with proj await on what's still open, proj ask or proj done"
+                    "proj: {t} is {how} already, so nothing is awaited: go on with what comes after it, then end the turn with proj await on what's still open, proj ask --default TEXT [--one-way] or proj done"
                 ),
             ));
         }
@@ -498,12 +521,17 @@ fn baselines(
 /// `proj ask` and `proj done`, from inside a job: how its turn ends, said
 /// before it does. The last of proj await, ask and done stands; neither of
 /// these waits on GitHub any longer.
-fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
+fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_JOB",
         &format!("proj {how} is for a proj job, about how its turn ends"),
     )?;
-    if words != 1 {
+    let recommendation = if how == "ask" {
+        Some(crate::ask::Recommendation::parse(args).map_err(|e| Fail::new(2, e))?)
+    } else {
+        None
+    };
+    if how == "done" && !args.is_empty() {
         return Err(Fail::new(
             2,
             format!("usage: proj {how} (nothing more: your answer says it)"),
@@ -511,6 +539,9 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
     }
     let job = Job::new(cfg, &id);
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    if let Some(recommendation) = recommendation {
+        crate::ask::record(&job, &recommendation).map_err(|e| Fail::new(1, e))?;
+    }
     put(declare_end(&job, how)?);
     Ok(())
 }
@@ -547,6 +578,9 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     job.mark_ended();
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
+    if crate::ask::load(&job).is_some() || job.path("question-label").exists() {
+        names.extend(["proj-watch".into(), "autoland".into()]);
+    }
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
         names.push(watch::kick_for(&a.target));
     }
@@ -740,6 +774,10 @@ pub(crate) mod declaration_tests {
         };
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = jobs.into();
-        dispatch(&cfg, &[env::var("PROJ_TEST_END_HOW").unwrap()]).unwrap();
+        let mut args = vec![env::var("PROJ_TEST_END_HOW").unwrap()];
+        if args[0] == "ask" {
+            args.extend(["--default".into(), "continue".into()]);
+        }
+        dispatch(&cfg, &args).unwrap();
     }
 }

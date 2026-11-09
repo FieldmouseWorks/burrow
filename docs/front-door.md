@@ -62,6 +62,9 @@ own, say), in seconds and without starting a Claude.
   - `queue`: `proj status`
   - `deployed`: the running and booted systems, the generation, the inputs'
     revisions, and what `HOST-update` last found live
+  - `contains REPO COMMIT`: whether a commit is an ancestor of the running
+    input revision, using its repository identity and local history; unavailable
+    or ambiguous history is reported as unknown
   - `oom [SINCE]`: the kernel's and systemd-oomd's kills, a day back by default
 
   A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
@@ -77,6 +80,19 @@ own, say), in seconds and without starting a Claude.
   nothing.
 - On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
   the machine says it.
+- Inside any job, use `proj probe QUESTION...` first. The host parses the same
+  grammar, reads its own machine state and scrubs the answer before returning
+  it to the job, including jobs inside sandboxes. Jobs never open probe issues.
+
+A job's question uses `proj ask --default "TEXT" [--one-way]`; a bare ask is
+refused. `burrow.proj.askTimeout` is its deadline in seconds (6h by default),
+kept across unrelated updates. A reply resumes it normally. Without one, a
+reversible default resumes the job with “no answer by TIME” and instructions
+to take that recommendation and report it on the issue. A one-way default
+completes without executing the recommendation: its issue stays open under
+the owner label and its drain claim is released. Questions from drained,
+bot-started or stuck-issue jobs carry the owner's waiting label and are listed
+in the pipeline's owner issue, so they have a reader.
 
 ## Engines with no agent
 

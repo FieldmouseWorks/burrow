@@ -156,8 +156,15 @@ Each has an entry below, and each can be imported on its own.
   `inbox.unstickLabel` (the steward's stuck issue) is run `--unstick`. Every
   turn says what comes next before it answers: `proj await` a PR or issue (the
   job holds no slot and is resumed when it changes; one already merged or
-  closed is refused, so the job goes on), `proj ask` a person (their reply
-  resumes it) or `proj done`; one that won't is told once and answers again,
+  closed is refused, so the job goes on), `proj ask --default "TEXT" [--one-way]`
+  a person, or `proj done`. A bare ask is refused. The recommended answer runs
+  after `proj.askTimeout` (seconds, default 6h) without a reply; a one-way
+  recommendation instead ends the job, frees its claim and leaves the issue
+  open under the owner label. Machine-started questions carry the owner's
+  waiting label and appear in the pipeline's owner issue. Jobs first check
+  machine facts with `proj probe QUESTION...`, using the host's probe and
+  scrubber even inside a sandbox, without credentials or a probe issue.
+  A turn that won't declare what comes next is told once and answers again,
   and still silent is a stall. Only jobs whose starter acts on each turn's end
   (`--owned`: the steward's, the watchdog's) needn't say. A run Claude Code
   refuses because the plan's usage is spent (a weekly or five-hour allowance,

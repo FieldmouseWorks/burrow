@@ -44,6 +44,8 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// proj, for `queue`; None where proj isn't on.
     pub proj: Option<PathBuf>,
+    #[serde(default)]
+    pub projects: Option<PathBuf>,
     pub tools: Tools,
 }
 
@@ -59,9 +61,15 @@ pub struct Journal {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tools {
+    #[serde(default = "git")]
+    pub git: PathBuf,
     pub journalctl: PathBuf,
     pub systemctl: PathBuf,
 }
 
 /// The mark on the probe's own comments.
 pub const MARK: &str = "<!-- burrow-probe -->";
+
+fn git() -> PathBuf {
+    "git".into()
+}

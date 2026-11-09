@@ -62,6 +62,7 @@ let
   connect = path: "python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"${path}\")'";
   calls = cmds: map (cmd: [ "exec_command" { inherit cmd; } ]) cmds;
   firstCalls = calls [
+    "proj probe deployed > /data/dev/jobs/$PROJ_JOB/host-probe && touch /data/dev/jobs/$PROJ_JOB/host-probed"
     "git fetch -q origin && touch /data/dev/jobs/$PROJ_JOB/fetched"
     "git worktree add -q -b work \"$PROJ_SCRATCH/tree\" origin/trunk && git -C \"$PROJ_SCRATCH/tree\" commit -q --allow-empty -m changed && touch /data/dev/jobs/$PROJ_JOB/committed"
     "python3 -c 'import os, socket; socket.socket(socket.AF_UNIX).connect(os.environ[\"GH_TOKEN_SOCKET\"])' && touch /data/dev/jobs/$PROJ_JOB/connected"
@@ -293,11 +294,12 @@ pkgs.testers.runNixOSTest {
     jobs.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{j}").split()
     said = jobs.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr")[1]
-    for mark in ["fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
+    for mark in ["host-probed", "fetched", "committed", "connected", "no-new-privs", "elsewhere-refused", "login-refused",
                  "login-target-refused", "codex-config-refused", "gitconfig-read-only", "bus-refused", "manager-refused", "tmux-socket-refused",
                  "tmux-custom-refused", "tmux-refused", "tmux-late-refused", "tmux-relative-refused",
                  "netns-refused", "daemon-refused", "keys-refused", "tmp-own", "store-queried", "removed"]:
         assert mark in marks, (mark, marks, said)
+    assert jobs.succeed("readlink /run/current-system").strip() in dev(f"cat /data/dev/jobs/{j}/host-probe")
     # The file went, after the guard's undo snapshot of its dataset, which
     # still has it.
     def snapshots():
