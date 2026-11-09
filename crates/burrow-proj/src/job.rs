@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::engine::{last_result, names_session};
+use crate::engine::last_result;
 use crate::waits::Facts;
 use crate::{filled, mtime, now, read, swap, systemd, usage};
 
@@ -144,14 +144,12 @@ impl<'a> Job<'a> {
     /// stream, and not a sandbox's, whose VM may outlive it. Under the job's
     /// lock.
     pub fn cut_off(&self, n: &str) -> bool {
-        let text = crate::state_reads::bytes(&self.turn(n, "jsonl")).unwrap_or_default();
-        let text = String::from_utf8_lossy(&text);
         self.turns().as_deref() == Some(n)
             && self.state() == "failed"
             && !filled(&self.turn(n, "outcome"))
             && !self.turn(n, "stopped").exists()
             && !filled(&self.path("agent"))
-            && names_session(&text)
+            && crate::engine::stream_names_session(&self.turn(n, "jsonl"), 0)
             && last_result(&self.turn(n, "jsonl"), 0).is_none()
     }
 

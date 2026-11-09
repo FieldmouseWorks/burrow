@@ -8,8 +8,8 @@ use std::{
 };
 
 /// Pin every component without symlinks, check the pinned inode before opening
-/// it for reading, and bound the read. Renames cannot redirect either open.
-pub(crate) fn bytes(path: &Path) -> io::Result<Vec<u8>> {
+/// it for reading. Renames cannot redirect either open.
+pub(crate) fn open(path: &Path) -> io::Result<File> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(io::Error::other("state paths cannot traverse parents"));
     }
@@ -31,7 +31,23 @@ pub(crate) fn bytes(path: &Path) -> io::Result<Vec<u8>> {
         return Err(io::Error::other("state is not a regular file"));
     }
     // Only our own pinned, verified descriptor is reopened through procfs.
-    let file = File::open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))?;
+    File::open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
+}
+
+/// Stream full transcripts without applying the small-record size limit.
+pub(crate) fn copy(path: &Path, output: &mut dyn io::Write) -> io::Result<u64> {
+    io::copy(&mut open(path)?, output)
+}
+
+pub(crate) fn prefix(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    open(path)?.take(limit).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// Small state records are bounded; transcripts use the confined file directly.
+pub(crate) fn bytes(path: &Path) -> io::Result<Vec<u8>> {
+    let file = open(path)?;
     const LIMIT: u64 = 64 * 1024 * 1024;
     let mut out = Vec::new();
     file.take(LIMIT + 1).read_to_end(&mut out)?;

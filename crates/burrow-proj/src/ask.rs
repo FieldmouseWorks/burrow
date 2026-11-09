@@ -98,7 +98,12 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             let text = job
                 .turns()
-                .and_then(|n| read(&job.turn(&n, "result")))
+                .and_then(|n| crate::state_reads::prefix(&job.turn(&n, "result"), 64000).ok())
+                .map(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .trim_end_matches('\n')
+                        .to_owned()
+                })
                 .unwrap_or_default();
             swap(
                 &host_path(job, "question-text"),

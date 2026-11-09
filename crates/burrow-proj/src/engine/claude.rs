@@ -9,6 +9,20 @@ use serde_json::Value;
 /// timestamp; failing that, its words say it ([`crate::limit`]), read at
 /// `now`.
 pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, String)> {
+    refused_records(
+        last,
+        stream
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok()),
+        now,
+    )
+}
+
+pub(super) fn refused_records(
+    last: &Value,
+    records: impl Iterator<Item = Value>,
+    now: i64,
+) -> Option<(Option<i64>, String)> {
     if !is_error(last) {
         return None;
     }
@@ -18,10 +32,7 @@ pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, Str
     }
     let mut until = None;
     let mut named = None;
-    for v in stream
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-    {
+    for v in records {
         for info in [
             &v["api_error_params"]["rate_limit_info"],
             &v["rate_limit_info"],

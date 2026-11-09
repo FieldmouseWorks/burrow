@@ -258,8 +258,8 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     };
     if raw {
         let stream = job.turn(&n, "jsonl");
-        let text = crate::state_reads::bytes(&stream).map_err(|e| io_fail(&stream, e))?;
-        let _ = io::stdout().lock().write_all(&text);
+        crate::state_reads::copy(&stream, &mut io::stdout().lock())
+            .map_err(|e| io_fail(&stream, e))?;
         return Ok(());
     }
     match told(cfg, id, &n) {
@@ -281,8 +281,6 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     // A turn's answer is read from its own stream, so an earlier turn's is
     // still there once later ones have started.
     let stream = job.turn(n, "jsonl");
-    let text = String::from_utf8_lossy(&crate::state_reads::bytes(&stream).unwrap_or_default())
-        .into_owned();
     let last = last_result(&stream, 0);
     let mut said = answer(&stream);
     if read(&job.turn(n, "end")).as_deref() == Some("ask")
@@ -318,8 +316,7 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     } else {
         format!("(turn {n} ended without an answer)\n")
     };
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    out.push_str(&lines[lines.len().saturating_sub(3)..].concat());
+    out.push_str(&crate::engine::stream_tail(&stream));
     Err(out)
 }
 

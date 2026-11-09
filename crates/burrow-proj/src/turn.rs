@@ -335,11 +335,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // slot and waits in line again, where none is handed out till then,
         // and runs once more in its own conversation, its clock stood still
         // meanwhile. Any other answer says usage is there.
-        let refusal = last.as_ref().and_then(|l| {
-            let text = crate::state_reads::bytes(&stream).unwrap_or_default();
-            let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
-            engine::refused(choice.engine, l, &run, now())
-        });
+        let refusal = last
+            .as_ref()
+            .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
         if choice.engine == Engine::Codex {
             if let Some((Some(due), _)) = &refusal {
                 if let Err(e) = swap(

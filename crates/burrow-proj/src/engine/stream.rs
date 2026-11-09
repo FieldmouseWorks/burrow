@@ -1,6 +1,8 @@
 //! Decode terminal answers without treating intermediate Codex messages as one.
 
 use super::*;
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader};
 
 #[derive(Default)]
 struct Decoder {
@@ -58,40 +60,61 @@ fn session(line: &str) -> Option<(Engine, String)> {
 pub fn names_session(text: &str) -> bool {
     text.lines().any(|l| session(l).is_some())
 }
+/// One pinned, confined stream, sought before parsing a retry's records.
+pub(super) fn lines(stream: &Path, from: u64) -> io::Result<io::Lines<BufReader<File>>> {
+    let mut file = crate::state_reads::open(stream)?;
+    file.seek(SeekFrom::Start(from))?;
+    Ok(BufReader::new(file).lines())
+}
 pub fn stream_names_session(stream: &Path, from: u64) -> bool {
-    crate::state_reads::bytes(stream).is_ok_and(|b| {
-        names_session(&String::from_utf8_lossy(
-            b.get(from as usize..).unwrap_or_default(),
-        ))
-    })
+    lines(stream, from)
+        .is_ok_and(|lines| lines.map_while(Result::ok).any(|l| session(&l).is_some()))
 }
 
-/// Results in order, with only the last Codex message of each completed turn.
-fn results(text: &str) -> Vec<Value> {
-    let mut decoder = Decoder::default();
-    text.lines().filter_map(|l| decoder.line(l)).collect()
-}
 pub fn answer(stream: &Path) -> String {
-    let text = crate::state_reads::bytes(stream)
-        .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
-        .unwrap_or_default();
-    results(&text)
-        .iter()
-        .filter_map(|v| {
-            v["result"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let mut decoder = Decoder::default();
+    let mut answer = String::new();
+    if let Ok(lines) = lines(stream, 0) {
+        for line in lines.map_while(Result::ok) {
+            if let Some(v) = decoder.line(&line)
+                && let Some(text) = v["result"].as_str().filter(|s| !s.is_empty())
+            {
+                if !answer.is_empty() {
+                    answer.push_str("\n\n");
+                }
+                answer.push_str(text);
+            }
+        }
+    }
+    answer
 }
 pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
-    let text = crate::state_reads::bytes(stream).ok()?;
-    results(&String::from_utf8_lossy(
-        text.get(from as usize..).unwrap_or_default(),
-    ))
-    .pop()
+    let mut decoder = Decoder::default();
+    lines(stream, from)
+        .ok()?
+        .map_while(Result::ok)
+        .filter_map(|line| decoder.line(&line))
+        .last()
+}
+
+pub fn stream_tail(stream: &Path) -> String {
+    let mut tail = VecDeque::new();
+    if let Ok(file) = crate::state_reads::open(stream) {
+        let mut reader = BufReader::new(file);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tail.len() == 3 {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+            }
+        }
+    }
+    tail.into_iter().collect()
 }
 
 /// Session storage is per engine; `session` remains the active session for job state.
@@ -108,7 +131,7 @@ pub fn resume(job: &Job, engine: Engine) -> Option<String> {
 
 pub struct Said<'a> {
     job: &'a Job<'a>,
-    file: Option<File>,
+    file: Option<BufReader<File>>,
     partial: Vec<u8>,
     decoder: Decoder,
     pub answered: bool,
@@ -116,10 +139,12 @@ pub struct Said<'a> {
 }
 impl<'a> Said<'a> {
     pub fn new(job: &'a Job<'a>, n: &str, from: u64) -> Self {
-        let file = File::open(job.turn(n, "jsonl")).ok().and_then(|mut f| {
-            f.seek(SeekFrom::Start(from)).ok()?;
-            Some(f)
-        });
+        let file = crate::state_reads::open(&job.turn(n, "jsonl"))
+            .ok()
+            .and_then(|mut f| {
+                f.seek(SeekFrom::Start(from)).ok()?;
+                Some(BufReader::new(f))
+            });
         Self {
             job,
             file,
@@ -130,24 +155,20 @@ impl<'a> Said<'a> {
         }
     }
     pub fn look(&mut self, last: bool) {
-        let Some(f) = &mut self.file else {
-            return;
-        };
-        if f.read_to_end(&mut self.partial).is_err() {
-            return;
-        }
-        let end = if last {
-            self.partial.len()
-        } else {
-            match self.partial.iter().rposition(|b| *b == b'\n') {
-                Some(i) => i + 1,
-                None => return,
+        loop {
+            let Some(f) = &mut self.file else {
+                return;
+            };
+            let Ok(count) = f.read_until(b'\n', &mut self.partial) else {
+                return;
+            };
+            if self.partial.is_empty() || (!last && !self.partial.ends_with(b"\n")) {
+                return;
             }
-        };
-        let whole: Vec<_> = self.partial.drain(..end).collect();
-        for line in String::from_utf8_lossy(&whole).lines() {
+            let whole = std::mem::take(&mut self.partial);
+            let line = String::from_utf8_lossy(&whole);
             if !self.named
-                && let Some((engine, id)) = session(line)
+                && let Some((engine, id)) = session(&line)
             {
                 if !self.job.path("session.engine").exists()
                     && let Some(previous) = read(&self.job.path("session"))
@@ -162,8 +183,13 @@ impl<'a> Said<'a> {
                 let _ = fs::write(self.job.path("session.engine"), engine.name());
                 self.named = true;
             }
-            if self.decoder.line(line).is_some() {
+            if self.decoder.line(&line).is_some() {
                 self.answered = true;
+            }
+            self.partial = whole;
+            self.partial.clear();
+            if count == 0 {
+                return;
             }
         }
     }
