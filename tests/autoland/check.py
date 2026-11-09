@@ -15,7 +15,7 @@ Each module is one part, run in this order.
   python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/policy.json \
     crates/target/debug/burrow-review crates/burrow-review/tests/fakes \
     crates/target/debug/burrow-upkeep crates/burrow-upkeep/src \
-    crates/target/debug/burrow-proof
+    crates/target/debug/burrow-proof crates/burrow-proj/src/ask.rs
   nix build .#checks.x86_64-linux.autoland
 """
 

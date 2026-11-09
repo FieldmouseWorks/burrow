@@ -16,6 +16,9 @@ pub struct Config {
     pub projects: PathBuf,
     /// Each job's prompts, streams and answers, a folder a job.
     pub jobs: PathBuf,
+    /// Host-owned question state; not a guest writable root.
+    #[serde(default)]
+    pub host_state: Option<PathBuf>,
     /// Where each job's scratch goes, under jobs/ (burrow.scratchDir).
     pub scratch: PathBuf,
     /// The slice every turn runs in, which the machine caps.
@@ -37,6 +40,14 @@ pub struct Config {
     pub stall_after_minutes: u64,
     /// How long an await waits on a PR or issue that doesn't change.
     pub await_hours: u64,
+    #[serde(default = "ask_timeout")]
+    pub ask_timeout: u64,
+    #[serde(default)]
+    pub probe: Option<burrow_probe::Config>,
+    #[serde(default = "waiting_owner_label")]
+    pub waiting_owner_label: String,
+    #[serde(default = "needs_owner_label")]
+    pub needs_owner_label: String,
     /// burrow-events' kick port: `http://127.0.0.1:PORT/kick`.
     pub kick: String,
     /// proj-watch's wake file, where it books its next look at each repo.
@@ -179,6 +190,16 @@ impl Config {
         ok.then(|| self.apps.get(name)).flatten()
     }
 
+    /// An explicit host-configured resource, not a pathname supplied by a job.
+    pub(crate) fn app_environment(&self, name: &str) -> Option<String> {
+        // NixOS installs this configured capability through an /etc symlink.
+        // Only a key in the host's immutable app map selects it; job state
+        // and all paths derived from job state use the confined reader.
+        self.app_env(name)
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.trim_end_matches('\n').to_owned())
+    }
+
     /// Resolve one role once per turn. Every non-comment line must parse,
     /// so a typo never silently sends work to a different engine. Repo scopes
     /// beat bare roles; duplicate keys fail with both lines, even on other roles.
@@ -211,6 +232,17 @@ impl Config {
     pub fn stall_queued(&self) -> i64 {
         (self.stall_after_minutes * 60) as i64
     }
+}
+
+fn ask_timeout() -> u64 {
+    6 * 3600
+}
+
+fn waiting_owner_label() -> String {
+    "waiting: owner".into()
+}
+fn needs_owner_label() -> String {
+    "needs-owner".into()
 }
 
 #[cfg(test)]

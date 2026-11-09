@@ -7,6 +7,7 @@ use crate::{Config, Journal, Tools};
 
 fn config() -> Config {
     Config {
+        projects: None,
         machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
@@ -20,6 +21,7 @@ fn config() -> Config {
         state_dir: "/var/lib/burrow".into(),
         proj: None,
         tools: Tools {
+            git: "git".into(),
             journalctl: "/bin/journalctl".into(),
             systemctl: "/bin/systemctl".into(),
         },

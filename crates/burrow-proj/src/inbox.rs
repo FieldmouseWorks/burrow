@@ -402,12 +402,22 @@ impl Pass<'_> {
             app,
             ..New::default()
         };
-        start_job(
+        let id = start_job(
             self.cfg,
             &new,
             &self.project[repo],
             &self.task(repo, issue, comments),
-        )
+        )?;
+        if !drained
+            && !self.lane(issue)
+            && issue["user"]["type"] != "Bot"
+            && !raw(&issue["user"]["login"]).ends_with("[bot]")
+        {
+            let job = crate::job::Job::new(self.cfg, &id);
+            let path = crate::ask::host_path(&job, "question-reader");
+            fs::write(&path, "issue author\n").map_err(|e| io_fail(&path, e))?;
+        }
+        Ok(id)
     }
 
     fn routing(&self, issue: &Value) -> (Option<String>, Option<crate::engine::Engine>) {
@@ -926,6 +936,7 @@ mod retirement;
 mod written;
 
 pub(crate) use drain::WAITING;
+mod sorting_questions;
 mod triage;
 mod write;
 
@@ -933,6 +944,8 @@ mod write;
 mod drain_tests;
 #[cfg(test)]
 mod handed_tests;
+#[cfg(test)]
+mod question_tests;
 #[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]

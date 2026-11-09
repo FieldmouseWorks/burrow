@@ -308,6 +308,7 @@ dependencies = [
  "burrow-codex",
  "burrow-events",
  "burrow-github",
+ "burrow-probe",
  "burrow-process",
  "burrow-test",
  "burrow-usage-reset",

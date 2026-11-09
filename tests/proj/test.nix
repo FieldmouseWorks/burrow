@@ -160,7 +160,12 @@ pkgs.testers.runNixOSTest {
         # The workers App's socket and git's settings, and no token of the
         # user's, as the stand-in's showenv says them.
         out = proj(f"log {job}")
-        assert re.fullmatch(r"did socket=/run/gh-token/workers\.sock count=[1-9][0-9]* token=", out), out
+        lines = out.splitlines()
+        assert re.fullmatch(r"did socket=/run/gh-token/workers\.sock count=[1-9][0-9]* token=", lines[0]), out
+        if len(lines) > 1:
+            # Only the host-owned question notice may follow the exact empty-token line.
+            assert len(lines) == 3 and lines[1] == "", out
+            assert re.fullmatch(r"Without an answer by [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z: continue[.] The job will take this reversible default and report the outcome[.]", lines[2]), out
   ''
   + script;
 }

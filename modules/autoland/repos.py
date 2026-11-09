@@ -455,7 +455,7 @@ def hooks(repos):
 # a merge GitHub won't take, a PR stuck a day, a branch it couldn't
 # archive), which a Claude job on this machine takes when proj's inbox is on.
 OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
-          "No reviewer can review it", "Flaky tests someone else quarantined")
+          "No reviewer can review it", "Flaky tests someone else quarantined", "Jobs waiting for the owner")
 
 
 # Kinds whose words are the PR's status as it stands, which changes each time
@@ -465,10 +465,17 @@ OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
 MOVING = ("Open over a day",)
 
 
+def job_questions():
+    result = subprocess.run([CFG["proj"], "_questions"], capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(result.stdout)
+
+
 def publish(digest):
     """What waits for the owner, in one issue in config.notify.repo assigned
     to them; what the pipeline is stuck on, in another the inbox hands to a
     Claude job. All of it is the owner's when the inbox can't take it."""
+    # proj owns question eligibility and deadlines; this is only digest glue.
+    digest = [*digest, *job_questions()]
     owners = (*OWNERS, f"Labelled {CFG['labels']['owner']}")
     off = inbox_off()
     owner = [x for x in digest if x[0] in owners or off]

@@ -4,6 +4,7 @@
 //! writes anything. What it says goes through the scrubber before it leaves
 //! (pass.rs); here it's as the machine said it.
 
+mod contains;
 mod memory;
 mod system;
 #[cfg(test)]
@@ -49,6 +50,10 @@ pub struct Ran {
 pub trait Run {
     /// `program args`, with the user manager's XDG_RUNTIME_DIR when `user`.
     fn run(&self, program: &Path, args: &[&str], user: bool, uid: u32) -> Result<Ran, String>;
+    /// Read local commit objects with no inherited Git overrides.
+    fn history(&self, program: &Path, args: &[&str], uid: u32) -> Result<Ran, String> {
+        self.run(program, args, false, uid)
+    }
 }
 
 /// The real thing, stopped past COMMAND_TIMEOUT.
@@ -56,63 +61,86 @@ pub struct Commands;
 
 impl Run for Commands {
     fn run(&self, program: &Path, args: &[&str], user: bool, uid: u32) -> Result<Ran, String> {
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("SYSTEMD_COLORS", "0")
-            .env("SYSTEMD_PAGER", "");
-        if user {
-            cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
-        }
-        let name = program.display();
-        let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
-        let pipe = |p: Option<Box<dyn Read + Send>>| {
-            thread::spawn(move || {
-                let mut s = Vec::new();
-                if let Some(mut p) = p {
-                    let _ = p.read_to_end(&mut s);
-                }
-                String::from_utf8_lossy(&s).into_owned()
-            })
-        };
-        let out = pipe(
-            child
-                .stdout
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-        );
-        let err = pipe(
-            child
-                .stderr
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-        );
-        let start = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if start.elapsed() < COMMAND_TIMEOUT => {
-                    thread::sleep(Duration::from_millis(20))
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "{name} took over {}s, and was stopped",
-                        COMMAND_TIMEOUT.as_secs()
-                    ));
-                }
-                Err(e) => return Err(format!("{name}: {e}")),
-            }
-        };
-        Ok(Ran {
-            code: status.code(),
-            stdout: out.join().unwrap_or_default(),
-            stderr: err.join().unwrap_or_default(),
-        })
+        command(program, args, user, uid, false)
     }
+    fn history(&self, program: &Path, args: &[&str], uid: u32) -> Result<Ran, String> {
+        command(program, args, false, uid, true)
+    }
+}
+fn command(
+    program: &Path,
+    args: &[&str],
+    user: bool,
+    uid: u32,
+    history: bool,
+) -> Result<Ran, String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("SYSTEMD_COLORS", "0")
+        .env("SYSTEMD_PAGER", "");
+    if history {
+        for (key, _) in std::env::vars_os() {
+            if key.as_encoded_bytes().starts_with(b"GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_GRAFT_FILE", "/dev/null");
+    }
+    if user {
+        cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
+    }
+    let name = program.display();
+    let mut child = cmd.spawn().map_err(|e| format!("{name}: {e}"))?;
+    let pipe = |p: Option<Box<dyn Read + Send>>| {
+        thread::spawn(move || {
+            let mut s = Vec::new();
+            if let Some(mut p) = p {
+                let _ = p.read_to_end(&mut s);
+            }
+            String::from_utf8_lossy(&s).into_owned()
+        })
+    };
+    let out = pipe(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = pipe(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < COMMAND_TIMEOUT => {
+                thread::sleep(Duration::from_millis(20))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{name} took over {}s, and was stopped",
+                    COMMAND_TIMEOUT.as_secs()
+                ));
+            }
+            Err(e) => return Err(format!("{name}: {e}")),
+        }
+    };
+    Ok(Ran {
+        code: status.code(),
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 impl Machine<'_> {
@@ -126,6 +154,7 @@ impl Machine<'_> {
             }
             Query::Rc => system::rc(self),
             Query::Queue => system::queue(self),
+            Query::Contains { repo, commit } => contains::answer(self, repo, commit),
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),
         }

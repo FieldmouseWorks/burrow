@@ -424,6 +424,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     if new.unstick {
         write("unstick", "")?;
     }
+    crate::ask::initialize(&job, new.link.as_deref()).map_err(|e| Fail::new(1, e))?;
     if let Some(l) = &new.link {
         write("link", &format!("{l}\n"))?;
     }

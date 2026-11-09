@@ -16,6 +16,8 @@ const COLLECTION_TIME: Duration = Duration::from_secs(30);
 struct Declaration {
     end: String,
     targets: Vec<String>,
+    #[serde(default)]
+    recommendation: Option<crate::ask::Recommendation>,
 }
 
 /// The guest's deliberately small `proj`: no host config or credentials.
@@ -38,11 +40,19 @@ pub fn declare(path: &Path, args: &[String]) -> Result<(), String> {
             declaration.end = "await".into();
             declaration.targets.extend_from_slice(&args[1..]);
         }
-        Some(how @ ("ask" | "done")) if args.len() == 1 => {
+        Some(how @ ("ask" | "done")) => {
+            declaration.recommendation = if how == "ask" {
+                Some(crate::ask::Recommendation::parse(&args[1..])?)
+            } else {
+                if args.len() != 1 {
+                    return Err("usage: proj done".into());
+                }
+                None
+            };
             declaration.end = how.into();
             declaration.targets.clear();
         }
-        _ => return Err("usage: proj await URL... | proj ask | proj done".into()),
+        _ => return Err("usage: proj await URL... | proj ask --default TEXT [--one-way] | proj done | proj probe QUESTION...".into()),
     }
     let next = path.with_extension("next");
     fs::write(
@@ -109,6 +119,15 @@ fn register(cfg: &Config, job: &Job, bytes: &[u8], until: Instant) -> Result<(),
     let declaration: Declaration = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     match declaration.end.as_str() {
         "ask" | "done" if declaration.targets.is_empty() => {
+            if declaration.end == "ask" {
+                crate::ask::record(
+                    job,
+                    declaration
+                        .recommendation
+                        .as_ref()
+                        .ok_or(crate::ask::USAGE)?,
+                )?;
+            }
             let _ = fs::remove_file(job.path("await.next"));
             fs::write(job.path("end.next"), declaration.end).map_err(|e| e.to_string())
         }
@@ -325,7 +344,11 @@ esac
                 let p = &p;
                 scope.spawn(move || {
                     started.send(()).unwrap();
-                    ended.send(declare(p, &[how.into()])).unwrap();
+                    let mut args = vec![how.into()];
+                    if how == "ask" {
+                        args.extend(["--default".into(), "continue".into()]);
+                    }
+                    ended.send(declare(p, &args)).unwrap();
                 });
                 running.recv().unwrap();
                 assert!(result.recv_timeout(Duration::from_millis(50)).is_err());
@@ -421,10 +444,19 @@ esac
         assert_eq!(read().targets.len(), 2);
         assert!(say(&["await", "bad"]).is_err());
         assert_eq!(read().targets.len(), 2);
-        say(&["ask"]).unwrap();
+        say(&["ask", "--default", "continue"]).unwrap();
         assert!(read().targets.is_empty());
         assert_eq!(read().end, "ask");
         say(&["done"]).unwrap();
         assert_eq!(read().end, "done");
+    }
+}
+
+#[cfg(test)]
+mod regression_569 {
+    #[test]
+    fn bare_ask_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::declare(&dir.path().join("next"), &["ask".into()]).is_err());
     }
 }

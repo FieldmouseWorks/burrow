@@ -53,6 +53,7 @@ impl Run for Fake {
 
 fn config(state: &Path) -> Config {
     Config {
+        projects: None,
         machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
@@ -66,6 +67,7 @@ fn config(state: &Path) -> Config {
         state_dir: state.to_path_buf(),
         proj: Some(PathBuf::from("/run/current-system/sw/bin/proj")),
         tools: Tools {
+            git: "git".into(),
             journalctl: "/bin/journalctl".into(),
             systemctl: "/bin/systemctl".into(),
         },

@@ -62,7 +62,7 @@
         while [ -e /tmp/inbox-hold ]; do sleep 0.2; done
         case $prompt in *inbox-done*) ;; *) ends=ask ;; esac
       fi
-      case $prompt in silent*|spent*) ;; *) proj "$ends" >/dev/null ;; esac
+      case $prompt in silent*|spent*) ;; *) if [ "$ends" = ask ]; then proj ask --default "continue" >/dev/null; else proj "$ends" >/dev/null; fi ;; esac
     fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
@@ -124,11 +124,11 @@
         printf '%s' "$prompt" >/tmp/told-spent
         echo "$args" >/tmp/spent-args
         proj done >/dev/null ;;
-      ask) proj ask >/dev/null ;;
+      ask) proj ask --default "continue" >/dev/null ;;
       scratch*)
         echo "''${PROJ_SCRATCH-}" >/tmp/scratch
         git -C /data/dev/src/web worktree add -q --detach "$PROJ_SCRATCH/web" && touch "$PROJ_SCRATCH/web/built"
-        case $prompt in *ask) proj ask >/dev/null ;; esac ;;
+        case $prompt in *ask) proj ask --default "continue" >/dev/null ;; esac ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
