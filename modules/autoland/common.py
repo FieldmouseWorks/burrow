@@ -57,7 +57,10 @@ class Gone(RuntimeError):
     again won't bring it back."""
 
 
-UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake", re.I)
+# GitHub not answering just now. GraphQL says its own server errors in the
+# body, not as an HTTP status: "Something went wrong while executing your
+# query" is a 5xx by another name.
+UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake|something went wrong while executing your query", re.I)
 
 
 # When the rate limit that turned one of this pass's calls away resets, once
@@ -924,6 +927,19 @@ def coverage(repos, covered):
     done = {r["repo"] for r in covered}
     return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "covered": r["repo"] in done}
                                  for r in repos}}
+
+
+def come_back(kick, at):
+    """GitHub didn't answer the pass before it was through: it comes back at
+    `at`, a full pass as one (burrow-events takes "" for it), a kicked one
+    for its repos. A wake-up booked sooner for one of them stays."""
+    again = [""] if kick is None else kick
+    wakes = {k: v for k, v in load("wake.json", {}).items() if v > NOW}
+    for k in again:
+        sooner = [v for w, v in wakes.items() if w.lower() == k.lower()]
+        wakes = {w: v for w, v in wakes.items() if w.lower() != k.lower()}
+        wakes[k] = min([at, *sooner])
+    save("wake.json", wakes)
 
 
 def after_limit(kick):
