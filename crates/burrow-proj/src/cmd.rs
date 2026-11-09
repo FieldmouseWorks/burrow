@@ -545,6 +545,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     )?;
     let job = Job::new(cfg, &id);
     job.mark_ended();
+    crate::question::notify(cfg, &job).map_err(|e| Fail::new(1, e))?;
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {

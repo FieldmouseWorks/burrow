@@ -13,6 +13,7 @@ pub(crate) struct Resume {
     before: Option<String>,
     asking: bool,
     committed: bool,
+    close: Option<(PathBuf, String)>,
 }
 
 impl Resume {
@@ -29,9 +30,17 @@ impl Resume {
             && (before.is_some() || end.as_deref() == Some("ask"));
         let state = Self {
             path,
-            before,
+            before: before.clone(),
             asking,
             committed: false,
+            close: (!asking && (before.is_some() || end.as_deref() == Some("ask")))
+                .then(|| {
+                    job.cfg
+                        .notify
+                        .clone()
+                        .map(|n| (n, format!("proj-question-{}", job.id)))
+                })
+                .flatten(),
         };
         state.write(if asking { Some("ask\n") } else { None })?;
         Ok(state)
@@ -49,6 +58,15 @@ impl Resume {
 
     pub(crate) fn commit(mut self) {
         self.committed = true;
+        if let Some((notifier, key)) = &self.close {
+            match std::process::Command::new(notifier)
+                .args(["close", key, "The job received an answer."])
+                .status()
+            {
+                Ok(s) if s.success() => (),
+                result => eprintln!("proj: closing question notification: {result:?}"),
+            }
+        }
     }
 
     fn write(&self, value: Option<&str>) -> Result<(), String> {
@@ -74,6 +92,33 @@ impl Drop for Resume {
     }
 }
 
+/// Notify once for an open question, using the state preserved across resumes.
+pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<(), String> {
+    let Some(n) = job.turns() else { return Ok(()) };
+    if read(&job.turn(&n, "end")).as_deref() != Some("ask") || job.path("open-question").exists() {
+        return Ok(());
+    }
+    if let Some(notifier) = &cfg.notify {
+        let question = crate::engine::answer(&job.turn(&n, "jsonl"));
+        let status = std::process::Command::new(notifier)
+            .args([
+                "open",
+                &format!("proj-question-{}", job.id),
+                "A project job needs an answer",
+            ])
+            .arg(format!(
+                "Job {} needs your answer. Reply with proj reply {}.\n\n{}",
+                job.id, job.id, question
+            ))
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("question notifier exited {status}"));
+        }
+    }
+    swap(&job.path("open-question"), "ask\n").map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +126,54 @@ mod tests {
         cmd::declaration_tests::response,
         config::{Config, tests::example},
     };
+
+    #[test]
+    fn only_new_human_questions_reach_notify() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.jobs = dir.path().to_owned();
+        let script = dir.path().join("notify");
+        let log = dir.path().join("notices");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        cfg.notify = Some(script);
+        let job = Job::new(&cfg, "j1");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        for end in ["done", "await", "undeclared"] {
+            fs::write(job.turn("1", "end"), end).unwrap();
+            notify(&cfg, &job).unwrap();
+            assert!(!log.exists());
+        }
+        fs::write(job.turn("1", "end"), "ask").unwrap();
+        fs::write(job.turn("1", "jsonl"), "{\"type\":\"result\",\"result\":\"Which release should we keep?\",\"is_error\":false}\n").unwrap();
+        notify(&cfg, &job).unwrap();
+        let notice = fs::read_to_string(&log).unwrap();
+        assert!(notice.starts_with("open\nproj-question-j1\n"));
+        assert!(notice.contains("proj reply j1"));
+        assert!(notice.contains("Which release should we keep?"));
+        notify(&cfg, &job).unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), notice);
+        // A machinery resume preserves the question and does not close it.
+        Resume::prepare(&job, false).unwrap().commit();
+        notify(&cfg, &job).unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), notice);
+        // Failed starts restore the question and leave its notice open.
+        drop(Resume::prepare(&job, true).unwrap());
+        assert_eq!(fs::read_to_string(&log).unwrap(), notice);
+        Resume::prepare(&job, true).unwrap().commit();
+        assert!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .contains("close\nproj-question-j1\n")
+        );
+        assert!(!job.path("open-question").exists());
+    }
 
     #[test]
     fn initial_and_completed_questions_keep_normal_declarations() {

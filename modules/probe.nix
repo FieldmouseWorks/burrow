@@ -22,6 +22,8 @@ let
   # What crates/burrow-probe reads (its Config).
   probeConfig = pkgs.writeText "burrow-probe.json" (builtins.toJSON {
     inherit (cfg) repo label authors;
+    machinery = if config.burrow.github.machineApp == null then null
+      else "${config.burrow.github.machineApp.slug}[bot]";
     host = config.networking.hostName;
     inherit user;
     inherit (config.burrow) stateDir;
