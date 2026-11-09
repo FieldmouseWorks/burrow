@@ -102,7 +102,7 @@ impl Capabilities {
                     .collect::<Vec<_>>()
                     .join(",");
                 format!(
-                    "{}={{command={},args={},env={{{env}}}}}",
+                    "{}={{command={},args={},env={{{env}}},default_tools_approval_mode=\"approve\"}}",
                     quote(&name),
                     quote(&server.command),
                     serde_json::to_string(&server.args).expect("args")
@@ -318,6 +318,7 @@ mod tests {
                 .contains(r#"env={"EXTRA"="inherited","NIX_REMOTE"="daemon","SETTING"="value"}"#)
         );
         assert!(profile.contains("strict_mcp_config=true"));
+        assert!(profile.contains("default_tools_approval_mode=\"approve\""));
         assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
         assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
         assert!(profile.contains(r#""/dev/kvm"="write""#));
