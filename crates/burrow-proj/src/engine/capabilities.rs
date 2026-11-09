@@ -232,7 +232,12 @@ pub fn resolve(
         .find(|g| g.capability == Capability::Mcp)
         .unwrap();
     mcp.servers = cfg.mcp_servers.clone();
-    for server in mcp.servers.values() {
+    for server in mcp.servers.values_mut() {
+        for name in &server.env_vars {
+            if let Some(value) = env(name).and_then(|v| v.into_string().ok()) {
+                server.env.entry(name.clone()).or_insert(value);
+            }
+        }
         mcp.paths
             .extend(server.read_paths.iter().cloned().map(|p| (p, false)));
         mcp.paths
@@ -260,6 +265,7 @@ mod tests {
                 command: "/bin/server".into(),
                 args: vec!["--stdio".into()],
                 env: BTreeMap::from([("SETTING".into(), "value".into())]),
+                env_vars: vec!["SETTING".into(), "EXTRA".into()],
                 read_paths: vec![socket.clone()],
                 write_paths: vec![output.clone()],
             },
@@ -268,7 +274,11 @@ mod tests {
         std::fs::create_dir_all(&job.dir).unwrap();
         std::fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
         let home = dir.path().join("home");
-        let env = |name: &str| (name == "HOME").then(|| home.clone().into_os_string());
+        let env = |name: &str| match name {
+            "HOME" => Some(home.clone().into_os_string()),
+            "SETTING" | "EXTRA" => Some("inherited".into()),
+            _ => None,
+        };
         let machine = sandbox::tests::machine_in(dir.path());
         let grants = resolve(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
         let claude = grants.claude_flags();
@@ -281,6 +291,10 @@ mod tests {
             config["mcpServers"]["machine.ledger"]["env"]["SETTING"],
             "value"
         );
+        assert_eq!(
+            config["mcpServers"]["machine.ledger"]["env"]["EXTRA"],
+            "inherited"
+        );
         assert!(claude.contains(&"--strict-mcp-config".to_owned()));
         assert!(claude.contains(&output.to_string_lossy().into_owned()));
         let profile = sandbox::flags(&cfg, &job, &dir.path().join("scratch"), &env, &machine)
@@ -288,7 +302,7 @@ mod tests {
             .flags
             .join("\n");
         assert!(profile.contains(r#"mcp_servers={"machine.ledger"={command="/bin/server""#));
-        assert!(profile.contains(r#"env={"SETTING"="value"}"#));
+        assert!(profile.contains(r#"env={"EXTRA"="inherited","SETTING"="value"}"#));
         assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
         assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
         assert!(profile.contains(r#""/dev/kvm"="write""#));

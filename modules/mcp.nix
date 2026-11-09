@@ -57,6 +57,11 @@ in
           default = { };
           description = "Environment given to this server by every engine.";
         };
+        envVars = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "Additional environment names copied from the job into each engine's server config.";
+        };
         readPaths = mkOption {
           type = types.listOf types.str;
           default = [ ];

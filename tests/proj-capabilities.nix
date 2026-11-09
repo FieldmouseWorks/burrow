@@ -16,12 +16,13 @@ let
       if [ "$1" = --mcp-config ]; then
         configured=true
         shift
-        jq -e '.mcpServers.reach.command == "${fixture}/bin/capabilities" and .mcpServers.reach.args == ["server"]' <<<"$1" >/dev/null
+        jq -e --arg job "$PROJ_JOB" '.mcpServers.reach.command == "${fixture}/bin/capabilities" and .mcpServers.reach.args == ["server"] and .mcpServers.reach.env.PROJ_JOB == $job and .mcpServers.reach.env.MCP_ENGINE == "1"' <<<"$1" >/dev/null
       fi
       shift
     done
     "$configured"
     cat >/dev/null
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call"}' | MCP_ENGINE=1 ${fixture}/bin/capabilities server >/dev/null
     ${fixture}/bin/capabilities 2>&1
     echo '{"type":"result","session_id":"reach","result":"done","is_error":false}'
   '';
@@ -57,6 +58,8 @@ in pkgs.testers.runNixOSTest {
       mcpServers.reach = {
         command = "${fixture}/bin/capabilities";
         args = [ "server" ];
+        env.MCP_ENGINE = "1";
+        envVars = [ "PROJ_JOB" ];
         readPaths = [ "/run/reach" ];
       };
       github.apps.workers = {
@@ -123,9 +126,9 @@ in pkgs.testers.runNixOSTest {
     assert dev(f"proj state {a}") == "done"
     assert expected and results(b) == expected, (a, b, expected, results(b), machine.execute(f"cat /data/dev/jobs/{b}/1.jsonl /data/dev/jobs/{b}/1.stderr"))
     assert dev(f"proj state {b}") == "done"
-    machine.succeed(f"test -f /data/dev/jobs/{b}/mcp-called")
     for j in [a, b]:
-        machine.fail(f"test -e /data/dev/jobs/{j}/unexpected-server")
+        machine.succeed(f"test -f /data/dev/jobs/{j}/mcp-called")
+    machine.fail("test -e /data/dev/src/web/unexpected-server")
     # Drop the heavy grant from Codex's generated profile, leaving the
     # declaration and probe unchanged. The same comparison must go red.
     original = dev("sed -n 's/^export PROJ_CONFIG=\\([^ ]*\\).*/\\1/p' $(command -v proj)")

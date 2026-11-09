@@ -16,14 +16,7 @@ fn run(program: &str, args: &[&str]) {
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
     if args.first().is_some_and(|s| s == "outside") {
-        fs::write(
-            format!(
-                "/data/dev/jobs/{}/unexpected-server",
-                env::var("PROJ_JOB").unwrap()
-            ),
-            "started",
-        )
-        .unwrap();
+        fs::write("/data/dev/src/web/unexpected-server", "started").unwrap();
         return;
     }
     if args.first().is_some_and(|s| s == "github") {
@@ -69,7 +62,12 @@ fn main() {
                 r#"{"tools":[{"name":"ping","description":"Check the job's machine MCP","inputSchema":{"type":"object","properties":{}}}]}"#
             } else {
                 let job = env::var("PROJ_JOB").unwrap();
-                fs::write(format!("/data/dev/jobs/{job}/mcp-called"), "yes").unwrap();
+                let marker = if env::var("MCP_ENGINE").as_deref() == Ok("1") {
+                    "mcp-called"
+                } else {
+                    "mcp-direct"
+                };
+                fs::write(format!("/data/dev/jobs/{job}/{marker}"), "yes").unwrap();
                 r#"{"content":[{"type":"text","text":"reachable"}]}"#
             };
             println!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}");

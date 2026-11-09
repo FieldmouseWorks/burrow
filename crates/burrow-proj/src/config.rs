@@ -96,6 +96,8 @@ pub struct McpServer {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
+    pub env_vars: Vec<String>,
+    #[serde(default)]
     pub read_paths: Vec<PathBuf>,
     #[serde(default)]
     pub write_paths: Vec<PathBuf>,
