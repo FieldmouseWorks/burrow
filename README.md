@@ -171,7 +171,20 @@ Each has an entry below, and each can be imported on its own.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
-  key overrides the bare role for that repo, matched case-insensitively. Codex uses its own
+  key overrides the bare role for that repo, matched case-insensitively.
+  Machine starters always name a role: `flaky`, `dependency-dashboard`,
+  `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
+  `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the
+  steward's `steward-handed`, `steward-redFixed`, `steward-failFixed`,
+  `steward-conflictFixed`, `steward-proved`, and `steward-judged` roles. Inbox issues use `stuck` when they
+  have `inbox.unstickLabel`; other bot issues use `machine-inbox`. Machines map
+  their own labels to roles with `burrow.proj.inbox.roles` (for example
+  career drift), including machines without an App. Engine labels enroll
+  these issues but their roles choose
+  the engine each turn, defaulting to Claude when no line matches.
+  A unit invoking `proj run` must supply `--role`, including units
+  declared by the machine itself.
+  Codex uses its own
   small slot pool (`codex.slots`, two), a sandbox that writes only the
   project, its scratch, its job's dir, git's metadata and a /tmp of its own,
   and reads only those and the machine's system paths (no home, no /run/user,

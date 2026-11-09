@@ -33,7 +33,7 @@ fn a_problem_gets_one_pipeline_job_while_its_recent() {
     );
     assert_eq!(
         m.kept("proj.log"),
-        "run --pipeline homelab main doesn't build\n"
+        "run --pipeline --role update homelab main doesn't build\n"
     );
     assert_eq!(m.job("build-main"), Some("homelab-1".into()));
 
@@ -57,7 +57,7 @@ fn a_problem_gets_one_pipeline_job_while_its_recent() {
     dispatch(&m.cfg, "switch", "the switch failed");
     assert_eq!(
         m.kept("proj.log").lines().last(),
-        Some("run --pipeline --app workers homelab the switch failed")
+        Some("run --pipeline --role update --app workers homelab the switch failed")
     );
 }
 

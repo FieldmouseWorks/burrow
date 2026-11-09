@@ -359,6 +359,7 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
         .collect();
     let key = p.ask("dashboard", &mut st.ask);
     p.out.jobs.push(Job {
+        role: "dependency-dashboard",
         part: "dashboard",
         key,
         task: task(p, cfg, n, &lines.join("\n")),

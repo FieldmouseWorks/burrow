@@ -79,7 +79,7 @@ def tried():
 # job goes there, and the origin says so for all else that reads it.
 clone("app", "https://github.com/old-org/app.git")
 with C.acting_for("sam/app"):
-    assert C.job("sam/app", "t", clone=True) == "job-1"
+    assert C.job("sam/app", "t", clone=True, role="baseline") == "job-1"
 assert tried() == [], tried()
 assert url("app") == "https://github.com/sam/app.git", url("app")
 assert C.project_dir("sam/app") == "app"
@@ -90,7 +90,7 @@ assert C.taken("sam/app") is None
 # folder and its kind of URL, and no second clone is made in `now`.
 clone("was", "git@github.com:sam/was.git")
 with C.acting_for("sam/now"):
-    assert C.job("sam/now", "t", clone=True) == "job-1"
+    assert C.job("sam/now", "t", clone=True, role="baseline") == "job-1"
 assert url("was") == "git@github.com:sam/now.git", url("was")
 assert tried() == [] and not os.path.exists(f"{src}/now")
 
@@ -167,14 +167,14 @@ for kept_state, gone in (({"settings": MADE + 99, "databaseId": "id-other"}, Tru
 clone("old", "https://github.com/sam/old.git")
 C.save("repo-sam_old.json", {"settings": MADE + 99, "databaseId": "id-other"})
 with C.acting_for("sam/new"):
-    assert C.job("sam/new", "t", clone=True) is None
+    assert C.job("sam/new", "t", clone=True, role="baseline") is None
 assert "sam/new" not in tried() and not os.path.exists(f"{src}/new"), tried()
 C.save(C.RETIRING_FILE, {})
 # Nor when that same look also found it a clone under another old name.
 NAMES["sam/alias"] = "sam/new"
 clone("alias", "https://github.com/sam/alias.git")
 with C.acting_for("sam/new"):
-    assert C.job("sam/new", "t", clone=True) is None
+    assert C.job("sam/new", "t", clone=True, role="baseline") is None
 assert url("alias") == "https://github.com/sam/new.git", url("alias")
 subprocess.run(["rm", "-rf", f"{src}/alias"], check=True)
 C.save(C.RETIRING_FILE, {})
@@ -184,7 +184,7 @@ os.remove(f"{tmp}/state/repo-sam_old.json")
 # A free path is cloned to, an empty folder included, as git would.
 os.makedirs(f"{src}/fresh")
 with C.acting_for("sam/fresh"):
-    assert C.job("sam/fresh", "t", clone=True) == "job-1"
+    assert C.job("sam/fresh", "t", clone=True, role="baseline") == "job-1"
 assert tried() == ["sam/fresh"], tried()
 os.remove(CLONES)
 
@@ -235,7 +235,7 @@ assert "sam/tool" not in C.load("baseline-failed.json", {})
 # further, and asks GitHub nothing more.
 ASKED.clear()
 with C.acting_for("sam/tool"):
-    assert C.job("sam/tool", "t", clone=True) is None
+    assert C.job("sam/tool", "t", clone=True, role="baseline") is None
 assert tried() == [], tried()
 assert ASKED == [], ASKED
 # What's kept only counts while it's what blocks the clone: another
@@ -277,12 +277,12 @@ assert RESET == [("sam/old", "sam_old")], RESET
 assert url("old") == "https://github.com/sam/old.git"
 assert [x for x in PUBLISHED[0] if x[0] == C.RETIRING and x[1] == "sam/old" and "sam/new" in x[2]], PUBLISHED
 with C.acting_for("sam/new"):
-    assert C.job("sam/new", "t", clone=True) is None
+    assert C.job("sam/new", "t", clone=True, role="baseline") is None
 assert "sam/new" not in tried(), tried()
 # Nor in a checkout of its own that it has already.
 clone("new", "https://github.com/sam/new.git")
 with C.acting_for("sam/new"):
-    assert C.job("sam/new", "t") is None
+    assert C.job("sam/new", "t", role="baseline") is None
 subprocess.run(["rm", "-rf", f"{src}/old", f"{src}/new"], check=True)
 assert full(T + 90060) == line
 assert len(RESET) == 2, RESET
@@ -305,7 +305,7 @@ C.save(C.RETIRING_FILE, legacy)
 NAMES.update({"sam/took": "sam/took", "sam/later": "sam/later"})
 NODES.update({"sam/took": "R_took", "sam/later": "R_took"})
 with C.acting_for("sam/took"):
-    assert C.job("sam/took", "t", clone=True) is None
+    assert C.job("sam/took", "t", clone=True, role="baseline") is None
 full(T + 90080)
 full(T + 90085, "sam/r")
 assert C.load(C.RETIRING_FILE, {}) == legacy
@@ -331,7 +331,7 @@ NAMES["sam/config"] = "sam/config"
 C.follow_renames()
 assert url(".cfg") == "https://github.com/sam/config.git", url(".cfg")
 with C.acting_for("sam/config"):
-    assert C.job("sam/config", "t", clone=True) == "job-1"
+    assert C.job("sam/config", "t", clone=True, role="baseline") == "job-1"
 assert C.project_dir("sam/config") == "config" and os.path.isdir(f"{src}/.cfg")
 subprocess.run(["rm", "-rf", f"{src}/.cfg", f"{src}/config"], check=True)
 os.remove(CLONES)
@@ -351,3 +351,12 @@ for x in ("known.json", "baseline-failed.json", C.TAKEN_FILE, C.RETIRING_FILE, "
         os.remove(f"{tmp}/state/{x}")
 ACTING.clear()
 print("clones: ok")
+
+
+# The machine starter cannot omit its routing role, even before a clone exists.
+try:
+    C.job("sam/absent", "task")
+except TypeError as e:
+    assert "role" in str(e), e
+else:
+    raise AssertionError("a roleless machine starter was accepted")

@@ -486,9 +486,9 @@ def publish(digest):
 
 
 def stuck_label():
-    """The stuck issue is judgment: only a label configured for Claude routes it.
+    """The label enrolls the issue; the inbox assigns its stuck routing role.
     With none, publish leaves the work with the owner and retires the old issue."""
-    return next((label for label, engine in sorted(CFG["inbox"]["labels"].items()) if engine == "claude"), None)
+    return next(iter(sorted(CFG["inbox"]["labels"])), None)
 
 
 def inbox_off():
@@ -500,7 +500,7 @@ def inbox_off():
     if not ib["enable"]:
         return "it's off"
     if stuck_label() is None:
-        return "no inbox label routes to Claude"
+        return "no inbox label enrolls machine issues"
     if not nrepo:  # the digest goes to the journal: there's no issue to take
         return "notify.repo isn't set"
     if not C.project_dir(nrepo):

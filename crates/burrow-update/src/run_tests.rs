@@ -225,7 +225,7 @@ fn an_input_that_doesnt_build_is_held_back_and_the_rest_go() {
     assert!(!logs.join("build-nixpkgs.log").exists());
     let job = jobs(&m);
     assert!(
-        job.starts_with("run --pipeline homelab box-update: these updates don't build with box's flake: burrow. "),
+        job.starts_with("run --pipeline --role update homelab box-update: these updates don't build with box's flake: burrow. "),
         "{job}"
     );
     assert!(m.cfg.state.join("jobs/build-inputs").exists());

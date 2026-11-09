@@ -35,7 +35,7 @@ Find the newest firmware the vendors publish for each ({hints}; microcode itself
     let mut c = Command::new(runuser);
     c.args(["-u", &cfg.user, "--"])
         .arg(&cfg.tools.proj)
-        .arg("run");
+        .args(["run", "--role", "firmware"]);
     if let Some(app) = &cfg.app {
         c.args(["--app", app]);
     }

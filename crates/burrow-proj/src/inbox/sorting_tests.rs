@@ -869,3 +869,23 @@ fn a_handed_issue_url_blocks_triage_and_its_completed_verdict() {
         b.log()
     );
 }
+
+#[test]
+fn existing_machine_issue_jobs_adopt_the_role_and_drop_the_label_pin() {
+    let mut b = Box::new();
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .authors
+        .push("steward[bot]".into());
+    b.job("j1", "done", "Nothing's stuck.");
+    b.record("j1");
+    let job = crate::job::Job::new(&b.cfg, "j1");
+    fs::write(job.path("engine"), "claude").unwrap();
+    let i = issue(7, "steward[bot]", &["claude", "stuck"]);
+    fs::write(b.path("repos_sam_box_issues_7"), i.to_string()).unwrap();
+    b.pass().jobs("sam/box", "box", &[i]).unwrap();
+    assert_eq!(fs::read_to_string(job.path("role")).unwrap(), "stuck\n");
+    assert!(!job.path("engine").exists());
+}

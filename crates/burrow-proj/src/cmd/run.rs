@@ -318,10 +318,35 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
         let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
+        unit_role(&new, std::env::var_os("INVOCATION_ID").is_some())?;
         start_job(cfg, &new, p, &args[i + 1])?
     };
     put(&format!("{id}\n"));
     Ok(())
+}
+
+/// Units are machinery: their jobs must be addressable by the roles file.
+fn unit_role(new: &New, in_unit: bool) -> Result<(), Fail> {
+    if in_unit && new.role.is_none() {
+        return Err(Fail::new(2, "proj run from a unit needs --role NAME"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_unit_cannot_start_a_roleless_job() {
+    assert!(unit_role(&New::default(), true).is_err());
+    assert!(unit_role(&New::default(), false).is_ok());
+    assert!(
+        unit_role(
+            &New {
+                role: Some("flaky".into()),
+                ..New::default()
+            },
+            true
+        )
+        .is_ok()
+    );
 }
 
 /// A new job in the project, its first turn started with the task: its id.
