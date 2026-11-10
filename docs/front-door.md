@@ -272,14 +272,8 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
-Claude's default model comes from the job user's `~/.claude/settings.json`
-`model` setting. A role's `:MODEL` overrides it for that role. New sandbox
-guests (`agent new`, `proj run --vm`) copy the user's model at creation;
-without it they use Claude Code's default. This is runtime data, not part
-of the guest image.
-
-Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE[:MODEL]`,
-with `ENGINE` either `claude` or `codex`. Scope a key to one repo with
+Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE`, with
+`ENGINE` either `claude` or `codex`. Scope a key to one repo with
 `ROLE@OWNER/REPO`:
 
 ```
@@ -289,13 +283,13 @@ steward-handed                  claude
 
 The scoped line wins for that repo, regardless of line order; repo names
 match case-insensitively. Other repos, and jobs with no repo, use the bare
-role. With neither, the role uses Claude's default. Duplicate keys fail the
-turn and name both lines, including scopes spelled in different cases.
-Other invalid lines fail the turn and name the line. `proj check-config`
-validates the deployed configuration and all roles without starting a job;
-updates run it as the job user in their health check before confirming
+role. With neither, the role uses Claude. Duplicate keys fail the turn and
+name both lines, including scopes spelled in different cases. Other invalid
+lines fail the turn and name the line. `proj check-config` validates the
+deployed configuration, all roles and all models lines without starting a
+job; updates run it as the job user in their health check before confirming
 ([updates](../README.md)). Add
-`over PCT ENGINE[:MODEL]` to move a turn to that engine when its own engine
+`over PCT ENGINE` to move a turn to that engine when its own engine
 is short: any window on its meter (the five-hour session or the week) at
 PCT with no credits to carry on, or, for Claude, the machine already out of
 Claude's usage. It moves only when the other engine's meter has room:
@@ -304,6 +298,29 @@ windows are spent. Missing readings, or readings an hour old, move nothing.
 `burrow.usageReset` supplies both meters and keeps their history in
 `meters/log`.
 Each engine keeps its own conversation when a role moves between them.
+
+The roles file picks only the engine, so a saved engine setup swaps it
+whole. What each role runs at on each engine lives beside it, in
+`~/.config/proj/models`, and stays put when setups switch:
+`ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]`.
+
+```
+steward-conflictFixed  claude  SMALLER-MODEL-ID  medium
+steward-judged         claude  -                  high
+```
+
+`-` keeps the engine's own model. Effort is Claude Code's `--effort` (`low`,
+`medium`, `high`, `xhigh`, `max`) or Codex's `model_reasoning_effort`
+(`minimal`, `low`, `medium`, `high`, `xhigh`). The line for the engine the
+turn ends on applies, overflow and the judge's Claude included; scopes,
+duplicates and bad lines work as in the roles file. A role with no line
+keeps the engine's own settings: for Claude, the job user's
+`~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`.
+New sandbox guests (`agent new`, `proj run --vm`) copy the user's `model`
+and its `env.CLAUDE_CODE_SUBAGENT_MODEL` (the model Claude Code's subagents
+run on) at creation; without them they use Claude Code's defaults. This is
+runtime data, not part of the guest image. Model ids live only in these
+untracked files: which model does what is the machine's business.
 
 Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
 an independent login: `autoland-codex-login job` logs the job user in,

@@ -106,7 +106,7 @@ Each has an entry below, and each can be imported on its own.
   on); anything that breaks reverts and goes to a Claude job. It deploys main
   too, so a merged PR goes live the same way. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
-  and every line of the machine’s roles file before confirmation. Failed
+  and every line of the machine’s roles and models files before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
@@ -175,15 +175,12 @@ Each has an entry below, and each can be imported on its own.
   paid extra usage is off, so limits mean waiting for reset, never asking
   the owner to raise a cap. `proj usage back` releases a stale hold once
   usage is available.
-  Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
-  model and an overflow to the other engine when its own is short and the
-  other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
-  key overrides the bare role for that repo, matched case-insensitively.
-  Claude's default model comes from the job user's `~/.claude/settings.json`
-  `model` setting. A role's `:MODEL` overrides it for that role. New sandbox
-  guests (`agent new`, `proj run --vm`) copy that setting at creation;
-  without it they use Claude Code's default. The model is never baked into
-  the guest image.
+  Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
+  overflow to the other engine when its own is short and the other has
+  room; `~/.config/proj/models` gives each role its model and effort on
+  each engine, and keeps them when an engine setup switches
+  ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO` key overrides
+  the bare role for that repo, matched case-insensitively.
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
   `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the

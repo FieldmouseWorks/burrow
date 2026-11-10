@@ -1,5 +1,5 @@
 //! One file parser for turns, checked switches and deployment checks.
-use crate::engine::{Choice, RoleKey, role};
+use crate::engine::{Engine, RoleKey, role};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -19,13 +19,13 @@ pub(crate) fn parse<'a>(
     meters: Option<&Path>,
     held: bool,
     now: i64,
-) -> Result<BTreeMap<RoleKey<'a>, Choice>, String> {
+) -> Result<BTreeMap<RoleKey<'a>, Engine>, String> {
     let mut entries = BTreeMap::new();
     for (i, line) in text.lines().enumerate() {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        let (key, choice) = role(line, meters, held, now)
+        let (key, engine) = role(line, meters, held, now)
             .map_err(|e| format!("{} line {}: {line}: {e}", path.display(), i + 1))?;
         if let Some((first, original, _)) = entries.get(&key) {
             return Err(format!(
@@ -34,37 +34,20 @@ pub(crate) fn parse<'a>(
                 i + 1
             ));
         }
-        entries.insert(key, (i + 1, line, choice));
+        entries.insert(key, (i + 1, line, engine));
     }
     Ok(entries
         .into_iter()
-        .map(|(key, (_, _, choice))| (key, choice))
+        .map(|(key, (_, _, engine))| (key, engine))
         .collect())
 }
 
-/// A validated policy with both primary and overflow engines, without models.
+/// A validated policy, one line a role, as the shared parser read it.
 pub(crate) fn engines(path: &Path, text: &str) -> Result<String, String> {
     parse(path, text, None, false, crate::now())?;
-    let mut out = String::new();
-    for line in text
+    Ok(text
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-    {
-        // The shared parser established the grammar. Only the two engine
-        // positions can contain model choices; no raw line is ever printed.
-        let words: Vec<_> = line
-            .split_whitespace()
-            .enumerate()
-            .map(|(i, word)| {
-                if i == 1 || i == 4 {
-                    word.split(':').next().unwrap_or("")
-                } else {
-                    word
-                }
-            })
-            .collect();
-        out += &words.join(" ");
-        out.push('\n');
-    }
-    Ok(out)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") + "\n")
+        .collect())
 }

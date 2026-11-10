@@ -14,24 +14,29 @@ fn switches_back_and_refuses_bad_or_unknown_without_changing_link() {
     assert!(roles.is_symlink());
     fs::write(
         store.dir.join("second"),
-        "work codex:chosen over 80 claude:other\nwork@sam/code claude\n",
+        "work  codex over 80 claude\nwork@sam/code claude\n",
     )
     .unwrap();
     let said = run(&store, &["use", "second"]).unwrap();
     assert!(said.contains("Was active: first\nActive: second\nPrevious: first"));
     assert!(
-        said.contains("work codex over 80 claude")
-            && !said.contains("chosen")
-            && !said.contains("other")
+        said.contains("work codex over 80 claude\nwork@sam/code claude\n"),
+        "{said}"
     );
     assert!(roles.is_symlink());
     run(&store, &["use", "back"]).unwrap();
     assert_eq!(fs::read_to_string(&roles).unwrap(), "work claude\n");
     let link = fs::read_link(&roles).unwrap();
     let previous = fs::read(&store.previous).unwrap();
-    fs::write(store.dir.join("bad"), "# header\njudge old-format\n").unwrap();
-    let bad = run(&store, &["use", "bad"]).unwrap_err();
-    assert!(bad.contains("roles.d/bad line 2"), "{bad}");
+    // A model is the models file's: a setup that names one is refused.
+    for text in [
+        "# header\njudge old-format\n",
+        "# header\njudge claude:chosen\n",
+    ] {
+        fs::write(store.dir.join("bad"), text).unwrap();
+        let bad = run(&store, &["use", "bad"]).unwrap_err();
+        assert!(bad.contains("roles.d/bad line 2"), "{bad}");
+    }
     for name in ["unknown", "../first", "", "UPPER"] {
         assert!(run(&store, &["use", name]).is_err());
     }

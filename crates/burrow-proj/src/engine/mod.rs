@@ -20,7 +20,7 @@ pub use handoff::first_prompt;
 pub(crate) use role::{RoleKey, role};
 pub use stream::{Said, answer, last_result, names_session, stream_names_session, stream_tail};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     #[default]
@@ -34,11 +34,23 @@ impl Engine {
             Self::Codex => "codex",
         }
     }
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            _ => Err(format!("unknown engine {s}")),
+        }
+    }
 }
+
+/// What one turn runs on: the engine its role gives it, and the model and
+/// effort the models file gives that role on that engine. None leaves the
+/// engine's own setting.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Choice {
     pub engine: Engine,
     pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Inbox jobs pin their label's engine; role jobs resolve the file each turn.
@@ -59,21 +71,21 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
 }
 
 /// Turn startup and drain admission share role scopes, overflow, pins and
-/// the judge restriction.
+/// the judge restriction. The model and effort follow the engine it ends on.
 pub(crate) fn resolve(
     cfg: &Config,
     role: &str,
     repo: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<Choice, String> {
-    let mut c = cfg.engine(role, repo)?;
-    if let Some(engine) = pinned {
-        c = Choice::parse(engine)?;
+    let mut engine = cfg.engine(role, repo)?;
+    if let Some(e) = pinned {
+        engine = Engine::parse(e)?;
     }
-    if role == "steward-judged" && c.engine == Engine::Codex {
-        c = Choice::default();
+    if role == "steward-judged" {
+        engine = Engine::Claude;
     }
-    Ok(c)
+    cfg.choice(role, repo, engine)
 }
 
 /// Normalized terminal records let the job lifecycle and log reader share outcomes.
@@ -175,15 +187,24 @@ mod tests {
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
         cfg.roles = dir.path().join("roles");
+        cfg.models = dir.path().join("models");
         fs::write(&cfg.roles, "steward-judged codex\n").unwrap();
         let job = Job::new(&cfg, "judge");
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-judged").unwrap();
         fs::write(job.path("engine"), "codex").unwrap();
         assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
-        fs::remove_file(job.path("engine")).unwrap();
-        fs::write(&cfg.roles, "steward-judged claude:chosen\n").unwrap();
-        assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("chosen"));
+        // The judge's own model and effort are Claude's line, not Codex's.
+        fs::write(
+            &cfg.models,
+            "steward-judged codex other low\nsteward-judged claude chosen max\n",
+        )
+        .unwrap();
+        let c = choice(&cfg, &job).unwrap();
+        assert_eq!(
+            (c.engine, c.model.as_deref(), c.effort.as_deref()),
+            (Engine::Claude, Some("chosen"), Some("max"))
+        );
     }
 }
 
@@ -199,6 +220,7 @@ mod scoped_tests {
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
         cfg.roles = dir.path().join("roles");
+        cfg.models = dir.path().join("models");
         cfg.tools.git = "git".into();
         let git = |args: &[&str]| {
             assert!(
@@ -219,7 +241,16 @@ mod scoped_tests {
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-handed").unwrap();
         fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        fs::write(&cfg.roles, "steward-handed claude:bare\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n").unwrap();
+        fs::write(
+            &cfg.roles,
+            "steward-handed claude\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n",
+        )
+        .unwrap();
+        fs::write(
+            &cfg.models,
+            "steward-handed claude bare\nsteward-handed@sam/code claude scoped\n",
+        )
+        .unwrap();
         for url in [
             "https://github.com/Sam/Code.git",
             "git@github.com:SAM/CODE.git",
@@ -230,7 +261,11 @@ mod scoped_tests {
         }
         fs::write(job.path("role"), "steward-judged").unwrap();
         assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
+        // A scoped role on Claude takes its repo's line.
+        fs::write(job.path("engine"), "claude").unwrap();
         fs::write(job.path("role"), "steward-handed").unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("scoped"));
+        fs::remove_file(job.path("engine")).unwrap();
         for url in [
             "https://github.com/other/code.git",
             "https://gitlab.com/sam/code.git",
