@@ -9,6 +9,13 @@ from step_context import STRIKES, STRIKE_LIMIT, ON, VERB, clock, _HEAD
 
 
 class Jobs:
+    def usage_grace(self):
+        """Only jobs still owning a step at settlement contribute grace."""
+        current = {jid for key, jid in self.st.items() if key.endswith("Job") and self.st.get(key[:-3])}
+        records = self.st.get("usageJobs", {})
+        return max((record["release"] for jid, record in records.items()
+                    if jid in current and self.looked.get(jid) in ("usage", "queued", "running", "unknown")), default=None)
+
     def deadline(self, kind):
         """A pass when this kind's job is due to have ended (proj stops a turn
         at jobTimeout, a proof build stops at proofTimeout), and every
@@ -52,16 +59,19 @@ class Jobs:
         records = self.st.setdefault("usageJobs", {})
         self.st.pop("usageRelease", None)  # replaced by job-scoped releases
         release = C.job_release(snapshot)
+        if state is None and jid in records:
+            record = records[jid]
+            if record["release"] > C.NOW:
+                usage = record["engine"], record["release"]
+            C.wake(self.repo, min(C.NOW + MIN, record["release"]) if record["release"] > C.NOW else C.NOW + MIN)  # ends: retry the unreadable lifecycle, bounded by reset
         if usage:
             engine, reset = usage
-            records[jid] = reset
-        elif jid in records:
+            records[jid] = {"engine": engine, "release": reset}
+        elif jid in records and state is not None:
             if state in ("queued", "running") and not target:
-                records[jid] = min(records[jid], release if release is not None else C.NOW)
+                records[jid]["release"] = min(records[jid]["release"], release if release is not None else C.NOW)
             else:
                 records.pop(jid)
-        if jid in records:
-            self.refresh["usage_release"] = max(self.refresh.get("usage_release", 0), records[jid])
         if usage:
             engine, reset = usage
             if reset > C.NOW or (state not in ("queued", "running") and target == "usage-limit"):

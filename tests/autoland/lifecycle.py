@@ -83,7 +83,7 @@ with tempfile.TemporaryDirectory() as tmp:
             says('failed', f'await usage-limit', f'usage {engine} {reset}')
             reader = Reader(kind, 'original')
             assert reader.running(kind, 'original') == 'usage'
-            assert reader.st['usageJobs']['job'] == reset and not reader.ends
+            assert reader.st['usageJobs']['job']['release'] == reset and not reader.ends
             assert C.at_work('job')
             assert C.WAKE['sam/r'] == reset
 
@@ -97,19 +97,46 @@ with tempfile.TemporaryDirectory() as tmp:
         says('running', f'released {engine} {release}')
         reader.looked, reader.refresh = {}, {}
         assert reader.running('judged', 'original') == 'running'
-        assert reader.refresh['usage_release'] == release
+        assert reader.usage_grace() == release
         says('queued', f'usage {engine} {int(C.NOW) + 3600}')
         reader.st.update(proved='original', provedJob='second')
         reader.running('proved', 'original')
-        assert reader.refresh['usage_release'] == int(C.NOW) + 3600
+        assert reader.usage_grace() == int(C.NOW) + 3600
         says('failed')
         reader.looked, reader.refresh = {}, {}
         reader.running('judged', 'original')
-        assert 'job' not in reader.st['usageJobs'] and not reader.refresh
+        assert 'job' not in reader.st['usageJobs'] and reader.usage_grace() is None
         reader.st['judgedJob'] = 'replacement'
         says('running')
         reader.running('judged', 'original')
-        assert not reader.refresh
+        assert reader.usage_grace() is None
+
+    # A failed read preserves the known hold for every job kind/engine.
+    # Grace is computed after cancellation/replacement, not accumulated
+    # during earlier reads in the same pass.
+    for engine in ('Claude', 'Codex'):
+        for kind in KINDS:
+            reset = int(C.NOW) + 3600
+            says('queued', f'usage {engine} {reset}')
+            reader = Reader(kind, 'original')
+            reader.running(kind, 'original')
+            says(None)
+            reader.looked.clear()
+            C.WAKE.clear()
+            assert reader.running(kind, 'original') == 'usage'
+            assert reader.usage_grace() == reset
+            assert C.NOW < C.WAKE['sam/r'] <= min(reset, C.NOW + 60)
+            reader.st.update(other='original', otherJob='other-job')
+            says('queued', f'usage {engine} {reset - 100}')
+            reader.running('other', 'original')
+            reader.st.pop(kind + 'Job')
+            assert reader.usage_grace() == reset - 100
+            reader.st.pop('otherJob')
+            assert reader.usage_grace() is None
+            reader.st[kind + 'Job'] = 'replacement'
+            says('queued')
+            reader.running(kind, 'original')
+            assert reader.usage_grace() is None
 
     # What proj says: its state, then each thing held; one it can't read the
     # record of (it exits non-zero) is kept, as one nothing can say of.

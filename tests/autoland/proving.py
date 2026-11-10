@@ -529,6 +529,33 @@ A_DONE = CI_GREEN + [{"__typename": "StatusContext", "context": "a", "state": "S
                      {"__typename": "StatusContext", "context": "b", "state": "PENDING", "description": ""}]
 status, _ = run(clean(checks=A_DONE), 800)
 assert STOPPED == [] and JOBS == [] and pr_state()["provedJob"] == jid and "running b" in status, (status, STOPPED, JOBS)
+# Retiring a usage-held proof in the same pass cannot lend its reset to
+# its replacement, whether the replacement is a job, build or run.
+from harness import HELD
+import waits
+for engine in ("Claude", "Codex"):
+    for replacement in ({"proofJobs": {"b": "Run b."}},
+                        {"proofBuilds": {"b": "checks.x86_64-linux.b"}},
+                        {"proofRuns": {"b": "true"}}):
+        fresh_pr_state()
+        STOPPED.clear()
+        tools()
+        S.CFG["repos"]["sam/r"] = {"proofJobs": {"a": "Run a."}}
+        only_a = CI_GREEN + [{"__typename": "StatusContext", "context": "a", "state": "PENDING"}]
+        run(clean(checks=only_a), 700)
+        st = pr_state()
+        st["provedJob"] = "retiring-proof"
+        C.save("pr-sam_r-5.json", st)
+        STATES["retiring-proof"] = "queued"
+        HELD["retiring-proof"] = [f"usage {engine} {int(C.ts(T0)) + 1000000}"]
+        S.CFG["repos"]["sam/r"] = replacement
+        only_b = CI_GREEN + [{"__typename": "StatusContext", "context": "b", "state": "PENDING"}]
+        status, digest = run(clean(checks=only_b), 100000)
+        noted = waits.NOTED["sam/r"]["sam/r#5"]
+        assert "retiring-proof" in STOPPED, (STOPPED, status)
+        assert noted.get("usage_release") is None, (noted, status)
+HELD.clear()
+
 # A job from before proofsLive, replaced by a build while it won't stop:
 # it holds its slot until it's over, so with one slot the build waits.
 fresh_pr_state()

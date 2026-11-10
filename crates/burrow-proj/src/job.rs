@@ -289,7 +289,7 @@ impl<'a> Job<'a> {
                     .then(|| facts.spent.map(|s| s.release()))
                     .flatten()
             });
-            if state == "running"
+            if matches!(state.as_str(), "queued" | "running")
                 && let Some(release) = usage::last_release(self.cfg)
                 && self.engine_label(&facts.turn) == "Claude"
             {
@@ -520,6 +520,42 @@ mod tests {
         }
         fs::remove_file(job.path("await")).unwrap();
         assert!(job.lifecycle().unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn queued_and_running_jobs_report_retained_early_release() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctl = tmp.path().join("systemctl");
+        burrow_test::executable(&ctl, "#!/bin/sh\nexit 0\n");
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        v["tools"]["systemctl"] = ctl.to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "released");
+        fs::create_dir(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "engine"), "claude").unwrap();
+        let release = now() - 10000;
+        let spent = serde_json::json!({"until": now() + 86400, "said": "spent", "job": "other",
+                                      "at": release - 100, "back": release, "told": 0});
+        for running in [false, true] {
+            if running {
+                fs::write(job.turn("1", "slot"), "").unwrap();
+            }
+            fs::write(cfg.jobs.join(".usage.json"), spent.to_string()).unwrap();
+            fs::write(cfg.jobs.join(".usage.released"), release.to_string()).unwrap();
+            for cleaned in [false, true] {
+                if cleaned {
+                    fs::remove_file(cfg.jobs.join(".usage.json")).unwrap();
+                }
+                let (state, lines) = job.lifecycle().unwrap();
+                assert_eq!(state, if running { "running" } else { "queued" });
+                assert!(
+                    lines.contains(&format!("released Claude {release}")),
+                    "{lines:?}"
+                );
+            }
+        }
     }
 
     // When a turn ended, as the stall watchdog goes by it. A turn killed with
