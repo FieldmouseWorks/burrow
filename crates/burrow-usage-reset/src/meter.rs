@@ -30,8 +30,13 @@ pub struct Snapshot {
     pub windows: BTreeMap<String, Window>,
     /// Paid usage that carries on once a window is used up.
     pub credits: bool,
-    /// When it was read, in seconds since the epoch.
+    /// When the reading completed, in seconds since the epoch.
     pub read_at: f64,
+    /// Before the fresh reading was requested. Older producers did not keep
+    /// this: their readings can route work but cannot prove recovery after
+    /// a refusal while a request was in flight.
+    #[serde(default)]
+    pub requested_at: Option<f64>,
 }
 
 /// One limit window: percent used, 0 to 100, and when it resets by itself,
@@ -107,6 +112,7 @@ pub fn claude(reading: &Reading, at: f64) -> Snapshot {
         windows,
         credits: false,
         read_at: at,
+        requested_at: Some(at),
     }
 }
 
@@ -118,8 +124,11 @@ pub struct Meter<A> {
 }
 impl<A: Account> Account for Meter<A> {
     fn read(&mut self) -> Result<Reading, String> {
+        let started = crate::now();
         let reading = self.account.read()?;
-        if let Err(e) = claude(&reading, crate::now()).record(&self.dir, "claude") {
+        let mut snapshot = claude(&reading, crate::now());
+        snapshot.requested_at = Some(started);
+        if let Err(e) = snapshot.record(&self.dir, "claude") {
             eprintln!("couldn't record Claude's meter: {e}");
         }
         Ok(reading)
@@ -148,6 +157,7 @@ mod tests {
                 .collect(),
             credits,
             read_at,
+            requested_at: Some(read_at),
         }
     }
 
@@ -225,5 +235,38 @@ mod tests {
             ..out
         };
         assert!(!paid.short(95.0) && paid.room());
+    }
+
+    #[test]
+    fn meter_timestamp_precedes_the_request_even_when_the_response_is_delayed() {
+        struct Delayed {
+            observed: f64,
+        }
+        impl Account for Delayed {
+            fn read(&mut self) -> Result<Reading, String> {
+                self.observed = crate::now();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                Ok(Reading {
+                    used: 1.0,
+                    week: "week".into(),
+                    ends: 20000.0,
+                    session: None,
+                })
+            }
+            fn reset(&mut self, _: &mut dyn FnMut() -> Result<(), String>) -> Reset {
+                unreachable!()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut metered = Meter {
+            account: Delayed { observed: 0.0 },
+            dir: dir.path().into(),
+        };
+        metered.read().unwrap();
+        let snapshot = Snapshot::read(dir.path(), "claude", crate::now()).unwrap();
+        assert!(
+            snapshot.requested_at.unwrap() <= metered.account.observed,
+            "a delayed response must not postdate an intervening refusal"
+        );
     }
 }

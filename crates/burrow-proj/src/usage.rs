@@ -107,15 +107,26 @@ pub fn out(cfg: &Config) -> Option<Spent> {
 /// `back` checks that timestamp again under the usage lock, so a refusal
 /// arriving meanwhile keeps its hold. All release effects still live there.
 pub fn metered(cfg: &Config) {
-    use burrow_usage_reset::meter::Snapshot;
-    let Some(s) = out(cfg) else { return };
-    let Some(dir) = &cfg.meters else { return };
-    if let Some(meter) = Snapshot::read(dir, "claude", now() as f64)
-        && meter.read_at > s.refused() as f64
-        && meter.room()
-    {
-        back(cfg, Some(meter.read_at.ceil() as i64));
+    if let Some(started) = meter_start(cfg) {
+        back(cfg, Some(started));
     }
+}
+
+fn meter_start(cfg: &Config) -> Option<i64> {
+    use burrow_usage_reset::meter::{FRESH, Snapshot};
+    let s = out(cfg)?;
+    let dir = cfg.meters.as_ref()?;
+    let now = now() as f64;
+    let meter = Snapshot::read(dir, "claude", now)?;
+    let requested = meter.requested_at?;
+    if !requested.is_finite() || requested > meter.read_at || now - requested >= FRESH {
+        return None;
+    }
+    // Refusals are recorded in whole seconds. Discard the fractional part:
+    // a request within the refusal's second could have preceded it. Pass
+    // this same conservative time to back's locked check of the latest refusal.
+    let started = requested.floor() as i64;
+    (started > s.refused() && meter.room()).then_some(started)
 }
 
 /// Its record, holding or not, while it's kept.

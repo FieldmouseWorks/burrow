@@ -142,6 +142,7 @@ pub fn snapshot(result: &Value, at: f64) -> Result<Snapshot, String> {
         windows,
         credits,
         read_at: at,
+        requested_at: Some(at),
     })
 }
 
