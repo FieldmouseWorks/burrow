@@ -97,14 +97,14 @@ def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None, usage_re
     minutes = repo_cfg(repo)[STALL[wait]]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
     grace = 0
-    if usage_release is not None:
-        ripe = max(ripe or 0, usage_release)
     if refreshing and wait != HOLD and CFG["watch"] and CFG["watch"]["renovateSweep"]:
         run = CFG["renovateRun"]
         grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
         phase += lock_wait.guard(run)
     claude = any(s in ("queued", "running") for j, s in (jobs or {}).items() if not j.startswith(C.BUILD))
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace, claude)
+    noted = item(repo, pr, phase, minutes, kick, rev, ripe, grace, claude)
+    noted["usage_release"] = usage_release
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = noted
 
 
 def overdue(repo, pr, why, said=None):
@@ -167,7 +167,7 @@ def publish(seen, digest, full):
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
-                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it.get("grace", 0) + it["minutes"] * MIN,
+                          "due": since if key in FAILING else max(max(since, it.get("until") or 0) + it.get("grace", 0), it.get("usage_release") or 0) + it["minutes"] * MIN,
                           "kick": it["kick"],
                           # A step that keeps failing is the steward's, whatever job it has.
                           "claude": it.get("claude", False) and key not in FAILING,

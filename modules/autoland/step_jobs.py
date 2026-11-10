@@ -49,10 +49,21 @@ class Jobs:
         snapshot = C.lifecycle(jid)
         state, target = C.job_lifecycle(jid, self.tag, snapshot)
         usage = C.job_usage(jid, snapshot)
+        records = self.st.setdefault("usageJobs", {})
+        self.st.pop("usageRelease", None)  # replaced by job-scoped releases
+        release = C.job_release(snapshot)
         if usage:
             engine, reset = usage
-            self.st["usageRelease"] = max(self.refresh.get("usage_release", 0), reset)
-            self.refresh["usage_release"] = self.st["usageRelease"]
+            records[jid] = reset
+        elif jid in records:
+            if state in ("queued", "running") and not target:
+                records[jid] = min(records[jid], release if release is not None else C.NOW)
+            else:
+                records.pop(jid)
+        if jid in records:
+            self.refresh["usage_release"] = max(self.refresh.get("usage_release", 0), records[jid])
+        if usage:
+            engine, reset = usage
             if reset > C.NOW or (state not in ("queued", "running") and target == "usage-limit"):
                 if reset > C.NOW:
                     C.wake(self.repo, reset)  # ends: the engine resets, and proj resumes this job

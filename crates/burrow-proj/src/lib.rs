@@ -47,7 +47,8 @@
 //! proj state ID               queued, running, done, error or failed
 //! proj lifecycle ID           its state, then what it holds open, a line each
 //!                             (Job::lifecycle): ask, owner, await TARGET
-//!                             usage ENGINE RESET (epoch seconds, including release grace)
+//!                             usage ENGINE RESET, released ENGINE RELEASE
+//!                             (epoch seconds, including release grace)
 //! proj find KEY               the id of the job run --key KEY, once it has
 //!                             started a turn; nothing for none, and one
 //!                             that never started lets its key go

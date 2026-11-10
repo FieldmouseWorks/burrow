@@ -289,6 +289,12 @@ impl<'a> Job<'a> {
                     .then(|| facts.spent.map(|s| s.release()))
                     .flatten()
             });
+            if state == "running"
+                && let Some(release) = usage::last_release(self.cfg)
+                && self.engine_label(&facts.turn) == "Claude"
+            {
+                held.push(format!("released Claude {release}"));
+            }
             if let Some(reset) = reset {
                 let engine = self.engine_label(&facts.turn);
                 held.push(format!("usage {engine} {reset}"));

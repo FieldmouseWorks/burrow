@@ -745,6 +745,15 @@ def job_usage(jid, snapshot=None):
     return None
 
 
+def job_release(snapshot):
+    """An engine's actual early release, reported separately from a hold."""
+    for line in snapshot[1]:
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == "released" and fields[2].isdigit():
+            return int(fields[2])
+    return None
+
+
 def job_lifecycle(jid, key=None, snapshot=None):
     """How job jid stands, and what keeps it at work though its turn is
     over: (state, held). state is lifecycle's; held, once it's not queued
@@ -791,7 +800,7 @@ def holding(lines, key):
         if what == "await":
             if target and (key is None or target.lower() != key.lower()):
                 return target
-        elif what and what != "usage":
+        elif what and what not in ("usage", "released"):
             return line.strip()
     return None
 

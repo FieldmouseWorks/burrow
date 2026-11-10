@@ -729,7 +729,7 @@ for engine in ("Claude", "Codex"):
     assert C.WAKE["sam/r"] == reset, C.WAKE
     import waits
     watched = waits.NOTED["sam/r"]["sam/r#5"]
-    assert watched["until"] == reset, watched
+    assert watched["usage_release"] == reset, watched
     # A refused turn is resumed by proj at reset, never replaced by a
     # second judge while its reset-triggered resume is being dispatched.
     STATES["job-1"] = "usage-limit"
@@ -1009,3 +1009,32 @@ many["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo
 status, _ = run(many, 700)
 assert "state=success" not in status and not merged() and "over 100 checks" in status, (status, WROTE)
 print("checks past a page: ok")
+
+# A different fix kind owning the branch keeps usage waits on the ordinary
+# steward deadline, including a refused turn awaiting reset dispatch.
+for engine in ("Claude", "Codex"):
+    fresh_pr_state()
+    STATES.clear()
+    HELD.clear()
+    red = [{"__typename": "StatusContext", "context": "ci", "state": "FAILURE"}]
+    run(clean(checks=red), 0)
+    run(clean(checks=red), 7200)
+    assert len(JOBS) == 1, JOBS
+    reset = int(C.ts(T0)) + 100000
+    HELD["job-1"] = [f"usage {engine} {reset}"]
+    for after, state in ((8000, "queued"), (100001, "usage-limit")):
+        STATES["job-1"] = state
+        if state == "usage-limit":
+            HELD["job-1"].insert(0, "await usage-limit")
+        status, digest = run(clean(threads=[False]), after)
+        assert "usage reset" in status and JOBS == [], (status, JOBS)
+        noted = __import__("waits").NOTED["sam/r"]["sam/r#5"]
+        assert noted["minutes"] == 120 and noted["kick"] == "autoland/sam/r", noted
+    # A new head cancels its judge/proof; an unrelated phase inherits no hold.
+    HELD.clear()
+    STATES.clear()
+    status, digest = run(mkpr(sha="f" * 40), 100100)
+    noted = __import__("waits").NOTED["sam/r"]["sam/r#5"]
+    assert noted.get("usage_release") is None, noted
+HELD.clear()
+STATES.clear()

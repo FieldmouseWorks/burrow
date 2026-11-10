@@ -83,7 +83,9 @@ class Actions:
             who = f"the last Claude job on it {how}, so another takes it at {clock(due)}"
         elif not ours:
             who = ""
-        elif (busy := self.fixing()) in self.awaits:
+        elif (busy := self.fixing()) and self.looked.get(self.st.get(busy + "Job")) == "usage":
+            who = f"waiting for {self.awaits[busy]}"
+        elif busy in self.awaits:
             awaited = self.awaits[busy]
             who = f"its Claude job on {ON[busy]} awaits {awaited}"
         elif wait and (due := self.handoff_at()) >= C.NOW:

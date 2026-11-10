@@ -83,9 +83,33 @@ with tempfile.TemporaryDirectory() as tmp:
             says('failed', f'await usage-limit', f'usage {engine} {reset}')
             reader = Reader(kind, 'original')
             assert reader.running(kind, 'original') == 'usage'
-            assert reader.st['usageRelease'] == reset and not reader.ends
+            assert reader.st['usageJobs']['job'] == reset and not reader.ends
             assert C.at_work('job')
             assert C.WAKE['sam/r'] == reset
+
+    # Early release is scoped to the job that was held. Other live holds
+    # survive, and an ended or replaced job cannot defer unrelated work.
+    for engine in ('Claude', 'Codex'):
+        says('queued', f'usage {engine} {int(C.NOW) + 7200}')
+        reader = Reader('judged', 'original')
+        reader.running('judged', 'original')
+        release = int(C.NOW) - 30
+        says('running', f'released {engine} {release}')
+        reader.looked, reader.refresh = {}, {}
+        assert reader.running('judged', 'original') == 'running'
+        assert reader.refresh['usage_release'] == release
+        says('queued', f'usage {engine} {int(C.NOW) + 3600}')
+        reader.st.update(proved='original', provedJob='second')
+        reader.running('proved', 'original')
+        assert reader.refresh['usage_release'] == int(C.NOW) + 3600
+        says('failed')
+        reader.looked, reader.refresh = {}, {}
+        reader.running('judged', 'original')
+        assert 'job' not in reader.st['usageJobs'] and not reader.refresh
+        reader.st['judgedJob'] = 'replacement'
+        says('running')
+        reader.running('judged', 'original')
+        assert not reader.refresh
 
     # What proj says: its state, then each thing held; one it can't read the
     # record of (it exits non-zero) is kept, as one nothing can say of.
