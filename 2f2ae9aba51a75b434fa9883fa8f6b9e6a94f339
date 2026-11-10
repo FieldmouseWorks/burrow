@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "33w6hj4a5v2wypef456c8ydjem",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 604,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/604",
+  "summary": "dispatch: allow fresh runners to execute workspace programs",
+  "task": "fieldmouseworks/burrow#588",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "9637e343a4faceb9ac1d379d34a4f923f00afa378ce16c57ceb183bf77dac9df",
+    "before": "39d596ce75ed4d7e6acce23345c128cd988fcb94",
+    "after": "2f2ae9aba51a75b434fa9883fa8f6b9e6a94f339",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794353282333
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714234935"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714234769"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714234678"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714234628"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435/job/129714166510"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714163925"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714163560"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#604)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#604)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#604)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#604)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#604)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#604)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049435"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129715778645"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/42782049497/job/129714163981"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/604#pullrequestreview-5838949875"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/604"
+    }
+  ]
+}
