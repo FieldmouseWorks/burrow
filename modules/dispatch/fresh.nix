@@ -175,6 +175,11 @@ in
         DynamicUser = true;
         StateDirectory = "${state}/%i";
         WorkingDirectory = root;
+        # systemd mounts idmapped DynamicUser state directories noexec.
+        # Jobs build and execute programs in this runner's workspace; opt
+        # only its own state into execution, retaining the private UID and
+        # mount plus the nosuid/nodev protections.
+        ExecPaths = [ root ];
         # The dispatcher queues the start and leaves the file to the unit,
         # which removes it once its runner has it, or as it stops if it
         # never got that far.
