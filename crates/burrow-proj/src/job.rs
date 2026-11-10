@@ -282,7 +282,19 @@ impl<'a> Job<'a> {
             .read_lock()
             .map_err(|e| format!("{}: {e}", self.path("lock").display()))?;
         let state = self.state();
-        Ok((state, self.holds()?))
+        let mut held = self.holds()?;
+        if let Some(facts) = self.facts() {
+            let reset = facts.usage_reset.map(|(_, reset)| reset).or_else(|| {
+                (state == "queued")
+                    .then(|| facts.spent.map(|s| s.release()))
+                    .flatten()
+            });
+            if let Some(reset) = reset {
+                let engine = self.engine_label(&facts.turn);
+                held.push(format!("usage {engine} {reset}"));
+            }
+        }
+        Ok((state, held))
     }
 
     /// What it holds open, whatever its latest turn's outcome (a failed
@@ -477,6 +489,31 @@ mod tests {
             .unwrap()
             .set_modified(at)
             .unwrap();
+    }
+
+    #[test]
+    fn lifecycle_reports_the_engine_and_usage_reset() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "held");
+        fs::create_dir(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "outcome"), "failed").unwrap();
+        let reset = now() + 3600;
+        fs::write(job.path("await"), format!("usage-limit\t1000\t{reset}\n")).unwrap();
+        for (engine, label) in [("claude", "Claude"), ("codex", "Codex")] {
+            fs::write(job.turn("1", "engine"), engine).unwrap();
+            assert!(
+                job.lifecycle()
+                    .unwrap()
+                    .1
+                    .contains(&format!("usage {label} {reset}"))
+            );
+        }
+        fs::remove_file(job.path("await")).unwrap();
+        assert!(job.lifecycle().unwrap().1.is_empty());
     }
 
     // When a turn ended, as the stall watchdog goes by it. A turn killed with

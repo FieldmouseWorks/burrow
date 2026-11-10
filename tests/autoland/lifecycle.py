@@ -29,6 +29,8 @@ with tempfile.TemporaryDirectory() as tmp:
             self.tag = 'sam/r#5'
             self.st = {kind: 'original', kind + 'Job': 'job'}
             self.looked, self.ends, self.awaits = {}, {}, {}
+            self.refresh = {}
+            self.repo = "sam/r"
         def deadline(self, kind):
             pass
         def breaking(self, kind):
@@ -73,6 +75,17 @@ with tempfile.TemporaryDirectory() as tmp:
             reader = Reader(kind, 'original')
             assert reader.running(kind, 'original') == '' and reader.ends == {kind: state}, (state, kind)
         assert not C.at_work('job', 'sam/r#5') and C.at_work('job'), 'awaiting only its own PR is ending its turn'
+
+    # Usage is a hold of the selected engine, for every kind of step.
+    for engine in ('Claude', 'Codex'):
+        for kind in KINDS:
+            reset = int(C.NOW) + 3600
+            says('failed', f'await usage-limit', f'usage {engine} {reset}')
+            reader = Reader(kind, 'original')
+            assert reader.running(kind, 'original') == 'usage'
+            assert reader.st['usageRelease'] == reset and not reader.ends
+            assert C.at_work('job')
+            assert C.WAKE['sam/r'] == reset
 
     # What proj says: its state, then each thing held; one it can't read the
     # record of (it exits non-zero) is kept, as one nothing can say of.

@@ -70,7 +70,9 @@ class Actions:
             )
             return
         awaited = None  # what the fix job on it awaits elsewhere (running)
-        if state == "awaiting":
+        if state == "usage":
+            who = f"waiting for {self.awaits[kind]}"
+        elif state == "awaiting":
             awaited = self.awaits[kind]
             who = f"its Claude job awaits {awaited}"
         elif state:

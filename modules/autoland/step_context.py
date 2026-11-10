@@ -155,6 +155,8 @@ class Context:
         show_waiting(self.repo, self.pr, self.labels, S.NONE if self.pr["isDraft"] or CFG["labels"]["hold"] in self.labels else stage)
         if why:
             self.digest.append((why, self.line, desc))
+        if self.st.get("usageRelease"):
+            self.refresh["usage_release"] = self.st["usageRelease"]
         waits.note(self.repo, self.pr, desc, wait, jobs=self.looked, **self.refresh)
         # Not settled (any more): nothing may merge it.
         if state != "success" and (C.queued(self.pr) or self.st.get("landed")):

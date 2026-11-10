@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, HELD, JOBS, POSTED, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
                      WROTE, clean, cn, cn_classed, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -717,6 +717,32 @@ assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (
 STATES["job-1"] = "queued"
 status, _ = run(clean(checks=CI_GREEN), 810)
 assert JOBS == [] and "a Claude job is queued for judging it" in status, (status, JOBS)
+# Every engine-pinned step reports its usage hold, wakes at reset and gets
+# its ordinary stall deadline after reset, even on a PR already a day old.
+for engine in ("Claude", "Codex"):
+    reset = int(C.ts(T0)) + 110000
+    HELD["job-1"] = [f"usage {engine} {reset}"]
+    status, digest = run(clean(checks=CI_GREEN), 100000)
+    assert f"waiting for {engine}'s usage reset" in status, (engine, status, HELD, pr_state())
+    assert __import__("step_context").clock(reset) in status, status
+    assert not digest and not merged() and JOBS == [], (digest, JOBS)
+    assert C.WAKE["sam/r"] == reset, C.WAKE
+    import waits
+    watched = waits.NOTED["sam/r"]["sam/r#5"]
+    assert watched["until"] == reset, watched
+    # A refused turn is resumed by proj at reset, never replaced by a
+    # second judge while its reset-triggered resume is being dispatched.
+    STATES["job-1"] = "usage-limit"
+    HELD["job-1"].insert(0, "await usage-limit")
+    status, digest = run(clean(checks=CI_GREEN), 110001)
+    assert JOBS == [] and not digest and "usage reset" in status, (status, digest, JOBS)
+    # The deadline remains deferred once the hold releases.
+    STATES["job-1"] = "queued"
+    HELD.clear()
+    status, digest = run(clean(checks=CI_GREEN), 110001)
+    assert not digest and "queued for judging" in status, (status, digest)
+    status, digest = run(clean(checks=CI_GREEN), 110000 + C.repo_cfg("sam/r")["stallAfter"] * 60 + 1)
+    assert any(row[0] == "Open over a day" for row in digest), digest
 STATES.clear()
 for v in ("owner", "failed"):
     status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)

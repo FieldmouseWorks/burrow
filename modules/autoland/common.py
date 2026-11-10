@@ -733,7 +733,19 @@ def lifecycle(jid):
     return lines[0].strip(), lines[1:]
 
 
-def job_lifecycle(jid, key=None):
+def job_usage(jid, snapshot=None):
+    """The job's engine usage hold, including its release for stall grace."""
+    if jid.startswith(BUILD):
+        return None
+    _, lines = snapshot if snapshot is not None else lifecycle(jid)
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == "usage" and fields[2].isdigit():
+            return fields[1], int(fields[2])
+    return None
+
+
+def job_lifecycle(jid, key=None, snapshot=None):
     """How job jid stands, and what keeps it at work though its turn is
     over: (state, held). state is lifecycle's; held, once it's not queued
     or running, what it still holds open, however its turn ended (a failed
@@ -749,7 +761,10 @@ def job_lifecycle(jid, key=None):
     branch, and both push once the question's answered or times out
     (remi#881). One nothing can say of (state None) is kept until a later
     pass."""
-    state, lines = lifecycle(jid)
+    state, lines = snapshot if snapshot is not None else lifecycle(jid)
+    usage = job_usage(jid, (state, lines))
+    if usage and usage[1] > NOW:
+        return state, f"{usage[0]}'s usage reset"
     if state in (None, "queued", "running"):
         return state, None
     return state, holding(lines, key)
@@ -776,7 +791,7 @@ def holding(lines, key):
         if what == "await":
             if target and (key is None or target.lower() != key.lower()):
                 return target
-        elif what:
+        elif what and what != "usage":
             return line.strip()
     return None
 

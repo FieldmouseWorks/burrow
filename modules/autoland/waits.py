@@ -76,7 +76,7 @@ def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0, claude=False)
             "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace, "claude": claude}
 
 
-def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None):
+def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None, usage_release=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
     None: nothing to watch. It waits on Claude (the watchdog's claude, which
     holds it while Claude is out of usage) while one of the Claude jobs the
@@ -97,6 +97,8 @@ def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None):
     minutes = repo_cfg(repo)[STALL[wait]]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
     grace = 0
+    if usage_release is not None:
+        ripe = max(ripe or 0, usage_release)
     if refreshing and wait != HOLD and CFG["watch"] and CFG["watch"]["renovateSweep"]:
         run = CFG["renovateRun"]
         grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)

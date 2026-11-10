@@ -52,6 +52,8 @@ class Pass(Context, Jobs, Actions):
         not (a check that never reports keeps it pending), is listed, unless
         it's listed already, watchdog or not. A Renovate update's own stuck
         ones are renovate-sweep's (swept)."""
+        if self.st.get("usageRelease") and C.NOW < self.st["usageRelease"] + C.repo_cfg(self.repo)["stallAfter"] * MIN:
+            return
         if not swept and C.NOW - ts(self.pr["createdAt"]) > 86400 and not any(x[1] == self.line for x in self.digest):
             self.digest.append(("Open over a day", self.line, what))
 

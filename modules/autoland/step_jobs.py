@@ -46,7 +46,20 @@ class Jobs:
 
     def look(self, kind, jid):
         """running's look at the job: what proj says of it, once."""
-        state, target = C.job_lifecycle(jid, self.tag)
+        snapshot = C.lifecycle(jid)
+        state, target = C.job_lifecycle(jid, self.tag, snapshot)
+        usage = C.job_usage(jid, snapshot)
+        if usage:
+            engine, reset = usage
+            self.st["usageRelease"] = max(self.refresh.get("usage_release", 0), reset)
+            self.refresh["usage_release"] = self.st["usageRelease"]
+            if reset > C.NOW or (state not in ("queued", "running") and target == "usage-limit"):
+                if reset > C.NOW:
+                    C.wake(self.repo, reset)  # ends: the engine resets, and proj resumes this job
+                else:
+                    self.deadline(kind)
+                self.awaits[kind] = f"{engine}'s usage reset at {clock(reset)}"
+                return "usage"
         if target:
             # No deadline: its wake is proj's resume, whose end kicks a pass.
             self.awaits[kind] = target
@@ -70,6 +83,8 @@ class Jobs:
         if at is _HEAD:
             at = self.head
         state = self.running(kind, at)
+        if state == "usage":
+            return f"waiting for {self.awaits[kind]} to continue {doing}"
         if state == "queued":
             return f"a Claude job is queued for {doing}"
         if state == "awaiting":
