@@ -320,7 +320,8 @@ keeps the engine's own settings: for Claude, the job user's
 `~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`.
 New sandbox guests (`agent new`, `proj run --vm`) copy the user's `model`
 and its `env.CLAUDE_CODE_SUBAGENT_MODEL` (the model Claude Code's subagents
-run on) at creation; without them they use Claude Code's defaults. This is
+run on) with `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` (which moves Explore,
+whose own definition inherits the session's model) at creation; without them they use Claude Code's defaults. This is
 runtime data, not part of the guest image. Model ids live only in these
 untracked files: which model does what is the machine's business.
 

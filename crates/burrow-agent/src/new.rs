@@ -233,13 +233,22 @@ fn claude_settings(host_home: &Path) -> Result<serde_json::Value, String> {
     {
         guest["model"] = model.into();
     }
-    const SUBAGENT: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
-    if let Some(model) = settings
-        .pointer(&format!("/env/{SUBAGENT}"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        guest["env"] = serde_json::json!({ SUBAGENT: model });
+    // Explore names `inherit`, so it moves only with the FORCE switch too.
+    let mut env = serde_json::Map::new();
+    for key in [
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    ] {
+        if let Some(v) = settings
+            .pointer(&format!("/env/{key}"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            env.insert(key.into(), v.into());
+        }
+    }
+    if !env.is_empty() {
+        guest["env"] = env.into();
     }
     Ok(guest)
 }
@@ -333,12 +342,12 @@ pub(crate) mod tests {
         );
         fs::write(
             &settings,
-            r#"{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"small-id","GH_TOKEN":"secret"}}"#,
+            r#"{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"small-id","CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"1","GH_TOKEN":"secret"}}"#,
         )
         .unwrap();
         assert_eq!(
             claude_settings(home.path()).unwrap(),
-            serde_json::json!({"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"small-id"}})
+            serde_json::json!({"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"small-id","CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"1"}})
         );
         fs::write(&settings, r#"{"effortLevel":"high","env":{"OTHER":"x"}}"#).unwrap();
         assert_eq!(claude_settings(home.path()).unwrap(), serde_json::json!({}));
