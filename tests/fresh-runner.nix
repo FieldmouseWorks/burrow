@@ -15,6 +15,10 @@ let
   standIn = pkgs.writeShellScript "runner-stand-in" ''
     set -eu
     [ "$(cat "$CREDENTIALS_DIRECTORY/jit")" = "registration $1" ]
+    # Build outputs must execute from the job workspace, including when
+    # systemd gives a DynamicUser an ID mapped StateDirectory.
+    cp ${pkgs.coreutils}/bin/true "$RUNNER_ROOT/true"
+    "$RUNNER_ROOT/true"
     echo left >"$RUNNER_ROOT/left"
     # What actions/checkout does with the credentials it writes for a
     # private repo's fetch: include them by the path of the workspace under
