@@ -173,8 +173,10 @@ Each has an entry below, and each can be imported on its own.
   runs again by itself after, `proj status` says why and until when, and
   `HOST-notify` tells you once. `burrow.proj.usage.paid` defaults to false:
   paid extra usage is off, so limits mean waiting for reset, never asking
-  the owner to raise a cap. `proj usage back` releases a stale hold once
-  usage is available.
+  the owner to raise a cap. A fresh engine meter read after the latest refusal
+  releases the hold and closes its notice when every window is below 100%
+  (or credits are available). Missing, stale or older readings keep the hold.
+  `proj usage back` also releases it once usage is available.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
   model and an overflow to the other engine when its own is short and the
   other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`

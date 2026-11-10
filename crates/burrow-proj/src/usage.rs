@@ -10,7 +10,8 @@
 //! usage` tells it), and the owner hears once, with the cause and when it
 //! resets. The first run that started after the refusal and isn't refused
 //! ends it ([`back`]), and the notice is closed; so does `proj usage back`,
-//! once usage is available before the recorded reset.
+//! once usage is available before the recorded reset. Scheduling also ends
+//! it through `back` when a fresh meter read after the last refusal has room.
 //!
 //! Every change to it goes under jobs/.usage.lock, so turns refused at once,
 //! and runs that finish meanwhile, each see the last one's. Its record
@@ -99,6 +100,22 @@ impl Spent {
 /// The machine's state as it stands: Some while it's out of usage.
 pub fn out(cfg: &Config) -> Option<Spent> {
     kept(cfg).filter(|s| s.holds(now()))
+}
+
+/// A scheduling pass can discover usage is back without starting a refused
+/// turn: only a fresh Claude meter read after the last refusal proves it.
+/// `back` checks that timestamp again under the usage lock, so a refusal
+/// arriving meanwhile keeps its hold. All release effects still live there.
+pub fn metered(cfg: &Config) {
+    use burrow_usage_reset::meter::Snapshot;
+    let Some(s) = out(cfg) else { return };
+    let Some(dir) = &cfg.meters else { return };
+    if let Some(meter) = Snapshot::read(dir, "claude", now() as f64)
+        && meter.read_at > s.refused() as f64
+        && meter.room()
+    {
+        back(cfg, Some(meter.read_at.ceil() as i64));
+    }
 }
 
 /// Its record, holding or not, while it's kept.
@@ -314,6 +331,7 @@ fn mark(cfg: &Config, now: i64) -> Result<(), String> {
 /// record's removal not written) is looked at again in RETRY, never
 /// sooner, so the look neither forgets it nor spins on it.
 pub fn tend(cfg: &Config) -> Option<i64> {
+    metered(cfg);
     let now = now();
     let retry = Some(now + RETRY);
     let s = match read(cfg) {

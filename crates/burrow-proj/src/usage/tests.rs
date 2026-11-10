@@ -755,3 +755,75 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     let fresh = record(&cfg, "web-3", Some(t + 10000), raw, t).unwrap();
     assert_eq!(fresh.said, expected.said);
 }
+
+#[test]
+fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
+    use burrow_usage_reset::meter::{FRESH, Snapshot, Window};
+    let (d, mut cfg) = rig();
+    cfg.meters = Some(d.path().join("meters"));
+    cfg.pipeline_slots = 0;
+    cfg.min_free_memory = 0;
+    let t = now();
+    record(&cfg, "held", Some(t + 7200), SAID, t - FRESH as i64 - 100).unwrap();
+    let mut meter = Snapshot {
+        windows: [
+            (
+                "seven_day".into(),
+                Window {
+                    used: 1.0,
+                    resets_at: 0.0,
+                },
+            ),
+            (
+                "five_hour".into(),
+                Window {
+                    used: 6.0,
+                    resets_at: 0.0,
+                },
+            ),
+        ]
+        .into(),
+        credits: false,
+        read_at: t as f64,
+    };
+    // A stale reading after the hold began still proves nothing.
+    meter.read_at = t as f64 - FRESH - 1.0;
+    meter
+        .record(cfg.meters.as_ref().unwrap(), "claude")
+        .unwrap();
+    assert!(!crate::slot::room(&cfg, crate::engine::Engine::Claude));
+    // A later refusal supersedes the original hold's start.
+    record(&cfg, "held", Some(t + 7200), SAID, t - 10).unwrap();
+    for at in [(t - 11) as f64, (t - 10) as f64] {
+        meter.read_at = at;
+        meter
+            .record(cfg.meters.as_ref().unwrap(), "claude")
+            .unwrap();
+        assert!(!crate::slot::room(&cfg, crate::engine::Engine::Claude));
+        assert!(out(&cfg).is_some());
+        assert_eq!(told(&d).len(), 1);
+    }
+    meter.read_at = t as f64;
+    // Every window must have room, and another engine cannot release it.
+    meter.windows.get_mut("five_hour").unwrap().used = 100.0;
+    meter
+        .record(cfg.meters.as_ref().unwrap(), "claude")
+        .unwrap();
+    assert!(!crate::slot::room(&cfg, crate::engine::Engine::Claude));
+    meter.windows.get_mut("five_hour").unwrap().used = 6.0;
+    meter.record(cfg.meters.as_ref().unwrap(), "codex").unwrap();
+    assert!(!crate::slot::room(&cfg, crate::engine::Engine::Claude));
+    meter
+        .record(cfg.meters.as_ref().unwrap(), "claude")
+        .unwrap();
+    assert!(
+        crate::slot::room(&cfg, crate::engine::Engine::Claude),
+        "next scheduling pass releases the held queue"
+    );
+    let job = Job::new(&cfg, "held");
+    fs::create_dir_all(&job.dir).unwrap();
+    let _slot = crate::slot::take(&cfg, "held", "1", crate::pick::Class::Normal, false).unwrap();
+    assert!(job.turn("1", "slot").exists());
+    assert!(out(&cfg).is_none());
+    assert!(told(&d).last().unwrap().starts_with("close proj-usage"));
+}
