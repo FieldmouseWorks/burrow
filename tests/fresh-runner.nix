@@ -21,6 +21,10 @@ let
     # the runner's root, which git matches against the real path.
     w=$RUNNER_ROOT/_work/r
     git init -q "$w"
+    # Jobs execute freshly compiled ELFs from their workspace, not just
+    # interpreters in the store. An idmapped state mount must allow that.
+    cp ${pkgs.hello}/bin/hello "$w/hello"
+    [ "$("$w/hello")" = "Hello, world!" ]
     printf '[burrow]\n\tseen = yes\n' >"$RUNNER_ROOT/included"
     git -C "$w" config --local "includeIf.gitdir:$w/.git.path" "$RUNNER_ROOT/included"
     [ "$(git -C "$w" config burrow.seen)" = yes ]
