@@ -14,12 +14,19 @@ pub(crate) struct Tuning {
     pub effort: Option<String>,
 }
 
-/// The levels each engine's CLI takes: Claude Code's `--effort`, Codex's
-/// `model_reasoning_effort`.
+/// The levels each engine's CLI takes. Claude Code's `--effort` has a fixed
+/// set; Codex's `model_reasoning_effort` also takes levels its models define
+/// (the pinned CLI's `ReasoningEffort` parser), so any plain word goes
+/// through unchanged and Codex itself says when a model lacks it.
 fn effort_ok(engine: Engine, effort: &str) -> bool {
     match engine {
         Engine::Claude => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
-        Engine::Codex => ["minimal", "low", "medium", "high", "xhigh"].contains(&effort),
+        Engine::Codex => {
+            !effort.is_empty()
+                && effort
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+        }
     }
 }
 
@@ -45,9 +52,6 @@ fn line(text: &str) -> Result<(RoleKey<'_>, Engine, Tuning), String> {
     if let Some(e) = effort.filter(|e| !effort_ok(engine, e)) {
         return Err(format!("{} takes no effort {e}", engine.name()));
     }
-    if model.is_none() && effort.is_none() {
-        return Err("names neither a model nor an effort".into());
-    }
     Ok((
         RoleKey::parse(key)?,
         engine,
@@ -61,7 +65,9 @@ fn line(text: &str) -> Result<(RoleKey<'_>, Engine, Tuning), String> {
 /// ROLE's model and effort on ENGINE in REPO. Every non-comment line must
 /// parse, so a typo never silently runs a role on the wrong model; a repo's
 /// line beats the bare one; two lines for one role and engine fail with
-/// both named, even on other roles. An absent file tunes nothing.
+/// both named, even on other roles. An absent file tunes nothing, and so does
+/// `ROLE ENGINE -`, which lets a repo's line put back the engine's own
+/// settings over a bare line's.
 pub(crate) fn tuning(
     path: &Path,
     role: &str,
@@ -136,6 +142,33 @@ mod tests {
         assert_eq!(get("judge", None, Engine::Claude), tune(None, Some("max")));
         assert_eq!(get("judge", None, Engine::Codex), Tuning::default());
         assert_eq!(get("other", None, Engine::Claude), Tuning::default());
+        // A repo's `-` line puts back the engine's own settings, in either
+        // order and any case; Codex takes the levels its models define.
+        for text in [
+            "fix claude small medium\nfix@Sam/Code claude -\nfix codex - max\nfix@sam/code codex - ultra\n",
+            "fix@sam/code codex - ultra\nfix@SAM/code claude -\nfix codex - max\nfix claude small medium\n",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(
+                get("fix", Some("sam/code"), Engine::Claude),
+                Tuning::default()
+            );
+            assert_eq!(
+                get("fix", Some("sam/other"), Engine::Claude),
+                tune(Some("small"), Some("medium"))
+            );
+            assert_eq!(get("fix", None, Engine::Codex), tune(None, Some("max")));
+            assert_eq!(
+                get("fix", Some("sam/code"), Engine::Codex),
+                tune(None, Some("ultra"))
+            );
+        }
+        std::fs::write(&path, "fix@sam/code claude -\nfix@Sam/Code claude big\n").unwrap();
+        assert!(
+            tuning(&path, "fix", None, Engine::Claude)
+                .unwrap_err()
+                .contains("duplicate")
+        );
     }
 
     #[test]
@@ -145,11 +178,11 @@ mod tests {
         for bad in [
             "fix",
             "fix claude",
-            "fix claude -",
             "fix other small",
             "fix claude a$b",
             "fix claude small huge",
-            "fix codex small max",
+            "fix codex small Max",
+            "fix codex small a=b",
             "fix claude small medium extra",
             "fix@owner claude small",
         ] {

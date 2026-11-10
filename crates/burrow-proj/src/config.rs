@@ -347,15 +347,15 @@ pub(crate) mod tests {
         crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
         // The models file is checked too, an unused role's line included.
         cfg.models = dir.path().join("models");
-        std::fs::write(&cfg.models, "unused codex - max\n").unwrap();
+        std::fs::write(&cfg.models, "unused claude - none\n").unwrap();
         let said = crate::cmd::dispatch(&cfg, &["check-config".into()])
             .unwrap_err()
             .say
             .unwrap();
-        assert!(said.contains("codex takes no effort max"), "{said}");
+        assert!(said.contains("claude takes no effort none"), "{said}");
         std::fs::write(
             &cfg.models,
-            "unused codex small xhigh\nother claude - max\n",
+            "unused codex small max\nother claude - max\nother@sam/code claude -\n",
         )
         .unwrap();
         crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();

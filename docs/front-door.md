@@ -309,9 +309,11 @@ steward-conflictFixed  claude  SMALLER-MODEL-ID  medium
 steward-judged         claude  -                  high
 ```
 
-`-` keeps the engine's own model. Effort is Claude Code's `--effort` (`low`,
-`medium`, `high`, `xhigh`, `max`) or Codex's `model_reasoning_effort`
-(`minimal`, `low`, `medium`, `high`, `xhigh`). The line for the engine the
+`-` keeps the engine's own model, and a line of just `ROLE ENGINE -` keeps
+all of its own settings, so a repo's line can undo a bare one. Effort is
+Claude Code's `--effort` (`low`, `medium`, `high`, `xhigh`, `max`) or
+Codex's `model_reasoning_effort`, passed as written: any lowercase word,
+since Codex's models define their own levels. The line for the engine the
 turn ends on applies, overflow and the judge's Claude included; scopes,
 duplicates and bad lines work as in the roles file. A role with no line
 keeps the engine's own settings: for Claude, the job user's

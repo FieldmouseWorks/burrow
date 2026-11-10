@@ -40,7 +40,7 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
         // Codex's is exec's own config, so it goes before resume too.
         match choice.engine {
             Engine::Claude => args.extend(["--effort".into(), e.clone()]),
-            Engine::Codex => args.extend(["-c".into(), format!("model_reasoning_effort={e}")]),
+            Engine::Codex => args.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]),
         }
     }
     if let Some(s) = session {
@@ -378,7 +378,12 @@ mod tests {
         };
         assert_eq!(
             args(&c, Some("thread".into()))[..4],
-            ["--no-daemon", "exec", "-c", "model_reasoning_effort=xhigh"]
+            [
+                "--no-daemon",
+                "exec",
+                "-c",
+                "model_reasoning_effort=\"xhigh\""
+            ]
         );
     }
 
