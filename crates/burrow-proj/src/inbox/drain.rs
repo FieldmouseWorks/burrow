@@ -86,6 +86,14 @@ impl Pass<'_> {
             if !mark.exists() || !self.record_uses_capacity(&d) {
                 continue;
             }
+            let named = fs::read_to_string(&mark).unwrap_or_default();
+            if named
+                .trim()
+                .split_once('#')
+                .is_some_and(|(repo, n)| self.inbox.planning && self.has_task_list(Some(repo), n))
+            {
+                continue;
+            }
             if d.join("job").exists() {
                 going += 1;
             } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
@@ -98,10 +106,6 @@ impl Pass<'_> {
             } else {
                 let _ = fs::remove_dir_all(&d);
             }
-        }
-        if going >= t.drain_jobs {
-            let _ = fs::remove_file(&waiting);
-            return Ok(());
         }
         let ranked = self.next_ready(&t);
         let Some((first, _)) = ranked.first() else {
@@ -138,6 +142,12 @@ impl Pass<'_> {
                 passed.insert(repo);
                 continue;
             }
+            // Repair children bypass ordinary drain capacity and slot reservation.
+            // Their queued turn still enforces the selected engine's hard cap.
+            let unstick = self.lane(&now_issue);
+            if going >= t.drain_jobs && !unstick {
+                continue;
+            }
             // Resolve the exact routing metadata the enrollment event will
             // give start(), including a role mapped to the enrollment label.
             let mut enrolled = now_issue;
@@ -160,7 +170,7 @@ impl Pass<'_> {
                     continue;
                 }
             };
-            if !slot::room(self.cfg, engine) {
+            if !unstick && !slot::room(self.cfg, engine) {
                 blocked = true;
                 if engine == Engine::Claude
                     && let Some(spent) = usage::out(self.cfg)
@@ -316,11 +326,12 @@ impl Pass<'_> {
                 let theirs = labels.iter().any(|l| {
                     self.inbox.labels.contains_key(*l)
                         || *l == t.owner_label
-                        || *l == self.inbox.unstick_label
                         || t.skip.iter().any(|s| s == l)
                 });
                 let n = raw(&i["number"]);
-                if !self.child_admissible(&repo, &n) {
+                if (self.inbox.planning && self.has_task_list(Some(&repo), &n))
+                    || !self.child_admissible(&repo, &n)
+                {
                     return None;
                 }
                 let kept = self

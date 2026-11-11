@@ -561,6 +561,9 @@ impl Pass<'_> {
         if !self.render_list(repo, n, &mut list) {
             return false;
         }
+        if !self.remove_label(repo, n, super::triage::READY) {
+            return false;
+        }
         for label in self.inbox.labels.keys() {
             if !self.remove_label(repo, n, label) {
                 return false;
@@ -626,6 +629,16 @@ impl Pass<'_> {
                 continue;
             };
             if !self.eligible(&issue) {
+                continue;
+            }
+            // Apply inherited repair scheduling even when a previous pass already
+            // offered this child, or it was reused with an engine label.
+            if issue["state"] == "open"
+                && self.lane(parent)
+                && !self.lane(&issue)
+                && !self.add_label(repo, &child.to_string(), &self.inbox.unstick_label)
+            {
+                self.miss(repo);
                 continue;
             }
             let mut advanced = false;

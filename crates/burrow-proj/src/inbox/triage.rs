@@ -192,13 +192,12 @@ impl Pass<'_> {
         if self.inbox.planning && self.worker_split_pending(Some(repo), &raw(&issue["number"])) {
             return true;
         }
-        if self.inbox.planning && labels.contains(&TRACKER) && !labels.contains(&READY) {
-            return self.has_task_list(Some(repo), &raw(&issue["number"]))
-                && !self
-                    .sorting_dir()
-                    .join(format!("{}-{}", key(repo), raw(&issue["number"])))
-                    .join("plan")
-                    .exists()
+        if self.inbox.planning && self.has_task_list(Some(repo), &raw(&issue["number"])) {
+            return !self
+                .sorting_dir()
+                .join(format!("{}-{}", key(repo), raw(&issue["number"])))
+                .join("plan")
+                .exists()
                 && self.verified_source(repo, issue).unwrap_or(false);
         }
         if self.inbox.planning

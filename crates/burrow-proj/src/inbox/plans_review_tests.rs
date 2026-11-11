@@ -654,3 +654,175 @@ fn edited_task_fields_never_inherit_completed_or_ambiguous_receipts() {
         assert_eq!(kept.retained[0].child.merged_pr.as_deref(), Some("landed"));
     }
 }
+
+#[test]
+fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
+    for interrupted in [false, true] {
+        let (b, mut parent, list) = parent_fixture();
+        parent["labels"] = json!([{"name":"ready"},{"name":"tracker"},{"name":"codex"}]);
+        parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        for n in [8, 9] {
+            let mut c = issue(n, "sam", &["later"]);
+            c["state"] = json!("open");
+            fs::write(b.path(&format!("repos_sam_box_issues_{n}")), c.to_string()).unwrap();
+        }
+        if interrupted {
+            fs::write(b.path("fail"), "DELETE repos/sam/box/issues/7/labels/ready").unwrap();
+        }
+        assert_eq!(
+            b.pass().split_children("sam/box", "7", &list.tasks),
+            !interrupted
+        );
+        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+        assert!(b.pass().sorted("sam/box", t, &parent, &Default::default()));
+        assert_eq!(b.pass().pick_ready(t, &[parent.clone()]), None);
+        let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+        fs::create_dir_all(&record).unwrap();
+        fs::write(record.join("drained"), "sam/box#7").unwrap();
+        let mut child = issue(8, "sam", &["ready"]);
+        child["state"] = json!("open");
+        child["repository_url"] = parent["repository_url"].clone();
+        fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+        b.pass()
+            .note_ready("sam/box", &[parent.clone(), child])
+            .unwrap();
+        b.pass().drain().unwrap();
+        assert!(
+            b.log().contains("issues/8/labels -f labels[]=codex"),
+            "{}",
+            b.log()
+        );
+        assert!(
+            b.log()
+                .contains("DELETE repos/sam/box/issues/7/labels/ready")
+        );
+        let source = b.pass().issue_text("sam/box", &parent, &[]);
+        assert!(b.pass().prepare_plan("sam/box", "7", &source, &[]));
+        fs::remove_dir_all(record).unwrap();
+        parent["labels"] = json!([{"name":"ready"}]);
+        assert_eq!(
+            b.pass().pick_ready(t, &[parent]),
+            Some(("sam/box".into(), "7".into()))
+        );
+    }
+}
+
+#[test]
+fn unstick_children_keep_admission_execution_and_sequence() {
+    use crate::engine::Engine;
+    for kind in ["generated", "reused", "nested", "offered"] {
+        for engine in [Engine::Claude, Engine::Codex] {
+            let (mut b, mut parent, mut list) = parent_fixture();
+            b.cfg.roles = b.path("roles");
+            fs::write(&b.cfg.roles, format!("stuck {}\n", engine.name())).unwrap();
+            b.cfg.projects = b.path("projects");
+            fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
+            b.cfg.tools.systemd_run = "true".into();
+            b.cfg.tools.systemctl = "false".into();
+            let inbox = b.cfg.inbox.as_mut().unwrap();
+            inbox.triage.as_mut().unwrap().drain = Some(engine);
+            let label = inbox.unstick_label.clone();
+            parent["labels"] = json!([{"name":"tracker"},{"name":label}]);
+            fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+            if kind == "reused" {
+                list.tasks[0].issue = Some(8);
+            }
+            if kind == "offered" {
+                list.children[0].offered = true;
+            }
+            assert!(b.pass().save_list("sam/box", "7", &list));
+            let mut child = issue(8, "sam", &["later"]);
+            child["state"] = json!("open");
+            fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+            b.pass().sequence("sam/box", &[parent]);
+            assert!(
+                b.log()
+                    .contains(&format!("issues/8/labels -f labels[]={label}")),
+                "{}",
+                b.log()
+            );
+            child["labels"] = json!([{"name":"ready"},{"name":label}]);
+            let target = if kind == "nested" {
+                let source = b.pass().issue_text("sam/box", &child, &[]);
+                b.pass().keep_planned("sam/box", "8", &source).unwrap();
+                list.children[0].number = Some(10);
+                list.children[1].number = Some(11);
+                assert!(b.pass().save_list("sam/box", "8", &list));
+                fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+                let mut next = issue(10, "sam", &["later"]);
+                next["state"] = json!("open");
+                fs::write(b.path("repos_sam_box_issues_10"), next.to_string()).unwrap();
+                b.pass().sequence("sam/box", &[child]);
+                assert!(
+                    b.log()
+                        .contains(&format!("issues/10/labels -f labels[]={label}"))
+                );
+                child = next;
+                child["labels"] = json!([{"name":"ready"},{"name":label}]);
+                10
+            } else {
+                8
+            };
+            child["repository_url"] = json!("https://api.github.com/repos/sam/box");
+            fs::write(
+                b.path(&format!("repos_sam_box_issues_{target}")),
+                child.to_string(),
+            )
+            .unwrap();
+            let source = b.pass().issue_text("sam/box", &child, &[]);
+            b.pass()
+                .keep_planned("sam/box", &target.to_string(), &source)
+                .unwrap();
+            let busy = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-99");
+            fs::create_dir_all(&busy).unwrap();
+            fs::write(busy.join("drained"), "sam/box#99").unwrap();
+            fs::write(busy.join("job"), "busy").unwrap();
+            let (slots, count) = if engine == Engine::Codex {
+                (".codex-slots", b.cfg.codex_slots)
+            } else {
+                (".slots", b.cfg.max_jobs)
+            };
+            fs::create_dir_all(b.cfg.jobs.join(slots)).unwrap();
+            let _held: Vec<_> = (1..=count)
+                .map(|n| {
+                    let f = fs::File::create(b.cfg.jobs.join(slots).join(n.to_string())).unwrap();
+                    f.lock().unwrap();
+                    f
+                })
+                .collect();
+            b.pass().note_ready("sam/box", &[child.clone()]).unwrap();
+            b.pass().drain().unwrap();
+            assert!(
+                b.log().contains(&format!(
+                    "issues/{target}/labels -f labels[]={}",
+                    engine.name()
+                )),
+                "{kind}/{engine:?}: {}",
+                b.log()
+            );
+            child["labels"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":engine.name()}));
+            fs::write(
+                b.path(&format!("repos_sam_box_issues_{target}")),
+                child.to_string(),
+            )
+            .unwrap();
+            b.pass().new_issues("sam/box", &[child]).unwrap();
+            let record = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(format!("sam_box-{target}"));
+            let id = read(&record.join("job")).unwrap();
+            let job = crate::job::Job::new(&b.cfg, &id);
+            assert!(job.path("unstick").exists());
+            assert_eq!(crate::engine::choice(&b.cfg, &job).unwrap().engine, engine);
+            assert!(!b.pass().child_admissible("sam/box", "9"));
+        }
+    }
+}
