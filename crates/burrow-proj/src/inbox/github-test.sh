@@ -10,6 +10,12 @@ if [ -e "$TEST/once-502" ]; then
   printf 'HTTP/2.0 502 Bad Gateway\n\n{}'; exit 1
 fi
 if [ "$path" = graphql ]; then
+  if printf '%s' "$body" | jq -e '.query | contains("closedByPullRequestsReferences")' >/dev/null; then
+    n=$(printf '%s' "$body" | jq -r .variables.n)
+    printf 'HTTP/2.0 200 OK\n\n'
+    cat "$TEST/merged-$n" 2>/dev/null || printf '{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}'
+    exit 0
+  fi
   if [ -f "$TEST/fail" ] && printf '%s' "api graphql" | grep -qF -f "$TEST/fail"; then exit 1; fi
   # The GraphQL fixture reads variables as fields for its jq data builder.
   set -- api graphql

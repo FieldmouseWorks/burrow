@@ -175,6 +175,13 @@ Each has an entry below, and each can be imported on its own.
   paid extra usage is off, so limits mean waiting for reset, never asking
   the owner to raise a cap. `proj usage back` releases a stale hold once
   usage is available.
+  `burrow.proj.inbox.planning` defaults on: a fresh Codex
+  planner sizes each inbox task before implementation. Large tasks become
+  ordered child issues, one outstanding child per parent, with a checklist
+  updated when each child's PR lands. The configured machinery App joins
+  `inbox.authors` so its children can enter the ready queue. A worker can
+  use `proj split FILE` when its task needs another split. See
+  [task planning](docs/task-planning.md) for the state and retry protocol.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
   overflow to the other engine when its own is short and the other has
   room; `~/.config/proj/models` gives each role its model and effort on
@@ -183,7 +190,7 @@ Each has an entry below, and each can be imported on its own.
   the bare role for that repo, matched case-insensitively.
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
-  `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the
+  `red-main`, `renovate-sweep`, `watchdog`, `triage`, `planner`, and the
   steward's `steward-handed`, `steward-redFixed`, `steward-failFixed`,
   `steward-conflictFixed`, `steward-proved`, and `steward-judged` roles. Inbox issues use `stuck` when they
   have `inbox.unstickLabel`; other bot issues use `machine-inbox`. Machines map

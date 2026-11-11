@@ -114,6 +114,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         inbox.state = at("state");
         inbox.outside_label = "outside text".into();
         inbox.triage = Some(Triage {
+            sort_unlabelled: true,
             owner_label: "needs-owner".into(),
             owner: Some("sam".into()),
             skip: vec!["probe".into()],

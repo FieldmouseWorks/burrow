@@ -88,6 +88,7 @@ impl Pass<'_> {
             // GitHub says now: closing it lets the turn finish only while
             // its issue may still be read.
             let mine = listed.iter().find(|i| raw(&i["number"]) == n);
+            let split_pending = job.path("planning-hold").exists();
             if (mine.is_some() || busy) && {
                 let Some(barred) = self.barred(repo, n, mine) else {
                     self.miss(repo);
@@ -122,7 +123,7 @@ impl Pass<'_> {
             let mut rv = revived(&d);
             let streak = if rv.0 == Some(turns) { rv.1 } else { 0 };
             let mut revive = false;
-            if st == "failed" && k < turns && streak < 2 && now_open.is_some() {
+            if !split_pending && st == "failed" && k < turns && streak < 2 && now_open.is_some() {
                 match reply(self.cfg, &id, CUT_OFF, true, Some(&turns.to_string())) {
                     Ok(()) => {
                         revive = true;
@@ -196,6 +197,29 @@ impl Pass<'_> {
                 continue;
             }
             if busy {
+                continue;
+            }
+            if self.inbox.planning
+                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("split")
+                && now_open.is_some_and(|i| self.begin_worker_split(repo, i))
+            {
+                {
+                    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    fs::write(job.path("planning-hold"), "finishing the task split\n")
+                        .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
+                }
+                let tasks = read(&job.turn(&turns.to_string(), "split"))
+                    .and_then(|text| crate::planning::parse(&text).ok());
+                if tasks
+                    .as_ref()
+                    .is_none_or(|tasks| !self.split_children(repo, n, tasks))
+                    || !self.add_label(repo, n, "tracker")
+                {
+                    self.miss(repo);
+                }
+                continue;
+            }
+            if split_pending && now_open.is_some() {
                 continue;
             }
 
@@ -292,7 +316,8 @@ impl Pass<'_> {
                 && k >= turns
                 && st == "done"
                 && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
-                && !self.lane(listed_now);
+                && !self.lane(listed_now)
+                && self.child_can_close(repo, n);
             let listed_changed = !Self::handed(&d, &self.issue_text(repo, listed_now, &had));
             if closable || !msg.is_empty() || listed_changed {
                 // Decided on the issue as GitHub has it now, not as the list

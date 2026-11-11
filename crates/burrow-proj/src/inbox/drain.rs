@@ -316,6 +316,9 @@ impl Pass<'_> {
                         || t.skip.iter().any(|s| s == l)
                 });
                 let n = raw(&i["number"]);
+                if !self.child_admissible(&repo, &n) {
+                    return None;
+                }
                 let kept = self
                     .inbox
                     .state

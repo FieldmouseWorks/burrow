@@ -391,6 +391,7 @@ impl Pass<'_> {
         let drained = self.drained(repo, &raw(&issue["number"]));
         let (role, engine) = self.routing(issue);
         let new = New {
+            inbox_issue: true,
             usage_kind: Some(usage::kind(self.cfg.steward_login.as_deref(), issue)),
             vm: self.inbox.vm,
             engine,
@@ -703,6 +704,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                     continue;
                 };
                 self.triage(&repo, &all)?;
+                self.sequence(&repo, &all);
                 self.note_ready(&repo, &all)?;
             }
         }
@@ -747,6 +749,11 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             };
             let issue = &safe;
+            if self.inbox.planning
+                && (!self.planned(Some(repo), issue) || !self.child_admissible(repo, &n))
+            {
+                continue;
+            }
             let id = match self.start(repo, issue, &comments) {
                 Ok(id) => id,
                 Err(f) => {
@@ -933,6 +940,7 @@ fn say(f: Fail) {
 mod claims;
 mod drain;
 mod jobs;
+mod plans;
 mod retirement;
 mod written;
 

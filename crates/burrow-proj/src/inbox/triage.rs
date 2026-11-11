@@ -66,6 +66,7 @@ pub(super) enum Verdict {
     Owner,
     Duplicate(u64),
     Done,
+    Split,
 }
 
 /// The verdict on an answer's first line with words on it, as the task asks
@@ -84,6 +85,7 @@ pub(super) fn verdict(answer: &str) -> Option<Verdict> {
         "tracker" => Verdict::Tracker,
         "owner" => Verdict::Owner,
         "done" => Verdict::Done,
+        "split" => Verdict::Split,
         "duplicate" => {
             let of = words.next()?.trim_start_matches('#');
             let of = of.trim_end_matches(|c: char| !c.is_ascii_digit());
@@ -157,7 +159,7 @@ impl Pass<'_> {
     pub(super) fn sorted(&self, t: &Triage, issue: &Value, claimed: &BTreeSet<String>) -> bool {
         if issue.get("pull_request").is_some()
             || !self.eligible(issue)
-            || claimed.contains(&raw(&issue["number"]))
+            || (!self.inbox.planning && claimed.contains(&raw(&issue["number"])))
         {
             return true;
         }
@@ -165,6 +167,39 @@ impl Pass<'_> {
             .as_array()
             .map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).collect())
             .unwrap_or_default();
+        if !t.sort_unlabelled
+            && self.engine(issue).is_none()
+            && !labels.contains(&READY)
+            && !labels.contains(&TRACKER)
+        {
+            return true;
+        }
+        if labels
+            .iter()
+            .any(|l| *l == t.owner_label || t.skip.iter().any(|s| s == l))
+        {
+            return true;
+        }
+        if self.inbox.planning
+            && self.started_issue_job(repo_from(issue).as_deref(), &raw(&issue["number"]))
+        {
+            return true;
+        }
+        if self.inbox.planning
+            && self.worker_split_pending(repo_from(issue).as_deref(), &raw(&issue["number"]))
+        {
+            return true;
+        }
+        if self.inbox.planning && labels.contains(&TRACKER) {
+            return self.has_task_list(repo_from(issue).as_deref(), &raw(&issue["number"]));
+        }
+        if self.inbox.planning
+            && !labels.contains(&TRACKER)
+            && !labels.contains(&LATER)
+            && (labels.contains(&READY) || self.engine(issue).is_some())
+        {
+            return self.planned(repo_from(issue).as_deref(), issue);
+        }
         labels.iter().any(|l| {
             [READY, LATER, TRACKER, t.owner_label.as_str()].contains(l)
                 || self.inbox.labels.contains_key(*l)
@@ -265,7 +300,17 @@ impl Pass<'_> {
         } else {
             labels.join(", ")
         };
-        let task = format!("{input}\n\nIts labels: {labels}.\n\n{SORT}");
+        let instruction = if self.inbox.planning {
+            crate::planning::INSTRUCTIONS
+        } else {
+            SORT
+        };
+        let given = if self.inbox.planning {
+            crate::planning::prompt(&input, Path::new("@PROJ_TASK_SOURCE@"))
+        } else {
+            input.clone()
+        };
+        let task = format!("{given}\n\nIts labels: {labels}.\n\n{instruction}");
         let app = self
             .cfg
             .machinery
@@ -273,13 +318,22 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
         let new = New {
+            task_source: (self.inbox.planning && input.len() > crate::planning::MAX_INPUT)
+                .then(|| input.clone()),
             usage_kind: Some(super::usage::kind(self.cfg.steward_login.as_deref(), issue)),
-            vm: self.inbox.vm,
+            vm: self.inbox.vm && !self.inbox.planning,
             owned: true,
             kicks: vec!["proj-inbox".into()],
             link: Some(raw(&issue["html_url"])).filter(|l| !l.is_empty() && l != "null"),
             app,
-            role: Some("triage".into()),
+            role: Some(
+                if self.inbox.planning {
+                    "planner"
+                } else {
+                    "triage"
+                }
+                .into(),
+            ),
             ..New::default()
         };
         start_job(self.cfg, &new, &self.project[repo], &task).map(|id| (id, input, seen))
@@ -430,6 +484,17 @@ impl Pass<'_> {
     /// `later`, saying so, so the issue isn't sorted over and over.
     pub(super) fn steps(&self, t: &Triage, id: &str, answer: &str) -> Vec<Step> {
         match verdict(answer) {
+            Some(Verdict::Split) => {
+                match crate::planning::parse(answer.split_once('\n').map_or("", |(_, rest)| rest)) {
+                    Ok(tasks) => vec![Step::Split(tasks), Step::Label(TRACKER.into())],
+                    Err(e) => vec![
+                        Step::Post(format!(
+                            "Invalid split: {e}. No children created; needs replanning."
+                        )),
+                        Step::Label(LATER.into()),
+                    ],
+                }
+            }
             Some(Verdict::Ready) => vec![Step::Label(READY.into())],
             Some(Verdict::Later) => vec![Step::Label(LATER.into())],
             Some(Verdict::Tracker) => vec![Step::Label(TRACKER.into())],
@@ -503,8 +568,27 @@ impl Pass<'_> {
                     self.post(repo, n, &format!("**{engine} job**\n\n{body}"))
                 }
                 Step::Close(reason) => self.close(repo, n, reason),
+                Step::Split(tasks) => {
+                    let Some(input) = read(&d.join("input")) else {
+                        return false;
+                    };
+                    self.keep_planned(repo, n, &input).is_ok()
+                        && self.split_children(repo, n, tasks)
+                }
             };
             if !took || fs::write(d.join("did"), format!("{}\n", i + 1)).is_err() {
+                return false;
+            }
+        }
+        if self.inbox.planning
+            && steps
+                .iter()
+                .any(|s| matches!(s, Step::Label(l) if l == READY))
+        {
+            let Some(input) = read(&d.join("input")) else {
+                return false;
+            };
+            if self.keep_planned(repo, n, &input).is_err() {
                 return false;
             }
         }
@@ -519,4 +603,13 @@ pub(super) enum Step {
     Assign(String),
     Post(String),
     Close(String),
+    Split(Vec<crate::planning::Task>),
+}
+
+fn repo_from(issue: &Value) -> Option<String> {
+    let url = issue["repository_url"].as_str()?;
+    let (owner, repo) = url
+        .strip_prefix("https://api.github.com/repos/")?
+        .split_once('/')?;
+    Some(format!("{owner}/{repo}"))
 }
