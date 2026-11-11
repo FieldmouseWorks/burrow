@@ -57,3 +57,19 @@ fn a_missing_policy_never_opts_a_repository_in() {
     cfg.settings = None;
     assert!(cfg.paused("sam/new"));
 }
+
+#[test]
+fn paused_turns_follow_a_deployed_policy_on_both_engines() {
+    for mode in ["paused-hand-over", "paused-codex-hand-over"] {
+        let tmp = TempDir::new().unwrap();
+        clones(&tmp);
+        let jobs = jobs_dir(&tmp);
+        let _kid = waiter_to(mode, &jobs, &tmp, "paused", 1);
+        let handed = jobs.join("paused/handed");
+        until("a paused turn follows the deployed policy", || {
+            handed.exists()
+        });
+        assert_eq!(fs::read_to_string(handed).unwrap(), "unmarked\n");
+        assert!(!jobs.join("paused/took").exists());
+    }
+}

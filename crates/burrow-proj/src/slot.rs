@@ -322,15 +322,15 @@ fn codex_slot(
         fs::remove_file(queue.join(left))?;
     }
     loop {
-        if automation_paused(cfg, &job) {
-            sleep(Duration::from_secs(2));
-            continue;
-        }
         if may_hand_over && let Some(to) = successor(cfg) {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
+        }
+        if automation_paused(cfg, &job) {
+            sleep(Duration::from_secs(2));
+            continue;
         }
         for i in 1..=cfg.codex_slots {
             let slot = File::create(slots.join(i.to_string()))?;
@@ -398,16 +398,13 @@ pub fn take(
         place_left(&queue, id, process::id()).unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
     loop {
-        if automation_paused(cfg, &job) {
-            sleep(Duration::from_secs(2));
-            continue;
-        }
+        let paused = automation_paused(cfg, &job);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too.
         usage::metered(cfg);
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if job.path("unstick").exists() {
+        if !paused && job.path("unstick").exists() {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
             let _ = fs::remove_file(queue.join(&me));
@@ -432,6 +429,10 @@ pub fn take(
             let failed = hand_over(cfg, &to, id, given);
             drop(lk);
             return Err(failed);
+        }
+        if paused {
+            sleep(Duration::from_secs(2));
+            continue;
         }
         let lk = File::create(slots.join(".lock"))?;
         // Keep checking for emergency reclassification while another census
