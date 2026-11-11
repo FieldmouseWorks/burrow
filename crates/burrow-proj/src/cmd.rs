@@ -688,7 +688,8 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         // The unit is gone, but its committed transfer is still pending.
         // Wake the filesystem consumer even when it failed after launch.
         if let Some(n) = job.turns() {
-            fs::write(job.turn(&n, "retry-wake"), "").map_err(|e| Fail::new(1, e.to_string()))?;
+            crate::swap_confined(&job.turn(&n, "retry-wake"), "")
+                .map_err(|e| Fail::new(1, e.to_string()))?;
         }
         return Ok(());
     }

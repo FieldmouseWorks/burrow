@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 mod authority;
 pub(crate) use authority::Identity;
 
-use crate::{config::Config, engine, job::Job, now_nanos, read, swap, systemd, turn};
+use crate::{
+    config::Config, engine, job::Job, now_nanos, read, swap, swap_confined, systemd, turn,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Checkpoint {
@@ -92,7 +94,12 @@ impl Checkpoint {
                     "retry was cancelled or superseded",
                 ));
             }
-            Identity::capture(job, n).map_err(io::Error::other)?;
+            Identity::capture(
+                job,
+                n,
+                engine::choice(job.cfg, job).map_err(io::Error::other)?,
+            )
+            .map_err(io::Error::other)?;
             match census(job, n) {
                 Ok(_census) => {
                     return swap(
@@ -124,7 +131,7 @@ impl Checkpoint {
         if !self.initial()
             && let Some(dl) = self.deadline
         {
-            swap(
+            swap_confined(
                 &job.turn(n, "deadline"),
                 &format!("{}\n", dl + now_nanos() - self.waited),
             )?;
@@ -132,7 +139,7 @@ impl Checkpoint {
         let prompt = if let Some(said) = &self.said {
             let asked = read(first).unwrap_or_default();
             let prompt = job.turn(n, "spent");
-            swap(
+            swap_confined(
                 &prompt,
                 &format!(
                     "{}\n\n{said}. {}\n\n{asked}",
@@ -149,10 +156,7 @@ impl Checkpoint {
         if job.turn(n, "quiet").exists() {
             fs::remove_file(job.turn(n, "quiet"))?;
         }
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(job.turn(n, "jsonl"))?
+        crate::open_append_nofollow(&job.turn(n, "jsonl"))?
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
         fs::remove_file(job.turn(n, "retry-migration"))?;
         let _ = fs::remove_file(job.turn(n, "retry-startup-failed"));
@@ -208,7 +212,7 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
 
 /// Enumerate only this engine's turn parents, using argv and executable
 /// identity rather than inherited environment or a possibly recycled pid.
-fn parents() -> io::Result<Vec<(u32, String, bool)>> {
+fn parents(cfg: &Config) -> io::Result<Vec<(u32, String, bool)>> {
     let current = std::env::current_exe()?;
     let mut found = Vec::new();
     for entry in fs::read_dir("/proc")?.filter_map(Result::ok) {
@@ -218,13 +222,20 @@ fn parents() -> io::Result<Vec<(u32, String, bool)>> {
         let Ok(exe) = fs::read_link(entry.path().join("exe")) else {
             continue;
         };
-        if exe == current || exe.file_name().and_then(|n| n.to_str()) != Some("burrow-proj") {
+        if exe == current {
             continue;
         }
         let Ok(bytes) = fs::read(entry.path().join("cmdline")) else {
             continue;
         };
         let args: Vec<_> = bytes.split(|b| *b == 0).collect();
+        // Between an old parent's census lock and its shell's own, the unit's
+        // main process is the handover shell, whose argv is fixed.
+        let handover = exe.file_name().and_then(|n| n.to_str()) != Some("burrow-proj")
+            && authority::legacy_handover(cfg, &exe, &args);
+        if !handover && exe.file_name().and_then(|n| n.to_str()) != Some("burrow-proj") {
+            continue;
+        }
         let Some(i) = args.iter().position(|a| *a == b"_exec") else {
             continue;
         };
@@ -294,7 +305,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
     // lock defers this repair without blocking progress in independent pools.
     let release_error = crate::usage::admission_cutoff(cfg).err();
     let mut busy = false;
-    for (pid, id, first) in parents()? {
+    for (pid, id, first) in parents(cfg)? {
         let job = Job::new(cfg, &id);
         if !job.dir.is_dir() || systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
             continue;
@@ -316,6 +327,12 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         }
         // Confirm this is the unit's main process, not another user's argv.
         if systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
+            continue;
+        }
+        // Waiting is the kernel's word, never a job file's or the saved
+        // identity's: a running turn holds a slot lock whatever its sandbox
+        // deleted, and one with no identity must also be fenced in the census.
+        if authority::holds_slot(cfg, pid)? {
             continue;
         }
         if Identity::load(&job, &n)

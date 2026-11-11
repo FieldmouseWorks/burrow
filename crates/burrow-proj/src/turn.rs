@@ -247,7 +247,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         outcome("codex cannot run a --vm job; agent sandboxes are Claude-only");
         return Err(Fail::quiet(1));
     }
-    crate::retry::Identity::capture(&job, &n).map_err(|e| Fail::new(1, e))?;
+    crate::retry::Identity::capture(&job, &n, choice.clone()).map_err(|e| Fail::new(1, e))?;
     let _ = fs::write(job.turn(&n, "engine"), choice.engine.name());
     // As its App, or not at all ([`github_app`]). Its env, read now, is what
     // every run of the turn starts in, so none starts as the user if the App

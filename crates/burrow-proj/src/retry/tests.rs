@@ -155,7 +155,7 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     .unwrap();
     fs::write(job.turn("1", "jsonl"), "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your monthly spend limit\"}\n").unwrap();
     fs::write(job.path("engine"), read(&job.turn("1", "engine")).unwrap()).unwrap();
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     let exe = if mode.starts_with("old") {
         r.tmp.path().join("old/burrow-proj")
     } else {
@@ -574,7 +574,7 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         engine::choice(&r.cfg, &job).unwrap().engine,
         engine::Engine::Codex
     );
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     fs::write(job.path("engine"), "claude").unwrap();
     let checkpoint = Checkpoint {
         waited: now_nanos(),
@@ -584,7 +584,7 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         first: false,
         retained: Some(true),
     };
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&checkpoint).unwrap(),
@@ -598,7 +598,7 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         name: "2-100-../../outside".into(),
         ..checkpoint
     };
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&invalid).unwrap(),
@@ -728,19 +728,19 @@ fn failed_resume_write_retains_checkpoint_and_does_not_double_extend_the_deadlin
         first: false,
         retained: Some(true),
     };
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&state).unwrap(),
     )
     .unwrap();
-    fs::create_dir(job.turn("1", "spent.new")).unwrap();
+    fs::create_dir(job.turn("1", "spent")).unwrap();
     assert!(state.resume(&job, "1", &job.path("prompt.1")).is_err());
     assert!(Checkpoint::load(&job, "1").unwrap().is_some());
     crate::cmd::finish(&r.cfg, "retry").unwrap();
     assert!(job.turn("1", "retry-wake").exists());
     assert!(!job.turn("1", "ended").exists());
-    fs::remove_dir(job.turn("1", "spent.new")).unwrap();
+    fs::remove_dir(job.turn("1", "spent")).unwrap();
     state.resume(&job, "1", &job.path("prompt.1")).unwrap();
     let deadline: i64 = read(&job.turn("1", "deadline")).unwrap().parse().unwrap();
     assert!(deadline <= state.deadline.unwrap() + now_nanos() - state.waited);
@@ -794,7 +794,7 @@ fn pending(r: &Rig, id: &str, retained: bool) -> (Checkpoint, String) {
         first: false,
         retained: Some(retained),
     };
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&state).unwrap(),
@@ -863,3 +863,5 @@ fn an_initial_waiter_keeps_no_deadline_but_a_retained_retry_does() {
 }
 
 mod review2;
+#[cfg(test)]
+mod review3;

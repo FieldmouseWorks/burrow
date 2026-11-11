@@ -231,7 +231,8 @@ pub fn filled(path: &Path) -> bool {
 }
 
 /// Swapped in whole, through PATH.new, so a reader never finds it missing or
-/// half written.
+/// half written. For host-owned directories only: a sandbox-writable one
+/// takes [`swap_confined`], since PATH.new is a name a sandbox can predict.
 pub fn swap(path: &Path, text: &str) -> io::Result<()> {
     let new = path.with_file_name(format!(
         "{}.new",
@@ -239,6 +240,28 @@ pub fn swap(path: &Path, text: &str) -> io::Result<()> {
     ));
     fs::write(&new, text)?;
     fs::rename(&new, path)
+}
+
+/// [`swap`] for a directory the sandbox can write: the staging file is new,
+/// randomly named and created exclusively, and the rename replaces whatever
+/// sits at PATH (a symlink included) rather than writing through it, so
+/// nothing the sandbox leaves there redirects the write outside the directory.
+pub fn swap_confined(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(dir)?;
+    staged.write_all(text.as_bytes())?;
+    staged.persist(path).map(drop).map_err(|e| e.error)
+}
+
+/// Open PATH for appending, created if missing, refusing a symlink at PATH.
+pub fn open_append_nofollow(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
 }
 
 /// When a file last changed, in nanoseconds since the epoch.

@@ -7,7 +7,7 @@ fn saved(r: &Rig, id: &str) -> Checkpoint {
     fs::write(job.path("project"), "/ordinary\n").unwrap();
     fs::write(job.path("prompt.1"), "original\n").unwrap();
     fs::write(job.turn("1", "jsonl"), "original stream\n").unwrap();
-    Identity::capture(&job, "1").unwrap();
+    Identity::capture(&job, "1", engine::choice(&r.cfg, &job).unwrap()).unwrap();
     let state = Checkpoint {
         waited: now_nanos() - 10_000_000_000,
         said: Some("refused".into()),
