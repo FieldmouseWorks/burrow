@@ -61,6 +61,12 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
             rec.checkout.display()
         ));
     }
+    if let Err(why) = crate::tools::sweep(&rec, builds, id) {
+        return short(why);
+    }
+    if let Err(why) = crate::tools::prepare(&rec, id, &log) {
+        return short(why);
+    }
     let mut ran = Ran::default();
     for (i, (check, cmd)) in rec.runs.iter().enumerate() {
         note(&format!("{check}: {cmd}"));
@@ -198,6 +204,10 @@ fn fenced(
     let (Ok(out), Ok(err)) = (out, err) else {
         return Err("can't hand it its log".into());
     };
+    c.env_remove("PROOF_TOOLS");
+    if rec.tools_ref.is_some() {
+        c.env("PROOF_TOOLS", crate::tools::path(rec, id(dir)?));
+    }
     c.current_dir(tree)
         .env("PROOF_REPO", &rec.repo)
         .env("PROOF_NUMBER", rec.number.to_string())

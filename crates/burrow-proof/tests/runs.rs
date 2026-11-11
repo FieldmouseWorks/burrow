@@ -249,3 +249,79 @@ fn a_summary_left_from_before_isnt_this_runs() {
     run(&dir, &mut Plain::default()).unwrap();
     assert!(!dir.join(COMMENT).exists());
 }
+
+#[test]
+fn trusted_tools_are_from_the_configured_branch_and_removed_by_end() {
+    use burrow_proof::end::{Ended, end};
+    let w = World::new();
+    let output = w.path().join("tools-output");
+    let cmd = format!(
+        "cat \"$PROOF_TOOLS/f\" >{}; cat f >>{}; git -C \"$PROOF_TOOLS\" status --porcelain >>{}",
+        output.display(),
+        output.display(),
+        output.display()
+    );
+    let mut rec = w.record(&[("gate", &cmd)]);
+    rec.tools_ref = Some("refs/heads/main".into());
+    let dir = w.made("proof-trusted-tools", &rec);
+    run(&dir, &mut Plain::default()).unwrap();
+    assert_eq!(read(&output), "main moved on\npr\n");
+    assert_eq!(ran(&dir).exits["gate"], 0);
+    assert!(read(&dir.join("log")).contains("tools refs/heads/main at"));
+    assert!(
+        world::git(&w.checkout, &["for-each-ref", "refs/burrow-proof/"])
+            .trim()
+            .is_empty()
+    );
+    end(
+        &dir,
+        &Ended {
+            result: "success".into(),
+            code: "exited".into(),
+            status: "0".into(),
+        },
+    )
+    .unwrap();
+    assert!(w.trees_left().is_empty());
+    assert_eq!(w.worktrees(), [w.checkout.to_str().unwrap()]);
+}
+
+#[test]
+fn missing_trusted_tools_never_run_the_pr_command() {
+    let w = World::new();
+    let output = w.path().join("must-not-run");
+    let mut rec = w.record(&[("gate", &format!("touch {}", output.display()))]);
+    rec.tools_ref = Some("refs/heads/missing".into());
+    let dir = w.made("proof-missing-tools", &rec);
+    assert!(run(&dir, &mut Plain::default()).is_err());
+    assert!(!output.exists());
+    assert!(!dir.join("ran.json").exists());
+}
+
+#[test]
+fn restart_sweep_removes_dead_tools_refs_and_keeps_live_ones() {
+    let w = World::new();
+    let fetched = world::git(&w.checkout, &["rev-parse", "HEAD"]);
+    for id in ["proof-dead", "proof-live"] {
+        world::git(
+            &w.checkout,
+            &[
+                "update-ref",
+                &format!("refs/burrow-proof/{id}/tools"),
+                fetched.trim(),
+            ],
+        );
+    }
+    let live = w.builds.join("proof-live");
+    let cgroup = w.path().join("live-cgroup");
+    fs::create_dir_all(&live).unwrap();
+    fs::create_dir(&cgroup).unwrap();
+    fs::write(live.join("cgroup"), cgroup.to_str().unwrap()).unwrap();
+    let dir = w.made("proof-after-restart", &w.record(&[("gate", "true")]));
+    run(&dir, &mut Plain::default()).unwrap();
+    let refs = world::git(
+        &w.checkout,
+        &["for-each-ref", "--format=%(refname)", "refs/burrow-proof/"],
+    );
+    assert_eq!(refs.trim(), "refs/burrow-proof/proof-live/tools");
+}

@@ -372,7 +372,7 @@ def start_run(repo, pr, checks, st):
         return None
     # burrow-proof's Record: what it runs, and how, from this steward's config.
     return start(jid, {"repo": repo, "number": n, "head": head, "checkout": os.path.join(CFG["projectsDir"], folder),
-                       "runs": runs, "unit": C.build_unit(jid), "timeout": int(timeout(repo) * C.MIN),
+                       "runs": runs, "toolsRef": C.repo_cfg(repo).get("proofToolsRef"), "unit": C.build_unit(jid), "timeout": int(timeout(repo) * C.MIN),
                        "bash": CFG["bash"], "git": CFG["git"], "trees": CFG["runsDir"],
                        "kick": f"{CFG['kick']}/{repo}", "commentBytes": COMMENT_BYTES},
                  f"the run of {', '.join(checks)}", [CFG["proofRun"], "start"])
@@ -661,6 +661,8 @@ def fits(st, stage):
     alone."""
     jid = st.get("provedJob")
     was = st.get("provedFor") or ["build" if jid and jid.startswith(C.BUILD) else "job"]
+    if was[3:] != stage[3:]:
+        return False
     if was[0] != stage[0] or len(was) == 1:
         return was[0] == stage[0]
     return set(stage[1]) <= set(was[1]) and all(was[2].get(c) == stage[2].get(c) for c in stage[1])
@@ -673,7 +675,9 @@ def still(st, said, rc):
     or command that proof had. A check dropped, remapped or made the other
     kind since gets none of it."""
     was = st.get("provedFor") or []
-    if len(was) != 3 or was[0] not in ("build", "run"):
+    if len(was) not in (3, 4) or was[0] not in ("build", "run"):
+        return {}
+    if was[0] == "run" and (was[3] if len(was) == 4 else None) != rc.get("proofToolsRef"):
         return {}
     now = rc["proofBuilds" if was[0] == "build" else "proofRuns"]
     return {c: v for c, v in said.items() if c in now and now[c] == was[2].get(c)}

@@ -64,7 +64,7 @@ assert jid and jid.startswith(C.BUILD + "sam-r-5-" + "a" * 12), jid
 # What it runs, where: the clone's real place, whatever its folder's
 # called; nothing of the PR's base.
 assert json.load(open(f"{folder(jid)}/build.json")) == {
-    "repo": "sam/r", "number": 5, "head": "a" * 40, "checkout": checkout, "runs": {"gate": "make gate"},
+    "repo": "sam/r", "number": 5, "head": "a" * 40, "checkout": checkout, "runs": {"gate": "make gate"}, "toolsRef": None,
     "unit": C.build_unit(jid), "timeout": 180 * 60, "bash": S.CFG["bash"], "git": S.CFG["git"], "trees": RUNS,
     "kick": f"{S.CFG['kick']}/sam/r", "commentBytes": P.COMMENT_BYTES}, json.load(open(f"{folder(jid)}/build.json"))
 # burrow-proof took it and handed systemd its unit, which it runs.
@@ -77,6 +77,11 @@ systemd_run()
 long_jid = P.start_run("sam/r", pr, ["gate"], {})
 assert json.load(open(f"{folder(long_jid)}/build.json"))["timeout"] == 720 * 60
 assert "--property=RuntimeMaxSec=43200s" in asked(), asked()
+S.CFG["repos"]["sam/r"]["proofToolsRef"] = "refs/heads/main"
+systemd_run()
+tools_jid = P.start_run("sam/r", pr, ["gate"], {})
+assert json.load(open(f"{folder(tools_jid)}/build.json"))["toolsRef"] == "refs/heads/main"
+del S.CFG["repos"]["sam/r"]["proofToolsRef"]
 del S.CFG["repos"]["sam/r"]["proofTimeoutMinutes"]
 # systemd's refusal: none started.
 systemd_run(1)
@@ -249,6 +254,13 @@ assert P.still({"provedFor": ["run", ["gate"], {"gate": "make gate"}]}, {"gate":
 assert P.still({"provedFor": ["run", ["gate"], {"gate": "make gate"}]}, {"gate": WAS},
                {"proofBuilds": {"gate": "make gate"}, "proofRuns": {}}) == {}
 assert P.still({"provedFor": ["build", ["gate"], {"gate": "make gate"}]}, {"gate": WAS}, KINDS) == {}
+# Changing the trusted tools branch invalidates a run's old verdict and
+# proof identity, even when its shell command did not change.
+TOOLS_STAGE = ["run", ["gate"], {"gate": "make gate"}, "refs/heads/main"]
+assert not P.fits({"provedFor": TOOLS_STAGE}, TOOLS_STAGE[:3])
+assert P.fits({"provedFor": TOOLS_STAGE}, TOOLS_STAGE)
+assert P.still({"provedFor": TOOLS_STAGE}, {"gate": WAS}, KINDS) == {}
+assert P.still({"provedFor": TOOLS_STAGE}, {"gate": WAS}, KINDS | {"proofToolsRef": "refs/heads/main"}) == {"gate": WAS}
 # A run's command remapped while it's pending is run again: the old one
 # says nothing of the new.
 fresh_pr_state()
