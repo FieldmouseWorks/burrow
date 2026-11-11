@@ -95,7 +95,7 @@ let
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
-    inherit (cfg) meters;
+    inherit (cfg) meters paused;
     usagePaid = cfg.usage.paid;
     inherit roles models;
     inbox = if cfg.inbox.enable then {
@@ -150,6 +150,17 @@ in
   ];
 
   options.burrow.proj = {
+    paused = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "OWNER/REPO" ];
+      description = ''
+        Repositories whose automated inbox, triage, drain and steward jobs
+        are paused (case insensitive). Labels and queued issues are kept;
+        removing a repository resumes them. Running jobs are not stopped,
+        and settled PRs may still merge.
+      '';
+    };
     enable = lib.mkEnableOption "proj, background agent jobs in each project";
     codex.slots = lib.mkOption {
       type = lib.types.ints.positive;

@@ -191,6 +191,15 @@ C.save("known.json", [])
 NEW_JOBS = []
 C.job, job = (lambda repo, task, clone=False, *, role: NEW_JOBS.append((repo, task, clone, role)) or "job-new"), C.job
 S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
+S.CFG["paused"] = ["SAM/R"]
+S.main()
+assert NEW_JOBS == [] and C.load("baseline-failed.json", {}) == {}, NEW_JOBS
+assert C.load("known.json", []) == []
+S.CFG.pop("paused")
+order.clear()
+seen_repos.clear()
+published.clear()
+open(UPKEEP_RAN, "w").close()
 S.main()
 S.CFG["baselineJobs"] = False
 del S.CFG["baselineTask"]

@@ -177,6 +177,9 @@ impl Pass<'_> {
     /// carried out, then a job for each issue nobody has sorted, while there's
     /// room.
     pub(super) fn triage(&mut self, repo: &str, all: &[Value]) -> Result<(), Fail> {
+        if self.cfg.paused(repo) {
+            return Ok(());
+        }
         let Some(t) = self.sorting().cloned() else {
             return Ok(());
         };
