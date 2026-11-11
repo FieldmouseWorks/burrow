@@ -230,3 +230,183 @@ fn cohort_uses_precise_birth_times_and_survives_renames() {
     line.remove(0);
     assert!(!super::super::draining(queue, &line, cutoff));
 }
+
+#[test]
+fn independent_pools_start_while_claude_census_is_blocked() {
+    for codex in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let jobs = jobs_dir(&tmp);
+        let census = File::create(jobs.join(".slots/.lock")).unwrap();
+        census.lock().unwrap();
+        fs::create_dir_all(jobs.join("escape")).unwrap();
+        if !codex {
+            fs::write(jobs.join("escape/unstick"), "").unwrap();
+        }
+        let _kid = waiter_to(
+            if codex { "codex" } else { "take" },
+            &jobs,
+            &tmp,
+            "escape",
+            1,
+        );
+        until("independent turn starts", || {
+            took(&jobs, "escape").is_some()
+        });
+        assert_eq!(in_queue(&jobs), 0);
+        assert_eq!(
+            fs::read_to_string(jobs.join("escape/1.slot")).unwrap(),
+            if codex { "codex-1\n" } else { "unstick\n" }
+        );
+    }
+}
+
+#[test]
+fn queue_to_unstick_and_usage_retry_escape_a_blocked_census() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let ordinary = File::create(jobs.join(".slots/1")).unwrap();
+    ordinary.lock().unwrap();
+    let _kid = waiter(&jobs, &tmp, "escape", 1);
+    until("Claude waiter joined", || in_queue(&jobs) == 1);
+    let census = File::create(jobs.join(".slots/.lock")).unwrap();
+    census.lock().unwrap();
+    out_of_usage(&jobs);
+    fs::write(jobs.join("escape/unstick"), "").unwrap();
+    until(
+        "emergency waiter leaves Claude queue even during usage hold",
+        || in_queue(&jobs) == 0,
+    );
+    assert_eq!(took(&jobs, "escape"), None);
+    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    until("emergency retry starts despite blocked census", || {
+        took(&jobs, "escape").is_some()
+    });
+}
+
+#[test]
+fn pipeline_holders_satisfy_only_their_own_usable_share() {
+    use crate::pick::{Waiter, pick_budget};
+    let mut cfg = config(Path::new("/unused"), 4);
+    cfg.pipeline_slots = 1;
+    let line: Vec<_> = [Class::Lead, Class::Pipeline, Class::Normal]
+        .into_iter()
+        .enumerate()
+        .map(|(i, class)| Waiter {
+            name: i.to_string(),
+            class,
+            project: i.to_string(),
+        })
+        .collect();
+    for held_class in [Class::Lead, Class::Pipeline] {
+        for held_slot in 0..4 {
+            let mut slots = vec![Slot::Free; 4];
+            slots[held_slot] = Slot::Held {
+                class: Some(held_class),
+                project: "held".into(),
+            };
+            let picked = pick_budget(&cfg, &slots, &line[..2], 1);
+            assert_eq!(picked.len(), 1);
+            assert_eq!(
+                line[picked[0].0].class,
+                if held_class == Class::Pipeline {
+                    Class::Lead
+                } else {
+                    Class::Pipeline
+                }
+            );
+        }
+    }
+    cfg.max_jobs = 2;
+    for cap in [1, 2, 3, usize::MAX] {
+        let slots = [
+            Slot::Held {
+                class: Some(Class::Pipeline),
+                project: "held".into(),
+            },
+            Slot::Free,
+        ];
+        let picked = pick_budget(&cfg, &slots, &line[1..], cap);
+        assert_eq!(
+            picked,
+            [(0, 2)],
+            "unusable ordinary share must not block pipeline work"
+        );
+    }
+}
+
+#[test]
+fn full_budgets_do_not_lose_progress_in_small_slot_configurations() {
+    use crate::pick::{Waiter, pick_budget};
+    // Enumerate holder classes and physical positions, including no general
+    // slots, no reserved slots, and project caps of zero or one.
+    let classes = [Class::Lead, Class::Pipeline, Class::Normal, Class::Steward];
+    let line: Vec<_> = classes
+        .into_iter()
+        .enumerate()
+        .map(|(i, class)| Waiter {
+            name: i.to_string(),
+            class,
+            project: "one".into(),
+        })
+        .collect();
+    for max in 1..=4 {
+        for reserved in 0..=max {
+            for per_project in 0..=2 {
+                let mut cfg = config(Path::new("/unused"), max);
+                cfg.pipeline_slots = reserved;
+                cfg.max_jobs_per_project = per_project;
+                for mask in 0..5usize.pow(max as u32) {
+                    let mut value = mask;
+                    let slots: Vec<_> = (0..max)
+                        .map(|_| {
+                            let v = value % 5;
+                            value /= 5;
+                            if v == 0 {
+                                Slot::Free
+                            } else {
+                                Slot::Held {
+                                    class: Some(classes[v - 1]),
+                                    project: "one".into(),
+                                }
+                            }
+                        })
+                        .collect();
+                    let full = pick_budget(&cfg, &slots, &line, usize::MAX);
+                    assert_eq!(pick_budget(&cfg, &slots, &line, max), full);
+                    for cap in 1..=max {
+                        let picked = pick_budget(&cfg, &slots, &line, cap);
+                        assert!(picked.len() <= cap);
+                        assert_eq!(
+                            picked.is_empty(),
+                            full.is_empty(),
+                            "lost progress: max={max} reserved={reserved} per_project={per_project} slots={slots:?} cap={cap}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn queue_birth_is_ordered_with_the_release_commit() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    out_of_usage(&jobs);
+    let cfg = config(&jobs, 1);
+    let release = crate::usage::lock(&cfg).unwrap();
+    let _kid = waiter(&jobs, &tmp, "joining", 1);
+    until("waiter started", || {
+        jobs.join("joining/1.withdrawable").exists()
+    });
+    sleep(Duration::from_secs(3));
+    assert_eq!(
+        in_queue(&jobs),
+        0,
+        "queue birth interleaved with the release transaction"
+    );
+    drop(release);
+    until("waiter publishes after transaction", || {
+        in_queue(&jobs) == 1
+    });
+}

@@ -315,12 +315,12 @@ fn codex_slot(
     // Claude's line would count as a live waiter there (waiter_alive) while it
     // waits for, or runs in, Codex's pool.
     let queue = cfg.jobs.join(".queue");
-    let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
-    lk.lock()?;
+    // Removal cannot hide a live rename: a census retaining this old name
+    // treats its missing timestamp conservatively until its next look. Keep
+    // this escape pool independent of a stalled Claude admission lock.
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
     }
-    drop(lk);
     loop {
         if may_hand_over && let Some(to) = successor(cfg) {
             unmark(&job, n)?;
@@ -384,11 +384,15 @@ pub fn take(
         // run would be refused, an --unstick turn's too.
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if job.path("unstick").exists() && !spent {
-            let lk = File::create(slots.join(".lock"))?;
-            lk.lock()?;
+        if job.path("unstick").exists() {
+            // Leaving the line needs no census lock: stale looks retain the
+            // cap conservatively, and the emergency path must never wait on it.
             let _ = fs::remove_file(queue.join(&me));
-            drop(lk);
+            if spent {
+                usage::remind(cfg);
+                sleep(Duration::from_secs(2));
+                continue;
+            }
             // Out of usage by the time it had the slot: back in line.
             if let Some(slot) = unstick_slot(cfg, id, n)? {
                 return Ok(slot);
@@ -407,7 +411,16 @@ pub fn take(
             return Err(failed);
         }
         let lk = File::create(slots.join(".lock"))?;
-        lk.lock()?;
+        // Keep checking for emergency reclassification while another census
+        // is stuck: blocking here would strand a queue-to-unstick transition.
+        match lk.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                sleep(Duration::from_secs(2));
+                continue;
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
         // Waited long enough: among the --first ones now, in its place by WHEN.
         if let Some(rest) = me.strip_prefix("2-")
             && now() - came >= cfg.max_wait as i64
@@ -418,7 +431,7 @@ pub fn take(
         }
         if spent {
             if !job.path("unstick").exists() {
-                publish(&queue, &me)?;
+                publish(cfg, &queue, &me)?;
             }
             drop(lk);
             usage::remind(cfg);
@@ -439,7 +452,7 @@ pub fn take(
             }
             me = new;
         }
-        publish(&queue, &me)?;
+        publish(cfg, &queue, &me)?;
         // A slot is taken only under this lock, so one a look sees free stays
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
@@ -503,8 +516,12 @@ pub fn take(
 /// This waiter's place in line, `me`, published whole (a dot file, which the
 /// line skips, then renamed), so a waiter clearing out dead places never sees
 /// it without its pid. Put back if it went anyway.
-fn publish(queue: &Path, me: &str) -> io::Result<()> {
+fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<()> {
     if !queue.join(me).exists() {
+        // Birth and early release are ordered by the same usage lock, so a
+        // queue entry cannot appear between capturing the cutoff and committing
+        // the release. The independent pools never publish here.
+        let _usage = usage::lock(cfg).map_err(io::Error::other)?;
         let tmp = queue.join(format!(".{me}.new"));
         fs::write(&tmp, format!("{}\n", process::id()))?;
         fs::rename(&tmp, queue.join(me))?;

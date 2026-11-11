@@ -104,6 +104,7 @@ fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
         job: "web-1".into(),
         at: 900,
         back: None,
+        admission: None,
         told: 900,
         last: Some(900),
     });

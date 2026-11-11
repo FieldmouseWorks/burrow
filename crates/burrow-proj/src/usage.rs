@@ -65,6 +65,10 @@ pub struct Spent {
     /// None while it holds.
     #[serde(default)]
     pub back: Option<i64>,
+    /// Precise admission boundary, committed atomically with `back`. A cutoff
+    /// from an unsuccessful release attempt must never affect an active hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<i64>,
     /// When the owner's notice was last sent: its open while it holds, its
     /// close after.
     #[serde(default)]
@@ -82,6 +86,14 @@ impl Spent {
     /// When the line moved again: its reset, or sooner if it ended sooner.
     pub fn release(&self) -> i64 {
         self.back.map_or(self.until, |b| b.min(self.until))
+    }
+
+    fn admission_cutoff(&self) -> i64 {
+        if self.back.is_some() {
+            self.admission.unwrap_or(self.release() * 1_000_000_000)
+        } else {
+            self.until * 1_000_000_000
+        }
     }
 
     /// Whether it holds the line at `now`.
@@ -116,7 +128,7 @@ pub fn admission_cutoff(cfg: &Config) -> Option<i64> {
     let _lock = lock(cfg).ok()?;
     match kept(cfg) {
         Some(s) if s.holds(now()) => None,
-        Some(s) => admission_release(cfg, &s).ok(),
+        Some(s) => Some(s.admission_cutoff()),
         None => crate::read(&cfg.jobs.join(".usage.admission"))?
             .split_once('\t')?
             .1
@@ -126,16 +138,12 @@ pub fn admission_cutoff(cfg: &Config) -> Option<i64> {
 }
 
 fn admission_release(cfg: &Config, s: &Spent) -> Result<i64, String> {
-    let path = cfg.jobs.join(".usage.admission");
-    if let Some(text) = crate::read(&path)
-        && let Some((at, cutoff)) = text.split_once('\t')
-        && at == format!("{}:{}", s.at, s.until)
-        && let Ok(cutoff) = cutoff.parse()
-    {
-        return Ok(cutoff);
-    }
-    let cutoff = s.release() * 1_000_000_000;
-    swap(&path, &format!("{}:{}\t{cutoff}\n", s.at, s.until)).map_err(|e| e.to_string())?;
+    let cutoff = s.admission_cutoff();
+    swap(
+        &cfg.jobs.join(".usage.admission"),
+        &format!("{}:{}\t{cutoff}\n", s.at, s.until),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(cutoff)
 }
 
@@ -175,7 +183,7 @@ fn released(cfg: &Config) -> Result<i64, String> {
 
 /// jobs/.usage.lock, held: every change to the record goes under it, and
 /// none goes ahead without it.
-fn lock(cfg: &Config) -> Result<File, String> {
+pub(crate) fn lock(cfg: &Config) -> Result<File, String> {
     let path = cfg.jobs.join(".usage.lock");
     let f = File::create(&path).map_err(|e| format!("proj: {}: {e}", path.display()))?;
     f.lock()
@@ -233,6 +241,7 @@ fn put(
             job: id.to_owned(),
             at,
             back: None,
+            admission: None,
             told: now(),
             last: Some(last),
         },
@@ -301,17 +310,6 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {
         return;
     }
-    if ends {
-        let s = s.as_ref().unwrap();
-        let cutoff = crate::now_nanos().min(s.until * 1_000_000_000);
-        if let Err(e) = swap(
-            &cfg.jobs.join(".usage.admission"),
-            &format!("{}:{}\t{cutoff}\n", s.at, s.until),
-        ) {
-            eprintln!("proj: admission release: {e}");
-            return;
-        }
-    }
     // What it ended is kept first, past the record: without it, an earlier
     // proj's limit could hold it again.
     if (owner || ends)
@@ -322,6 +320,7 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     }
     match s {
         Some(mut s) if ends => {
+            s.admission = Some(crate::now_nanos().min(s.until * 1_000_000_000));
             s.back = Some(now);
             s.told = now;
             if let Err(e) = keep(cfg, &s) {

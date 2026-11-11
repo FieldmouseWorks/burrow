@@ -705,6 +705,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
         job: "web-1".into(),
         at: t - 10,
         back: None,
+        admission: None,
         told: t - RETELL,
         last: Some(t - 5),
     };
@@ -770,36 +771,4 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     assert_eq!(fresh.said, expected.said);
 }
 
-#[test]
-fn admission_cutoff_survives_natural_completion_and_settlement() {
-    let (_d, cfg) = rig();
-    let t = now() - 100;
-    record(&cfg, "web", Some(t + 10), SAID, t).unwrap();
-    let cutoff = (t + 10) * 1_000_000_000;
-    assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-    back(&cfg, Some(t + 20));
-    assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-    let s = kept(&cfg).unwrap();
-    settle(&cfg, s.clone(), s.release() + cfg.stall_queued() + 1);
-    assert!(kept(&cfg).is_none());
-    assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-    back(&cfg, None);
-    assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-}
-
-#[test]
-fn early_admission_cutoff_has_subsecond_order_and_never_expands() {
-    let (_d, cfg) = rig();
-    let t = now();
-    record(&cfg, "web", Some(t + 3600), SAID, t - 100).unwrap();
-    let before = crate::now_nanos();
-    back(&cfg, None);
-    let after = crate::now_nanos();
-    let cutoff = admission_cutoff(&cfg).unwrap();
-    assert!(before <= cutoff && cutoff <= after);
-    back(&cfg, Some(t + 1));
-    assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-    let s = kept(&cfg).unwrap();
-    settle(&cfg, s.clone(), s.release() + cfg.stall_queued() + 1);
-    assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-}
+mod admission;

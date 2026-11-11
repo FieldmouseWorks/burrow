@@ -8,7 +8,8 @@
 //! next one. A lead turn (pipeline work in a lead repo's project, what the
 //! pipeline is built from) is a pipeline turn that goes first of all: ahead
 //! of the whole line, the other pipeline turns included, except that it
-//! leaves them the pipeline's own slots while one waits, so a lead repo's
+//! leaves them any unsatisfied pipeline share while one waits, counting
+//! non-lead pipeline holders in any slot, so a lead repo's
 //! backlog can't stop the work on what deploys it. Any other turn waits
 //! while its project holds maxJobsPerProject slots (pipeline turns not
 //! counted), and lets those behind it by meanwhile, so one project's jobs
@@ -157,16 +158,35 @@ pub fn pick_budget(
     // and one of them may start: its project's cap can't be holding it back
     // when none of theirs runs, unless the cap is none.
     let owed = usize::from(
-        held.is_empty() && cfg.max_jobs_per_project > 0 && line.iter().any(|w| !w.class.pipeline()),
+        !theirs.is_empty()
+            && held.is_empty()
+            && cfg.max_jobs_per_project > 0
+            && line.iter().any(|w| !w.class.pipeline()),
     );
-    // Who goes: each in turn, while the slots still go round. lead counts the
-    // lead turns chosen and others the rest held to the slots anyone may
-    // take; spare is how many of those the slot owed leaves pipeline turns;
-    // open is how many of the pipeline's own slots the other pipeline turns
-    // in line leave lead ones; and need how many of the slots anyone may take
-    // lead ones must have.
+    // Reservations consume only usable admission capacity. A non-lead
+    // pipeline holder satisfies its share regardless of the physical slot it
+    // took; lead holders do not. Ordinary work needs a free general slot.
     let spare = theirs.len().saturating_sub(owed);
-    let pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
+    let pipeline_held = slots
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                Slot::Held {
+                    class: Some(Class::Pipeline),
+                    ..
+                }
+            )
+        })
+        .count();
+    let pipeline = line
+        .iter()
+        .filter(|w| w.class == Class::Pipeline)
+        .count()
+        .min(cfg.pipeline_slots.saturating_sub(pipeline_held))
+        .min((theirs.len() + ours.len()).saturating_sub(owed));
+    let capacity = (theirs.len() + ours.len()).min(budget);
+    let lead_capacity = capacity.saturating_sub(owed + pipeline);
     let open = ours.len().saturating_sub(pipeline);
     let (mut lead, mut others) = (0, 0);
     let mut went = Vec::new();
@@ -180,14 +200,12 @@ pub fn pick_budget(
                 .filter(|(_, w)| w.class != Class::Lead),
         );
     for (i, w) in order {
-        if went.len() >= (theirs.len() + ours.len()).min(budget) {
+        if went.len() >= capacity {
             break;
         }
         match w.class {
             Class::Lead => {
-                if lead
-                    >= (spare + open).min(budget.saturating_sub(owed + pipeline.min(ours.len())))
-                {
+                if lead >= lead_capacity {
                     continue;
                 }
                 lead += 1;
