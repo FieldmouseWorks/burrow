@@ -35,10 +35,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
-        if crate::inbox::job_paused(cfg, &id) {
-            retry.push((String::new(), now() + RETRY));
-            continue;
-        }
+        let paused = crate::inbox::job_paused(cfg, &id);
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             if let Err(e) = crate::question::recover(&job) {
@@ -46,21 +43,20 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 retry.push((String::new(), now() + RETRY));
                 continue 'jobs;
             }
-            match crate::ask::expire(cfg, &job) {
-                Ok(Some(at)) => retry.push((String::new(), at)),
-                Ok(None) => (),
-                Err(e) => {
-                    eprintln!("proj question: {e}");
-                    retry.push((String::new(), now() + RETRY));
+            if !paused {
+                match crate::ask::expire(cfg, &job) {
+                    Ok(Some(at)) => retry.push((String::new(), at)),
+                    Ok(None) => (),
+                    Err(e) => {
+                        eprintln!("proj question: {e}");
+                        retry.push((String::new(), now() + RETRY));
+                    }
                 }
             }
         }
         if let Err(error) = crate::ask::visibility(cfg, &job) {
             eprintln!("proj question: {error}");
             retry.push((String::new(), now() + RETRY));
-        }
-        if crate::ask::host_path(&job, "question-needs-owner").exists() {
-            continue;
         }
         // Notifications are independent of GitHub waits and include stopped
         // and completed jobs. Serialize with starts so rollback stays atomic.
@@ -75,6 +71,17 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 }
             }
             drop(held);
+        }
+        // Pausing stops automatic turns, not question reconciliation or
+        // durable notification delivery (including stopped/completed jobs).
+        if paused {
+            if filled(&job.path("await")) || crate::ask::load(&job).is_some() {
+                retry.push((String::new(), now() + RETRY));
+            }
+            continue;
+        }
+        if crate::ask::host_path(&job, "question-needs-owner").exists() {
+            continue;
         }
         let f = job.path("await");
         if crate::planning::admit(&job).is_err() {

@@ -87,14 +87,6 @@ impl Pass<'_> {
             if !mark.exists() || self.drain_user(&d).is_none() {
                 continue;
             }
-            let named = fs::read_to_string(&mark).unwrap_or_default();
-            if named
-                .trim()
-                .split_once('#')
-                .is_some_and(|(repo, n)| self.inbox.planning && self.has_task_list(Some(repo), n))
-            {
-                continue;
-            }
             if d.join("job").exists() {
                 going += 1;
             } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
@@ -206,8 +198,8 @@ impl Pass<'_> {
     /// Active turns and enrollments reserve capacity only in enabled repos.
     fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
         let named = crate::read(&dir.join("drained"))?;
-        let (repo, _) = named.split_once('#')?;
-        if self.cfg.paused(repo) {
+        let (repo, n) = named.split_once('#')?;
+        if self.cfg.paused(repo) || (self.inbox.planning && self.has_task_list(Some(repo), n)) {
             return None;
         }
         if let Some(id) = crate::read(&dir.join("job")) {
@@ -419,19 +411,29 @@ pub(super) fn priority_label(issue: &Value) -> Option<&str> {
 
 /// Automated inbox wakeups retain their waits while the repo is paused.
 pub(crate) fn job_paused(cfg: &crate::config::Config, id: &str) -> bool {
-    let Some(inbox) = &cfg.inbox else {
-        return false;
-    };
     if cfg.paused.is_empty() {
         return false;
     }
-    dirs(&inbox.state, "").iter().any(|dir| {
-        crate::read(&dir.join("job")).as_deref() == Some(id)
-            && crate::read(&dir.join("issue"))
-                .or_else(|| crate::read(&dir.join("drained")))
-                .and_then(|named| named.split_once('#').map(|(repo, _)| cfg.paused(repo)))
-                .unwrap_or(false)
-    })
+    let Some(inbox) = &cfg.inbox else {
+        return false;
+    };
+    // Legacy sorting/planner records have only KEY-N and job, without
+    // source metadata. Both record roots use the same repository key.
+    [inbox.state.clone(), inbox.state.join(".triage")]
+        .iter()
+        .flat_map(|root| dirs(root, ""))
+        .any(|dir| {
+            crate::read(&dir.join("job")).as_deref() == Some(id)
+                && dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.rsplit_once('-'))
+                    .is_some_and(|(repo, _)| {
+                        cfg.paused
+                            .iter()
+                            .any(|paused| key(paused).eq_ignore_ascii_case(repo))
+                    })
+        })
 }
 
 /// The next candidates from the drain's own lists and ranking.
