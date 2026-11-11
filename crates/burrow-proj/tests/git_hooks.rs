@@ -13,10 +13,16 @@ fn git(dir: &Path, hooks: &Path, args: &[&str]) -> Output {
 fn git_with_hash(dir: &Path, hooks: &Path, args: &[&str], hash: &str) -> Output {
     Command::new("git")
         .env("GIT_DEFAULT_HASH", hash)
-        .arg("-C")
+        .arg(if dir.join("HEAD").exists() {
+            "--git-dir"
+        } else {
+            "-C"
+        })
         .arg(dir)
         .args(args)
-        .env("GIT_CONFIG_COUNT", "4")
+        .env("GIT_CONFIG_COUNT", "5")
+        .env("GIT_CONFIG_KEY_4", "safe.bareRepository")
+        .env("GIT_CONFIG_VALUE_4", "explicit")
         .env("GIT_CONFIG_KEY_0", "core.hooksPath")
         .env("GIT_CONFIG_VALUE_0", hooks)
         .env("GIT_CONFIG_KEY_1", "user.name")
@@ -607,8 +613,24 @@ fn explicit_git_dir_does_not_check_the_current_directory_instead() {
 #[test]
 fn source_environment_object_store_and_alternates_are_preserved() {
     let repo = Repo::new();
-    let objects = repo.work.with_file_name("environment-objects");
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let objects = repo.work.with_file_name(std::ffi::OsString::from_vec(
+        b"objects\n\xff\t\"\\".to_vec(),
+    ));
     fs::create_dir(&objects).unwrap();
+    let alternate = objects.with_file_name(std::ffi::OsString::from_vec(
+        b"alternate\n\xff\t\"\\".to_vec(),
+    ));
+    fs::rename(repo.work.join(".git/objects"), &alternate).unwrap();
+    let quoted_alternate = format!(
+        "\"{}\"",
+        alternate
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("\\{b:03o}"))
+            .collect::<String>()
+    );
     let run = |args: &[&str], hooks: &Path| {
         Command::new("git")
             .current_dir(&repo.work)
@@ -616,10 +638,7 @@ fn source_environment_object_store_and_alternates_are_preserved() {
             .env("GIT_WORK_TREE", &repo.work)
             .env("GIT_COMMON_DIR", repo.work.join(".git"))
             .env("GIT_OBJECT_DIRECTORY", &objects)
-            .env(
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                repo.work.join(".git/objects"),
-            )
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &quoted_alternate)
             .args([
                 "-c",
                 &format!("core.hooksPath={}", hooks.display()),
@@ -648,4 +667,50 @@ fn source_environment_object_store_and_alternates_are_preserved() {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+}
+
+#[test]
+fn noncommit_objects_and_nested_tags_can_be_pushed_together() {
+    let repo = Repo::new();
+    fs::write(repo.work.join("blob"), "contents").unwrap();
+    let blob = repo.ok(&["hash-object", "-w", "blob"]);
+    let tree = repo.ok(&["rev-parse", "HEAD^{tree}"]);
+    repo.ok(&["tag", "blob", &blob]);
+    repo.ok(&["tag", "tree", &tree]);
+    repo.ok(&["tag", "-a", "annotated-blob", &blob, "-m", "blob"]);
+    repo.ok(&["tag", "-a", "nested", "annotated-blob", "-m", "nested"]);
+    repo.ok(&["commit", "--allow-empty", "-m", "marked"]);
+    repo.ok(&["tag", "-a", "commit", "HEAD", "-m", "commit"]);
+    repo.ok(&["push", "origin", "HEAD:work", "--tags"]);
+    let none = repo.work.with_file_name("no-hooks");
+    succeeds(git(
+        &repo.work,
+        &none,
+        &["commit", "--allow-empty", "-m", "unmarked"],
+    ));
+    repo.ok(&["tag", "-a", "unmarked-commit", "HEAD", "-m", "commit"]);
+    repo.ok(&[
+        "tag",
+        "-a",
+        "nested-unmarked",
+        "unmarked-commit",
+        "-m",
+        "nested",
+    ]);
+    let refused = repo.run(&["push", "origin", "--tags"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("no Engine: codex trailer"));
+}
+
+#[test]
+fn checkout_paths_preserve_arbitrary_bytes() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let mut repo = Repo::new();
+    let work = repo
+        .work
+        .with_file_name(OsString::from_vec(b"checkout\n\xff\"\\".to_vec()));
+    fs::rename(&repo.work, &work).unwrap();
+    repo.work = work;
+    repo.ok(&["commit", "--allow-empty", "-m", "marked"]);
+    repo.push("work").unwrap();
 }

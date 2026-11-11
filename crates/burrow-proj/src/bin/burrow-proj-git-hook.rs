@@ -1,5 +1,8 @@
 //! Git hooks installed only in Codex jobs' environment, never repo config.
 
+#[path = "../git_hook_objects.rs"]
+mod object_stores;
+
 use std::{
     env,
     io::{self, Read, Write},
@@ -66,6 +69,15 @@ fn git_in(
     args: &[&str],
     input: Option<&str>,
 ) -> Result<String, String> {
+    Ok(String::from_utf8_lossy(&git_bytes(dir, settings, args, input)?).into_owned())
+}
+
+fn git_bytes(
+    dir: Option<&Path>,
+    settings: Settings,
+    args: &[&str],
+    input: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     match settings {
         Settings::Job => {}
@@ -92,6 +104,7 @@ fn git_in(
         }
     }
     match dir {
+        Some(dir) if matches!(settings, Settings::Remote) => command.arg("--git-dir").arg(dir),
         Some(dir) => command.arg("-C").arg(dir),
         None => {
             for var in REPO_ENV {
@@ -111,13 +124,22 @@ fn git_in(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
-    if let Some(input) = input {
-        let mut stdin = child.stdin.take().ok_or("git's stdin is gone")?;
-        stdin
-            .write_all(input.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let output = std::thread::scope(|scope| {
+        let writer = if let Some(input) = input {
+            let mut stdin = child.stdin.take().ok_or("git's stdin is gone")?;
+            Some(scope.spawn(move || stdin.write_all(input.as_bytes())))
+        } else {
+            None
+        };
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        if let Some(writer) = writer {
+            writer
+                .join()
+                .map_err(|_| "git input writer panicked")?
+                .map_err(|e| e.to_string())?;
+        }
+        Ok::<_, String>(output)
+    })?;
     if !output.status.success() {
         // The operation alone, never its arguments or git's stderr: a
         // remote's URL (as given, configured or rewritten) may carry
@@ -128,7 +150,7 @@ fn git_in(
             output.status
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(output.stdout)
 }
 
 /// The trailer that sends a Codex job's PR to a Claude judge.
@@ -270,14 +292,25 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
     // its missing object also loses the exemption for its known ancestors.
     // Fetch those tips in an isolated repository: the job's remote config
     // must not redirect the query or supply fake remote-tracking evidence.
-    let missing: Vec<_> = advertisement
+    let advertised = advertisement
         .lines()
         .filter_map(|line| {
             let (oid, _) = line.split_once('\t')?;
-            (!oid.starts_with("ref: ")
-                && git_in(Some(dir), Settings::Push, &["cat-file", "-e", oid], None).is_err())
-            .then_some(oid)
+            (!oid.starts_with("ref: ")).then_some(oid)
         })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let present = git_in(
+        Some(dir),
+        Settings::Push,
+        &["cat-file", "--batch-check"],
+        Some(&advertised),
+    )?;
+    let missing: Vec<_> = present
+        .lines()
+        .filter_map(|line| line.strip_suffix(" missing"))
         .collect();
     let isolated = tempfile::tempdir().map_err(|e| e.to_string())?;
     // Preserve Git's selected object store (including environment alternates)
@@ -286,12 +319,7 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
         let fields: Vec<_> = line.split_whitespace().collect();
         let tip = fields[1]; // updates has validated the input shape
         if !tip.bytes().all(|b| b == b'0') {
-            git_in(
-                Some(dir),
-                Settings::Push,
-                &["cat-file", "-e", &format!("{tip}^{{commit}}")],
-                None,
-            )?;
+            git_in(Some(dir), Settings::Push, &["cat-file", "-e", tip], None)?;
         }
     }
     let format = git_in(
@@ -315,7 +343,7 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
         ],
         None,
     )?;
-    let mut objects = git_in(
+    let objects = git_bytes(
         Some(dir),
         Settings::Push,
         &[
@@ -326,17 +354,10 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
         ],
         None,
     )?;
-    let counts = git_in(Some(dir), Settings::Push, &["count-objects", "-v"], None)?;
-    for alternate in counts.lines().filter_map(|l| l.strip_prefix("alternate: ")) {
-        objects.push_str(alternate);
-        objects.push('\n');
-    }
-    std::fs::write(isolated.path().join("objects/info/alternates"), objects)
-        .map_err(|e| e.to_string())?;
+    let counts = git_bytes(Some(dir), Settings::Push, &["count-objects", "-v"], None)?;
+    object_stores::install(isolated.path(), objects, &counts)?;
     if !missing.is_empty() {
-        let mut args = vec!["fetch", "--no-tags", "--no-write-fetch-head", url];
-        args.extend(missing);
-        git_in(Some(isolated.path()), Settings::Remote, &args, None)?;
+        fetch_tips(isolated.path(), url, &missing)?;
     }
     let check_dir = isolated.path();
     match unmarked(check_dir, input, &advertisement)?.first() {
@@ -345,6 +366,22 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
             "commit {commit} has no {MARK} trailer, so its PR wouldn't go to a Claude judge: it was made past this Codex job's commit-msg hook (plumbing, a stash, a rewrite or hooks turned off). Make it again with git commit (git reset --soft past it, then commit), and push that"
         )),
     }
+}
+
+fn fetch_tips(dir: &Path, url: &str, tips: &[&str]) -> Result<(), String> {
+    git_in(
+        Some(dir),
+        Settings::Remote,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--stdin",
+            url,
+        ],
+        Some(&tips.join("\n")),
+    )
+    .map(|_| ())
 }
 
 /// Where `remote`, as git hands it to pre-push, points from a query run
@@ -458,6 +495,70 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn large_repeated_and_distinct_tip_lists_are_fetched() {
+        use super::*;
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        for dir in [source.path(), destination.path()] {
+            git_in(
+                None,
+                Settings::Remote,
+                &[
+                    "init",
+                    "--bare",
+                    "--object-format=sha1",
+                    dir.to_str().unwrap(),
+                ],
+                None,
+            )
+            .unwrap();
+        }
+        let marks = source.path().join("marks");
+        let stream = (1..=55_000)
+            .map(|i| {
+                let text = format!("object {i}");
+                format!("blob\nmark :{i}\ndata {}\n{text}\n", text.len())
+            })
+            .collect::<String>();
+        git_in(
+            Some(source.path()),
+            Settings::Remote,
+            &[
+                "fast-import",
+                &format!("--export-marks={}", marks.display()),
+            ],
+            Some(&stream),
+        )
+        .unwrap();
+        let marks = std::fs::read_to_string(marks).unwrap();
+        let distinct = marks
+            .lines()
+            .map(|l| l.split_once(' ').unwrap().1)
+            .collect::<Vec<_>>();
+        let repeated = vec![distinct[0]; 55_000];
+        fetch_tips(
+            destination.path(),
+            source.path().to_str().unwrap(),
+            &repeated,
+        )
+        .unwrap();
+        fetch_tips(
+            destination.path(),
+            source.path().to_str().unwrap(),
+            &distinct,
+        )
+        .unwrap();
+        let checked = git_in(
+            Some(destination.path()),
+            Settings::Remote,
+            &["cat-file", "--batch-check"],
+            Some(&distinct.join("\n")),
+        )
+        .unwrap();
+        assert_eq!(checked.lines().count(), distinct.len());
+        assert!(!checked.contains("missing"));
+    }
     #[test]
     fn unreadable_positive_tip_is_rejected() {
         let repo = tempfile::tempdir().unwrap();
