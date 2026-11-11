@@ -144,6 +144,21 @@ with tempfile.TemporaryDirectory() as tmp:
             reader.running(kind, 'original')
             assert reader.usage_grace() is None
 
+    # Parked questions and proofs retain their records while holding no lane.
+    says('parked', 'ask', 'await sam/up#3')
+    assert not C.at_work('job')
+    import proofs as P
+    state = {'provedJob': 'job', 'proofsLive': ['job'], 'proofPaths': {'job': {'paths': ['kept']}}}
+    assert P.live(state) == []
+    assert state['proofsLive'] == ['job'] and state['proofPaths']['job']['paths'] == ['kept']
+    folder = Path(tmp) / 'builds' / 'proof-paused'
+    folder.mkdir(parents=True)
+    (folder / 'policy-paused').write_text('paused')
+    (folder / 'build.json').write_text('{}')
+    (folder / 'end.json').write_text('{"state":"parked"}')
+    P.prune()
+    assert folder.is_dir(), 'parked builds and their roots never age out'
+
     # What proj says: its state, then each thing held; one it can't read the
     # record of (it exits non-zero) is kept, as one nothing can say of.
     del C.lifecycle

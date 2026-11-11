@@ -45,6 +45,8 @@ __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_
 def handle(repo, pr, repo_info, digest, held=None, below=None):
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
     try:
+        if C.paused(repo):
+            raise C.JobPaused(f"{repo}: repository work paused")
         p.run()
     except C.JobPaused:
         p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)

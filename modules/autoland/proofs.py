@@ -123,10 +123,12 @@ def live(st):
     """The PR's proof jobs still queued or running, or that proj can't say
     about: kept in its state, the ended ones dropped, and what they build
     with them."""
-    st["proofsLive"] = [j for j in jobs(st) if running(j)]
+    snapshots = {j: C.lifecycle(j) for j in jobs(st)}
+    moving = [j for j, snapshot in snapshots.items() if C.at_work(j, snapshot=snapshot)]
+    st["proofsLive"] = [j for j in snapshots if j in moving or snapshots[j][0] == "parked"]
     if "proofPaths" in st:  # {job: {"paths": [...], "at": when it started}}
         st["proofPaths"] = {j: p for j, p in st["proofPaths"].items() if j in st["proofsLive"]}
-    return st["proofsLive"]
+    return moving
 
 
 def nix(*args, timeout=60):
@@ -457,6 +459,8 @@ def start(jid, build_json, what, starter=None):
     """The proof's folder, with what it is (build.json), then its unit: a
     build's runs run(); a run's, starter (its command line, the folder
     after it) starts. Its id, or None when it wouldn't start."""
+    if C.paused(build_json["repo"]):
+        return None
     prune()
     here = os.path.join(STATE, "builds", jid)
     os.makedirs(here)
@@ -486,6 +490,8 @@ def prune():
     still at work, or that systemd can't say about, is kept."""
     root = os.path.join(STATE, "builds")
     for jid in os.listdir(root) if os.path.isdir(root) else ():
+        if any(os.path.exists(os.path.join(root, jid, f"policy-{state}")) for state in ("paused", "restoring")):
+            continue
         end = load(f"builds/{jid}/end.json", None)
         keep = KEEP_INPUTS if (load(f"builds/{jid}/build.json", None) or {}).get("inputs") else KEEP
         try:
@@ -507,14 +513,21 @@ def run(jid):
     failure, not the PR's, so it's built again); timed out past
     proofTimeout. A prebuild's has no verdicts: only how it ended. Then it
     kicks its repo's pass, which posts them, or puts the PR in line."""
+    here = os.path.join(STATE, "builds", jid)
+    restoring = os.path.join(here, "policy-restoring")
+    resumed = os.path.exists(restoring)
+    if resumed:
+        os.unlink(restoring)
     b = load(f"builds/{jid}/build.json", None)
+    if C.paused(b["repo"]):
+        return
     end = {"state": "failed", "exit": None}
     # Derivations collected since they were worked out leave nothing to
     # build, and no verdict in that: the pass that sees it works them out
     # again.
     if not gone(sorted(set(b["drvs"].values()))):
         cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + own("realise", jid)
-        with open(os.path.join(STATE, "builds", jid, "log"), "wb") as out:
+        with open(os.path.join(STATE, "builds", jid, "log"), "ab" if resumed else "wb") as out:
             p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
             try:
                 rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)

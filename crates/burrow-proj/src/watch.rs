@@ -35,6 +35,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
+        if crate::policy::parked(&job) || crate::policy::denied(&job) {
+            continue;
+        }
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             if let Err(e) = crate::question::recover(&job) {
@@ -256,7 +259,11 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     }
     let hours = cfg.await_hours as i64;
     for id in job_ids(cfg) {
-        for a in awaits(&read(&Job::new(cfg, &id).path("await")).unwrap_or_default()) {
+        let job = Job::new(cfg, &id);
+        if crate::policy::parked(&job) || crate::policy::denied(&job) {
+            continue;
+        }
+        for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
             let Some(since) = (!a.since.is_empty() && a.since.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| a.since.parse::<i64>().ok())
                 .flatten()
@@ -327,6 +334,12 @@ mod codex_tests {
         cfg.tools.systemd_run = "true".into();
         let job = Job::new(&cfg, "code");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
         job.set_turns(1).unwrap();
         fs::write(
             job.turn("1", "outcome"),

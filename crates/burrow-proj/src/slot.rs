@@ -124,6 +124,9 @@ fn place_left(queue: &Path, id: &str, pid: u32) -> Option<(String, i64)> {
 /// --since), or else from now. Every WHEN has the same number of digits, so
 /// sorting the names sorts them by when.
 fn entry(job: &Job, id: &str, given: Class) -> String {
+    if let Some(order) = read(&crate::policy::path(job, "order")) {
+        return order;
+    }
     let prefix = if given == Class::First { 1 } else { 2 };
     let since = read(&job.path("since"));
     let began = since.as_deref().and_then(|s| s.lines().next());
@@ -148,7 +151,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::out(cfg).is_some() {
+    if usage::out(cfg).is_some() || automation_paused(cfg, &job) {
         return Ok(None);
     }
     let slot = held(slot)?;
@@ -166,6 +169,11 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
 /// stop. One withdrawn while it waits here is stopped with no slot.
 fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
     let _held = job.lock()?;
+    if automation_paused(job.cfg, job) {
+        crate::policy::mark(job, "queued", false).map_err(io::Error::other)?;
+        return Err(io::Error::from(io::ErrorKind::WouldBlock));
+    }
+    let _ = fs::remove_file(crate::policy::path(job, "order"));
     fs::write(job.turn(n, "slot"), format!("{s}\n"))
 }
 
@@ -275,6 +283,13 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
     let mut line = Vec::new();
     for name in names {
         let fid = job_of(&name);
+        if name != me && !waiter_alive(&queue.join(&name), fid) {
+            let _ = fs::remove_file(queue.join(&name));
+            continue;
+        }
+        if automation_paused(cfg, &Job::new(cfg, fid)) {
+            continue;
+        }
         if name == me {
             line.push(Waiter {
                 name,
@@ -344,18 +359,10 @@ fn codex_slot(
     }
 }
 
-/// Recheck runtime admission before taking a slot. Triage may sort all repos;
-/// explicit interactive work (no automation role or inbox mark) is unaffected.
-fn automation_paused(cfg: &Config, job: &Job) -> bool {
-    let role = crate::read(&job.path("role")).unwrap_or_default();
-    if matches!(role.as_str(), "triage" | "planner")
-        || (role.is_empty() && !job.path("usage-kind").exists())
-    {
-        return false;
-    }
-    let repo = crate::pick::github_repo(cfg, &project(&job.dir));
-    // Machine work without a GitHub origin has no repository to scope.
-    !repo.is_empty() && cfg.paused(&repo)
+/// Recheck bound repository admission before taking any slot. Explicit pauses
+/// vacate every role; unlisted repos can still sort issues.
+fn automation_paused(_cfg: &Config, job: &Job) -> bool {
+    crate::policy::denied(job)
 }
 
 pub fn take_engine(
@@ -542,6 +549,7 @@ pub fn take(
                 fs::write(slots.join(".next"), "")?;
                 let _ = fs::remove_file(queue.join(&me));
                 drop(lk);
+                fs::write(job.turn(n, "queue-order"), &me)?;
                 took_slot(&job, n, &n_slot.to_string())?;
                 return Ok(slot);
             }
@@ -591,6 +599,9 @@ pub fn in_line(cfg: &Config) -> String {
     let mut rows: Vec<(Class, String)> = Vec::new();
     for name in &names {
         let fid = job_of(name);
+        if automation_paused(cfg, &Job::new(cfg, fid)) {
+            continue;
+        }
         if !waiter_alive(&queue.join(name), fid) {
             continue;
         }
@@ -614,7 +625,7 @@ pub fn in_line(cfg: &Config) -> String {
 }
 
 /// The job a place in line is for: PREFIX-WHEN-ID.
-fn job_of(name: &str) -> &str {
+pub(crate) fn job_of(name: &str) -> &str {
     name.split_once('-')
         .and_then(|(_, r)| r.split_once('-'))
         .map_or(name, |(_, r)| r)

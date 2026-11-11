@@ -26,6 +26,7 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
+from proof_state import build_unit, user_systemctl, user_systemctl_run, build_state
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
@@ -796,12 +797,12 @@ def job_lifecycle(jid, key=None, snapshot=None):
     return state, holding(lines, key)
 
 
-def at_work(jid, key=None):
+def at_work(jid, key=None, snapshot=None):
     """Whether job jid (or a proof build) is still at work: queued, running,
     nothing can say, or its turn is over but it holds something open
     (job_lifecycle)."""
-    state, held = job_lifecycle(jid, key)
-    return state in (None, "queued", "running") or held is not None
+    state, held = job_lifecycle(jid, key, snapshot)
+    return state != "parked" and (state in (None, "queued", "running") or held is not None)
 
 
 def holding(lines, key):
@@ -829,47 +830,6 @@ def holding(lines, key):
 # way (lifecycle, stop_job).
 BUILD = "proof-"
 
-
-def build_unit(jid):
-    return f"autoland-{jid}.service"
-
-
-def user_systemctl(*args):
-    """systemctl --user, as the machine user, from a unit that doesn't set
-    the user's runtime dir (proj sets it the same way)."""
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, env=env)
-
-
-def user_systemctl_run(unit, cmd):
-    """Starts cmd as unit, a transient one of the machine user's that goes
-    once it ends (its end is in its build's folder), with this steward's
-    config and tools."""
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    keep = [f"--setenv={k}={os.environ[k]}" for k in ("AUTOLAND_CONFIG", "PATH") if k in os.environ]
-    return subprocess.run(["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", *keep, "--", *cmd],
-                          capture_output=True, text=True, env=env)
-
-
-def build_state(jid):
-    """A proof build's state, as lifecycle says a job's: running while its
-    unit is; done once it built all it could, each check's verdict then in
-    whether its outputs are valid (proofs.verdicts); failed when it stopped
-    short of that (stopped, killed, or nix couldn't build at all), timed out
-    past proofTimeout; None when systemd can't say."""
-    end = load(f"builds/{jid}/end.json", None)
-    if end is not None:
-        return end["state"]
-    p = user_systemctl("show", "-P", "ActiveState", build_unit(jid))
-    if p.returncode:
-        return None
-    if p.stdout.strip() in ("active", "activating", "deactivating", "reloading", "refreshing"):
-        return "running"
-    # Gone, with no end: unless it wrote one just after the first look.
-    end = load(f"builds/{jid}/end.json", None)
-    return end["state"] if end else "failed"
 
 
 def jobs():

@@ -3,6 +3,10 @@
 { self, pkgs }:
 let
   gh = pkgs.writeShellScriptBin "gh" ''
+    if [ -e /var/lib/settings-fixture/limited ]; then
+      printf 'HTTP/2.0 429 Too Many Requests\r\nRetry-After: 3\r\nContent-Type: application/json\r\n\r\n{"message":"limited"}'
+      exit 1
+    fi
     printf 'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
     case "$*" in
       *graphql*)
@@ -64,7 +68,11 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("systemctl mask --runtime --now burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service autoland.service autoland@.service autoland-review.service burrow-update.service burrow-ledger.service burrow-ledger@.service")
     machine.succeed("burrow-settings /etc/settings-tracked allows sam/code")
     machine.fail("burrow-settings /etc/settings-tracked allows sam/new")
-    machine.succeed("touch /var/lib/settings-fixture/pause")
+    machine.succeed("touch /var/lib/settings-fixture/pause /var/lib/settings-fixture/limited")
+    machine.succeed("systemctl start burrow-settings-door.service")
+    machine.succeed("test $(systemctl show -P Result burrow-settings-door.service) = success; test -s /var/lib/burrow/settings-door/wake.json")
+    machine.succeed("burrow-settings /etc/settings-tracked allows sam/code")
+    machine.succeed("rm /var/lib/settings-fixture/limited")
     machine.wait_until_fails("burrow-settings /etc/settings-tracked allows sam/code", timeout=90)
     machine.succeed("test $(systemctl show -P Result burrow-settings-door.service) = success")
     assert "sam/code" in machine.succeed("settings show")

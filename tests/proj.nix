@@ -65,12 +65,12 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
   with subtest("a job's role runs it at the model and effort the machine's models file gives it, and only then"):
       machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"# kinds of work\\nquick claude\\n\" >~/.config/proj/roles'")
       machine.succeed("su - dev -c 'printf \"quick claude chosen medium\\nquick codex other low\\n\" >~/.config/proj/models'")
-      r = proj('run --role quick web "sleep 1"')
+      r = proj('run --local-work --role quick web "sleep 1"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       args = machine.succeed("cat /tmp/args").split()
       assert args[args.index("--model") + 1] == "chosen", args
       assert args[args.index("--effort") + 1] == "medium", args
-      r = proj('run --role other web "sleep 1"')
+      r = proj('run --local-work --role other web "sleep 1"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       args = machine.succeed("cat /tmp/args").split()
       assert "--model" not in args and "--effort" not in args, args

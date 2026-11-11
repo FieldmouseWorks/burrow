@@ -719,6 +719,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     assert!(!p.record_uses_capacity(&drained));
     // A genuinely active paused turn still consumes shared capacity.
     fs::write(b.path("active"), "").unwrap();
+    fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
     assert!(p.sorting_slot(&sorting));
     assert!(p.record_uses_capacity(&drained));
     fs::remove_file(b.path("active")).unwrap();

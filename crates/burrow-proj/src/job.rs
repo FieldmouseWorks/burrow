@@ -183,6 +183,9 @@ impl<'a> Job<'a> {
     /// its latest turn has a slot or not), then how that turn ended, as it
     /// wrote it, or failed when it wrote nothing.
     pub fn state(&self) -> String {
+        if crate::policy::parked(self) {
+            return "parked".into();
+        }
         self.adopt();
         let n = self.turns().unwrap_or_default();
         if systemd::active(self.cfg, &self.unit()) {

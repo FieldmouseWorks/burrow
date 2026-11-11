@@ -55,6 +55,7 @@ in {
       description = "Change operational settings without the pipeline";
       path = [ cfg.door.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
+      environment.BURROW_DOOR_WAKE = "${stateDir}/settings-door/wake.json";
       serviceConfig = {
         Type = "oneshot";
         User = user;

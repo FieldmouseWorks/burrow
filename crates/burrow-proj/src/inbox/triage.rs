@@ -222,6 +222,14 @@ impl Pass<'_> {
         let Some(t) = self.sorting().cloned() else {
             return Ok(());
         };
+        if self
+            .cfg
+            .settings
+            .as_ref()
+            .is_none_or(|s| !s.decision(repo).is_ok_and(|d| !d.vacate))
+        {
+            return Ok(());
+        }
         let root = self.sorting_dir();
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let handled = self.verdicts(repo, &t, all)?;
@@ -325,6 +333,7 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
         let new = New {
+            admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
             unstick: self.lane(issue),
             task_source: (self.inbox.planning && input.len() > crate::planning::MAX_INPUT)
                 .then(|| input.clone()),
@@ -383,6 +392,9 @@ impl Pass<'_> {
             let job = Job::new(self.cfg, &id);
             if !job.dir.is_dir() {
                 let _ = fs::remove_dir_all(&d);
+                continue;
+            }
+            if crate::policy::parked(&job) || crate::policy::denied(&job) {
                 continue;
             }
             let open = all.iter().find(|i| raw(&i["number"]) == n);

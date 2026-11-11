@@ -13,6 +13,14 @@ pub struct Config {
     #[serde(default)]
     pub settings: Option<burrow_settings::Config>,
     #[serde(default)]
+    pub proofs_state: Option<PathBuf>,
+    #[serde(default)]
+    pub agent_tool: Option<PathBuf>,
+    #[serde(default)]
+    pub proof_run: Option<PathBuf>,
+    #[serde(default)]
+    pub proof_build_driver: Vec<String>,
+    #[serde(default)]
     pub usage_paid: bool,
     /// Where the projects are: each folder in it is one (burrow.projectsDir).
     pub projects: PathBuf,

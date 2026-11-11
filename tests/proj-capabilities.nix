@@ -111,7 +111,7 @@ in pkgs.testers.runNixOSTest {
     # App environment and token socket and stand in only for gh's endpoint.
     dev("echo 'export PATH=${fakeGh}/bin:$PATH ANTHROPIC_BASE_URL=http://127.0.0.1:18556 ANTHROPIC_API_KEY=sk-stand-in ANTHROPIC_MODEL=stand-in CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' >>~/.bash_profile")
     def job(role):
-        j = dev(f'proj run --role {role} --app workers web go')
+        j = dev(f'proj run --local-work --role {role} --app workers web go')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
         return j
     def results(j):
@@ -140,7 +140,7 @@ in pkgs.testers.runNixOSTest {
     dev("jq '.tools.codex = \"${drop}\" | .deployed = \"/home/dev/proj-negative\"' " + original + " >/home/dev/proj-negative.json")
     wrapper = "#!/bin/sh\nexport PROJ_CONFIG=/home/dev/proj-negative.json PROJ_SELF=/home/dev/proj-negative\nexec ${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj \"$@\"\n"
     dev("printf %s " + shlex.quote(wrapper) + " >/home/dev/proj-negative && chmod +x /home/dev/proj-negative")
-    n = dev('/home/dev/proj-negative run --role second --app workers web go')
+    n = dev('/home/dev/proj-negative run --local-work --role second --app workers web go')
     machine.wait_until_succeeds(f"su - dev -c 'proj state {n}' | grep -Evx 'queued|running'", timeout=300)
     assert results(n) != expected, "dropping heavy did not break parity"
     assert machine.succeed(f"cat /data/dev/jobs/{n}/capability-running").strip() == "heavy"

@@ -57,7 +57,6 @@ fn start_with(
     let job = Job::new(cfg, id);
     crate::planning::admit(&job)?;
     let unit = job.unit();
-    let end = job.end_unit();
     // The last turn reads as ended once it has written its outcome, but its
     // unit is there until it's over, and no unit starts under that name
     // until it's gone; its _ended (telling the watchdog, kicking proj-watch,
@@ -116,24 +115,16 @@ fn start_with(
     // what kills the turn's whole cgroup (systemd-oomd does) would take an
     // ExecStopPost with it. The name is doubled up on its backslashes, which
     // systemd-run reads as escapes.
-    let hook = end.replace('\\', "\\\\");
-    let started = systemd::systemd_run(cfg)
-        .args(["--quiet", "--collect"])
-        .arg(format!("--unit={unit}"))
-        .arg(format!("--slice={}", cfg.slice))
-        .arg(format!("--property=MemoryMax={}", cfg.job_memory_max))
-        .arg("--property=OOMPolicy=continue")
-        .arg("--property=OOMScoreAdjust=500")
-        .arg(format!(
-            "--property=WorkingDirectory={}",
-            read(&job.path("project")).unwrap_or_default()
-        ))
-        .arg(format!("--property=OnSuccess={hook}"))
-        .arg(format!("--property=OnFailure={hook}"))
-        .arg(&cfg.me)
-        .args(["_exec", id, if first { "first" } else { "normal" }])
-        .status()
-        .is_ok_and(|s| s.success());
+    let _ = fs::write(
+        job.turn(&n.to_string(), "priority"),
+        if first { "first" } else { "normal" },
+    );
+    let started = if crate::policy::denied(&job) {
+        crate::policy::mark(&job, "queued", first)?;
+        true
+    } else {
+        launch(cfg, &job, first)
+    };
     if !started {
         undo();
         return Err(couldnt());
@@ -156,6 +147,30 @@ fn start_with(
     Ok(())
 }
 
+pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
+    let end = job.end_unit();
+    let unit = job.unit();
+    let id = job.id;
+    let hook = end.replace('\\', "\\\\");
+    systemd::systemd_run(cfg)
+        .args(["--quiet", "--collect"])
+        .arg(format!("--unit={unit}"))
+        .arg(format!("--slice={}", cfg.slice))
+        .arg(format!("--property=MemoryMax={}", cfg.job_memory_max))
+        .arg("--property=OOMPolicy=continue")
+        .arg("--property=OOMScoreAdjust=500")
+        .arg(format!(
+            "--property=WorkingDirectory={}",
+            read(&job.path("project")).unwrap_or_default()
+        ))
+        .arg(format!("--property=OnSuccess={hook}"))
+        .arg(format!("--property=OnFailure={hook}"))
+        .arg(&cfg.me)
+        .args(["_exec", id, if first { "first" } else { "normal" }])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// One turn of a job, inside its own systemd unit: `first` or `normal`, as
 /// it was started.
 pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
@@ -168,6 +183,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     {
         let _lock = job.lock().map_err(|e| Fail::new(1, e.to_string()))?;
         crate::question::accept(&job, &n).map_err(|e| Fail::new(1, e))?;
+        crate::policy::accepted(&job).map_err(|e| Fail::new(1, e))?;
     }
     let outcome = |text: &str| {
         let _ = fs::write(job.turn(&n, "outcome"), format!("{text}\n"));

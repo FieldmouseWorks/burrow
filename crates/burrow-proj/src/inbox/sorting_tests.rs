@@ -165,6 +165,13 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
     pub(super) fn job_ending(&self, id: &str, outcome: &str, end: Option<&str>, said: &str) {
         let d = self.cfg.jobs.join(id);
         fs::create_dir_all(&d).unwrap();
+        crate::policy::bind(
+            &crate::job::Job::new(&self.cfg, id),
+            crate::policy::Identity::Repository("sam/box".into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+        fs::write(d.join("usage-kind"), "inbox").unwrap();
         crate::ask::ensure(&crate::job::Job::new(&self.cfg, id)).unwrap();
         fs::write(
             crate::ask::host_path(&crate::job::Job::new(&self.cfg, id), "question-text"),

@@ -28,6 +28,11 @@ use crate::{
 /// why it ended short, in words, also in its log.
 pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
     let rec = Record::read(dir)?;
+    match fs::remove_file(dir.join("policy-restoring")) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.to_string()),
+    }
     let id = id(dir)?;
     let log = OpenOptions::new()
         .create(true)
@@ -61,8 +66,15 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
             rec.checkout.display()
         ));
     }
-    let mut ran = Ran::default();
+    let mut ran: Ran = match fs::read(dir.join(RAN)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ran::default(),
+        Err(e) => return Err(e.to_string()),
+    };
     for (i, (check, cmd)) in rec.runs.iter().enumerate() {
+        if ran.verdicts.contains_key(check) && ran.exits.contains_key(check) {
+            continue;
+        }
         note(&format!("{check}: {cmd}"));
         let exit = match one(&rec, dir, id, i, check, cmd, fence, &log) {
             Ok(exit) => exit,
@@ -84,6 +96,7 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
         };
         ran.verdicts.insert(check.clone(), said);
         ran.exits.insert(check.clone(), exit);
+        save(&dir.join(RAN), &ran).map_err(|e| e.to_string())?;
     }
     if let Some(text) = comment::comment(&rec, dir, id, &ran)
         && let Err(e) = write_whole(&dir.join(COMMENT), text.as_bytes())
@@ -154,9 +167,17 @@ fn one(
     log: &File,
 ) -> Result<i32, String> {
     let tree = rec.trees.join(format!("{id}-{i}"));
-    let made = trees::add(&rec.git, &rec.checkout, &tree, &rec.head, log);
+    let made = if tree.exists() {
+        Command::new(&rec.git)
+            .arg("-C")
+            .arg(&tree)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == rec.head)
+    } else {
+        trees::add(&rec.git, &rec.checkout, &tree, &rec.head, log)
+    };
     if !made.as_ref().is_ok_and(|ok| *ok) {
-        let _ = trees::remove(&rec.git, &rec.checkout, &tree);
         return Err(match made {
             Err(e) => format!("can't make its worktree at {}: {e}", tree.display()),
             Ok(_) => format!("can't make its worktree at {}", tree.display()),

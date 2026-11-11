@@ -186,3 +186,26 @@ fn a_comment_fits_whatever_its_summaries_hold() {
     assert_eq!(cut("界界", 6), "界界");
     assert_eq!(cut("界界", 3), "");
 }
+
+#[test]
+fn parked_proof_trees_survive_the_end_hook_and_other_runs_sweeps() {
+    let temp = tempfile::tempdir().unwrap();
+    let builds = temp.path().join("builds");
+    let trees = temp.path().join("trees");
+    let id = "proof-sam-r-5-aaaaaaaaaaaa-1";
+    let dir = builds.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&trees).unwrap();
+    let tree = trees.join(format!("{id}-0"));
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("preserved"), "work").unwrap();
+    let mut rec = record();
+    rec.trees = trees.clone();
+    written(&dir, serde_json::to_value(rec).unwrap());
+    fs::write(dir.join("policy-paused"), "paused").unwrap();
+    let end = crate::end::end(&dir, &crate::end::Ended::default()).unwrap();
+    assert_eq!(end["state"], "parked");
+    assert!(tree.join("preserved").exists());
+    assert!(crate::trees::sweep(&trees, &builds, "another-run", Path::new("git")).is_empty());
+    assert!(tree.join("preserved").exists());
+}

@@ -25,6 +25,7 @@ pub struct Config {
 pub struct Decision {
     pub allowed: bool,
     pub retry_at: Option<i64>,
+    pub vacate: bool,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -80,6 +81,12 @@ impl Config {
         let allowed = self.permits(&state, repo);
         Ok(Decision {
             allowed,
+            vacate: state.repos.get(&repo.to_ascii_lowercase()) == Some(&false)
+                || (state.pipeline_until.is_some_and(|t| t > now())
+                    && !self
+                        .pipeline_repos
+                        .iter()
+                        .any(|r| r.eq_ignore_ascii_case(repo))),
             retry_at: state.pipeline_until.filter(|t| !allowed && *t > now()),
         })
     }

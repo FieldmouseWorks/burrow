@@ -219,6 +219,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("_policy") => crate::policy::reconcile(cfg).map_err(|e| Fail::new(1, e)),
         Some("_questions") => {
             put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
             Ok(())

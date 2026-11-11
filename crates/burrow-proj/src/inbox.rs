@@ -342,13 +342,20 @@ impl Pass<'_> {
         let paused = name
             .rsplit_once('-')
             .is_some_and(|(repo, _)| self.cfg.paused(&repo.replacen('_', "/", 1)));
+        if let Some(id) = read(&dir.join("job")) {
+            let job = Job::new(self.cfg, &id);
+            if !job.dir.is_dir() {
+                return !paused;
+            }
+            if crate::policy::parked(&job) {
+                return false;
+            }
+            if crate::policy::denied(&job) {
+                return job.state() == "running";
+            }
+            return true;
+        }
         !paused
-            || read(&dir.join("job")).is_some_and(|id| {
-                matches!(
-                    Job::new(self.cfg, &id).state().as_str(),
-                    "queued" | "running"
-                )
-            })
     }
 
     fn book(&mut self, repo: &str, at: i64) {
@@ -409,6 +416,7 @@ impl Pass<'_> {
         let drained = self.drained(repo, &raw(&issue["number"]));
         let (role, engine) = self.routing(issue);
         let new = New {
+            admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
             inbox_issue: true,
             usage_kind: Some(usage::kind(self.cfg.steward_login.as_deref(), issue)),
             vm: self.inbox.vm,

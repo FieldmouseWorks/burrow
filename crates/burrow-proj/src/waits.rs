@@ -26,7 +26,7 @@ use serde_json::{Map, Value, json};
 use crate::config::Config;
 use crate::job::{Job, USAGE_LIMIT};
 use crate::slot::successor;
-use crate::{GRACE, RESUME_GRACE, mtime, now, swap, usage};
+use crate::{GRACE, RESUME_GRACE, mtime, now, read, swap, usage};
 
 /// What [`job_wait`] reads of a job's latest turn.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -67,6 +67,9 @@ pub struct Facts {
 /// One job's wait in the watchdog's form, or None when there's nothing to
 /// watch.
 pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
+    if f.state == "parked" {
+        return None;
+    }
     let stall = cfg.stall_queued();
     let turn = &f.turn;
     let mut kick = None;
@@ -317,12 +320,19 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     for id in ids {
         let f = dir.join(id);
         let job = Job::new(cfg, id);
-        let wait = job
-            .dir
-            .is_dir()
-            .then(|| job.facts())
-            .flatten()
-            .and_then(|facts| job_wait(cfg, &facts));
+        let wait = (!crate::policy::parked(&job) && !crate::policy::denied(&job))
+            .then_some(&job)
+            .filter(|job| job.dir.is_dir())
+            .and_then(|job| job.facts())
+            .and_then(|mut facts| {
+                if let Some(released) =
+                    read(&crate::policy::path(&job, "released")).and_then(|s| s.parse::<i64>().ok())
+                {
+                    facts.queued = facts.queued.max(released);
+                }
+                job_wait(cfg, &facts)
+            });
+
         match wait {
             Some(item) => swap(&f, &format!("{}\n", json!(item)))?,
             None => {

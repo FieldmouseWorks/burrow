@@ -30,6 +30,9 @@ pub fn dir(cfg: &Config, id: &str) -> PathBuf {
 /// comes next) keeps its scratch: what it awaits, or a reply, resumes it there.
 /// A reply to a job that was over finds its scratch made afresh, empty.
 pub fn over(job: &Job) -> bool {
+    if crate::policy::parked(job) || crate::policy::path(job, "restoring").exists() {
+        return false;
+    }
     if crate::ask::load(job).is_some() {
         return false;
     }
