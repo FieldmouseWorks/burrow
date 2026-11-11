@@ -174,7 +174,7 @@ pkgs.testers.runNixOSTest {
         minFreeMemory = 0;
       };
       github.apps.workers = {
-        id = 7;
+        id = 7; accountId = 8;
         slug = "sam-workers";
         keyFile = "/run/keys/workers.pem";
         users = [ "dev" ];

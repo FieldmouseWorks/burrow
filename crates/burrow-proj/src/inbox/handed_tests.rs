@@ -11,7 +11,7 @@ use super::sorting_tests::{Box, issue};
 
 /// A comment of the author's, old enough to be handed on.
 fn said(id: u64, body: &str) -> Value {
-    json!({"id": id, "user": {"login": "sam"}, "body": body,
+    json!({"id": id, "user": burrow_github::fake::actor("sam"), "body": body,
            "created_at": "2026-11-01T00:00:00Z"})
 }
 
@@ -198,7 +198,7 @@ fn a_reply_cannot_smuggle_outside_edits_into_a_running_job() {
     for field in ["body", "title", "comment"] {
         let had = issue(7, "sam", &["claude"]);
         let mut now = had.clone();
-        let bad = json!({"totalCount":1,"nodes":[{"editor":{"login":"mallory"},"actor":{"login":"mallory"}}]});
+        let bad = json!({"totalCount":1,"nodes":[{"editor":burrow_github::fake::actor("mallory"),"actor":burrow_github::fake::actor("mallory")}]});
         let mut comments = vec![said(9, "authorized continuation")];
         match field {
             "body" => {
@@ -241,7 +241,7 @@ fn a_final_refresh_edit_retries_verification_before_closing_or_continuing() {
                 } else {
                     "userContentEdits"
                 };
-                edited[history] = json!({"totalCount":1,"nodes":[{"actor":{"login":"mallory"},"editor":{"login":"mallory"}}]});
+                edited[history] = json!({"totalCount":1,"nodes":[{"actor":burrow_github::fake::actor("mallory"),"editor":burrow_github::fake::actor("mallory")}]});
             }
             let mut b = Box::new();
             let d = finished(&mut b, &had, 0, &[], &had);
@@ -390,7 +390,7 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
         let comments = [
             said(5, "already handed"),
             said(6, "one more run"),
-            json!({"id": 7, "user": {"login": "stranger"}, "body": "outside"}),
+            json!({"id": 7, "user": burrow_github::fake::actor("stranger"), "body": "outside"}),
             said(8, "answer <!-- proj-inbox -->"),
         ];
         let d = finished(&mut b, &now, 5, &comments, &now);

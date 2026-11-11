@@ -25,10 +25,12 @@ pub(super) fn parent_fixture() -> (Box, Value, List) {
             .collect(),
         children: vec![
             Child {
+                posting_id: Some(burrow_github::fake::author("workers[bot]").id),
                 number: Some(8),
                 ..Child::default()
             },
             Child {
+                posting_id: Some(burrow_github::fake::author("workers[bot]").id),
                 number: Some(9),
                 ..Child::default()
             },
@@ -97,7 +99,7 @@ fn edited_and_untrusted_parents_cannot_admit_children() {
         match change {
             "edit" => parent["body"] = json!("Changed scope"),
             "outside" => parent["labels"] = json!([{"name":"outside text"}]),
-            _ => parent["user"]["login"] = json!("stranger"),
+            _ => parent["user"] = burrow_github::fake::actor("stranger"),
         }
         fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
         assert!(!b.pass().child_admissible("sam/box", "8"), "{change}");
@@ -464,7 +466,7 @@ fn approvals_compare_exact_task_bytes_for_bodies_comments_and_children() {
             let mut comments = Vec::new();
             if comment {
                 comments
-                    .push(json!({"id":1,"user":{"login":"sam"},"body":format!("body{suffix}")}));
+                    .push(json!({"id":1,"user":burrow_github::fake::actor("sam"),"body":format!("body{suffix}")}));
             } else {
                 parent["body"] = json!(format!("body{suffix}"));
             }
@@ -479,7 +481,7 @@ fn approvals_compare_exact_task_bytes_for_bodies_comments_and_children() {
             if comment {
                 fs::write(
                     b.path("comments"),
-                    json!([[{"id":1,"user":{"login":"sam"},"body":format!("body{suffix} ")}]])
+                    json!([[{"id":1,"user":burrow_github::fake::actor("sam"),"body":format!("body{suffix} ")}]])
                         .to_string(),
                 )
                 .unwrap();
@@ -544,7 +546,7 @@ fn generated_child_approval_detects_every_trailing_whitespace_edit() {
         // A newly approved comment must retain its terminal newlines too.
         fs::write(
             b.path("comments"),
-            json!([[{"id":1,"user":{"login":"sam"},"body":"scope"}]]).to_string(),
+            json!([[{"id":1,"user":burrow_github::fake::actor("sam"),"body":"scope"}]]).to_string(),
         )
         .unwrap();
         let source = b.pass().input("sam/box", &child).unwrap();
@@ -552,7 +554,7 @@ fn generated_child_approval_detects_every_trailing_whitespace_edit() {
         assert!(b.pass().planned(Some("sam/box"), &child));
         fs::write(
             b.path("comments"),
-            json!([[{"id":1,"user":{"login":"sam"},"body":format!("scope{suffix}")}]]).to_string(),
+            json!([[{"id":1,"user":burrow_github::fake::actor("sam"),"body":format!("scope{suffix}")}]]).to_string(),
         )
         .unwrap();
         assert!(

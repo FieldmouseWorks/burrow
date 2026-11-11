@@ -41,13 +41,13 @@
     probe = {
       enable = true;
       repo = "sam/homelab";
-      authors = [ "sam" ];
+      authors = [ { login = "sam"; id = 1; } ];
     };
     autoland = {
       enable = true;
       owners = [ "sam" ];
       authors = [ "sam" ];
-      app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; };
+      app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; };
       reviewers.codex.enable = true;
       # Its PRs land through its merge train (on the ledger, below).
       repos."sam/homelab".train = true;
@@ -63,7 +63,7 @@
     # The App the machine's own jobs act as, rather than as sam.
     github = {
       apps.workers = {
-        id = 2;
+        id = 2; accountId = 3;
         slug = "sam-workers";
         keyFile = "/run/secrets/workers-key";
       };

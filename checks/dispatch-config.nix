@@ -46,7 +46,7 @@ let
     burrow.autoland = {
       enable = true;
       owners = [ "sam" ];
-      app = { id = 123; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
+      app = { id = 123; accountId = 124; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
     };
   } ];
   dispatchOnly = machine { } [ { burrow.dispatch.fresh.enable = lib.mkForce false; } ];

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub repo: String,
     pub label: String,
-    pub authors: Vec<String>,
+    pub authors: Vec<burrow_github::Author>,
     pub roles: PathBuf,
     pub state: PathBuf,
 }
