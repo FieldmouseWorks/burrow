@@ -30,7 +30,7 @@ fn ctx(pairs: &[(&str, V)]) -> Ctx {
 fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     let job = job();
     let all = steps(&job);
-    let (made, restore, install) = (&all[2], &all[3], &all[4]);
+    let (made, restore, install) = (&all[2], &all[4], &all[5]);
     for (keep, nix) in [(true, true), (true, false), (false, true)] {
         let c = ctx(&[
             ("inputs.keep-builds", keep.into()),
@@ -99,9 +99,9 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
             said
         );
     }
-    let [tool, keep, save] = &all[all.len() - 3..] else {
-        unreachable!()
-    };
+    let tool = crate::harness::step(&job, "keep-tool");
+    let keep = crate::harness::step(&job, "keep");
+    let save = crate::harness::step(&job, "keep-save");
     // burrow-keep from the commit this workflow is, whichever repo calls it,
     // with nothing that can push.
     assert!(
@@ -188,7 +188,7 @@ fn a_negative_restores_every_legs_kept_builds() {
     let all = steps(neg);
     let gate = job();
     let gate_all = steps(&gate);
-    let (gate_made, gate_restore, gate_install) = (&gate_all[2], &gate_all[3], &gate_all[4]);
+    let (gate_made, gate_restore, gate_install) = (&gate_all[2], &gate_all[4], &gate_all[5]);
     let uses = |s: &Value, action: &str| s["uses"].as_str().is_some_and(|u| u.starts_with(action));
     let at = |f: &dyn Fn(&Value) -> bool| all.iter().position(f).unwrap();
     let restores: Vec<&Value> = all
