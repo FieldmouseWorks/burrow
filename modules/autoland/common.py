@@ -26,7 +26,10 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
-from proof_state import build_unit, user_systemctl, user_systemctl_run as user_systemctl_run, build_state
+import proof_state
+from proof_state import build_unit, user_systemctl, build_state
+
+user_systemctl_run = proof_state.user_systemctl_run
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
