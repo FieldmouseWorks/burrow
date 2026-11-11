@@ -814,7 +814,7 @@ fn tell(cfg: &Config, args: &[&str]) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod owner_tests;

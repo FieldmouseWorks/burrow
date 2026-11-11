@@ -88,6 +88,11 @@ pub struct Config {
     /// effort on each engine ([`crate::models`]). Missing roles keep the
     /// engine's own; malformed lines fail the turn.
     pub models: PathBuf,
+    /// The flake's value of each option in burrow-settings' schema, and
+    /// whether the flake set it (modules/settings/tracked.nix), for `proj
+    /// settings` ([`crate::settings`]).
+    #[serde(default)]
+    pub settings: serde_json::Map<String, serde_json::Value>,
     /// The engines' meters (claude.json, codex.json), written by
     /// usage-reset; absent disables overflow.
     pub meters: Option<PathBuf>,

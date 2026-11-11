@@ -51,3 +51,16 @@ pub(crate) fn engines(path: &Path, text: &str) -> Result<String, String> {
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") + "\n")
         .collect())
 }
+
+/// Every line of a roles file, as `settings show` gives it: `ROLE[@OWNER/REPO]`
+/// to `ENGINE [over PCT ENGINE]`, each checked as a turn checks it.
+pub(crate) fn shown(
+    path: &Path,
+    text: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    Ok(engines(path, text)?
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(role, engine)| (role.to_owned(), engine.into()))
+        .collect())
+}

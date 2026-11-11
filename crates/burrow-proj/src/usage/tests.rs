@@ -16,7 +16,7 @@ use crate::config::tests::example;
 /// answers `pending` with 0 (may still be open) while there's a `pending`
 /// file, with the code in `pending-code` when there's one of those, killed
 /// when there's a `pending-killed`, and 1 (closed) otherwise.
-pub(super) fn rig() -> (tempfile::TempDir, Config) {
+pub(crate) fn rig() -> (tempfile::TempDir, Config) {
     let d = tempfile::tempdir().unwrap();
     let notify = d.path().join("notify");
     let dir = d.path().display();

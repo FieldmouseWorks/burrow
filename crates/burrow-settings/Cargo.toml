@@ -1,0 +1,14 @@
+[package]
+name = "burrow-settings"
+description = "The pipeline's options, each declared once in a typed schema, and the document that shows each one's value and where it came from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

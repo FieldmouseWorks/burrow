@@ -10,7 +10,7 @@
 # their own wake-ups start them, never a timer. With the stall watchdog on,
 # proj is one of its sources: each job's wait, as of its last change.
 inputs:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, options, ... }:
 let
   cfg = config.burrow.proj;
   # What marks proj-inbox's own comments on an issue: never a reply, never news.
@@ -100,6 +100,7 @@ let
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
     inherit roles models;
+    settings = import ./settings/tracked.nix { inherit lib options; };
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
