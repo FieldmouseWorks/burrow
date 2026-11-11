@@ -22,7 +22,11 @@ impl Pass<'_> {
         // goes, the next look at the issue (new_issues) saying why.
         self.retired(repo)?;
         let listed = open;
-        let open: Vec<Value> = open.iter().filter(|i| self.eligible(i)).cloned().collect();
+        let open: Vec<Value> = open
+            .iter()
+            .filter(|i| self.eligible(repo, i))
+            .cloned()
+            .collect();
         let open = open.as_slice();
         'jobs: for d in dirs(&self.inbox.state, &format!("{}-", key(repo))) {
             let Some(mut id) = read(&d.join("job")).filter(|j| !j.is_empty()) else {
@@ -392,7 +396,7 @@ impl Pass<'_> {
                 now_issue["title"] = safe_issue["title"].clone();
                 now_issue["body"] = safe_issue["body"].clone();
                 let labelled = self.engine(&now_issue).is_some();
-                if now_issue["state"] != "open" || !labelled || !self.eligible(&now_issue) {
+                if now_issue["state"] != "open" || !labelled || !self.eligible(repo, &now_issue) {
                     continue;
                 }
                 // Not what the job's record says it was handed (the title or

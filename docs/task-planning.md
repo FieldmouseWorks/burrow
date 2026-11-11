@@ -37,10 +37,11 @@ engine label cannot admit a later child. Completion requires a merged PR,
 not merely a closed issue. Nested splits complete through their own lists.
 Issue, PR and turn-completion events advance the list without a parent job.
 
-Children created by the machine must pass the same author and edit-history
-checks as other issues. Enabling planning includes the configured machinery
-App's bot identity in `inbox.authors`. Outside-text labels and untrusted
-edits retain their existing protections. An edited parent pauses child
+Generated children are admitted only through local durable creation receipts;
+reused issues still require a configured author. Planning never changes
+`inbox.authors`. Comments and edit histories always require configured
+authors, including on generated children. Outside-text labels retain their
+existing protection. An edited parent pauses child
 admission and posts a notice; the task list and completed work remain on
 disk for replanning rather than silently executing the old scope.
 

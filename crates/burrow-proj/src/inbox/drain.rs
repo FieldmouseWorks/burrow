@@ -303,9 +303,6 @@ impl Pass<'_> {
             .iter()
             .filter(|i| i.get("pull_request").is_none())
             .filter_map(|i| {
-                if !self.eligible(i) {
-                    return None;
-                }
                 let url = raw(&i["repository_url"]);
                 let named = url.rsplit('/').take(2).collect::<Vec<_>>();
                 let [name, owner] = named[..] else {
@@ -316,7 +313,7 @@ impl Pass<'_> {
                     .keys()
                     .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
                     .clone();
-                if self.cfg.paused(&repo) {
+                if !self.eligible(&repo, i) || self.cfg.paused(&repo) {
                     return None;
                 }
                 let labels: Vec<&str> = i["labels"]

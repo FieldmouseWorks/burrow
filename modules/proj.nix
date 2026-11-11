@@ -352,8 +352,8 @@ in
           Plan inbox tasks on fresh planner-role sessions before implementation.
           This role defaults to Codex; Claude requires an explicit small model.
           Large tasks become ordered child issues, with a durable parent
-          checklist. The configured machinery App is included in inbox.authors
-          so those children can enter the normal ready queue.
+          checklist. Durable creation receipts admit generated children without
+          adding their creator to inbox.authors.
         '';
       };
       enable = lib.mkEnableOption ''
@@ -463,8 +463,6 @@ in
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [ {
-    burrow.proj.inbox.authors = lib.mkIf (cfg.inbox.planning && machineApp != null)
-      (lib.mkAfter [ "${machineApp.slug}[bot]" ]);
     assertions = [{
       assertion = cfg.pipelineSlots < cfg.maxJobs;
       message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";

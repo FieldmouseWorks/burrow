@@ -164,7 +164,7 @@ impl Pass<'_> {
         claimed: &BTreeSet<String>,
     ) -> bool {
         if issue.get("pull_request").is_some()
-            || !self.eligible(issue)
+            || !self.eligible(repo, issue)
             || claimed.contains(&raw(&issue["number"]))
         {
             return true;

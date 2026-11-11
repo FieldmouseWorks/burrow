@@ -744,7 +744,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             }
             let opener = raw(&issue["user"]["login"]);
-            if !self.allowed(&opener) {
+            if !self.allowed(&opener) && !self.generated_child(repo, issue) {
                 let said = format!(
                     "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
                     self.inbox.host,
@@ -807,17 +807,18 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
 
     /// Whether an agent may read the issue: one of the authors opened it,
     /// and it isn't labelled outside text.
-    pub(super) fn eligible(&self, issue: &Value) -> bool {
-        self.allowed(&raw(&issue["user"]["login"])) && !self.outside(issue)
+    pub(super) fn eligible(&self, repo: &str, issue: &Value) -> bool {
+        (self.allowed(&raw(&issue["user"]["login"])) || self.generated_child(repo, issue))
+            && !self.outside(issue)
     }
 
     /// Whether an agent may no longer read issue N: as `listed` has it, or
     /// as GitHub says now when no list has it. None when GitHub didn't say.
     pub(super) fn barred(&self, repo: &str, n: &str, listed: Option<&Value>) -> Option<bool> {
         match listed {
-            Some(i) => Some(!self.eligible(i)),
+            Some(i) => Some(!self.eligible(repo, i)),
             None => crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
-                .map(|i| !self.eligible(&i)),
+                .map(|i| !self.eligible(repo, &i)),
         }
     }
 

@@ -187,8 +187,8 @@ Each has an entry below, and each can be imported on its own.
   `burrow.proj.inbox.planning` defaults on: a fresh Codex
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist
-  updated when each child's PR lands. The configured machinery App joins
-  `inbox.authors` so its children can enter the ready queue. A worker can
+  updated when each child's PR lands. Durable creation receipts admit
+  generated children without widening `inbox.authors`. A worker can
   use `proj split FILE` when its task needs another split. See
   [task planning](docs/task-planning.md) for the state and retry protocol.
   After a reset, `burrow.proj.usageTrickle` (default 2) caps concurrent Claude

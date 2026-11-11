@@ -75,6 +75,32 @@ impl Pass<'_> {
             .collect()
     }
 
+    /// Only a locally recorded creation can bypass the opener allowlist.
+    /// Reused issues and comments receive no additional trust. Edit history
+    /// remains checked against configured authors by written().
+    pub(super) fn generated_child(&self, repo: &str, issue: &Value) -> bool {
+        if !self.inbox.planning {
+            return false;
+        }
+        let Some(number) = issue["number"].as_u64() else {
+            return false;
+        };
+        self.plan_dirs(repo).iter().any(|d| {
+            fs::read(d.join("tasks.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<List>(&bytes).ok())
+                .is_some_and(|list| {
+                    list.tasks
+                        .iter()
+                        .zip(&list.children)
+                        .chain(list.retained.iter().map(|r| (&r.task, &r.child)))
+                        .any(|(task, child)| {
+                            task.issue.is_none() && child.attempted && child.number == Some(number)
+                        })
+                })
+        })
+    }
+
     pub(super) fn approved_input(&self, repo: &str, n: &str, input: &str) -> bool {
         !self.has_task_list(Some(repo), n)
             && fs::read_to_string(self.plan_dir(repo, n).join("input"))
@@ -146,10 +172,7 @@ impl Pass<'_> {
             };
             list.comment = comments
                 .iter()
-                .find(|c| {
-                    self.allowed(c["user"]["login"].as_str().unwrap_or_default())
-                        && c["body"].as_str().is_some_and(|b| b.contains(&marker))
-                })
+                .find(|c| c["body"].as_str() == Some(body.as_str()))
                 .and_then(|c| c["id"].as_u64());
         }
         let (method, endpoint) = match list.comment {
@@ -244,7 +267,7 @@ impl Pass<'_> {
                 self.miss(repo);
                 return false;
             };
-            if !self.eligible(&issue)
+            if !self.eligible(repo, &issue)
                 || issue["state"] != "open"
                 || !self.verified_source(repo, &issue).unwrap_or(false)
                 || list.next() != Some(index)
@@ -466,7 +489,7 @@ impl Pass<'_> {
                 let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{existing}")) else {
                     return false;
                 };
-                if !self.eligible(&issue) || issue.get("pull_request").is_some() {
+                if !self.eligible(repo, &issue) || issue.get("pull_request").is_some() {
                     return false;
                 }
                 list.children[i].number = Some(existing);
@@ -488,7 +511,15 @@ impl Pass<'_> {
             let matches: Vec<_> = all
                 .iter()
                 .filter(|issue| {
-                    self.eligible(issue)
+                    !self.outside(issue)
+                        && (self.eligible(repo, issue)
+                            || (list.children[i].attempted
+                                && issue["title"].as_str() == Some(task.title.as_str())
+                                && issue["body"].as_str()
+                                    == Some(
+                                        Self::receipt_body(repo, n, i, task, &list.children[i])
+                                            .as_str(),
+                                    )))
                         && issue.get("pull_request").is_none()
                         && issue["body"]
                             .as_str()
@@ -550,7 +581,7 @@ impl Pass<'_> {
             };
             if child["title"].as_str() == Some(task.title.as_str())
                 && child["body"].as_str() == Some(expected.as_str())
-                && self.eligible(&child)
+                && self.eligible(repo, &child)
             {
                 let input = self.issue_text(repo, &child, &[]);
                 if self.keep_planned(repo, &number, &input).is_err() {
@@ -592,7 +623,7 @@ impl Pass<'_> {
             };
             let Some(parent) = all
                 .iter()
-                .find(|i| raw(&i["number"]) == n && self.eligible(i))
+                .find(|i| raw(&i["number"]) == n && self.eligible(repo, i))
             else {
                 continue;
             };
@@ -634,7 +665,7 @@ impl Pass<'_> {
                 self.miss(repo);
                 continue;
             };
-            if !self.eligible(&issue) {
+            if !self.eligible(repo, &issue) {
                 continue;
             }
             // Apply inherited repair scheduling even when a previous pass already
@@ -723,3 +754,7 @@ mod tests;
 #[cfg(test)]
 #[path = "plans_review_tests.rs"]
 mod review_tests;
+
+#[cfg(test)]
+#[path = "plans_trust_tests.rs"]
+mod trust_tests;
