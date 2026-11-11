@@ -90,7 +90,7 @@ def limited(stderr, env):
     if LIMITED or not re.search(r"rate limit", stderr, re.I):
         return
     p = remote(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
-                       capture_output=True, text=True, env=env)
+               capture_output=True, text=True, env=env)
     try:
         LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
     except ValueError:
@@ -224,7 +224,7 @@ def fresh(path, etag=None):
     gh() does, and Gone when there's no such thing."""
     env = gh_env()
     p = remote(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
-                       capture_output=True, text=True, env=env)
+               capture_output=True, text=True, env=env)
     status, _, rest = p.stdout.partition("\n")
     code = status.split(" ")[1:2]
     if code == ["304"]:
