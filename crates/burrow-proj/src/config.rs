@@ -22,6 +22,10 @@ pub struct Config {
     pub proof_run: Option<PathBuf>,
     #[serde(default)]
     pub proof_build_driver: Vec<String>,
+    /// The steward config the build driver reads now; a restored proof uses
+    /// it, never the one its earlier unit was started with.
+    #[serde(default)]
+    pub proof_driver_config: Option<PathBuf>,
     #[serde(default)]
     pub usage_paid: bool,
     /// Where the projects are: each folder in it is one (burrow.projectsDir).

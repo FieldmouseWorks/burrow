@@ -2,7 +2,7 @@
 //! failed GitHub reply cannot replay an old allow over a newer host pause.
 use crate::Config;
 use burrow_door::{Door, asked, fenced};
-use burrow_github::{Api, Error};
+use burrow_github::{Api, Author, Error};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -15,7 +15,7 @@ use std::{
 pub struct DoorConfig {
     pub repo: String,
     pub label: String,
-    pub authors: Vec<String>,
+    pub authors: Vec<Author>,
     pub state: PathBuf,
     pub settings: Config,
 }
@@ -79,12 +79,12 @@ mod tests {
         let mut gh = Fake::default();
         let edits: Vec<_> = editor
             .into_iter()
-            .map(|e| json!({"editor":{"login":e},"deletedBy":null}))
+            .map(|e| json!({"editor":burrow_github::fake::actor(e),"deletedBy":null}))
             .collect();
         gh.on(
             "GET",
             "repos/sam/box/issues",
-            vec![ok(200, json!([{"number":1,"user":{"login":author}}]), &[])],
+            vec![ok(200, json!([{"number":1,"user":burrow_github::fake::actor(author)}]), &[])],
         )
         .on(
             "POST",
@@ -92,7 +92,7 @@ mod tests {
             vec![ok(
                 200,
                 json!({"data":{"repository":{"issue":{
-                  "id":"one", "author":{"login":author},"title":"settings","body":body,
+                  "id":"one", "author":burrow_github::fake::actor(author),"title":"settings","body":body,
                   "openCycle":{"nodes":[]},
                   "userContentEdits":{"totalCount":edits.len(),"nodes":edits},
                   "timelineItems":{"totalCount":0,"nodes":[]}
@@ -119,7 +119,7 @@ mod tests {
         let cfg = DoorConfig {
             repo: "sam/box".into(),
             label: "settings".into(),
-            authors: vec!["sam".into()],
+            authors: vec![burrow_github::fake::author("sam")],
             state: dir.path().join("door"),
             settings: Config {
                 overlay: dir.path().join("overlay.json"),

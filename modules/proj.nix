@@ -105,6 +105,7 @@ let
     agentTool = "${agents}/bin/agent";
     proofsState = "${stateDir}/autoland/builds";
     proofRun = "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof}/bin/burrow-proof";
+    proofDriverConfig = config.burrow.autoland.configFile or null;
     proofBuildDriver = [ "${pkgs.python3}/bin/python3" "-E" "-s" "${./autoland}/steward.py" ];
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;

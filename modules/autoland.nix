@@ -314,6 +314,7 @@ in
 
   options.burrow.autoland = {
     enable = lib.mkEnableOption "autoland, the PR steward for every repo you own";
+    configFile = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; default = configFile; description = "The steward's settings file."; };
 
     owners = mkOption {
       type = types.listOf types.str;
