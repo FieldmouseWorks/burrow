@@ -843,6 +843,12 @@ fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     );
     let job = Job::new(&cfg, "held");
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
     let _slot = crate::slot::take(&cfg, "held", "1", crate::pick::Class::Normal, false).unwrap();
     assert!(job.turn("1", "slot").exists());
     assert!(out(&cfg).is_none());
