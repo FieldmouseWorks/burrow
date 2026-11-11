@@ -3,6 +3,14 @@ use super::tests::{earlier_resets, rig, told};
 use super::*;
 use std::fs;
 
+// Owner-record content checks run as serialized transactions. Public admission
+// contention is tested separately, rather than assuming no concurrent fork
+// briefly inherits a descriptor before exec.
+fn admission_cutoff(cfg: &Config) -> std::io::Result<Option<i64>> {
+    let _held = super::lock(cfg).map_err(std::io::Error::other)?;
+    super::admission_cutoff_locked(cfg)
+}
+
 #[test]
 fn owner_hold_after_release_is_fresh_and_only_explicitly_released() {
     let (_d, cfg) = rig();

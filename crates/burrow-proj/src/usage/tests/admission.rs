@@ -1,7 +1,10 @@
 use super::*;
 
 fn admission_cutoff(cfg: &Config) -> Option<i64> {
-    super::super::admission_cutoff(cfg).unwrap()
+    // Content assertions own the transaction; unrelated concurrent forks may
+    // briefly retain its descriptor until exec closes it.
+    let _held = super::super::lock(cfg).unwrap();
+    super::super::admission_cutoff_locked(cfg).unwrap()
 }
 
 #[test]
@@ -125,5 +128,15 @@ fn interrupted_release_watermarks_cannot_override_active_or_extended_holds() {
     assert_eq!(
         admission_release(&cfg, &replacement).unwrap(),
         replacement.until * 1_000_000_000
+    );
+}
+
+#[test]
+fn admission_reader_yields_while_another_transaction_owns_the_lock() {
+    let (_d, cfg) = rig();
+    let _held = super::super::lock(&cfg).unwrap();
+    assert_eq!(
+        super::super::admission_cutoff(&cfg).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
 }
