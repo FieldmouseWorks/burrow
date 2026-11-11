@@ -741,3 +741,65 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     assert!(sorting.join("job").exists());
     assert!(!b.posted().contains("deferred verdict"));
 }
+
+#[test]
+fn priorities_precede_pipeline_and_age_and_drive_queue() {
+    let b = Box::new();
+    let p = b.pass();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let items = [
+        found("sam/box", 1, "sam", &["ready"], "2026-01-01"),
+        found(
+            "sam/game",
+            2,
+            "sam",
+            &["ready", "priority: high"],
+            "2026-03-01",
+        ),
+        found(
+            "sam/box",
+            3,
+            "sam",
+            &["ready", "priority: high"],
+            "2026-05-01",
+        ),
+        found(
+            "sam/box",
+            4,
+            "sam",
+            &["ready", "priority: high"],
+            "2026-04-01",
+        ),
+        found(
+            "sam/box",
+            5,
+            "sam",
+            &["ready", "priority: low"],
+            "2025-01-01",
+        ),
+    ];
+    for i in &items {
+        let (repo, n) = p.pick_ready(&t, std::slice::from_ref(i)).unwrap();
+        p.note_ready(
+            &repo,
+            &items
+                .iter()
+                .filter(|i| i["repository_url"].as_str().unwrap().ends_with(&repo))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        on_github(&b, i);
+        assert!(!n.is_empty());
+    }
+    assert_eq!(
+        p.ready_queue(&t),
+        "ready 1: sam/box#4\nready 2: sam/box#3\nready 3: sam/game#2\nready 4: sam/box#1\nready 5: sam/box#5\n"
+    );
+    b.pass().drain().unwrap();
+    assert!(
+        b.log().contains("issues/4/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
+}
