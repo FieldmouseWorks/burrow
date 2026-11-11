@@ -200,7 +200,8 @@ impl Pass<'_> {
                 continue;
             }
             if self.inbox.planning
-                && crate::planning::pending_split(&job).as_deref() == Some(&turns.to_string())
+                && let Some(split_turn) = crate::planning::pending_split(&job)
+                && let Some(parent) = now_open
             {
                 {
                     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
@@ -213,11 +214,41 @@ impl Pass<'_> {
                     fs::write(job.path("planning-hold"), "finishing the task split\n")
                         .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
                 }
-                if !now_open.is_some_and(|i| self.begin_worker_split(repo, i)) {
+                let Some(written) = self.written(repo, parent) else {
+                    self.miss(repo);
+                    continue;
+                };
+                let input = self.issue_text(repo, &written.issue, &written.comments);
+                if !Self::handed(&d, &input) {
+                    // Explicitly invalidate the proposal, preserving its data and
+                    // all partial creation receipts. Normal reply delivery below
+                    // will hand the updated verified task to the worker next pass.
+                    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    if job.turns().as_deref() != Some(&turns.to_string())
+                        || matches!(job.state().as_str(), "queued" | "running")
+                    {
+                        self.retry(repo);
+                        continue;
+                    }
+                    // Intent still bars admission if we crash before the rename.
+                    match fs::remove_file(job.path("planning-hold")) {
+                        Ok(()) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(e) => return Err(io_fail(&job.path("planning-hold"), e)),
+                    }
+                    fs::rename(
+                        job.turn(&split_turn, "split"),
+                        job.turn(&split_turn, "split-invalid"),
+                    )
+                    .map_err(|e| io_fail(&job.turn(&split_turn, "split"), e))?;
+                    self.retry(repo);
+                    continue;
+                }
+                if !self.begin_worker_split(repo, &written.issue) {
                     self.miss(repo);
                     continue;
                 }
-                let tasks = read(&job.turn(&turns.to_string(), "split"))
+                let tasks = read(&job.turn(&split_turn, "split"))
                     .and_then(|text| crate::planning::parse(&text).ok());
                 if tasks
                     .as_ref()
@@ -225,7 +256,20 @@ impl Pass<'_> {
                     || !self.add_label(repo, n, "tracker")
                 {
                     self.miss(repo);
+                    continue;
                 }
+                // Children no longer need their parent's worker or drain slot.
+                // Keep the plan/receipts independently of the retired record.
+                let root = self
+                    .inbox
+                    .state
+                    .join(".retired")
+                    .join(key(repo).to_lowercase())
+                    .join(n);
+                fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
+                let retired = root.join(&id);
+                fs::rename(&d, &retired).map_err(|e| io_fail(&retired, e))?;
+                self.retire(repo, n, &id, &retired)?;
                 continue;
             }
             if split_pending && now_open.is_some() {
@@ -353,7 +397,8 @@ impl Pass<'_> {
                 // record from before what it was handed was kept): changed,
                 // and the job is handed the issue as it stands, replies and
                 // all, rather than the issue closed.
-                let changed = !Self::handed(&d, &self.issue_text(repo, &now_issue, &had));
+                let changed = !Self::handed(&d, &self.issue_text(repo, &now_issue, &had))
+                    || job.turn(&turns.to_string(), "split-invalid").exists();
                 // Closed with the job, and the job stopped, under the lock
                 // turns start under: a reply (proj reply, proj _watch) that
                 // started a turn since the look above leaves the issue open,
@@ -391,7 +436,7 @@ impl Pass<'_> {
                 });
                 let msg = if changed {
                     format!(
-                        "The issue has changed since you were handed it: its title or text edited, or a comment on it edited or deleted. As it stands now:\n\n{whole}"
+                        "The issue has changed since you were handed it: its title or text edited, or a comment on it added, edited or deleted. Any stale split proposal has been invalidated; its original tasks remain in your turn's split-invalid file and any existing children and creation receipts are retained by the host. Reassess the updated task before declaring a split again. As it stands now:\n\n{whole}"
                     )
                 } else {
                     msg

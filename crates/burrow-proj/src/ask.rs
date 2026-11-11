@@ -142,6 +142,9 @@ pub(crate) fn clear(job: &Job) {
 /// with no GitHub target. An unavailable starter is retried without losing intent.
 pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     crate::question::recover(job)?;
+    if crate::planning::admit(job).is_err() {
+        return Ok(Some(crate::now() + 60));
+    }
     if crate::question::acceptance_pending(job)? {
         return Ok(Some(crate::now() + 60));
     }
@@ -319,6 +322,24 @@ mod tests {
         assert!(prompt.contains("Take your reversible recommended answer now: keep the change"));
         assert!(!prompt.contains("question is still posted"));
         assert!(load(&job).is_none());
+    }
+    #[test]
+    fn split_intent_defers_both_question_expiry_transitions_without_losing_state() {
+        for one_way in [false, true] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, one_way);
+            fs::write(job.turn("1", "split"), "[]").unwrap();
+            let before = fs::read(host_path(&job, "question")).unwrap();
+            let _held = job.lock().unwrap();
+            assert!(expire(&cfg, &job).unwrap().is_some());
+            assert_eq!(job.turns().as_deref(), Some("1"));
+            assert_eq!(fs::read(host_path(&job, "question")).unwrap(), before);
+            assert!(!job.turn("2", "end").exists());
+            // Even a legacy synthetic turn cannot hide an earlier intent.
+            job.set_turns(2).unwrap();
+            assert_eq!(crate::planning::pending_split(&job).as_deref(), Some("1"));
+            assert!(crate::planning::admit(&job).is_err());
+        }
     }
     #[test]
     fn expired_one_way_question_completes_without_an_engine_and_stays_visible() {

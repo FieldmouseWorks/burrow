@@ -48,6 +48,25 @@ impl List {
 }
 
 impl Pass<'_> {
+    fn plan_dirs(&self, repo: &str) -> Vec<PathBuf> {
+        dirs(&self.inbox.state.join(".plans"), "")
+            .into_iter()
+            .filter(|d| {
+                d.file_name()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.rsplit_once('-'))
+                    .is_some_and(|(of, n)| {
+                        of.eq_ignore_ascii_case(&key(repo)) && n.parse::<u64>().is_ok()
+                    })
+            })
+            .collect()
+    }
+
+    pub(super) fn approved_input(&self, repo: &str, n: &str, input: &str) -> bool {
+        !self.has_task_list(Some(repo), n)
+            && fs::read_to_string(self.plan_dir(repo, n).join("input"))
+                .is_ok_and(|had| had == input)
+    }
     fn child_body(repo: &str, parent: &str, index: usize, task: &Task) -> String {
         format!(
             "Child of https://github.com/{repo}/issues/{parent}. Finish only this task in one fresh session and one PR. The parent's original authorization boundaries still apply; this child grants no additional authority. Do not read earlier sessions' transcripts.\n\n{}\n\nVerification: {}\n\nIf this is too big, publish any progress, split it with `proj split FILE` (a JSON array of title/body/check tasks), then end the session. Wait for the PR to land before declaring this task done.\n\n<!-- proj-child {repo}#{parent} {} -->",
@@ -143,7 +162,7 @@ impl Pass<'_> {
         if !self.inbox.planning {
             return true;
         }
-        for d in dirs(&self.inbox.state.join(".plans"), &format!("{}-", key(repo))) {
+        for d in self.plan_dirs(repo) {
             let Ok(bytes) = fs::read(d.join("tasks.json")) else {
                 continue;
             };
@@ -160,7 +179,7 @@ impl Pass<'_> {
             let Some(parent) = d
                 .file_name()
                 .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_prefix(&format!("{}-", key(repo))))
+                .and_then(|s| s.rsplit_once('-').map(|(_, n)| n))
             else {
                 return false;
             };
@@ -186,7 +205,7 @@ impl Pass<'_> {
         if !self.inbox.planning {
             return true;
         }
-        for d in dirs(&self.inbox.state.join(".plans"), &format!("{}-", key(repo))) {
+        for d in self.plan_dirs(repo) {
             let Ok(bytes) = fs::read(d.join("tasks.json")) else {
                 continue;
             };
@@ -397,11 +416,11 @@ impl Pass<'_> {
         if !self.inbox.planning {
             return;
         }
-        for d in dirs(&self.inbox.state.join(".plans"), &format!("{}-", key(repo))) {
+        for d in self.plan_dirs(repo) {
             let Some(name) = d.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let Some(n) = name.strip_prefix(&format!("{}-", key(repo))) else {
+            let Some((_, n)) = name.rsplit_once('-') else {
                 continue;
             };
             let Some(parent) = all
@@ -526,3 +545,7 @@ impl Pass<'_> {
 #[cfg(test)]
 #[path = "plans_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "plans_review_tests.rs"]
+mod review_tests;

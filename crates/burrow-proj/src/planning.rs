@@ -16,7 +16,18 @@ pub(crate) fn admit(job: &crate::job::Job) -> Result<(), String> {
 /// The per-turn split file is the durable intent, published under the job lock.
 /// Admission also checks it if the process dies before the hold/end is written.
 pub(crate) fn pending_split(job: &crate::job::Job) -> Option<String> {
-    job.turns().filter(|n| job.turn(n, "split").exists())
+    std::fs::read_dir(&job.dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_suffix(".split")?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
+        .map(|n| n.to_string())
 }
 
 pub(crate) fn declare_split(job: &crate::job::Job, n: &str, tasks: &[Task]) -> std::io::Result<()> {

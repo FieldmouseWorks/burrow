@@ -2,7 +2,7 @@ use super::super::sorting_tests::{Box, issue};
 use super::*;
 use crate::read;
 
-fn parent_fixture() -> (Box, Value, List) {
+pub(super) fn parent_fixture() -> (Box, Value, List) {
     let mut b = Box::new();
     b.cfg.inbox.as_mut().unwrap().planning = true;
     let mut parent = issue(7, "sam", &["tracker"]);
@@ -188,7 +188,7 @@ fn a_worker_split_posts_its_answer_before_retiring_and_can_retry_a_partial_plan(
     b.pass()
         .jobs("sam/box", "box", std::slice::from_ref(&enrolled))
         .unwrap();
-    assert_eq!(read(&record.join("answered")).as_deref(), Some("1"));
+    assert!(!record.exists());
     assert!(b.posted().contains("Split into bounded tasks."));
     assert!(b.pass().worker_split_pending(Some("sam/box"), "7"));
     assert!(b.log().contains("labels[]=tracker"));
@@ -660,7 +660,7 @@ fn a_cutoff_split_intent_is_recovered_without_an_end_declaration_or_another_turn
         .unwrap();
     assert_eq!(b.pass().same_source("sam/box", &parent), Some(true));
     assert_eq!(job.turns().as_deref(), Some("1"));
-    assert_eq!(read(&record.join("answered")).as_deref(), Some("1"));
+    assert!(!record.exists());
     assert!(job.path("planning-hold").exists());
     assert!(b.pass().worker_split_pending(Some("sam/box"), "7"));
     assert!(b.log().contains("labels[]=tracker"));

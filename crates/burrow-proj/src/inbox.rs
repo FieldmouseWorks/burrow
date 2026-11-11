@@ -774,7 +774,8 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             };
             let issue = &safe;
             if self.inbox.planning
-                && (!self.planned(Some(repo), issue) || !self.child_admissible(repo, &n))
+                && (!self.approved_input(repo, &n, &self.issue_text(repo, issue, &comments))
+                    || !self.child_admissible(repo, &n))
             {
                 continue;
             }
