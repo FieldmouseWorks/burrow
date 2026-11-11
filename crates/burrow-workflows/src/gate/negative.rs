@@ -278,16 +278,18 @@ fn every_pr_gets_one_from_the_workflows_own_files() {
     for (id, paths_only) in [("paths", "true"), ("negative", "false")] {
         let s = step(job, id);
         assert_eq!(s["run"], r#"bash "$TOOLS/negative.sh""#);
-        assert_eq!(
-            s["env"],
-            yaml(&format!(
-                "{{BASE: '${{{{ github.event.pull_request.base.ref }}}}', \
+        let mut expected = yaml(&format!(
+            "{{BASE: '${{{{ github.event.pull_request.base.ref }}}}', \
                  HEAD_SHA: '${{{{ github.event.pull_request.head.sha }}}}', \
                  SKIP: '${{{{ inputs.build-skip }}}}', PATHS_ONLY: '{paths_only}', \
                  TOOLS: '${{{{ github.workspace }}}}/.flake-check/.github/flake-check'}}"
-            )),
-            "{id}"
-        );
+        ));
+        if id == "negative" {
+            expected["NIX_CONFIG"] = yaml_serde::Value::from(
+                "${{ inputs.keep-builds && inputs.install-nix && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}",
+            );
+        }
+        assert_eq!(s["env"], expected, "{id}");
     }
     assert_eq!(
         step(job, "negative")["if"],

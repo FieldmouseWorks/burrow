@@ -105,6 +105,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    # Temporary #641 timing probe: rebuild the proj negative checks.
     import json
     import re
     import time
