@@ -258,10 +258,40 @@ pub(crate) fn lock(cfg: &Config) -> Result<File, String> {
 
 /// Waiters retry contention so an emergency promotion can bypass a stalled
 /// usage transaction. Other I/O failures retain their original meaning.
+///
+/// One try can find the lock taken when nobody holds it: a child any thread
+/// of the process forks holds a copy of every descriptor open at the fork,
+/// a held lock's included, until it execs, so for that moment a lock its
+/// holder has let go still looks taken (#675). A caller holding another
+/// lock (admission holds the slots' census) tries once and retries from its
+/// own loop, letting that lock go meanwhile; one that holds none waits the
+/// moment out ([`wait_lock`]).
 pub(crate) fn try_lock(cfg: &Config) -> std::io::Result<File> {
     let f = File::create(cfg.jobs.join(".usage.lock"))?;
     f.try_lock().map_err(std::io::Error::from)?;
     Ok(f)
+}
+
+/// How long a caller that holds no other lock waits out contention before
+/// it takes the lock for taken: a fork's moment, and short enough that a
+/// stalled usage transaction holds it up no longer than that.
+const CONTENTION: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// [`try_lock`], for a caller holding no other lock: WouldBlock once the
+/// lock has been taken for [`CONTENTION`].
+fn wait_lock(cfg: &Config) -> std::io::Result<File> {
+    let deadline = std::time::Instant::now() + CONTENTION;
+    loop {
+        match try_lock(cfg) {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            got => return got,
+        }
+    }
 }
 
 fn owner_reference(job: &str) -> bool {
@@ -492,7 +522,7 @@ pub fn remind(cfg: &Config) {
     if !kept(cfg).is_some_and(|s| due(&s)) {
         return;
     }
-    let Ok(_lock) = try_lock(cfg) else { return };
+    let Ok(_lock) = wait_lock(cfg) else { return };
     if let Err(e) = reconcile_expiry(cfg) {
         eprintln!("{e}");
         return;

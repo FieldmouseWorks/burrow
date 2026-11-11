@@ -58,6 +58,37 @@ fn kicked(d: &tempfile::TempDir) -> Vec<String> {
     got
 }
 
+/// Admission's cutoff, read as admission reads it (slot.rs): a try that
+/// finds the lock taken is tried again, never taken for an error, since a
+/// child another test's thread forks can hold this test's lock for a moment
+/// after it's let go ([`try_lock`]).
+pub(super) fn cutoff(cfg: &Config) -> Option<i64> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match admission_cutoff(cfg) {
+            Ok(cutoff) => return cutoff,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => panic!("admission_cutoff: {e}"),
+        }
+    }
+}
+
+/// The lock held a moment by a copy of its descriptor, as a child forked
+/// meanwhile has it until it execs, then let go.
+pub(super) fn held_a_moment(cfg: &Config) -> std::thread::JoinHandle<()> {
+    let copy = File::create(cfg.jobs.join(".usage.lock")).unwrap();
+    copy.lock().unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(copy);
+    })
+}
+
 pub(super) fn told(d: &tempfile::TempDir) -> Vec<String> {
     fs::read_to_string(d.path().join("told"))
         .unwrap_or_default()
@@ -770,6 +801,35 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     // Direct callers of record() cannot introduce the old instructions either.
     let fresh = record(&cfg, "web-3", Some(t + 10000), raw, t).unwrap();
     assert_eq!(fresh.said, expected.said);
+}
+
+#[test]
+fn a_reminder_waits_out_a_moments_hold_and_not_a_stalled_one() {
+    let (d, cfg) = rig();
+    hold(&cfg, now() + 3600, "pause").unwrap();
+    let told_before = told(&d).len();
+    let stale = |cfg: &Config| {
+        let mut s = kept(cfg).unwrap();
+        s.told = now() - RETELL;
+        keep(cfg, &s).unwrap();
+    };
+    stale(&cfg);
+    let moment = held_a_moment(&cfg);
+    remind(&cfg);
+    moment.join().unwrap();
+    assert_eq!(
+        told(&d).len(),
+        told_before + 1,
+        "a moment's hold skipped it"
+    );
+    // A transaction that holds on: no wait past CONTENTION, and no reminder.
+    stale(&cfg);
+    let stalled = wait_lock(&cfg).unwrap();
+    let started = std::time::Instant::now();
+    remind(&cfg);
+    assert!(started.elapsed() < CONTENTION * 3);
+    assert_eq!(told(&d).len(), told_before + 1);
+    drop(stalled);
 }
 
 mod admission;
