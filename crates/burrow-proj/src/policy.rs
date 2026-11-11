@@ -178,9 +178,9 @@ pub fn reconcile(cfg: &Config) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
     loop {
-        let before = (overlay(cfg)?, read(&cfg.jobs.join(".policy-wake")));
-        reconcile_pass(cfg)?;
-        if before == (overlay(cfg)?, read(&cfg.jobs.join(".policy-wake"))) {
+        let before = (generation(cfg)?, read(&cfg.jobs.join(".policy-wake")));
+        reconcile_pass(cfg, &before.0)?;
+        if before == (generation(cfg)?, read(&cfg.jobs.join(".policy-wake"))) {
             return Ok(());
         }
     }
@@ -197,7 +197,20 @@ fn overlay(cfg: &Config) -> Result<Vec<u8>, String> {
     }
 }
 
-fn reconcile_pass(cfg: &Config) -> Result<(), String> {
+type Generation = (Vec<u8>, Option<i64>);
+
+fn generation(cfg: &Config) -> Result<Generation, String> {
+    Ok((
+        overlay(cfg)?,
+        // A malformed policy is still denied by each admission reader;
+        // fingerprint its bytes without preventing vacating.
+        cfg.settings
+            .as_ref()
+            .and_then(|s| s.scope_until().ok().flatten()),
+    ))
+}
+
+fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), String> {
     let mut ids: Vec<_> = fs::read_dir(&cfg.jobs)
         .map_err(|e| e.to_string())?
         .flatten()
@@ -208,7 +221,7 @@ fn reconcile_pass(cfg: &Config) -> Result<(), String> {
     let watched = ids.clone();
     let mut errors = Vec::new();
     for id in ids {
-        if let Err(error) = reconcile_job(cfg, &id) {
+        if let Err(error) = reconcile_job(cfg, &id, release_generation) {
             errors.push(format!("{id}: {error}"));
         }
     }
@@ -264,7 +277,7 @@ fn reconcile_pass(cfg: &Config) -> Result<(), String> {
     }
 }
 
-fn reconcile_job(cfg: &Config, id: &str) -> Result<(), String> {
+fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Result<(), String> {
     let job = Job::new(cfg, id);
     if path(&job, "restoring").exists() && !parked(&job) && systemd::gone(cfg, &job.unit()) {
         let rec: Park =
@@ -307,6 +320,12 @@ fn reconcile_job(cfg: &Config, id: &str) -> Result<(), String> {
         }
         remove_places(cfg, id)?;
     } else if parked(&job) {
+        // Turning off is immediate; turning on must traverse one ordered
+        // generation. Otherwise an unpause mid-pass can release a later
+        // job after an earlier one was already skipped under the old pause.
+        if &generation(cfg)? != release_generation {
+            return Ok(());
+        }
         let held = job.lock().map_err(|e| e.to_string())?;
         let crate::inbox::resumption::Resume::Ready(_capacity) =
             crate::inbox::resumption::admission(cfg, &job)?

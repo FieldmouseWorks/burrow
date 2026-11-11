@@ -354,3 +354,64 @@ fn restoration_reserves_order_until_the_earlier_worker_registers() {
         assert!(!crate::policy::path(&later, "restoring").exists());
     }
 }
+
+#[test]
+fn an_unpause_mid_scan_restarts_order_before_resuming_later_work() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    cfg.tools.systemd_run = tmp.path().join("systemd-run");
+    let settings = cfg.settings.as_ref().unwrap();
+    settings
+        .command(&["allow".into(), "sam/web".into()], "test")
+        .unwrap();
+    let allowed = tmp.path().join("allowed.json");
+    fs::copy(&settings.overlay, &allowed).unwrap();
+    settings
+        .command(&["pause".into(), "sam/web".into()], "test")
+        .unwrap();
+    for (id, first, order) in [
+        ("earlier", true, "1-1-earlier"),
+        ("later", false, "2-2-later"),
+    ] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Repository("sam/web".into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+        crate::policy::mark(&job, "queued", first).unwrap();
+        fs::write(crate::policy::path(&job, "order"), order).unwrap();
+    }
+    // The first job was observed paused. Release while checking its unit,
+    // after it has been passed over but before the later job is examined.
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n*ActiveState*proj-earlier.service*) cp '{}' '{}' ;;\nesac\ncase \"$*\" in\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+            allowed.display(),
+            settings.overlay.display()
+        ),
+    );
+    let starts = tmp.path().join("starts");
+    burrow_test::executable(
+        &cfg.tools.systemd_run,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>'{}'\n",
+            starts.display()
+        ),
+    );
+    crate::policy::reconcile(&cfg).unwrap();
+    let starts = fs::read_to_string(starts).unwrap();
+    let first = starts
+        .find("_exec earlier first")
+        .expect("earlier worker resumes");
+    let later = starts
+        .find("_exec later normal")
+        .expect("later worker resumes");
+    assert!(first < later, "release crossed the ordered scan: {starts}");
+}

@@ -521,11 +521,11 @@ def run(jid):
     here = os.path.join(STATE, "builds", jid)
     restoring = os.path.join(here, "policy-restoring")
     resumed = os.path.exists(restoring)
-    if resumed:
-        os.unlink(restoring)
     b = load(f"builds/{jid}/build.json", None)
     if C.paused(b["repo"]):
         return
+    if resumed:
+        os.unlink(restoring)
     end = {"state": "failed", "exit": None}
     # Derivations collected since they were worked out leave nothing to
     # build, and no verdict in that: the pass that sees it works them out

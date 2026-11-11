@@ -42,10 +42,10 @@ in {
   config = lib.mkMerge [ {
     burrow.settings = { effective = settings; file = tracked; command = "${package}/bin/burrow-settings"; };
     environment.systemPackages = [ command ];
-    systemd.tmpfiles.rules = [ "d ${stateDir}/settings 0755 ${user} ${config.users.users.${user}.group} -" ];
+    systemd.tmpfiles.rules = [ "d ${stateDir}/settings 0755 ${user} - -" ];
   } (lib.mkIf cfg.door.enable {
     assertions = [ { assertion = cfg.door.authors != [ ] && cfg.door.repo != ""; message = "The settings door requires a repository and authorized authors."; } ];
-    systemd.tmpfiles.rules = [ "d ${stateDir}/settings-door 0700 ${user} ${config.users.users.${user}.group} -" ];
+    systemd.tmpfiles.rules = [ "d ${stateDir}/settings-door 0700 ${user} - -" ];
     # This timer is independent of the pipeline and its event dispatcher.
     systemd.timers.burrow-settings-door = {
       wantedBy = [ "timers.target" ];
