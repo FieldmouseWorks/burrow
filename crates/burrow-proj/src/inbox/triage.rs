@@ -111,7 +111,7 @@ pub(super) fn why(answer: &str) -> String {
 /// what each verdict means.
 const SORT: &str = "Sort this issue for the machine's queue of open issues. Read the issue and the repo as much as you need to, but change nothing: no commits, branches, PRs, comments, labels or issues. The pass that started you acts on your answer.
 
-Answer with the verdict alone on its first line, then a short paragraph on why:
+Answer with the verdict followed by a priority (high, medium or low) on its first line, then a short paragraph on why. Examples: `ready high`, `duplicate #123 low`. Use high for serious correctness, safety or pipeline blockers, medium for ordinary tasks, low for minor improvements. Existing priority labels are preserved:
 
 - `ready`: a clear task an agent can finish now and prove with the repo's own checks, with nothing in it only the owner can decide. It will be handed to an agent as it stands, so the issue has to say enough.
 - `owner`: it waits on a call only the owner can make: spending money, a step that can't be undone, their own accounts or person, or a call the repo's own rules (its AGENTS.md) leave to them. Say exactly what the call is: they're asked it. A technical, design or stack choice is not one of these, even when the issue says it's the owner's: the agent that takes the issue makes it by the repo's rules, so on its own it doesn't keep an issue from `ready`.
@@ -557,7 +557,15 @@ impl Pass<'_> {
         {
             return Some(plan);
         }
-        let plan = self.steps(t, id, answer);
+        let mut plan = self.steps(t, id, answer);
+        let priority = answer
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .and_then(|l| l.split_whitespace().last())
+            .map(|s| s.trim_matches(['`', '*', '.', ',']).to_lowercase())
+            .filter(|s| matches!(s.as_str(), "high" | "medium" | "low"))
+            .unwrap_or_else(|| "medium".into());
+        plan.insert(0, Step::Priority(format!("priority: {priority}")));
         fs::write(&kept, serde_json::to_vec(&plan).ok()?).ok()?;
         Some(plan)
     }
@@ -572,6 +580,14 @@ impl Pass<'_> {
             .unwrap_or(0);
         for (i, step) in steps.iter().enumerate().skip(did) {
             let took = match step {
+                Step::Priority(l) => {
+                    let Some(issue) =
+                        crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
+                    else {
+                        return false;
+                    };
+                    super::drain::priority_label(&issue).is_some() || self.add_label(repo, n, l)
+                }
                 Step::Label(l) => self.add_label(repo, n, l),
                 Step::Assign(o) => self.assign(repo, n, o),
                 Step::Post(body) => {
@@ -609,6 +625,7 @@ impl Pass<'_> {
 /// One thing a verdict does on its issue.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) enum Step {
+    Priority(String),
     Label(String),
     Assign(String),
     Post(String),

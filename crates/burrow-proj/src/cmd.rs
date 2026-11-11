@@ -250,6 +250,7 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
         let job = Job::new(cfg, &id);
         put(&status_line(&job));
     }
+    put(&crate::inbox::ready_queue(cfg));
     Ok(())
 }
 

@@ -657,7 +657,7 @@ fn a_verdict_on_a_changed_issue_is_dropped() {
     b.pass()
         .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
         .unwrap();
-    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "1\n");
+    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "2\n");
     fs::remove_file(b.path("fail")).unwrap();
     let said = |who: &str, id: u64, body: &str| json!({"id": id, "user": {"login": who}, "body": body, "created_at": UPDATED});
     let mark = &b.cfg.inbox_mark;
@@ -703,11 +703,11 @@ fn a_verdict_keeps_its_plan() {
     b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap().owner = None;
     let d = sorting(&b, "owner\nIt spends money.");
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-    fs::write(b.path("fail"), "labels\n").unwrap();
+    fs::write(b.path("fail"), "labels[]=needs-owner\n").unwrap();
     b.pass()
         .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
         .unwrap();
-    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "1\n");
+    assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "2\n");
     fs::remove_file(b.path("fail")).unwrap();
     // An owner set since: not assigned now, and nothing said twice.
     let mut t = t;
@@ -908,4 +908,25 @@ fn existing_machine_issue_jobs_adopt_the_role_and_drop_the_label_pin() {
     b.pass().jobs("sam/box", "box", &[i]).unwrap();
     assert_eq!(fs::read_to_string(job.path("role")).unwrap(), "stuck\n");
     assert!(!job.path("engine").exists());
+}
+
+#[test]
+fn triage_assigns_priority_but_preserves_existing_labels() {
+    for (labels, want) in [
+        (vec![], Some("priority: high")),
+        (vec!["priority: low"], None),
+    ] {
+        let b = Box::new();
+        sorting(&b, "ready high\nA pipeline blocker.");
+        let mut i = issue(7, "sam", &labels);
+        i["repository_url"] = json!("https://api.github.com/repos/sam/box");
+        on_github(&b, &i);
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        b.pass().verdicts("sam/box", &t, &[i]).unwrap();
+        assert!(b.log().contains("labels[]=ready"), "{}", b.log());
+        match want {
+            Some(label) => assert!(b.log().contains(&format!("labels[]={label}"))),
+            None => assert!(!b.log().contains("labels[]=priority:")),
+        }
+    }
 }
