@@ -443,7 +443,13 @@ pub fn take(
         }
         let seen = look(cfg, &me, &job.dir, class)?;
         looked = now();
-        let picked = pick(cfg, &seen.slots, &seen.line);
+        let mut picked = pick(cfg, &seen.slots, &seen.line);
+        let draining = usage::last_release(cfg).is_some_and(|release| {
+            seen.line
+                .iter()
+                .any(|w| mtime(&queue.join(&w.name)).is_some_and(|came| came <= release))
+        });
+        trickle(&mut picked, &seen.slots, draining, cfg.usage_trickle);
         let names: Vec<String> = picked
             .iter()
             .map(|&(i, _)| {
@@ -585,6 +591,19 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
         Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,
+    }
+}
+
+/// Apply the reset cap to the already prioritized selection, under the same
+/// admission lock as slot acquisition. Each subsequent look counts the slots
+/// acquired by earlier looks, so separate waiters cannot multiply the cap.
+fn trickle(picked: &mut Vec<(usize, usize)>, slots: &[Slot], draining: bool, limit: usize) {
+    if draining {
+        let active = slots
+            .iter()
+            .filter(|s| matches!(s, Slot::Held { .. }))
+            .count();
+        picked.truncate(limit.saturating_sub(active));
     }
 }
 
