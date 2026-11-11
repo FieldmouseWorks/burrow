@@ -263,16 +263,12 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                     s.job = job.to_owned();
                 }
                 if s.back.is_some() && s.admission.is_none() {
-                    // Legacy releases have no journal reference. Their atomic
-                    // record write is a nanosecond boundary, not the beginning
-                    // of back's second (which would omit same-second waiters).
-                    s.admission = crate::mtime_nanos(&path).map(|written| {
-                        written
-                            .saturating_add(1)
-                            .max(s.back.unwrap() * 1_000_000_000)
-                            .min((s.back.unwrap() + 1) * 1_000_000_000)
-                            .min(s.until * 1_000_000_000)
-                    });
+                    // An old writer supplies only a whole-second release.
+                    // Its filesystem timestamp may be coarser than new queue
+                    // timestamps. Include the whole release second so none of
+                    // its same-second waiters can bypass the cap.
+                    s.admission =
+                        Some(((s.back.unwrap() + 1) * 1_000_000_000).min(s.until * 1_000_000_000));
                 }
                 // Legacy writers preserve the metadata reference in job. Their
                 // last-refusal update distinguishes a real refusal at/after the

@@ -523,7 +523,7 @@ fn failed_release_journal_or_record_never_poison_old_writers() {
 }
 
 #[test]
-fn legacy_releases_include_same_second_waiters_and_keep_the_boundary_on_later_writes() {
+fn legacy_releases_include_the_whole_release_second_and_keep_the_boundary_on_later_writes() {
     for owner in [false, true] {
         let (_d, cfg) = rig();
         let t = now();
@@ -537,9 +537,8 @@ fn legacy_releases_include_same_second_waiters_and_keep_the_boundary_on_later_wr
         // The old back() publishes back, without knowing the new journal.
         old.back = Some(now());
         fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        let written = crate::mtime_nanos(&cfg.jobs.join(FILE)).unwrap();
         let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-        assert_eq!(cutoff, (written + 1).max(old.back.unwrap() * 1_000_000_000));
+        assert_eq!(cutoff, (old.back.unwrap() + 1) * 1_000_000_000);
         let mut released: LegacySpent =
             serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
         released.told += 1;

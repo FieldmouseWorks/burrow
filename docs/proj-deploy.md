@@ -12,8 +12,9 @@ its tab-separated cutoff for earlier trickle readers. An old writer preserves
 the reference when updating the released record. If an old generation deletes
 the record after an interrupted acknowledgement, recovery conservatively
 includes the original natural-reset cohort. A release written entirely by an
-old binary uses its record's nanosecond modification time, rather than the
-start of its whole `back` second.
+old binary includes the whole `back` second: filesystem timestamps may be
+coarser than the new queue timestamps, so using the record's modification
+time could omit same-second waiters. New releases retain exact nanoseconds.
 
 `proj-retry-barrier` holds the original `.slots/.lock` for the deployment's
 lifetime. It stays running across package changes, so restarting the transfer
