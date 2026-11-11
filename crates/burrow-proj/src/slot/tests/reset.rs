@@ -520,3 +520,121 @@ fn uncapped_physical_reservations_survive_holder_accounting() {
         slots[1] = Slot::Free;
     }
 }
+
+#[test]
+fn pipeline_budget_survives_ordinary_queue_order_and_repeated_admissions() {
+    use crate::pick::{Waiter, pick_budget};
+    let mut cfg = config(Path::new("/unused"), 4);
+    cfg.pipeline_slots = 1;
+    cfg.max_jobs_per_project = 2;
+    // A census can observe a new class before its filename is renamed:
+    // publication during a hold, class changes and maxWait promotion all
+    // permit pipeline work anywhere in filename order.
+    for position in 0..4 {
+        let mut classes = vec![Class::Normal, Class::First, Class::Steward];
+        classes.insert(position, Class::Pipeline);
+        let line: Vec<_> = classes
+            .into_iter()
+            .enumerate()
+            .map(|(i, class)| Waiter {
+                name: format!("{i}-unrenamed"),
+                class,
+                project: i.to_string(),
+            })
+            .collect();
+        let slots = vec![Slot::Free; 4];
+        let picked = pick_budget(&cfg, &slots, &line, 2);
+        assert_eq!(picked.len(), 2);
+        assert!(
+            picked
+                .iter()
+                .any(|(i, _)| line[*i].class == Class::Pipeline)
+        );
+        assert!(picked.iter().any(|(i, _)| !line[*i].class.pipeline()));
+        for &(first, slot) in &picked {
+            let mut slots = slots.clone();
+            slots[slot - 1] = Slot::Held {
+                class: Some(line[first].class),
+                project: line[first].project.clone(),
+            };
+            let rest: Vec<_> = line
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != first)
+                .map(|(_, w)| w.clone())
+                .collect();
+            let next = pick_budget(&cfg, &slots, &rest, 1);
+            assert_eq!(next.len(), 1);
+            assert_eq!(
+                rest[next[0].0].class == Class::Pipeline,
+                line[first].class != Class::Pipeline
+            );
+        }
+        // A pipeline holder satisfies the budget reservation in every slot;
+        // lead holders cannot satisfy it. Ordinary work keeps its usable share.
+        for at in 0..4 {
+            for class in [Class::Pipeline, Class::Lead, Class::Normal] {
+                let mut slots = slots.clone();
+                slots[at] = Slot::Held {
+                    class: Some(class),
+                    project: "held".into(),
+                };
+                let cap = if class == Class::Lead { 2 } else { 1 };
+                let next = pick_budget(&cfg, &slots, &line, cap);
+                assert_eq!(next.len(), cap);
+                assert_eq!(
+                    next.iter().any(|(i, _)| line[*i].class == Class::Pipeline),
+                    class != Class::Pipeline
+                );
+            }
+        }
+        assert_eq!(
+            pick_budget(&cfg, &slots, &line, 4),
+            pick_budget(&cfg, &slots, &line, usize::MAX)
+        );
+    }
+}
+
+#[test]
+fn ordinary_caps_and_multiple_pipeline_reservations_share_the_budget() {
+    use crate::pick::{Waiter, pick_budget};
+    let mut cfg = config(Path::new("/unused"), 6);
+    cfg.pipeline_slots = 2;
+    cfg.max_jobs_per_project = 2;
+    let line: Vec<_> = [
+        Class::Normal,
+        Class::Normal,
+        Class::Steward,
+        Class::Pipeline,
+        Class::Pipeline,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, class)| Waiter {
+        name: i.to_string(),
+        class,
+        project: "one".into(),
+    })
+    .collect();
+    let mut slots = vec![Slot::Free; 6];
+    let picked = pick_budget(&cfg, &slots, &line, 3);
+    assert_eq!(
+        picked.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        [0, 3, 4]
+    );
+    slots[0] = Slot::Held {
+        class: Some(Class::Normal),
+        project: "one".into(),
+    };
+    let picked = pick_budget(&cfg, &slots, &line, 3);
+    assert_eq!(
+        picked.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        [2, 3, 4]
+    );
+    slots[1] = Slot::Held {
+        class: Some(Class::Steward),
+        project: "one".into(),
+    };
+    let picked = pick_budget(&cfg, &slots, &line, 3);
+    assert_eq!(picked.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [3, 4]);
+}

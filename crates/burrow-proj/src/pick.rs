@@ -191,7 +191,11 @@ pub fn pick_budget(
     } else {
         (spare + open).min(capacity.saturating_sub(owed + pipeline))
     };
-    let (mut lead, mut others) = (0, 0);
+    // Ordinary selections must leave room for the still-unsatisfied pipeline
+    // share too: filename order need not match the census's current classes.
+    // When the cap cannot fit both shares, retain the usable ordinary share.
+    let pipeline_budget = pipeline.min(capacity.saturating_sub(owed));
+    let (mut lead, mut others, mut pipelines) = (0, 0, 0);
     let mut went = Vec::new();
     let order = line
         .iter()
@@ -219,6 +223,10 @@ pub fn pick_budget(
                 }
             }
             Class::Steward | Class::First | Class::Normal => {
+                if went.len() >= capacity.saturating_sub(pipeline_budget.saturating_sub(pipelines))
+                {
+                    continue;
+                }
                 let need = lead.saturating_sub(open);
                 let h = held.entry(w.project.as_str()).or_default();
                 if !h.admits(w.class, cfg.max_jobs_per_project) || others + need >= theirs.len() {
@@ -227,6 +235,9 @@ pub fn pick_budget(
                 h.add(Some(w.class));
                 others += 1;
             }
+        }
+        if w.class == Class::Pipeline {
+            pipelines += 1;
         }
         went.push(i);
     }
