@@ -9,7 +9,8 @@ let
   fixture = "tests/house/rust-members";
   # The repo as a store path, as a flake's self is, with only the fixture
   # and the toolchain file its own links to, less what `keep` leaves out.
-  project = keep: (self.lib.project {
+  project = keep: projectWith keep { };
+  projectWith = keep: extra: (self.lib.project {
     self = builtins.path {
       path = ./..;
       name = "source";
@@ -19,10 +20,12 @@ let
           [ fixture "crates/rust-toolchain.toml" ];
     };
     systems = [ system ];
-    rust = { dir = fixture; members = true; };
+    rust = { dir = fixture; members = true; } // extra;
   }).packages.${system};
   all = project (_: true);
   hello = all.members-hello;
+  # Built with a tool each program runs with (rust.runtimeInputs).
+  carried = (projectWith (_: true) { runtimeInputs = p: [ p.hello ]; }).members-hello;
   # Without a file of the other program's.
   less = project (rel: rel != "${fixture}/other/src/seven.rs");
   # Without the tests of the library it reaches (lib/project.nix's
@@ -32,6 +35,8 @@ in
 {
   house-members-package = pkgs.runCommand "house-members-package-check" { } ''
     [ "$(${hello}/bin/members-hello)" = 42 ] || { echo "members-hello didn't say 42"; exit 1; }
+    [ "$(PATH= ${carried}/bin/members-hello)" = 42 ] && grep -q '${pkgs.hello}/bin' ${carried}/bin/members-hello \
+      || { echo "a member's program doesn't carry its runtimeInputs"; exit 1; }
     # A program named tests is a program (lib/project.nix's cargoTests).
     [ "$(${hello}/bin/tests)" = tests ] || { echo "members-hello has no program named tests"; exit 1; }
     [ "$(${all.members-other}/bin/members-other)" = 7 ] || { echo "members-other didn't say 7"; exit 1; }

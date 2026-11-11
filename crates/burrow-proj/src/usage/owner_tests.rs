@@ -387,3 +387,25 @@ fn early_owner_release_is_not_later_replaced_by_its_original_deadline() {
         assert!(!out(&cfg).unwrap().owner, "{writer}");
     }
 }
+
+#[test]
+fn fresh_meter_cannot_release_an_owner_pause() {
+    let (d, mut cfg) = rig();
+    cfg.meters = Some(d.path().join("meters"));
+    hold(&cfg, now() + 7200, "owner pause").unwrap();
+    let held = out(&cfg).unwrap();
+    fs::create_dir_all(cfg.meters.as_ref().unwrap()).unwrap();
+    fs::write(
+        cfg.meters.as_ref().unwrap().join("claude.json"),
+        serde_json::json!({
+            "windows": {"seven_day": {"used": 1.0, "resets_at": 0.0}},
+            "credits": false, "read_at": now() as f64, "requested_at": now() as f64
+        })
+        .to_string(),
+    )
+    .unwrap();
+    metered(&cfg);
+    tend(&cfg);
+    assert_eq!(out(&cfg), Some(held));
+    assert_eq!(last_release(&cfg), None);
+}

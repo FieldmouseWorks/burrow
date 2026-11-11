@@ -10,9 +10,11 @@
 //! usage` tells it), and the owner hears once, with the cause and when it
 //! resets. The first run that started after the refusal and isn't refused
 //! ends it ([`back`]), and the notice is closed; so does `proj usage back`,
-//! once usage is available before the recorded reset. An explicit owner
-//! hold (`proj usage hold`) instead lasts until its deadline or `usage back`;
-//! running turns and fresh meters cannot release it early.
+//! once usage is available before the recorded reset. Scheduling also ends
+//! ordinary usage holds through `back` when a fresh meter read after the last
+//! refusal has room. An explicit owner hold (`proj usage hold`) instead lasts
+//! until its deadline or `usage back`; running turns and fresh meters cannot
+//! release it early.
 //!
 //! Every change to it goes under jobs/.usage.lock, so turns refused at once,
 //! and runs that finish meanwhile, each see the last one's. Its record
@@ -116,6 +118,33 @@ impl Spent {
 /// The machine's state as it stands: Some while it's out of usage.
 pub fn out(cfg: &Config) -> Option<Spent> {
     kept(cfg).filter(|s| s.holds(now()))
+}
+
+/// A scheduling pass can discover usage is back without starting a refused
+/// turn: only a fresh Claude meter read after the last refusal proves it.
+/// `back` checks that timestamp again under the usage lock, so a refusal
+/// arriving meanwhile keeps its hold. All release effects still live there.
+pub fn metered(cfg: &Config) {
+    if let Some(started) = meter_start(cfg) {
+        back(cfg, Some(started));
+    }
+}
+
+fn meter_start(cfg: &Config) -> Option<i64> {
+    use burrow_usage_reset::meter::{FRESH, Snapshot};
+    let s = out(cfg)?;
+    let dir = cfg.meters.as_ref()?;
+    let now = now() as f64;
+    let meter = Snapshot::read(dir, "claude", now)?;
+    let requested = meter.requested_at?;
+    if !requested.is_finite() || requested > meter.read_at || now - requested >= FRESH {
+        return None;
+    }
+    // Refusals are recorded in whole seconds. Discard the fractional part:
+    // a request within the refusal's second could have preceded it. Pass
+    // this same conservative time to back's locked check of the latest refusal.
+    let started = requested.floor() as i64;
+    (started > s.refused() && meter.room()).then_some(started)
 }
 
 /// The actual release, retained after the usage notice and record are gone.
@@ -504,6 +533,7 @@ fn mark(cfg: &Config, now: i64) -> Result<(), String> {
 /// record's removal not written) is looked at again in RETRY, never
 /// sooner, so the look neither forgets it nor spins on it.
 pub fn tend(cfg: &Config) -> Option<i64> {
+    metered(cfg);
     let now = now();
     let retry = Some(now + RETRY);
     {

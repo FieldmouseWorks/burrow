@@ -2,6 +2,8 @@
 { self, pkgs, system, ... }:
 let
   pkg = (self.lib.project { self = ../tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
+  # The same, with a tool every program runs with (rust.runtimeInputs).
+  carried = (self.lib.project { self = ../tests/house/rust; systems = [ system ]; rust.runtimeInputs = p: [ p.hello ]; }).packages.${system}.default;
 in pkgs.runCommand "house-rust-package-check" { } ''
   # Its answer comes from modules named like tests that the library uses:
   # one declared plainly, one by a path attribute that a #[cfg(test)]
@@ -53,5 +55,12 @@ in pkgs.runCommand "house-rust-package-check" { } ''
   # A package whose release build compiles a crate in its tests/ that
   # includes one of its test modules.
   [ "$(${pkg}/bin/house-fixture-outer)" = outer ]
+  # With rust.runtimeInputs, each program still runs, with the tool ahead
+  # of whatever PATH starts it; without, none is wrapped.
+  [ "$(PATH= ${carried}/bin/main)" = main ]
+  for p in ${carried}/bin/*; do
+    grep -q '${pkgs.hello}/bin' "$p" || { echo "$p doesn't carry hello"; exit 1; }
+  done
+  ! grep -lq makeWrapper ${pkg}/bin/* || { echo "a package without runtimeInputs is wrapped"; exit 1; }
   touch $out
 ''

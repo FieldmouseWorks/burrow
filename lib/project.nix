@@ -23,7 +23,9 @@
   # Cargo workspace in DIR, built with the toolchain DIR/rust-toolchain.toml
   # (or the repo root's) pins; latest stable without one. `test = false` skips
   # the tests (say, when they need a database); `testInputs = pkgs: [ pkgs.git ]`
-  # puts tools the tests run on their PATH. `include = [ "docs/spec.md" ]`
+  # puts tools the tests run on their PATH, and `runtimeInputs` the same on
+  # every program the package installs, so a program that runs git carries
+  # the git it was built with, whatever PATH starts it. `include = [ "docs/spec.md" ]`
   # names files outside DIR, from the repo's root, that the tests read: the
   # checks then build from the root with DIR and only those, so a test finds
   # each where a checkout has it. A workspace that links native
@@ -64,6 +66,7 @@ let
     dir = ".";
     test = true;
     testInputs = _: [ ];
+    runtimeInputs = _: [ ];
     include = [ ];
     members = false;
     nativeBuildInputs = _: [ ];
@@ -100,9 +103,20 @@ let
 
   craneFor = pkgs: (crane.mkLib pkgs).overrideToolchain (toolchainFor pkgs [ ]);
 
+  # What a package's build adds so each program it installs finds
+  # rust.runtimeInputs ahead of its caller's PATH: nothing without any.
+  runtime = pkgs: let tools = rustCfg.runtimeInputs pkgs; in lib.optionalAttrs (tools != [ ]) {
+    nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ [ pkgs.makeWrapper ];
+    postInstall = ''
+      for p in $out/bin/*; do
+        wrapProgram "$p" --prefix PATH : ${lib.makeBinPath tools}
+      done
+    '';
+  };
+
   # The workspace's binaries, built for release: packages.default, what a
   # machine installs.
-  rustPackage = pkgs: (craneFor pkgs).buildPackage {
+  rustPackage = pkgs: (craneFor pkgs).buildPackage ({
     src = packageSource pkgs;
     strictDeps = true;
     nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
@@ -110,7 +124,7 @@ let
     cargoExtraArgs = "--locked --workspace";
     # The gate runs the tests.
     doCheck = false;
-  };
+  } // runtime pkgs);
 
   # rust.members: each member with a binary, built alone. Its workspace is
   # the member and those it reaches by path (dev and build dependencies
@@ -492,7 +506,7 @@ let
       version = toml.package.version or "0.0.0";
       cargoToml = craneLib.writeTOML "Cargo.toml" (manifestFor dirs);
     in
-    craneLib.buildPackage {
+    craneLib.buildPackage ({
       pname = toml.package.name;
       version = if builtins.isAttrs version then rootToml.workspace.package.version else version;
       src = lib.cleanSourceWith {
@@ -523,7 +537,7 @@ let
       meta = lib.optionalAttrs ((toml.bin or [ ]) == [ ] && builtins.pathExists (rustDir + "/${dir}/src/main.rs")) {
         mainProgram = toml.package.name;
       };
-    };
+    } // runtime pkgs);
   memberPackages = pkgs:
     let members = lib.listToAttrs (map (dir: lib.nameValuePair (memberToml dir).package.name (memberPackage pkgs dir))
       (builtins.filter hasBinary memberDirs));

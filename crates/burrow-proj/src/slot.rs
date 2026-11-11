@@ -379,6 +379,7 @@ pub fn take(
     loop {
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too.
+        usage::metered(cfg);
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
         if job.path("unstick").exists() && !spent {
@@ -580,6 +581,7 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
     };
     match engine {
         Engine::Claude => {
+            usage::metered(cfg);
             usage::out(cfg).is_none()
                 && in_line(cfg).is_empty()
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
