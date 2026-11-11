@@ -985,7 +985,11 @@ mod question_tests;
 mod sorting_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 mod usage;
 
-pub(crate) use drain::ready_queue;
+mod view;
+
+pub(crate) use view::view;

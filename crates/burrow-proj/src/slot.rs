@@ -47,6 +47,7 @@ use crate::config::Config;
 use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
+use crate::snapshot::{self, Waiting};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
@@ -549,11 +550,12 @@ fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<bool> {
     Ok(true)
 }
 
-/// `proj status --line`: every turn in line, in the order pick takes them
-/// (lead ones, then the rest), with its job, class, how long it has waited and
-/// its project. Only reads. The wait is from when its place was made, not its
-/// name's WHEN, which for a job started --since is when its work began.
-pub fn in_line(cfg: &Config) -> String {
+/// Every turn in line, in the order pick takes them (lead ones, then the
+/// rest), with its job, class, project and how long it has waited: the live
+/// snapshot's line, which `proj status --line` prints. Only reads. The wait is
+/// from when its place was made, not its name's WHEN, which for a job started
+/// --since is when its work began.
+pub fn line(cfg: &Config) -> Vec<Waiting> {
     let queue = cfg.jobs.join(".queue");
     let mut names: Vec<String> = fs::read_dir(&queue)
         .map(|d| {
@@ -565,7 +567,8 @@ pub fn in_line(cfg: &Config) -> String {
         .unwrap_or_default();
     names.sort();
     let mut classes = Classes::default();
-    let mut rows: Vec<(Class, String)> = Vec::new();
+    let at = now();
+    let mut rows: Vec<Waiting> = Vec::new();
     for name in &names {
         let fid = job_of(name);
         if !waiter_alive(&queue.join(name), fid) {
@@ -576,18 +579,115 @@ pub fn in_line(cfg: &Config) -> String {
         };
         let dir = cfg.jobs.join(fid);
         let (class, _) = classes.place(cfg, name, &dir);
-        let wait = now() - made;
-        let row = format!(
-            "{fid:<40} {:<8} {:>4}m{:02}s  {}\n",
-            class.name(),
-            wait / 60,
-            wait % 60,
-            project(&dir)
-        );
-        rows.push((class, row));
+        rows.push(Waiting {
+            job: fid.to_owned(),
+            class: class.name().to_owned(),
+            project: project(&dir),
+            since: made,
+            wait: at - made,
+        });
     }
-    rows.sort_by_key(|(c, _)| *c != Class::Lead);
-    rows.into_iter().map(|(_, r)| r).collect()
+    rows.sort_by_key(|w| w.class != Class::Lead.name());
+    rows
+}
+
+/// Whether the lock file at a path is taken: tried, and let go at once. A
+/// missing one is free.
+fn taken(path: &Path) -> bool {
+    File::open(path).is_ok_and(|f| match f.try_lock() {
+        Ok(()) => {
+            let _ = f.unlock();
+            false
+        }
+        Err(_) => true,
+    })
+}
+
+/// Every slot of the line's, Codex's pool and the machine's heavy work, for
+/// the live snapshot: each one taken with the job whose latest turn took it
+/// (its N.slot, the newest that names it), else what its N.who says.
+pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
+    use snapshot::{Holder, SlotKind, SlotState, held, job_slot};
+    // Which job last took each slot: one look through every job's latest turn.
+    let mut took: std::collections::HashMap<String, (i64, String)> = Default::default();
+    for e in fs::read_dir(&cfg.jobs).into_iter().flatten().flatten() {
+        let id = e.file_name().to_string_lossy().into_owned();
+        if id.starts_with('.') {
+            continue;
+        }
+        let job = Job::new(cfg, &id);
+        let Some(n) = job.turns() else { continue };
+        let at_slot = job.turn(&n, "slot");
+        let (Some(name), Some(when)) = (read(&at_slot), crate::mtime_nanos(&at_slot)) else {
+            continue;
+        };
+        let newest = took.get(&name).is_none_or(|(t, _)| when > *t);
+        if newest {
+            took.insert(name, (when, id));
+        }
+    }
+    let mut slots = Vec::new();
+    // Each slot by its name in its kind, the name a turn's N.slot gives it,
+    // its lock and its N.who.
+    let mut one =
+        |kind: SlotKind, name: String, key: String, lock: PathBuf, who: Option<PathBuf>| {
+            let slot = if !taken(&lock) {
+                held(kind, name, SlotState::Idle, None, at)
+            } else if let Some((_, id)) = took.get(&key) {
+                job_slot(cfg, kind, name, id, None, at)
+            } else {
+                let who = who.and_then(|w| read(&w)).unwrap_or_default();
+                let (class, project) = who.split_once('\t').unwrap_or((&who, ""));
+                let since = mtime(&lock);
+                snapshot::Slot {
+                    holder: Some(Holder {
+                        class: Some(class.to_owned()).filter(|c| !c.is_empty() && c != "-"),
+                        project: Some(project.to_owned()).filter(|p| !p.is_empty() && p != "-"),
+                        ..Holder::default()
+                    }),
+                    ..held(kind, name, SlotState::Busy, since, at)
+                }
+            };
+            slots.push(slot);
+        };
+    let dir = cfg.jobs.join(".slots");
+    for i in 1..=cfg.max_jobs {
+        one(
+            SlotKind::Claude,
+            i.to_string(),
+            i.to_string(),
+            dir.join(i.to_string()),
+            Some(dir.join(format!("{i}.who"))),
+        );
+    }
+    one(
+        SlotKind::Unstick,
+        "unstick".into(),
+        "unstick".into(),
+        dir.join("unstick"),
+        Some(dir.join("unstick.who")),
+    );
+    let codex = cfg.jobs.join(".codex-slots");
+    for i in 1..=cfg.codex_slots {
+        one(
+            SlotKind::Codex,
+            i.to_string(),
+            format!("codex-{i}"),
+            codex.join(i.to_string()),
+            None,
+        );
+    }
+    if let Some(heavy) = &cfg.heavy_dir {
+        for i in 1.. {
+            let lock = burrow_heavy::config::slot_file(heavy, i);
+            if !lock.exists() {
+                break;
+            }
+            // Nothing of proj's takes these: whose they are is heavy's.
+            one(SlotKind::Heavy, i.to_string(), String::new(), lock, None);
+        }
+    }
+    slots
 }
 
 /// The job a place in line is for: PREFIX-WHEN-ID.
@@ -625,21 +725,13 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
         if fs::create_dir_all(&dir).is_err() {
             return 0;
         }
-        (1..=n)
-            .filter(|i| {
-                File::create(dir.join(i.to_string())).is_ok_and(|f| {
-                    let ok = f.try_lock().is_ok();
-                    let _ = f.unlock();
-                    ok
-                })
-            })
-            .count()
+        (1..=n).filter(|i| !taken(&dir.join(i.to_string()))).count()
     };
     match engine {
         Engine::Claude => {
             usage::metered(cfg);
             usage::out(cfg).is_none()
-                && in_line(cfg).is_empty()
+                && line(cfg).is_empty()
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
         Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,

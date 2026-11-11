@@ -795,9 +795,23 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         on_github(&b, i);
         assert!(!n.is_empty());
     }
+    // The snapshot's queue is the drain's order, with what put each there.
+    use crate::snapshot::Priority::{High, Low, Medium};
+    let queue: Vec<_> = p
+        .view(&t, crate::now())
+        .queue
+        .into_iter()
+        .map(|r| (format!("{}#{}", r.repo, r.number), r.priority, r.pipeline))
+        .collect();
     assert_eq!(
-        p.ready_queue(&t),
-        "ready 1: sam/box#4\nready 2: sam/box#3\nready 3: sam/game#2\nready 4: sam/box#1\nready 5: sam/box#5\n"
+        queue,
+        [
+            ("sam/box#4".to_owned(), High, true),
+            ("sam/box#3".to_owned(), High, true),
+            ("sam/game#2".to_owned(), High, false),
+            ("sam/box#1".to_owned(), Medium, true),
+            ("sam/box#5".to_owned(), Low, true),
+        ]
     );
     b.pass().drain().unwrap();
     assert!(

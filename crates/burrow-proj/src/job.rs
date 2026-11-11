@@ -8,7 +8,9 @@
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
 //! stop it while it waits), `N.slot` (the slot it took, once it has one),
-//! `N.started` (immutable first execution time, Unix seconds), `N.jsonl`
+//! `N.started` (immutable first execution time, Unix seconds), `N.engine`,
+//! `N.model` and `N.effort` (what it runs on: no model or effort file for
+//! the engine's own), `N.jsonl`
 //! (its stream, with host-written `burrow.run` boundaries), `N.result`
 //! (its answer), `N.outcome`
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it

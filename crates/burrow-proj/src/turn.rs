@@ -200,6 +200,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         return Err(Fail::quiet(1));
     }
     let _ = fs::write(job.turn(&n, "engine"), choice.engine.name());
+    // What it runs on, for the live snapshot's slots: the engine's own when
+    // the models file names none (no file).
+    for (kind, said) in [("model", &choice.model), ("effort", &choice.effort)] {
+        match said {
+            Some(v) => drop(fs::write(job.turn(&n, kind), v)),
+            None => drop(fs::remove_file(job.turn(&n, kind))),
+        }
+    }
     // As its App, or not at all ([`github_app`]). Its env, read now, is what
     // every run of the turn starts in, so none starts as the user if the App
     // goes while the turn waits for a slot: it acts as an App that's gone,

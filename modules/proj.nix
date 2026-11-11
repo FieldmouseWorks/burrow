@@ -564,6 +564,7 @@ in
           proj run --role NAME web "task"   on the engine ~/.config/proj/roles gives NAME
           proj status                       what's running, what finished
           proj status --line                every turn in line, next first, and its wait
+          proj state --json                 the live snapshot: queue, every slot and its holder, meters, holds
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
           proj stop ID                      end it: its running turn, and anything it awaits

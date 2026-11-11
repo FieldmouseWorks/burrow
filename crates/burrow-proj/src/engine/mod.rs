@@ -20,7 +20,19 @@ pub use handoff::first_prompt;
 pub(crate) use role::{RoleKey, role};
 pub use stream::{Said, answer, last_result, names_session, stream_names_session, stream_tail};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Deserialize,
+    Serialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     #[default]

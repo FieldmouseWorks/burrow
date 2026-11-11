@@ -1,0 +1,654 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Snapshot",
+  "type": "object",
+  "properties": {
+    "at": {
+      "description": "When it was taken, in seconds since the epoch.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "holds": {
+      "$ref": "#/$defs/Holds"
+    },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobRow"
+      }
+    },
+    "line": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Waiting"
+      }
+    },
+    "meters": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Meter"
+      }
+    },
+    "queue": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Ready"
+      }
+    },
+    "slots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Slot"
+      }
+    },
+    "version": {
+      "description": "[`VERSION`].",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "at",
+    "queue",
+    "line",
+    "slots",
+    "meters",
+    "holds",
+    "jobs"
+  ],
+  "$defs": {
+    "Engine": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "Holder": {
+      "description": "What holds a slot.",
+      "type": "object",
+      "properties": {
+        "awaits": {
+          "description": "What it's parked on, each PR or issue.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "class": {
+          "description": "lead, pipeline, steward, first, normal or unstick: what took a shared\nslot, as it says.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Engine"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issue": {
+          "description": "The issue or PR it's about: a link, or OWNER/REPO#N.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "None: the engine's own.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Its project's folder.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "awaits"
+      ]
+    },
+    "Holds": {
+      "description": "What's configured to hold work back, where it lives today (the config\nmodules/proj.nix writes).",
+      "type": "object",
+      "properties": {
+        "paused": {
+          "description": "Repos whose automated work is paused.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pipeline": {
+          "$ref": "#/$defs/Pipeline"
+        },
+        "triage": {
+          "description": "The inbox's triage; none when it's off.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Triage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "paused",
+        "pipeline"
+      ]
+    },
+    "JobRow": {
+      "description": "A job, as `proj status` lists it.",
+      "type": "object",
+      "properties": {
+        "answer": {
+          "description": "Its latest answer's first 100 bytes, one line.",
+          "type": "string"
+        },
+        "apps": {
+          "description": "The App it acts as.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "awaits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "demoted": {
+          "description": "Why it no longer goes as pipeline work.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ends": {
+          "description": "How its latest turn said it ends.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "description": "What `proj state` says.",
+          "type": "string"
+        },
+        "vm": {
+          "description": "Its sandbox, with --vm.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "waitingInLine": {
+          "description": "What a running turn's command waits in line for.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "state",
+        "vm",
+        "apps",
+        "waitingInLine",
+        "awaits",
+        "ends",
+        "answer"
+      ]
+    },
+    "Meter": {
+      "description": "One engine's meter and hold.",
+      "type": "object",
+      "properties": {
+        "engine": {
+          "$ref": "#/$defs/Engine"
+        },
+        "hold": {
+          "description": "Work held back on it: Claude's usage hold.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageHold"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reading": {
+          "description": "Its latest reading, none when there's none to read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reading"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "engine"
+      ]
+    },
+    "Pipeline": {
+      "type": "object",
+      "properties": {
+        "lead": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "slots": {
+          "description": "The shared slots only pipeline jobs in its own repos may take.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repos",
+        "lead",
+        "slots"
+      ]
+    },
+    "Priority": {
+      "description": "In the drain's order: high first.",
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "Reading": {
+      "type": "object",
+      "properties": {
+        "age": {
+          "description": "Seconds since it was read.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "credits": {
+          "description": "Paid usage that carries on past the windows.",
+          "type": "boolean"
+        },
+        "fiveHour": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Window"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fresh": {
+          "description": "Young enough to move a turn (role overflow reads only those).",
+          "type": "boolean"
+        },
+        "readAt": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "weekly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Window"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "credits",
+        "readAt",
+        "age",
+        "fresh"
+      ]
+    },
+    "Ready": {
+      "description": "A ready issue the drain will hand on, next first.",
+      "type": "object",
+      "properties": {
+        "age": {
+          "description": "Seconds since then; none when GitHub's time can't be read.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "opened": {
+          "description": "When it was opened, as GitHub says it.",
+          "type": "string"
+        },
+        "pipeline": {
+          "description": "In one of the pipeline's own repos, which go ahead of the rest.",
+          "type": "boolean"
+        },
+        "priority": {
+          "$ref": "#/$defs/Priority"
+        },
+        "repair": {
+          "description": "A repair child, which takes no ordinary drain slot.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "OWNER/REPO.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "number",
+        "priority",
+        "pipeline",
+        "repair",
+        "opened"
+      ]
+    },
+    "Slot": {
+      "description": "One slot, and what holds it.",
+      "type": "object",
+      "properties": {
+        "age": {
+          "description": "Seconds since then.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "holder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Holder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/SlotKind"
+        },
+        "name": {
+          "description": "Its name within its kind: 1, 2, ..., or unstick.",
+          "type": "string"
+        },
+        "since": {
+          "description": "Since when it has been in that state, in seconds since the epoch.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "state": {
+          "$ref": "#/$defs/SlotState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "state"
+      ]
+    },
+    "SlotKind": {
+      "oneOf": [
+        {
+          "description": "One of the `maxJobs` the line shares.",
+          "type": "string",
+          "const": "claude"
+        },
+        {
+          "description": "The one slot past `maxJobs` for jobs run --unstick.",
+          "type": "string",
+          "const": "unstick"
+        },
+        {
+          "description": "One of Codex's own pool.",
+          "type": "string",
+          "const": "codex"
+        },
+        {
+          "description": "One of the drain's `drainJobs`: an issue it handed on, until that\nissue's record goes.",
+          "type": "string",
+          "const": "drain"
+        },
+        {
+          "description": "One of the inbox's `atOnce` sorting jobs.",
+          "type": "string",
+          "const": "sorting"
+        },
+        {
+          "description": "One of the machine's heavy-work slots (`heavy`).",
+          "type": "string",
+          "const": "heavy"
+        }
+      ]
+    },
+    "SlotState": {
+      "oneOf": [
+        {
+          "description": "Nothing holds it.",
+          "type": "string",
+          "const": "idle"
+        },
+        {
+          "description": "Its holder's turn is running.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "Its holder's turn waits in line for a turn slot.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Its holder's turn has ended on `proj await`: it holds the slot while\nit waits for a PR or issue to change.",
+          "type": "string",
+          "const": "parked"
+        },
+        {
+          "description": "Its holder's turn has ended on a question for a person.",
+          "type": "string",
+          "const": "asking"
+        },
+        {
+          "description": "Its holder's turn has ended and holds nothing open, yet the slot is\nstill counted as taken: doing nothing.",
+          "type": "string",
+          "const": "ended"
+        },
+        {
+          "description": "Handed on, its job not started yet.",
+          "type": "string",
+          "const": "starting"
+        },
+        {
+          "description": "Taken, by something proj has no record of.",
+          "type": "string",
+          "const": "busy"
+        }
+      ]
+    },
+    "Triage": {
+      "type": "object",
+      "properties": {
+        "drain": {
+          "description": "The engine ready issues are handed to; none hands none on.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Engine"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "drainJobs": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "sortingAtOnce": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "drainJobs",
+        "sortingAtOnce"
+      ]
+    },
+    "UsageHold": {
+      "description": "No turn of the engine starts while it holds.",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "description": "The owner paused it (`proj usage hold`), rather than a refusal.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "The owner's reason, or the engine's own words when it refused.",
+          "type": "string"
+        },
+        "since": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "until": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "since",
+        "until",
+        "reason"
+      ]
+    },
+    "Waiting": {
+      "description": "A turn waiting in line for a slot, in the order the line takes them.",
+      "type": "object",
+      "properties": {
+        "class": {
+          "description": "lead, pipeline, steward, first or normal.",
+          "type": "string"
+        },
+        "job": {
+          "type": "string"
+        },
+        "project": {
+          "description": "Its project's folder.",
+          "type": "string"
+        },
+        "since": {
+          "description": "When its place in line was made.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "wait": {
+          "description": "Seconds it has waited.",
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "job",
+        "class",
+        "project",
+        "since",
+        "wait"
+      ]
+    },
+    "Window": {
+      "type": "object",
+      "properties": {
+        "resetsAt": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "used": {
+          "description": "Percent used, 0 to 100.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "used",
+        "resetsAt"
+      ]
+    }
+  }
+}

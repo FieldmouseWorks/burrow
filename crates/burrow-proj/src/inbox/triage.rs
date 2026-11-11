@@ -125,7 +125,7 @@ impl Pass<'_> {
         self.inbox.triage.as_ref()
     }
 
-    fn sorting_dir(&self) -> PathBuf {
+    pub(super) fn sorting_dir(&self) -> PathBuf {
         self.inbox.state.join(".triage")
     }
 

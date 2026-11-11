@@ -48,17 +48,43 @@ pub struct Window {
     pub resets_at: f64,
 }
 
+/// How long a limit window runs, whatever an engine calls it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Span {
+    FiveHour,
+    Week,
+}
+
+impl Span {
+    /// The span of a window by its engine's name for it: Claude's
+    /// (`five_hour`, `seven_day`, as [`claude`] keeps them) or Codex's
+    /// (its length in minutes); None for one of another length.
+    pub fn of(name: &str) -> Option<Span> {
+        match name {
+            "five_hour" | "300m" => Some(Span::FiveHour),
+            "seven_day" | "10080m" => Some(Span::Week),
+            _ => None,
+        }
+    }
+}
+
 impl Snapshot {
     /// ENGINE's reading in DIR, if there's one fresh at NOW that makes
     /// sense. A missing, malformed, future or stale one is none: it moves
     /// nothing.
     pub fn read(dir: &Path, engine: &str, now: f64) -> Option<Self> {
-        let bytes = fs::read(dir.join(format!("{engine}.json"))).ok()?;
-        let s: Self = serde_json::from_slice(&bytes).ok()?;
+        let s = Self::load(dir, engine)?;
         (s.read_at <= now
             && now - s.read_at < FRESH
             && s.windows.values().all(|w| (0.0..=100.0).contains(&w.used)))
         .then_some(s)
+    }
+
+    /// ENGINE's reading in DIR as it was written, however old: for showing
+    /// it (proj's live snapshot), never for moving a turn ([`Self::read`]).
+    pub fn load(dir: &Path, engine: &str) -> Option<Self> {
+        let bytes = fs::read(dir.join(format!("{engine}.json"))).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     /// Short of usage at PCT: a window at or past it, and no credits to

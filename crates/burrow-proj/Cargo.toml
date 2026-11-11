@@ -20,8 +20,11 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 pulldown-cmark = { version = "0.13.6", default-features = false }
+schemars = "1"
+burrow-heavy = { version = "0.0.0", path = "../burrow-heavy" }
 
 [dev-dependencies]
+boon = "0.6.1"
 burrow-test = { path = "../burrow-test" }
 gh-token = { path = "../gh-token" }
 # The zones a usage limit's reset is said in, for tests on a machine with no

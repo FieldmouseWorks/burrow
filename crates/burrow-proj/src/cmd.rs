@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::engine::{answer, is_error, last_result};
 use crate::github::{fingerprint_until, over, target};
 use crate::job::{Job, awaits, kick};
-use crate::pick::demoted;
+use crate::snapshot::{self, Snapshot};
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
 use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
@@ -61,11 +61,25 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
-            put(&slot::in_line(cfg));
+            put(&Snapshot::take(cfg, 0)?.in_line());
             Ok(())
         }
         None | Some("status") => status(cfg, args.get(1)),
         Some("log") => log(cfg, args),
+        Some("state") if args.get(1).is_some_and(|a| a == "--json") => {
+            let jobs = match args.get(2) {
+                None => snapshot::JOBS,
+                Some(n) => n
+                    .parse()
+                    .map_err(|_| Fail::new(2, "usage: proj state --json [N]"))?,
+            };
+            put(&state_json(cfg, jobs)?);
+            Ok(())
+        }
+        Some("state") if args.get(1).is_some_and(|a| a == "--schema") => {
+            put(&Snapshot::schema());
+            Ok(())
+        }
         Some("state") => {
             let id = arg(args, 1, "usage: proj state ID")?;
             put(&format!("{}\n", Job::new(cfg, id).state()));
@@ -220,83 +234,24 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     }
 }
 
-/// `proj status [N]`: the N jobs most recently changed, and how each is.
+/// `proj status [N]`: the N jobs most recently changed, and how each is,
+/// as the live snapshot has them.
 fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
     let limit: usize = match limit {
-        None => 15,
+        None => snapshot::JOBS,
         Some(n) => n
             .parse()
             .map_err(|_| Fail::new(1, format!("proj status: {n} isn't a number")))?,
     };
-    fs::create_dir_all(&cfg.jobs).map_err(|e| io_fail(&cfg.jobs, e))?;
-    let mut jobs: Vec<(std::time::SystemTime, String)> = fs::read_dir(&cfg.jobs)
-        .map_err(|e| io_fail(&cfg.jobs, e))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| {
-            (
-                e.metadata().and_then(|m| m.modified()),
-                e.file_name().to_string_lossy().into_owned(),
-            )
-        })
-        .filter(|(_, id)| !id.starts_with('.'))
-        .map(|(t, id)| (t.unwrap_or(std::time::UNIX_EPOCH), id))
-        .collect();
-    jobs.sort_by(|a, b| b.cmp(a));
-    if let Some(spent) = usage::out(cfg) {
-        put(&format!("{}\n", usage::line(&spent)));
-    }
-    for (_, id) in jobs.into_iter().take(limit) {
-        let job = Job::new(cfg, &id);
-        put(&status_line(&job));
-    }
-    put(&crate::inbox::ready_queue(cfg));
+    put(&Snapshot::take(cfg, limit)?.status());
     Ok(())
 }
 
-pub(crate) fn status_line(job: &Job) -> String {
-    let cfg = job.cfg;
-    let id = job.id;
-    let st = job.state();
-    let n = job.turns().unwrap_or_default();
-    let each = |name: &str, f: &dyn Fn(&str) -> Option<String>| -> String {
-        lines(&job.path(name))
-            .iter()
-            .filter_map(|l| f(l))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let mut notes = String::new();
-    notes += &each("agent", &|l| Some(format!("[vm {l}] ")));
-    notes += &each("app", &|l| Some(format!("[as {l}] ")));
-    if let Some(why) = demoted(cfg, &job.dir) {
-        notes += &format!("[{why}] ");
-    }
-    if st == "running" {
-        notes += &each(&format!("{n}.wait"), &|l| {
-            let what = l.split('\t').nth(1).unwrap_or(l);
-            (!what.is_empty()).then(|| format!("[waiting in line: {what}] "))
-        });
-    }
-    let targets: Vec<String> = awaits(&read(&job.path("await")).unwrap_or_default())
-        .into_iter()
-        .map(|a| a.target)
-        .collect();
-    if !targets.is_empty() {
-        notes += &format!("[awaits {}] ", targets.join(" "));
-    }
-    notes += &each(&format!("{n}.end"), &|l| match l {
-        "ask" => Some("[asks] ".into()),
-        "undeclared" => Some("[no next step] ".into()),
-        _ => None,
-    });
-    let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
-    let mut cut = result.len().min(100);
-    while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
-        cut -= 1;
-    }
-    notes += &String::from_utf8_lossy(&result[..cut]).replace('\n', " ");
-    format!("{id:<40} {st:<8} {notes}\n")
+/// `proj state --json [N]`: the live snapshot, with the N jobs most recently
+/// changed.
+pub(crate) fn state_json(cfg: &Config, jobs: usize) -> Result<String, Fail> {
+    let snap = Snapshot::take(cfg, jobs)?;
+    Ok(format!("{}\n", serde_json::to_string(&snap).unwrap()))
 }
 
 /// `proj log ID [--turn N] [--raw]`: a turn's answer, and how it ended.

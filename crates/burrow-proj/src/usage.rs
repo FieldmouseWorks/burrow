@@ -739,17 +739,21 @@ fn pending(cfg: &Config) -> bool {
 
 /// It, in a line: `proj status`'s, and the turn's journal's.
 pub fn line(s: &Spent) -> String {
-    if s.owner {
+    hold_line(s.owner, s.until, &s.said)
+}
+
+/// A hold in a line, from what the live snapshot keeps of it: the owner's
+/// pause or a refusal, until when, and its reason or Claude Code's words.
+pub fn hold_line(owner: bool, until: i64, said: &str) -> String {
+    if owner {
         return format!(
-            "Claude work is paused by the owner until {}: {}",
-            when(s.until),
-            s.said
+            "Claude work is paused by the owner until {}: {said}",
+            when(until)
         );
     }
     format!(
-        "Claude is out of usage until {}: no Claude turn starts till then (\"{}\")",
-        when(s.until),
-        s.said
+        "Claude is out of usage until {}: no Claude turn starts till then (\"{said}\")",
+        when(until)
     )
 }
 
