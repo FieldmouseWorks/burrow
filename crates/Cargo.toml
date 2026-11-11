@@ -31,6 +31,7 @@ members = [
     "burrow-proof",
     "burrow-renovate",
     "burrow-review",
+    "burrow-settings",
     "burrow-robot",
     "burrow-rustc-wrapper",
     "burrow-switch",

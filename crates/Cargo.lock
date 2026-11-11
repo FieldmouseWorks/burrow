@@ -313,6 +313,7 @@ dependencies = [
  "burrow-github",
  "burrow-probe",
  "burrow-process",
+ "burrow-settings",
  "burrow-test",
  "burrow-usage-reset",
  "burrow-watchdog",
@@ -386,6 +387,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "burrow-settings"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
