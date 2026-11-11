@@ -171,6 +171,9 @@ fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
 pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> {
     let mut pending = Vec::new();
     for entry in fs::read_dir(&cfg.jobs)?.filter_map(Result::ok) {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
         let id = entry.file_name().to_string_lossy().into_owned();
         if id.starts_with('.') {
             continue;
@@ -213,6 +216,10 @@ fn parents() -> io::Result<Vec<(u32, String, bool)>> {
             continue;
         };
         if let Some(id) = args.get(i + 1).and_then(|b| std::str::from_utf8(b).ok()) {
+            // argv is not authority to address host paths outside this queue.
+            if id.starts_with('.') || id.contains('/') {
+                continue;
+            }
             found.push((
                 pid,
                 id.to_owned(),
@@ -276,6 +283,9 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
     let mut busy = false;
     for (pid, id, first) in parents()? {
         let job = Job::new(cfg, &id);
+        if !job.dir.is_dir() || systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
+            continue;
+        }
         let Some(_lock) = job.try_lock()? else {
             busy = true;
             continue;
@@ -320,6 +330,9 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         }
     }
     for entry in fs::read_dir(&cfg.jobs)?.filter_map(Result::ok) {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
         let id = entry.file_name().to_string_lossy().into_owned();
         if id.starts_with('.') {
             continue;
