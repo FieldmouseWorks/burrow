@@ -81,3 +81,43 @@ assert C.WAKE["sam/r"] == 4102444800
 assert not C.paused("sam/other")
 assert C.paused("sam/new")
 C.CFG["settings"] = DEFAULT_ADMISSION
+
+# A pause arriving after the PR's initial look still gates the next write.
+import prs
+import train as T
+
+
+def pause_during_merge_method(*args):
+    C.CFG["settings"] = admission([], [])
+    return "squash"
+
+
+with patch.object(C, "unland", return_value=True), patch.object(prs, "merge_method", side_effect=pause_during_merge_method):
+    with patch.object(C, "write", side_effect=AssertionError("merge escaped pause")):
+        try:
+            prs.land("sam/r", clean(), {})
+        except C.JobPaused:
+            pass
+        else:
+            raise AssertionError("late pause did not stop merge")
+with patch.object(T, "cn", side_effect=AssertionError("train escaped pause")):
+    try:
+        T.ride("sam/r", {}, {}, "", None, None, "", True)
+    except C.JobPaused:
+        pass
+    else:
+        raise AssertionError("paused repo joined its train")
+    T.step("sam/r")
+C.CFG["settings"] = DEFAULT_ADMISSION
+
+# The native train write also reloads policy after preceding remote reads.
+C.CFG["settings"] = admission([], [])
+with patch.object(C, "remote", side_effect=AssertionError("native train write escaped pause")):
+    for action in ("join", "step"):
+        try:
+            T.cn("train", action, "sam/r")
+        except C.JobPaused:
+            pass
+        else:
+            raise AssertionError("paused native train write was admitted")
+C.CFG["settings"] = DEFAULT_ADMISSION
