@@ -207,7 +207,7 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
 
 /// Enumerate only this engine's turn parents, using argv and executable
 /// identity rather than inherited environment or a possibly recycled pid.
-fn parents() -> io::Result<Vec<(u32, String, bool)>> {
+fn parents(cfg: &Config) -> io::Result<Vec<(u32, String, bool)>> {
     let current = std::env::current_exe()?;
     let mut found = Vec::new();
     for entry in fs::read_dir("/proc")?.filter_map(Result::ok) {
@@ -217,13 +217,18 @@ fn parents() -> io::Result<Vec<(u32, String, bool)>> {
         let Ok(exe) = fs::read_link(entry.path().join("exe")) else {
             continue;
         };
-        if exe == current || exe.file_name().and_then(|n| n.to_str()) != Some("burrow-proj") {
+        if exe == current {
             continue;
         }
         let Ok(bytes) = fs::read(entry.path().join("cmdline")) else {
             continue;
         };
         let args: Vec<_> = bytes.split(|b| *b == 0).collect();
+        if exe.file_name().and_then(|n| n.to_str()) != Some("burrow-proj")
+            && !authority::legacy_handover(cfg, &exe, &args)
+        {
+            continue;
+        }
         let Some(i) = args.iter().position(|a| *a == b"_exec") else {
             continue;
         };
@@ -293,7 +298,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
     // lock defers this repair without blocking progress in independent pools.
     let release_error = crate::usage::admission_cutoff(cfg).err();
     let mut busy = false;
-    for (pid, id, first) in parents()? {
+    for (pid, id, first) in parents(cfg)? {
         let job = Job::new(cfg, &id);
         if !job.dir.is_dir() || systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
             continue;
@@ -315,6 +320,9 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         }
         // Confirm this is the unit's main process, not another user's argv.
         if systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
+            continue;
+        }
+        if authority::holds_slot(cfg, pid)? {
             continue;
         }
         if Checkpoint::load(&job, &n)?.is_none() && !authority::legacy_waiting(cfg, pid)? {

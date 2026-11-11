@@ -284,7 +284,7 @@ fn legacy_reset(r: &Rig) {
     usage::back(&r.cfg, None);
     until(|| {
         let mut waiting = false;
-        for (pid, id, _) in parents().unwrap() {
+        for (pid, id, _) in parents(&r.cfg).unwrap() {
             let job = Job::new(&r.cfg, &id);
             if !job.dir.is_dir()
                 || read(&job.path("pid")).as_deref() != Some(pid.to_string().as_str())
@@ -926,3 +926,5 @@ fn an_initial_waiter_keeps_no_deadline_but_a_retained_retry_does() {
 mod review2;
 
 mod review3;
+
+mod review4;
