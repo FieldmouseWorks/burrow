@@ -24,7 +24,7 @@ pkgs.testers.runNixOSTest {
       engines.door = {
         enable = true;
         repo = "sam/box";
-        authors = [ "sam" ];
+        authors = [ { login = "sam"; id = 1; } ];
       };
     };
     # Prove readable wake permissions even with a restrictive service umask.

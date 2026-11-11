@@ -61,7 +61,7 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.ledger self.nixosModules.github ];
     burrow.github = {
       apps.workers = {
-        id = 7;
+        id = 7; accountId = 8;
         slug = "sam-workers";
         keyFile = "/run/keys/workers.pem";
         api = "http://127.0.0.1:8080";

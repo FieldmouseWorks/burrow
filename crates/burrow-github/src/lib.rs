@@ -7,6 +7,9 @@ use std::{fmt, thread, time::Duration};
 
 use serde_json::Value;
 
+mod author;
+pub use author::{Author, author_names};
+
 /// Allocation bound for deadline-bound GitHub reads, including pagination.
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 

@@ -58,7 +58,7 @@ fn config(state: &Path) -> Config {
         machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
-        authors: vec!["sam".into()],
+        authors: vec![burrow_github::fake::author("sam")],
         host: "box".into(),
         user: "dev".into(),
         journal: Journal {

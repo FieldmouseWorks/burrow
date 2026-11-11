@@ -10,14 +10,14 @@ fn config() -> Config {
     Config {
         repo: "sam/box".into(),
         label: "undo".into(),
-        authors: vec!["Sam".into()],
+        authors: vec![burrow_github::fake::author("Sam")],
         host: "box".into(),
         cn: "/bin/cn".into(),
     }
 }
 
 fn issue(n: u64, login: &str, body: &str) -> Value {
-    json!({ "number": n, "user": { "login": login }, "title": "undo", "body": body })
+    json!({ "number": n, "user": burrow_github::fake::actor(login), "title": "undo", "body": body })
 }
 
 /// GitHub with `issues` open, each by its opener with nobody else's edits.
@@ -32,7 +32,7 @@ fn github(issues: Value) -> Fake {
             ok(
                 200,
                 json!({ "data": { "repository": { "issue": {
-                    "author": { "login": "sam" }, "title": i["title"], "body": i["body"],
+                    "author": burrow_github::fake::actor("sam"), "title": i["title"], "body": i["body"],
                     "userContentEdits": { "totalCount": 0, "nodes": [] },
                     "timelineItems": { "totalCount": 0, "nodes": [] },
                 } } } }),
