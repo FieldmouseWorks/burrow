@@ -265,7 +265,9 @@ fn reconcile_job(cfg: &Config, id: &str) -> Result<(), String> {
         return Ok(());
     }
     if denied(&job) {
-        let active = systemd::active(cfg, &job.unit());
+        // Activating and deactivating units can still hold descendants and
+        // inherited locks; only a known gone unit has vacated.
+        let active = !systemd::gone(cfg, &job.unit());
         if !parked(&job) {
             let state = job.state();
             if !active && job.holds()?.is_empty() {

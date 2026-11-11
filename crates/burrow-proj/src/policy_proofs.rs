@@ -34,7 +34,7 @@ pub(crate) fn reconcile(cfg: &Config) -> Result<(), String> {
             fs::rename(dir.join("policy-restoring"), &mark).map_err(|e| e.to_string())?;
         }
         if cfg.paused(repo) {
-            if systemd::active(cfg, &unit) {
+            if !systemd::gone(cfg, &unit) {
                 let env = systemd::show(cfg, &unit, "Environment")
                     .split_whitespace()
                     .map(|s| s.trim_matches('"'))
