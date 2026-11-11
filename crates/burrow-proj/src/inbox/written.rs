@@ -135,7 +135,7 @@ mod tests {
         let b = Box::new();
         let mut rest = issue(7, "sam", &["claude"]);
         rest["user"]["id"] = json!(999);
-        let mut exposed = vec![("opener", b.pass().eligible(&rest))];
+        let mut exposed = vec![("opener", b.pass().eligible("sam/box", &rest))];
         for role in ["author", "editor", "actor", "commenter", "deleter"] {
             let mut t = text();
             let spoof = json!({"login":"sam","databaseId":999});
@@ -150,7 +150,7 @@ mod tests {
                 "actor" => t["timelineItems"] = json!({"totalCount":1,"nodes":[{"actor":spoof}]}),
                 _ => t["comments"]["nodes"][0]["author"] = spoof,
             }
-            let written = b.pass().checked(&rest, &t).unwrap();
+            let written = b.pass().checked("sam/box", &rest, &t).unwrap();
             if role == "commenter" {
                 exposed.push((role, !written.comments.is_empty()));
             } else {
@@ -167,11 +167,11 @@ mod tests {
         let b = Box::new();
         let mut rest = issue(7, "sam", &[]);
         rest["user"]["login"] = json!("renamed-account");
-        assert!(b.pass().eligible(&rest));
+        assert!(b.pass().eligible("sam/box", &rest));
         let mut t = text();
         t["author"]["login"] = json!("renamed-account");
         t["comments"]["nodes"][0]["author"]["login"] = json!("renamed-account");
-        let written = b.pass().checked(&rest, &t).unwrap();
+        let written = b.pass().checked("sam/box", &rest, &t).unwrap();
         assert_eq!(written.issue["title"], "trusted title");
         assert_eq!(written.comments.len(), 1);
         assert!(b.pass().heard(&written.comments[0]));
