@@ -95,6 +95,14 @@ pub fn denied(job: &Job) -> bool {
     d.vacate || matches!(a.kind, Kind::Automated) && !d.allowed
 }
 
+/// Bound identity for downstream runtime readers, never mutable job metadata.
+pub(crate) fn repository(job: &Job) -> Option<String> {
+    match admission(job).ok()?.identity {
+        Identity::Repository(repo) => Some(repo),
+        Identity::Local => None,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Park {
     pub state: String,

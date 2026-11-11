@@ -26,7 +26,7 @@ in {
     allowed = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      description = "Repositories whose automated work may move. Unlisted and new repositories are off. Triage can still sort everywhere. Runtime changes use settings allow/pause.";
+      description = "Repositories whose automated work may move. Unlisted and new repositories are off. Unlisted repositories can still be triaged; explicit runtime pauses vacate every role. Runtime changes use settings allow/pause.";
     };
     effective = lib.mkOption { type = lib.types.attrs; readOnly = true; internal = true; };
     file = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; };

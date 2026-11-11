@@ -6,6 +6,9 @@ start automated inbox, steward fix, judge or proof jobs until opted in.
 Triage and its planner sessions can sort issues in unlisted repositories;
 offering planned children and implementation stay gated. An explicit runtime
 pause or scoped exclusion parks every role, including sorting and manual work.
+The steward also holds their settled PRs. Existing watchdog snapshots are
+gated at the reader, so a stopped publisher cannot turn a pause into repair
+work or an owner escalation.
 
 The reusable `burrow-settings` crate reads that starting policy and one
 runtime overlay (`settings/overlay.json` under `burrow.stateDir`). Every

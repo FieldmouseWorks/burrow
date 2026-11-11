@@ -761,3 +761,27 @@ fn bad_files() {
     fs::write(&m.steward, "{half").unwrap();
     assert_eq!(m.pass(T, false).1, BTreeMap::new());
 }
+
+// Sources may be stopped during the pause: their already-published snapshots
+// must not turn the deliberate hold into repair work in the machine's repo.
+#[test]
+fn runtime_pauses_suppress_repairs_from_existing_watch_snapshots() {
+    let m = Machine::new();
+    let settings = m.cfg.settings.as_ref().unwrap();
+    let stalled = item(T - H, T - MIN, Some("autoland/sam/q"));
+    m.write(&m.steward, json!({"sam/q#8":stalled}), T);
+    let mut job = item(T - H, T - MIN, Some("proj-watch/sam/q"));
+    job["repo"] = json!("sam/q");
+    m.write(&m.line, json!({"job-id":job}), T);
+    settings
+        .command(&["pause".into(), "sam/q".into()], "test")
+        .unwrap();
+    m.run(T);
+    m.run(T + H);
+    assert!(m.kicks().is_empty() && m.runs().is_empty() && m.notices().is_empty());
+    settings
+        .command(&["allow".into(), "sam/q".into()], "test")
+        .unwrap();
+    m.run(T + H + MIN);
+    assert!(m.kicks().iter().any(|k| k.contains("sam/q")));
+}

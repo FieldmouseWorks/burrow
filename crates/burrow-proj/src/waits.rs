@@ -179,6 +179,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         return None;
     }
     Some(Item {
+        repo: None,
         what: format!("proj job {}", f.id),
         phase,
         since: since as f64,
@@ -330,7 +331,10 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
                 {
                     facts.queued = facts.queued.max(released);
                 }
-                job_wait(cfg, &facts)
+                job_wait(cfg, &facts).map(|mut item| {
+                    item.repo = crate::policy::repository(&job);
+                    item
+                })
             });
 
         match wait {

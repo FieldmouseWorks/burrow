@@ -23,7 +23,7 @@ with patch.object(C, "retiring", side_effect=AssertionError("admitted")):
 C.CFG["settings"] = DEFAULT_ADMISSION
 
 # Exercise the PR transaction boundary: paused fix/judge/proof admissions
-# become holds with no strikes or failure digest. Already settled PRs merge.
+# become holds with no strikes or failure digest. Settled PRs stay held too.
 from harness import JOBS, S, R, CI_GREEN, fresh_pr_state, clean, mkpr, run, pr_state, merged, rv_review, stand_in
 
 stand_in()
@@ -44,13 +44,19 @@ with patch.object(C, "job", REAL["job"]):
         # The first pass establishes the head's settle time.
         run(pr, 0)
         status, digest = run(pr, 7200)
-        # The clean PR can merge without a job; the fix requires one.
-        if pr is not cases[-1]:
-            assert "Automated jobs paused" in status, status
-            assert digest == [] and JOBS == [], (digest, JOBS)
-            assert not pr_state().get("strikes"), pr_state()
-        else:
-            assert pr_state().get("landed") == pr["headRefOid"], (status, pr_state())
+        assert "Automated jobs paused" in status, status
+        assert digest == [] and JOBS == [], (digest, JOBS)
+        assert not pr_state().get("strikes"), pr_state()
+        assert not pr_state().get("landed"), (status, pr_state())
+    # Listed pipeline work still settles and lands under the same mode.
+    C.CFG["settings"] = admission(["sam/r"], ["sam/r"], 4102444800)
+    C.CFG["repos"]["sam/r"] = {}
+    fresh_pr_state()
+    pr = clean()
+    run(pr, 0)
+    status, _ = run(pr, 7200)
+    assert pr_state().get("landed") == pr["headRefOid"], (status, pr_state())
+    C.CFG["settings"] = admission(["sam/r", "sam/other"], ["sam/other"], 4102444800)
     mine = []
     out = {"stuck": [], "failed": [], "wake": None, "searched": 0,
            "jobs": [{"task": "fix", "pipeline": True, "timeout": 60, "key": "pause",

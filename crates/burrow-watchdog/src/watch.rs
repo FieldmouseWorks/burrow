@@ -13,6 +13,8 @@ use crate::words::clock;
 /// What a source waits on, as its watch file has it.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Item {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub what: String,
     /// What it waits on now, and since when: a new phase is progress.
     pub phase: String,
@@ -93,6 +95,7 @@ fn item(it: &Value) -> Option<Item> {
             .and_then(|n| n.as_f64())
     };
     Some(Item {
+        repo: text("repo"),
         what: text("what")?,
         phase: text("phase")?,
         since: number("since")?,
@@ -143,6 +146,7 @@ pub fn overdue(
                         source: name.clone(),
                         key: String::new(),
                         item: Item {
+                            repo: None,
                             what: src.about.clone(),
                             phase,
                             since: at,
@@ -160,6 +164,21 @@ pub fn overdue(
             due.push(at + stale);
         }
         for (key, it) in got.map(|(_, items)| items).unwrap_or_default() {
+            // Repository work deliberately stopped is not a machine failure.
+            // Adopt legacy PR snapshots by their source-owned key as well.
+            let repo = it.repo.as_deref().or_else(|| {
+                key.split_once('#')
+                    .map(|(repo, _)| repo)
+                    .filter(|r| r.contains('/'))
+            });
+            if let Some(repo) = repo
+                && !cfg
+                    .settings
+                    .as_ref()
+                    .is_some_and(|s| s.allows(repo).unwrap_or(false))
+            {
+                continue;
+            }
             if it.due <= now {
                 found.insert(
                     sid(name, &key, it.since),
