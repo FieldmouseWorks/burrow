@@ -638,3 +638,47 @@ fn ordinary_caps_and_multiple_pipeline_reservations_share_the_budget() {
     let picked = pick_budget(&cfg, &slots, &line, 3);
     assert_eq!(picked.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [3, 4]);
 }
+
+#[test]
+fn nonbinding_budgets_preserve_ordinary_share_after_leads_take_general_slots() {
+    use crate::pick::{Waiter, pick_budget};
+    let mut cfg = config(Path::new("/unused"), 4);
+    cfg.pipeline_slots = 1;
+    // Pipeline work cannot use the occupied reserved slot, and the leads
+    // exhaust its general allowance. Ordinary work must still use slot 3.
+    for held_class in [Class::Lead, Class::Pipeline] {
+        for pipeline_first in [false, true] {
+            let mut classes = vec![Class::Lead, Class::Lead];
+            classes.extend(if pipeline_first {
+                [Class::Pipeline, Class::Normal]
+            } else {
+                [Class::Normal, Class::Pipeline]
+            });
+            let line: Vec<_> = classes
+                .into_iter()
+                .enumerate()
+                .map(|(i, class)| Waiter {
+                    name: i.to_string(),
+                    class,
+                    project: i.to_string(),
+                })
+                .collect();
+            let slots = [
+                Slot::Free,
+                Slot::Free,
+                Slot::Free,
+                Slot::Held {
+                    class: Some(held_class),
+                    project: "held".into(),
+                },
+            ];
+            let normal = line.iter().position(|w| w.class == Class::Normal).unwrap();
+            for budget in [3, 4, usize::MAX] {
+                assert_eq!(
+                    pick_budget(&cfg, &slots, &line, budget),
+                    [(0, 1), (1, 2), (normal, 3)]
+                );
+            }
+        }
+    }
+}

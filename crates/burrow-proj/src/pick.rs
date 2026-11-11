@@ -223,7 +223,9 @@ pub fn pick_budget(
                 }
             }
             Class::Steward | Class::First | Class::Normal => {
-                if went.len() >= capacity.saturating_sub(pipeline_budget.saturating_sub(pipelines))
+                if budget < theirs.len() + ours.len()
+                    && went.len()
+                        >= capacity.saturating_sub(pipeline_budget.saturating_sub(pipelines))
                 {
                     continue;
                 }
