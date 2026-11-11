@@ -77,7 +77,12 @@ fn an_identity_and_a_deleted_slot_file_do_not_make_a_running_turn_waiting() {
 
 #[test]
 fn only_the_exact_legacy_handover_shell_is_a_parent() {
-    let r = rig();
+    let mut r = rig();
+    // The host example's /bin/bash need not exist in a Nix build sandbox.
+    r.cfg.tools.bash = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("bash"))
+        .find(|path| path.is_file())
+        .unwrap();
     let cfg = &r.cfg;
     let lock = cfg.jobs.join(".slots/.lock");
     let script = r#"exec 9>"$0"; "$1" 9; shift; exec "$@""#;
