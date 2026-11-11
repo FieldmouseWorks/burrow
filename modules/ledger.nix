@@ -164,7 +164,11 @@ in
 
     package = mkOption {
       type = types.package;
-      description = "Conary, whose `cn` keeps the ledger (its flake's packages.default).";
+      description = ''
+        Conary, whose `cn` keeps the ledger (its flake's packages.default).
+        The package must carry its runtime tools, including git; units do
+        not supply them.
+      '';
     };
 
     dir = mkOption {

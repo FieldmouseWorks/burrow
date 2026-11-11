@@ -118,7 +118,7 @@ impl GitHub {
             .skip((page - 1) * per_page)
             .take(per_page)
             .map(|i| {
-                json!({"number": i.number, "title": i.title,
+                json!({"number": i.number, "title": i.title, "body": i.body,
                        "labels": label_objects(&i.labels),
                        "pull_request": if i.pull_request { json!({"url": "x"}) } else { Value::Null }})
             })
@@ -255,6 +255,15 @@ impl Api for GitHub {
                     .comments
                     .push(body["body"].as_str().unwrap().into());
                 answer(201, json!({}), None)
+            }
+            ("PATCH", ["issues", n]) if body.get("title").is_some() => {
+                if self.fails("update") {
+                    return refused();
+                }
+                let i = number(n);
+                self.issues[i].title = body["title"].as_str().unwrap().into();
+                self.issues[i].body = body["body"].as_str().unwrap().into();
+                answer(200, json!({}), None)
             }
             ("PATCH", ["issues", n]) => {
                 if self.fails("close") {
@@ -745,4 +754,34 @@ fn ensure_retries_ambiguous_creation_without_daily_reminders() {
         assert_eq!(b.github.issues.len(), 1);
         assert!(b.github.issues[0].comments.is_empty());
     }
+}
+
+#[test]
+fn changed_notice_facts_replace_the_open_issue_and_retry_failed_updates() {
+    let mut m = machine(Some("sam/homelab"));
+    m.notify(&["open", "usage", "limit", "reset tomorrow"], NOW);
+    m.github.fails.push("update");
+    m.notify(
+        &["open", "usage", "owner pause", "save usage until Friday"],
+        NOW + 1,
+    );
+    assert_eq!(m.github.issues[0].body, "reset tomorrow");
+    assert!(pending(&m.cfg, "usage"));
+    m.github.fails.clear();
+    m.notify(
+        &["open", "usage", "owner pause", "save usage until Friday"],
+        NOW + 2,
+    );
+    assert_eq!(m.github.issues.len(), 1);
+    assert_eq!(m.github.issues[0].title, "[usage] owner pause");
+    assert_eq!(m.github.issues[0].body, "save usage until Friday");
+    // A pending close does not abandon the notice when the hold is replaced.
+    m.github.fails.push("close");
+    m.notify(&["close", "usage"], NOW + 3);
+    m.github.fails.clear();
+    m.notify(&["open", "usage", "new pause", "until Monday"], NOW + 4);
+    assert_eq!(m.github.issues.len(), 1);
+    assert_eq!(m.github.issues[0].body, "until Monday");
+    m.notify(&["close", "usage"], NOW + 5);
+    assert!(!pending(&m.cfg, "usage"));
 }

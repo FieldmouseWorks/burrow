@@ -70,8 +70,8 @@
 //! proj usage [back]           whether the machine is out of Claude usage, and
 //!                             until when (JSON; nothing when it isn't);
 //!                             back: it isn't, now (the limit was raised)
-//! proj usage hold UNTIL       the hold an earlier stall watchdog kept,
-//!                             taken into proj's
+//! proj usage hold UNTIL [--reason TEXT]  pause Claude work until a Unix timestamp
+//! proj usage adopt UNTIL      import a legacy watchdog limit
 //! proj ask --default TEXT [--one-way]  from inside a job: its answer is a question for
 //!                             a person, whose reply resumes it
 //! proj done                   from inside a job: its work is finished
