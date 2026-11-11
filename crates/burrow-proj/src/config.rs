@@ -156,6 +156,10 @@ pub struct Inbox {
     /// Machine issue labels mapped to routing roles.
     #[serde(default)]
     pub roles: BTreeMap<String, String>,
+    /// The role an authors' own issue runs as when no machine rule names one;
+    /// its engine label still picks the engine. None keeps label routing alone.
+    #[serde(default)]
+    pub owner_role: Option<String>,
     /// The label that, with an engine label, makes an issue's job one that waits in no
     /// line (proj run --unstick): the steward's stuck issue's.
     pub unstick_label: String,
