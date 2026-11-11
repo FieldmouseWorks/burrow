@@ -55,11 +55,13 @@ parked without holding admission capacity or producing stall alerts.
 Job scratch, worktrees, native sessions, conversations and proof checkpoints
 remain. On release, queued turns return at their original order and priority;
 interrupted turns and reviews continue their native sessions, and proofs
-retain completed checks. Native review queue entries keep their age and
+retain completed checks. Interrupted trusted-tools copies are archived before
+checks get a fresh copy from the configured origin branch. Native review queue entries keep their age and
 priority while releasing reviewer capacity.
 Question and await deadlines advance by the parked duration. The overlay path
 wakes reconciliation immediately, scope expiry books its own wake, and a
 short recovery timer handles a machine restart or interrupted reconciliation.
+Turn completions and inbox admission changes also wake control directly.
 
 Automation binds its repository identity in host-owned control state before
 launch. A missing identity fails closed; deliberately local automated work
