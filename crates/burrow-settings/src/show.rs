@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::schema::{self, Fallback, SETTINGS, Setting};
+use crate::schema::{self, SETTINGS, Setting};
 
 /// Where a value came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -77,33 +77,58 @@ impl Reading {
 }
 
 /// The flake's own values, as modules/settings/tracked.nix renders them:
-/// each option's name, then `{ "value": V, "set": BOOL }`, or null where the
-/// machine doesn't have the module that declares it (its default holds).
+/// each option's name, then `{ "value": V, "set": BOOL, "default": D }` (D
+/// its module's own default, given the machine's other values), or null
+/// where the machine doesn't have the module that declares it (its default
+/// holds). A module's default that isn't the schema's fails it, overridden
+/// by the flake or not, a derived one's worked out from the values here.
 pub fn flake(tracked: &Map<String, Value>) -> Result<Vec<Reading>, String> {
-    tracked
-        .iter()
-        .map(|(name, entry)| {
-            let setting = schema::find(name).ok_or_else(|| {
-                format!("{name}: the flake renders an option the settings schema doesn't declare")
+    let mut readings = Vec::new();
+    let mut defaults = Vec::new();
+    for (name, entry) in tracked {
+        let setting = schema::find(name).ok_or_else(|| {
+            format!("{name}: the flake renders an option the settings schema doesn't declare")
+        })?;
+        if entry.is_null() {
+            let value = setting.default_value().ok_or_else(|| {
+                format!("{name}: its default is derived, and the machine doesn't have its module")
             })?;
-            if entry.is_null() {
-                let value = setting.default_value().ok_or_else(|| {
-                    format!(
-                        "{name}: its default is derived, and the machine doesn't have its module"
-                    )
-                })?;
-                return Ok(Reading::new(name, value, Origin::Default));
-            }
-            let (Some(value), Some(Value::Bool(set))) = (entry.get("value"), entry.get("set"))
-            else {
-                return Err(format!(
-                    "{name}: expected {{\"value\": V, \"set\": BOOL}}, got {entry}"
-                ));
-            };
-            let origin = if *set { Origin::Flake } else { Origin::Default };
-            Ok(Reading::new(name, value.clone(), origin))
-        })
+            readings.push(Reading::new(name, value, Origin::Default));
+            continue;
+        }
+        let (Some(value), Some(Value::Bool(set)), Some(default)) =
+            (entry.get("value"), entry.get("set"), entry.get("default"))
+        else {
+            return Err(format!(
+                "{name}: expected {{\"value\": V, \"set\": BOOL, \"default\": D}}, got {entry}"
+            ));
+        };
+        let origin = if *set { Origin::Flake } else { Origin::Default };
+        readings.push(Reading::new(name, value.clone(), origin));
+        defaults.push((setting, default));
+    }
+    let values = values(&readings);
+    for (setting, default) in defaults {
+        let want = setting.default_given(&values);
+        if want.as_ref() != Some(default) {
+            return Err(drift(setting.name, "its module's default", default, want));
+        }
+    }
+    Ok(readings)
+}
+
+fn values(readings: &[Reading]) -> schema::Values {
+    readings
+        .iter()
+        .map(|r| (r.name.clone(), r.value.clone()))
         .collect()
+}
+
+fn drift(name: &str, what: &str, got: &Value, want: Option<Value>) -> String {
+    match want {
+        Some(want) => format!("{name}: {what} is {got}, the settings schema's is {want}"),
+        None => format!("{name}: {what} is {got}, and the settings schema can't work its own out"),
+    }
 }
 
 /// Every option the schema declares, each with its reading.
@@ -115,11 +140,12 @@ pub struct Document {
 impl Document {
     /// The document, or why these readings can't be one.
     pub fn build(readings: Vec<Reading>) -> Result<Self, String> {
+        let values = values(&readings);
         let mut options = BTreeMap::new();
         for r in readings {
             let setting = schema::find(&r.name)
                 .ok_or_else(|| format!("{}: not an option the settings schema declares", r.name))?;
-            check(setting, &r)?;
+            check(setting, &r, &values)?;
             if options.insert(r.name.clone(), r).is_some() {
                 return Err(format!("{}: read twice", setting.name));
             }
@@ -161,7 +187,7 @@ impl Document {
     }
 }
 
-fn check(setting: &Setting, r: &Reading) -> Result<(), String> {
+fn check(setting: &Setting, r: &Reading, values: &schema::Values) -> Result<(), String> {
     let name = setting.name;
     if !setting.origins().contains(&r.origin) {
         return Err(format!(
@@ -174,15 +200,9 @@ fn check(setting: &Setting, r: &Reading) -> Result<(), String> {
         .kind
         .check(&r.value)
         .map_err(|e| format!("{name}: {e}"))?;
-    if let (Origin::Default, Fallback::Value(_)) = (r.origin, &setting.default) {
-        let want = setting.default_value();
-        if want.as_ref() != Some(&r.value) {
-            return Err(format!(
-                "{name}: its default where it lives is {}, the settings schema's is {}",
-                r.value,
-                want.unwrap_or_default()
-            ));
-        }
+    let want = setting.default_given(values);
+    if r.origin == Origin::Default && want.as_ref() != Some(&r.value) {
+        return Err(drift(name, "its default where it lives", &r.value, want));
     }
     Ok(())
 }
@@ -192,12 +212,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Every option at its default, as a machine with nothing set reads it.
+    /// Every option at its default, as a machine with nothing set reads it:
+    /// a derived one worked out from those before it.
     fn defaults() -> Vec<Reading> {
+        let mut values = schema::Values::new();
         SETTINGS
             .iter()
             .map(|s| {
-                let value = s.default_value().unwrap_or(json!(1));
+                let value = s.default_given(&values).unwrap();
+                values.insert(s.name.into(), value.clone());
                 Reading::new(s.name, value, Origin::Default)
             })
             .collect()
@@ -257,6 +280,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("the settings schema's is 5"), "{err}");
+        // So is a derived default that isn't what its formula gives: with
+        // maxJobs 4 and pipelineSlots 1, maxJobsPerProject's is 2.
+        let err = with(
+            "proj.maxJobsPerProject",
+            Reading::new("proj.maxJobsPerProject", json!(1), Origin::Default),
+        )
+        .unwrap_err();
+        assert!(err.contains("is 1, the settings schema's is 2"), "{err}");
         // A flake option can't come from a live file, nor a live one from the flake.
         assert!(
             with(
@@ -282,23 +313,58 @@ mod tests {
     #[test]
     fn the_flakes_values_say_which_it_set() {
         let tracked = json!({
-            "autoland.rounds": {"value": 3, "set": true},
-            "autoland.jobIdleMinutes": {"value": 20, "set": false},
+            "autoland.rounds": {"value": 3, "set": true, "default": 5},
+            "autoland.jobIdleMinutes": {"value": 20, "set": false, "default": 20},
             "autoland.reviewers.codex.effort": null,
+            "proj.maxJobs": {"value": 6, "set": true, "default": 4},
+            "proj.pipelineSlots": {"value": 1, "set": false, "default": 1},
+            "proj.maxJobsPerProject": {"value": 2, "set": true, "default": 4},
         });
         let got = flake(tracked.as_object().unwrap()).unwrap();
+        let got: Vec<_> = got.iter().map(|r| (r.name.as_str(), r.origin)).collect();
         assert_eq!(
             got,
             vec![
-                Reading::new("autoland.jobIdleMinutes", json!(20), Origin::Default),
-                Reading::new(
-                    "autoland.reviewers.codex.effort",
-                    json!("high"),
-                    Origin::Default
-                ),
-                Reading::new("autoland.rounds", json!(3), Origin::Flake),
+                ("autoland.jobIdleMinutes", Origin::Default),
+                ("autoland.reviewers.codex.effort", Origin::Default),
+                ("autoland.rounds", Origin::Flake),
+                ("proj.maxJobs", Origin::Flake),
+                ("proj.maxJobsPerProject", Origin::Flake),
+                ("proj.pipelineSlots", Origin::Default),
             ]
         );
+        let changed = |name: &str, entry: Value| {
+            let mut t = tracked.as_object().unwrap().clone();
+            t.insert(name.into(), entry);
+            flake(&t).unwrap_err()
+        };
+        // A literal default the flake overrides is still the schema's.
+        let err = changed(
+            "autoland.rounds",
+            json!({"value": 3, "set": true, "default": 4}),
+        );
+        assert_eq!(
+            err,
+            "autoland.rounds: its module's default is 4, the settings schema's is 5"
+        );
+        // A derived default is what its formula gives from the flake's values,
+        // overridden (maxJobsPerProject) or not (pipelineSlots).
+        let err = changed(
+            "proj.maxJobsPerProject",
+            json!({"value": 2, "set": true, "default": 3}),
+        );
+        assert!(err.contains("is 3, the settings schema's is 4"), "{err}");
+        let err = changed(
+            "proj.pipelineSlots",
+            json!({"value": 1, "set": true, "default": 0}),
+        );
+        assert_eq!(
+            err,
+            "proj.pipelineSlots: its module's default is 0, the settings schema's is 1"
+        );
+        // An entry without its module's default isn't one.
+        let err = changed("autoland.rounds", json!({"value": 3, "set": true}));
+        assert!(err.contains("expected"), "{err}");
         let err = flake(json!({"autoland.nope": null}).as_object().unwrap()).unwrap_err();
         assert!(err.contains("doesn't declare"), "{err}");
         let err = flake(json!({"proj.maxJobsPerProject": null}).as_object().unwrap()).unwrap_err();

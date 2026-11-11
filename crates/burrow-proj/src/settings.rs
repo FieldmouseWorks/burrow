@@ -1,6 +1,6 @@
 //! `proj settings`: the read door of burrow-settings' schema. Each option
 //! is read from where it lives today: the flake's, from the values
-//! modules/settings/tracked.nix renders into proj's config; the live ones,
+//! modules/settings/tracked.nix renders into the file proj's config names; the live ones,
 //! from proj's own files, through the parsers its turns use. The schema
 //! decides what may be shown ([`burrow_settings::show::Document`]).
 
@@ -15,7 +15,14 @@ use crate::usage;
 
 /// Every option in effect, and where each came from.
 pub fn document(cfg: &Config) -> Result<Document, String> {
-    let mut readings = show::flake(&cfg.settings)?;
+    let file = cfg
+        .settings
+        .as_deref()
+        .ok_or("proj's config names no settings file")?;
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let tracked: serde_json::Map<String, Value> =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut readings = show::flake(&tracked)?;
     let roles = crate::roles::read(&cfg.roles)?;
     readings.push(Reading::live(
         "proj.roles",
@@ -43,7 +50,7 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     readings.push(Reading::live(
         "proj.usageHold",
         cfg.jobs.join(usage::FILE),
-        usage::out(cfg)
+        usage::held(cfg)?
             .map(|s| json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said})),
     ));
     Document::build(readings)

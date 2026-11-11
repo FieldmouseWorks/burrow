@@ -13,16 +13,26 @@ fn tracked() -> serde_json::Map<String, Value> {
         .filter(|s| s.change == Change::Deploy)
         .map(|s| {
             let entry = match s.name {
-                "autoland.rounds" => json!({"value": 3, "set": true}),
-                "proj.pipelineSlots" => json!({"value": 1, "set": false}),
-                "proj.maxJobsPerProject" => json!({"value": 2, "set": false}),
+                "autoland.rounds" => json!({"value": 3, "set": true, "default": 5}),
+                "proj.pipelineSlots" => json!({"value": 1, "set": false, "default": 1}),
+                "proj.maxJobsPerProject" => json!({"value": 2, "set": false, "default": 2}),
                 // A module the machine doesn't have: its default holds.
                 n if n.starts_with("autoland.reviewers.") => Value::Null,
-                _ => json!({"value": s.default_value().unwrap(), "set": false}),
+                _ => {
+                    let d = s.default_value().unwrap();
+                    json!({"value": d, "set": false, "default": d})
+                }
             };
             (s.name.to_owned(), entry)
         })
         .collect()
+}
+
+/// Puts the flake's values where the config says, as /etc has them.
+fn set(cfg: &mut Config, tracked: serde_json::Map<String, Value>) {
+    let file = cfg.jobs.join("settings.json");
+    fs::write(&file, Value::Object(tracked).to_string()).unwrap();
+    cfg.settings = Some(file);
 }
 
 fn show(cfg: &Config) -> Value {
@@ -34,7 +44,7 @@ fn every_option_shown_comes_from_the_schema() {
     let (d, mut cfg) = crate::usage::tests::rig();
     cfg.roles = d.path().join("config/roles");
     cfg.models = d.path().join("config/models");
-    cfg.settings = tracked();
+    set(&mut cfg, tracked());
 
     // Nothing live yet: every live option at its default, naming its file.
     let doc = show(&cfg);
@@ -100,19 +110,28 @@ fn every_option_shown_comes_from_the_schema() {
     );
 
     // The flake rendering an option the schema doesn't declare fails it.
-    cfg.settings.insert(
+    let mut extra = tracked();
+    extra.insert(
         "autoland.undeclared".into(),
-        json!({"value": 1, "set": true}),
+        json!({"value": 1, "set": true, "default": 1}),
     );
+    set(&mut cfg, extra);
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.starts_with("autoland.undeclared: "), "{err}");
     // So does one it declares that the flake doesn't render.
-    cfg.settings = tracked();
-    cfg.settings.remove("autoland.rounds");
+    let mut missing = tracked();
+    missing.remove("autoland.rounds");
+    set(&mut cfg, missing);
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.starts_with("autoland.rounds: declared"), "{err}");
+    // And a usage record that can't be read is no "no hold".
+    set(&mut cfg, tracked());
+    fs::write(cfg.jobs.join(crate::usage::FILE), "{not json").unwrap();
+    let err = command(&cfg, &["show".into()]).unwrap_err();
+    assert!(err.contains(".usage.json"), "{err}");
+    fs::remove_file(cfg.jobs.join(crate::usage::FILE)).unwrap();
     // And a live file a turn would refuse.
-    cfg.settings = tracked();
+    set(&mut cfg, tracked());
     fs::write(&cfg.models, "triage claude small enormous\n").unwrap();
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.contains("takes no effort enormous"), "{err}");

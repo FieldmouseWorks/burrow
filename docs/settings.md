@@ -39,15 +39,20 @@ dashboard can be built from it alone.
 
 ## How it stays one list
 
-- The flake's values reach `proj settings` through proj's config, rendered by
-  [modules/settings/tracked.nix](../modules/settings/tracked.nix) by schema
-  name, with whether the flake set each one (a definition above the option's
-  own default).
+- The flake's values reach `proj settings` in `/etc/burrow/settings.json`,
+  rendered by [modules/settings/tracked.nix](../modules/settings/tracked.nix)
+  by schema name, with whether the flake set each one (a definition above the
+  option's own default) and the module's own default. proj's config names
+  the file rather than holding it: those values may run proj themselves (a
+  repo's `proofRuns`).
 - `proj settings show` only builds its document from the schema's options
   (`burrow_settings::show::Document`): a value for a name the schema doesn't
   declare, a declared option nothing read, a value of the wrong kind, a value
   from where its option can't come, or a module's default that isn't the
-  schema's, each fails it, naming the option.
+  schema's, each fails it, naming the option. That last holds whether or not
+  the flake overrides the option, and a derived default (`pipelineSlots`,
+  `maxJobsPerProject`) is worked out from the machine's own values by the
+  schema's formula.
 - The live files are read with the parsers proj's turns use, so a line a turn
   would refuse fails the show too.
 - `checks/settings.nix` runs it on a fixture machine with values from its

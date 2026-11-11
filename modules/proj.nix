@@ -63,6 +63,9 @@ let
     PRs to the steward. There are no TTY sessions: run each command whole.
   '');
 
+  # The flake's value of each option in burrow-settings' schema, for `proj
+  # settings show`.
+  settingsFile = "burrow/settings.json";
   roles = "${config.users.users.${user}.home}/.config/proj/roles";
   models = "${config.users.users.${user}.home}/.config/proj/models";
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
@@ -100,7 +103,9 @@ let
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
     inherit roles models;
-    settings = import ./settings/tracked.nix { inherit lib options; };
+    # A path, not the file: the flake's values include ones that run proj
+    # (a repo's proofRuns), so proj's config can't hold them.
+    settings = "/etc/${settingsFile}";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
@@ -473,6 +478,7 @@ in
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package agents ];
+    environment.etc.${settingsFile}.text = builtins.toJSON (import ./settings/tracked.nix { inherit lib options; });
     burrow.updates.health.proj-config = ''
       if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
         exec ${proj}/bin/proj check-config

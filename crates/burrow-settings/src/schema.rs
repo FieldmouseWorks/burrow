@@ -6,7 +6,12 @@
 //! in the NixOS modules (modules/settings/tracked.nix renders them); the
 //! ones that change live are named for the file that keeps them today.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value, json};
+
+/// Each option's value in effect, by name.
+pub type Values = BTreeMap<String, Value>;
 
 /// What one option's value is.
 #[derive(Debug)]
@@ -63,8 +68,11 @@ impl Change {
 pub enum Fallback {
     /// This value, as JSON.
     Value(&'static str),
-    /// Worked out from other options, as this says.
-    Derived(&'static str),
+    /// Worked out from other options' values, as `says` says.
+    Derived {
+        says: &'static str,
+        from: fn(&Values) -> Option<Value>,
+    },
 }
 
 /// One option.
@@ -87,7 +95,16 @@ impl Setting {
                 serde_json::from_str(text)
                     .unwrap_or_else(|e| panic!("{}: default {text}: {e}", self.name)),
             ),
-            Fallback::Derived(_) => None,
+            Fallback::Derived { .. } => None,
+        }
+    }
+
+    /// Its default given the other options' values; None when a derived
+    /// one's inputs aren't there.
+    pub fn default_given(&self, values: &Values) -> Option<Value> {
+        match self.default {
+            Fallback::Value(_) => self.default_value(),
+            Fallback::Derived { from, .. } => from(values),
         }
     }
 
@@ -190,7 +207,22 @@ const fn live(
     }
 }
 
-use Fallback::{Derived, Value as Is};
+use Fallback::Value as Is;
+
+fn count(values: &Values, name: &str) -> Option<i64> {
+    values.get(name)?.as_i64()
+}
+
+/// modules/proj.nix: `if maxJobs > 1 then 1 else 0`.
+fn pipeline_slots(values: &Values) -> Option<Value> {
+    Some(json!(i64::from(count(values, "proj.maxJobs")? > 1)))
+}
+
+/// modules/proj.nix: `max 1 (maxJobs - pipelineSlots - 1)`.
+fn per_project(values: &Values) -> Option<Value> {
+    let left = count(values, "proj.maxJobs")? - count(values, "proj.pipelineSlots")? - 1;
+    Some(json!(left.max(1)))
+}
 
 /// Every option, in the order `settings show` lists them.
 pub static SETTINGS: &[Setting] = &[
@@ -205,14 +237,20 @@ pub static SETTINGS: &[Setting] = &[
     flake(
         "proj.pipelineSlots",
         &Kind::Count { min: 0 },
-        Derived("1 when maxJobs is more than 1, else 0"),
+        Fallback::Derived {
+            says: "1 when maxJobs is more than 1, else 0",
+            from: pipeline_slots,
+        },
         "proj",
         "Of maxJobs, how many only the pipeline's own repos' jobs may take.",
     ),
     flake(
         "proj.maxJobsPerProject",
         &SLOTS,
-        Derived("max 1 (maxJobs - pipelineSlots - 1)"),
+        Fallback::Derived {
+            says: "max 1 (maxJobs - pipelineSlots - 1)",
+            from: per_project,
+        },
         "proj",
         "The most slots one project's jobs hold at once.",
     ),
@@ -510,7 +548,7 @@ pub fn json_schema() -> Value {
                 value["default"] = default;
             }
             let help = match s.default {
-                Fallback::Derived(how) => format!("{} Default: {how}.", s.help),
+                Fallback::Derived { says, .. } => format!("{} Default: {says}.", s.help),
                 Fallback::Value(_) => s.help.to_owned(),
             };
             let origins: Vec<_> = s.origins().iter().map(|o| o.name()).collect();

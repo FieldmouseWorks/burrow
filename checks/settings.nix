@@ -2,25 +2,33 @@
 # flake and from each live file, validates against the JSON Schema
 # burrow-settings generates (`proj settings schema`), checked by a validator
 # of its own; and a document with an option the schema doesn't declare, or
-# a value from where its option can't come, doesn't.
+# a value from where its option can't come, doesn't. A module default that
+# isn't the schema's, hidden by the flake's own value, fails the show.
 { self, pkgs, ... }:
 let
   fixture = self.nixosConfigurations.example.extendModules {
-    modules = [ {
+    modules = [ ({ config, ... }: {
       burrow.autoland.rounds = 3;
+      # An override that runs proj itself: proj's own config can't carry the
+      # flake's values, or this is a cycle.
+      burrow.autoland.repos."sam/kept".proofRuns.check = "${config.burrow.tools.proj}/bin/proj check-config";
       burrow.proj.maxJobs = 6;
       burrow.proj.paused = [ "sam/kept" ];
-    } ];
+    }) ];
   };
   proj = fixture.config.burrow.tools.proj;
+  tracked = fixture.config.environment.etc."burrow/settings.json".source;
 in
 pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-jsonschema ]; } ''
   # The fixture's own config, its live files moved where the build can write.
   config=$(grep -o '/nix/store/[^ ]*-proj\.json' ${proj}/bin/proj | head -n1)
   live=$TMPDIR/live
   mkdir -p $live/jobs $live/config/roles.d
-  jq --arg live "$live" '.jobs = "\($live)/jobs" | .roles = "\($live)/config/roles" | .models = "\($live)/config/models"' \
+  [ "$(jq -r .settings "$config")" = /etc/burrow/settings.json ]
+  jq --arg live "$live" --arg pwd "$PWD" \
+    '.jobs = "\($live)/jobs" | .roles = "\($live)/config/roles" | .models = "\($live)/config/models" | .settings = "\($pwd)/settings.json"' \
     "$config" >proj.json
+  jq . ${tracked} >settings.json
   printf 'triage codex\nfix@sam/homelab codex over 80 claude\n' >$live/config/roles.d/usual
   ln -s $live/config/roles.d/usual $live/config/roles
   printf 'triage codex - low\n' >$live/config/models
@@ -56,5 +64,11 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   refuses '.options["autoland.rounds"].value = "3"'
   refuses '.options["autoland.rounds"].origin = "live"'
   refuses 'del(.options["proj.roles"])'
+
+  # The flake overrides rounds, but its module's own default still has to be
+  # the schema's.
+  jq '.["autoland.rounds"].default = 4' ${tracked} >settings.json
+  if run settings show 2>err; then echo "show took a module default of 4"; exit 1; fi
+  grep -F "autoland.rounds: its module's default is 4, the settings schema's is 5" err
   touch $out
 ''
