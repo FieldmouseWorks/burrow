@@ -42,7 +42,7 @@ pub(crate) const FILE: &str = ".usage.json";
 /// goes once its notice is settled, or is replaced by a new refusal), so an
 /// earlier proj's limit written before it never holds again ([`earlier`]).
 const RELEASED: &str = ".usage.released";
-const OWNER: &str = ".usage.owner.json";
+const OWNER: &str = ".usage-owner-";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
@@ -127,15 +127,17 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Spent>(&text)
             .map(|mut s| {
-                // Old turns reject unknown fields and still write this record.
-                // Keep owner metadata separately; their writes preserve at/job.
-                if s.job == "owner"
-                    && s.back.is_none()
-                    && let Ok(bytes) = fs::read(cfg.jobs.join(OWNER))
-                {
+                // Legacy writers preserve the metadata reference in job. Their
+                // last-refusal update distinguishes a real refusal at/after the
+                // deadline from the compatibility fence (deadline minus one).
+                if owner_reference(&s.job) && s.back.is_none() {
+                    let bytes = fs::read(cfg.jobs.join(&s.job))
+                        .map_err(|e| format!("proj: {}: {e}", s.job))?;
                     let mut owner: Spent = serde_json::from_slice(&bytes)
-                        .map_err(|e| format!("proj: {OWNER}: {e}"))?;
-                    if owner.at == s.at {
+                        .map_err(|e| format!("proj: {}: {e}", s.job))?;
+                    if s.refused() >= owner.until {
+                        s.said = EARLIER.into();
+                    } else {
                         owner.owner = true;
                         owner.told = s.told;
                         return Ok(owner);
@@ -175,28 +177,56 @@ fn lock(cfg: &Config) -> Result<File, String> {
     Ok(f)
 }
 
+fn owner_reference(job: &str) -> bool {
+    job.strip_prefix(OWNER).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+/// Prepare immutable metadata first; publishing the compatible record is the
+/// only commit point. Old generations remain readable by concurrent readers.
+fn owner_generation(cfg: &Config, s: &Spent) -> Result<Spent, String> {
+    if owner_reference(&s.job)
+        && let Ok(bytes) = fs::read(cfg.jobs.join(&s.job))
+        && let Ok(previous) = serde_json::from_slice::<Spent>(&bytes)
+        && previous.until == s.until
+        && previous.at == s.at
+        && previous.said == s.said
+    {
+        return Ok(s.clone());
+    }
+    let mut file = tempfile::Builder::new()
+        .prefix(OWNER)
+        .tempfile_in(&cfg.jobs)
+        .map_err(|e| format!("proj: owner metadata: {e}"))?;
+    let mut generation = s.clone();
+    generation.job = file
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let text =
+        serde_json::to_string(&generation).map_err(|e| format!("proj: owner metadata: {e}"))?;
+    std::io::Write::write_all(file.as_file_mut(), text.as_bytes())
+        .map_err(|e| format!("proj: owner metadata: {e}"))?;
+    file.keep()
+        .map_err(|e| format!("proj: owner metadata: {e}"))?;
+    Ok(generation)
+}
+
 /// The record written whole (a temp file renamed over it), or why not.
 fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
-    let encode = |s: &Spent| serde_json::to_string(s).map_err(|e| format!("proj: {FILE}: {e}"));
-    let mut mirror = s.clone();
+    let mut mirror = if s.owner && s.back.is_none() {
+        owner_generation(cfg, s)?
+    } else {
+        s.clone()
+    };
     if s.owner && s.back.is_none() {
-        // The sidecar owns the actual deadline even if an old refusal extends
-        // its compatible mirror. A future last-refusal fences old successful
-        // turns from releasing this pause before its deadline.
-        swap(&cfg.jobs.join(OWNER), &encode(s)?).map_err(|e| format!("proj: {OWNER}: {e}"))?;
-        mirror.last = Some(s.until);
+        mirror.last = Some(s.until - 1);
     }
-    swap(&cfg.jobs.join(FILE), &format!("{}\n", encode(&mirror)?))
-        .map_err(|e| format!("proj: {FILE}: {e}"))?;
-    if !s.owner || s.back.is_some() {
-        match fs::remove_file(cfg.jobs.join(OWNER)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(format!("proj: {OWNER}: {e}"));
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
+    swap(&cfg.jobs.join(FILE), &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
 }
 
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
@@ -627,3 +657,6 @@ fn tell(cfg: &Config, args: &[&str]) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod owner_tests;
