@@ -13,6 +13,8 @@ use std::{fs, path::PathBuf};
 struct Child {
     number: Option<u64>,
     attempted: bool,
+    #[serde(default)]
+    posting_id: Option<u64>,
     merged_pr: Option<String>,
     #[serde(default)]
     offered: bool,
@@ -514,6 +516,9 @@ impl Pass<'_> {
                     !self.outside(issue)
                         && (self.eligible(repo, issue)
                             || (list.children[i].attempted
+                                && list.children[i]
+                                    .posting_id
+                                    .is_some_and(|id| issue["user"]["id"].as_u64() == Some(id))
                                 && issue["title"].as_str() == Some(task.title.as_str())
                                 && issue["body"].as_str()
                                     == Some(
@@ -534,6 +539,19 @@ impl Pass<'_> {
             } else if list.children[i].attempted {
                 return false;
             } else {
+                // Read the identity using the same repository authentication
+                // route as the creation POST, and persist it before sending.
+                let Some(id) = crate::github::query_for(
+                    self.cfg,
+                    repo,
+                    "query { viewer { databaseId } }",
+                    json!({}),
+                )
+                .and_then(|v| v["viewer"]["databaseId"].as_u64())
+                .filter(|id| *id > 0) else {
+                    return false;
+                };
+                list.children[i].posting_id = Some(id);
                 list.children[i].attempted = true;
                 if !self.save_list(repo, n, &list) {
                     return false;

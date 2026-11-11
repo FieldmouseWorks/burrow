@@ -10,6 +10,10 @@ if [ -e "$TEST/once-502" ]; then
   printf 'HTTP/2.0 502 Bad Gateway\n\n{}'; exit 1
 fi
 if [ "$path" = graphql ]; then
+  if printf '%s' "$body" | jq -e '.query | contains("viewer")' >/dev/null; then
+    printf 'HTTP/2.0 200 OK\n\n{"data":{"viewer":{"databaseId":42}}}'
+    exit 0
+  fi
   if printf '%s' "$body" | jq -e '.query | contains("closedByPullRequestsReferences")' >/dev/null; then
     if [ -f "$TEST/fail" ] && grep -qF merged-query "$TEST/fail"; then exit 1; fi
     n=$(printf '%s' "$body" | jq -r .variables.n)

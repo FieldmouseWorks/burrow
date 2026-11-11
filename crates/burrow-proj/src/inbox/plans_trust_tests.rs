@@ -81,9 +81,15 @@ fn lost_creation_response_recovers_the_exact_child_and_its_approval() {
     list.tasks.truncate(1);
     list.children.truncate(1);
     list.children[0].number = None;
+    list.children[0].posting_id = Some(42);
     list.children[0].attempted = true;
     assert!(b.pass().save_list("sam/box", "7", &list));
     let mut child = issue(8, "workers[bot]", &["later"]);
+    child["user"]["id"] = json!(if child["user"]["login"] == "stranger" {
+        99
+    } else {
+        42
+    });
     child["title"] = json!(list.tasks[0].title);
     child["body"] = json!(Pass::receipt_body(
         "sam/box",
@@ -117,4 +123,90 @@ fn lost_creation_response_recovers_the_exact_child_and_its_approval() {
         "{}",
         b.log()
     );
+}
+
+#[test]
+fn lost_creation_response_does_not_adopt_a_strangers_exact_receipt() {
+    let (mut b, _, mut list) = super::tests::parent_fixture();
+    b.cfg.projects = b.path("projects");
+    fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
+    b.cfg.tools.systemd_run = "true".into();
+    b.cfg.tools.systemctl = "false".into();
+    list.tasks.truncate(1);
+    list.children.truncate(1);
+    list.children[0].number = None;
+    list.children[0].posting_id = Some(42);
+    list.children[0].attempted = true;
+    assert!(b.pass().save_list("sam/box", "7", &list));
+    let mut child = issue(8, "stranger", &["later"]);
+    child["user"]["id"] = json!(if child["user"]["login"] == "stranger" {
+        99
+    } else {
+        42
+    });
+    child["title"] = json!(list.tasks[0].title);
+    child["body"] = json!(Pass::receipt_body(
+        "sam/box",
+        "7",
+        0,
+        &list.tasks[0],
+        &list.children[0]
+    ));
+    fs::write(
+        b.path("repos_sam_box_issues"),
+        json!([child.clone()]).to_string(),
+    )
+    .unwrap();
+    fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+    assert!(!b.pass().eligible("sam/box", &child));
+    assert!(!b.pass().split_children("sam/box", "7", &list.tasks));
+    let kept = serde_json::from_slice::<List>(
+        &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(kept.children[0].number.is_none());
+    assert!(!b.pass().eligible("sam/box", &child));
+}
+
+#[test]
+fn lost_creation_response_without_a_posting_identity_stays_pending() {
+    let (mut b, _, mut list) = super::tests::parent_fixture();
+    b.cfg.projects = b.path("projects");
+    fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
+    b.cfg.tools.systemd_run = "true".into();
+    b.cfg.tools.systemctl = "false".into();
+    list.tasks.truncate(1);
+    list.children.truncate(1);
+    list.children[0].number = None;
+    list.children[0].posting_id = None;
+    list.children[0].attempted = true;
+    assert!(b.pass().save_list("sam/box", "7", &list));
+    let mut child = issue(8, "workers[bot]", &["later"]);
+    child["user"]["id"] = json!(if child["user"]["login"] == "stranger" {
+        99
+    } else {
+        42
+    });
+    child["title"] = json!(list.tasks[0].title);
+    child["body"] = json!(Pass::receipt_body(
+        "sam/box",
+        "7",
+        0,
+        &list.tasks[0],
+        &list.children[0]
+    ));
+    fs::write(
+        b.path("repos_sam_box_issues"),
+        json!([child.clone()]).to_string(),
+    )
+    .unwrap();
+    fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+    assert!(!b.pass().eligible("sam/box", &child));
+    assert!(!b.pass().split_children("sam/box", "7", &list.tasks));
+    let kept = serde_json::from_slice::<List>(
+        &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(kept.children[0].number.is_none());
+    assert!(!b.pass().eligible("sam/box", &child));
 }
