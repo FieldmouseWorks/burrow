@@ -35,8 +35,9 @@ fn degradation_source_reads_runs_and_preserves_stalls_on_api_failure() {
     )
     .unwrap();
     let script = r#"#!/bin/sh
-case "$2" in
-  repos/sam/repo/pulls/*) cat "$FIXTURES/pr-${2##*/}.json" ;;
+printf 'HTTP/2 200 OK\r\n\r\n'
+case "$5" in
+  repos/sam/repo/pulls/*) cat "$FIXTURES/pr-${5##*/}.json" ;;
   repos/sam/repo) echo '{"default_branch":"main"}' ;;
   *event=pull_request*) echo '{"workflow_runs":[]}' ;;
   *workflows/ci.yml/runs*) cat "$FIXTURES/runs.json" ;;
@@ -130,8 +131,9 @@ fn pr_runs_need_a_configured_author_and_partial_reruns_keep_signals() {
     };
     // Leg a degraded in attempt 1 and wasn't rerun; leg b was.
     let script = r#"#!/bin/sh
-case "$2" in
-  repos/sam/repo/pulls/*) cat "$FIXTURES/pr-${2##*/}.json" ;;
+printf 'HTTP/2 200 OK\r\n\r\n'
+case "$5" in
+  repos/sam/repo/pulls/*) cat "$FIXTURES/pr-${5##*/}.json" ;;
   repos/sam/repo) echo '{"default_branch":"main"}' ;;
   *event=pull_request*) cat "$FIXTURES/prs.json" ;;
   *workflows/ci.yml/runs*) echo '{"workflow_runs":[]}' ;;

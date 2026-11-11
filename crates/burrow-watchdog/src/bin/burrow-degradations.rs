@@ -6,7 +6,7 @@ use burrow_watchdog::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf, process::Command, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -18,14 +18,8 @@ struct Config {
     kick: String,
 }
 fn api(path: &str) -> Result<Value, String> {
-    let out = Command::new("gh")
-        .args(["api", path])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!("GitHub request failed: {path}: {}", out.status));
-    }
-    serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+    let response = burrow_github::call(&mut burrow_github::Gh::default(), "GET", path, None, None)?;
+    response.json().map_err(String::from)
 }
 fn timestamp(s: &str) -> Result<f64, String> {
     s.parse::<jiff::Timestamp>()
