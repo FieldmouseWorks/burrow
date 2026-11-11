@@ -29,6 +29,8 @@ enum Settings {
     /// git's own defaults alone: how the steward reads a message
     /// (crates/burrow-upkeep/src/commits.rs).
     Defaults,
+    /// An isolated repository, with no source repository environment.
+    Remote,
 }
 
 /// The environment git gives a hook about its repository: gone when a
@@ -67,9 +69,11 @@ fn git_in(
     let mut command = Command::new("git");
     match settings {
         Settings::Job => {}
-        Settings::Push => {
-            for var in REPO_ENV {
-                command.env_remove(var);
+        Settings::Push | Settings::Remote => {
+            if matches!(settings, Settings::Remote) {
+                for var in REPO_ENV {
+                    command.env_remove(var);
+                }
             }
             command
                 .env_remove("GIT_CONFIG_PARAMETERS")
@@ -276,32 +280,65 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
         })
         .collect();
     let isolated = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let check_dir = if missing.is_empty() {
-        dir.as_path()
-    } else {
-        let path = isolated
-            .path()
-            .to_str()
-            .ok_or("temporary path isn't UTF-8")?;
-        git_in(None, Settings::Push, &["init", "--bare", path], None)?;
-        let objects = git_in(
-            Some(dir),
-            Settings::Push,
-            &[
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-path",
-                "objects",
-            ],
-            None,
-        )?;
-        std::fs::write(isolated.path().join("objects/info/alternates"), objects)
-            .map_err(|e| e.to_string())?;
+    // Preserve Git's selected object store (including environment alternates)
+    // before leaving the source repository. Missing positive tips fail closed.
+    for line in input.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let tip = fields[1]; // updates has validated the input shape
+        if !tip.bytes().all(|b| b == b'0') {
+            git_in(
+                Some(dir),
+                Settings::Push,
+                &["cat-file", "-e", &format!("{tip}^{{commit}}")],
+                None,
+            )?;
+        }
+    }
+    let format = git_in(
+        Some(dir),
+        Settings::Push,
+        &["rev-parse", "--show-object-format"],
+        None,
+    )?;
+    let path = isolated
+        .path()
+        .to_str()
+        .ok_or("temporary path isn't UTF-8")?;
+    git_in(
+        None,
+        Settings::Remote,
+        &[
+            "init",
+            "--bare",
+            &format!("--object-format={}", format.trim()),
+            path,
+        ],
+        None,
+    )?;
+    let mut objects = git_in(
+        Some(dir),
+        Settings::Push,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ],
+        None,
+    )?;
+    let counts = git_in(Some(dir), Settings::Push, &["count-objects", "-v"], None)?;
+    for alternate in counts.lines().filter_map(|l| l.strip_prefix("alternate: ")) {
+        objects.push_str(alternate);
+        objects.push('\n');
+    }
+    std::fs::write(isolated.path().join("objects/info/alternates"), objects)
+        .map_err(|e| e.to_string())?;
+    if !missing.is_empty() {
         let mut args = vec!["fetch", "--no-tags", "--no-write-fetch-head", url];
         args.extend(missing);
-        git_in(Some(isolated.path()), Settings::Push, &args, None)?;
-        isolated.path()
-    };
+        git_in(Some(isolated.path()), Settings::Remote, &args, None)?;
+    }
+    let check_dir = isolated.path();
     match unmarked(check_dir, input, &advertisement)?.first() {
         None => Ok(()),
         Some(commit) => Err(format!(
@@ -373,15 +410,15 @@ fn unmarked(dir: &Path, input: &str, advertisement: &str) -> Result<Vec<String>,
     }
     let new = git_in(
         Some(dir),
-        Settings::Push,
-        &["rev-list", "--ignore-missing", "--stdin"],
+        Settings::Remote,
+        &["rev-list", "--stdin"],
         Some(&revs),
     )?;
     let mut found = Vec::new();
     for commit in new.lines() {
         let object = git_in(
             Some(dir),
-            Settings::Push,
+            Settings::Remote,
             &["cat-file", "commit", commit],
             None,
         )?;
@@ -421,6 +458,24 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unreadable_positive_tip_is_rejected() {
+        let repo = tempfile::tempdir().unwrap();
+        super::git_in(
+            None,
+            super::Settings::Remote,
+            &["init", "--bare", repo.path().to_str().unwrap()],
+            None,
+        )
+        .unwrap();
+        let input = format!(
+            "HEAD {} refs/heads/work {}\n",
+            "1".repeat(40),
+            "0".repeat(40)
+        );
+        assert!(super::unmarked(repo.path(), &input, "").is_err());
+        assert!(super::pre_push(repo.path(), repo.path().to_str().unwrap(), &input).is_err());
+    }
     use super::*;
     #[test]
     fn trailers_are_once_and_only_trailers_count() {

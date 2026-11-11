@@ -7,7 +7,12 @@ use std::{
 };
 
 fn git(dir: &Path, hooks: &Path, args: &[&str]) -> Output {
+    git_with_hash(dir, hooks, args, "sha1")
+}
+
+fn git_with_hash(dir: &Path, hooks: &Path, args: &[&str], hash: &str) -> Output {
     Command::new("git")
+        .env("GIT_DEFAULT_HASH", hash)
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -107,6 +112,10 @@ struct Repo {
 
 impl Repo {
     fn new() -> Repo {
+        Self::with_format("sha1")
+    }
+
+    fn with_format(format: &str) -> Repo {
         let d = tempfile::tempdir().unwrap();
         let hooks = d.path().join("hooks");
         fs::create_dir(&hooks).unwrap();
@@ -121,7 +130,14 @@ impl Repo {
         succeeds(git(
             d.path(),
             &none,
-            &["init", "-q", "-b", "main", "theirs"],
+            &[
+                "init",
+                &format!("--object-format={format}"),
+                "-q",
+                "-b",
+                "main",
+                "theirs",
+            ],
         ));
         succeeds(git(
             &theirs,
@@ -299,7 +315,13 @@ fn a_commit_made_past_commit_msg_isnt_pushed() {
 /// commit on it, and a merge with the remote's own, push.
 #[test]
 fn what_the_remote_has_is_not_checked() {
-    let repo = Repo::new();
+    for format in ["sha1", "sha256"] {
+        published_history(format);
+    }
+}
+
+fn published_history(format: &str) {
+    let repo = Repo::with_format(format);
     repo.ok(&["commit", "--allow-empty", "-m", "mine"]);
     let mine = repo.ok(&["rev-parse", "HEAD"]);
     assert_eq!(repo.push("work"), Ok(mine.clone()));
@@ -330,7 +352,13 @@ fn what_the_remote_has_is_not_checked() {
         &["commit", "--allow-empty", "-m", "later"],
     ));
     succeeds(git(&other, &none, &["push", "-q", "origin", "main"]));
-    assert_eq!(repo.push("work"), Ok(merge));
+    succeeds(git_with_hash(
+        &repo.work,
+        &repo.hooks,
+        &["push", "origin", "HEAD:refs/heads/work"],
+        if format == "sha1" { "sha256" } else { "sha1" },
+    ));
+    assert_eq!(repo.ok(&["rev-parse", "origin/work"]), merge);
     // Their commit, already there, onto a new branch.
     repo.ok(&["reset", "-q", "--hard", "origin/main"]);
     let theirs = repo.ok(&["rev-parse", "HEAD"]);
@@ -538,5 +566,86 @@ fn a_relative_remote_is_the_one_pushed_to() {
     assert_eq!(
         succeeds(git(&repo.remote, &none, &["rev-parse", "main"])),
         initial
+    );
+}
+
+/// An explicit source repository must survive clearing the hook environment.
+#[test]
+fn explicit_git_dir_does_not_check_the_current_directory_instead() {
+    let repo = Repo::new();
+    let other = repo.work.with_file_name("selected");
+    let none = repo.work.with_file_name("no-hooks");
+    succeeds(git(
+        repo.work.parent().unwrap(),
+        &none,
+        &["clone", "-q", repo.remote.to_str().unwrap(), "selected"],
+    ));
+    succeeds(git(
+        &other,
+        &none,
+        &["commit", "--allow-empty", "-m", "unmarked"],
+    ));
+    let args = [
+        format!("--git-dir={}", other.join(".git").display()),
+        format!("--work-tree={}", other.display()),
+    ];
+    let output = repo.run(&[
+        &args[0],
+        &args[1],
+        "push",
+        repo.remote.to_str().unwrap(),
+        "HEAD:work",
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no Engine: codex trailer"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn source_environment_object_store_and_alternates_are_preserved() {
+    let repo = Repo::new();
+    let objects = repo.work.with_file_name("environment-objects");
+    fs::create_dir(&objects).unwrap();
+    let run = |args: &[&str], hooks: &Path| {
+        Command::new("git")
+            .current_dir(&repo.work)
+            .env("GIT_DIR", repo.work.join(".git"))
+            .env("GIT_WORK_TREE", &repo.work)
+            .env("GIT_COMMON_DIR", repo.work.join(".git"))
+            .env("GIT_OBJECT_DIRECTORY", &objects)
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                repo.work.join(".git/objects"),
+            )
+            .args([
+                "-c",
+                &format!("core.hooksPath={}", hooks.display()),
+                "-c",
+                "user.name=Worker",
+                "-c",
+                "user.email=worker@example.test",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    succeeds(run(
+        &["commit", "--allow-empty", "-m", "marked"],
+        &repo.hooks,
+    ));
+    succeeds(run(&["push", "origin", "HEAD:work"], &repo.hooks));
+    let none = repo.work.with_file_name("no-hooks");
+    succeeds(run(&["commit", "--allow-empty", "-m", "unmarked"], &none));
+    let refused = run(&["push", "origin", "HEAD:work"], &repo.hooks);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no Engine: codex trailer"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
     );
 }
