@@ -13,7 +13,7 @@ import os
 import time
 
 import proofs as P
-from harness import CI_GREEN, JOBS, PROOF_RUN, STATES, WROTE, C, S, clean, fresh_pr_state, pr_state, run, sh, stand_in, tmp
+from harness import CI_GREEN, JOBS, PROOF_RUN, STATES, STOPPED, T0, WROTE, C, S, clean, fresh_pr_state, pr_state, run, sh, stand_in, tmp
 
 stand_in()
 
@@ -64,12 +64,25 @@ assert jid and jid.startswith(C.BUILD + "sam-r-5-" + "a" * 12), jid
 # What it runs, where: the clone's real place, whatever its folder's
 # called; nothing of the PR's base.
 assert json.load(open(f"{folder(jid)}/build.json")) == {
-    "repo": "sam/r", "number": 5, "head": "a" * 40, "checkout": checkout, "runs": {"gate": "make gate"},
+    "repo": "sam/r", "number": 5, "head": "a" * 40, "checkout": checkout, "runs": {"gate": "make gate"}, "toolsRef": None,
     "unit": C.build_unit(jid), "timeout": 180 * 60, "bash": S.CFG["bash"], "git": S.CFG["git"], "trees": RUNS,
     "kick": f"{S.CFG['kick']}/sam/r", "commentBytes": P.COMMENT_BYTES}, json.load(open(f"{folder(jid)}/build.json"))
 # burrow-proof took it and handed systemd its unit, which it runs.
 a = asked()
 assert a and f"--unit={C.build_unit(jid)}" in a and a[-3:] == [os.path.realpath(PROOF_RUN), "run", folder(jid)], a
+# A repo's serial replay deadline is its unit's, independent of both the
+# machine default and the steward's agent turn deadline.
+S.CFG["repos"]["sam/r"]["proofTimeoutMinutes"] = 720
+systemd_run()
+long_jid = P.start_run("sam/r", pr, ["gate"], {})
+assert json.load(open(f"{folder(long_jid)}/build.json"))["timeout"] == 720 * 60
+assert "--property=RuntimeMaxSec=43200s" in asked(), asked()
+S.CFG["repos"]["sam/r"]["proofToolsRef"] = "refs/heads/main"
+systemd_run()
+tools_jid = P.start_run("sam/r", pr, ["gate"], {})
+assert json.load(open(f"{folder(tools_jid)}/build.json"))["toolsRef"] == "refs/heads/main"
+del S.CFG["repos"]["sam/r"]["proofToolsRef"]
+del S.CFG["repos"]["sam/r"]["proofTimeoutMinutes"]
 # systemd's refusal: none started.
 systemd_run(1)
 assert P.start_run("sam/r", pr, ["gate"], {}) is None
@@ -159,6 +172,23 @@ for verdict, comment in ((PASSED, None), (PASSED, "`gate` passed on it.\n\n## 6 
         assert WROTE.index(said[0]) < WROTE.index(next(w for w in WROTE if "/statuses/" in w)), WROTE
     run(clean(sha=HEAD, checks=GATE), 1000)
     assert comments() == [], WROTE
+# A running unit outlives several agent turn deadlines. Repeated passes
+# retain its id and proof slot; no agent starts and nothing stops the unit.
+fresh_pr_state()
+STARTED.clear()
+STOPPED.clear()
+S.CFG["repos"]["sam/r"] = {"proofRuns": {"gate": "make gate"}, "proofTimeoutMinutes": 720, "proofSlots": 1}
+run(clean(sha=HEAD, checks=GATE), 700)
+long_jid = pr_state()["provedJob"]
+for at in (700 + S.CFG["jobTimeout"] * 60 + 1, 700 + 4 * S.CFG["jobTimeout"] * 60):
+    status, _ = run(clean(sha=HEAD, checks=GATE), at)
+    assert pr_state()["provedJob"] == long_jid and STARTED == [long_jid], (status, STARTED)
+    assert JOBS == [] and STOPPED == [] and "running gate here" in status, (status, JOBS, STOPPED)
+    assert C.WAKE["sam/r"] == C.ts(T0) + 700 + (720 + 5) * 60, C.WAKE
+finish(long_jid, verdicts={"gate": PASSED}, comment="Serial replays passed on the exact head.\n")
+status, _ = run(clean(sha=HEAD, checks=GATE), at + 100)
+assert statuses()[0]["state"] == "success" and "verdict posted" in status, (status, WROTE)
+assert JOBS == [] and STOPPED == [] and STARTED == [long_jid]
 # One that failed (stopped, timed out, ended short): no verdict, and
 # another runs it later.
 for state in ("failed", "timed out"):
@@ -224,6 +254,13 @@ assert P.still({"provedFor": ["run", ["gate"], {"gate": "make gate"}]}, {"gate":
 assert P.still({"provedFor": ["run", ["gate"], {"gate": "make gate"}]}, {"gate": WAS},
                {"proofBuilds": {"gate": "make gate"}, "proofRuns": {}}) == {}
 assert P.still({"provedFor": ["build", ["gate"], {"gate": "make gate"}]}, {"gate": WAS}, KINDS) == {}
+# Changing the trusted tools branch invalidates a run's old verdict and
+# proof identity, even when its shell command did not change.
+TOOLS_STAGE = ["run", ["gate"], {"gate": "make gate"}, "refs/heads/main"]
+assert not P.fits({"provedFor": TOOLS_STAGE}, TOOLS_STAGE[:3])
+assert P.fits({"provedFor": TOOLS_STAGE}, TOOLS_STAGE)
+assert P.still({"provedFor": TOOLS_STAGE}, {"gate": WAS}, KINDS) == {}
+assert P.still({"provedFor": TOOLS_STAGE}, {"gate": WAS}, KINDS | {"proofToolsRef": "refs/heads/main"}) == {"gate": WAS}
 # A run's command remapped while it's pending is run again: the old one
 # says nothing of the new.
 fresh_pr_state()

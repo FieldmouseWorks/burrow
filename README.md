@@ -245,6 +245,10 @@ Each has an entry below, and each can be imported on its own.
   With `engines.door.enable`, an author's `engines` issue in `engines.door.repo`
   switches setups without an agent ([engines door](docs/front-door.md#engines-with-no-agent)).
 
+  `proj settings show [--json]` prints every pipeline option in effect, its
+  value and where it came from (default, flake or live file), each declared
+  once in burrow-settings' schema ([settings](docs/settings.md)).
+
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
@@ -322,7 +326,9 @@ Each has an entry below, and each can be imported on its own.
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The
   watchdog's job clears a crash whose cause it fixed with
-  `burrow-units clear EXE`, and a later one is back.
+  `burrow-units clear EXE`, and a later one is back. With
+  `degradations.enable`, repeated soft CI failures feed the same ladder:
+  [workflow degradations](docs/degradations.md) describes the signal and options.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
   on together, the machine's Actions runners and its deploy, keeps moving. A
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that

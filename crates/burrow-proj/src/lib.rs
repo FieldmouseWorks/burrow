@@ -67,6 +67,9 @@
 //! proj engines save NAME [--replace]  check and save the current roles
 //! proj engines use NAME       check and atomically switch roles (back returns)
 //! proj check-config           validate machine config and every roles line
+//! proj settings show [--json] every pipeline option in effect, its value and
+//!                             where it came from (default, flake, live file)
+//! proj settings schema        the options' JSON Schema (burrow-settings)
 //! proj list                   projects you can run jobs in
 //! proj await TARGET...        from inside a job: resume it once a PR or
 //!                             issue (URL or OWNER/REPO#N) changes; one
@@ -174,6 +177,7 @@ pub mod probe;
 mod question;
 mod roles;
 pub mod scratch;
+pub mod settings;
 pub mod setups;
 pub mod slot;
 pub mod snapshot;
