@@ -64,9 +64,6 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
     if let Err(why) = crate::tools::sweep(&rec, builds, id) {
         return short(why);
     }
-    if let Err(why) = crate::tools::prepare(&rec, id, &log) {
-        return short(why);
-    }
     let mut ran = Ran::default();
     for (i, (check, cmd)) in rec.runs.iter().enumerate() {
         note(&format!("{check}: {cmd}"));
@@ -159,6 +156,7 @@ fn one(
     fence: &mut dyn Fence,
     log: &File,
 ) -> Result<i32, String> {
+    crate::tools::prepare(rec, id, i, log)?;
     let tree = rec.trees.join(format!("{id}-{i}"));
     let made = trees::add(&rec.git, &rec.checkout, &tree, &rec.head, log);
     if !made.as_ref().is_ok_and(|ok| *ok) {
@@ -179,6 +177,14 @@ fn one(
         let _ = writeln!(
             &mut &*log,
             "autoland: {check}: can't remove its worktree: {e}"
+        );
+    }
+    if rec.tools_ref.is_some()
+        && let Err(e) = trees::remove(&rec.git, &rec.checkout, &crate::tools::path(rec, id, i))
+    {
+        let _ = writeln!(
+            &mut &*log,
+            "autoland: {check}: can't remove its tools worktree: {e}"
         );
     }
     ended
@@ -206,7 +212,7 @@ fn fenced(
     };
     c.env_remove("PROOF_TOOLS");
     if rec.tools_ref.is_some() {
-        c.env("PROOF_TOOLS", crate::tools::path(rec, id(dir)?));
+        c.env("PROOF_TOOLS", crate::tools::path(rec, id(dir)?, i));
     }
     c.current_dir(tree)
         .env("PROOF_REPO", &rec.repo)

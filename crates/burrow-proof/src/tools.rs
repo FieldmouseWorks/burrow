@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 
 use crate::{Record, trees};
 
-pub fn path(rec: &Record, id: &str) -> PathBuf {
-    rec.trees.join(format!("{id}-tools"))
+pub fn path(rec: &Record, id: &str, i: usize) -> PathBuf {
+    rec.trees.join(format!("{id}-tools{i}"))
 }
 fn reference(id: &str) -> String {
     format!("refs/burrow-proof/{id}/tools")
@@ -18,7 +18,7 @@ fn reference(id: &str) -> String {
 
 /// Fetch to a run-specific ref: concurrent fetches cannot change which
 /// commit is checked out between fetch and worktree add.
-pub fn prepare(rec: &Record, id: &str, log: &File) -> Result<(), String> {
+pub fn prepare(rec: &Record, id: &str, i: usize, log: &File) -> Result<(), String> {
     let Some(source) = &rec.tools_ref else {
         return Ok(());
     };
@@ -41,7 +41,7 @@ pub fn prepare(rec: &Record, id: &str, log: &File) -> Result<(), String> {
     if !status.success() {
         return Err(format!("can't fetch trusted tools from {source}"));
     }
-    let tree = path(rec, id);
+    let tree = path(rec, id, i);
     let made = trees::add(&rec.git, &rec.checkout, &tree, &target, log).map_err(|e| e.to_string());
     // The worktree pins the commit. End also forgets this ref if a stop
     // interrupted fetch/add, and sweep handles a machine restart.

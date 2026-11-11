@@ -325,3 +325,18 @@ fn restart_sweep_removes_dead_tools_refs_and_keeps_live_ones() {
     );
     assert_eq!(refs.trim(), "refs/burrow-proof/proof-live/tools");
 }
+
+#[test]
+fn checks_cannot_poison_each_others_trusted_tools() {
+    let w = World::new();
+    let output = w.path().join("second-tools");
+    let second = format!("cat \"$PROOF_TOOLS/f\" >{}", output.display());
+    let mut rec = w.record(&[("a", "echo poisoned >\"$PROOF_TOOLS/f\""), ("b", &second)]);
+    rec.tools_ref = Some("refs/heads/main".into());
+    let dir = w.made("proof-separate-tools", &rec);
+    run(&dir, &mut Plain::default()).unwrap();
+    assert_eq!(ran(&dir).exits["a"], 0);
+    assert_eq!(ran(&dir).exits["b"], 0);
+    assert_eq!(read(&output), "main moved on\n");
+    assert!(w.trees_left().is_empty());
+}
