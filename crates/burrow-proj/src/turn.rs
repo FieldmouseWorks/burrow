@@ -266,18 +266,22 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         outcome("failed");
         return Err(Fail::quiet(2));
     };
-    if retry.is_none() {
+    // An initial wait that moved with a deploy is a fresh turn: its budget
+    // starts at its slot. Only a turn that had run keeps its deadline.
+    let retained = retry.as_ref().is_some_and(|r| r.retained);
+    let fresh = !retained;
+    if fresh {
         for f in ["deadline", "wait", "late"] {
             let _ = fs::remove_file(job.turn(&n, f));
         }
     }
-    if retry.is_none() && total > 0 {
+    if fresh && total > 0 {
         let taken = mtime_nanos(&job.turn(&n, "slot")).unwrap_or_else(now_nanos);
         let _ = fs::write(job.turn(&n, "deadline"), format!("{}\n", taken + total));
     }
     // Where its commands say they're waiting in line (waits::waiting).
     let waitdir = job.turn(&n, "waits");
-    if retry.is_none() {
+    if fresh {
         let _ = fs::remove_dir_all(&waitdir);
     }
     fs::create_dir_all(&waitdir)
@@ -291,7 +295,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     fs::OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(retry.is_none())
+        .truncate(fresh)
         .open(&stream)
         .map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
     // What it's asked, after what its engine's conversation missed of the
@@ -307,6 +311,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         prompt = retry
             .resume(&job, &n, &first)
             .map_err(|e| Fail::new(1, e.to_string()))?;
+        // The deadline just moved on by the wait; the watchdog's copy
+        // (published above) is stale until told.
+        rewatch(cfg, &[id]);
     }
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())

@@ -23,6 +23,10 @@ pub(crate) struct Checkpoint {
     pub deadline: Option<i64>,
     name: String,
     first: bool,
+    /// Whether the turn had already run (an in-process retry), as against an
+    /// initial wait for its first slot: only the former keeps a deadline.
+    #[serde(default)]
+    pub retained: bool,
 }
 
 impl Checkpoint {
@@ -55,6 +59,7 @@ impl Checkpoint {
             waited,
             said: Some(said.into()),
             first,
+            retained: true,
             deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
             name: crate::slot::entry_at(
                 job,
@@ -74,7 +79,7 @@ impl Checkpoint {
     }
 
     pub fn resume(&self, job: &Job, n: &str, first: &Path) -> io::Result<PathBuf> {
-        if let Some(dl) = self.deadline {
+        if let (true, Some(dl)) = (self.retained, self.deadline) {
             swap(
                 &job.turn(n, "deadline"),
                 &format!("{}\n", dl + now_nanos() - self.waited),
@@ -183,6 +188,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         said,
         name,
         first,
+        retained: fs::metadata(&stream).is_ok_and(|m| m.len() > 0),
         deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
     })
 }
@@ -190,11 +196,15 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
 /// The barrier is mandatory: observing a busy legacy census alone is not a
 /// barrier; the system service owns it for the entire deployment, including
 /// this consumer's restarts. A health check verifies its unit is active.
-pub fn pass(cfg: &Config) -> io::Result<()> {
+/// Returns whether a job was skipped because its lock was busy: the caller
+/// retries those, since releasing a lock raises no event of its own.
+pub fn pass(cfg: &Config) -> io::Result<bool> {
+    let mut skipped = false;
     for (pid, id, first) in parents()? {
         let job = Job::new(cfg, &id);
         let Some(n) = job.turns() else { continue };
         let Some(_lock) = job.try_lock()? else {
+            skipped = true;
             continue;
         };
         // Running turns keep their own locks and executable. Waiting Codex
@@ -231,6 +241,17 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         }
         let job = Job::new(cfg, &id);
         let Some(n) = job.turns() else { continue };
+        if !job.turn(&n, "retry-migration").exists() {
+            continue;
+        }
+        let Some(_lock) = job.try_lock()? else {
+            skipped = true;
+            continue;
+        };
+        // Everything below is decided from one snapshot under the lock that
+        // `proj stop` and new turns take: a stop that completed before this
+        // lock can't be raced into a launch.
+        let Some(n) = job.turns() else { continue };
         let Some(state) = Checkpoint::load(&job, &n)? else {
             continue;
         };
@@ -238,9 +259,6 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             fs::remove_file(job.turn(&n, "retry-migration"))?;
             continue;
         }
-        let Some(_lock) = job.try_lock()? else {
-            continue;
-        };
         if systemd::active(cfg, &job.unit()) {
             continue;
         }
@@ -269,7 +287,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             return Err(io::Error::other(format!("couldn't resume {id}")));
         }
     }
-    Ok(())
+    Ok(skipped)
 }
 
 /// Watch both new job directories and each turn's slot removal. A scan after
@@ -299,7 +317,11 @@ pub fn watch(cfg: &Config) -> io::Result<()> {
                 )?;
             }
         }
-        pass(cfg)?;
+        // Work skipped on a busy lock is tried again shortly: nothing else
+        // would wake this loop when the holder lets go.
+        while pass(cfg)? {
+            std::thread::sleep(Duration::from_secs(1));
+        }
         let mut events = inotify::Reader::new(&fd, &mut buf);
         loop {
             let event = events.next()?;

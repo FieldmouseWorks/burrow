@@ -427,7 +427,6 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // failed: nobody waits on it.
     if let Some(n) = &n {
         let _ = fs::write(job.turn(n, "stopped"), "");
-        let _ = fs::remove_file(job.turn(n, "retry-migration"));
     }
     // No turn of it running, so no end of one to clear its scratch: this does.
     let idle = systemd::gone(cfg, &unit);
@@ -448,6 +447,11 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             u8::try_from(rc).unwrap_or(1),
             format!("proj: couldn't stop {id}"),
         ));
+    }
+    // A retained retry's checkpoint goes only once the stop is confirmed: a
+    // failed stop returned above with it, its stream and prompt intact.
+    if let Some(n) = &n {
+        let _ = fs::remove_file(job.turn(n, "retry-migration"));
     }
     crate::ask::clear(job);
     if crate::ask::host_path(job, "label").exists() {

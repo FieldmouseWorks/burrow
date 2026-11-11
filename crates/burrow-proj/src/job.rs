@@ -185,7 +185,9 @@ impl<'a> Job<'a> {
     pub fn state(&self) -> String {
         self.adopt();
         let n = self.turns().unwrap_or_default();
-        if systemd::active(self.cfg, &self.unit()) {
+        if self.transfer_pending(&n) {
+            "queued".into()
+        } else if systemd::active(self.cfg, &self.unit()) {
             if self.turn(&n, "slot").exists() {
                 "running".into()
             } else {
@@ -196,6 +198,15 @@ impl<'a> Job<'a> {
         } else {
             "failed".into()
         }
+    }
+
+    /// Whether turn N holds a deploy-transfer checkpoint (retry.rs) that
+    /// nothing has resumed or cancelled: it is still unfinished work, though
+    /// its unit is stopped.
+    fn transfer_pending(&self, n: &str) -> bool {
+        !n.is_empty()
+            && !self.turn(n, "stopped").exists()
+            && self.turn(n, "retry-migration").exists()
     }
 
     /// Whether turn N, the latest, was cut off: its whole unit killed (by oomd,
@@ -223,10 +234,13 @@ impl<'a> Job<'a> {
         let lock = self.lock_file().ok()?;
         lock.lock_shared().ok()?;
         self.adopt();
-        if filled(&self.turn(n, "outcome")) {
+        if self.turns().as_deref() == Some(n) && self.transfer_pending(n) {
+            None
+        } else if filled(&self.turn(n, "outcome")) {
             read(&self.turn(n, "outcome"))
         } else if self.turns().as_deref() == Some(n) {
-            (!systemd::active(self.cfg, &self.unit())).then(|| "failed".into())
+            (!self.transfer_pending(n) && !systemd::active(self.cfg, &self.unit()))
+                .then(|| "failed".into())
         } else if self.turn(n, "slot").exists() {
             Some("failed".into())
         } else {

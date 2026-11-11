@@ -300,7 +300,7 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
                 class: own,
                 project: project(dir),
             });
-        } else if waiter_alive(&queue.join(&name), fid) {
+        } else if waiter_alive(cfg, &queue.join(&name), fid) {
             let dir = cfg.jobs.join(fid);
             line.push(Waiter {
                 class: classes.place(cfg, &name, &dir).0,
@@ -329,6 +329,7 @@ fn codex_slot(
     fs::create_dir_all(cfg.jobs.join(".slots"))?;
     let job = Job::new(cfg, id);
     fs::write(job.turn(n, "withdrawable"), "")?;
+    let retry = crate::retry::Checkpoint::load(&job, n)?;
     // A turn that waited in Claude's line and was handed to this proj brings
     // its place with it, under this pid. It is Codex's now, and a place left in
     // Claude's line would count as a live waiter there (waiter_alive) while it
@@ -341,7 +342,10 @@ fn codex_slot(
         fs::remove_file(queue.join(left))?;
     }
     loop {
-        if may_hand_over && let Some(to) = successor(cfg) {
+        if may_hand_over
+            && let Some(to) = successor(cfg)
+            && (retry.is_none() || retry_compatible(&to))
+        {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
             lk.lock()?;
@@ -602,7 +606,7 @@ pub fn in_line(cfg: &Config) -> String {
     let mut rows: Vec<(Class, String)> = Vec::new();
     for name in &names {
         let fid = job_of(name);
-        if !waiter_alive(&queue.join(name), fid) {
+        if !waiter_alive(cfg, &queue.join(name), fid) {
             continue;
         }
         let Some(made) = mtime(&queue.join(name)) else {
@@ -633,7 +637,12 @@ fn job_of(name: &str) -> &str {
 
 /// Whether the place at a path is a waiting turn's: its pid's command line is
 /// that job's _exec.
-fn waiter_alive(place: &Path, id: &str) -> bool {
+fn waiter_alive(cfg: &Config, place: &Path, id: &str) -> bool {
+    // A waiter whose process was stopped for a deploy transfer stays in the
+    // line, counted and ordered, until it's resumed or cancelled.
+    if transfer_pending(cfg, place, id) {
+        return true;
+    }
     let Some(pid) = read(place).filter(|p| !p.is_empty()) else {
         return false;
     };
@@ -645,6 +654,29 @@ fn waiter_alive(place: &Path, id: &str) -> bool {
         .map(|b| if b == 0 { b' ' } else { b })
         .collect();
     String::from_utf8_lossy(&cmdline).contains(&format!(" _exec {id} "))
+}
+
+#[cfg(test)]
+pub(crate) fn waiter_alive_for_tests(cfg: &Config, place: &Path, id: &str) -> bool {
+    waiter_alive(cfg, place, id)
+}
+
+/// Whether `place` is the saved place of job `id`'s pending transfer
+/// checkpoint (retry.rs), which isn't cancelled by `stopped`.
+fn transfer_pending(cfg: &Config, place: &Path, id: &str) -> bool {
+    let job = Job::new(cfg, id);
+    let Some(n) = job.turns() else {
+        return false;
+    };
+    let name = place
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default();
+    !job.turn(&n, "stopped").exists()
+        && crate::retry::Checkpoint::load(&job, &n)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.queue().0 == name)
 }
 
 /// Whether a turn on this engine started now would get a slot, as far as a
