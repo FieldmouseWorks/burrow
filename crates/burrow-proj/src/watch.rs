@@ -77,6 +77,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             drop(held);
         }
         let f = job.path("await");
+        if crate::planning::admit(&job).is_err() {
+            continue;
+        }
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;
         }

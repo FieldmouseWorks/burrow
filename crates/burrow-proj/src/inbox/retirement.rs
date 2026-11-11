@@ -53,7 +53,7 @@ impl Pass<'_> {
                 self.miss(repo);
                 return Ok(());
             };
-            if self.eligible(&issue) {
+            if self.eligible(repo, &issue) {
                 let Some(written) = self.written(repo, &issue) else {
                     self.miss(repo);
                     return Ok(());

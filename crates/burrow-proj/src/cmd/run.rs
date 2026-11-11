@@ -19,6 +19,10 @@ use crate::{Fail, filled, io_fail, now};
 /// A new job's settings: `proj run`'s flags.
 #[derive(Clone, Debug, Default)]
 pub struct New {
+    /// A worker enrolled by the inbox, whose host consumes split declarations.
+    pub inbox_issue: bool,
+    /// Verified source kept beside a bounded planning prompt, before start.
+    pub task_source: Option<String>,
     /// Structured inbox attribution, without its prompt or title.
     pub usage_kind: Option<String>,
     pub vm: bool,
@@ -394,6 +398,9 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
     };
     write("project", &format!("{project}\n"))?;
+    if new.inbox_issue {
+        write("inbox-issue", "true\n")?;
+    }
     if let Some(kind) = &new.usage_kind {
         write("usage-kind", kind)?;
     }
@@ -467,7 +474,16 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
         }
     }
-    start(cfg, &id, task, new.first).map_err(|e| Fail::new(1, e))?;
+    let given = if let Some(source) = &new.task_source {
+        write("task-source", source)?;
+        task.replace(
+            "@PROJ_TASK_SOURCE@",
+            &job.path("task-source").to_string_lossy(),
+        )
+    } else {
+        task.to_owned()
+    };
+    start(cfg, &id, &given, new.first).map_err(|e| Fail::new(1, e))?;
     Ok(id)
 }
 
@@ -509,6 +525,7 @@ fn resume(
     // back a wait only under the same lock.
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     let st = job.state();
+    crate::planning::admit(&job).map_err(|e| Fail::new(no, e))?;
     if st == "queued" || st == "running" {
         return Err(Fail::new(no, format!("{id} is still {st}")));
     }

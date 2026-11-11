@@ -157,13 +157,15 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             ));
         }
     }
-    for (name, path) in names(&state.join(".triage")) {
-        if name
-            .to_lowercase()
-            .rsplit_once('-')
-            .is_some_and(|(k, _)| k == want)
-        {
-            fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+    for namespace in [".triage", ".plans"] {
+        for (name, path) in names(&state.join(namespace)) {
+            if name
+                .to_lowercase()
+                .rsplit_once('-')
+                .is_some_and(|(k, _)| k == want)
+            {
+                fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+            }
         }
     }
     for (name, path) in names(&state.join(".retired")) {
@@ -410,6 +412,7 @@ impl Pass<'_> {
         let drained = self.drained(repo, &raw(&issue["number"]));
         let (role, engine) = self.routing(issue);
         let new = New {
+            inbox_issue: true,
             usage_kind: Some(usage::kind(self.cfg.steward_login.as_deref(), issue)),
             vm: self.inbox.vm,
             engine,
@@ -515,7 +518,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         let n = raw(&issue["number"]);
         let body = match &issue["body"] {
             Value::Null | Value::Bool(false) => String::new(),
-            b => raw(b),
+            b => b.as_str().map_or_else(|| raw(b), str::to_owned),
         };
         let said: String = comments
             .iter()
@@ -524,7 +527,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 format!(
                     "\n{} commented:\n\n{}\n",
                     raw(&c["user"]["login"]),
-                    raw(&c["body"])
+                    c["body"].as_str().unwrap_or_default()
                 )
             })
             .collect();
@@ -538,7 +541,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             raw(&issue["html_url"]),
             raw(&issue["user"]["login"]),
             raw(&issue["title"]),
-            trimmed(&said),
+            said,
         )
     }
 
@@ -725,6 +728,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                     continue;
                 };
                 self.triage(&repo, &all)?;
+                self.sequence(&repo, &all);
                 self.note_ready(&repo, &all)?;
             }
         }
@@ -740,7 +744,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             }
             let opener = raw(&issue["user"]["login"]);
-            if !self.allowed(&opener) {
+            if !self.allowed(&opener) && !self.generated_child(repo, issue) {
                 let said = format!(
                     "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
                     self.inbox.host,
@@ -769,6 +773,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             };
             let issue = &safe;
+            if self.inbox.planning
+                && (!self.approved_input(repo, &n, &self.issue_text(repo, issue, &comments))
+                    || !self.child_admissible(repo, &n))
+            {
+                continue;
+            }
             let id = match self.start(repo, issue, &comments) {
                 Ok(id) => id,
                 Err(f) => {
@@ -797,17 +807,18 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
 
     /// Whether an agent may read the issue: one of the authors opened it,
     /// and it isn't labelled outside text.
-    pub(super) fn eligible(&self, issue: &Value) -> bool {
-        self.allowed(&raw(&issue["user"]["login"])) && !self.outside(issue)
+    pub(super) fn eligible(&self, repo: &str, issue: &Value) -> bool {
+        (self.allowed(&raw(&issue["user"]["login"])) || self.generated_child(repo, issue))
+            && !self.outside(issue)
     }
 
     /// Whether an agent may no longer read issue N: as `listed` has it, or
     /// as GitHub says now when no list has it. None when GitHub didn't say.
     pub(super) fn barred(&self, repo: &str, n: &str, listed: Option<&Value>) -> Option<bool> {
         match listed {
-            Some(i) => Some(!self.eligible(i)),
+            Some(i) => Some(!self.eligible(repo, i)),
             None => crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))
-                .map(|i| !self.eligible(&i)),
+                .map(|i| !self.eligible(repo, &i)),
         }
     }
 
@@ -956,6 +967,7 @@ mod claims;
 mod drain;
 pub(crate) use drain::job_paused;
 mod jobs;
+mod plans;
 mod retirement;
 mod written;
 
@@ -977,21 +989,4 @@ mod tests;
 
 mod usage;
 
-/// The next candidates from the drain's own lists and ranking.
-pub(crate) fn ready_queue(cfg: &Config) -> String {
-    let Some(inbox) = cfg.inbox.as_ref() else {
-        return String::new();
-    };
-    let Some(t) = inbox.triage.as_ref().filter(|t| t.drain.is_some()) else {
-        return String::new();
-    };
-    let pass = Pass {
-        cfg,
-        inbox,
-        project: projects(cfg),
-        wake: BTreeMap::new(),
-        unreached: Vec::new(),
-        looked: Vec::new(),
-    };
-    pass.ready_queue(t)
-}
+pub(crate) use drain::ready_queue;
