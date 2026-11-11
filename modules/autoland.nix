@@ -292,7 +292,7 @@ let
   # token.rs), and the steward's token.
   credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
   # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
-  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward user credentials; };
+  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward user credentials; git = config.programs.git.package; };
 in
 {
   imports = [

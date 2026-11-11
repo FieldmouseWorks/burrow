@@ -54,6 +54,7 @@ let
     user = shadow.serviceConfig.User == machine.burrow.user;
     ledger = shadow.environment.CONARY_LEDGER == machine.burrow.ledger.dir;
     token = lib.hasSuffix "/bin/autoland-steward token" shadow.environment.CONARY_TOKEN_COMMAND;
+    git = lib.elem machine.programs.git.package shadow.path;
     key = lib.any (lib.hasPrefix "app-key:") shadow.serviceConfig.LoadCredential;
     unshadowed = !(none ? "autoland-shadow@") && (none."autoland@".unitConfig.OnSuccess or [ ]) == [ ];
   };
