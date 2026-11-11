@@ -92,11 +92,13 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"{base}/specialisation/{name}/bin/switch-to-configuration test")
         machine.wait_for_unit("proj-retry-transfer.service")
         assert machine.succeed("systemctl show -P MainPID proj-retry-barrier.service").strip() == barrier_pid
+        machine.fail("flock -n /data/dev/jobs/.slots/.lock true")
 
     machine.wait_for_unit("user@1001.service")
     machine.wait_for_unit("proj-retry-barrier.service")
     machine.wait_for_unit("proj-retry-transfer.service")
     barrier_pid = machine.succeed("systemctl show -P MainPID proj-retry-barrier.service").strip()
+    machine.fail("flock -n /data/dev/jobs/.slots/.lock true")
     base = machine.succeed("readlink -f /run/current-system").strip()
     first = machine.succeed("readlink -f /run/current-system/sw/bin/proj").strip()
 
