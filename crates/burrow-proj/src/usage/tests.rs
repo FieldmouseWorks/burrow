@@ -839,3 +839,76 @@ fn owner_deadline_survives_refusals_and_expires_normally() {
     record(&cfg, "running", Some(now() + 7200), "refused", now()).unwrap();
     assert!(!out(&cfg).unwrap().owner);
 }
+
+// The disk schema used by turns that keep the previous binary through a deploy.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySpent {
+    until: i64,
+    said: String,
+    job: String,
+    at: i64,
+    back: Option<i64>,
+    told: i64,
+    last: Option<i64>,
+}
+
+#[test]
+fn owner_holds_survive_legacy_reads_refusals_and_successful_turns() {
+    let (_d, cfg) = rig();
+    record(&cfg, "ordinary", Some(now() + 60), "refused", now()).unwrap();
+    let old: LegacySpent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+    assert!(old.back.is_none() && old.until > now());
+    hold(&cfg, now() + 3600, "owner reason").unwrap();
+    let held = out(&cfg).unwrap();
+    let mut old: LegacySpent =
+        serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+    // The old slot/retry loop still reads an active hold, and its successful
+    // turn cannot satisfy back()'s started > last-refusal condition.
+    assert!(old.back.is_none() && old.until > now());
+    assert!(now() < old.last.unwrap());
+    // Exactly the old put() update: a refusal extends the compatible mirror
+    // and preserves the rest. It cannot erase the owner's actual deadline.
+    old.until = old.until.max(now() + 7200);
+    old.last = Some(old.last.unwrap().max(now()));
+    fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(out(&cfg), Some(held.clone()));
+    back(&cfg, Some(now() + 1));
+    assert_eq!(out(&cfg), Some(held));
+    // Replacement owner pauses update both the old reader and the metadata.
+    hold(&cfg, now() + 1200, "replacement").unwrap();
+    let old: LegacySpent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+    assert_eq!(old.until, out(&cfg).unwrap().until);
+    assert_eq!(out(&cfg).unwrap().said, "replacement");
+    back(&cfg, None);
+    assert!(!cfg.jobs.join(OWNER).exists());
+}
+
+#[test]
+fn owner_expiry_settles_without_a_claude_run_and_retries_its_close() {
+    let (d, cfg) = rig();
+    fs::write(d.path().join("pending"), "").unwrap();
+    hold(&cfg, now() + 60, "short pause").unwrap();
+    assert!(tend(&cfg).unwrap() <= out(&cfg).unwrap().until);
+    let mut expired = kept(&cfg).unwrap();
+    expired.until = now() - 1;
+    keep(&cfg, &expired).unwrap();
+    tend(&cfg);
+    assert_eq!(kept(&cfg).unwrap().back, Some(expired.until));
+    assert!(last_release(&cfg).unwrap() >= expired.until);
+    assert!(!cfg.jobs.join(OWNER).exists());
+    assert!(told(&d).iter().any(|s| s.starts_with("close ")));
+    let closes = told(&d).iter().filter(|s| s.starts_with("close ")).count();
+    let mut retry = kept(&cfg).unwrap();
+    retry.told = now() - RETRY;
+    keep(&cfg, &retry).unwrap();
+    tend(&cfg);
+    assert!(told(&d).iter().filter(|s| s.starts_with("close ")).count() > closes);
+    fs::remove_file(d.path().join("pending")).unwrap();
+    let mut settled = kept(&cfg).unwrap();
+    settled.until = now() - cfg.stall_queued() - 2;
+    settled.back = Some(settled.until);
+    keep(&cfg, &settled).unwrap();
+    tend(&cfg);
+    assert!(kept(&cfg).is_none());
+}

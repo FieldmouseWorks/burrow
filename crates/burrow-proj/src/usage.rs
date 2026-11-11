@@ -42,6 +42,7 @@ pub(crate) const FILE: &str = ".usage.json";
 /// goes once its notice is settled, or is replaced by a new refusal), so an
 /// earlier proj's limit written before it never holds again ([`earlier`]).
 const RELEASED: &str = ".usage.released";
+const OWNER: &str = ".usage.owner.json";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
@@ -60,7 +61,7 @@ const RETRY: i64 = RETELL / 12;
 #[serde(deny_unknown_fields)]
 pub struct Spent {
     /// An explicit owner pause: only the owner or its deadline releases it.
-    #[serde(default)]
+    #[serde(skip)]
     pub owner: bool,
     pub until: i64,
     pub said: String,
@@ -126,12 +127,25 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Spent>(&text)
             .map(|mut s| {
-                if !s.owner {
-                    s.said = crate::engine::claude::normalize_refusal(&s.said);
+                // Old turns reject unknown fields and still write this record.
+                // Keep owner metadata separately; their writes preserve at/job.
+                if s.job == "owner"
+                    && s.back.is_none()
+                    && let Ok(bytes) = fs::read(cfg.jobs.join(OWNER))
+                {
+                    let mut owner: Spent = serde_json::from_slice(&bytes)
+                        .map_err(|e| format!("proj: {OWNER}: {e}"))?;
+                    if owner.at == s.at {
+                        owner.owner = true;
+                        owner.told = s.told;
+                        return Ok(owner);
+                    }
                 }
-                Some(s)
+                s.said = crate::engine::claude::normalize_refusal(&s.said);
+                Ok(s)
             })
-            .map_err(|e| format!("proj: {}: {e}", path.display())),
+            .map_err(|e| format!("proj: {}: {e}", path.display()))?
+            .map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("proj: {}: {e}", path.display())),
     }
@@ -163,8 +177,26 @@ fn lock(cfg: &Config) -> Result<File, String> {
 
 /// The record written whole (a temp file renamed over it), or why not.
 fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
-    let text = serde_json::to_string(s).map_err(|e| format!("proj: {FILE}: {e}"))?;
-    swap(&cfg.jobs.join(FILE), &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
+    let encode = |s: &Spent| serde_json::to_string(s).map_err(|e| format!("proj: {FILE}: {e}"));
+    let mut mirror = s.clone();
+    if s.owner && s.back.is_none() {
+        // The sidecar owns the actual deadline even if an old refusal extends
+        // its compatible mirror. A future last-refusal fences old successful
+        // turns from releasing this pause before its deadline.
+        swap(&cfg.jobs.join(OWNER), &encode(s)?).map_err(|e| format!("proj: {OWNER}: {e}"))?;
+        mirror.last = Some(s.until);
+    }
+    swap(&cfg.jobs.join(FILE), &format!("{}\n", encode(&mirror)?))
+        .map_err(|e| format!("proj: {FILE}: {e}"))?;
+    if !s.owner || s.back.is_some() {
+        match fs::remove_file(cfg.jobs.join(OWNER)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("proj: {OWNER}: {e}"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
@@ -370,9 +402,33 @@ pub fn tend(cfg: &Config) -> Option<i64> {
             return retry;
         }
     };
+    if s.owner && s.back.is_none() && s.until <= now {
+        let Ok(_lock) = lock(cfg) else { return retry };
+        if let Some(mut expired) =
+            kept(cfg).filter(|s| s.owner && s.back.is_none() && s.until <= now)
+        {
+            expired.back = Some(expired.until);
+            expired.told = now;
+            if mark(cfg, expired.until)
+                .and_then(|_| keep(cfg, &expired))
+                .is_err()
+            {
+                return retry;
+            }
+            tell(cfg, &["close", NOTICE, CLOSED]);
+            changed(cfg);
+        }
+        return retry;
+    }
     let next = if s.holds(now) {
         remind(cfg);
-        kept(cfg).map(|s| s.told + RETELL)
+        kept(cfg).map(|s| {
+            if s.owner {
+                (s.told + RETELL).min(s.until)
+            } else {
+                s.told + RETELL
+            }
+        })
     } else {
         s.back?;
         let Ok(_lock) = lock(cfg) else { return retry };
@@ -385,7 +441,12 @@ pub fn tend(cfg: &Config) -> Option<i64> {
             s.release() + cfg.stall_queued()
         })
     };
-    Some(next.unwrap_or(now).max(now + RETRY))
+    let floor = if s.owner && s.holds(now) {
+        now + 1
+    } else {
+        now + RETRY
+    };
+    Some(next.unwrap_or(now).max(floor))
 }
 
 /// What's left once it has ended, under the lock: the close sent again
