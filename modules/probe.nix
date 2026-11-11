@@ -97,11 +97,14 @@ in
           "autoland.service"
           "autoland@*.service"
           "autoland-*.service"
+          # Updates dispatches a full pass or one repository's pass.
+          "renovate.service"
+          "renovate@*.service"
           "proj-*.service"
           "nix-daemon.service"
           "systemd-oomd.service"
         ];
-        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "proj-*.service" "nix-daemon.service" "systemd-oomd.service" ]'';
+        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "renovate.service" "renovate@*.service" "proj-*.service" "nix-daemon.service" "systemd-oomd.service" ]'';
         description = ''
           The system units whose journals a probe may read (globs: `*`, `?`,
           `[...]`). Keep off any whose log can hold a secret: the scrubber only
