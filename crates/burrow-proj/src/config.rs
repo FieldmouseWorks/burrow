@@ -146,6 +146,8 @@ pub struct Tools {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Inbox {
+    #[serde(default)]
+    pub planning: bool,
     /// What it keeps of each issue it has a job for, a folder an issue.
     pub state: PathBuf,
     /// Each label selects its engine; Codex wins when both are present.
@@ -178,6 +180,8 @@ pub struct Inbox {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Triage {
+    #[serde(default = "sort_unlabelled")]
+    pub sort_unlabelled: bool,
     /// The label on an issue only the owner can settle (the steward's owner
     /// label, which lists PRs for them).
     pub owner_label: String,
@@ -196,6 +200,10 @@ pub struct Triage {
     pub drain_jobs: usize,
 }
 
+fn sort_unlabelled() -> bool {
+    true
+}
+
 impl Config {
     pub fn paused(&self, repo: &str) -> bool {
         self.settings
@@ -209,7 +217,7 @@ impl Config {
 
     pub fn settings_line(&self) -> String {
         let Some(settings) = &self.settings else {
-            return String::new();
+            return "Automated work: paused (settings are not configured)\n".into();
         };
         let repos: Vec<_> = std::fs::read_dir(&self.projects)
             .into_iter()
@@ -263,6 +271,15 @@ impl Config {
     /// so a typo never silently sends work to a different engine. Repo scopes
     /// beat bare roles; duplicate keys fail with both lines, even on other roles.
     pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
+        self.engine_default(role, repo, Engine::Claude)
+    }
+
+    pub(crate) fn engine_default(
+        &self,
+        role: &str,
+        repo: Option<&str>,
+        default: Engine,
+    ) -> Result<Engine, String> {
         let text = crate::roles::read(&self.roles)?;
         let entries = crate::roles::parse(
             &self.roles,
@@ -276,7 +293,7 @@ impl Config {
             .filter_map(|(key, engine)| key.specificity(role, repo).map(|rank| (rank, engine)))
             .max_by_key(|(rank, _)| *rank)
             .map(|(_, engine)| engine)
-            .unwrap_or_default())
+            .unwrap_or(default))
     }
 
     /// What a turn of ROLE in REPO runs on ENGINE: the models file's model
