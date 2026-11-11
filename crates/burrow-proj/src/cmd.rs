@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::time::Instant;
 
 use crate::config::Config;
@@ -152,6 +152,43 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             )),
         },
         Some("await") => wait_on(cfg, &args[1..]),
+        Some("split") => {
+            let id = this_job("PROJ_JOB", "proj split is for the inbox job being split")?;
+            let file = arg(
+                args,
+                1,
+                "usage: proj split FILE (JSON title/body/check tasks)",
+            )?;
+            let max = crate::planning::MAX_TASKS * (crate::planning::MAX_BODY + 1000);
+            let mut bytes = Vec::new();
+            File::open(file)
+                .and_then(|f| f.take(max as u64 + 1).read_to_end(&mut bytes))
+                .map_err(|e| io_fail(std::path::Path::new(file), e))?;
+            if bytes.len() > max {
+                return Err(Fail::new(2, "split exceeds the bounded plan size"));
+            }
+            let text = std::str::from_utf8(&bytes).map_err(|e| Fail::new(2, e.to_string()))?;
+            let tasks = crate::planning::parse(text).map_err(|e| Fail::new(2, e))?;
+            let job = Job::new(cfg, &id);
+            if !job.path("inbox-issue").exists()
+                || !cfg.inbox.as_ref().is_some_and(|i| i.planning)
+                || read(&job.path("link"))
+                    .as_deref()
+                    .and_then(target)
+                    .is_none()
+            {
+                return Err(Fail::new(
+                    2,
+                    "split needs an inbox issue with planning enabled",
+                ));
+            }
+            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let n = job.turns().ok_or_else(|| Fail::new(2, "no active turn"))?;
+            let path = job.turn(&n, "split");
+            crate::planning::declare_split(&job, &n, &tasks).map_err(|e| io_fail(&path, e))?;
+            put(declare_end(&job, "split")?);
+            Ok(())
+        }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
         Some("_questions") => {
             put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
