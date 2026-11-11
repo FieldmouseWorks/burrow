@@ -142,7 +142,7 @@ in pkgs.testers.runNixOSTest {
     assert machine.succeed("cat /data/dev/jobs/"+aw+"/await").split("\t")==awaiting
     machine.succeed("test -e /data/proof-trees/"+proof+"-1/preserved; test $(grep -c complete /data/proof-events) = 1")
     # A paused drained record no longer reserves the only drain handoff.
-    issue={"number":30,"user":{"login":"sam","type":"User"},"html_url":"https://github.com/o/web/issues/30","repository_url":"https://api.github.com/repos/o/web","title":"fixture","body":"fixture-finish","state":"open","labels":[{"name":"ready"}],"created_at":"2026-01-01T00:00:00Z"}
+    issue={"number":30,"user":{"login":"sam","id":1,"type":"User"},"html_url":"https://github.com/o/web/issues/30","repository_url":"https://api.github.com/repos/o/web","title":"fixture","body":"fixture-finish","state":"open","labels":[{"name":"ready"}],"created_at":"2026-01-01T00:00:00Z"}
     data("repos/o/web/issues",[issue]); data("repos/o/web/issues/30",issue); data("repos/o/web/issues/30/comments",[])
     machine.succeed("touch /tmp/gh/calls; chmod a+rw /tmp/gh/calls")
     dev("proj-inbox o/web")

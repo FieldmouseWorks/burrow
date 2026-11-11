@@ -314,7 +314,7 @@ in
 
   options.burrow.autoland = {
     enable = lib.mkEnableOption "autoland, the PR steward for every repo you own";
-    configFile = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; default = configFile; description = "The steward's settings file."; };
+    configFile = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; default = "/etc/burrow/autoland.json"; description = "The current steward config, read at proof restoration without a store dependency cycle."; };
 
     owners = mkOption {
       type = types.listOf types.str;
@@ -858,6 +858,7 @@ in
     # opens (repos.py publish).
     burrow.proj.inbox.authors = [ { login = "${cfg.app.slug}[bot]"; id = cfg.app.accountId; } ];
 
+    environment.etc."burrow/autoland.json".source = configFile;
     environment.systemPackages = [ steward ];
 
     # Every PR's pass comes from what happens to it (burrow.events): a push, a

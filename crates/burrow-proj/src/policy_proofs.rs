@@ -120,11 +120,15 @@ mod tests {
         };
         let (_rig, mut cfg) = crate::usage::tests::rig();
         cfg.tools.systemctl = tool("systemctl", "echo inactive");
-        cfg.tools.systemd_run = tool("run", &format!("echo \"$@\" > {}/args", dir.path().display()));
+        cfg.tools.systemd_run = tool(
+            "run",
+            &format!("echo \"$@\" > {}/args", dir.path().display()),
+        );
         let state = dir.path().join("builds");
         let proof = state.join("proof-o-r-1");
         fs::create_dir_all(&proof).unwrap();
-        fs::write(proof.join("build.json"), r#"{"repo":"o/r"}"#).unwrap();
+        let inputs = r#"{"repo":"o/r","head":"original-head","drvs":{"check":"original.drv"}}"#;
+        fs::write(proof.join("build.json"), inputs).unwrap();
         fs::write(proof.join("policy-paused"), "paused").unwrap();
         fs::write(
             proof.join("policy-env.json"),
@@ -141,8 +145,15 @@ mod tests {
         });
         reconcile(&cfg).unwrap();
         let args = fs::read_to_string(dir.path().join("args")).unwrap();
-        assert!(args.contains("--setenv=AUTOLAND_CONFIG=/new/autoland.json"), "{args}");
+        assert!(
+            args.contains("--setenv=AUTOLAND_CONFIG=/new/autoland.json"),
+            "{args}"
+        );
         assert!(args.contains("--setenv=PATH=/tools"), "{args}");
         assert!(!args.contains("/old/"), "{args}");
+        assert_eq!(
+            fs::read_to_string(proof.join("build.json")).unwrap(),
+            inputs
+        );
     }
 }
