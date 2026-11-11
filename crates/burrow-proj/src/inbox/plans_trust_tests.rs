@@ -211,3 +211,15 @@ fn lost_creation_response_without_a_posting_identity_stays_pending() {
     assert!(kept.children[0].number.is_none());
     assert!(!b.pass().eligible("sam/box", &child));
 }
+
+#[test]
+fn a_creation_receipt_never_authorizes_a_different_account() {
+    let (b, _, mut list) = super::tests::parent_fixture();
+    list.children[0].attempted = true;
+    list.children[0].posting_id = Some(42);
+    assert!(b.pass().save_list("sam/box", "7", &list));
+    let mut child = issue(8, "workers[bot]", &["ready"]);
+    child["user"]["id"] = json!(999);
+    assert!(!b.pass().generated_child("sam/box", &child));
+    assert!(!b.pass().eligible("sam/box", &child));
+}

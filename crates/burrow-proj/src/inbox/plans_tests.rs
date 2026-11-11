@@ -25,10 +25,12 @@ pub(super) fn parent_fixture() -> (Box, Value, List) {
             .collect(),
         children: vec![
             Child {
+                posting_id: Some(burrow_github::fake::author("workers[bot]").id),
                 number: Some(8),
                 ..Child::default()
             },
             Child {
+                posting_id: Some(burrow_github::fake::author("workers[bot]").id),
                 number: Some(9),
                 ..Child::default()
             },
