@@ -732,7 +732,7 @@ fn waiting_codex_turn_transfers_back_to_its_own_pool() {
         })
         .collect();
     start(&mut r, "codex", "old-codex", "/ordinary");
-    until(|| r.cfg.jobs.join("codex/1.engine").exists());
+    until(|| r.cfg.jobs.join("codex/1.withdrawable").exists());
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
     pass(&r.cfg).unwrap();
