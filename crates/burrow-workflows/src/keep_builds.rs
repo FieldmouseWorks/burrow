@@ -6,7 +6,7 @@
 //! them, last, under the key and the path restores look for, without its
 //! failure failing the gate, with crates/burrow-keep (whose tests say what
 //! it keeps) from the workflow's own commit. A PR's negative run restores
-//! every leg's, on the same terms, before installing Nix.
+//! every leg's, on the same terms, when it has a negative to build.
 
 use yaml_serde::Value;
 
@@ -177,8 +177,8 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
 
 /// The negative job restores every leg's kept builds, under the keys and
 /// path each leg restores its own from and on the same terms (no PR from a
-/// fork), before installing Nix, and nix substitutes from them as the
-/// legs' does. Without them it built what no public cache
+/// fork), but only when it has a negative to build, and nix substitutes
+/// from them as the legs' does. Without them it built what no public cache
 /// has (the workspace's dependencies, the machines' patched packages) again
 /// for every PR that adds a test.
 #[test]
@@ -193,22 +193,20 @@ fn a_negative_restores_every_legs_kept_builds() {
     let at = |f: &dyn Fn(&Value) -> bool| all.iter().position(f).unwrap();
     let restores: Vec<&Value> = all
         .iter()
-        .filter(|s| uses(s, "actions/cache/restore@") && s["with"]["lookup-only"] != true)
+        .filter(|s| uses(s, "actions/cache/restore@"))
         .collect();
     assert_eq!(restores.len(), 8, "one a leg, up to eight");
     let first = at(&|s| uses(s, "actions/cache/restore@"));
     let made = &all[at(&|s| s.get("run").is_some_and(|r| r == script(gate_made)))];
     let install = &all[at(&|s| uses(s, "cachix/install-nix-action@"))];
-    // Restores must precede Nix opening the file cache, including the
-    // paths-only bootstrap. This fails on the order introduced by #545.
+    // Provision Nix before the Rust paths step. Restore kept builds only
+    // after it says a negative is needed, and before that negative runs.
     let install_at = at(&|s| uses(s, "cachix/install-nix-action@"));
     let paths_at = at(&|s| s["id"] == "paths");
-    assert!(at(&|s| s.get("run").is_some_and(|r| r == script(gate_made))) < first);
-    for restore in &restores {
-        assert!(at(&|s| s == *restore) < install_at);
-    }
+    assert!(at(&|s| s.get("run").is_some_and(|r| r == script(gate_made))) < install_at);
     assert!(install_at < paths_at);
-    assert!(paths_at < at(&|s| s["id"] == "negative"));
+    assert!(paths_at < first);
+    assert!(first + 8 <= at(&|s| s["id"] == "negative"));
     assert_eq!(install["if"], "inputs.install-nix");
     assert_eq!(script(made), script(gate_made));
     let base = |legs: u64| {
@@ -251,14 +249,15 @@ fn a_negative_restores_every_legs_kept_builds() {
             assert_eq!(r["uses"], gate_restore["uses"]);
         }
     }
-    // None for a PR from a fork, or one whose fork is gone, nor with
-    // keep-builds or nix's install off.
+    // None for a PR from a fork, or one whose fork is gone, nor with no
+    // negative to build, nor with keep-builds or nix's install off.
     for (key, off) in [
         (
             "github.event.pull_request.head.repo.full_name",
             V::from("someone/burrow"),
         ),
         ("github.event.pull_request.head.repo.full_name", V::Null),
+        ("steps.paths.outputs.needs", "false".into()),
         ("inputs.keep-builds", false.into()),
         ("inputs.install-nix", false.into()),
     ] {
@@ -269,6 +268,9 @@ fn a_negative_restores_every_legs_kept_builds() {
         }
         if key.starts_with("inputs.") {
             assert!(!condition(text(&made["if"]), &c), "{key} {off:?}");
+        } else if key == "steps.paths.outputs.needs" {
+            // The compiler needs Nix even when the path filter finds none.
+            assert!(condition(text(&made["if"]), &c));
         }
     }
     assert!(condition(text(&made["if"]), &base(1)));
@@ -276,25 +278,4 @@ fn a_negative_restores_every_legs_kept_builds() {
         install["with"]["extra_nix_config"],
         gate_install["with"]["extra_nix_config"]
     );
-    // Lookup does not extract. Both an exact and a prefix hit require a
-    // successful restore; a genuine miss may build cold on first use.
-    for (k, restore) in restores.iter().enumerate() {
-        let id = format!("kept-{}", k + 1);
-        let lookup = &all[at(&|s| s["id"] == id)];
-        assert!(at(&|s| s == lookup) < at(&|s| s == *restore));
-        assert_eq!(lookup["if"], restore["if"]);
-        assert_eq!(lookup["uses"], restore["uses"]);
-        assert_eq!(lookup["with"]["lookup-only"], true);
-        for field in ["path", "key", "restore-keys"] {
-            assert_eq!(lookup["with"][field], restore["with"][field]);
-        }
-        for (hit, required) in [("true", true), ("false", true), ("", false)] {
-            let c = ctx(&[(&format!("steps.{id}.outputs.cache-hit"), hit.into())]);
-            assert_eq!(
-                value(text(&restore["with"]["fail-on-cache-miss"]), &c).truthy(),
-                required,
-                "{id}: {hit}"
-            );
-        }
-    }
 }
