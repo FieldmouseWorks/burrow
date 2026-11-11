@@ -66,37 +66,41 @@ pub fn evaluate(
     File { at: now, items }
 }
 
-/// A PR run's text is the PR author's: only a run whose original actor (a
-/// rerun keeps it; `triggering_actor` is whoever clicked) is a configured
-/// author, from a branch of this repository, may supply keys and links.
-/// Unknown provenance is untrusted.
-pub fn trusted(run: &serde_json::Value, repo: &str, authors: &[String]) -> bool {
-    let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
-    let from_here = run["head_repository"]["full_name"]
+/// GitHub's PR/head association authenticates the observed snapshot, while
+/// the PR resource supplies its author. Event actors are not authors. Check
+/// this before consulting cached observations too. A PR may since have moved
+/// on: its recorded run snapshot remains associated with that same PR.
+pub fn trusted(
+    run: &serde_json::Value,
+    pr: &serde_json::Value,
+    repo: &str,
+    authors: &[String],
+) -> bool {
+    let same_repo =
+        |v: &serde_json::Value| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(repo));
+    let Some(associations) = run["pull_requests"].as_array() else {
+        return false;
+    };
+    let [association] = associations.as_slice() else {
+        return false;
+    };
+    let sha = run["head_sha"]
         .as_str()
-        .is_some_and(|n| same(n, repo));
-    from_here
-        && run["actor"]["login"]
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    let head_id = pr["head"]["repo"]["id"].as_u64();
+    same_repo(&run["head_repository"]["full_name"])
+        && same_repo(&pr["head"]["repo"]["full_name"])
+        && pr["user"]["login"]
             .as_str()
-            .is_some_and(|a| authors.iter().any(|x| same(x, a)))
-}
-
-/// The current result of every logical job across attempts: a partial rerun
-/// keeps the jobs it didn't rerun and replaces the ones it did. Jobs are
-/// matched by name (matrix legs have their own), newest attempt wins.
-pub fn latest_jobs(all: &[serde_json::Value]) -> serde_json::Value {
-    let mut latest: BTreeMap<&str, &serde_json::Value> = BTreeMap::new();
-    for job in all {
-        let name = job["name"].as_str().unwrap_or_default();
-        let attempt = |j: &serde_json::Value| j["run_attempt"].as_u64().unwrap_or(0);
-        if latest
-            .get(name)
-            .is_none_or(|old| attempt(job) >= attempt(old))
-        {
-            latest.insert(name, job);
-        }
-    }
-    serde_json::json!({ "jobs": latest.into_values().collect::<Vec<_>>() })
+            .is_some_and(|a| authors.iter().any(|x| x.eq_ignore_ascii_case(a)))
+        && pr["number"]
+            .as_u64()
+            .is_some_and(|n| association["number"].as_u64() == Some(n))
+        && sha.is_some_and(|s| association["head"]["sha"].as_str() == Some(s))
+        && head_id.is_some_and(|id| {
+            association["head"]["repo"]["id"].as_u64() == Some(id)
+                && run["head_repository"]["id"].as_u64() == Some(id)
+        })
 }
 
 /// Parse only explicit reporter steps. A failed reporter still signals the
@@ -204,52 +208,48 @@ mod tests {
             {"name":"cache warning", "conclusion":"success"}]}]});
         assert_eq!(keys(&jobs), BTreeSet::from(["cache".into(), "save".into()]));
     }
-    fn job(name: &str, attempt: u64, step: Option<&str>) -> serde_json::Value {
-        let steps: Vec<_> = step
-            .into_iter()
-            .map(|n| serde_json::json!({"name":n,"conclusion":"success"}))
-            .collect();
-        serde_json::json!({"name":name,"run_attempt":attempt,"steps":steps})
+    #[test]
+    fn current_jobs_preserve_duplicate_names_and_ignore_display_identity() {
+        let jobs = serde_json::json!({"jobs":[
+            {"id":1,"name":"check","steps":[{"name":"degraded/cache","conclusion":"success"}]},
+            {"id":2,"name":"check","steps":[]}
+        ]});
+        assert_eq!(keys(&jobs), BTreeSet::from(["cache".into()]));
+        // GitHub supplies only current executions, even if a name changed.
+        assert!(
+            keys(&serde_json::json!({"jobs":[{"id":3,"name":"check attempt 2","steps":[]}]}))
+                .is_empty()
+        );
     }
     #[test]
-    fn partial_reruns_keep_unrerun_jobs_and_replace_rerun_ones() {
-        // Leg a degraded and passed in attempt 1; leg b failed and was rerun.
-        let all = [
-            job("a", 1, Some("degraded/cache")),
-            job("b", 1, None),
-            job("b", 2, None),
-        ];
-        assert_eq!(keys(&latest_jobs(&all)), BTreeSet::from(["cache".into()]));
-        // Order doesn't matter; a rerun leg that recovered drops its signal.
-        let all = [
-            job("b", 2, None),
-            job("b", 1, Some("degraded/save")),
-            job("a", 1, Some("degraded/cache")),
-            job("a", 3, None),
-        ];
-        assert!(keys(&latest_jobs(&all)).is_empty());
-        // A full rerun reporting something new.
-        let all = [job("a", 1, None), job("a", 2, Some("degraded/new"))];
-        assert_eq!(keys(&latest_jobs(&all)), BTreeSet::from(["new".into()]));
-    }
-    #[test]
-    fn only_configured_authors_on_this_repo_are_trusted() {
-        let authors = ["Sam".to_string()];
-        let r = |actor: serde_json::Value, head: serde_json::Value| {
-            serde_json::json!({"actor":{"login":actor},"head_repository":{"full_name":head},
-                "triggering_actor":{"login":"sam"}})
-        };
-        assert!(trusted(&r("sam".into(), "o/r".into()), "O/R", &authors));
-        // Sam rerunning an outsider's run: the actor stays the outsider.
-        assert!(!trusted(&r("eve".into(), "o/r".into()), "o/r", &authors));
-        // A fork, even by a configured author's login.
-        assert!(!trusted(&r("sam".into(), "eve/r".into()), "o/r", &authors));
-        // Unknown provenance.
-        assert!(!trusted(&serde_json::json!({}), "o/r", &authors));
-        assert!(!trusted(
-            &r("sam".into(), serde_json::Value::Null),
-            "o/r",
-            &authors
-        ));
+    fn author_and_observed_head_are_authenticated_not_event_actors() {
+        let sha = "a".repeat(40);
+        let run = serde_json::json!({"head_sha":sha,"actor":{"login":"outsider"},
+            "triggering_actor":{"login":"sam"},"head_repository":{"id":7,"full_name":"o/r"},
+            "pull_requests":[{"number":3,"head":{"sha":sha,"repo":{"id":7}}}]});
+        let pr = serde_json::json!({"number":3,"user":{"login":"sam"},
+            "head":{"sha":"b".repeat(40),"repo":{"id":7,"full_name":"o/r"}}});
+        let authors = ["Sam".into()];
+        assert!(trusted(&run, &pr, "O/R", &authors));
+        let mut outsider = pr.clone();
+        outsider["user"]["login"] = "eve".into();
+        assert!(!trusted(&run, &outsider, "o/r", &authors));
+        let mut reopened = run.clone();
+        reopened["actor"]["login"] = "sam".into();
+        assert!(!trusted(&reopened, &outsider, "o/r", &authors));
+        for pointer in [
+            "/head_sha",
+            "/pull_requests/0/head/sha",
+            "/head_repository/id",
+            "/pull_requests",
+            "/pull_requests/0/number",
+        ] {
+            let mut unknown = run.clone();
+            *unknown.pointer_mut(pointer).unwrap() = serde_json::Value::Null;
+            assert!(!trusted(&unknown, &pr, "o/r", &authors), "{pointer}");
+        }
+        let mut fork = pr.clone();
+        fork["head"]["repo"]["full_name"] = "eve/r".into();
+        assert!(!trusted(&run, &fork, "o/r", &authors));
     }
 }

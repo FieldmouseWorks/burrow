@@ -45,8 +45,21 @@ push runs per configured workflow and completed PR runs created in the last
 runs in that window, creates a stall. Matrix legs and attempts of one run
 count once, and a run's signals are the current result of each of its jobs:
 a partial rerun keeps the jobs it didn't rerun and replaces the ones it did.
-PR runs count only when their original actor is one of `authors` and their
-head is in the same repository; a rerun by someone else changes nothing. Repositories and workflows have separate keys.
+PR runs count only when the PR resource names one of `authors` and GitHub's
+run record associates the observed head SHA and repository with that PR.
+The current head may have moved on; an earlier associated snapshot still
+counts. Both repositories must be this repository. Event actors (including
+reopen, edit and rerun actors) never substitute for PR authorship. Provenance
+is rechecked before reading cached observations. Unknown provenance is ignored.
+Repositories and workflows have separate keys.
+
+The reader paginates GitHub's `jobs?filter=latest` endpoint, preserving every
+returned job rather than inferring identity from display names. GitHub filters
+superseded executions server-side, including partial reruns: see its
+[API change description](https://github.blog/changelog/2020-03-09-new-filter-parameter-in-workflow-jobs-api/).
+Duplicate names and names that change between attempts therefore cannot erase
+another current job or preserve a historical result. A new cache namespace
+invalidates observations produced by the former name-based reduction.
 
 The reusable policy lives in `burrow_watchdog::degradations`; the
 `burrow-degradations` binary supplies Actions observations and writes the

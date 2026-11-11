@@ -30,7 +30,7 @@ in {
       type = types.listOf types.str;
       default = config.burrow.autoland.authors or [ ];
       defaultText = lib.literalExpression "config.burrow.autoland.authors";
-      description = "Whose pull-request runs may supply degradation keys and links to the fix job. A run counts only when its original actor (a rerun by someone else doesn't change it) is listed and its head is in the same repository.";
+      description = "Whose pull-request runs may supply degradation keys and links to the fix job. A run counts only when its PR author is listed and GitHub associates the observed head snapshot with that PR in the same repository. Event actors never substitute for PR authorship.";
     };
     prThreshold = mkOption {
       type = types.ints.positive;

@@ -1,7 +1,7 @@
 //! Event-driven Actions reader; errors leave the previous watch untouched
 //! so an unavailable API cannot clear a stall or masquerade as health.
 use burrow_watchdog::{
-    degradations::{Run, evaluate, keys, latest_jobs, trusted},
+    degradations::{Run, evaluate, keys, trusted},
     watch::File,
 };
 use serde::Deserialize;
@@ -59,12 +59,24 @@ fn collect(
             }
             // PR-controlled text reaches a trusted fix job: authenticate it
             // before it is read or cached.
-            if !default && !trusted(r, repo, authors) {
-                continue;
+            if !default {
+                let Some(associations) = r["pull_requests"].as_array() else {
+                    continue;
+                };
+                let [association] = associations.as_slice() else {
+                    continue;
+                };
+                let Some(number) = association["number"].as_u64() else {
+                    continue;
+                };
+                let pr = api(&format!("repos/{repo}/pulls/{number}"))?;
+                if !trusted(r, &pr, repo, authors) {
+                    continue;
+                }
             }
             let id = r["id"].as_u64().ok_or("missing run id")?;
             let attempt = r["run_attempt"].as_u64().ok_or("missing run attempt")?;
-            let key = format!("{repo}/{id}/{attempt}");
+            let key = format!("current-v2/{repo}/{id}/{attempt}");
             let run = if let Some(run) = cache.get(&key) {
                 run.clone()
             } else {
@@ -72,7 +84,7 @@ fn collect(
                 let mut job_page = 1;
                 loop {
                     let jobs = api(&format!(
-                        "repos/{repo}/actions/runs/{id}/jobs?filter=all&per_page=100&page={job_page}"
+                        "repos/{repo}/actions/runs/{id}/jobs?filter=latest&per_page=100&page={job_page}"
                     ))?;
                     let list = jobs["jobs"].as_array().ok_or("missing jobs")?;
                     all.extend(list.iter().cloned());
@@ -81,7 +93,7 @@ fn collect(
                     }
                     job_page += 1;
                 }
-                let found = keys(&latest_jobs(&all));
+                let found = keys(&serde_json::json!({"jobs":all}));
                 Run {
                     id,
                     at,

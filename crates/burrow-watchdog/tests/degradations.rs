@@ -24,12 +24,24 @@ fn degradation_source_reads_runs_and_preserves_stalls_on_api_failure() {
         {"id":1,"run_attempt":1,"created_at":at,"html_url":"https://example.org/1"}
     ]});
     fs::write(d.join("runs.json"), runs.to_string()).unwrap();
+    let mut jobs: Vec<_> = (0..100)
+        .map(|id| json!({"id":id,"name":"check","steps":[]}))
+        .collect();
+    jobs[0]["steps"] = json!([{"name":"degraded/cache","conclusion":"success"}]);
+    fs::write(d.join("jobs-1.json"), json!({"jobs":jobs}).to_string()).unwrap();
+    fs::write(
+        d.join("jobs-2.json"),
+        json!({"jobs":[{"id":100,"name":"check","steps":[]}]}).to_string(),
+    )
+    .unwrap();
     let script = r#"#!/bin/sh
 case "$2" in
+  repos/sam/repo/pulls/*) cat "$FIXTURES/pr-${2##*/}.json" ;;
   repos/sam/repo) echo '{"default_branch":"main"}' ;;
   *event=pull_request*) echo '{"workflow_runs":[]}' ;;
   *workflows/ci.yml/runs*) cat "$FIXTURES/runs.json" ;;
-  *runs/*/jobs*) echo '{"jobs":[{"steps":[{"name":"degraded/cache","conclusion":"success"}]}]}' ;;
+  *runs/*/jobs?filter=latest'&'*page=1) cat "$FIXTURES/jobs-1.json" ;;
+  *runs/*/jobs?filter=latest'&'*page=2) cat "$FIXTURES/jobs-2.json" ;;
   *) exit 1 ;;
 esac
 "#;
@@ -64,8 +76,8 @@ esac
     burrow_test::executable(
         d.join("gh"),
         script.replace(
-            "*runs/*/jobs*)",
-            "*runs/3/jobs*) echo '{\"jobs\":[]}' ;;\n  *runs/*/jobs*)",
+            "*runs/*/jobs?filter=latest'&'*page=1)",
+            "*runs/3/jobs?filter=latest'&'*) echo '{\"jobs\":[]}' ;;\n  *runs/*/jobs?filter=latest'&'*page=1)",
         ),
     );
     let clean = json!({"workflow_runs":[
@@ -95,10 +107,18 @@ fn pr_runs_need_a_configured_author_and_partial_reruns_keep_signals() {
     )
     .unwrap();
     let at = jiff::Timestamp::now().to_string();
-    let pr = |id: u64, actor: &str, head: &str| {
+    let pr = |id: u64, author: &str, head: &str| {
+        fs::write(
+            d.join(format!("pr-{id}.json")),
+            json!({"number":id,"user":{"login":author},
+            "head":{"repo":{"id":7,"full_name":head}}})
+            .to_string(),
+        )
+        .unwrap();
         json!({"id":id,"run_attempt":2,"created_at":at,"html_url":format!("https://example.org/{id}"),
-        "actor":{"login":actor},"triggering_actor":{"login":"sam"},
-        "head_repository":{"full_name":head}})
+        "actor":{"login":"sam"},"triggering_actor":{"login":"sam"},"head_sha":"a".repeat(40),
+        "head_repository":{"id":7,"full_name":head},
+        "pull_requests":[{"number":id,"head":{"sha":"a".repeat(40),"repo":{"id":7}}}]})
     };
     let write_runs = |runs: Vec<serde_json::Value>| {
         fs::write(
@@ -110,12 +130,13 @@ fn pr_runs_need_a_configured_author_and_partial_reruns_keep_signals() {
     // Leg a degraded in attempt 1 and wasn't rerun; leg b was.
     let script = r#"#!/bin/sh
 case "$2" in
+  repos/sam/repo/pulls/*) cat "$FIXTURES/pr-${2##*/}.json" ;;
   repos/sam/repo) echo '{"default_branch":"main"}' ;;
   *event=pull_request*) cat "$FIXTURES/prs.json" ;;
   *workflows/ci.yml/runs*) echo '{"workflow_runs":[]}' ;;
-  *runs/*/jobs*) echo '{"jobs":[
+  *runs/*/jobs?filter=latest'&'*) echo '{"jobs":[
     {"name":"a","run_attempt":1,"steps":[{"name":"degraded/cache","conclusion":"success"}]},
-    {"name":"b","run_attempt":1,"steps":[]},{"name":"b","run_attempt":2,"steps":[]}]}' ;;
+    {"name":"b","run_attempt":2,"steps":[]}]}' ;;
   *) exit 1 ;;
 esac
 "#;
@@ -155,4 +176,35 @@ esac
         pr(6, "sam", "sam/repo"),
     ]);
     assert_eq!(run(), 1, "three trusted runs, signal kept past the rerun");
+    // Recheck provenance before using a cached observation: event actors
+    // remain trusted, but one PR no longer has an authorized author.
+    fs::write(
+        d.join("pr-6.json"),
+        json!({"number":6,"user":{"login":"eve"},
+        "head":{"repo":{"id":7,"full_name":"sam/repo"}}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(run(), 0, "cached signals do not bypass PR authentication");
+    // A later full rerun replaces the old observation even when the display
+    // name changes. The API supplies the authoritative current executions.
+    let fresh: Vec<_> = (4..=6)
+        .map(|id| {
+            let mut r = pr(id, "sam", "sam/repo");
+            r["run_attempt"] = 3.into();
+            r
+        })
+        .collect();
+    write_runs(fresh);
+    burrow_test::executable(
+        d.join("gh"),
+        script
+            .replace("degraded/cache", "normal")
+            .replace("\"name\":\"a\"", "\"name\":\"a attempt 3\""),
+    );
+    assert_eq!(
+        run(),
+        0,
+        "full rerun replaces cached signals despite renamed jobs"
+    );
 }
