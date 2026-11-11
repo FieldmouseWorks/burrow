@@ -29,6 +29,9 @@ pub struct Config {
     /// How many turns run Claude at once, how many of those slots are the
     /// pipeline's own, and the most one project's other jobs hold.
     pub max_jobs: usize,
+    /// Claude concurrency while turns queued before a usage reset drain.
+    #[serde(default = "usage_trickle")]
+    pub usage_trickle: usize,
     pub pipeline_slots: usize,
     pub max_jobs_per_project: usize,
     /// MiB to spare before another turn starts while one runs.
@@ -283,6 +286,10 @@ impl Config {
 
 fn ask_timeout() -> u64 {
     6 * 3600
+}
+
+fn usage_trickle() -> usize {
+    2
 }
 
 fn waiting_owner_label() -> String {

@@ -98,6 +98,7 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     inherit (cfg) meters paused;
     usagePaid = cfg.usage.paid;
+    usageTrickle = cfg.usageTrickle;
     inherit roles models;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
@@ -192,6 +193,17 @@ in
         says queued), so a launcher can hand over as much work as it likes.
         Each headless Claude holds a few GB. One more, run `--unstick` (the
         stuck issue's, `inbox.unstickLabel`), has a slot of its own besides.
+      '';
+    };
+    usageTrickle = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2;
+      description = ''
+        Maximum concurrent ordinary Claude turns while the queue from a usage
+        hold drains after its reset. Running turns count towards this limit;
+        the usual priority and project limits still apply. Codex and the
+        emergency --unstick slot are independent. Once no pre-reset turn is
+        queued, maxJobs applies again.
       '';
     };
     pipelineSlots = lib.mkOption {

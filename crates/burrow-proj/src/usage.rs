@@ -73,6 +73,10 @@ pub struct Spent {
     /// None while it holds.
     #[serde(default)]
     pub back: Option<i64>,
+    /// Precise admission boundary, committed atomically with `back`. A cutoff
+    /// from an unsuccessful release attempt must never affect an active hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<i64>,
     /// When the owner's notice was last sent: its open while it holds, its
     /// close after.
     #[serde(default)]
@@ -90,6 +94,14 @@ impl Spent {
     /// When the line moved again: its reset, or sooner if it ended sooner.
     pub fn release(&self) -> i64 {
         self.back.map_or(self.until, |b| b.min(self.until))
+    }
+
+    fn admission_cutoff(&self) -> i64 {
+        if self.back.is_some() {
+            self.admission.unwrap_or(self.release() * 1_000_000_000)
+        } else {
+            self.until * 1_000_000_000
+        }
     }
 
     /// Whether it holds the line at `now`.
@@ -156,6 +168,35 @@ pub fn last_release(cfg: &Config) -> Option<i64> {
     released(cfg).ok().filter(|at| *at > 0)
 }
 
+/// Admission's nanosecond cutoff, independent of the later successful-run
+/// watermark used to reject stale refusal records. Serialized with usage changes.
+pub fn admission_cutoff(cfg: &Config) -> std::io::Result<Option<i64>> {
+    let _lock = try_lock(cfg)?;
+    Ok(admission_cutoff_locked(cfg))
+}
+
+fn admission_cutoff_locked(cfg: &Config) -> Option<i64> {
+    match kept(cfg) {
+        Some(s) if s.holds(now()) => None,
+        Some(s) => Some(s.admission_cutoff()),
+        None => crate::read(&cfg.jobs.join(".usage.admission"))?
+            .split_once('\t')?
+            .1
+            .parse()
+            .ok(),
+    }
+}
+
+fn admission_release(cfg: &Config, s: &Spent) -> Result<i64, String> {
+    let cutoff = s.admission_cutoff();
+    swap(
+        &cfg.jobs.join(".usage.admission"),
+        &format!("{}:{}\t{cutoff}\n", s.at, s.until),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(cutoff)
+}
+
 /// Its record, holding or not, while it's kept.
 pub fn kept(cfg: &Config) -> Option<Spent> {
     read(cfg).ok().flatten()
@@ -177,6 +218,7 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                         owner.owner = true;
                         owner.told = s.told;
                         owner.back = s.back;
+                        owner.admission = s.admission;
                         return Ok(owner);
                     }
                 }
@@ -206,11 +248,19 @@ fn released(cfg: &Config) -> Result<i64, String> {
 
 /// jobs/.usage.lock, held: every change to the record goes under it, and
 /// none goes ahead without it.
-fn lock(cfg: &Config) -> Result<File, String> {
+pub(crate) fn lock(cfg: &Config) -> Result<File, String> {
     let path = cfg.jobs.join(".usage.lock");
     let f = File::create(&path).map_err(|e| format!("proj: {}: {e}", path.display()))?;
     f.lock()
         .map_err(|e| format!("proj: {}: {e}", path.display()))?;
+    Ok(f)
+}
+
+/// Waiters retry contention so an emergency promotion can bypass a stalled
+/// usage transaction. Other I/O failures retain their original meaning.
+pub(crate) fn try_lock(cfg: &Config) -> std::io::Result<File> {
+    let f = File::create(cfg.jobs.join(".usage.lock"))?;
+    f.try_lock().map_err(std::io::Error::from)?;
     Ok(f)
 }
 
@@ -361,6 +411,7 @@ pub fn hold(cfg: &Config, until: i64, reason: &str) -> Result<(), String> {
         job: "owner".into(),
         at,
         back: None,
+        admission: None,
         told: at,
         last: Some(at),
     };
@@ -402,6 +453,7 @@ fn put(
             job: id.to_owned(),
             at,
             back: None,
+            admission: None,
             told: now(),
             last: Some(last),
         },
@@ -440,7 +492,7 @@ pub fn remind(cfg: &Config) {
     if !kept(cfg).is_some_and(|s| due(&s)) {
         return;
     }
-    let Ok(_lock) = lock(cfg) else { return };
+    let Ok(_lock) = try_lock(cfg) else { return };
     if let Err(e) = reconcile_expiry(cfg) {
         eprintln!("{e}");
         return;
@@ -492,6 +544,7 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     }
     match s {
         Some(mut s) if ends => {
+            s.admission = Some(crate::now_nanos().min(s.until * 1_000_000_000));
             s.back = Some(now);
             s.told = now;
             if let Err(e) = keep(cfg, &s) {
@@ -583,6 +636,9 @@ pub fn tend(cfg: &Config) -> Option<i64> {
 /// until it got through, and the record gone a stall's time after the
 /// release.
 fn settle(cfg: &Config, mut s: Spent, now: i64) {
+    if admission_release(cfg, &s).is_err() {
+        return;
+    }
     let settled = !pending(cfg);
     if settled && now >= s.release() + cfg.stall_queued() {
         let _ = fs::remove_file(cfg.jobs.join(FILE));

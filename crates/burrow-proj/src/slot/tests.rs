@@ -150,6 +150,21 @@ esac
             fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
         }
     }
+    if what == "codex" {
+        let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
+        held = Some(
+            super::take_engine(
+                &cfg,
+                &id,
+                "1",
+                Class::Normal,
+                false,
+                crate::engine::Engine::Codex,
+            )
+            .unwrap(),
+        );
+        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+    }
     if what == "soon" {
         cfg.max_wait = 4;
     }
@@ -820,6 +835,8 @@ fn out_of_usage_no_turn_takes_a_slot() {
 fn an_unstick_turn_waiting_on_its_slot_waits_out_a_refusal() {
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);
+    let census = File::create(jobs.join(".slots/.lock")).unwrap();
+    census.lock().unwrap();
     let held = File::create(jobs.join(".slots/unstick")).unwrap();
     held.try_lock().unwrap();
     fs::create_dir_all(jobs.join("u")).unwrap();
@@ -919,6 +936,9 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
     let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
     cfg.jobs = d.path().to_owned();
     cfg.codex_slots = 1;
+    fs::create_dir_all(cfg.jobs.join(".slots")).unwrap();
+    let census = File::create(cfg.jobs.join(".slots/.lock")).unwrap();
+    census.lock().unwrap();
     let job = Job::new(&cfg, "code");
     fs::create_dir_all(&job.dir).unwrap();
     let queue = cfg.jobs.join(".queue");
@@ -935,4 +955,5 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
     drop(slot);
 }
 
+mod reset;
 mod usage;
