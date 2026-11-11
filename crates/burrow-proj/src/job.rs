@@ -362,7 +362,11 @@ impl<'a> Job<'a> {
             stopped: self.turn(&n, "stopped").exists(),
             end: opt(self.turn(&n, "end")),
             link: opt(self.path("link")),
-            queued: mtime(&prompt).unwrap_or(0),
+            // A policy hold's release restarts the queue clock (slot::note_hold).
+            queued: mtime(&prompt)
+                .unwrap_or(0)
+                .max(mtime(&self.turn(&n, "held")).unwrap_or(0)),
+            held: read(&self.turn(&n, "held")).as_deref() == Some("1"),
             slot: mtime(&self.turn(&n, "slot")).unwrap_or(0),
             ended: self.ended_at(&n, &state, || self.end_pending()),
             // Its deadline as it stands, to the second (none without a

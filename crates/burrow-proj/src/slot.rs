@@ -151,6 +151,11 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     if usage::out(cfg).is_some() {
         return Ok(None);
     }
+    // Waiting for the emergency slot may have outlasted admission: a pause
+    // meanwhile sends the turn back to wait, slot unused.
+    if automation_paused(cfg, &job) {
+        return Ok(None);
+    }
     let slot = held(slot)?;
     fs::write(
         slots.join("unstick.who"),
@@ -283,6 +288,11 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             });
         } else if waiter_alive(&queue.join(&name), fid) {
             let dir = cfg.jobs.join(fid);
+            // A policy-held waiter keeps its place but is not offered a slot
+            // it would not take, nor does it count as the line.
+            if automation_paused(cfg, &Job::new(cfg, fid)) {
+                continue;
+            }
             line.push(Waiter {
                 class: classes.place(cfg, &name, &dir).0,
                 project: project(&dir),
@@ -328,7 +338,9 @@ fn codex_slot(
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
         }
-        if automation_paused(cfg, &job) {
+        let paused = automation_paused(cfg, &job);
+        note_hold(&job, n, paused);
+        if paused {
             sleep(Duration::from_secs(2));
             continue;
         }
@@ -336,6 +348,12 @@ fn codex_slot(
             let slot = File::create(slots.join(i.to_string()))?;
             if slot.try_lock().is_ok() {
                 let slot = held(slot)?;
+                // Admission may have changed since the check: a pause during
+                // the lock leaves the slot unused.
+                if automation_paused(cfg, &job) {
+                    drop(slot);
+                    break;
+                }
                 took_slot(&job, n, &format!("codex-{i}"))?;
                 return Ok(slot);
             }
@@ -346,16 +364,50 @@ fn codex_slot(
 
 /// Recheck runtime admission before taking a slot. Triage may sort all repos;
 /// explicit interactive work (no automation role or inbox mark) is unaffected.
-fn automation_paused(cfg: &Config, job: &Job) -> bool {
+/// Automation fails closed: a repository that can't be read is paused, unless
+/// the job already recorded its identity (`admission`: a repo, or `local` for
+/// an origin that is not GitHub's), which a later unreadable origin keeps.
+pub(crate) fn automation_paused(cfg: &Config, job: &Job) -> bool {
     let role = crate::read(&job.path("role")).unwrap_or_default();
     if matches!(role.as_str(), "triage" | "planner")
         || (role.is_empty() && !job.path("usage-kind").exists())
     {
         return false;
     }
-    let repo = crate::pick::github_repo(cfg, &project(&job.dir));
-    // Machine work without a GitHub origin has no repository to scope.
-    !repo.is_empty() && cfg.paused(&repo)
+    let origin = crate::pick::origin(cfg, &project(&job.dir));
+    let seen = match crate::pick::github_name(&origin) {
+        Some(repo) => Some(repo),
+        None if !origin.is_empty() => Some("local".to_owned()),
+        None => None,
+    };
+    let recorded = crate::read(&job.path("admission")).filter(|r| !r.is_empty());
+    let identity = match (seen, recorded) {
+        (Some(seen), recorded) => {
+            if recorded.as_deref() != Some(seen.as_str()) {
+                let _ = fs::write(job.path("admission"), format!("{seen}\n"));
+            }
+            seen
+        }
+        (None, Some(recorded)) => recorded,
+        (None, None) => return true,
+    };
+    identity != "local" && cfg.paused(&identity)
+}
+
+/// Say, under the turn's files, whether its wait is a deliberate policy hold,
+/// so the watchdog does not count it as a stall ([`Job::facts`]). Written only
+/// on a change; the release time is the file's mtime, from which the queue
+/// stall counts again.
+fn note_hold(job: &Job, n: &str, held: bool) {
+    let path = job.turn(n, "held");
+    let want = if held { "1\n" } else { "0\n" };
+    match fs::read_to_string(&path) {
+        Ok(have) if have == want => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !held => {}
+        _ => {
+            let _ = fs::write(&path, want);
+        }
+    }
 }
 
 pub fn take_engine(
@@ -399,6 +451,7 @@ pub fn take(
     let mut looked = 0;
     loop {
         let paused = automation_paused(cfg, &job);
+        note_hold(&job, n, paused);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too.
         usage::metered(cfg);
@@ -531,7 +584,7 @@ pub fn take(
             && (!seen.busy || spare() >= cfg.min_free_memory)
         {
             let slot = File::create(slots.join(n_slot.to_string()))?;
-            if slot.try_lock().is_ok() {
+            if slot.try_lock().is_ok() && !automation_paused(cfg, &job) {
                 let slot = held(slot)?;
                 fs::write(
                     slots.join(format!("{n_slot}.who")),
@@ -597,6 +650,9 @@ pub fn in_line(cfg: &Config) -> String {
         let Some(made) = mtime(&queue.join(name)) else {
             continue;
         };
+        if automation_paused(cfg, &Job::new(cfg, fid)) {
+            continue;
+        }
         let dir = cfg.jobs.join(fid);
         let (class, _) = classes.place(cfg, name, &dir);
         let wait = now() - made;

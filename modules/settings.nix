@@ -54,7 +54,9 @@ in {
     systemd.services.burrow-settings-door = {
       description = "Change operational settings without the pipeline";
       path = [ cfg.door.gh ];
-      environment.GH_NO_UPDATE_NOTIFIER = "1";
+      # Rate-limit deferrals are kept here, so a limited pass waits for GitHub's
+      # deadline and exits cleanly instead of failing the unit.
+      environment = { GH_NO_UPDATE_NOTIFIER = "1"; BURROW_DOOR_WAKE = "${stateDir}/settings-door/wake.json"; };
       serviceConfig = {
         Type = "oneshot";
         User = user;

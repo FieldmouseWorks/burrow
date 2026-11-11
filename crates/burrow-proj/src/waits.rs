@@ -48,6 +48,8 @@ pub struct Facts {
     /// When it was started, took its slot and ended ([`Job::facts`]; 0 while
     /// it's queued or running), in seconds.
     pub queued: i64,
+    /// Waiting on purpose: runtime settings hold its repository's automation.
+    pub held: bool,
     pub slot: i64,
     pub ended: i64,
     /// When a running turn's timeout is up as it stands, in seconds; 0 for
@@ -70,6 +72,10 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let stall = cfg.stall_queued();
     let turn = &f.turn;
     let mut kick = None;
+    // A deliberate policy hold is no stall; the release restarts the clock.
+    if f.held && f.state == "queued" {
+        return None;
+    }
     let (since, due, phase) = match f.state.as_str() {
         _ if !matches!(f.state.as_str(), "queued" | "running")
             && !f.stopped

@@ -335,8 +335,9 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
-    /// A paused record retains its results, but only an active turn consumes
-    /// shared admission capacity. Unstarted handoffs cannot start while paused.
+    /// A paused record retains its results, but only a running turn consumes
+    /// shared admission capacity: a queued one is held by policy and takes
+    /// none, and the limits apply again when it resumes.
     pub(super) fn record_uses_capacity(&self, dir: &Path) -> bool {
         let name = dir.file_name().unwrap_or_default().to_string_lossy();
         let paused = name
@@ -344,10 +345,14 @@ impl Pass<'_> {
             .is_some_and(|(repo, _)| self.cfg.paused(&repo.replacen('_', "/", 1)));
         !paused
             || read(&dir.join("job")).is_some_and(|id| {
-                matches!(
-                    Job::new(self.cfg, &id).state().as_str(),
-                    "queued" | "running"
-                )
+                let job = Job::new(self.cfg, &id);
+                match job.state().as_str() {
+                    "running" => true,
+                    // Triage and planning sort every repo, so a queued one
+                    // still takes its turn; held automation does not.
+                    "queued" => !crate::slot::automation_paused(self.cfg, &job),
+                    _ => false,
+                }
             })
     }
 

@@ -975,3 +975,85 @@ mod reset;
 mod usage;
 
 mod admission;
+
+// A waiter whose repository the settings pause keeps its place but is neither
+// in the line status shows nor offered a slot by a look, so it reserves nothing.
+#[test]
+fn a_paused_waiter_holds_no_place_in_the_line() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    clones(&tmp);
+    let mut cfg = config(&jobs, 6);
+    let _holder = line_of_size(&tmp, &jobs, 4);
+    for j in ["job1", "job2"] {
+        fs::write(jobs.join(j).join("role"), "work\n").unwrap();
+    }
+    cfg.settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .retain(|r| r != "sam/box");
+    let got = in_line(&cfg);
+    let ids: Vec<&str> = got
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert!(!ids.contains(&"job1"), "{got}");
+    assert!(ids.contains(&"job2"), "{got}");
+    let seen = look(&cfg, "none", &jobs.join("job0"), Class::Normal).unwrap();
+    assert!(seen.line.iter().all(|w| !w.name.ends_with("job1")));
+    assert!(seen.line.iter().any(|w| w.name.ends_with("job2")));
+    assert_eq!(in_queue(&jobs), 4, "its place is kept");
+}
+
+// Automation whose repository cannot be read is held; once seen, its identity
+// is kept, so a lost origin neither frees a paused repository nor pauses an
+// allowed one. Interactive work is never held.
+#[test]
+fn automation_fails_closed_when_its_repository_cannot_be_read() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    clones(&tmp);
+    let mut cfg = config(&jobs, 1);
+    let job_dir = jobs.join("j");
+    fs::create_dir_all(&job_dir).unwrap();
+    let set = |p: &str| fs::write(job_dir.join("project"), format!("{p}\n")).unwrap();
+    let job = Job::new(&cfg, "j");
+    let none = tmp.path().join("nowhere");
+    set(none.to_str().unwrap());
+    assert!(!super::automation_paused(&cfg, &job), "interactive");
+    fs::write(job_dir.join("role"), "work\n").unwrap();
+    assert!(super::automation_paused(&cfg, &job), "unreadable origin");
+    set(tmp.path().join("box").to_str().unwrap());
+    assert!(!super::automation_paused(&cfg, &job));
+    set(none.to_str().unwrap());
+    assert!(!super::automation_paused(&cfg, &job), "identity kept");
+    drop(job);
+    cfg.settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .retain(|r| r != "sam/box");
+    let job = Job::new(&cfg, "j");
+    assert!(
+        super::automation_paused(&cfg, &job),
+        "paused repo, no origin"
+    );
+}
+
+// The hold is told to the watchdog only while it lasts; its release restarts
+// the queue clock.
+#[test]
+fn a_hold_is_noted_and_its_release_restarts_the_clock() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = config(&jobs, 1);
+    fs::create_dir_all(jobs.join("j")).unwrap();
+    let job = Job::new(&cfg, "j");
+    super::note_hold(&job, "1", false);
+    assert!(!job.turn("1", "held").exists());
+    super::note_hold(&job, "1", true);
+    assert_eq!(fs::read_to_string(job.turn("1", "held")).unwrap(), "1\n");
+    super::note_hold(&job, "1", false);
+    assert_eq!(fs::read_to_string(job.turn("1", "held")).unwrap(), "0\n");
+}
