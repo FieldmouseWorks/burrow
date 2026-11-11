@@ -495,6 +495,52 @@ fn approvals_compare_exact_task_bytes_for_bodies_comments_and_children() {
 }
 
 #[test]
+fn generated_child_approval_detects_every_trailing_whitespace_edit() {
+    for suffix in [" ", "\t", "\n", " \t\n\n"] {
+        let (b, _, list) = parent_fixture();
+        for (i, task) in list.tasks.iter().enumerate() {
+            let mut child = issue(8 + i as u64, "sam", &["later"]);
+            child["title"] = json!(task.title);
+            child["body"] = json!(Pass::child_body("sam/box", "7", i, task));
+            fs::write(
+                b.path(&format!("repos_sam_box_issues_{}", 8 + i)),
+                child.to_string(),
+            )
+            .unwrap();
+        }
+        assert!(b.pass().split_children("sam/box", "7", &list.tasks));
+        let mut child: Value =
+            serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_8")).unwrap()).unwrap();
+        assert!(b.pass().planned(Some("sam/box"), &child));
+        child["body"] = json!(format!("{}{suffix}", child["body"].as_str().unwrap()));
+        fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+        assert!(
+            !b.pass().planned(Some("sam/box"), &child),
+            "body {suffix:?}"
+        );
+
+        // A newly approved comment must retain its terminal newlines too.
+        fs::write(
+            b.path("comments"),
+            json!([[{"id":1,"user":{"login":"sam"},"body":"scope"}]]).to_string(),
+        )
+        .unwrap();
+        let source = b.pass().input("sam/box", &child).unwrap();
+        b.pass().keep_planned("sam/box", "8", &source).unwrap();
+        assert!(b.pass().planned(Some("sam/box"), &child));
+        fs::write(
+            b.path("comments"),
+            json!([[{"id":1,"user":{"login":"sam"},"body":format!("scope{suffix}")}]]).to_string(),
+        )
+        .unwrap();
+        assert!(
+            !b.pass().planned(Some("sam/box"), &child),
+            "comment {suffix:?}"
+        );
+    }
+}
+
+#[test]
 fn unavailable_planning_reads_retry_without_false_stale_notices() {
     for endpoint in ["source", "parent", "completion"] {
         let (b, parent, _) = parent_fixture();

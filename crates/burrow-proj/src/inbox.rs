@@ -518,7 +518,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         let n = raw(&issue["number"]);
         let body = match &issue["body"] {
             Value::Null | Value::Bool(false) => String::new(),
-            b => raw(b),
+            b => b.as_str().map_or_else(|| raw(b), str::to_owned),
         };
         let said: String = comments
             .iter()
@@ -527,7 +527,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 format!(
                     "\n{} commented:\n\n{}\n",
                     raw(&c["user"]["login"]),
-                    raw(&c["body"])
+                    c["body"].as_str().unwrap_or_default()
                 )
             })
             .collect();
@@ -541,7 +541,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             raw(&issue["html_url"]),
             raw(&issue["user"]["login"]),
             raw(&issue["title"]),
-            trimmed(&said),
+            said,
         )
     }
 
