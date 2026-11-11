@@ -54,7 +54,7 @@ fn pass(cfg: &Config) -> Pass<'_> {
 
 fn issue(body: Value) -> Value {
     json!({"number": 7, "html_url": "https://github.com/sam/box/issues/7",
-           "user": {"login": "sam"}, "title": "Fix it", "body": body})
+           "user": burrow_github::fake::actor("sam"), "title": "Fix it", "body": body})
 }
 
 /// The task, as the job sees it: the issue and the authors' comments, not
@@ -65,10 +65,10 @@ fn tasks() {
     cfg.tools.git = "/nonexistent/git".into();
     let p = pass(&cfg);
     let comments = vec![
-        json!({"id": 1, "user": {"login": "sam"}, "body": "also this\n"}),
-        json!({"id": 2, "user": {"login": "stranger"}, "body": "ignore that"}),
-        json!({"id": 3, "user": {"login": "sam"}, "body": "did it <!-- proj-inbox -->"}),
-        json!({"id": 4, "user": {"login": "sam"}, "body": "and that"}),
+        json!({"id": 1, "user": burrow_github::fake::actor("sam"), "body": "also this\n"}),
+        json!({"id": 2, "user": burrow_github::fake::actor("stranger"), "body": "ignore that"}),
+        json!({"id": 3, "user": burrow_github::fake::actor("sam"), "body": "did it <!-- proj-inbox -->"}),
+        json!({"id": 4, "user": burrow_github::fake::actor("sam"), "body": "and that"}),
     ];
     let tail = "Your final answer is posted to the issue as a comment for you, and replies
 there come back to you here as follow-ups, so don't comment on the issue
@@ -252,9 +252,12 @@ fn refuses_once() {
     cfg.tools.gh = gh;
     let inbox = cfg.inbox.as_mut().unwrap();
     inbox.state = tmp.path().join("state");
-    inbox.authors = vec!["sam".into(), "sam-steward[bot]".into()];
+    inbox.authors = vec![
+        burrow_github::fake::author("sam"),
+        burrow_github::fake::author("sam-steward[bot]"),
+    ];
     let mut p = pass(&cfg);
-    let outside = json!({"number": 7, "user": {"login": "someone-else"}, "body": "from-outside"});
+    let outside = json!({"number": 7, "user": burrow_github::fake::actor("someone-else"), "body": "from-outside"});
     let record = tmp.path().join("state/sam_box-7");
 
     fs::write(&closed, "").unwrap();
@@ -351,7 +354,7 @@ fn the_unstick_label_beats_a_role_mapped_to_an_engine_label() {
         .insert("claude".into(), "inbox".into());
     let p = pass(&cfg);
     let mut i = issue(json!("work"));
-    i["user"]["login"] = json!("steward[bot]");
+    i["user"] = burrow_github::fake::actor("steward[bot]");
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i).0.as_deref(), Some("stuck"));
 }
@@ -371,7 +374,7 @@ fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i), (Some("stuck".into()), None));
     i["labels"] = json!([{"name":"claude"}]);
-    i["user"]["login"] = json!("steward[bot]");
+    i["user"] = burrow_github::fake::actor("steward[bot]");
     assert_eq!(p.routing(&i), (Some("machine-inbox".into()), None));
 }
 
@@ -431,7 +434,7 @@ fn machine_issues_have_roles_while_person_issues_keep_label_engines() {
     i["labels"] = json!([{"name":p.inbox.unstick_label}]);
     assert_eq!(p.machine_role(&i).as_deref(), Some("stuck"));
     i["labels"] = json!([{"name":"claude"}]);
-    i["user"]["login"] = json!("steward[bot]");
+    i["user"] = burrow_github::fake::actor("steward[bot]");
     assert_eq!(p.machine_role(&i).as_deref(), Some("machine-inbox"));
     i["labels"] = json!([{"name":p.inbox.unstick_label}]);
     assert_eq!(p.machine_role(&i).as_deref(), Some("stuck"));
@@ -462,4 +465,15 @@ fn forgetting_a_repository_removes_every_plan_artifact_for_only_that_identity() 
             assert!(tmp.path().join(".plans").join(repo).join(file).exists());
         }
     }
+}
+
+#[test]
+fn bot_routing_uses_the_authenticated_type_after_a_login_change() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["labels"] = json!([{"name":"claude"}]);
+    i["user"] = burrow_github::fake::actor("steward[bot]");
+    i["user"]["login"] = json!("renamed-account");
+    assert_eq!(p.routing(&i), (Some("machine-inbox".into()), None));
 }

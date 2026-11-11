@@ -6,7 +6,7 @@ import ./proj/test.nix { inherit self pkgs; planning = true; } "proj-planning" '
       import shlex
       machine.succeed("su - dev -c 'git -C /data/dev/src/ib init -q && git -C /data/dev/src/ib remote add origin https://github.com/o/r'")
       machine.succeed("mkdir -p /tmp/gh && chmod 777 /tmp/gh && install -m 666 /dev/null /tmp/gh/posted && touch /tmp/inbox-hold")
-      task = {"number": 7, "user": {"login": "sam"}, "html_url": "https://github.com/o/r/issues/7",
+      task = {"number": 7, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/r/issues/7",
               "repository_url": "https://api.github.com/repos/o/r", "title": "bounded task",
               "body": "inbox-done " + "x" * 70000, "state": "open", "labels": [{"name": "claude"}]}
       for endpoint, data in [("repos_o_r_issues", [task]), ("repos_o_r_issues_7", task), ("repos_o_r_issues_7_comments", [])]:

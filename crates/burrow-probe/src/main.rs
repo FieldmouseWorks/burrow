@@ -55,7 +55,7 @@ fn main() -> ExitCode {
                         eprintln!(
                             "turned away {}#{n}: its author isn't one of {}",
                             cfg.repo,
-                            cfg.authors.join(", ")
+                            burrow_github::author_names(&cfg.authors, ", ")
                         );
                     }
                     ExitCode::SUCCESS

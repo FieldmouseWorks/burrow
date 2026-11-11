@@ -1,6 +1,7 @@
-//! Durable rate-limit deferral for serialized issue-door passes.
+//! Durable rate-limit deferral: a pass GitHub held off, booked again in its
+//! burrow-events wake file for when the limit lifts.
 use crate::{Api, Error};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{fs, path::Path};
 
 /// The issue-door services configure their own wake file. Local commands do
@@ -73,16 +74,72 @@ pub fn run<T>(
     }
 }
 
+/// Book KEY's pass (an OWNER/REPO, or "" for the full pass) for AT in the
+/// wake file, keeping every other booking: for a program whose passes over
+/// one repo and over every repo can run side by side (renovate-run), so
+/// each change is made under the wake file's lock. A later booking already
+/// there stands. Keys are kept in lower case, as burrow-events reads them.
+pub fn book(wake: &Path, key: &str, at: u64) -> Result<(), String> {
+    keyed(wake, |booked| {
+        let key = key.to_lowercase();
+        let later = booked
+            .get(&key)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .max(at);
+        booked.insert(key, later.into());
+    })
+}
+
+/// KEY's pass ran, as of NOW: a booking for it that had come due is used up,
+/// and one still to come stands.
+pub fn ran(wake: &Path, key: &str, now: u64) -> Result<(), String> {
+    keyed(wake, |booked| {
+        let key = key.to_lowercase();
+        if booked
+            .get(&key)
+            .is_some_and(|at| at.as_u64().is_none_or(|at| at <= now))
+        {
+            booked.remove(&key);
+        }
+    })
+}
+
+/// Change the wake file's bookings with CHANGE, holding the lock beside it
+/// from the read to the write. A missing file is no bookings.
+fn keyed(wake: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Result<(), String> {
+    let lock = wake.with_extension("lock");
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)
+        .and_then(|f| f.lock().map(|()| f))
+        .map_err(|e| format!("{}: {e}", lock.display()))?;
+    let mut booked = match fs::read(wake) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(Value::Object(booked)) => booked,
+            _ => return Err(format!("{}: expected wake object", wake.display())),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(e) => return Err(format!("{}: {e}", wake.display())),
+    };
+    change(&mut booked);
+    let saved = write(wake, &Value::Object(booked));
+    drop(held);
+    saved
+}
+
 fn save(path: &Path, at: Option<u64>) -> Result<(), String> {
+    write(path, &at.map_or_else(|| json!({}), |at| json!({"": at})))
+}
+
+fn write(path: &Path, booked: &Value) -> Result<(), String> {
     let write = || -> std::io::Result<()> {
         use std::io::Write;
         let temp = path.with_extension("new");
         let mut file = fs::File::create(&temp)?;
-        file.write_all(
-            at.map_or_else(|| json!({}), |at| json!({"": at}))
-                .to_string()
-                .as_bytes(),
-        )?;
+        file.write_all(booked.to_string().as_bytes())?;
         // The scheduler is a different account, even if a caller has a
         // private umask. This file contains only the public retry deadline.
         #[cfg(unix)]
@@ -347,6 +404,31 @@ mod tests {
         fs::write(&wake, r#"{"":1000}"#).unwrap();
         assert!(run(Some(&wake), &mut hub(403, &[]), 1000, ask).is_err());
         assert_eq!(fs::read_to_string(wake).unwrap(), "{}");
+    }
+
+    #[test]
+    fn keyed_bookings_keep_each_others_and_the_latest_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        book(&wake, "Sam/R", 2000).unwrap();
+        book(&wake, "", 1500).unwrap();
+        book(&wake, "sam/r", 1800).unwrap();
+        let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked, json!({"sam/r": 2000, "": 1500}));
+        // A pass that ran before its booking came due leaves it be; one that
+        // ran once it had used it up.
+        ran(&wake, "SAM/r", 1999).unwrap();
+        ran(&wake, "", 1500).unwrap();
+        ran(&wake, "kim/q", 1500).unwrap();
+        let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked, json!({"sam/r": 2000}));
+        ran(&wake, "sam/r", 2000).unwrap();
+        assert_eq!(fs::read_to_string(&wake).unwrap(), "{}");
+        // What isn't a wake file is no booking to throw away.
+        fs::write(&wake, "[]").unwrap();
+        assert!(book(&wake, "sam/r", 2000).is_err());
+        assert_eq!(fs::read_to_string(&wake).unwrap(), "[]");
+        assert!(book(&dir.path().join("absent/wake.json"), "", 2000).is_err());
     }
 
     #[test]

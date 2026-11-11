@@ -76,14 +76,14 @@
             (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
             (nixpkgs.lib.optionalAttrs (name == "backup") { burrow.backup = { repository = "rclone:offsite:backups/burrow"; passwordFile = "/run/secrets/backup-password"; rcloneConfigFile = "/run/secrets/backup-rclone"; datasets = [ "rpool/safe/data" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
-            (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; }; })
+            (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; }; })
             (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
-            (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.probe = { repo = "sam/homelab"; authors = [ "sam" ]; }; })
+            (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.probe = { repo = "sam/homelab"; authors = [ { login = "sam"; id = 1; } ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
             (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
             # github has no switch: it's on with an App to serve.
-            (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
+            (if name == "github" then { burrow.github.apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
              else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
           ];
         };

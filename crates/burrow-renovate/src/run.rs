@@ -9,6 +9,13 @@
 //! minutes aren't spent waiting on another's. Each run that ends, failed or
 //! not, is noted in `runs`.
 //!
+//! GitHub's rate limit is a wait, not a failure: the installation's hourly
+//! allowance is shared with everything else acting as the App. A repo it
+//! holds off, and the rest of its owner's in a full run, is booked again in
+//! the renovate handler's wake file (burrow-events) for when it lifts, as is
+//! the full pass when an owner's repos can't be listed; the pass exits 0
+//! unless something else failed.
+//!
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
 use std::collections::BTreeMap;
@@ -36,6 +43,10 @@ pub struct Config {
     /// When each repo's runs ended (`all` for one over every repo), the
     /// last ten, for autoland's dashboard watcher.
     pub runs: PathBuf,
+    /// The renovate handler's wake file (burrow-events), {repo: epoch} with
+    /// "" for the full pass: what GitHub's rate limit held off is booked
+    /// there for when it lifts.
+    pub wake: PathBuf,
     /// The machine's own App, when Renovate runs as it rather than as the
     /// user.
     pub app: Option<App>,
@@ -75,46 +86,78 @@ impl Config {
 
     /// Renovate over `only`, or over every repo: what it exits with.
     pub fn run(&self, only: Option<&str>) -> u8 {
+        let started = now();
         if let Some(repo) = only {
-            return self.one(repo);
+            return match self.one(repo) {
+                Ok(rc) => rc.max(self.used_up(repo, started)),
+                Err(held) => self.held(repo, &held),
+            };
         }
         let Some(app) = &self.app else {
-            return self.renovate("", &[]);
+            return self.renovate("", &[]).max(self.used_up("", started));
         };
         // Every repo the installations reach, a run each. One that fails
-        // doesn't hold up the rest, but fails the pass.
+        // doesn't hold up the rest, but fails the pass. Each owner's
+        // installation has a rate limit of its own: one that holds off a
+        // repo holds off the rest of that owner's, which aren't asked about.
         let mut failed = 0;
         for owner in &app.owners {
-            let Some(repos) = self.reached(owner) else {
-                complain(&format!(
-                    "couldn't list the repos {owner}'s installation reaches"
-                ));
-                failed = 1;
-                continue;
+            let repos = match self.reached(owner) {
+                Ok(repos) => repos,
+                Err(e) => {
+                    failed = failed.max(match e.retry_at {
+                        Some(_) => self.held("", &e),
+                        None => {
+                            complain(&format!(
+                                "{e}\ncouldn't list the repos {owner}'s installation reaches"
+                            ));
+                            1
+                        }
+                    });
+                    continue;
+                }
             };
-            for repo in repos.split_whitespace() {
-                if self.one(repo) != 0 {
-                    complain(&format!("{repo}: Renovate's run failed"));
-                    failed = 1;
+            let mut limited: Option<u64> = None;
+            for repo in &repos {
+                if let Some(at) = limited {
+                    failed = failed.max(self.book(repo, at, None));
+                    continue;
+                }
+                match self.one(repo) {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        complain(&format!("{repo}: Renovate's run failed"));
+                        failed = 1;
+                    }
+                    Err(held) => {
+                        limited = held.retry_at;
+                        failed = failed.max(self.held(repo, &held));
+                    }
                 }
             }
         }
-        failed
+        failed.max(self.used_up("", started))
     }
 
-    /// One repo. Renovate's own code applies its autodiscoverFilter here, to
-    /// the repo as GitHub spells it (burrow-events has it in lower case, and
-    /// a /regex/ filter can mind case). Then its own autodiscovery, narrowed
-    /// to this repo, applies the rest (topics, forks, archived, mirrors).
-    fn one(&self, repo: &str) -> u8 {
+    /// One repo, or the GitHub rate limit that held it off. Renovate's own
+    /// code applies its autodiscoverFilter here, to the repo as GitHub
+    /// spells it (burrow-events has it in lower case, and a /regex/ filter
+    /// can mind case). Then its own autodiscovery, narrowed to this repo,
+    /// applies the rest (topics, forks, archived, mirrors).
+    fn one(&self, repo: &str) -> Result<u8, burrow_github::Error> {
         let mut gh = self.github();
-        let Some(repo) = burrow_github::call(&mut gh, "GET", &format!("repos/{repo}"), None, None)
+        let asked = match burrow_github::call(&mut gh, "GET", &format!("repos/{repo}"), None, None)
+        {
+            Err(e) if e.retry_at.is_some() => return Err(e),
+            asked => asked,
+        };
+        let Some(repo) = asked
             .map_err(|e| complain(&e.to_string()))
             .ok()
             .and_then(|r| r.json().ok())
             .and_then(|v| v["full_name"].as_str().map(str::to_owned))
         else {
-            return 1;
+            return Ok(1);
         };
         match self.command(&self.tools.covers).arg(&repo).status() {
             Ok(s) if s.success() => {}
@@ -122,33 +165,71 @@ impl Config {
                 say(&format!(
                     "{repo}: not one of Renovate's (autodiscoverFilter)"
                 ));
-                return 0;
+                return Ok(0);
             }
             _ => {
                 complain(&format!("{repo}: couldn't apply autodiscoverFilter"));
-                return 1;
+                return Ok(1);
             }
         }
         let filter = serde_json::Value::from(vec![repo.as_str()]);
-        self.renovate(&repo, &[format!("--autodiscover-filter={filter}")])
+        Ok(self.renovate(&repo, &[format!("--autodiscover-filter={filter}")]))
     }
 
     /// The repos `owner`'s installation reaches, archived ones aside.
-    fn reached(&self, owner: &str) -> Option<String> {
+    fn reached(&self, owner: &str) -> Result<Vec<String>, burrow_github::Error> {
         let mut gh = self.github();
         gh.env.push(("GH_TOKEN_OWNER".into(), owner.into()));
-        let pages = burrow_github::pages(&mut gh, "installation/repositories")
-            .map_err(|e| complain(&e.to_string()))
-            .ok()?;
+        let pages = burrow_github::pages(&mut gh, "installation/repositories")?;
+        let odd = || {
+            burrow_github::Error::said(
+                "GET installation/repositories: an answer that isn't a list of repos",
+            )
+        };
         let mut repos = Vec::new();
         for page in pages {
-            for repo in page["repositories"].as_array()? {
+            for repo in page["repositories"].as_array().ok_or_else(odd)? {
                 if repo["archived"] != true {
-                    repos.push(repo["full_name"].as_str()?.to_owned());
+                    repos.push(repo["full_name"].as_str().ok_or_else(odd)?.to_owned());
                 }
             }
         }
-        Some(repos.join("\n"))
+        Ok(repos)
+    }
+
+    /// `key`'s pass (a repo, or "" for every repo) held off by GitHub's rate
+    /// limit, as `held` says: booked again for when it lifts.
+    fn held(&self, key: &str, held: &burrow_github::Error) -> u8 {
+        let at = held.retry_at.unwrap_or_else(|| now() + 60);
+        self.book(key, at, Some(held))
+    }
+
+    /// Book `key`'s pass again for `at`, saying so (and what GitHub said,
+    /// when it was asked): 0, or 1 when it can't be booked.
+    fn book(&self, key: &str, at: u64, said: Option<&burrow_github::Error>) -> u8 {
+        if let Err(e) = burrow_github::deferred::book(&self.wake, key, at) {
+            return self.broke(&self.wake, io::Error::other(e));
+        }
+        let what = if key.is_empty() { "every repo" } else { key };
+        let when = i64::try_from(at)
+            .ok()
+            .and_then(|at| jiff::Timestamp::from_second(at).ok())
+            .map_or_else(|| at.to_string(), |at| at.to_string());
+        let mut line = format!("{what}: booked again for {when}, when GitHub's rate limit lifts");
+        if let Some(said) = said {
+            line = format!("{line}: {said}");
+        }
+        say(&line);
+        0
+    }
+
+    /// `key`'s pass, started at `started`, ran: a booking it was started
+    /// for is used up.
+    fn used_up(&self, key: &str, started: u64) -> u8 {
+        match burrow_github::deferred::ran(&self.wake, key, started) {
+            Ok(()) => 0,
+            Err(e) => self.broke(&self.wake, io::Error::other(e)),
+        }
     }
 
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
@@ -275,6 +356,14 @@ impl Config {
     }
 }
 
+/// The time now, in seconds since the epoch, as wake files have it.
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,7 +371,7 @@ mod tests {
     #[test]
     fn its_config_is_every_setting_and_only_those() {
         let config = serde_json::json!({
-            "name": "renovate-run", "runLock": "/r/run.lock", "runs": "/r/runs",
+            "name": "renovate-run", "runLock": "/r/run.lock", "runs": "/r/runs", "wake": "/r/wake.json",
             "app": {"env": {"GH_TOKEN_SOCKET": "/run/gh-token/w.sock"}, "owners": ["sam"], "ghToken": "/b/gh-token"},
             "tools": {"gh": "/b/gh", "renovate": "/b/renovate", "covers": "/b/covers"},
         });

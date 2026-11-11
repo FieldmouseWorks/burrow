@@ -77,7 +77,8 @@ impl Pass<'_> {
             .collect()
     }
 
-    /// Only a locally recorded creation can bypass the opener allowlist.
+    /// Only a locally recorded creation by the saved posting account can
+    /// bypass the opener allowlist.
     /// Reused issues and comments receive no additional trust. Edit history
     /// remains checked against configured authors by written().
     pub(super) fn generated_child(&self, repo: &str, issue: &Value) -> bool {
@@ -97,7 +98,12 @@ impl Pass<'_> {
                         .zip(&list.children)
                         .chain(list.retained.iter().map(|r| (&r.task, &r.child)))
                         .any(|(task, child)| {
-                            task.issue.is_none() && child.attempted && child.number == Some(number)
+                            task.issue.is_none()
+                                && child.attempted
+                                && child.number == Some(number)
+                                && child
+                                    .posting_id
+                                    .is_some_and(|id| issue["user"]["id"].as_u64() == Some(id))
                         })
                 })
         })

@@ -101,7 +101,7 @@ fn stale_split_proposals_resume_the_updated_verified_task_and_keep_receipts() {
         let job = crate::job::Job::new(&b.cfg, "j1");
         fs::write(job.path("session"), "s").unwrap();
         parent["labels"] = json!([{"name":"claude"}]);
-        let comment = |body: &str| json!({"id":5,"user":{"login":"sam"},"body":body,"created_at":"2020-01-01T00:00:00Z"});
+        let comment = |body: &str| json!({"id":5,"user":burrow_github::fake::actor("sam"),"body":body,"created_at":"2020-01-01T00:00:00Z"});
         let old_comments = if matches!(change, "comment-edit" | "comment-delete") {
             vec![comment("old")]
         } else {
@@ -242,7 +242,9 @@ fn launched_workers_share_approved_prompt_handed_text_and_comment_cursor() {
             assert!(b.pass().split_children("sam/box", "7", &list.tasks));
         }
         let n = raw(&task["number"]);
-        let comments = vec![json!({"id":42,"user":{"login":"sam"},"body":"approved comment \t\n"})];
+        let comments = vec![
+            json!({"id":42,"user":burrow_github::fake::actor("sam"),"body":"approved comment \t\n"}),
+        ];
         fs::write(b.path("comments"), json!([comments]).to_string()).unwrap();
         if kind != "ordinary" {
             // The fixture shares one comments response across issue numbers.
@@ -421,7 +423,7 @@ fn invalidated_splits_resume_even_after_edits_are_reverted_and_launch_retries() 
         let job = crate::job::Job::new(&b.cfg, "j1");
         fs::write(job.path("session"), "s").unwrap();
         parent["labels"] = json!([{"name":"claude"}]);
-        let comment = |body: &str| json!({"id":5,"user":{"login":"sam"},"body":body,"created_at":"2020-01-01T00:00:00Z"});
+        let comment = |body: &str| json!({"id":5,"user":burrow_github::fake::actor("sam"),"body":body,"created_at":"2020-01-01T00:00:00Z"});
         let old_comments = if matches!(change, "comment-edit" | "comment-delete") {
             vec![comment("old")]
         } else {

@@ -288,7 +288,7 @@ impl Pass<'_> {
                 serde_json::json!({
                     "number": i["number"],
                     "created_at": i["created_at"],
-                    "user": {"login": i["user"]["login"]},
+                    "user": {"login": i["user"]["login"], "id": i["user"]["id"], "type": i["user"]["type"]},
                     "labels": i["labels"],
                     "repository_url": i["repository_url"],
                 })
