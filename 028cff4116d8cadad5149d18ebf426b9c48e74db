@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "77hckpmrrca99ygzhp8qs4454t",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 642,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/642",
+  "summary": "flake-check: restore kept builds before installing nix",
+  "task": "fieldmouseworks/burrow#641",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "438f9a6ad37d99092ddc9749e3a5bab29124c37f5e672986012979818164a50c",
+    "before": "3bdabc2d791035143f581db5ac347c30a25e4ca5",
+    "after": "028cff4116d8cadad5149d18ebf426b9c48e74db",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794414283202
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644466471"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644465798"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268/job/130644464640"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#642)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#642)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#642)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#642)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#642)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#642)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709268"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644584784"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644466523"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644584615"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644584584"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/642#pullrequestreview-5861829836"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/642"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130650662276"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43055709036/job/130644584728"
+    }
+  ]
+}
