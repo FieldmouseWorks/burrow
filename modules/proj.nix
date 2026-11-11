@@ -102,7 +102,7 @@ let
     inherit roles models;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
       inherit (cfg.inbox) planning;
       host = config.networking.hostName;
       wake = inboxWake;
@@ -369,7 +369,13 @@ in
       roles = lib.mkOption {
         type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
         default = {};
-        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label comes first and uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+      };
+      ownerRole = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9-]+");
+        default = null;
+        example = "inbox";
+        description = "The role the authors' own issues run as when no rule above names one, so the models file can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
