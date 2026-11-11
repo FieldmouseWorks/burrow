@@ -111,7 +111,7 @@ pub fn sweep(trees: &Path, builds: &Path, own: &str, git: &Path) -> Vec<String> 
 }
 
 /// Whether a process of the run whose folder is RUN may still be at work.
-fn live(run: &Path) -> bool {
+pub(crate) fn live(run: &Path) -> bool {
     !run.join(END).exists()
         && fs::read_to_string(run.join(CGROUP)).is_ok_and(|c| Path::new(c.trim_end()).exists())
 }

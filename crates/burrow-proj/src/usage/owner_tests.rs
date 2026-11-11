@@ -1,5 +1,5 @@
 //! Owner pauses: compatibility, deadline reconciliation and atomic generations.
-use super::tests::{earlier_resets, rig, told};
+use super::tests::{cutoff, earlier_resets, rig, told};
 use super::*;
 use std::fs;
 
@@ -422,20 +422,20 @@ fn fresh_meter_cannot_release_an_owner_pause() {
 fn owner_release_preserves_precise_admission_boundary_through_cleanup() {
     let (_d, cfg) = rig();
     hold(&cfg, now() + 3600, "pause").unwrap();
-    assert_eq!(admission_cutoff(&cfg).unwrap(), None);
+    assert_eq!(cutoff(&cfg), None);
     let before = crate::now_nanos();
     back(&cfg, None);
     let after = crate::now_nanos();
-    let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-    assert!((before..=after).contains(&cutoff));
+    let boundary = cutoff(&cfg).unwrap();
+    assert!((before..=after).contains(&boundary));
     let mut s = kept(&cfg).unwrap();
-    assert_eq!(s.admission, Some(cutoff));
+    assert_eq!(s.admission, Some(boundary));
     s.until = now() - cfg.stall_queued() - 2;
     s.back = Some(s.until);
     keep(&cfg, &s).unwrap();
     tend(&cfg);
     assert!(kept(&cfg).is_none());
-    assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+    assert_eq!(cutoff(&cfg), Some(boundary));
 }
 
 #[test]
@@ -445,10 +445,10 @@ fn owner_expiry_retains_natural_admission_boundary() {
     let mut s = kept(&cfg).unwrap();
     s.until = now() - 1;
     keep(&cfg, &s).unwrap();
-    let cutoff = s.until * 1_000_000_000;
-    assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+    let boundary = s.until * 1_000_000_000;
+    assert_eq!(cutoff(&cfg), Some(boundary));
     back(&cfg, Some(now() + 1));
-    assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+    assert_eq!(cutoff(&cfg), Some(boundary));
 }
 
 #[test]

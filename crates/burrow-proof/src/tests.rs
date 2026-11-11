@@ -11,6 +11,7 @@ use crate::{Ran, Record, summary, verdict};
 fn record() -> Record {
     Record {
         repo: "sam/r".into(),
+        tools_ref: None,
         number: 5,
         head: "a".repeat(40),
         checkout: "/srv/projects/r".into(),
@@ -27,6 +28,27 @@ fn record() -> Record {
 
 fn written(dir: &Path, value: serde_json::Value) {
     fs::write(dir.join("build.json"), value.to_string()).unwrap();
+}
+
+#[test]
+fn tools_can_only_come_from_a_configured_origin_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    for reference in [
+        "main",
+        "refs/pull/5/head",
+        "refs/heads/",
+        "refs/heads/main:other",
+        "refs/heads/a b",
+    ] {
+        let mut bad = record();
+        bad.tools_ref = Some(reference.into());
+        written(dir.path(), serde_json::to_value(bad).unwrap());
+        assert!(Record::read(dir.path()).is_err(), "{reference}");
+    }
+    let mut old = serde_json::to_value(record()).unwrap();
+    old.as_object_mut().unwrap().remove("toolsRef");
+    written(dir.path(), old);
+    assert_eq!(Record::read(dir.path()).unwrap().tools_ref, None);
 }
 
 #[test]

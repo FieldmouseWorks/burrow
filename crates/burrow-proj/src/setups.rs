@@ -80,6 +80,30 @@ impl<'a> Store<'a> {
         Ok(None)
     }
 
+    /// The saved setups and the one in force, as `settings show` gives
+    /// them, each setup's roles checked as a turn checks them; None when
+    /// none is saved.
+    pub(crate) fn shown(&self) -> Result<Option<serde_json::Value>, String> {
+        let names = self.names()?;
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let mut saved = serde_json::Map::new();
+        for name in names {
+            let path = self.dir.join(&name);
+            let text = fs::read_to_string(&path).map_err(|e| error(&path, e))?;
+            saved.insert(name, crate::roles::shown(&path, &text)?.into());
+        }
+        Ok(Some(
+            serde_json::json!({"active": self.active()?, "saved": saved}),
+        ))
+    }
+
+    /// Where the saved setups are kept.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn previous(&self) -> Result<Option<String>, String> {
         match fs::read_to_string(&self.previous) {
             Ok(s) if valid_name(s.trim()) => Ok(Some(s.trim().into())),

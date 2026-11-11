@@ -19,13 +19,16 @@
 //!
 //! A run proves its head under its commands, as a build proves its head's
 //! derivation: nothing of the PR's base reaches it, so its verdict is the
-//! commit's, whatever the PR targets.
+//! commit's, whatever the PR targets. An optional `toolsRef` supplies a
+//! separate trusted origin branch checkout in PROOF_TOOLS; the command's
+//! current directory and PROOF_HEAD remain the head under test.
 
 pub mod comment;
 pub mod end;
 pub mod fence;
 pub mod run;
 pub mod start;
+pub mod tools;
 pub mod trees;
 
 use std::collections::BTreeMap;
@@ -49,6 +52,9 @@ pub struct Record {
     pub checkout: PathBuf,
     /// Each check's command, run in this order (by name).
     pub runs: BTreeMap<String, String>,
+    /// Trusted origin branch, independently fetched for PROOF_TOOLS, if requested.
+    #[serde(default, rename = "toolsRef")]
+    pub tools_ref: Option<String>,
     /// The unit it runs in (`autoland-ID.service`).
     pub unit: String,
     /// Seconds the whole run may take before systemd ends it.
@@ -108,6 +114,13 @@ impl Record {
             if !p.is_absolute() {
                 return Err(format!("{name} {} isn't an absolute path", p.display()));
             }
+        }
+        if let Some(reference) = &self.tools_ref
+            && (!reference.starts_with("refs/heads/")
+                || reference == "refs/heads/"
+                || !reference.bytes().all(plain))
+        {
+            return Err("toolsRef must name a branch under refs/heads/".into());
         }
         if self.runs.is_empty() {
             return Err("no runs".into());

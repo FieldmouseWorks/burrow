@@ -11,6 +11,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,
   fixed and held.
+- [docs/settings.md](docs/settings.md): the pipeline's options, their one
+  schema (crates/burrow-settings) and `proj settings show`.
 
 <!-- house:rules v1 begin. Copied from FieldmouseWorks/burrow house/rules.md, verbatim. Change it there, not here: burrow's house sync rewrites everything between these markers. -->
 ## House rules
