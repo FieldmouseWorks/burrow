@@ -64,7 +64,7 @@ pkgs.testers.runNixOSTest {
           # configuration. proj-planning runs this fixture with planning on.
           inherit planning;
           enable = true;
-          authors = [ "sam" "sam-steward[bot]" ];
+          authors = [ { login = "sam"; id = 1; } { login = "sam-steward[bot]"; id = 2; } ];
         };
       };
       # The App the machine's own work acts as. Its socket isn't asked here:

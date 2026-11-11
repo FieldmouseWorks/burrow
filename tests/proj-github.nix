@@ -296,7 +296,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("a labelled issue from outside the authors starts no job, and says so once"):
       machine.succeed("install -d -o dev -g dev /data/dev/src/ox")
       machine.succeed("su - dev -c 'git -C /data/dev/src/ox init -q && git -C /data/dev/src/ox remote add origin https://github.com/o/x'")
-      outside = {"number": 1, "user": {"login": "sam-workers[bot]", "id": 99, "type": "Bot"}, "html_url": "https://github.com/o/x/issues/1",
+      outside = {"number": 1, "user": {"login": "sam-workers[bot]", "id": 8, "type": "Bot"}, "html_url": "https://github.com/o/x/issues/1",
                  "title": "t", "body": "from-outside", "state": "open", "labels": [{"name": "claude"}]}
       inside = {**outside, "number": 2, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/x/issues/2", "body": "from-inside"}
       github("repos/o/x/issues", json.dumps([outside]))
