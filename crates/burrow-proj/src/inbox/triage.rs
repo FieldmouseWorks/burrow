@@ -156,7 +156,13 @@ impl Pass<'_> {
     }
 
     /// Whether an issue is sorted already, or isn't triage's to sort.
-    pub(super) fn sorted(&mut self, t: &Triage, issue: &Value, claimed: &BTreeSet<String>) -> bool {
+    pub(super) fn sorted(
+        &mut self,
+        repo: &str,
+        t: &Triage,
+        issue: &Value,
+        claimed: &BTreeSet<String>,
+    ) -> bool {
         if issue.get("pull_request").is_some()
             || !self.eligible(issue)
             || claimed.contains(&raw(&issue["number"]))
@@ -180,31 +186,27 @@ impl Pass<'_> {
         {
             return true;
         }
-        if self.inbox.planning
-            && self.started_issue_job(repo_from(issue).as_deref(), &raw(&issue["number"]))
-        {
+        if self.inbox.planning && self.started_issue_job(Some(repo), &raw(&issue["number"])) {
             return true;
         }
-        if self.inbox.planning
-            && self.worker_split_pending(repo_from(issue).as_deref(), &raw(&issue["number"]))
-        {
+        if self.inbox.planning && self.worker_split_pending(Some(repo), &raw(&issue["number"])) {
             return true;
         }
-        if self.inbox.planning && labels.contains(&TRACKER) {
-            return self.has_task_list(repo_from(issue).as_deref(), &raw(&issue["number"]))
-                && !repo_from(issue).is_some_and(|repo| {
-                    self.sorting_dir()
-                        .join(format!("{}-{}", key(&repo), raw(&issue["number"])))
-                        .join("plan")
-                        .exists()
-                });
+        if self.inbox.planning && labels.contains(&TRACKER) && !labels.contains(&READY) {
+            return self.has_task_list(Some(repo), &raw(&issue["number"]))
+                && !self
+                    .sorting_dir()
+                    .join(format!("{}-{}", key(repo), raw(&issue["number"])))
+                    .join("plan")
+                    .exists()
+                && self.verified_source(repo, issue).unwrap_or(false);
         }
         if self.inbox.planning
-            && !labels.contains(&TRACKER)
+            && (!labels.contains(&TRACKER) || labels.contains(&READY))
             && !labels.contains(&LATER)
             && (labels.contains(&READY) || self.engine(issue).is_some())
         {
-            return self.planned(repo_from(issue).as_deref(), issue);
+            return self.planned(Some(repo), issue);
         }
         labels.iter().any(|l| {
             [READY, LATER, TRACKER, t.owner_label.as_str()].contains(l)
@@ -238,7 +240,7 @@ impl Pass<'_> {
                 continue;
             }
             let n = raw(&issue["number"]);
-            if self.sorted(&t, issue, &claimed) || handled.contains(&n) {
+            if self.sorted(repo, &t, issue, &claimed) || handled.contains(&n) {
                 continue;
             }
             let d = root.join(format!("{}-{n}", key(repo)));
@@ -432,7 +434,7 @@ impl Pass<'_> {
             // even partway through carrying its verdict out, the verdict is
             // of something else, and the issue is sorted again as it stands.
             let mut stale = false;
-            if !barred && let Some(i) = open.filter(|i| !self.sorted(t, i, &claimed)) {
+            if !barred && let Some(i) = open.filter(|i| !self.sorted(repo, t, i, &claimed)) {
                 let Some(now) = self.input(repo, i) else {
                     self.miss(repo);
                     continue;
@@ -440,7 +442,7 @@ impl Pass<'_> {
                 stale = !Self::handed(&d, &now);
             }
             let mut failed = false;
-            if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i, &claimed)) {
+            if !barred && !stale && open.is_some_and(|i| !self.sorted(repo, t, i, &claimed)) {
                 match told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into())) {
                     Ok(answer) => {
                         let Some(plan) = self.plan(&d, t, &id, &answer) else {
@@ -582,8 +584,7 @@ impl Pass<'_> {
                     let Ok(input) = fs::read_to_string(d.join("input")) else {
                         return false;
                     };
-                    self.keep_planned(repo, n, &input).is_ok()
-                        && self.split_children(repo, n, tasks)
+                    self.prepare_plan(repo, n, &input, tasks) && self.split_children(repo, n, tasks)
                 }
             };
             if !took || fs::write(d.join("did"), format!("{}\n", i + 1)).is_err() {
@@ -598,7 +599,7 @@ impl Pass<'_> {
             let Ok(input) = fs::read_to_string(d.join("input")) else {
                 return false;
             };
-            if self.keep_planned(repo, n, &input).is_err() {
+            if !self.prepare_plan(repo, n, &input, &[]) {
                 return false;
             }
         }
@@ -614,12 +615,4 @@ pub(super) enum Step {
     Post(String),
     Close(String),
     Split(Vec<crate::planning::Task>),
-}
-
-fn repo_from(issue: &Value) -> Option<String> {
-    let url = issue["repository_url"].as_str()?;
-    let (owner, repo) = url
-        .strip_prefix("https://api.github.com/repos/")?
-        .split_once('/')?;
-    Some(format!("{owner}/{repo}"))
 }

@@ -340,11 +340,15 @@ fn what_counts_as_sorted() {
         (issue(1, "player", &[]), true),
         (issue(1, "sam", &["outside text"]), true),
     ] {
-        assert_eq!(p.sorted(&t, &i, &Default::default()), sorted, "{i}");
+        assert_eq!(
+            p.sorted("sam/box", &t, &i, &Default::default()),
+            sorted,
+            "{i}"
+        );
     }
     let mut pr = issue(1, "sam", &[]);
     pr["pull_request"] = json!({});
-    assert!(p.sorted(&t, &pr, &Default::default()));
+    assert!(p.sorted("sam/box", &t, &pr, &Default::default()));
 }
 
 /// What a sorting job for issue N, as the fixtures have it, read of it.

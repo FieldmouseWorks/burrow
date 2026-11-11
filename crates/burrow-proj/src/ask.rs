@@ -142,13 +142,13 @@ pub(crate) fn clear(job: &Job) {
 /// with no GitHub target. An unavailable starter is retried without losing intent.
 pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     crate::question::recover(job)?;
-    if crate::planning::admit(job).is_err() {
-        return Ok(Some(crate::now() + 60));
-    }
     if crate::question::acceptance_pending(job)? {
         return Ok(Some(crate::now() + 60));
     }
     let Some(q) = load(job) else { return Ok(None) };
+    if crate::planning::admit(job).is_err() {
+        return Ok(Some(crate::now() + 60));
+    }
     if job.end_pending() || matches!(job.state().as_str(), "queued" | "running") {
         return Ok(Some(q.due.max(crate::now() + 60)));
     }
@@ -339,6 +339,24 @@ mod tests {
             job.set_turns(2).unwrap();
             assert_eq!(crate::planning::pending_split(&job).as_deref(), Some("1"));
             assert!(crate::planning::admit(&job).is_err());
+        }
+    }
+    #[test]
+    fn split_holds_without_question_work_do_not_schedule_wakes() {
+        for state in ["held", "retired", "closed", "unenrolled"] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, true);
+            fs::write(job.turn("1", "split"), "[]").unwrap();
+            fs::write(job.path("planning-hold"), "1").unwrap();
+            if state == "held" {
+                clear(&job);
+            } else {
+                crate::cmd::stop(&cfg, "j1", false).unwrap();
+                assert!(job.turn("1", "stopped").exists());
+            }
+            let _held = job.lock().unwrap();
+            assert_eq!(expire(&cfg, &job).unwrap(), None, "{state}");
+            assert_eq!(job.turns().as_deref(), Some("1"));
         }
     }
     #[test]

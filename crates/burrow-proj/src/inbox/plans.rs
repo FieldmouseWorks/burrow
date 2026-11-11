@@ -16,9 +16,22 @@ struct Child {
     merged_pr: Option<String>,
     #[serde(default)]
     offered: bool,
+    #[serde(default)]
+    marker: Option<String>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+struct Retained {
+    task: Task,
+    child: Child,
 }
 #[derive(Deserialize, Serialize)]
 struct List {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    retained: Vec<Retained>,
     tasks: Vec<Task>,
     children: Vec<Child>,
     comment: Option<u64>,
@@ -65,7 +78,7 @@ impl Pass<'_> {
     pub(super) fn approved_input(&self, repo: &str, n: &str, input: &str) -> bool {
         !self.has_task_list(Some(repo), n)
             && fs::read_to_string(self.plan_dir(repo, n).join("input"))
-                .is_ok_and(|had| had == input)
+                .is_ok_and(|had| had == input && self.list_bound(repo, n, input).unwrap_or(false))
     }
     fn child_body(repo: &str, parent: &str, index: usize, task: &Task) -> String {
         format!(
@@ -86,7 +99,8 @@ impl Pass<'_> {
         })
     }
     pub(super) fn worker_split_pending(&self, repo: Option<&str>, n: &str) -> bool {
-        repo.is_some_and(|repo| self.plan_dir(repo, n).join("worker-split").exists())
+        self.started_issue_job(repo, n)
+            && repo.is_some_and(|repo| self.plan_dir(repo, n).join("worker-split").exists())
     }
     pub(super) fn begin_worker_split(&self, repo: &str, issue: &Value) -> bool {
         let n = raw(&issue["number"]);
@@ -94,7 +108,7 @@ impl Pass<'_> {
             return false;
         };
         let record = self.inbox.state.join(format!("{}-{n}", key(repo)));
-        if !Self::handed(&record, &input) || self.keep_planned(repo, &n, &input).is_err() {
+        if !Self::handed(&record, &input) {
             return false;
         }
         fs::write(
@@ -105,7 +119,16 @@ impl Pass<'_> {
         .is_ok()
     }
     pub(super) fn has_task_list(&self, repo: Option<&str>, n: &str) -> bool {
-        repo.is_some_and(|repo| self.plan_dir(repo, n).join("tasks.json").exists())
+        repo.is_some_and(|repo| {
+            let path = self.plan_dir(repo, n).join("tasks.json");
+            if !path.exists() {
+                return false;
+            }
+            fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<List>(&bytes).ok())
+                .is_none_or(|list| !list.tasks.is_empty())
+        })
     }
     fn render_list(&self, repo: &str, n: &str, list: &mut List) -> bool {
         let text = list.checklist(repo, n);
@@ -169,6 +192,37 @@ impl Pass<'_> {
             let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
                 return false;
             };
+            for old in &list.retained {
+                if list
+                    .children
+                    .iter()
+                    .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
+                {
+                    break;
+                }
+                if old.child.number.map(|v| v.to_string()).as_deref() == Some(n) {
+                    return false;
+                }
+                if old.child.attempted && old.child.number.is_none() {
+                    let Some(issues) = every(
+                        self.cfg,
+                        &format!("repos/{repo}/issues?state=all&per_page=100"),
+                    ) else {
+                        self.miss(repo);
+                        return false;
+                    };
+                    if issues.iter().any(|issue| {
+                        raw(&issue["number"]) == n
+                            && old.child.marker.as_ref().is_some_and(|marker| {
+                                issue["body"]
+                                    .as_str()
+                                    .is_some_and(|body| body.ends_with(marker))
+                            })
+                    }) {
+                        return false;
+                    }
+                }
+            }
             let Some(index) = list
                 .children
                 .iter()
@@ -240,13 +294,13 @@ impl Pass<'_> {
         }
         let Some(repo) = repo else { return false };
         let n = raw(&issue["number"]);
-        if self.plan_dir(repo, &n).join("tasks.json").exists() {
+        if self.has_task_list(Some(repo), &n) {
             return false;
         }
         // Unavailable verification must never approve implementation.
         self.verified_source(repo, issue).unwrap_or(false)
     }
-    fn verified_source(&mut self, repo: &str, issue: &Value) -> Option<bool> {
+    pub(super) fn verified_source(&mut self, repo: &str, issue: &Value) -> Option<bool> {
         let result = self.same_source(repo, issue);
         if result.is_none() {
             self.miss(repo);
@@ -260,7 +314,19 @@ impl Pass<'_> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
             Err(_) => return None,
         };
+        if !self.list_bound(repo, &n, &had)? {
+            return Some(false);
+        }
         self.input(repo, issue).map(|input| input == had)
+    }
+    fn list_bound(&self, repo: &str, n: &str, input: &str) -> Option<bool> {
+        match fs::read(self.plan_dir(repo, n).join("tasks.json")) {
+            Ok(bytes) => serde_json::from_slice::<List>(&bytes)
+                .ok()
+                .map(|list| list.source.as_ref().is_none_or(|source| source == input)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(true),
+            Err(_) => None,
+        }
     }
     pub(super) fn keep_planned(&self, repo: &str, n: &str, input: &str) -> std::io::Result<()> {
         let d = self.plan_dir(repo, n);
@@ -272,6 +338,92 @@ impl Pass<'_> {
             .ok()
             .is_some_and(|text| swap(&self.plan_dir(repo, n).join("tasks.json"), &text).is_ok())
     }
+    /// Bind a reconciled list before publishing approval. Receipts belong to
+    /// exact tasks, never their position in a later proposal.
+    pub(super) fn prepare_plan(&self, repo: &str, n: &str, input: &str, tasks: &[Task]) -> bool {
+        let d = self.plan_dir(repo, n);
+        if fs::create_dir_all(&d).is_err() {
+            return false;
+        }
+        let mut list: List = match fs::read(d.join("tasks.json")) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(list) => list,
+                Err(_) => return false,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => List {
+                source: None,
+                revision: 0,
+                retained: vec![],
+                tasks: vec![],
+                children: vec![],
+                comment: None,
+                rendered: String::new(),
+            },
+            Err(_) => return false,
+        };
+        if list.tasks != tasks {
+            for (i, child) in list.children.iter_mut().enumerate() {
+                child
+                    .marker
+                    .get_or_insert_with(|| format!("<!-- proj-child {repo}#{n} {} -->", i + 1));
+            }
+            let mut pool = std::mem::take(&mut list.retained);
+            pool.extend(
+                std::mem::take(&mut list.tasks)
+                    .into_iter()
+                    .zip(std::mem::take(&mut list.children))
+                    .map(|(task, child)| Retained { task, child }),
+            );
+            if !pool.is_empty() {
+                list.revision += 1;
+            }
+            list.children = tasks
+                .iter()
+                .enumerate()
+                .map(|(i, task)| {
+                    if let Some(at) = pool.iter().position(|old| &old.task == task) {
+                        pool.remove(at).child
+                    } else {
+                        Child {
+                            marker: Some(if list.revision == 0 {
+                                format!("<!-- proj-child {repo}#{n} {} -->", i + 1)
+                            } else {
+                                format!(
+                                    "<!-- proj-child {repo}#{n} revision-{} {} -->",
+                                    list.revision,
+                                    i + 1
+                                )
+                            }),
+                            ..Child::default()
+                        }
+                    }
+                })
+                .collect();
+            list.tasks = tasks.to_vec();
+            list.retained = pool;
+        }
+        list.source = Some(input.to_owned());
+        self.save_list(repo, n, &list)
+            && (!tasks.is_empty()
+                || list.retained.is_empty()
+                || self.render_list(repo, n, &mut list))
+            && self.keep_planned(repo, n, input).is_ok()
+    }
+
+    fn receipt_body(repo: &str, n: &str, i: usize, task: &Task, child: &Child) -> String {
+        let body = Self::child_body(repo, n, i, task);
+        match &child.marker {
+            Some(marker) => {
+                format!(
+                    "{}{marker}",
+                    body.strip_suffix(&format!("<!-- proj-child {repo}#{n} {} -->", i + 1))
+                        .unwrap()
+                )
+            }
+            None => body,
+        }
+    }
+
     /// Reconcile a POST whose answer was lost by its immutable receipt.
     /// Never re-POST an ambiguous creation: if it is not found, retain the
     /// task and retry reconciliation, rather than run or lose it.
@@ -287,6 +439,9 @@ impl Pass<'_> {
                 Err(_) => return false,
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => List {
+                source: fs::read_to_string(d.join("input")).ok(),
+                revision: 0,
+                retained: vec![],
                 tasks: tasks.to_vec(),
                 children: vec![Child::default(); tasks.len()],
                 comment: None,
@@ -320,7 +475,10 @@ impl Pass<'_> {
                 }
                 continue;
             }
-            let marker = format!("<!-- proj-child {repo}#{n} {} -->", i + 1);
+            let marker = list.children[i]
+                .marker
+                .clone()
+                .unwrap_or_else(|| format!("<!-- proj-child {repo}#{n} {} -->", i + 1));
             let Some(all) = every(
                 self.cfg,
                 &format!("repos/{repo}/issues?state=all&per_page=100"),
@@ -349,7 +507,7 @@ impl Pass<'_> {
                 if !self.save_list(repo, n, &list) {
                     return false;
                 }
-                let body = Self::child_body(repo, n, i, task);
+                let body = Self::receipt_body(repo, n, i, task, &list.children[i]);
                 let result = burrow_github::call_once(
                     &mut crate::github::client(self.cfg),
                     "POST",
@@ -388,7 +546,7 @@ impl Pass<'_> {
             let expected = if task.issue.is_some() {
                 task.body.clone()
             } else {
-                Self::child_body(repo, n, i, task)
+                Self::receipt_body(repo, n, i, task, &list.children[i])
             };
             if child["title"].as_str() == Some(task.title.as_str())
                 && child["body"].as_str() == Some(expected.as_str())
@@ -436,7 +594,7 @@ impl Pass<'_> {
                 self.retry(repo);
                 continue;
             };
-            if self.claimed(repo).contains(n) {
+            if list.tasks.is_empty() || self.claimed(repo).contains(n) {
                 continue;
             }
             let Some(same) = self.verified_source(repo, parent) else {
@@ -486,10 +644,7 @@ impl Pass<'_> {
                 }
             } else if !list.children[index].offered
                 && self.engine(&issue).is_none()
-                && !self
-                    .plan_dir(repo, &child.to_string())
-                    .join("tasks.json")
-                    .exists()
+                && !self.has_task_list(Some(repo), &child.to_string())
             {
                 if !self.add_label(repo, &child.to_string(), "ready")
                     || !self.remove_label(repo, &child.to_string(), "later")

@@ -12,6 +12,9 @@ pub(super) fn parent_fixture() -> (Box, Value, List) {
     let source = p.issue_text("sam/box", &parent, &[]);
     p.keep_planned("sam/box", "7", &source).unwrap();
     let mut list = List {
+        source: None,
+        revision: 0,
+        retained: vec![],
         tasks: (0..2)
             .map(|i| Task {
                 issue: None,
@@ -190,12 +193,20 @@ fn a_worker_split_posts_its_answer_before_retiring_and_can_retry_a_partial_plan(
         .unwrap();
     assert!(!record.exists());
     assert!(b.posted().contains("Split into bounded tasks."));
-    assert!(b.pass().worker_split_pending(Some("sam/box"), "7"));
+    assert!(!b.pass().worker_split_pending(Some("sam/box"), "7"));
     assert!(b.log().contains("labels[]=tracker"));
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+    enrolled["labels"] = json!([{"name":"tracker"}]);
     assert!(
-        b.pass().sorted(t, &enrolled, &Default::default()),
-        "the host resumes the split instead of starting another planner"
+        b.pass()
+            .sorted("sam/box", t, &enrolled, &Default::default())
+    );
+    enrolled["body"] = json!("changed after retirement");
+    fs::write(b.path("repos_sam_box_issues_7"), enrolled.to_string()).unwrap();
+    assert!(
+        !b.pass()
+            .sorted("sam/box", t, &enrolled, &Default::default()),
+        "a retired worker's marker cannot prevent replanning changed scope"
     );
     assert!(!b.log().contains("-X POST repos/sam/box/issues "));
 }
@@ -297,11 +308,14 @@ fn existing_workers_are_not_resized_on_every_reply() {
     issue["repository_url"] = json!("https://api.github.com/repos/sam/box");
     assert!(b.pass().started_issue_job(Some("sam/box"), "7"));
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    assert!(b.pass().sorted(t, &issue, &Default::default()));
+    assert!(b.pass().sorted("sam/box", t, &issue, &Default::default()));
 }
 #[test]
 fn a_parent_advances_only_past_a_recorded_merged_pr() {
     let mut list = List {
+        source: None,
+        revision: 0,
+        retained: vec![],
         tasks: vec![],
         children: vec![Child::default(); 100],
         comment: None,
@@ -379,7 +393,10 @@ fn tracker_split_transactions_recover_every_durable_stage() {
         }
         assert!(b.pass().save_list("sam/box", "7", &list));
         let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-        assert!(!b.pass().sorted(t, &parent, &Default::default()), "{stage}");
+        assert!(
+            !b.pass().sorted("sam/box", t, &parent, &Default::default()),
+            "{stage}"
+        );
         b.pass().verdicts("sam/box", t, &[parent]).unwrap();
         assert!(!record.exists(), "{stage}: {}", b.log());
         if stage != "label" && stage != "did" {
@@ -425,7 +442,10 @@ fn planning_preserves_queued_running_and_awaiting_reference_ownership() {
         let task_file = pass.plan_dir("sam/box", "7").join("tasks.json");
         let tasks = fs::read(&task_file).unwrap();
         fs::remove_file(&task_file).unwrap();
-        assert!(pass.sorted(t, &parent, &pass.claimed("sam/box")), "{state}");
+        assert!(
+            pass.sorted("sam/box", t, &parent, &pass.claimed("sam/box")),
+            "{state}"
+        );
         fs::write(task_file, tasks).unwrap();
         assert!(!pass.child_admissible("sam/box", "8"), "{state}");
         pass.sequence("sam/box", &[parent]);
@@ -662,7 +682,7 @@ fn a_cutoff_split_intent_is_recovered_without_an_end_declaration_or_another_turn
     assert_eq!(job.turns().as_deref(), Some("1"));
     assert!(!record.exists());
     assert!(job.path("planning-hold").exists());
-    assert!(b.pass().worker_split_pending(Some("sam/box"), "7"));
+    assert!(!b.pass().worker_split_pending(Some("sam/box"), "7"));
     assert!(b.log().contains("labels[]=tracker"));
 }
 

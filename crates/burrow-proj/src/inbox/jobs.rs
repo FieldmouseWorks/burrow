@@ -250,10 +250,10 @@ impl Pass<'_> {
                 }
                 let tasks = read(&job.turn(&split_turn, "split"))
                     .and_then(|text| crate::planning::parse(&text).ok());
-                if tasks
-                    .as_ref()
-                    .is_none_or(|tasks| !self.split_children(repo, n, tasks))
-                    || !self.add_label(repo, n, "tracker")
+                if tasks.as_ref().is_none_or(|tasks| {
+                    !self.prepare_plan(repo, n, &input, tasks)
+                        || !self.split_children(repo, n, tasks)
+                }) || !self.add_label(repo, n, "tracker")
                 {
                     self.miss(repo);
                     continue;
@@ -372,7 +372,11 @@ impl Pass<'_> {
                 && !self.lane(listed_now)
                 && self.child_can_close(repo, n);
             let listed_changed = !Self::handed(&d, &self.issue_text(repo, listed_now, &had));
-            if closable || !msg.is_empty() || listed_changed {
+            if closable
+                || !msg.is_empty()
+                || listed_changed
+                || job.turn(&turns.to_string(), "split-invalid").exists()
+            {
                 // Decided on the issue as GitHub has it now, not as the list
                 // read before this pass started jobs had it.
                 let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {

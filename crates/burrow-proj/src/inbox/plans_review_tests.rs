@@ -277,3 +277,380 @@ fn launched_workers_share_approved_prompt_handed_text_and_comment_cursor() {
         assert_eq!(read(&record.join("seen")).as_deref(), Some("42"), "{kind}");
     }
 }
+
+#[test]
+fn revisions_bind_source_and_preserve_exact_task_receipts_across_reordering() {
+    let (b, mut parent, mut list) = parent_fixture();
+    list.children[0].merged_pr = Some("landed".into());
+    list.children[1].number = None;
+    list.children[1].attempted = true;
+    assert!(b.pass().save_list("sam/box", "7", &list));
+    let old = list.tasks.clone();
+    parent["body"] = json!("revised scope");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    let source = b.pass().issue_text("sam/box", &parent, &[]);
+    let replacement = Task {
+        title: "replacement".into(),
+        ..old[1].clone()
+    };
+    let revised = vec![old[1].clone(), replacement.clone()];
+    assert!(b.pass().prepare_plan("sam/box", "7", &source, &revised));
+    let path = b.pass().plan_dir("sam/box", "7").join("tasks.json");
+    let kept: List = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(kept.source.as_deref(), Some(source.as_str()));
+    assert!(kept.children[0].attempted);
+    assert_eq!(kept.children[0].number, None);
+    assert!(
+        kept.children[0]
+            .marker
+            .as_ref()
+            .unwrap()
+            .ends_with(" 2 -->")
+    );
+    assert!(!kept.children[1].attempted);
+    assert!(
+        kept.children[1]
+            .marker
+            .as_ref()
+            .unwrap()
+            .contains("revision-1")
+    );
+    assert_eq!(kept.retained[0].child.merged_pr.as_deref(), Some("landed"));
+    assert!(!b.pass().child_admissible("sam/box", "8"));
+    assert_eq!(b.pass().same_source("sam/box", &parent), Some(true));
+    // A crash between list publication and approval publication is closed.
+    b.pass()
+        .keep_planned("sam/box", "7", "old approval")
+        .unwrap();
+    assert_eq!(b.pass().same_source("sam/box", &parent), Some(false));
+    assert!(b.pass().prepare_plan("sam/box", "7", &source, &revised));
+    // Reinstating the identical completed task recovers its original receipt.
+    let restored = vec![replacement, old[0].clone()];
+    assert!(b.pass().prepare_plan("sam/box", "7", &source, &restored));
+    let kept: List = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(kept.children[1].number, Some(8));
+    assert_eq!(kept.children[1].merged_pr.as_deref(), Some("landed"));
+    assert!(
+        kept.retained
+            .iter()
+            .any(|r| r.child.attempted && r.child.number.is_none())
+    );
+}
+
+#[test]
+fn triage_uses_the_pass_repository_for_every_state_lookup() {
+    for kind in ["tracker", "transaction", "approval", "worker", "split"] {
+        let (b, mut issue, _) = parent_fixture();
+        issue["repository_url"] = json!("https://api.github.com/repos/Sam/Box");
+        let n = "7";
+        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+        match kind {
+            "transaction" => {
+                let d = b
+                    .cfg
+                    .inbox
+                    .as_ref()
+                    .unwrap()
+                    .state
+                    .join(".triage/sam_box-7");
+                fs::create_dir_all(&d).unwrap();
+                fs::write(d.join("plan"), "[]").unwrap();
+            }
+            "approval" => {
+                issue["labels"] = json!([{"name":"ready"}]);
+                fs::remove_file(b.pass().plan_dir("sam/box", n).join("tasks.json")).unwrap();
+            }
+            "worker" => {
+                issue["labels"] = json!([{"name":"claude"}]);
+                let d = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+                fs::create_dir_all(&d).unwrap();
+                fs::write(d.join("job"), "j1").unwrap();
+            }
+            "split" => {
+                let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+                fs::create_dir_all(&record).unwrap();
+                fs::write(record.join("job"), "j1").unwrap();
+                issue["labels"] = json!([{"name":"claude"}]);
+                fs::write(
+                    b.pass().plan_dir("sam/box", n).join("worker-split"),
+                    "pending",
+                )
+                .unwrap();
+            }
+            _ => (),
+        }
+        fs::write(b.path("repos_sam_box_issues_7"), issue.to_string()).unwrap();
+        let source = b.pass().issue_text("sam/box", &issue, &[]);
+        b.pass().keep_planned("sam/box", n, &source).unwrap();
+        assert_eq!(
+            b.pass().sorted("sam/box", t, &issue, &Default::default()),
+            kind != "transaction",
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn invalidated_splits_resume_even_after_edits_are_reverted_and_launch_retries() {
+    for change in [
+        "body",
+        "title",
+        "comment-add",
+        "comment-edit",
+        "comment-delete",
+    ] {
+        let (mut b, mut parent, mut list) = parent_fixture();
+        list.children[0].merged_pr = Some("https://github.com/sam/box/pull/10".into());
+        list.children[1].number = None;
+        list.children[1].attempted = true;
+        assert!(b.pass().save_list("sam/box", "7", &list));
+        b.cfg.tools.systemd_run = "true".into();
+        burrow_test::executable(
+            &b.cfg.tools.systemctl,
+            "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; esac\n",
+        );
+        b.job_ending("j1", "done", Some("split"), "old proposal");
+        let record = b.record("j1");
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        fs::write(job.path("session"), "s").unwrap();
+        parent["labels"] = json!([{"name":"claude"}]);
+        let comment = |body: &str| json!({"id":5,"user":{"login":"sam"},"body":body,"created_at":"2020-01-01T00:00:00Z"});
+        let old_comments = if matches!(change, "comment-edit" | "comment-delete") {
+            vec![comment("old")]
+        } else {
+            vec![]
+        };
+        Pass::hand(
+            &record,
+            &b.pass().issue_text("sam/box", &parent, &old_comments),
+        )
+        .unwrap();
+        fs::write(
+            record.join("seen"),
+            if old_comments.is_empty() { "0" } else { "5" },
+        )
+        .unwrap();
+        match change {
+            "body" => parent["body"] = json!("new body"),
+            "title" => parent["title"] = json!("new title"),
+            _ => (),
+        }
+        let comments = match change {
+            "comment-add" | "comment-edit" => vec![comment("updated")],
+            _ => vec![],
+        };
+        fs::write(b.path("comments"), json!([comments]).to_string()).unwrap();
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        crate::planning::declare_split(&job, "1", &list.tasks).unwrap();
+        let receipts = fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&parent))
+            .unwrap();
+        assert!(job.turn("1", "split-invalid").exists(), "{change}");
+        assert!(crate::planning::admit(&job).is_ok(), "{change}");
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        let old_input = fs::read_to_string(record.join("input")).unwrap();
+        // Restore every original source field after invalidation, before delivery.
+        // Use the fixture's original issue rather than assume its rendering.
+        let original = issue(7, "sam", &["claude"]);
+        parent["title"] = original["title"].clone();
+        parent["body"] = original["body"].clone();
+        let comments = old_comments;
+        assert_eq!(
+            b.pass().issue_text("sam/box", &parent, &comments),
+            old_input
+        );
+        fs::write(b.path("comments"), json!([comments]).to_string()).unwrap();
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        // Failed launch must leave the invalidation recoverable.
+        drop(job);
+        b.cfg.tools.systemd_run = "false".into();
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&parent))
+            .unwrap();
+        b.cfg.tools.systemd_run = "true".into();
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&parent))
+            .unwrap();
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        let whole = b.pass().issue_text("sam/box", &parent, &comments);
+        assert!(
+            fs::read_to_string(job.path("prompt.2"))
+                .unwrap()
+                .contains(&whole),
+            "{change}"
+        );
+        assert!(Pass::handed(&record, &whole), "{change}");
+        assert_eq!(
+            fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+            receipts
+        );
+        if !comments.is_empty() {
+            assert_eq!(read(&record.join("seen")).as_deref(), Some("5"));
+        }
+        let cursor = fs::read(record.join("seen")).unwrap();
+        let prompt = fs::read(job.path("prompt.2")).unwrap();
+        b.pass()
+            .jobs("sam/box", "box", std::slice::from_ref(&parent))
+            .unwrap();
+        assert_eq!(job.turns().as_deref(), Some("2"));
+        assert_eq!(fs::read(record.join("seen")).unwrap(), cursor);
+        assert_eq!(fs::read(job.path("prompt.2")).unwrap(), prompt);
+    }
+}
+
+#[test]
+fn planner_and_worker_revisions_complete_without_reauthorizing_obsolete_children() {
+    for owner in ["planner", "worker"] {
+        let (b, mut parent, mut list) = parent_fixture();
+        list.children[0].merged_pr = Some("landed".into());
+        list.children[1].number = None;
+        list.children[1].attempted = true;
+        assert!(b.pass().save_list("sam/box", "7", &list));
+        let tasks = vec![
+            Task {
+                title: "replacement".into(),
+                ..list.tasks[1].clone()
+            },
+            list.tasks[0].clone(),
+        ];
+        parent["body"] = json!("revised source");
+        parent["labels"] = json!([{"name": if owner == "worker" { "claude" } else { "tracker" }}]);
+        parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        let source = b.pass().issue_text("sam/box", &parent, &[]);
+        let mut new_child = issue(10, "sam", &["later"]);
+        new_child["title"] = json!(tasks[0].title);
+        new_child["body"] = json!(Pass::receipt_body(
+            "sam/box",
+            "7",
+            0,
+            &tasks[0],
+            &Child {
+                marker: Some("<!-- proj-child sam/box#7 revision-1 1 -->".into()),
+                ..Child::default()
+            }
+        ));
+        let mut obsolete = issue(9, "sam", &["ready"]);
+        obsolete["body"] = json!(Pass::child_body("sam/box", "7", 1, &list.tasks[1]));
+        fs::write(
+            b.path("repos_sam_box_issues"),
+            json!([new_child, obsolete]).to_string(),
+        )
+        .unwrap();
+        fs::write(b.path("repos_sam_box_issues_10"), new_child.to_string()).unwrap();
+        if owner == "worker" {
+            b.job_ending("j1", "done", Some("split"), "revised proposal");
+            let record = b.record("j1");
+            Pass::hand(&record, &source).unwrap();
+            fs::write(
+                b.cfg.jobs.join("j1/1.split"),
+                serde_json::to_string(&tasks).unwrap(),
+            )
+            .unwrap();
+            b.pass().jobs("sam/box", "box", &[parent.clone()]).unwrap();
+            assert!(!record.exists(), "{}", b.log());
+        } else {
+            b.job(
+                "planner",
+                "done",
+                &format!("split\n{}", serde_json::to_string(&tasks).unwrap()),
+            );
+            let record = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(".triage/sam_box-7");
+            fs::create_dir_all(&record).unwrap();
+            fs::write(record.join("job"), "planner").unwrap();
+            Pass::hand(&record, &source).unwrap();
+            let steps = vec![
+                super::super::triage::Step::Split(tasks.clone()),
+                super::super::triage::Step::Label("tracker".into()),
+            ];
+            fs::write(record.join("plan"), serde_json::to_string(&steps).unwrap()).unwrap();
+            let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+            b.pass().verdicts("sam/box", t, &[parent.clone()]).unwrap();
+            assert!(!record.exists(), "{}", b.log());
+        }
+        assert_eq!(b.pass().same_source("sam/box", &parent), Some(true));
+        assert!(
+            b.pass().child_admissible("sam/box", "10"),
+            "{owner}: {}",
+            b.log()
+        );
+        assert!(!b.pass().child_admissible("sam/box", "9"), "{owner}");
+        assert!(
+            !b.log().contains("-X POST repos/sam/box/issues "),
+            "{owner}"
+        );
+        let kept: List = serde_json::from_slice(
+            &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kept.children[1].merged_pr.as_deref(), Some("landed"));
+        assert!(kept.retained[0].child.attempted);
+    }
+}
+
+#[test]
+fn replanning_as_ready_keeps_history_without_admitting_old_children_or_closing_parent() {
+    let (b, mut parent, _) = parent_fixture();
+    parent["body"] = json!("now one bounded task");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    let source = b.pass().issue_text("sam/box", &parent, &[]);
+    assert!(b.pass().prepare_plan("sam/box", "7", &source, &[]));
+    assert!(!b.pass().has_task_list(Some("sam/box"), "7"));
+    assert!(b.pass().approved_input("sam/box", "7", &source));
+    assert!(!b.pass().child_admissible("sam/box", "8"));
+    b.pass().sequence("sam/box", &[parent]);
+    assert!(!b.log().contains("state=closed"));
+    let kept: List = serde_json::from_slice(
+        &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept.retained.len(), 2);
+    // Incomplete approval publication must not launch the old input either.
+    b.pass().keep_planned("sam/box", "7", "old input").unwrap();
+    assert!(!b.pass().approved_input("sam/box", "7", "old input"));
+}
+
+#[test]
+fn edited_task_fields_never_inherit_completed_or_ambiguous_receipts() {
+    for field in ["title", "body", "check", "issue"] {
+        let (b, parent, mut list) = parent_fixture();
+        list.children[0].merged_pr = Some("landed".into());
+        list.children[1].number = None;
+        list.children[1].attempted = true;
+        assert!(b.pass().save_list("sam/box", "7", &list));
+        let mut tasks = list.tasks.clone();
+        match field {
+            "title" => tasks[0].title = "edited".into(),
+            "body" => tasks[0].body = "edited".into(),
+            "check" => tasks[0].check = "edited".into(),
+            "issue" => tasks[0].issue = Some(99),
+            _ => unreachable!(),
+        }
+        let source = b.pass().issue_text("sam/box", &parent, &[]);
+        assert!(b.pass().prepare_plan("sam/box", "7", &source, &tasks));
+        let kept: List = serde_json::from_slice(
+            &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kept.children[0].number, None, "{field}");
+        assert_eq!(kept.children[0].merged_pr, None, "{field}");
+        assert!(!kept.children[0].attempted, "{field}");
+        assert!(kept.children[1].attempted, "{field}");
+        assert!(
+            kept.children[1]
+                .marker
+                .as_ref()
+                .unwrap()
+                .ends_with(" 2 -->")
+        );
+        assert_eq!(kept.retained[0].child.number, Some(8));
+        assert_eq!(kept.retained[0].child.merged_pr.as_deref(), Some("landed"));
+    }
+}

@@ -369,7 +369,7 @@ fn running_handed_references_are_not_drained() {
     assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
-    assert!(p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     for (repo, n, claimed) in [
         ("sam/box", 8, true),
         ("sam/box", 10, true),
@@ -389,7 +389,10 @@ fn running_handed_references_are_not_drained() {
     fs::remove_file(b.cfg.jobs.join("lane/1.slot")).unwrap();
     assert_eq!(b.pass().pick_ready(t, std::slice::from_ref(&seven)), None);
     fs::remove_file(b.path("active")).unwrap();
-    assert!(!b.pass().sorted(t, &unsorted, &b.pass().claimed("sam/box")));
+    assert!(
+        !b.pass()
+            .sorted("sam/box", t, &unsorted, &b.pass().claimed("sam/box"))
+    );
     b.pass().drain().unwrap();
     assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
 }
@@ -638,7 +641,7 @@ fn awaiting_handed_references_are_not_drained() {
     assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
-    assert!(p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     p.note_ready("sam/box", std::slice::from_ref(&seven))
         .unwrap();
     on_github(&b, &seven);
@@ -646,7 +649,7 @@ fn awaiting_handed_references_are_not_drained() {
     assert!(!b.log().contains("labels[]=codex"));
     // Stopping or finishing the job removes its live wait, releasing the brief.
     fs::remove_file(job.join("await")).unwrap();
-    assert!(!p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    assert!(!p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     b.pass().drain().unwrap();
     assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
 }
