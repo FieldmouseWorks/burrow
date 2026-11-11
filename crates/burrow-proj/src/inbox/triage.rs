@@ -201,9 +201,9 @@ impl Pass<'_> {
                 && self.verified_source(repo, issue).unwrap_or(false);
         }
         if self.inbox.planning
-            && (!labels.contains(&TRACKER) || labels.contains(&READY))
-            && !labels.contains(&LATER)
-            && (labels.contains(&READY) || self.engine(issue).is_some())
+            && (labels.contains(&TRACKER)
+                || (!labels.contains(&LATER)
+                    && (labels.contains(&READY) || self.engine(issue).is_some())))
         {
             return self.planned(Some(repo), issue);
         }

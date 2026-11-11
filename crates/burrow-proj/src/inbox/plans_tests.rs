@@ -338,83 +338,85 @@ fn a_parent_advances_only_past_a_recorded_merged_pr() {
 
 #[test]
 fn tracker_split_transactions_recover_every_durable_stage() {
-    for stage in [
-        "creation",
-        "receipt",
-        "approval",
-        "checklist",
-        "label",
-        "did",
-    ] {
-        let (b, mut parent, mut list) = parent_fixture();
-        parent["labels"] = json!([{"name":"tracker"}]);
-        parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
-        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
-        let tasks = list.tasks.clone();
-        let answer = format!("split\n{}", serde_json::to_string(&tasks).unwrap());
-        b.job("planner", "done", &answer);
-        let record = b
-            .cfg
-            .inbox
-            .as_ref()
-            .unwrap()
-            .state
-            .join(".triage/sam_box-7");
-        fs::create_dir_all(&record).unwrap();
-        fs::write(record.join("job"), "planner").unwrap();
-        Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
-        let steps = vec![
-            super::super::triage::Step::Split(tasks.clone()),
-            super::super::triage::Step::Label("tracker".into()),
-        ];
-        fs::write(record.join("plan"), serde_json::to_string(&steps).unwrap()).unwrap();
-        let mut children = Vec::new();
-        for (i, task) in tasks.iter().enumerate() {
-            let mut child = issue(8 + i as u64, "sam", &["later"]);
-            child["title"] = json!(task.title);
-            child["body"] = json!(Pass::child_body("sam/box", "7", i, task));
-            fs::write(
-                b.path(&format!("repos_sam_box_issues_{}", 8 + i)),
-                child.to_string(),
-            )
-            .unwrap();
-            children.push(child);
-        }
-        if stage == "creation" || stage == "receipt" {
-            list.children[1].number = None;
-            list.children[1].attempted = stage == "receipt";
-        }
-        fs::write(b.path("repos_sam_box_issues"), json!(children).to_string()).unwrap();
-        if stage == "checklist" {
-            list.rendered.clear();
-        }
-        if stage == "label" || stage == "did" {
-            fs::write(record.join("did"), "1").unwrap();
-        }
-        assert!(b.pass().save_list("sam/box", "7", &list));
-        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-        assert!(
-            !b.pass().sorted("sam/box", t, &parent, &Default::default()),
-            "{stage}"
-        );
-        b.pass().verdicts("sam/box", t, &[parent]).unwrap();
-        assert!(!record.exists(), "{stage}: {}", b.log());
-        if stage != "label" && stage != "did" {
+    for enrollment in ["tracker", "ready", "claude"] {
+        for stage in [
+            "creation",
+            "receipt",
+            "approval",
+            "checklist",
+            "label",
+            "did",
+        ] {
+            let (b, mut parent, mut list) = parent_fixture();
+            parent["labels"] = json!([{"name":enrollment}]);
+            parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
+            fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+            let tasks = list.tasks.clone();
+            let answer = format!("split\n{}", serde_json::to_string(&tasks).unwrap());
+            b.job("planner", "done", &answer);
+            let record = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(".triage/sam_box-7");
+            fs::create_dir_all(&record).unwrap();
+            fs::write(record.join("job"), "planner").unwrap();
+            Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
+            let steps = vec![
+                super::super::triage::Step::Split(tasks.clone()),
+                super::super::triage::Step::Label("tracker".into()),
+            ];
+            fs::write(record.join("plan"), serde_json::to_string(&steps).unwrap()).unwrap();
+            let mut children = Vec::new();
+            for (i, task) in tasks.iter().enumerate() {
+                let mut child = issue(8 + i as u64, "sam", &["later"]);
+                child["title"] = json!(task.title);
+                child["body"] = json!(Pass::child_body("sam/box", "7", i, task));
+                fs::write(
+                    b.path(&format!("repos_sam_box_issues_{}", 8 + i)),
+                    child.to_string(),
+                )
+                .unwrap();
+                children.push(child);
+            }
+            if stage == "creation" || stage == "receipt" {
+                list.children[1].number = None;
+                list.children[1].attempted = stage == "receipt";
+            }
+            fs::write(b.path("repos_sam_box_issues"), json!(children).to_string()).unwrap();
+            if stage == "checklist" {
+                list.rendered.clear();
+            }
+            if stage == "label" || stage == "did" {
+                fs::write(record.join("did"), "1").unwrap();
+            }
+            assert!(b.pass().save_list("sam/box", "7", &list));
+            let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
             assert!(
-                b.pass().plan_dir("sam/box", "8").join("input").exists(),
+                !b.pass().sorted("sam/box", t, &parent, &Default::default()),
                 "{stage}"
             );
-            let saved: List = serde_json::from_slice(
-                &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
-            )
-            .unwrap();
-            assert!(saved.children.iter().all(|c| c.number.is_some()), "{stage}");
+            b.pass().verdicts("sam/box", t, &[parent]).unwrap();
+            assert!(!record.exists(), "{stage}: {}", b.log());
+            if stage != "label" && stage != "did" {
+                assert!(
+                    b.pass().plan_dir("sam/box", "8").join("input").exists(),
+                    "{stage}"
+                );
+                let saved: List = serde_json::from_slice(
+                    &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+                )
+                .unwrap();
+                assert!(saved.children.iter().all(|c| c.number.is_some()), "{stage}");
+            }
+            assert!(b.log().contains("labels[]=tracker"), "{stage}");
+            assert!(
+                !b.log().contains("-X POST repos/sam/box/issues "),
+                "{stage}"
+            );
         }
-        assert!(b.log().contains("labels[]=tracker"), "{stage}");
-        assert!(
-            !b.log().contains("-X POST repos/sam/box/issues "),
-            "{stage}"
-        );
     }
 }
 

@@ -561,6 +561,12 @@ impl Pass<'_> {
         if !self.render_list(repo, n, &mut list) {
             return false;
         }
+        // Establish durable enrollment before removing the implementation labels.
+        // A failed or ambiguous label response leaves the original enrollment
+        // intact, so either caller can retry finalization after a crash.
+        if !self.add_label(repo, n, super::triage::TRACKER) {
+            return false;
+        }
         if !self.remove_label(repo, n, super::triage::READY) {
             return false;
         }

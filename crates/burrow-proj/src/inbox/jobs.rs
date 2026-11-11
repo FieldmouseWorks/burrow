@@ -253,8 +253,7 @@ impl Pass<'_> {
                 if tasks.as_ref().is_none_or(|tasks| {
                     !self.prepare_plan(repo, n, &input, tasks)
                         || !self.split_children(repo, n, tasks)
-                }) || !self.add_label(repo, n, "tracker")
-                {
+                }) {
                     self.miss(repo);
                     continue;
                 }

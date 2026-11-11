@@ -25,7 +25,7 @@ fn every_plan_scan_uses_the_complete_repository_identity() {
 
 #[test]
 fn completed_or_unenrolled_splits_retire_without_losing_receipts() {
-    for ending in ["complete", "closed", "unenrolled"] {
+    for ending in ["complete", "retry-finalization", "closed", "unenrolled"] {
         let (mut b, mut parent, list) = parent_fixture();
         b.cfg.scratch = b.path("scratch");
         b.job_ending("j1", "done", Some("split"), "My split answer");
@@ -42,7 +42,14 @@ fn completed_or_unenrolled_splits_retire_without_losing_receipts() {
         parent["labels"] = json!([{"name":"claude"}]);
         fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
         let receipts = fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
-        if ending == "complete" {
+        if ending == "complete" || ending == "retry-finalization" {
+            if ending == "retry-finalization" {
+                fs::write(b.path("fail"), "labels[]=tracker").unwrap();
+                b.pass().jobs("sam/box", "box", &[parent.clone()]).unwrap();
+                assert!(record.exists());
+                assert!(!b.log().contains("DELETE repos/sam/box/issues/7/labels/"));
+                fs::remove_file(b.path("fail")).unwrap();
+            }
             b.pass().jobs("sam/box", "box", &[parent]).unwrap();
         } else {
             if ending == "closed" {
@@ -824,5 +831,74 @@ fn unstick_children_keep_admission_execution_and_sequence() {
             assert_eq!(crate::engine::choice(&b.cfg, &job).unwrap().engine, engine);
             assert!(!b.pass().child_admissible("sam/box", "9"));
         }
+    }
+}
+
+#[test]
+fn unplanned_trackers_remain_eligible_without_ready_enrollment() {
+    for unlabelled in [false, true] {
+        for labels in [
+            vec!["tracker"],
+            vec!["tracker", "claude"],
+            vec!["tracker", "later"],
+        ] {
+            let (mut b, mut parent, _) = parent_fixture();
+            fs::remove_dir_all(b.pass().plan_dir("sam/box", "7")).unwrap();
+            b.cfg
+                .inbox
+                .as_mut()
+                .unwrap()
+                .triage
+                .as_mut()
+                .unwrap()
+                .sort_unlabelled = unlabelled;
+            parent["labels"] = json!(
+                labels
+                    .iter()
+                    .map(|name| json!({"name":name}))
+                    .collect::<Vec<_>>()
+            );
+            fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+            let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
+            assert!(!b.pass().sorted("sam/box", t, &parent, &Default::default()));
+            b.job("planner", "done", "ready");
+            let record = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(".triage/sam_box-7");
+            fs::create_dir_all(&record).unwrap();
+            fs::write(record.join("job"), "planner").unwrap();
+            Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
+            b.pass().verdicts("sam/box", t, &[parent]).unwrap();
+            assert!(!record.exists());
+            assert!(b.log().contains("labels[]=ready"), "{}", b.log());
+        }
+    }
+}
+
+#[test]
+fn split_finalization_establishes_tracker_before_removing_any_enrollment() {
+    for label in ["ready", "claude"] {
+        let (b, mut parent, list) = parent_fixture();
+        parent["labels"] = json!([{"name":label}]);
+        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+        fs::write(b.path("fail"), "labels[]=tracker").unwrap();
+        assert!(!b.pass().split_children("sam/box", "7", &list.tasks));
+        assert!(!b.log().contains("DELETE repos/sam/box/issues/7/labels/"));
+        let receipts = fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
+        fs::remove_file(b.path("fail")).unwrap();
+        assert!(b.pass().split_children("sam/box", "7", &list.tasks));
+        let log = b.log();
+        assert!(
+            log.find("labels[]=tracker").unwrap()
+                < log.find("DELETE repos/sam/box/issues/7/labels/").unwrap()
+        );
+        assert_eq!(
+            fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
+            receipts
+        );
     }
 }
