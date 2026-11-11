@@ -6,7 +6,7 @@
 //! them, last, under the key and the path restores look for, without its
 //! failure failing the gate, with crates/burrow-keep (whose tests say what
 //! it keeps) from the workflow's own commit. A PR's negative run restores
-//! every leg's, on the same terms, when it has a negative to build.
+//! every leg's, on the same terms, before installing Nix.
 
 use yaml_serde::Value;
 
@@ -177,8 +177,8 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
 
 /// The negative job restores every leg's kept builds, under the keys and
 /// path each leg restores its own from and on the same terms (no PR from a
-/// fork), but only when it has a negative to build, and nix substitutes
-/// from them as the legs' does. Without them it built what no public cache
+/// fork), before installing Nix, and nix substitutes from them as the
+/// legs' does. Without them it built what no public cache
 /// has (the workspace's dependencies, the machines' patched packages) again
 /// for every PR that adds a test.
 #[test]
@@ -269,9 +269,6 @@ fn a_negative_restores_every_legs_kept_builds() {
         }
         if key.starts_with("inputs.") {
             assert!(!condition(text(&made["if"]), &c), "{key} {off:?}");
-        } else if key == "steps.paths.outputs.needs" {
-            // The compiler needs Nix even when the path filter finds none.
-            assert!(condition(text(&made["if"]), &c));
         }
     }
     assert!(condition(text(&made["if"]), &base(1)));
