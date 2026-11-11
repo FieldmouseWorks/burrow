@@ -19,7 +19,7 @@ let
   inherit (config.burrow.github) machineApp;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
-  enginesWake = "${stateDir}/proj-engines/wake.json";
+  enginesWake = "${stateDir}/engines-door/wake.json";
   # The pipeline's own repos, whose projects' pipeline jobs get its slots,
   # and the lead ones, what it's built from, whose go first of all (pipeline
   # repos whether or not pipelineRepos lists them).
@@ -585,7 +585,10 @@ in
       wake = enginesWake;
       gap = 2;
     };
-    systemd.tmpfiles.rules = [ "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -" ];
+    systemd.tmpfiles.rules = [
+      "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -"
+      "d ${stateDir}/engines-door 0755 ${user} ${config.users.users.${user}.group} -"
+    ];
     systemd.services.burrow-engines-door = {
       description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
       restartIfChanged = false;

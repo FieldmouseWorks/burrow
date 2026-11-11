@@ -52,6 +52,9 @@ pub struct Error {
     /// the status and the transport, never by the words, which name
     /// whatever the request was about (a repo called `timeout`).
     pub unanswered: bool,
+    /// Earliest retry time, only when every cause is a rate-limit failure.
+    /// Kept through context and aggregation instead of parsing diagnostics.
+    pub retry_at: Option<u64>,
 }
 
 impl Error {
@@ -60,6 +63,7 @@ impl Error {
         Self {
             why: why.into(),
             unanswered: false,
+            retry_at: None,
         }
     }
 
@@ -67,6 +71,30 @@ impl Error {
         Self {
             why,
             unanswered: true,
+            retry_at: None,
+        }
+    }
+    /// Add context without losing the cause's retry classification.
+    pub fn context(mut self, context: impl fmt::Display) -> Self {
+        self.why = format!("{context}: {}", self.why);
+        self
+    }
+
+    /// A collection is deferrable only when all its causes are rate limits.
+    pub fn aggregate(errors: Vec<Self>) -> Self {
+        let retry_at = errors
+            .iter()
+            .all(|e| e.retry_at.is_some())
+            .then(|| errors.iter().filter_map(|e| e.retry_at).max())
+            .flatten();
+        Self {
+            why: errors
+                .iter()
+                .map(|e| e.why.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+            unanswered: !errors.is_empty() && errors.iter().all(|e| e.unanswered),
+            retry_at,
         }
     }
 }
@@ -80,6 +108,17 @@ impl fmt::Display for Error {
 impl From<Error> for String {
     fn from(e: Error) -> String {
         e.why
+    }
+}
+
+impl From<String> for Error {
+    fn from(why: String) -> Self {
+        Self::said(why)
+    }
+}
+impl From<&str> for Error {
+    fn from(why: &str) -> Self {
+        Self::said(why)
     }
 }
 
@@ -100,6 +139,15 @@ pub trait Api {
     fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
         let _ = owner;
         self.request("POST", "graphql", Some(body), None)
+    }
+
+    /// Wall time after a response arrives; test APIs can advance a clock
+    /// during requests, earlier pass work and retry waits.
+    fn now(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     /// A wait before asking again.
@@ -201,7 +249,7 @@ pub fn call_once(
     let r = api
         .request(method, path, body, None)
         .map_err(|f| failed(&what, f))?;
-    kept(&what, r, &[])
+    kept(&what, Received::new(r, api.now()), &[])
 }
 
 /// A write that comes out the same however often it's made, asked again as
@@ -253,11 +301,10 @@ fn graphql(
 ) -> Result<Value, Error> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let what = "POST graphql";
-    let r = kept(
-        what,
-        tried(api, what, repeats, |api| api.graphql(owner, &body))?,
-        &[],
-    )?;
+    let received = tried(api, what, repeats, |api| api.graphql(owner, &body))?;
+    let at = received.at;
+    let limited_until = received.limited_until;
+    let r = kept(what, received, &[])?;
     let mut answer = r.json()?;
     if let Some(errors) = answer.get("errors").and_then(Value::as_array) {
         let said: Vec<&str> = errors
@@ -265,9 +312,32 @@ fn graphql(
             .map(|e| e["message"].as_str().unwrap_or("an error"))
             .collect();
         let said: String = said.join("; ").chars().take(300).collect();
-        return Err(Error::said(format!("{what}: {said}")));
+        let why = format!("{what}: {said}");
+        return Err(
+            if !errors.is_empty() && errors.iter().all(graphql_rate_error) {
+                limited(why, &r, at, limited_until)
+            } else {
+                Error::said(why)
+            },
+        );
     }
     Ok(answer["data"].take())
+}
+
+struct Received {
+    response: Response,
+    at: u64,
+    limited_until: Option<u64>,
+}
+impl Received {
+    fn new(response: Response, at: u64) -> Self {
+        let limited_until = rate_limited(&response).then(|| retry_at(&response, at));
+        Self {
+            response,
+            at,
+            limited_until,
+        }
+    }
 }
 
 /// One request, asked again after AGAIN on a 429, and on no answer or a 5xx
@@ -278,14 +348,30 @@ fn tried(
     what: &str,
     repeats: bool,
     mut ask: impl FnMut(&mut dyn Api) -> Result<Response, Failed>,
-) -> Result<Response, Error> {
+) -> Result<Received, Error> {
     let mut tries = 0;
+    let mut limited_until = None;
     loop {
-        let again = match ask(&mut *api) {
-            Ok(r) if r.status == 429 || (repeats && r.status >= 500) => {
-                format!("HTTP {}", r.status)
+        let received = ask(&mut *api).map(|r| Received::new(r, api.now()));
+        if let Ok(r) = &received {
+            limited_until = limited_until.max(r.limited_until);
+        }
+        let again = match received {
+            Ok(r) if r.response.status == 429 || (repeats && r.response.status >= 500) => {
+                if tries == AGAIN.len() && r.response.status == 429 {
+                    return Err(limited(
+                        format!("{what}: HTTP 429, {} times", tries + 1),
+                        &r.response,
+                        r.at,
+                        limited_until,
+                    ));
+                }
+                format!("HTTP {}", r.response.status)
             }
-            Ok(r) => return Ok(r),
+            Ok(mut r) => {
+                r.limited_until = limited_until;
+                return Ok(r);
+            }
             Err(f) if f.transient && repeats => f.why,
             Err(f) => return Err(failed(what, f)),
         };
@@ -314,13 +400,20 @@ fn failed(what: &str, f: Failed) -> Error {
 /// An answer to keep: 2xx, 304 or one of `allowed`; anything else, an
 /// Error that says what GitHub said. A 429, a 5xx (a POST's, not asked
 /// again) and a 403 for a rate limit are GitHub not answering.
-fn kept(what: &str, r: Response, allowed: &[u16]) -> Result<Response, Error> {
+fn kept(what: &str, received: Received, allowed: &[u16]) -> Result<Response, Error> {
+    let Received {
+        response: r,
+        at,
+        limited_until,
+    } = received;
     if (200..300).contains(&r.status) || r.status == 304 || allowed.contains(&r.status) {
         return Ok(r);
     }
     let said = message(&r.body);
     let why = format!("{what}: HTTP {}: {said}", r.status);
-    Err(if r.status >= 500 || rate_limited(&r) {
+    Err(if rate_limited(&r) {
+        limited(why, &r, at, limited_until)
+    } else if r.status >= 500 {
         Error::unanswered(why)
     } else {
         Error::said(why)
@@ -333,6 +426,44 @@ fn rate_limited(r: &Response) -> bool {
             && (r.header("x-ratelimit-remaining") == Some("0")
                 || r.header("retry-after").is_some()
                 || message(&r.body).to_lowercase().contains("rate limit"))
+}
+
+fn graphql_rate_error(error: &Value) -> bool {
+    let kind = error["type"]
+        .as_str()
+        .or_else(|| error["extensions"]["code"].as_str());
+    if let Some(kind) = kind {
+        return kind == "RATE_LIMITED";
+    }
+    let text = error["message"].as_str().unwrap_or("").to_lowercase();
+    text.contains("rate limit exceeded") || text.contains("exceeded a secondary rate limit")
+}
+
+fn retry_at(r: &Response, at: u64) -> u64 {
+    let retry = r
+        .header("retry-after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|delay| at.saturating_add(delay));
+    let reset = (r.header("x-ratelimit-remaining") == Some("0"))
+        .then(|| {
+            r.header("x-ratelimit-reset")
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .flatten();
+    retry
+        .into_iter()
+        .chain(reset)
+        .filter(|deadline| *deadline > at)
+        .max()
+        .unwrap_or(at.saturating_add(60))
+}
+
+fn limited(why: String, r: &Response, at: u64, earlier: Option<u64>) -> Error {
+    Error {
+        why,
+        unanswered: true,
+        retry_at: Some(retry_at(r, at).max(earlier.unwrap_or(0))),
+    }
 }
 
 fn message(body: &str) -> String {

@@ -267,6 +267,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
