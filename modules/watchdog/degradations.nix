@@ -11,7 +11,7 @@ let
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-watchdog;
   settings = pkgs.writeText "burrow-degradations.json" (builtins.toJSON {
     inherit file;
-    inherit (cfg) repos prThreshold;
+    inherit (cfg) repos prThreshold authors;
     kick = "${config.burrow.events.kick}/watchdog";
   });
 in {
@@ -26,6 +26,12 @@ in {
       example = { "sam/homelab" = [ "flake.yml" ]; };
       description = "Repositories and workflow filenames to read. The GitHub login needs Actions: read. Only completed runs count.";
     };
+    authors = mkOption {
+      type = types.listOf types.str;
+      default = config.burrow.autoland.authors or [ ];
+      defaultText = lib.literalExpression "config.burrow.autoland.authors";
+      description = "Whose pull-request runs may supply degradation keys and links to the fix job. A run counts only when its original actor (a rerun by someone else doesn't change it) is listed and its head is in the same repository.";
+    };
     prThreshold = mkOption {
       type = types.ints.positive;
       default = 3;
@@ -36,6 +42,9 @@ in {
     assertions = [ {
       assertion = config.burrow.watchdog.enable;
       message = "watchdog.degradations requires watchdog.enable";
+    } {
+      assertion = cfg.authors != [ ];
+      message = "burrow.watchdog.degradations.authors: name whose PR runs may be read.";
     } ];
     burrow.events.handlers.degradations = {
       events = [ "workflow_run" ];

@@ -43,7 +43,10 @@ covering lost deliveries. It reads the latest two completed default-branch
 push runs per configured workflow and completed PR runs created in the last
 24 hours. The same key in both default runs, or in `prThreshold` distinct PR
 runs in that window, creates a stall. Matrix legs and attempts of one run
-count once. Repositories and workflows have separate keys.
+count once, and a run's signals are the current result of each of its jobs:
+a partial rerun keeps the jobs it didn't rerun and replaces the ones it did.
+PR runs count only when their original actor is one of `authors` and their
+head is in the same repository; a rerun by someone else changes nothing. Repositories and workflows have separate keys.
 
 The reusable policy lives in `burrow_watchdog::degradations`; the
 `burrow-degradations` binary supplies Actions observations and writes the

@@ -1,7 +1,7 @@
 //! Event-driven Actions reader; errors leave the previous watch untouched
 //! so an unavailable API cannot clear a stall or masquerade as health.
 use burrow_watchdog::{
-    degradations::{Run, evaluate, keys},
+    degradations::{Run, evaluate, keys, latest_jobs, trusted},
     watch::File,
 };
 use serde::Deserialize;
@@ -14,6 +14,7 @@ struct Config {
     file: PathBuf,
     repos: BTreeMap<String, Vec<String>>,
     pr_threshold: usize,
+    authors: Vec<String>,
     kick: String,
 }
 fn api(path: &str) -> Result<Value, String> {
@@ -36,6 +37,7 @@ fn collect(
     workflow: &str,
     query: &str,
     default: bool,
+    authors: &[String],
     now: f64,
     cache: &mut BTreeMap<String, Run>,
 ) -> Result<Vec<Run>, String> {
@@ -55,24 +57,31 @@ fn collect(
                 end = true;
                 break;
             }
+            // PR-controlled text reaches a trusted fix job: authenticate it
+            // before it is read or cached.
+            if !default && !trusted(r, repo, authors) {
+                continue;
+            }
             let id = r["id"].as_u64().ok_or("missing run id")?;
             let attempt = r["run_attempt"].as_u64().ok_or("missing run attempt")?;
             let key = format!("{repo}/{id}/{attempt}");
             let run = if let Some(run) = cache.get(&key) {
                 run.clone()
             } else {
-                let mut found = std::collections::BTreeSet::new();
+                let mut all = Vec::new();
                 let mut job_page = 1;
                 loop {
                     let jobs = api(&format!(
-                        "repos/{repo}/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100&page={job_page}"
+                        "repos/{repo}/actions/runs/{id}/jobs?filter=all&per_page=100&page={job_page}"
                     ))?;
-                    found.extend(keys(&jobs));
-                    if jobs["jobs"].as_array().ok_or("missing jobs")?.len() < 100 {
+                    let list = jobs["jobs"].as_array().ok_or("missing jobs")?;
+                    all.extend(list.iter().cloned());
+                    if list.len() < 100 {
                         break;
                     }
                     job_page += 1;
                 }
+                let found = keys(&latest_jobs(&all));
                 Run {
                     id,
                     at,
@@ -100,6 +109,9 @@ fn pass() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     if cfg.pr_threshold == 0 {
         return Err("prThreshold must be positive".into());
+    }
+    if cfg.authors.is_empty() {
+        return Err("authors must name who may supply PR signals".into());
     }
     if std::env::args().nth(1).as_deref() == Some("--check") {
         return Ok(());
@@ -134,6 +146,7 @@ fn pass() -> Result<(), String> {
                 &workflow,
                 &format!("event=push&branch={branch}"),
                 true,
+                &cfg.authors,
                 now,
                 &mut cache,
             )?;
@@ -142,6 +155,7 @@ fn pass() -> Result<(), String> {
                 &workflow,
                 "event=pull_request",
                 false,
+                &cfg.authors,
                 now,
                 &mut cache,
             )?;
