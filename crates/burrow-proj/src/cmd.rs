@@ -61,6 +61,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
+            put(&cfg.settings_line());
             put(&slot::in_line(cfg));
             Ok(())
         }
@@ -121,11 +122,29 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 Ok(())
             }
             Some("back") => {
+                if let Some(settings) = &cfg.settings {
+                    settings
+                        .command(&["back".into()], "proj usage back")
+                        .map_err(|e| Fail::new(1, e))?;
+                }
                 usage::back(cfg, None);
                 Ok(())
             }
             Some("hold") => {
-                let help = "usage: proj usage hold UNTIL [--reason TEXT]";
+                let help = "usage: proj usage hold UNTIL [--only pipeline | --reason TEXT]";
+                if args.get(3).is_some_and(|s| s == "--only") {
+                    if args.len() != 5 || args[4] != "pipeline" {
+                        return Err(Fail::new(2, help));
+                    }
+                    let settings = cfg
+                        .settings
+                        .as_ref()
+                        .ok_or_else(|| Fail::new(1, "settings are not configured"))?;
+                    put(&settings
+                        .command(&["pipeline".into(), args[2].clone()], "proj usage hold")
+                        .map_err(|e| Fail::new(1, e))?);
+                    return Ok(());
+                }
                 let until = arg(args, 2, help)?
                     .parse::<i64>()
                     .map_err(|_| Fail::new(2, help))?;
@@ -151,6 +170,16 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "usage: proj usage [back | hold UNTIL [--reason TEXT] | adopt UNTIL]",
             )),
         },
+        Some("settings") => {
+            let settings = cfg
+                .settings
+                .as_ref()
+                .ok_or_else(|| Fail::new(1, "settings are not configured"))?;
+            put(&settings
+                .command(&args[1..], "proj")
+                .map_err(|e| Fail::new(1, e))?);
+            Ok(())
+        }
         Some("await") => wait_on(cfg, &args[1..]),
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
         Some("_questions") => {
@@ -209,6 +238,7 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
     if let Some(spent) = usage::out(cfg) {
         put(&format!("{}\n", usage::line(&spent)));
     }
+    put(&cfg.settings_line());
     for (_, id) in jobs.into_iter().take(limit) {
         let job = Job::new(cfg, &id);
         put(&status_line(&job));

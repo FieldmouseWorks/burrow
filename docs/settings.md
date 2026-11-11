@@ -1,0 +1,45 @@
+# Automated work settings
+
+`burrow.settings.allowed` is the tracked allow list, set by the importing
+machine's flake. It defaults to empty: new repos cannot drain issues or
+start automated inbox, steward fix, judge or proof jobs until opted in.
+Triage can still sort issues in every repo. Running turns finish and
+settled PRs can merge without starting an agent.
+
+The reusable `burrow-settings` crate reads that starting policy and one
+runtime overlay (`settings/overlay.json` under `burrow.stateDir`). Every
+admission reloads it; malformed or unreadable settings stop admission.
+The host's `settings` command and `proj settings` share the write door:
+
+```
+settings show
+settings pause OWNER/REPO
+settings allow OWNER/REPO
+proj usage hold UNIX_TIMESTAMP --only pipeline
+proj usage back
+```
+
+Pipeline scope intersects the effective allow list with `pipelineRepos`
+(including `leadRepos`). It expires at the deadline without a daemon, or
+ends with `usage back`. A plain usage hold retains its existing engine
+budget behavior. Runtime allow/pause changes persist across deployments;
+`settings show`, `proj status` and the probe's `queue` answer report the
+current scope, allowed repositories, and paused repositories. Every
+unlisted repository, including a newly discovered one, is paused.
+
+To keep the off switch available when pipeline services are stopped,
+enable `burrow.settings.door` and set its `repo` and authorized `authors`.
+An issue with its configured label (default `settings`) takes one command
+line from above, omitting the `settings` prefix. Use `pipeline TIMESTAMP`
+and `back` for scoped mode. The separate `burrow-settings-door` unit checks
+these requests independently of the inbox, steward, CI, updater and event
+dispatcher. It authenticates the opener and every editor through the shared
+issue door. Repeated deliveries cannot replay an old allow over a newer
+host pause. It polls independently so it remains reachable during a
+pipeline outage; no paid agent handles these requests.
+
+Writes are serialized, logged with actor and timestamp, synced and
+published atomically. Readers never write their own overlay. This is the
+first option set in `burrow-settings`; other operational settings join the
+same tracked document, loader and overlay rather than acquiring another
+store.

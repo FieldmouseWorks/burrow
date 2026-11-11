@@ -322,6 +322,10 @@ fn codex_slot(
         fs::remove_file(queue.join(left))?;
     }
     loop {
+        if automation_paused(cfg, &job) {
+            sleep(Duration::from_secs(2));
+            continue;
+        }
         if may_hand_over && let Some(to) = successor(cfg) {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
@@ -338,6 +342,17 @@ fn codex_slot(
         }
         sleep(Duration::from_secs(2));
     }
+}
+
+/// Recheck runtime admission before taking a slot. Triage may sort all repos;
+/// explicit interactive work (no automation role or inbox mark) is unaffected.
+fn automation_paused(cfg: &Config, job: &Job) -> bool {
+    let role = crate::read(&job.path("role")).unwrap_or_default();
+    if role == "triage" || (role.is_empty() && !job.path("usage-kind").exists()) {
+        return false;
+    }
+    let repo = crate::pick::github_repo(cfg, &project(&job.dir));
+    cfg.paused(&repo)
 }
 
 pub fn take_engine(
@@ -380,6 +395,10 @@ pub fn take(
         place_left(&queue, id, process::id()).unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
     loop {
+        if automation_paused(cfg, &job) {
+            sleep(Duration::from_secs(2));
+            continue;
+        }
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too.
         usage::metered(cfg);

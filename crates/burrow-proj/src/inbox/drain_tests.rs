@@ -662,7 +662,11 @@ fn paused_ready_issues_wait_without_relabelling() {
     b.pass()
         .note_ready("sam/game", std::slice::from_ref(&active))
         .unwrap();
-    b.cfg.paused = vec!["SAM/BOX".into()];
+    b.cfg.settings = Some(burrow_settings::Config {
+        overlay: b.path("overlay.json"),
+        allowed: vec!["sam/game".into(), "sam/burrow".into()],
+        pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+    });
     on_github(&b, &active);
     b.pass().drain().unwrap();
     assert!(
@@ -672,21 +676,17 @@ fn paused_ready_issues_wait_without_relabelling() {
     );
     assert!(!b.log().contains("repos/sam/box/issues/8"), "{}", b.log());
     // The original ready list survives the pause and is eligible again.
-    b.cfg.paused.clear();
+    b.cfg
+        .settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .push("sam/box".into());
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     assert_eq!(
         b.pass().pick_ready(&t, &[paused]),
         Some(("sam/box".into(), "8".into()))
     );
-}
-
-#[test]
-fn a_paused_inbox_pass_and_triage_do_no_work() {
-    let mut b = Box::new();
-    b.cfg.paused = vec!["SAM/BOX".into()];
-    b.pass().triage("sam/box", &[issue(7, "sam", &[])]).unwrap();
-    b.pass().run("sam/box").unwrap();
-    assert!(b.log().is_empty(), "{}", b.log());
 }
 
 #[test]
@@ -698,7 +698,11 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     fs::create_dir_all(&drained).unwrap();
     fs::write(drained.join("drained"), "sam/box#8\n").unwrap();
     fs::write(drained.join("job"), "s1\n").unwrap();
-    b.cfg.paused = vec!["SAM/BOX".into()];
+    b.cfg.settings = Some(burrow_settings::Config {
+        overlay: b.path("overlay.json"),
+        allowed: vec!["sam/game".into(), "sam/burrow".into()],
+        pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+    });
     b.cfg
         .inbox
         .as_mut()
@@ -801,5 +805,67 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         b.log().contains("issues/4/labels -f labels[]=codex"),
         "{}",
         b.log()
+    );
+}
+
+#[test]
+fn opt_in_and_pipeline_scope_gate_the_real_drain() {
+    let mut b = Box::new();
+    let game = found("sam/game", 4, "sam", &["ready"], "2026-10-01T00:00:00Z");
+    let pipeline = found("sam/box", 8, "sam", &["ready"], "2026-11-01T00:00:00Z");
+    let settings = burrow_settings::Config {
+        overlay: b.path("settings-overlay.json"),
+        allowed: vec!["sam/box".into()],
+        pipeline_repos: vec!["sam/box".into()],
+    };
+    b.cfg.settings = Some(settings.clone());
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    assert!(
+        b.pass()
+            .pick_ready(&t, std::slice::from_ref(&game))
+            .is_none()
+    );
+    settings
+        .command(&["allow".into(), "sam/game".into()], "test")
+        .unwrap();
+    assert!(
+        b.pass()
+            .pick_ready(&t, std::slice::from_ref(&game))
+            .is_some()
+    );
+    settings
+        .command(
+            &["pipeline".into(), (crate::now() + 60).to_string()],
+            "test",
+        )
+        .unwrap();
+    b.pass().note_ready("sam/game", &[game]).unwrap();
+    b.pass()
+        .note_ready("sam/box", std::slice::from_ref(&pipeline))
+        .unwrap();
+    on_github(&b, &pipeline);
+    b.pass().drain().unwrap();
+    assert!(
+        b.log().contains("issues/8/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
+    assert!(!b.log().contains("repos/sam/game/issues/4"), "{}", b.log());
+    assert!(b.cfg.paused("sam/new"));
+}
+
+#[test]
+fn an_unlisted_repo_can_still_be_triaged() {
+    let mut b = Box::new();
+    b.cfg.settings = Some(burrow_settings::Config {
+        overlay: b.path("settings-overlay.json"),
+        ..Default::default()
+    });
+    assert!(b.cfg.paused("sam/box"));
+    let mut p = b.pass();
+    p.triage("sam/box", &[issue(7, "sam", &[])]).unwrap();
+    assert!(
+        p.wake.contains_key("sam/box"),
+        "triage still attempts sorting with the stand-in launcher"
     );
 }

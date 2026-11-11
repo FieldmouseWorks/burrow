@@ -17,6 +17,20 @@ import time
 import urllib.parse
 
 tmp = tempfile.mkdtemp()
+SETTINGS = os.path.abspath(sys.argv[9])
+
+
+def admission(allowed, pipeline=(), until=None):
+    """Use the production Rust reader, with a tracked file and live overlay."""
+    folder = tempfile.mkdtemp(dir=tmp)
+    path = f"{folder}/tracked.json"
+    overlay = f"{folder}/overlay.json"
+    with open(path, "w") as f:
+        json.dump({"overlay": overlay, "allowed": allowed, "pipelineRepos": list(pipeline)}, f)
+    if until is not None:
+        subprocess.run([SETTINGS, path, "pipeline", str(until)], check=True, capture_output=True)
+    return {"command": SETTINGS, "config": path}
+
 
 # burrow-events' kick port: which repos' passes were kicked.
 KICKS = []

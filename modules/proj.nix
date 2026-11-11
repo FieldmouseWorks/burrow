@@ -96,7 +96,8 @@ let
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
-    inherit (cfg) meters paused;
+    inherit (cfg) meters;
+    settings = config.burrow.settings.effective;
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
     inherit roles models;
@@ -143,6 +144,8 @@ in
   imports = [
     ./updates/health-options.nix
     (import ./common.nix inputs)
+    { key = "burrow/settings"; imports = [ (import ./settings.nix inputs) ]; }
+    (lib.mkRemovedOptionModule [ "burrow" "proj" "paused" ] "Use burrow.settings.allowed and settings pause OWNER/REPO; runtime pauses need no deploy.")
     { key = "burrow/codex-login"; imports = [ (import ./codex-login.nix inputs) ]; }
     { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
@@ -152,17 +155,6 @@ in
   ];
 
   options.burrow.proj = {
-    paused = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      example = [ "OWNER/REPO" ];
-      description = ''
-        Repositories whose automated inbox, triage, drain and steward jobs
-        are paused (case insensitive). Labels and queued issues are kept;
-        removing a repository resumes them. Running jobs are not stopped,
-        and settled PRs may still merge.
-      '';
-    };
     enable = lib.mkEnableOption "proj, background agent jobs in each project";
     codex.slots = lib.mkOption {
       type = lib.types.ints.positive;
@@ -421,7 +413,7 @@ in
         skip = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ "probe" "undo" "flaky" ];
-          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label);
+          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label ++ lib.optional config.burrow.settings.door.enable config.burrow.settings.door.label);
           description = "Labels whose issues other machinery owns: never sorted or handed on. The engines door's configured label always joins them while the door is on.";
         };
         atOnce = lib.mkOption {

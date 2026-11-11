@@ -147,9 +147,7 @@ Each has an entry below, and each can be imported on its own.
   default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
   GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
   comes back as a comment and a reply there continues it; `proj done` closes its issue.
-  `burrow.proj.paused = [ "OWNER/REPO" ];` pauses automated inbox, triage,
-  drain and steward jobs for those repositories, without changing labels.
-  Removing a repository resumes it; running jobs continue and settled PRs may merge.
+  Automated admission and runtime pauses use [the settings source](docs/settings.md).
   With `inbox.triage`, every other issue the
   authors open is sorted by a job of its own (`ready`, `later`, `tracker`, the
   owner's call, or closed as a duplicate or done), and `triage.drain` hands

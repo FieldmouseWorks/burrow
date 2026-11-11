@@ -1,3 +1,4 @@
+from harness import admission
 """What starts the steward's passes, as burrow-events runs them: the
 wake-ups a pass books, a kicked pass over one repo, and the kicks from
 reviews and Claude jobs coming back."""
@@ -191,11 +192,11 @@ C.save("known.json", [])
 NEW_JOBS = []
 C.job, job = (lambda repo, task, clone=False, *, role: NEW_JOBS.append((repo, task, clone, role)) or "job-new"), C.job
 S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
-S.CFG["paused"] = ["SAM/R"]
+S.CFG["settings"] = admission([])
 S.main()
 assert NEW_JOBS == [] and C.load("baseline-failed.json", {}) == {}, NEW_JOBS
 assert C.load("known.json", []) == []
-S.CFG.pop("paused")
+S.CFG.pop("settings")
 order.clear()
 seen_repos.clear()
 published.clear()

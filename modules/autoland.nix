@@ -94,7 +94,8 @@ let
     renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
     # proj's record of its jobs, which repos.py reads for a remade repo's.
-    inherit (config.burrow.proj) jobsDir paused;
+    inherit (config.burrow.proj) jobsDir;
+    settings = { inherit (config.burrow.settings) command; config = config.burrow.settings.file; };
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;

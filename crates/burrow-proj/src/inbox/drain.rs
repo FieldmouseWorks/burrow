@@ -169,6 +169,9 @@ impl Pass<'_> {
                 }
                 continue;
             }
+            if self.cfg.paused(&repo) {
+                continue;
+            }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
             fs::write(d.join("drained"), format!("{repo}#{n}\n"))

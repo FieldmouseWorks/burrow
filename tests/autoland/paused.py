@@ -1,9 +1,10 @@
+from harness import admission
 """Paused repositories never reach the steward's cloning or job startup path."""
 from unittest.mock import patch
 
 from harness import C, REAL
 
-C.CFG["paused"] = ["SAM/R"]
+C.CFG["settings"] = admission(["sam/r", "sam/other"], ["sam/other"], 4102444800)
 with patch.object(C, "retiring", side_effect=AssertionError("admitted")):
     for role in ("steward-handed", "steward-judged", "proof"):
         try:
@@ -12,21 +13,21 @@ with patch.object(C, "retiring", side_effect=AssertionError("admitted")):
             pass
         else:
             raise AssertionError("paused job was admitted")
-    # An unlisted repository still reaches normal admission.
+    # A listed pipeline repository still reaches normal admission.
     try:
         REAL["job"]("sam/other", "task", role="steward-handed")
     except AssertionError as error:
         assert str(error) == "admitted"
     else:
-        raise AssertionError("unlisted repository was paused")
-C.CFG.pop("paused")
+        raise AssertionError("pipeline repository was paused")
+C.CFG.pop("settings")
 
 # Exercise the PR transaction boundary: paused fix/judge/proof admissions
 # become holds with no strikes or failure digest. Already settled PRs merge.
 from harness import JOBS, S, R, CI_GREEN, fresh_pr_state, clean, mkpr, run, pr_state, merged, rv_review, stand_in
 
 stand_in()
-C.CFG["paused"] = ["SAM/R"]
+C.CFG["settings"] = admission(["sam/r", "sam/other"], ["sam/other"], 4102444800)
 with patch.object(C, "job", REAL["job"]):
     saved_repo = dict(C.CFG["repos"].get("sam/r", {}))
     C.CFG["repos"]["sam/r"] = {"proofJobs": {"paused-proof": "run proof"}}
@@ -63,5 +64,12 @@ with patch.object(C, "job", REAL["job"]):
     R.watch_default({"repo": "sam/r", "default": "main"}, info, [], mine)
     assert mine == [] and not C.load("repo-sam_r.json", {}).get("red", {}).get("job"), mine
 C.CFG["repos"]["sam/r"] = saved_repo
-C.CFG.pop("paused")
+C.CFG.pop("settings")
 stand_in()
+
+# Scope narrows the same allow list, with no cached reader state.
+C.CFG["settings"] = admission(["sam/r", "sam/other"], ["sam/other"], 4102444800)
+assert C.paused("sam/r")
+assert not C.paused("sam/other")
+assert C.paused("sam/new")
+C.CFG.pop("settings")

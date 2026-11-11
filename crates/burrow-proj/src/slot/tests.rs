@@ -957,3 +957,5 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
 
 mod reset;
 mod usage;
+
+mod admission;

@@ -692,7 +692,12 @@ class JobPaused(Exception):
 
 
 def paused(repo):
-    return any(repo.casefold() == r.casefold() for r in CFG.get("paused", []))
+    settings = CFG.get("settings")
+    if settings:
+        result = subprocess.run([settings["command"], settings["config"], "allows", repo],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return result.returncode != 0
+    return False
 
 
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):

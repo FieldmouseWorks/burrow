@@ -337,12 +337,9 @@ impl Pass<'_> {
     /// shared admission capacity. Unstarted handoffs cannot start while paused.
     pub(super) fn record_uses_capacity(&self, dir: &Path) -> bool {
         let name = dir.file_name().unwrap_or_default().to_string_lossy();
-        let paused = name.rsplit_once('-').is_some_and(|(repo, _)| {
-            self.cfg
-                .paused
-                .iter()
-                .any(|r| key(r).eq_ignore_ascii_case(repo))
-        });
+        let paused = name
+            .rsplit_once('-')
+            .is_some_and(|(repo, _)| self.cfg.paused(&repo.replacen('_', "/", 1)));
         !paused
             || read(&dir.join("job")).is_some_and(|id| {
                 matches!(
@@ -681,9 +678,6 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             if !only.is_empty() && repo.to_lowercase() != only.to_lowercase() {
                 continue;
             }
-            if self.cfg.paused(&repo) {
-                continue;
-            }
             self.looked.push(repo.clone());
             self.label(&repo);
             // None when GitHub can't be asked: the repo is skipped this
@@ -714,8 +708,10 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 .into_iter()
                 .filter(|i| i.get("pull_request").is_none())
                 .collect();
-            self.new_issues(&repo, &open)?;
-            self.jobs(&repo, &p, &open)?;
+            if !self.cfg.paused(&repo) {
+                self.new_issues(&repo, &open)?;
+                self.jobs(&repo, &p, &open)?;
+            }
             if self.inbox.triage.is_some() {
                 let Some(all) = every(
                     self.cfg,

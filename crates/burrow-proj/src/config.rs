@@ -10,9 +10,8 @@ use crate::engine::{Choice, Engine};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
-    /// Repositories whose automated work is paused, without changing labels.
     #[serde(default)]
-    pub paused: Vec<String>,
+    pub settings: Option<burrow_settings::Config>,
     #[serde(default)]
     pub usage_paid: bool,
     /// Where the projects are: each folder in it is one (burrow.projectsDir).
@@ -199,7 +198,26 @@ pub struct Triage {
 
 impl Config {
     pub fn paused(&self, repo: &str) -> bool {
-        self.paused.iter().any(|r| r.eq_ignore_ascii_case(repo))
+        self.settings
+            .as_ref()
+            .is_some_and(|s| !s.allows(repo).unwrap_or(false))
+    }
+
+    pub fn settings_line(&self) -> String {
+        let Some(settings) = &self.settings else {
+            return String::new();
+        };
+        let repos: Vec<_> = std::fs::read_dir(&self.projects)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .map(|e| crate::pick::github_repo(self, &e.path().to_string_lossy()))
+            .filter(|r| !r.is_empty())
+            .collect();
+        settings
+            .show_for(&repos)
+            .unwrap_or_else(|e| format!("Automated work: paused (settings error: {e})\n"))
     }
 
     /// The config PROJ_CONFIG names.
