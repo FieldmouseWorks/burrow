@@ -253,11 +253,29 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         Checkpoint::valid_place(&e.file_name().to_string_lossy(), job.id)
             && read(&e.path()).as_deref() == Some(pid.to_string().as_str())
     });
-    let waited = place
-        .as_ref()
-        .and_then(|e| crate::mtime_nanos(&e.path()))
-        .or_else(|| crate::mtime_nanos(&job.turn(n, "withdrawable")))
-        .unwrap_or_else(now_nanos);
+    let stream = job.turn(n, "jsonl");
+    let said = engine::last_result(&stream, 0)
+        .and_then(|last| {
+            engine::refused_file(engine::Engine::Claude, &last, &stream, 0, crate::now())
+        })
+        .map(|(_, said)| said);
+    // A legacy parent can be preempted after refusal but before it publishes
+    // its place. Publication after reset must not turn that retained refusal
+    // into fresh work that can bypass the draining cohort.
+    let refusal = said.as_ref().and_then(|_| crate::mtime_nanos(&stream));
+    let awaiting = read(&job.path("await"))
+        .filter(|s| s.starts_with("usage-limit\t"))
+        .and_then(|_| crate::mtime_nanos(&job.path("await")));
+    let waited = [
+        place.as_ref().and_then(|e| crate::mtime_nanos(&e.path())),
+        crate::mtime_nanos(&job.turn(n, "withdrawable")),
+        refusal,
+        awaiting,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or_else(now_nanos);
     let name = place
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .unwrap_or_else(|| {
@@ -272,12 +290,6 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
                 waited,
             )
         });
-    let stream = job.turn(n, "jsonl");
-    let said = engine::last_result(&stream, 0)
-        .and_then(|last| {
-            engine::refused_file(engine::Engine::Claude, &last, &stream, 0, crate::now())
-        })
-        .map(|(_, said)| said);
     Ok(Checkpoint {
         waited,
         said,

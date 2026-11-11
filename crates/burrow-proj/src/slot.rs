@@ -50,7 +50,7 @@ use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
-pub const RETRY_HANDOVER_FORMAT: &str = "2";
+pub const RETRY_HANDOVER_FORMAT: &str = "3";
 const NEXT_FRESH: i64 = 2;
 /// Whatever the note says, a waiter looks this often, which is as long as a
 /// job whose class changed can go on holding its old place in line.
@@ -86,6 +86,17 @@ pub(crate) fn retry_compatible(to: &Path) -> bool {
             said.status.success()
                 && String::from_utf8_lossy(&said.stdout).trim_end() == RETRY_HANDOVER_FORMAT
         })
+}
+
+/// Initial startup has already committed its execution identity too. An
+/// unaware rollback must not execute that turn while leaving a stale identity
+/// for a later deployment to trust. Both pools use this single handover rule.
+fn startup_compatible(job: &Job, n: &str, to: &Path) -> io::Result<bool> {
+    let protected = crate::retry::Checkpoint::load(job, n)?.is_some()
+        || crate::retry::Identity::load(job, n)
+            .map_err(io::Error::other)?
+            .is_some();
+    Ok(!protected || retry_compatible(to))
 }
 
 /// On with the proj at `to`, in this pid, its look's lock on fd 9 until it's up:
@@ -291,18 +302,25 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     for (id, name, arrived) in &pending {
-        if !existing
+        let mut places = existing
             .iter()
-            .any(|n| !n.starts_with('.') && job_of(n) == id)
-        {
+            .filter(|n| !n.starts_with('.') && job_of(n) == id)
+            .map(|n| queue.join(n))
+            .collect::<Vec<_>>();
+        if places.is_empty() {
             // A dead parent's place may have been cleared by another census.
-            // Restore its committed position before deciding the cohort drained.
             let path = queue.join(name);
             crate::state_reads::write(&path, "pending\n")?;
-            File::open(path)?.set_times(
-                FileTimes::new()
-                    .set_modified(UNIX_EPOCH + Duration::from_nanos((*arrived).max(0) as u64)),
-            )?;
+            places.push(path);
+        }
+        for path in places {
+            let file = crate::state_reads::open(&path)?;
+            let birth = UNIX_EPOCH + Duration::from_nanos((*arrived).max(0) as u64);
+            if file.metadata()?.modified()? > birth {
+                // Preserve the earlier refusal even when an old writer only
+                // managed to publish its queue entry after reset.
+                file.set_times(FileTimes::new().set_modified(birth))?;
+            }
         }
     }
     let mut names: Vec<String> = fs::read_dir(&queue)?
@@ -369,11 +387,10 @@ fn codex_slot(
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
     }
-    let retry = crate::retry::Checkpoint::load(&job, n)?;
     loop {
         if may_hand_over
             && let Some(to) = successor(cfg)
-            && (retry.is_none() || retry_compatible(&to))
+            && startup_compatible(&job, n, &to)?
         {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
@@ -465,7 +482,7 @@ pub fn take(
         // LOOK_EVERY).
         if may_hand_over
             && let Some(to) = successor(cfg)
-            && (retry.is_none() || retry_compatible(&to))
+            && startup_compatible(&job, n, &to)?
         {
             unmark(&job, n)?;
             let lk = File::create(slots.join(".admission-lock"))?;

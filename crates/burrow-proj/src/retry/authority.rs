@@ -178,6 +178,10 @@ pub(super) fn legacy_handover(cfg: &Config, exe: &Path, args: &[&[u8]]) -> bool 
         .get(4)
         .and_then(|b| std::str::from_utf8(b).ok())
         .map(Path::new);
+    let target = args
+        .get(5)
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .map(Path::new);
     args.len() >= 9
         && args[1] == b"-c"
         && args[2] == SCRIPT
@@ -185,6 +189,8 @@ pub(super) fn legacy_handover(cfg: &Config, exe: &Path, args: &[&[u8]]) -> bool 
         && args[3] == cfg.jobs.join(".slots/.lock").as_os_str().as_bytes()
         && (args[4] == cfg.tools.flock.as_os_str().as_bytes()
             || flock.is_some_and(|path| store_tool(path, "flock")))
-        && args[5].rsplit(|b| *b == b'/').next() == Some(b"burrow-proj")
+        && target.is_some_and(|path| {
+            same(path, &cfg.deployed) || store_tool(path, "proj") || store_tool(path, "burrow-proj")
+        })
         && args[6] == b"_exec"
 }

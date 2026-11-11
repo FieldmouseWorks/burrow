@@ -121,6 +121,7 @@ echo $! >'{jobs}'/$id/pid
     }
 }
 
+#[track_caller]
 fn until(mut f: impl FnMut() -> bool) {
     let began = Instant::now();
     while !f() {
@@ -223,6 +224,11 @@ fn child() {
         .unwrap();
         fs::remove_file(job.turn("1", "slot")).unwrap();
         drop(file);
+    }
+    if mode == "old-delayed" {
+        while !job.path("publish").exists() {
+            sleep(Duration::from_millis(10));
+        }
     }
     if mode == "new-retry" {
         Checkpoint::retry(&job, "1", false, now_nanos(), "refused").unwrap();
@@ -379,7 +385,11 @@ fn post_deploy_refusal_cannot_enter_the_old_scheduler() {
     }
     legacy_reset(&r);
     pass(&r.cfg).unwrap();
-    until(|| took(&r.cfg) == 2);
+    until(|| {
+        let count = took(&r.cfg);
+        assert!(count <= 2, "reset budget bypassed: {count}");
+        count == 2
+    });
     sleep(Duration::from_secs(3));
     assert_eq!(took(&r.cfg), 2);
 }
@@ -770,6 +780,11 @@ fn retained_handover_rejects_rollback_to_startup_that_would_truncate_its_stream(
         &old,
         "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 2\n",
     );
+    assert!(!slot::retry_compatible(&old));
+    burrow_test::executable(
+        &old,
+        "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 3\n",
+    );
     assert!(slot::retry_compatible(&old));
 }
 
@@ -928,3 +943,5 @@ mod review2;
 mod review3;
 
 mod review4;
+
+mod rollback;
