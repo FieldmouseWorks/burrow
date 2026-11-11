@@ -9,6 +9,13 @@ from step_context import STRIKES, STRIKE_LIMIT, ON, VERB, clock, _HEAD
 
 
 class Jobs:
+    def usage_grace(self):
+        """Only jobs still owning a step at settlement contribute grace."""
+        current = {jid for key, jid in self.st.items() if key.endswith("Job") and self.st.get(key[:-3])}
+        records = self.st.get("usageJobs", {})
+        return max((record["release"] for jid, record in records.items()
+                    if jid in current and self.looked.get(jid) in ("usage", "queued", "running", "unknown")), default=None)
+
     def deadline(self, kind):
         """A pass when this kind's job is due to have ended (proj stops a turn
         at jobTimeout, a proof build stops at proofTimeout), and every
@@ -46,7 +53,34 @@ class Jobs:
 
     def look(self, kind, jid):
         """running's look at the job: what proj says of it, once."""
-        state, target = C.job_lifecycle(jid, self.tag)
+        snapshot = C.lifecycle(jid)
+        state, target = C.job_lifecycle(jid, self.tag, snapshot)
+        usage = C.job_usage(jid, snapshot)
+        records = self.st.setdefault("usageJobs", {})
+        self.st.pop("usageRelease", None)  # replaced by job-scoped releases
+        release = C.job_release(snapshot)
+        if state is None and jid in records:
+            record = records[jid]
+            if record["release"] > C.NOW:
+                usage = record["engine"], record["release"]
+            C.wake(self.repo, min(C.NOW + MIN, record["release"]) if record["release"] > C.NOW else C.NOW + MIN)  # ends: retry the unreadable lifecycle, bounded by reset
+        if usage:
+            engine, reset = usage
+            records[jid] = {"engine": engine, "release": reset}
+        elif jid in records and state is not None:
+            if state in ("queued", "running") and not target:
+                records[jid]["release"] = min(records[jid]["release"], release if release is not None else C.NOW)
+            else:
+                records.pop(jid)
+        if usage:
+            engine, reset = usage
+            if reset > C.NOW or (state not in ("queued", "running") and target == "usage-limit"):
+                if reset > C.NOW:
+                    C.wake(self.repo, reset)  # ends: the engine resets, and proj resumes this job
+                else:
+                    self.deadline(kind)
+                self.awaits[kind] = f"{engine}'s usage reset at {clock(reset)}"
+                return "usage"
         if target:
             # No deadline: its wake is proj's resume, whose end kicks a pass.
             self.awaits[kind] = target
@@ -70,6 +104,8 @@ class Jobs:
         if at is _HEAD:
             at = self.head
         state = self.running(kind, at)
+        if state == "usage":
+            return f"waiting for {self.awaits[kind]} to continue {doing}"
         if state == "queued":
             return f"a Claude job is queued for {doing}"
         if state == "awaiting":
