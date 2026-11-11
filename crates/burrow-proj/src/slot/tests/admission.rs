@@ -186,3 +186,75 @@ fn an_unlisted_repository_can_sort_until_explicitly_paused() {
         .unwrap();
     assert!(crate::policy::denied(&job));
 }
+
+// A waiter whose repository the settings pause keeps its place but is neither
+// in the line status shows nor offered a slot by a look, so it reserves nothing.
+#[test]
+fn a_paused_waiter_holds_no_place_in_the_line() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    clones(&tmp);
+    let mut cfg = config(&jobs, 6);
+    let _holder = line_of_size(&tmp, &jobs, 4);
+    for j in ["job1", "job2"] {
+        fs::write(jobs.join(j).join("role"), "work\n").unwrap();
+    }
+    cfg.settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .retain(|r| r != "sam/box");
+    let got = in_line(&cfg);
+    let ids: Vec<&str> = got
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert!(!ids.contains(&"job1"), "{got}");
+    assert!(ids.contains(&"job2"), "{got}");
+    let seen = look(&cfg, "none", &jobs.join("job0"), Class::Normal).unwrap();
+    assert!(seen.line.iter().all(|w| !w.name.ends_with("job1")));
+    assert!(seen.line.iter().any(|w| w.name.ends_with("job2")));
+    assert_eq!(in_queue(&jobs), 4, "its place is kept");
+}
+
+#[test]
+fn a_bound_repository_survives_a_lost_origin_and_cannot_change_identity() {
+    let tmp = TempDir::new().unwrap();
+    clones(&tmp);
+    let jobs = jobs_dir(&tmp);
+    let mut cfg = config(&jobs, 1);
+    let dir = jobs.join("identity");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("project"),
+        tmp.path().join("box").to_str().unwrap(),
+    )
+    .unwrap();
+    let job = Job::new(&cfg, "identity");
+    assert!(!crate::policy::denied(&job));
+    fs::write(dir.join("project"), "/missing/project").unwrap();
+    assert!(
+        !crate::policy::denied(&job),
+        "bound repository survives a lost origin"
+    );
+    drop(job);
+    cfg.settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .retain(|r| r != "sam/box");
+    let job = Job::new(&cfg, "identity");
+    assert!(
+        crate::policy::denied(&job),
+        "paused repo with lost origin stays paused"
+    );
+    fs::write(
+        dir.join("project"),
+        tmp.path().join("web").to_str().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        crate::policy::denied(&job),
+        "metadata cannot change the repository"
+    );
+}

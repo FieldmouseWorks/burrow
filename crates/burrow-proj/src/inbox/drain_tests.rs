@@ -722,6 +722,10 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
     assert!(p.sorting_slot(&sorting));
     assert!(p.record_uses_capacity(&drained));
+    // A queued automated worker of a paused repository is held, not counted.
+    fs::write(b.cfg.jobs.join("s1/role"), "work\n").unwrap();
+    assert!(!p.record_uses_capacity(&drained));
+    fs::remove_file(b.cfg.jobs.join("s1/role")).unwrap();
     fs::remove_file(b.path("active")).unwrap();
     let ready = found("sam/game", 4, "sam", &["ready"], "2026-11-01T00:00:00Z");
     p.note_ready("sam/game", std::slice::from_ref(&ready))
