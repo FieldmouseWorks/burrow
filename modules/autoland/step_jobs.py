@@ -2,6 +2,7 @@
 
 import claims
 import common as C
+import proofs as P
 import stages as S
 import waits
 from common import CFG, MIN, log, ts
@@ -22,7 +23,7 @@ class Jobs:
         quarter hour past that while it still hasn't (it waited for a slot
         first): its end kicks one, and this is the one that sees it if that
         kick never got through."""
-        limit = CFG["proofTimeout"] if str(self.st.get(kind + "Job")).startswith(C.BUILD) else CFG["jobTimeout"]
+        limit = P.timeout(self.repo) if str(self.st.get(kind + "Job")).startswith(C.BUILD) else CFG["jobTimeout"]
         due = self.st.get(kind + "At", C.NOW) + (limit + 5) * MIN
         C.wake(self.repo, due if due > C.NOW else C.NOW + 15 * MIN)  # ends: its PR's wait, unchanged, is overdue at its deadline
 

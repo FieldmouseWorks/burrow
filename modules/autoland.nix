@@ -59,9 +59,9 @@ let
     (lib.filter (c: lib.elem (lib.toLower c) (map lib.toLower (lib.attrNames (rc.proofBuilds or { }))))
       (lib.attrNames (rc.proofRuns or { })))) cfg.repos);
   # Every setting a repo in `repos` may have: the steward's defaults, and the
-  # three read only where they're set (keepBranches by the branch cleanup,
-  # proofSlots by the proof line, skipPaths by the reviewers' snapshot).
-  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "skipPaths" ];
+  # settings read only where they're set (branch cleanup, proof limits and
+  # the reviewers' snapshot).
+  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "proofTimeoutMinutes" "skipPaths" ];
   # "REPO".SETTING, for each setting a repo has that isn't one of those.
   unknown = lib.concatLists (lib.mapAttrsToList (repo: rc: map (k: "\"${repo}\".${k}")
     (lib.filter (k: !lib.elem k known) (lib.attrNames rc))) cfg.repos);
@@ -506,7 +506,7 @@ in
         proofBuilds or proofRuns) may take, a build's wait for a heavy slot
         included, before it's stopped and started again: long enough for a
         NixOS test's own hour (its driver's globalTimeout) after a slot has
-        come free.
+        come free. A repo may override this with its own proofTimeoutMinutes.
       '';
     };
 
@@ -752,6 +752,9 @@ in
         needs (`heavy --`, a gate's own). A check can't be in both
         proofBuilds and proofRuns; one in proofRuns and proofJobs is a run;
         none runs on a head in the docs lane),
+        proofTimeoutMinutes (a positive integer, overriding the machine's
+        proofTimeoutMinutes for this repo's builds and runs, independently
+        of jobTimeoutMinutes; long serial replays need not extend agent turns),
         proofSlots (how many of those proofs, jobs, builds and runs, the repo may
         have building at once, for proofs that take the whole machine: the
         rest wait their turn, those labelled `labels.first` first, then the
@@ -799,6 +802,10 @@ in
         (lib.filter (c: lib.elem (lib.toLower c) (names kind)) (lib.attrNames (rc.proofJobs or { })));
     in shadowed "proofBuilds" "builds" ++ shadowed "proofRuns" "runs") cfg.repos);
     assertions = [{
+      assertion = lib.all (rc: !(rc ? proofTimeoutMinutes) ||
+        (builtins.isInt rc.proofTimeoutMinutes && rc.proofTimeoutMinutes > 0)) (lib.attrValues cfg.repos);
+      message = "burrow.autoland.repos: proofTimeoutMinutes must be a positive integer.";
+    } {
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
     } {
