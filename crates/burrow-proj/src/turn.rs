@@ -168,6 +168,30 @@ pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+pub(crate) fn initialize_deadline(
+    job: &Job,
+    n: &str,
+    retry: Option<&crate::retry::Checkpoint>,
+    total: i64,
+) -> std::io::Result<()> {
+    if retry.is_none_or(|s| s.initial()) {
+        for f in ["deadline", "wait", "late"] {
+            fs::remove_file(job.turn(n, f)).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+        }
+        if total > 0 {
+            let taken = mtime_nanos(&job.turn(n, "slot")).unwrap_or_else(now_nanos);
+            swap(&job.turn(n, "deadline"), &format!("{}\n", taken + total))?;
+        }
+    }
+    Ok(())
+}
+
 /// One turn of a job, inside its own systemd unit: `first` or `normal`, as
 /// it was started.
 pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
@@ -182,6 +206,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         crate::question::accept(&job, &n).map_err(|e| Fail::new(1, e))?;
     }
     let outcome = |text: &str| {
+        // Distinguish a failed checkpoint-aware startup from a completed old
+        // turn whose leftover checkpoint must never replay its conversation.
+        if job.turn(&n, "retry-migration").exists()
+            && swap(&job.turn(&n, "retry-startup-failed"), "").is_err()
+        {
+            return;
+        }
         let _ = fs::write(job.turn(&n, "outcome"), format!("{text}\n"));
     };
     // The last turn's waits, now that this one has started: this turn
@@ -266,15 +297,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         outcome("failed");
         return Err(Fail::quiet(2));
     };
-    if retry.is_none() {
-        for f in ["deadline", "wait", "late"] {
-            let _ = fs::remove_file(job.turn(&n, f));
-        }
-    }
-    if retry.is_none() && total > 0 {
-        let taken = mtime_nanos(&job.turn(&n, "slot")).unwrap_or_else(now_nanos);
-        let _ = fs::write(job.turn(&n, "deadline"), format!("{}\n", taken + total));
-    }
+    initialize_deadline(&job, &n, retry.as_ref(), total)
+        .map_err(|e| Fail::new(1, e.to_string()))?;
     // Where its commands say they're waiting in line (waits::waiting).
     let waitdir = job.turn(&n, "waits");
     if retry.is_none() {
@@ -282,7 +306,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     }
     fs::create_dir_all(&waitdir)
         .map_err(|e| Fail::new(1, format!("proj: {}: {e}", waitdir.display())))?;
-    rewatch(cfg, &[id]);
     // Whether its turns must say what comes next: an --owned job's starter
     // acts on each end itself.
     let agent = read(&job.path("agent")).filter(|a| !a.is_empty());
@@ -308,6 +331,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             .resume(&job, &n, &first)
             .map_err(|e| Fail::new(1, e.to_string()))?;
     }
+    rewatch(cfg, &[id]);
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
@@ -455,17 +479,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         .map_err(|e| Fail::new(1, e.to_string()))?;
                     let _ = held.insert(take(true)?);
                     kick(cfg, lines(&job.path("kick")));
-                    if let Some(dl) = deadline(&job, &n) {
-                        let dl = dl + (now_nanos() - waited);
-                        let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
-                    }
-                    fs::remove_file(job.turn(&n, "retry-migration"))
+                    let state = crate::retry::Checkpoint::load(&job, &n)
+                        .map_err(|e| Fail::new(1, e.to_string()))?
+                        .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
+                    prompt = state
+                        .resume(&job, &n, &first)
                         .map_err(|e| Fail::new(1, e.to_string()))?;
-                    let asked = read(&first).unwrap_or_default();
-                    prompt = again(
-                        &format!("{SPENT}\n\n{said}. {}\n\n{asked}", usage::policy(cfg)),
-                        "spent",
-                    );
+                    rewatch_later(cfg, id);
                     continue;
                 }
                 eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");

@@ -368,6 +368,11 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
 /// again.
 fn left_be(job: &Job, n: &str, active: &str) -> Result<Option<&'static str>, Fail> {
     let id = job.id;
+    // Checkpoint consumption takes the same job lock as withdrawal. Until
+    // that commit, even an inactive transfer with stale slot files is queued.
+    if job.retry_pending(n) {
+        return Ok(None);
+    }
     match active {
         "active" | "activating" | "reloading" => {}
         "inactive" | "failed" => return Ok(Some("over")),
@@ -427,7 +432,6 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // failed: nobody waits on it.
     if let Some(n) = &n {
         let _ = fs::write(job.turn(n, "stopped"), "");
-        let _ = fs::remove_file(job.turn(n, "retry-migration"));
     }
     // No turn of it running, so no end of one to clear its scratch: this does.
     let idle = systemd::gone(cfg, &unit);
@@ -448,6 +452,17 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             u8::try_from(rc).unwrap_or(1),
             format!("proj: couldn't stop {id}"),
         ));
+    }
+    if let Some(n) = &n {
+        fs::remove_file(job.turn(n, "retry-migration"))
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|e| Fail::new(1, e.to_string()))?;
     }
     crate::ask::clear(job);
     if crate::ask::host_path(job, "label").exists() {

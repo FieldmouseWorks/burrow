@@ -174,5 +174,39 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"ls /data/dev/jobs/.queue | grep -- '-{r}$'")
         proj(f"stop {q}")
         proj(f"stop {r}")
+
+    def restore_waiter(job_id, budget, retained=False):
+        machine.succeed("systemctl stop proj-retry-transfer.service")
+        proj(f"usage hold {int(time.time()) + 3600} --reason transfer-test")
+        name, pid = place(job_id)
+        unit = machine.succeed(f"systemd-escape --template=proj-.service '{job_id}'").strip()
+        machine.succeed(f"systemctl --user -M dev@ stop '{unit}'")
+        now = int(time.time() * 1_000_000_000)
+        checkpoint = {"waited": now - 3600_000_000_000, "said": None,
+                      "deadline": now - 3600_000_000_000 + budget * 1_000_000_000 if retained else None,
+                      "name": "2-" + name, "first": False}
+        machine.succeed(f"printf '%s' '{json.dumps(checkpoint)}' >/data/dev/jobs/{job_id}/1.retry-migration")
+        machine.succeed("systemctl start proj-retry-transfer.service")
+        proj("usage back")
+
+    with subtest("a transferred initial waiter starts its configured timeout"):
+        proj(f"usage hold {int(time.time()) + 3600} --reason initial-test")
+        initial = proj('run --timeout 2s web "sleep 600"')
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -- '-{initial}$'", timeout=30)
+        restore_waiter(initial, 2)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {initial}' | grep -x 'timed out after 2s'", timeout=30)
+
+    with subtest("restored paused time reaches the watchdog before a retained run starts"):
+        proj(f"usage hold {int(time.time()) + 3600} --reason watchdog-test")
+        retained = proj('run --timeout 30s web "sleep 600"')
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -- '-{retained}$'", timeout=30)
+        restore_waiter(retained, 30, retained=True)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {retained}' | grep -x running", timeout=30)
+        machine.wait_until_succeeds(f"jq -e '.items[\"{retained}\"].phase | test(\"is running\")' /data/dev/jobs/.waits.json", timeout=20)
+        deadline = int(machine.succeed(f"cat /data/dev/jobs/{retained}/1.deadline")) // 1_000_000_000
+        item = json.loads(machine.succeed(f"jq -c '.items[\"{retained}\"]' /data/dev/jobs/.waits.json"))
+        assert item["due"] >= deadline, (item, deadline)
+        assert deadline >= time.time() + 10, deadline
+        proj(f"stop {retained}")
   '';
 }

@@ -27,7 +27,7 @@ pub(crate) struct Checkpoint {
 
 impl Checkpoint {
     pub fn load(job: &Job, n: &str) -> io::Result<Option<Self>> {
-        match fs::read(job.turn(n, "retry-migration")) {
+        match crate::state_reads::bytes(&job.turn(n, "retry-migration")) {
             Ok(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
                 let parts: Vec<_> = state.name.splitn(3, '-').collect();
@@ -50,6 +50,10 @@ impl Checkpoint {
         }
     }
 
+    pub fn initial(&self) -> bool {
+        self.deadline.is_none() && self.said.is_none()
+    }
+
     pub fn retry(job: &Job, n: &str, first: bool, waited: i64, said: &str) -> io::Result<()> {
         let state = Self {
             waited,
@@ -67,13 +71,42 @@ impl Checkpoint {
                 waited,
             ),
         };
-        swap(
-            &job.turn(n, "retry-migration"),
-            &serde_json::to_string(&state)?,
-        )
+        loop {
+            let held = job.lock()?;
+            if job.turns().as_deref() != Some(n) || job.turn(n, "stopped").exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "retry was cancelled or superseded",
+                ));
+            }
+            match census(job, n) {
+                Ok(_census) => {
+                    return swap(
+                        &job.turn(n, "retry-migration"),
+                        &serde_json::to_string(&state)?,
+                    );
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // Cancellation and emergency promotion remain available.
+                    drop(held);
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     pub fn resume(&self, job: &Job, n: &str, first: &Path) -> io::Result<PathBuf> {
+        let _job = job.lock()?;
+        if job.turns().as_deref() != Some(n)
+            || job.turn(n, "stopped").exists()
+            || !job.turn(n, "retry-migration").exists()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "retry was cancelled or superseded",
+            ));
+        }
         if let Some(dl) = self.deadline {
             swap(
                 &job.turn(n, "deadline"),
@@ -106,12 +139,46 @@ impl Checkpoint {
             .open(job.turn(n, "jsonl"))?
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
         fs::remove_file(job.turn(n, "retry-migration"))?;
+        let _ = fs::remove_file(job.turn(n, "retry-startup-failed"));
         Ok(prompt)
     }
 
     pub fn queue(&self) -> (&str, i64) {
         (&self.name, self.waited)
     }
+}
+
+fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
+    if job.path("unstick").exists() || read(&job.turn(n, "engine")).as_deref() == Some("codex") {
+        return Ok(None);
+    }
+    let file = fs::File::create(job.cfg.jobs.join(".slots/.admission-lock"))?;
+    file.try_lock().map_err(io::Error::from)?;
+    Ok(Some(file))
+}
+
+/// Pending ordinary turns remain in the census even with no live parent.
+/// The caller owns the admission lock when publishing their saved places.
+pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> {
+    let mut pending = Vec::new();
+    for entry in fs::read_dir(&cfg.jobs)?.filter_map(Result::ok) {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if id.starts_with('.') {
+            continue;
+        }
+        let job = Job::new(cfg, &id);
+        let Some(n) = job.turns() else { continue };
+        if !job.retry_pending(&n)
+            || job.path("unstick").exists()
+            || read(&job.turn(&n, "engine")).as_deref() == Some("codex")
+        {
+            continue;
+        }
+        if let Some(state) = Checkpoint::load(&job, &n)? {
+            pending.push((id, state.name, state.waited));
+        }
+    }
+    Ok(pending)
 }
 
 /// Enumerate only this engine's turn parents, using argv and executable
@@ -191,17 +258,22 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
 /// barrier; the system service owns it for the entire deployment, including
 /// this consumer's restarts. A health check verifies its unit is active.
 pub fn pass(cfg: &Config) -> io::Result<()> {
+    let mut busy = false;
     for (pid, id, first) in parents()? {
         let job = Job::new(cfg, &id);
-        let Some(n) = job.turns() else { continue };
         let Some(_lock) = job.try_lock()? else {
+            busy = true;
             continue;
         };
+        let Some(n) = job.turns() else { continue };
         // Running turns keep their own locks and executable. Waiting Codex
         // and emergency turns must transfer too: an old initial handover can
         // itself be blocked on the fenced census. Their saved engine/flag
         // sends the replacement straight back to its independent pool.
-        if job.turn(&n, "slot").exists() || job.turn(&n, "outcome").exists() {
+        if job.turn(&n, "slot").exists()
+            || job.turn(&n, "outcome").exists()
+            || job.turn(&n, "stopped").exists()
+        {
             continue;
         }
         // Confirm this is the unit's main process, not another user's argv.
@@ -210,6 +282,14 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         }
         if Checkpoint::load(&job, &n)?.is_none() {
             let state = checkpoint(cfg, &job, &n, pid, first)?;
+            let _census = match census(&job, &n) {
+                Ok(held) => held,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    busy = true;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             swap(
                 &job.turn(&n, "retry-migration"),
                 &serde_json::to_string(&state)?,
@@ -230,15 +310,21 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         }
         let job = Job::new(cfg, &id);
-        let Some(n) = job.turns() else { continue };
-        let Some(state) = Checkpoint::load(&job, &n)? else {
+        let Some(_lock) = job.try_lock()? else {
+            busy = true;
             continue;
         };
-        if job.turn(&n, "stopped").exists() {
-            fs::remove_file(job.turn(&n, "retry-migration"))?;
+        // One locked snapshot owns cancellation, turn identity and launch.
+        let Some(n) = job.turns() else { continue };
+        if job.turn(&n, "stopped").exists() || job.retry_completed(&n) {
+            match fs::remove_file(job.turn(&n, "retry-migration")) {
+                Ok(()) => (),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e),
+            }
             continue;
         }
-        let Some(_lock) = job.try_lock()? else {
+        let Some(state) = Checkpoint::load(&job, &n)? else {
             continue;
         };
         if systemd::active(cfg, &job.unit()) {
@@ -268,6 +354,14 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if !turn::launch(cfg, &job, state.first) {
             return Err(io::Error::other(format!("couldn't resume {id}")));
         }
+    }
+    if busy {
+        // The consumer retries this deferred pass explicitly. No lock file
+        // events (including our own opens/closes) can create a scan loop.
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "retry transfer job lock busy",
+        ));
     }
     Ok(())
 }
@@ -299,7 +393,16 @@ pub fn watch(cfg: &Config) -> io::Result<()> {
                 )?;
             }
         }
-        pass(cfg)?;
+        match pass(cfg) {
+            Ok(()) => (),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Contention is deferred work, not a failed deployment unit.
+                // Retry explicitly after releasing every per-job lock.
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
         let mut events = inotify::Reader::new(&fd, &mut buf);
         loop {
             let event = events.next()?;

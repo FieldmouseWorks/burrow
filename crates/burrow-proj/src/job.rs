@@ -179,12 +179,26 @@ impl<'a> Job<'a> {
         }
     }
 
-    /// What `proj state` says: queued or running while its unit is up (as
+    /// What `proj state` says: queued while a transfer is pending, otherwise
+    /// queued or running while its unit is up (as
     /// its latest turn has a slot or not), then how that turn ended, as it
     /// wrote it, or failed when it wrote nothing.
+    pub(crate) fn retry_completed(&self, n: &str) -> bool {
+        filled(&self.turn(n, "outcome")) && !self.turn(n, "retry-startup-failed").exists()
+    }
+
+    pub(crate) fn retry_pending(&self, n: &str) -> bool {
+        self.turn(n, "retry-migration").exists()
+            && !self.turn(n, "stopped").exists()
+            && !self.retry_completed(n)
+    }
+
     pub fn state(&self) -> String {
         self.adopt();
         let n = self.turns().unwrap_or_default();
+        if self.retry_pending(&n) {
+            return "queued".into();
+        }
         if systemd::active(self.cfg, &self.unit()) {
             if self.turn(&n, "slot").exists() {
                 "running".into()
@@ -223,7 +237,9 @@ impl<'a> Job<'a> {
         let lock = self.lock_file().ok()?;
         lock.lock_shared().ok()?;
         self.adopt();
-        if filled(&self.turn(n, "outcome")) {
+        if self.turns().as_deref() == Some(n) && self.retry_pending(n) {
+            None
+        } else if filled(&self.turn(n, "outcome")) {
             read(&self.turn(n, "outcome"))
         } else if self.turns().as_deref() == Some(n) {
             (!systemd::active(self.cfg, &self.unit())).then(|| "failed".into())
@@ -312,7 +328,8 @@ impl<'a> Job<'a> {
     /// `await TARGET` for each PR or issue it awaits (proj-watch resumes it
     /// once one changes). A job that holds anything is still at work. proj
     /// stop clears all of it. An error when a record that would say can't be
-    /// read: only one that isn't there holds nothing.
+    /// read: only one that isn't there holds nothing. `retry` holds a committed
+    /// transfer open until it resumes or cancellation succeeds.
     pub fn holds(&self) -> Result<Vec<String>, String> {
         let text = |path: &Path| match crate::state_reads::bytes(path) {
             Ok(b) => Ok(Some(
@@ -328,6 +345,9 @@ impl<'a> Job<'a> {
                 .map_err(|e| format!("{}: {e}", path.display()))
         };
         let mut held = Vec::new();
+        if self.turns().is_some_and(|n| self.retry_pending(&n)) {
+            held.push("retry".into());
+        }
         let asked = match text(&self.path("turns"))?.filter(|n| valid_turn(n)) {
             Some(n) => {
                 !there(&self.turn(&n, "stopped"))?
@@ -363,7 +383,11 @@ impl<'a> Job<'a> {
             end: opt(self.turn(&n, "end")),
             link: opt(self.path("link")),
             queued: mtime(&prompt).unwrap_or(0),
-            slot: mtime(&self.turn(&n, "slot")).unwrap_or(0),
+            slot: if self.retry_pending(&n) {
+                0
+            } else {
+                mtime(&self.turn(&n, "slot")).unwrap_or(0)
+            },
             ended: self.ended_at(&n, &state, || self.end_pending()),
             // Its deadline as it stands, to the second (none without a
             // timeout): when it took its slot and its timeout, moved on by

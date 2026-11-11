@@ -48,11 +48,10 @@ fn rig() -> Rig {
     fs::create_dir_all(jobs.join(".queue")).unwrap();
     fs::create_dir_all(jobs.join(".slots")).unwrap();
     fs::create_dir(root.join("old")).unwrap();
-    fs::copy(
-        std::env::current_exe().unwrap(),
+    burrow_test::executable(
         root.join("old/burrow-proj"),
-    )
-    .unwrap();
+        fs::read(std::env::current_exe().unwrap()).unwrap(),
+    );
     let systemctl = root.join("systemctl");
     burrow_test::executable(
         &systemctl,
@@ -139,7 +138,7 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     fs::write(job.path("session"), "conversation-123\n").unwrap();
     fs::write(
         job.turn("1", "engine"),
-        if mode == "old-codex" {
+        if matches!(mode, "old-codex" | "new-codex") {
             "codex\n"
         } else {
             "claude\n"
@@ -375,7 +374,7 @@ fn transfer_checkpoint_survives_failed_launch_and_preserves_paused_deadline() {
     let original_deadline = state.deadline.unwrap();
     // Restarting the consumer resumes the committed transfer; it never
     // creates another turn or replaces the conversation or original stream.
-    fs::write(&r.cfg.tools.systemd_run, launcher).unwrap();
+    burrow_test::executable(&r.cfg.tools.systemd_run, launcher);
     pass(&r.cfg).unwrap();
     sleep(Duration::from_millis(100));
     usage::back(&r.cfg, None);
@@ -746,3 +745,5 @@ fn waiting_codex_turn_transfers_back_to_its_own_pool() {
     );
     assert!(!r.cfg.jobs.join(".slots/1").exists());
 }
+
+mod review;

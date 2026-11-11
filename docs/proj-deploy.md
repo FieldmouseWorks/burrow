@@ -39,3 +39,16 @@ The process regressions in `crates/burrow-proj/src/retry/tests.rs` run the
 pre-trickle scheduler snapshot alongside the current one, including an
 unfenced control that starts five turns at a reset. Usage tests exercise the
 real strict legacy schema, owner generations, interrupted writes and cleanup.
+
+Pending checkpoints remain queued work in lifecycle and watchdog snapshots,
+even while their unit is inactive or its startup failed. Their saved queue
+places remain visible to the census until admission or cancellation, so dead
+parent PIDs and failed launches cannot make the reset cohort disappear.
+Cancellation, checkpoint consumption and recovery launch decisions share the
+job lock. Failed cancellation retains the checkpoint; successful cancellation
+removes it. Only a startup explicitly marked `retry-startup-failed` can retry
+an outcome: a terminal outcome from an unaware old binary never replays.
+Lock contention gets an explicit delayed retry within the consumer, without
+watching its own lock-file events or failing the deployment service.
+Initial transfers start their configured budget at acquisition; retained
+retries restore their remaining budget, then publish the final watchdog state.

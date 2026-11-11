@@ -285,6 +285,26 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             });
         }
     }
+    let pending = crate::retry::admission(cfg)?;
+    let existing: Vec<_> = fs::read_dir(&queue)?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    for (id, name, arrived) in &pending {
+        if !existing
+            .iter()
+            .any(|n| !n.starts_with('.') && job_of(n) == id)
+        {
+            // A dead parent's place may have been cleared by another census.
+            // Restore its committed position before deciding the cohort drained.
+            let path = queue.join(name);
+            crate::swap(&path, "pending\n")?;
+            File::open(path)?.set_times(
+                FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_nanos((*arrived).max(0) as u64)),
+            )?;
+        }
+    }
     let mut names: Vec<String> = fs::read_dir(&queue)?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -300,7 +320,9 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
                 class: own,
                 project: project(dir),
             });
-        } else if waiter_alive(&queue.join(&name), fid) {
+        } else if waiter_alive(&queue.join(&name), fid)
+            || pending.iter().any(|(id, _, _)| id == fid)
+        {
             let dir = cfg.jobs.join(fid);
             line.push(Waiter {
                 class: classes.place(cfg, &name, &dir).0,
@@ -340,8 +362,12 @@ fn codex_slot(
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
     }
+    let retry = crate::retry::Checkpoint::load(&job, n)?;
     loop {
-        if may_hand_over && let Some(to) = successor(cfg) {
+        if may_hand_over
+            && let Some(to) = successor(cfg)
+            && (retry.is_none() || retry_compatible(&to))
+        {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
             lk.lock()?;
@@ -589,6 +615,7 @@ fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::R
 /// name's WHEN, which for a job started --since is when its work began.
 pub fn in_line(cfg: &Config) -> String {
     let queue = cfg.jobs.join(".queue");
+    let pending = crate::retry::admission(cfg).unwrap_or_default();
     let mut names: Vec<String> = fs::read_dir(&queue)
         .map(|d| {
             d.filter_map(|e| e.ok())
@@ -602,7 +629,7 @@ pub fn in_line(cfg: &Config) -> String {
     let mut rows: Vec<(Class, String)> = Vec::new();
     for name in &names {
         let fid = job_of(name);
-        if !waiter_alive(&queue.join(name), fid) {
+        if !waiter_alive(&queue.join(name), fid) && !pending.iter().any(|(id, _, _)| id == fid) {
             continue;
         }
         let Some(made) = mtime(&queue.join(name)) else {
@@ -673,6 +700,7 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
         Engine::Claude => {
             usage::metered(cfg);
             usage::out(cfg).is_none()
+                && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
                 && in_line(cfg).is_empty()
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
