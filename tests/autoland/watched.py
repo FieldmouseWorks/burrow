@@ -275,6 +275,24 @@ assert run(460, "sam/r")["sam/r#9"]["kick"] == "autoland/sam/r"
 S.CFG["watch"]["renovateSweep"] = True
 print("waits on Renovate: ok")
 
+# Engine releases never select lock-age recovery, and the independent
+# usage allowance runs alongside, rather than after, Renovate's recovery.
+for engine in ('Claude', 'Codex'):
+    for refreshing, lock_date in ((False, None), (True, None), (True, T + 86400), (True, T - 10)):
+        for release in (T - 100, T + 3600, T + 10 * 86400):
+            fresh_pr_state()
+            C.NOW = T + 500
+            subject = pr('sam/r', 5)
+            waits.begin()
+            waits.read('sam/r', [subject])
+            waits.note('sam/r', subject, f'{engine} release', waits.STEWARD,
+                       refreshing=refreshing, ripe=lock_date, usage_release=release)
+            waits.publish({'sam/r'}, {}, True)
+            actual = C.load('watch.json', {})['items']['sam/r#5']
+            allowance = (recovery if lock_date else drain) if refreshing else 0
+            expected = max(max(C.NOW, lock_date or 0) + allowance, release) + 120 * MIN
+            assert actual['due'] == expected, (actual, expected, refreshing, lock_date, release)
+
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.V.snap_name = kept_fns
 OPEN.clear()
 fresh_pr_state()

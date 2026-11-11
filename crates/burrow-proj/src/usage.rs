@@ -101,6 +101,15 @@ pub fn out(cfg: &Config) -> Option<Spent> {
     kept(cfg).filter(|s| s.holds(now()))
 }
 
+/// The actual release, retained after the usage notice and record are gone.
+pub fn last_release(cfg: &Config) -> Option<i64> {
+    let now = now();
+    if let Some(spent) = kept(cfg) {
+        return (spent.release() <= now).then(|| spent.release());
+    }
+    released(cfg).ok().filter(|at| *at > 0)
+}
+
 /// Its record, holding or not, while it's kept.
 pub fn kept(cfg: &Config) -> Option<Spent> {
     read(cfg).ok().flatten()

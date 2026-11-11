@@ -282,7 +282,25 @@ impl<'a> Job<'a> {
             .read_lock()
             .map_err(|e| format!("{}: {e}", self.path("lock").display()))?;
         let state = self.state();
-        Ok((state, self.holds()?))
+        let mut held = self.holds()?;
+        if let Some(facts) = self.facts() {
+            let reset = facts.usage_reset.map(|(_, reset)| reset).or_else(|| {
+                (state == "queued")
+                    .then(|| facts.spent.map(|s| s.release()))
+                    .flatten()
+            });
+            if matches!(state.as_str(), "queued" | "running")
+                && let Some(release) = usage::last_release(self.cfg)
+                && self.engine_label(&facts.turn) == "Claude"
+            {
+                held.push(format!("released Claude {release}"));
+            }
+            if let Some(reset) = reset {
+                let engine = self.engine_label(&facts.turn);
+                held.push(format!("usage {engine} {reset}"));
+            }
+        }
+        Ok((state, held))
     }
 
     /// What it holds open, whatever its latest turn's outcome (a failed
@@ -477,6 +495,67 @@ mod tests {
             .unwrap()
             .set_modified(at)
             .unwrap();
+    }
+
+    #[test]
+    fn lifecycle_reports_the_engine_and_usage_reset() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "held");
+        fs::create_dir(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "outcome"), "failed").unwrap();
+        let reset = now() + 3600;
+        fs::write(job.path("await"), format!("usage-limit\t1000\t{reset}\n")).unwrap();
+        for (engine, label) in [("claude", "Claude"), ("codex", "Codex")] {
+            fs::write(job.turn("1", "engine"), engine).unwrap();
+            assert!(
+                job.lifecycle()
+                    .unwrap()
+                    .1
+                    .contains(&format!("usage {label} {reset}"))
+            );
+        }
+        fs::remove_file(job.path("await")).unwrap();
+        assert!(job.lifecycle().unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn queued_and_running_jobs_report_retained_early_release() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctl = tmp.path().join("systemctl");
+        burrow_test::executable(&ctl, "#!/bin/sh\nexit 0\n");
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        v["tools"]["systemctl"] = ctl.to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "released");
+        fs::create_dir(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "engine"), "claude").unwrap();
+        let release = now() - 10000;
+        let spent = serde_json::json!({"until": now() + 86400, "said": "spent", "job": "other",
+                                      "at": release - 100, "back": release, "told": 0});
+        for running in [false, true] {
+            if running {
+                fs::write(job.turn("1", "slot"), "").unwrap();
+            }
+            fs::write(cfg.jobs.join(".usage.json"), spent.to_string()).unwrap();
+            fs::write(cfg.jobs.join(".usage.released"), release.to_string()).unwrap();
+            for cleaned in [false, true] {
+                if cleaned {
+                    fs::remove_file(cfg.jobs.join(".usage.json")).unwrap();
+                }
+                let (state, lines) = job.lifecycle().unwrap();
+                assert_eq!(state, if running { "running" } else { "queued" });
+                assert!(
+                    lines.contains(&format!("released Claude {release}")),
+                    "{lines:?}"
+                );
+            }
+        }
     }
 
     // When a turn ended, as the stall watchdog goes by it. A turn killed with

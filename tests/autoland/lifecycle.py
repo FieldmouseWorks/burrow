@@ -29,6 +29,8 @@ with tempfile.TemporaryDirectory() as tmp:
             self.tag = 'sam/r#5'
             self.st = {kind: 'original', kind + 'Job': 'job'}
             self.looked, self.ends, self.awaits = {}, {}, {}
+            self.refresh = {}
+            self.repo = "sam/r"
         def deadline(self, kind):
             pass
         def breaking(self, kind):
@@ -73,6 +75,68 @@ with tempfile.TemporaryDirectory() as tmp:
             reader = Reader(kind, 'original')
             assert reader.running(kind, 'original') == '' and reader.ends == {kind: state}, (state, kind)
         assert not C.at_work('job', 'sam/r#5') and C.at_work('job'), 'awaiting only its own PR is ending its turn'
+
+    # Usage is a hold of the selected engine, for every kind of step.
+    for engine in ('Claude', 'Codex'):
+        for kind in KINDS:
+            reset = int(C.NOW) + 3600
+            says('failed', f'await usage-limit', f'usage {engine} {reset}')
+            reader = Reader(kind, 'original')
+            assert reader.running(kind, 'original') == 'usage'
+            assert reader.st['usageJobs']['job']['release'] == reset and not reader.ends
+            assert C.at_work('job')
+            assert C.WAKE['sam/r'] == reset
+
+    # Early release is scoped to the job that was held. Other live holds
+    # survive, and an ended or replaced job cannot defer unrelated work.
+    for engine in ('Claude', 'Codex'):
+        says('queued', f'usage {engine} {int(C.NOW) + 7200}')
+        reader = Reader('judged', 'original')
+        reader.running('judged', 'original')
+        release = int(C.NOW) - 30
+        says('running', f'released {engine} {release}')
+        reader.looked, reader.refresh = {}, {}
+        assert reader.running('judged', 'original') == 'running'
+        assert reader.usage_grace() == release
+        says('queued', f'usage {engine} {int(C.NOW) + 3600}')
+        reader.st.update(proved='original', provedJob='second')
+        reader.running('proved', 'original')
+        assert reader.usage_grace() == int(C.NOW) + 3600
+        says('failed')
+        reader.looked, reader.refresh = {}, {}
+        reader.running('judged', 'original')
+        assert 'job' not in reader.st['usageJobs'] and reader.usage_grace() is None
+        reader.st['judgedJob'] = 'replacement'
+        says('running')
+        reader.running('judged', 'original')
+        assert reader.usage_grace() is None
+
+    # A failed read preserves the known hold for every job kind/engine.
+    # Grace is computed after cancellation/replacement, not accumulated
+    # during earlier reads in the same pass.
+    for engine in ('Claude', 'Codex'):
+        for kind in KINDS:
+            reset = int(C.NOW) + 3600
+            says('queued', f'usage {engine} {reset}')
+            reader = Reader(kind, 'original')
+            reader.running(kind, 'original')
+            says(None)
+            reader.looked.clear()
+            C.WAKE.clear()
+            assert reader.running(kind, 'original') == 'usage'
+            assert reader.usage_grace() == reset
+            assert C.NOW < C.WAKE['sam/r'] <= min(reset, C.NOW + 60)
+            reader.st.update(other='original', otherJob='other-job')
+            says('queued', f'usage {engine} {reset - 100}')
+            reader.running('other', 'original')
+            reader.st.pop(kind + 'Job')
+            assert reader.usage_grace() == reset - 100
+            reader.st.pop('otherJob')
+            assert reader.usage_grace() is None
+            reader.st[kind + 'Job'] = 'replacement'
+            says('queued')
+            reader.running(kind, 'original')
+            assert reader.usage_grace() is None
 
     # What proj says: its state, then each thing held; one it can't read the
     # record of (it exits non-zero) is kept, as one nothing can say of.

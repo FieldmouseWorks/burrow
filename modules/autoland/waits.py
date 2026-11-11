@@ -76,7 +76,7 @@ def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0, claude=False)
             "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace, "claude": claude}
 
 
-def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None):
+def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None, usage_release=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
     None: nothing to watch. It waits on Claude (the watchdog's claude, which
     holds it while Claude is out of usage) while one of the Claude jobs the
@@ -102,7 +102,9 @@ def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None):
         grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
         phase += lock_wait.guard(run)
     claude = any(s in ("queued", "running") for j, s in (jobs or {}).items() if not j.startswith(C.BUILD))
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace, claude)
+    noted = item(repo, pr, phase, minutes, kick, rev, ripe, grace, claude)
+    noted["usage_release"] = usage_release
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = noted
 
 
 def overdue(repo, pr, why, said=None):
@@ -165,7 +167,7 @@ def publish(seen, digest, full):
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
-                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it.get("grace", 0) + it["minutes"] * MIN,
+                          "due": since if key in FAILING else max(max(since, it.get("until") or 0) + it.get("grace", 0), it.get("usage_release") or 0) + it["minutes"] * MIN,
                           "kick": it["kick"],
                           # A step that keeps failing is the steward's, whatever job it has.
                           "claude": it.get("claude", False) and key not in FAILING,

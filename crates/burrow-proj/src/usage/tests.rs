@@ -496,6 +496,20 @@ fn an_earlier_limit_counts_from_when_it_was_written() {
 /// before the release, an N.resets, a retained await's or the watchdog's,
 /// still never holds again; one written after it does.
 #[test]
+fn lifecycle_can_read_actual_release_past_the_notice() {
+    let (_dir, cfg) = rig();
+    let t = now();
+    assert_eq!(last_release(&cfg), None);
+    record(&cfg, "web-1", Some(t + 7200), SAID, t - 100).unwrap();
+    assert_eq!(last_release(&cfg), None);
+    back(&cfg, Some(t - 50));
+    let actual = kept(&cfg).unwrap().release();
+    assert_eq!(last_release(&cfg), Some(actual));
+    fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+    assert_eq!(last_release(&cfg), Some(actual));
+}
+
+#[test]
 fn a_release_outlives_its_record() {
     let (d, cfg) = rig();
     let t = now();
