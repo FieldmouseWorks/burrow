@@ -50,7 +50,7 @@ use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
-pub const RETRY_HANDOVER_FORMAT: &str = "1";
+pub const RETRY_HANDOVER_FORMAT: &str = "2";
 const NEXT_FRESH: i64 = 2;
 /// Whatever the note says, a waiter looks this often, which is as long as a
 /// job whose class changed can go on holding its old place in line.
@@ -312,27 +312,34 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
         .collect();
     names.sort();
     let mut line = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // The live caller's place wins over any stale names of that same job.
+    names.sort_by_key(|name| (name != me, name.clone()));
     for name in names {
         let fid = job_of(&name);
+        let alive = name == me
+            || waiter_alive(&queue.join(&name), fid)
+            || pending.iter().any(|(id, _, _)| id == fid);
+        if !alive || !seen.insert(fid.to_owned()) {
+            remove_place(&queue.join(&name))?;
+            continue;
+        }
         if name == me {
             line.push(Waiter {
                 name,
                 class: own,
                 project: project(dir),
             });
-        } else if waiter_alive(&queue.join(&name), fid)
-            || pending.iter().any(|(id, _, _)| id == fid)
-        {
+        } else {
             let dir = cfg.jobs.join(fid);
             line.push(Waiter {
                 class: classes.place(cfg, &name, &dir).0,
                 project: project(&dir),
                 name,
             });
-        } else {
-            let _ = fs::remove_file(queue.join(&name));
         }
     }
+    line.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Look { slots, busy, line })
 }
 
@@ -477,6 +484,11 @@ pub fn take(
                 continue;
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+        // Adopt one logical place under the census lock. A checkpoint may
+        // predate a promotion or a configuration-driven class rename.
+        if retry.is_some() {
+            reconcile(&queue, id, &me)?;
         }
         // Waited long enough: among the --first ones now, in its place by WHEN.
         if let Some(rest) = me.strip_prefix("2-")
@@ -741,3 +753,22 @@ pub fn spare() -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+/// Remove obsolete names only while holding the shared census lock.
+fn reconcile(queue: &Path, id: &str, adopted: &str) -> io::Result<()> {
+    for entry in fs::read_dir(queue)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') && name != adopted && job_of(&name) == id {
+            remove_place(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_place(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}

@@ -52,3 +52,20 @@ Lock contention gets an explicit delayed retry within the consumer, without
 watching its own lock-file events or failing the deployment service.
 Initial transfers start their configured budget at acquisition; retained
 retries restore their remaining budget, then publish the final watchdog state.
+
+Recovery authority, startup-failure markers, launch rate limits and the saved
+execution identity live under the sandbox-denied host control root, rather
+than the job directory. Guest-written checkpoint-shaped files are ignored.
+New starters save engine, model, effort and execution metadata before the
+engine runs. Legacy parents without that identity are adopted only when
+systemd identifies the main process and the kernel proves it is blocked on
+the fenced legacy census lock. Sleeping legacy retries remain fenced until
+that proof is available at reset. Recovery restores the saved execution
+identity; mutable job files cannot broaden its capabilities.
+
+Each retained turn occupies one queue place, even after promotion or a
+configuration-driven class change. The census and replacement adoption remove
+obsolete names under the admission lock. Every replacement launch records its
+next retry delay first, including startups unable to write an outcome; delayed
+jobs do not hold up healthy jobs or independent pools. Confirmed cancellation
+finishes deferred end processing once, irrespective of end-hook ordering.

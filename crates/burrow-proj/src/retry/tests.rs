@@ -154,6 +154,8 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     )
     .unwrap();
     fs::write(job.turn("1", "jsonl"), "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your monthly spend limit\"}\n").unwrap();
+    fs::write(job.path("engine"), read(&job.turn("1", "engine")).unwrap()).unwrap();
+    Identity::capture(&job, "1").unwrap();
     let exe = if mode.starts_with("old") {
         r.tmp.path().join("old/burrow-proj")
     } else {
@@ -313,7 +315,11 @@ fn post_deploy_refusal_cannot_enter_the_old_scheduler() {
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
     pass(&r.cfg).unwrap();
-    assert!(!r.cfg.jobs.join("running/1.retry-migration").exists());
+    assert!(
+        !Job::new(&r.cfg, "running")
+            .turn("1", "retry-migration")
+            .exists()
+    );
     fs::write(r.cfg.jobs.join("running/refuse"), "").unwrap();
     until(|| !r.cfg.jobs.join("running/1.slot").exists());
     for i in 0..4 {
@@ -375,6 +381,8 @@ fn transfer_checkpoint_survives_failed_launch_and_preserves_paused_deadline() {
     // Restarting the consumer resumes the committed transfer; it never
     // creates another turn or replaces the conversation or original stream.
     burrow_test::executable(&r.cfg.tools.systemd_run, launcher);
+    assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    sleep(Duration::from_secs(2));
     pass(&r.cfg).unwrap();
     sleep(Duration::from_millis(100));
     usage::back(&r.cfg, None);
@@ -510,7 +518,11 @@ fn deployment_barrier_leaves_codex_and_emergency_pools_independent() {
     sleep(Duration::from_secs(3));
     assert_eq!(took(&r.cfg), 5, "two ordinary, two Codex, one emergency");
     assert!(r.cfg.jobs.join("emergency/took").exists());
-    assert!(!r.cfg.jobs.join("emergency/1.retry-migration").exists());
+    assert!(
+        !Job::new(&r.cfg, "emergency")
+            .turn("1", "retry-migration")
+            .exists()
+    );
 }
 
 #[test]
@@ -535,7 +547,11 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
         .unwrap();
     r.children.push(consumer);
     fs::write(r.cfg.jobs.join("running/refuse"), "").unwrap();
-    until(|| r.cfg.jobs.join("running/1.retry-migration").exists());
+    until(|| {
+        Job::new(&r.cfg, "running")
+            .turn("1", "retry-migration")
+            .exists()
+    });
     usage::back(&r.cfg, None);
     until(|| r.cfg.jobs.join("running/took").exists());
     assert_eq!(
@@ -558,6 +574,8 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         engine::choice(&r.cfg, &job).unwrap().engine,
         engine::Engine::Codex
     );
+    Identity::capture(&job, "1").unwrap();
+    fs::write(job.path("engine"), "claude").unwrap();
     let checkpoint = Checkpoint {
         waited: now_nanos(),
         said: Some("refused".into()),
@@ -566,6 +584,7 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         first: false,
         retained: Some(true),
     };
+    Identity::capture(&job, "1").unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&checkpoint).unwrap(),
@@ -573,12 +592,13 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
     .unwrap();
     assert_eq!(
         engine::choice(&r.cfg, &job).unwrap().engine,
-        engine::Engine::Claude
+        engine::Engine::Codex
     );
     let invalid = Checkpoint {
         name: "2-100-../../outside".into(),
         ..checkpoint
     };
+    Identity::capture(&job, "1").unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&invalid).unwrap(),
@@ -685,6 +705,11 @@ fn retained_handover_rejects_rollback_to_startup_that_would_truncate_its_stream(
         &old,
         "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 1\n",
     );
+    assert!(!slot::retry_compatible(&old));
+    burrow_test::executable(
+        &old,
+        "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 2\n",
+    );
     assert!(slot::retry_compatible(&old));
 }
 
@@ -703,6 +728,7 @@ fn failed_resume_write_retains_checkpoint_and_does_not_double_extend_the_deadlin
         first: false,
         retained: Some(true),
     };
+    Identity::capture(&job, "1").unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&state).unwrap(),
@@ -737,7 +763,11 @@ fn waiting_codex_turn_transfers_back_to_its_own_pool() {
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
     pass(&r.cfg).unwrap();
-    assert!(r.cfg.jobs.join("codex/1.retry-migration").exists());
+    assert!(
+        Job::new(&r.cfg, "codex")
+            .turn("1", "retry-migration")
+            .exists()
+    );
     drop(held);
     until(|| r.cfg.jobs.join("codex/took").exists());
     assert!(
@@ -764,6 +794,7 @@ fn pending(r: &Rig, id: &str, retained: bool) -> (Checkpoint, String) {
         first: false,
         retained: Some(retained),
     };
+    Identity::capture(&job, "1").unwrap();
     swap(
         &job.turn("1", "retry-migration"),
         &serde_json::to_string(&state).unwrap(),
@@ -830,3 +861,5 @@ fn an_initial_waiter_keeps_no_deadline_but_a_retained_retry_does() {
     let moved: i64 = read(&job.turn("1", "deadline")).unwrap().parse().unwrap();
     assert!(moved >= dl);
 }
+
+mod review2;

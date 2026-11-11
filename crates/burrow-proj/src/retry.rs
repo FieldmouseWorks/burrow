@@ -14,6 +14,9 @@ use std::time::Duration;
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
 use serde::{Deserialize, Serialize};
 
+mod authority;
+pub(crate) use authority::Identity;
+
 use crate::{config::Config, engine, job::Job, now_nanos, read, swap, systemd, turn};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,14 +37,7 @@ impl Checkpoint {
         match crate::state_reads::bytes(&job.turn(n, "retry-migration")) {
             Ok(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                let parts: Vec<_> = state.name.splitn(3, '-').collect();
-                if parts.len() != 3
-                    || !matches!(parts[0], "0" | "1" | "2")
-                    || parts[1].is_empty()
-                    || !parts[1].bytes().all(|b| b.is_ascii_digit())
-                    || parts[2] != job.id
-                    || state.name.contains('/')
-                {
+                if !Self::valid_place(&state.name, job.id) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "invalid retry queue place",
@@ -52,6 +48,16 @@ impl Checkpoint {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    fn valid_place(name: &str, id: &str) -> bool {
+        let parts: Vec<_> = name.splitn(3, '-').collect();
+        parts.len() == 3
+            && matches!(parts[0], "0" | "1" | "2")
+            && !parts[1].is_empty()
+            && parts[1].bytes().all(|b| b.is_ascii_digit())
+            && parts[2] == id
+            && !name.contains('/')
     }
 
     pub fn initial(&self) -> bool {
@@ -86,6 +92,7 @@ impl Checkpoint {
                     "retry was cancelled or superseded",
                 ));
             }
+            Identity::capture(job, n).map_err(io::Error::other)?;
             match census(job, n) {
                 Ok(_census) => {
                     return swap(
@@ -157,8 +164,17 @@ impl Checkpoint {
     }
 }
 
+fn is_codex(job: &Job, n: &str) -> io::Result<bool> {
+    Ok(Identity::load(job, n)
+        .map_err(io::Error::other)?
+        .map_or_else(
+            || read(&job.turn(n, "engine")).as_deref() == Some("codex"),
+            |identity| identity.choice.engine == engine::Engine::Codex,
+        ))
+}
+
 fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
-    if job.path("unstick").exists() || read(&job.turn(n, "engine")).as_deref() == Some("codex") {
+    if job.path("unstick").exists() || is_codex(job, n)? {
         return Ok(None);
     }
     let file = fs::File::create(job.cfg.jobs.join(".slots/.admission-lock"))?;
@@ -180,10 +196,7 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
         }
         let job = Job::new(cfg, &id);
         let Some(n) = job.turns() else { continue };
-        if !job.retry_pending(&n)
-            || job.path("unstick").exists()
-            || read(&job.turn(&n, "engine")).as_deref() == Some("codex")
-        {
+        if !job.retry_pending(&n) || job.path("unstick").exists() || is_codex(&job, &n)? {
             continue;
         }
         if let Some(state) = Checkpoint::load(&job, &n)? {
@@ -233,7 +246,7 @@ fn parents() -> io::Result<Vec<(u32, String, bool)>> {
 fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Result<Checkpoint> {
     let queue = cfg.jobs.join(".queue");
     let place = fs::read_dir(&queue)?.filter_map(Result::ok).find(|e| {
-        !e.file_name().to_string_lossy().starts_with('.')
+        Checkpoint::valid_place(&e.file_name().to_string_lossy(), job.id)
             && read(&e.path()).as_deref() == Some(pid.to_string().as_str())
     });
     let waited = place
@@ -305,8 +318,18 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
             continue;
         }
+        if Identity::load(&job, &n)
+            .map_err(io::Error::other)?
+            .is_none()
+            && !authority::legacy_waiting(cfg, pid)?
+        {
+            busy = true;
+            continue;
+        }
+        crate::ask::ensure(&job).map_err(io::Error::other)?;
         if Checkpoint::load(&job, &n)?.is_none() {
             let state = checkpoint(cfg, &job, &n, pid, first)?;
+            Identity::capture_legacy(&job, &n).map_err(io::Error::other)?;
             let _census = match census(&job, &n) {
                 Ok(held) => held,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -320,6 +343,9 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
                 &serde_json::to_string(&state)?,
             )?;
         }
+        // Validate the committed checkpoint before authorizing a stop.
+        Checkpoint::load(&job, &n)?
+            .ok_or_else(|| io::Error::other("missing transfer checkpoint"))?;
         // The checkpoint commits before stopping anything. The end hook and
         // watcher leave it alone; a crash or failed start is retried below.
         if systemd::stop(cfg, &job.unit()) != 0 {
@@ -359,28 +385,37 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         }
         systemd::reset_failed(cfg, &job.unit());
-        // Wait for the stop's end hook before reusing its transient unit name.
-        let mut ready = false;
-        for _ in 0..120 {
-            if systemd::show(cfg, &job.unit(), "LoadState") != "loaded" && !job.end_pending() {
-                ready = true;
-                break;
+        // A unit still ending is deferred, without holding up other pools.
+        if systemd::show(cfg, &job.unit(), "LoadState") == "loaded" || job.end_pending() {
+            busy = true;
+            continue;
+        }
+        let attempt = job.turn(&n, "retry-attempt");
+        if read(&attempt)
+            .and_then(|s| s.parse::<i64>().ok())
+            .is_some_and(|at| now_nanos() - at < 2_000_000_000)
+        {
+            busy = true;
+            continue;
+        }
+        // Publish the rate limit before every launch, including startups that
+        // cannot write an outcome. A crash cannot bypass the next delay.
+        let prepare = || -> io::Result<()> {
+            swap(&attempt, &now_nanos().to_string())?;
+            Identity::restore(&job, &n).map_err(io::Error::other)?;
+            if job.turn(&n, "outcome").exists() {
+                fs::remove_file(job.turn(&n, "outcome"))?;
             }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        if !ready {
-            return Err(io::Error::other(format!(
-                "{id} is still ending during transfer"
-            )));
-        }
-        if job.turn(&n, "outcome").exists() {
-            // A transfer which failed after startup retains its checkpoint.
-            // Back off before retrying a persistent I/O/configuration failure.
-            std::thread::sleep(Duration::from_secs(2));
-            fs::remove_file(job.turn(&n, "outcome"))?;
+            Ok(())
+        };
+        if let Err(error) = prepare() {
+            eprintln!("proj: couldn't prepare retained retry {id}: {error}");
+            busy = true;
+            continue;
         }
         if !turn::launch(cfg, &job, state.first) {
-            return Err(io::Error::other(format!("couldn't resume {id}")));
+            busy = true;
+            continue;
         }
     }
     if let Some(error) = release_error {
@@ -403,16 +438,26 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
 pub fn watch(cfg: &Config) -> io::Result<()> {
     fs::create_dir_all(cfg.jobs.join(".queue"))?;
     fs::create_dir_all(cfg.jobs.join(".slots"))?;
+    fs::create_dir_all(crate::ask::control_root(cfg))?;
     let fd = inotify::init(CreateFlags::CLOEXEC)?;
     let mut watched = HashSet::new();
     let mut buf = [MaybeUninit::uninit(); 16384];
     loop {
-        for path in std::iter::once(cfg.jobs.clone()).chain(
-            fs::read_dir(&cfg.jobs)?
-                .filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.is_dir()),
-        ) {
+        for path in [cfg.jobs.clone(), crate::ask::control_root(cfg)]
+            .into_iter()
+            .chain(
+                fs::read_dir(&cfg.jobs)?
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir()),
+            )
+            .chain(
+                fs::read_dir(crate::ask::control_root(cfg))?
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir()),
+            )
+        {
             if watched.insert(path.clone()) {
                 inotify::add_watch(
                     &fd,

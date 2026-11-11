@@ -7,6 +7,7 @@ fn saved(r: &Rig, id: &str) -> Checkpoint {
     fs::write(job.path("project"), "/ordinary\n").unwrap();
     fs::write(job.path("prompt.1"), "original\n").unwrap();
     fs::write(job.turn("1", "jsonl"), "original stream\n").unwrap();
+    Identity::capture(&job, "1").unwrap();
     let state = Checkpoint {
         waited: now_nanos() - 10_000_000_000,
         said: Some("refused".into()),
@@ -208,13 +209,18 @@ fn codex_checkpoint_never_hands_over_to_unaware_rollback_startup() {
     cfg["deployed"] = old.to_str().unwrap().into();
     fs::write(path, serde_json::to_vec(&cfg).unwrap()).unwrap();
     saved(&r, "codex");
+    fs::remove_file(Job::new(&r.cfg, "codex").turn("1", "execution")).unwrap();
     start(&mut r, "codex", "new-codex", "/ordinary");
     until(|| r.cfg.jobs.join("codex/took").exists() || wrong.exists());
     assert!(
         !wrong.exists(),
         "retained Codex turn handed over to destructive startup"
     );
-    assert!(!r.cfg.jobs.join("codex/1.retry-migration").exists());
+    assert!(
+        !Job::new(&r.cfg, "codex")
+            .turn("1", "retry-migration")
+            .exists()
+    );
 }
 
 #[test]

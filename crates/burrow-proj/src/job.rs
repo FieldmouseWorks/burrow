@@ -63,7 +63,11 @@ impl<'a> Job<'a> {
     /// Turn N's file of this kind: N.slot, N.jsonl...
     pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
         let n = if valid_turn(n) { n } else { "invalid-turn" };
-        self.dir.join(format!("{n}.{kind}"))
+        if (kind.starts_with("retry-") && kind != "retry-wake") || kind == "execution" {
+            crate::ask::host_path(self, &format!("{n}.{kind}"))
+        } else {
+            self.dir.join(format!("{n}.{kind}"))
+        }
     }
 
     /// The engine recorded for this turn, including jobs that changed engines.
@@ -82,6 +86,7 @@ impl<'a> Job<'a> {
 
     /// Swapped in whole, so a reader never finds it missing or half written.
     pub fn set_turns(&self, n: u64) -> io::Result<()> {
+        crate::ask::ensure(self).map_err(io::Error::other)?;
         swap(&self.path("turns"), &format!("{n}\n"))
     }
 

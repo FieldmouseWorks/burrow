@@ -46,7 +46,7 @@ impl Engine {
 /// What one turn runs on: the engine its role gives it, and the model and
 /// effort the models file gives that role on that engine. None leaves the
 /// engine's own setting.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
     pub engine: Engine,
     pub model: Option<String>,
@@ -62,13 +62,12 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     } else {
         crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
     };
-    let retained = job.turns().and_then(|n| {
-        job.turn(&n, "retry-migration")
-            .exists()
-            .then(|| read(&job.turn(&n, "engine")))
-            .flatten()
-    });
-    let pinned = retained.or_else(|| read(&job.path("engine")));
+    if let Some(n) = job.turns()
+        && let Some(identity) = crate::retry::Identity::load(job, &n)?
+    {
+        return Ok(identity.choice);
+    }
+    let pinned = read(&job.path("engine"));
     resolve(
         cfg,
         &role,

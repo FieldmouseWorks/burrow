@@ -454,6 +454,10 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
         ));
     }
     if let Some(n) = &n {
+        if job.turn(n, "retry-migration").exists() {
+            crate::swap(&job.turn(n, "retry-cancelled"), "")
+                .map_err(|e| Fail::new(1, e.to_string()))?;
+        }
         fs::remove_file(job.turn(n, "retry-migration"))
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -475,7 +479,13 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     if let Err(e) = crate::question::notify(cfg, job) {
         eprintln!("proj: {e}");
     }
-    if idle {
+    // The end hook may have deferred while the checkpoint still existed.
+    // Confirmed transfer cancellation owns finalization in either ordering.
+    if n.as_ref()
+        .is_some_and(|n| job.turn(n, "retry-cancelled").exists())
+    {
+        finish(cfg, id)?;
+    } else if idle {
         scratch::clear(cfg, id);
     }
     if withdraw {
@@ -645,6 +655,20 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         }
         return Ok(());
     }
+    let cancelled = job
+        .turns()
+        .filter(|n| job.turn(n, "retry-cancelled").exists());
+    let _finalizing = if let Some(n) = &cancelled {
+        let lock = fs::File::create(job.turn(n, "retry-finalizing"))
+            .map_err(|e| Fail::new(1, e.to_string()))?;
+        lock.lock().map_err(|e| Fail::new(1, e.to_string()))?;
+        if job.turn(n, "retry-finalized").exists() {
+            return Ok(());
+        }
+        Some(lock)
+    } else {
+        None
+    };
     job.mark_ended();
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
@@ -670,6 +694,10 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     // ended, and makes its own afresh.
     if scratch::over(&job) {
         scratch::clear(cfg, id);
+    }
+    if let Some(n) = cancelled {
+        crate::swap(&job.turn(&n, "retry-finalized"), "")
+            .map_err(|e| Fail::new(1, e.to_string()))?;
     }
     // A resume may own the lock while waiting for this oneshot to finish.
     // The watcher kick above retains reconciliation when it cannot run here.
