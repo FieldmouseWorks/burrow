@@ -322,6 +322,14 @@ fn what_the_remote_has_is_not_checked() {
     repo.ok(&["merge", "--no-ff", "--no-edit", "origin/main"]);
     let merge = repo.ok(&["rev-parse", "HEAD"]);
     assert!(steward_sees_mark(&repo, &merge));
+    // Main moves again after our fetch and merge. Its advertised tip is
+    // absent locally, but the merged parent is still published history.
+    succeeds(git(
+        &other,
+        &none,
+        &["commit", "--allow-empty", "-m", "later"],
+    ));
+    succeeds(git(&other, &none, &["push", "-q", "origin", "main"]));
     assert_eq!(repo.push("work"), Ok(merge));
     // Their commit, already there, onto a new branch.
     repo.ok(&["reset", "-q", "--hard", "origin/main"]);

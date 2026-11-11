@@ -68,6 +68,9 @@ fn git_in(
     match settings {
         Settings::Job => {}
         Settings::Push => {
+            for var in REPO_ENV {
+                command.env_remove(var);
+            }
             command
                 .env_remove("GIT_CONFIG_PARAMETERS")
                 .env_remove("XDG_CONFIG_HOME")
@@ -259,7 +262,47 @@ fn pre_push(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
         )
         .is_ok()
     })?;
-    match unmarked(dir, input, &advertisement)?.first() {
+    // An advertised tip may have advanced since the job fetched. Ignoring
+    // its missing object also loses the exemption for its known ancestors.
+    // Fetch those tips in an isolated repository: the job's remote config
+    // must not redirect the query or supply fake remote-tracking evidence.
+    let missing: Vec<_> = advertisement
+        .lines()
+        .filter_map(|line| {
+            let (oid, _) = line.split_once('\t')?;
+            (!oid.starts_with("ref: ")
+                && git_in(Some(dir), Settings::Push, &["cat-file", "-e", oid], None).is_err())
+            .then_some(oid)
+        })
+        .collect();
+    let isolated = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let check_dir = if missing.is_empty() {
+        dir.as_path()
+    } else {
+        let path = isolated
+            .path()
+            .to_str()
+            .ok_or("temporary path isn't UTF-8")?;
+        git_in(None, Settings::Push, &["init", "--bare", path], None)?;
+        let objects = git_in(
+            Some(dir),
+            Settings::Push,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "objects",
+            ],
+            None,
+        )?;
+        std::fs::write(isolated.path().join("objects/info/alternates"), objects)
+            .map_err(|e| e.to_string())?;
+        let mut args = vec!["fetch", "--no-tags", "--no-write-fetch-head", url];
+        args.extend(missing);
+        git_in(Some(isolated.path()), Settings::Push, &args, None)?;
+        isolated.path()
+    };
+    match unmarked(check_dir, input, &advertisement)?.first() {
         None => Ok(()),
         Some(commit) => Err(format!(
             "commit {commit} has no {MARK} trailer, so its PR wouldn't go to a Claude judge: it was made past this Codex job's commit-msg hook (plumbing, a stash, a rewrite or hooks turned off). Make it again with git commit (git reset --soft past it, then commit), and push that"
