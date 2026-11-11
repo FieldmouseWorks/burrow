@@ -23,7 +23,6 @@ rest of the steward when that's ported."""
 
 import json
 import os
-import subprocess
 import sys
 
 import common as C
@@ -68,7 +67,7 @@ def cn(*args):
     """What cn answered, as JSON. GitHub unavailable (cn's exit 75): C.Unavailable."""
     me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steward.py")
     env = {**os.environ, **CONARY["env"], "CONARY_TOKEN_COMMAND": f"{sys.executable} -E -s {me} token"}
-    p = subprocess.run([CONARY["cn"], *args], env=env, capture_output=True, text=True)
+    p = C.remote([CONARY["cn"], *args], timeout=300, env=env, capture_output=True, text=True)
     what = f"cn {' '.join(args[:3])}"
     if p.returncode == 75:
         raise C.Unavailable(f"{what}: GitHub is unavailable")
