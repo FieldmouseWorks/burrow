@@ -41,7 +41,7 @@ in pkgs.testers.runNixOSTest {
       cpu.enable = true;
       settings.allowed = [ "o/r" "o/web" ];
       github = {
-        apps.workers = { id=7; slug="test-workers"; keyFile="/run/keys/workers.pem"; users=[ "dev" ]; };
+        apps.workers = { id=7; accountId=8; slug="test-workers"; keyFile="/run/keys/workers.pem"; users=[ "dev" ]; };
         machinery = "workers";
       };
       proj = {
