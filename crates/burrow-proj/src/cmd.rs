@@ -124,17 +124,32 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 usage::back(cfg, None);
                 Ok(())
             }
-            // A hold #428's stall watchdog kept for itself, until UNTIL.
             Some("hold") => {
-                let until = arg(args, 2, "usage: proj usage hold UNTIL")?
+                let help = "usage: proj usage hold UNTIL [--reason TEXT]";
+                let until = arg(args, 2, help)?
                     .parse::<i64>()
-                    .map_err(|_| Fail::new(2, "usage: proj usage hold UNTIL (seconds)"))?;
-                // Fails unless the hold has it: the watchdog keeps its own
-                // till then. It doesn't say when it was written: before
-                // this proj ran.
+                    .map_err(|_| Fail::new(2, help))?;
+                let reason = match &args[3..] {
+                    [] => "Claude work paused by the owner",
+                    [flag, reason] if flag == "--reason" && !reason.trim().is_empty() => reason,
+                    _ => return Err(Fail::new(2, help)),
+                };
+                usage::hold(cfg, until, reason).map_err(|e| Fail::new(1, e))
+            }
+            // Import the old watchdog's undated limit without reviving a released hold.
+            Some("adopt") => {
+                if args.len() != 3 {
+                    return Err(Fail::new(2, "usage: proj usage adopt UNTIL"));
+                }
+                let until = arg(args, 2, "usage: proj usage adopt UNTIL")?
+                    .parse::<i64>()
+                    .map_err(|_| Fail::new(2, "usage: proj usage adopt UNTIL (seconds)"))?;
                 usage::earlier(cfg, "the stall watchdog", until, None).map_err(|e| Fail::new(1, e))
             }
-            Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
+            Some(_) => Err(Fail::new(
+                2,
+                "usage: proj usage [back | hold UNTIL [--reason TEXT] | adopt UNTIL]",
+            )),
         },
         Some("await") => wait_on(cfg, &args[1..]),
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),

@@ -11,7 +11,8 @@
 //! ```
 //!
 //! `ensure` opens an absent notice without the daily reminder that `open`
-//! sends for a continuing problem. It is safe to retry after an ambiguous reply.
+//! sends for a continuing problem. Both update an existing notice's title and
+//! body when the facts change. It is safe to retry after an ambiguous reply.
 //!
 //! GitHub never fails the caller: a notice that can't be sent goes to the
 //! journal and is dropped. With no repo, every notice only goes to the
@@ -214,7 +215,7 @@ impl Notices<'_> {
         // Fails when GitHub can't be asked, so that's never taken for "no
         // issue", which would open a second one.
         let open = github::open_issues(api, repo, &cfg.label, key)?;
-        let Some(&first) = open.first() else {
+        let Some(first) = open.first() else {
             // Before the notice file: with no label there's no issue, and
             // nothing to close.
             github::label(api, repo, &cfg.label, &cfg.name)?;
@@ -230,8 +231,12 @@ impl Notices<'_> {
                 cfg.assignee.as_deref().filter(|a| !a.is_empty()),
             );
         };
+        let wanted = format!("[{key}] {title}");
+        if first.title != wanted || first.body != body {
+            github::update(api, repo, first.number, &wanted, body)?;
+        }
         if remind && now.saturating_sub(said(&stamp)) > DAY {
-            github::comment(api, repo, first, &format!("Still happening: {body}"))?;
+            github::comment(api, repo, first.number, &format!("Still happening: {body}"))?;
             write_stamp(&stamp, now)?;
         }
         Ok(())
@@ -245,7 +250,7 @@ impl Notices<'_> {
             return Ok(());
         }
         for n in github::open_issues(api, repo, &cfg.label, key)? {
-            github::close(api, repo, n, what)?;
+            github::close(api, repo, n.number, what)?;
         }
         // Forgotten only once none is open, so a failed close is tried again
         // by the next one.

@@ -177,9 +177,13 @@ Each has an entry below, and each can be imported on its own.
   `HOST-notify` tells you once. `burrow.proj.usage.paid` defaults to false:
   paid extra usage is off, so limits mean waiting for reset, never asking
   the owner to raise a cap. A fresh engine meter requested after the latest refusal
-  releases the hold and closes its notice when every window is below 100%
-  (or credits are available). Missing, stale or ambiguously ordered readings keep the hold.
-  `proj usage back` also releases it once usage is available.
+  releases an ordinary usage hold and closes its notice when every window is below
+  100% (or credits are available). Missing, stale or ambiguously ordered readings
+  keep the hold. `proj usage back` also releases it once usage is available.
+  `proj usage hold UNTIL [--reason TEXT]` starts a fresh owner pause until a
+  future Unix timestamp, even after a previous release. Successful turns and
+  fresh meters cannot release an owner pause; `proj usage back` can.
+  Running turns continue, and Codex work remains eligible.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
   overflow to the other engine when its own is short and the other has
   room; `~/.config/proj/models` gives each role its model and effort on

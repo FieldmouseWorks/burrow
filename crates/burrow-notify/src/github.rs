@@ -11,12 +11,18 @@ use serde_json::{Value, json};
 /// finds it: one that came out bare still has to be found, or it would get a
 /// twin and never close. Fails when GitHub can't be asked, so that's never
 /// taken for "no issue".
+pub struct Notice {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+}
+
 pub fn open_issues(
     api: &mut dyn Api,
     repo: &str,
     label: &str,
     key: &str,
-) -> Result<Vec<u64>, Error> {
+) -> Result<Vec<Notice>, Error> {
     let tag = format!("[{key}]");
     let mut found = Vec::new();
     let mut path = Some(format!("repos/{repo}/issues?state=open&per_page=100"));
@@ -31,7 +37,11 @@ pub fn open_issues(
                 && issue["title"].as_str().is_some_and(|t| t.starts_with(&tag))
                 && labelled_or_bare(issue, label);
             if let (true, Some(n)) = (ours, issue["number"].as_u64()) {
-                found.push(n);
+                found.push(Notice {
+                    number: n,
+                    title: issue["title"].as_str().unwrap_or_default().to_owned(),
+                    body: issue["body"].as_str().unwrap_or_default().to_owned(),
+                });
             }
         }
         path = r.next();
@@ -144,6 +154,18 @@ pub fn close(api: &mut dyn Api, repo: &str, n: u64, why: &str) -> Result<(), Err
         "PATCH",
         &format!("repos/{repo}/issues/{n}"),
         Some(&json!({"state": "closed"})),
+        None,
+    )
+    .map(drop)
+}
+
+/// Publish changed facts on the existing notice without creating another one.
+pub fn update(api: &mut dyn Api, repo: &str, n: u64, title: &str, body: &str) -> Result<(), Error> {
+    call(
+        api,
+        "PATCH",
+        &format!("repos/{repo}/issues/{n}"),
+        Some(&json!({"title": title, "body": body})),
         None,
     )
     .map(drop)

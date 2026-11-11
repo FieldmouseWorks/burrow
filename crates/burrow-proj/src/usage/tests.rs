@@ -16,7 +16,7 @@ use crate::config::tests::example;
 /// answers `pending` with 0 (may still be open) while there's a `pending`
 /// file, with the code in `pending-code` when there's one of those, killed
 /// when there's a `pending-killed`, and 1 (closed) otherwise.
-fn rig() -> (tempfile::TempDir, Config) {
+pub(super) fn rig() -> (tempfile::TempDir, Config) {
     let d = tempfile::tempdir().unwrap();
     let notify = d.path().join("notify");
     let dir = d.path().display();
@@ -58,7 +58,7 @@ fn kicked(d: &tempfile::TempDir) -> Vec<String> {
     got
 }
 
-fn told(d: &tempfile::TempDir) -> Vec<String> {
+pub(super) fn told(d: &tempfile::TempDir) -> Vec<String> {
     fs::read_to_string(d.path().join("told"))
         .unwrap_or_default()
         .lines()
@@ -591,7 +591,7 @@ fn a_look_that_cant_tend_books_another() {
 /// Job `id`'s latest turn ended on a usage limit an earlier proj wrote,
 /// resetting at `reset`, its N.resets written at `written`; `owned` for an
 /// --owned job's.
-fn earlier_resets(cfg: &Config, id: &str, reset: i64, written: i64, owned: bool) {
+pub(super) fn earlier_resets(cfg: &Config, id: &str, reset: i64, written: i64, owned: bool) {
     let dir = cfg.jobs.join(id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("turns"), "1\n").unwrap();
@@ -700,6 +700,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     let t = now();
     let raw = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)";
     let original = Spent {
+        owner: false,
         until: t + 7200,
         said: raw.into(),
         job: "web-1".into(),
