@@ -71,6 +71,9 @@ pub fn end(dir: &Path, how: &Ended) -> Result<Value, String> {
     };
     match (&rec, cleared) {
         (Ok(rec), Ok(())) => {
+            if let Err(e) = crate::tools::forget(rec, id) {
+                note(&e);
+            }
             for said in own_trees(rec, id) {
                 note(&said);
             }
