@@ -74,8 +74,8 @@ pub fn successor(cfg: &Config) -> Option<PathBuf> {
     (String::from_utf8_lossy(&said.stdout).trim_end() == HANDOVER_FORMAT).then_some(d)
 }
 
-/// A retained turn requires checkpoint-aware startup. Older generations
-/// accept ordinary handovers but would truncate its stream on a rollback.
+/// Every turn requires protected-state-aware startup. Even initial waiters
+/// already have an execution identity that older generations cannot maintain.
 pub(crate) fn retry_compatible(to: &Path) -> bool {
     Command::new(to)
         .arg("_retry_format")
@@ -86,17 +86,6 @@ pub(crate) fn retry_compatible(to: &Path) -> bool {
             said.status.success()
                 && String::from_utf8_lossy(&said.stdout).trim_end() == RETRY_HANDOVER_FORMAT
         })
-}
-
-/// Initial startup has already committed its execution identity too. An
-/// unaware rollback must not execute that turn while leaving a stale identity
-/// for a later deployment to trust. Both pools use this single handover rule.
-fn startup_compatible(job: &Job, n: &str, to: &Path) -> io::Result<bool> {
-    let protected = crate::retry::Checkpoint::load(job, n)?.is_some()
-        || crate::retry::Identity::load(job, n)
-            .map_err(io::Error::other)?
-            .is_some();
-    Ok(!protected || retry_compatible(to))
 }
 
 /// On with the proj at `to`, in this pid, its look's lock on fd 9 until it's up:
@@ -390,7 +379,7 @@ fn codex_slot(
     loop {
         if may_hand_over
             && let Some(to) = successor(cfg)
-            && startup_compatible(&job, n, &to)?
+            && retry_compatible(&to)
         {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
@@ -482,7 +471,7 @@ pub fn take(
         // LOOK_EVERY).
         if may_hand_over
             && let Some(to) = successor(cfg)
-            && startup_compatible(&job, n, &to)?
+            && retry_compatible(&to)
         {
             unmark(&job, n)?;
             let lk = File::create(slots.join(".admission-lock"))?;
