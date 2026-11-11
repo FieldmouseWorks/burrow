@@ -66,6 +66,7 @@ pub(super) enum Verdict {
     Owner,
     Duplicate(u64),
     Done,
+    Split,
 }
 
 /// The verdict on an answer's first line with words on it, as the task asks
@@ -84,6 +85,7 @@ pub(super) fn verdict(answer: &str) -> Option<Verdict> {
         "tracker" => Verdict::Tracker,
         "owner" => Verdict::Owner,
         "done" => Verdict::Done,
+        "split" => Verdict::Split,
         "duplicate" => {
             let of = words.next()?.trim_start_matches('#');
             let of = of.trim_end_matches(|c: char| !c.is_ascii_digit());
@@ -154,9 +156,15 @@ impl Pass<'_> {
     }
 
     /// Whether an issue is sorted already, or isn't triage's to sort.
-    pub(super) fn sorted(&self, t: &Triage, issue: &Value, claimed: &BTreeSet<String>) -> bool {
+    pub(super) fn sorted(
+        &mut self,
+        repo: &str,
+        t: &Triage,
+        issue: &Value,
+        claimed: &BTreeSet<String>,
+    ) -> bool {
         if issue.get("pull_request").is_some()
-            || !self.eligible(issue)
+            || !self.eligible(repo, issue)
             || claimed.contains(&raw(&issue["number"]))
         {
             return true;
@@ -165,6 +173,40 @@ impl Pass<'_> {
             .as_array()
             .map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).collect())
             .unwrap_or_default();
+        if !t.sort_unlabelled
+            && self.engine(issue).is_none()
+            && !labels.contains(&READY)
+            && !labels.contains(&TRACKER)
+        {
+            return true;
+        }
+        if labels
+            .iter()
+            .any(|l| *l == t.owner_label || t.skip.iter().any(|s| s == l))
+        {
+            return true;
+        }
+        if self.inbox.planning && self.started_issue_job(Some(repo), &raw(&issue["number"])) {
+            return true;
+        }
+        if self.inbox.planning && self.worker_split_pending(Some(repo), &raw(&issue["number"])) {
+            return true;
+        }
+        if self.inbox.planning && self.has_task_list(Some(repo), &raw(&issue["number"])) {
+            return !self
+                .sorting_dir()
+                .join(format!("{}-{}", key(repo), raw(&issue["number"])))
+                .join("plan")
+                .exists()
+                && self.verified_source(repo, issue).unwrap_or(false);
+        }
+        if self.inbox.planning
+            && (labels.contains(&TRACKER)
+                || (!labels.contains(&LATER)
+                    && (labels.contains(&READY) || self.engine(issue).is_some())))
+        {
+            return self.planned(Some(repo), issue);
+        }
         labels.iter().any(|l| {
             [READY, LATER, TRACKER, t.owner_label.as_str()].contains(l)
                 || self.inbox.labels.contains_key(*l)
@@ -193,11 +235,11 @@ impl Pass<'_> {
             .count();
         let mut room = t.at_once.saturating_sub(going);
         for issue in all {
-            if room == 0 {
-                break;
+            if room == 0 && !self.lane(issue) {
+                continue;
             }
             let n = raw(&issue["number"]);
-            if self.sorted(&t, issue, &claimed) || handled.contains(&n) {
+            if self.sorted(repo, &t, issue, &claimed) || handled.contains(&n) {
                 continue;
             }
             let d = root.join(format!("{}-{n}", key(repo)));
@@ -228,7 +270,7 @@ impl Pass<'_> {
             }
             Self::hand(&d, &input)?;
             fs::write(d.join("seen"), seen.to_string()).map_err(|e| io_fail(&d, e))?;
-            room -= 1;
+            room = room.saturating_sub(1);
         }
         Ok(())
     }
@@ -268,7 +310,17 @@ impl Pass<'_> {
         } else {
             labels.join(", ")
         };
-        let task = format!("{input}\n\nIts labels: {labels}.\n\n{SORT}");
+        let instruction = if self.inbox.planning {
+            crate::planning::INSTRUCTIONS
+        } else {
+            SORT
+        };
+        let given = if self.inbox.planning {
+            crate::planning::prompt(&input, Path::new("@PROJ_TASK_SOURCE@"))
+        } else {
+            input.clone()
+        };
+        let task = format!("{given}\n\nIts labels: {labels}.\n\n{instruction}");
         let app = self
             .cfg
             .machinery
@@ -276,13 +328,23 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| issue["user"]["type"] == "Bot");
         let new = New {
+            unstick: self.lane(issue),
+            task_source: (self.inbox.planning && input.len() > crate::planning::MAX_INPUT)
+                .then(|| input.clone()),
             usage_kind: Some(super::usage::kind(self.cfg.steward_account.as_ref(), issue)),
-            vm: self.inbox.vm,
+            vm: self.inbox.vm && !self.inbox.planning,
             owned: true,
             kicks: vec!["proj-inbox".into()],
             link: Some(raw(&issue["html_url"])).filter(|l| !l.is_empty() && l != "null"),
             app,
-            role: Some("triage".into()),
+            role: Some(
+                if self.inbox.planning {
+                    "planner"
+                } else {
+                    "triage"
+                }
+                .into(),
+            ),
             ..New::default()
         };
         start_job(self.cfg, &new, &self.project[repo], &task).map(|id| (id, input, seen))
@@ -371,7 +433,7 @@ impl Pass<'_> {
             // even partway through carrying its verdict out, the verdict is
             // of something else, and the issue is sorted again as it stands.
             let mut stale = false;
-            if !barred && let Some(i) = open.filter(|i| !self.sorted(t, i, &claimed)) {
+            if !barred && let Some(i) = open.filter(|i| !self.sorted(repo, t, i, &claimed)) {
                 let Some(now) = self.input(repo, i) else {
                     self.miss(repo);
                     continue;
@@ -379,7 +441,7 @@ impl Pass<'_> {
                 stale = !Self::handed(&d, &now);
             }
             let mut failed = false;
-            if !barred && !stale && open.is_some_and(|i| !self.sorted(t, i, &claimed)) {
+            if !barred && !stale && open.is_some_and(|i| !self.sorted(repo, t, i, &claimed)) {
                 match told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into())) {
                     Ok(answer) => {
                         let Some(plan) = self.plan(&d, t, &id, &answer) else {
@@ -433,6 +495,17 @@ impl Pass<'_> {
     /// `later`, saying so, so the issue isn't sorted over and over.
     pub(super) fn steps(&self, t: &Triage, id: &str, answer: &str) -> Vec<Step> {
         match verdict(answer) {
+            Some(Verdict::Split) => {
+                match crate::planning::parse(answer.split_once('\n').map_or("", |(_, rest)| rest)) {
+                    Ok(tasks) => vec![Step::Split(tasks), Step::Label(TRACKER.into())],
+                    Err(e) => vec![
+                        Step::Post(format!(
+                            "Invalid split: {e}. No children created; needs replanning."
+                        )),
+                        Step::Label(LATER.into()),
+                    ],
+                }
+            }
             Some(Verdict::Ready) => vec![Step::Label(READY.into())],
             Some(Verdict::Later) => vec![Step::Label(LATER.into())],
             Some(Verdict::Tracker) => vec![Step::Label(TRACKER.into())],
@@ -522,8 +595,26 @@ impl Pass<'_> {
                     self.post(repo, n, &format!("**{engine} job**\n\n{body}"))
                 }
                 Step::Close(reason) => self.close(repo, n, reason),
+                Step::Split(tasks) => {
+                    let Ok(input) = fs::read_to_string(d.join("input")) else {
+                        return false;
+                    };
+                    self.prepare_plan(repo, n, &input, tasks) && self.split_children(repo, n, tasks)
+                }
             };
             if !took || fs::write(d.join("did"), format!("{}\n", i + 1)).is_err() {
+                return false;
+            }
+        }
+        if self.inbox.planning
+            && steps
+                .iter()
+                .any(|s| matches!(s, Step::Label(l) if l == READY))
+        {
+            let Ok(input) = fs::read_to_string(d.join("input")) else {
+                return false;
+            };
+            if !self.prepare_plan(repo, n, &input, &[]) {
                 return false;
             }
         }
@@ -539,4 +630,5 @@ pub(super) enum Step {
     Assign(String),
     Post(String),
     Close(String),
+    Split(Vec<crate::planning::Task>),
 }

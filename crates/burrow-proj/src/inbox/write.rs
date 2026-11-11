@@ -5,6 +5,17 @@ use super::Pass;
 use serde_json::json;
 
 impl Pass<'_> {
+    pub(super) fn remove_label(&self, repo: &str, n: &str, label: &str) -> bool {
+        crate::github::reported(burrow_github::call_allowing(
+            &mut crate::github::client(self.cfg),
+            "DELETE",
+            &format!("repos/{repo}/issues/{n}/labels/{}", super::uri(label)),
+            None,
+            None,
+            &[404],
+        ))
+        .is_some()
+    }
     /// Close the issue with GitHub's completed or not_planned reason.
     pub(super) fn close(&self, repo: &str, n: &str, reason: &str) -> bool {
         crate::github::reported(burrow_github::call_once(

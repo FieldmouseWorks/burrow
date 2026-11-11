@@ -114,6 +114,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         inbox.state = at("state");
         inbox.outside_label = "outside text".into();
         inbox.triage = Some(Triage {
+            sort_unlabelled: true,
             owner_label: "needs-owner".into(),
             owner: Some("sam".into()),
             skip: vec!["probe".into()],
@@ -324,7 +325,7 @@ fn verdicts_read() {
 #[test]
 fn what_counts_as_sorted() {
     let b = Box::new();
-    let p = b.pass();
+    let mut p = b.pass();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     for (i, sorted) in [
         (issue(1, "sam", &[]), false),
@@ -339,11 +340,15 @@ fn what_counts_as_sorted() {
         (issue(1, "player", &[]), true),
         (issue(1, "sam", &["outside text"]), true),
     ] {
-        assert_eq!(p.sorted(&t, &i, &Default::default()), sorted, "{i}");
+        assert_eq!(
+            p.sorted("sam/box", &t, &i, &Default::default()),
+            sorted,
+            "{i}"
+        );
     }
     let mut pr = issue(1, "sam", &[]);
     pr["pull_request"] = json!({});
-    assert!(p.sorted(&t, &pr, &Default::default()));
+    assert!(p.sorted("sam/box", &t, &pr, &Default::default()));
 }
 
 /// What a sorting job for issue N, as the fixtures have it, read of it.

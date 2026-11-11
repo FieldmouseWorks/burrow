@@ -1,0 +1,64 @@
+# Inbox task planning
+
+`burrow.proj.inbox.planning` defaults on, including when unlabelled-issue
+triage is disabled. In that case only enrolled, ready and tracker issues
+enter the planning queue; unrelated unlabelled issues remain untouched.
+Planning uses a new job on the `planner` role, independently of the
+implementation engine label. This role defaults to Codex. Its model and
+effort come from the role configuration; a Claude selection requires an
+explicit small model, so it cannot fall through to the Claude default.
+Host planning jobs are required;
+enabling planning with `inbox.vm` is rejected at configuration time.
+
+The planner reads the verified issue and repository, including existing
+issues and PRs. It receives no previous sessions' transcripts. A planning
+prompt contains at most 64,000 bytes of issue input; larger input is retained
+as `task-source` inside that job's own permitted directory, with a short
+preview and instructions to inspect the complete source in bounded portions.
+
+A `ready` verdict approves the exact verified input for implementation.
+An engine label alone cannot bypass planning. A `split` verdict is a JSON
+array of 2–16 tasks, each with `title`, `body` and `check`; an optional
+`issue` number reuses an existing authorized issue in the same repository.
+Titles and task bodies have fixed bounds, and a whole plan is validated
+before any child is created. Exact generated or verbatim reused children
+retain that size approval, rather than running another planner. Changed
+input is checked again. The planner must preserve authorization
+boundaries, unresolved work and existing PRs in self-contained children.
+
+The inbox's `.plans/OWNER_REPO-N/tasks.json` is the authoritative ordered
+task list. A single comment on the parent mirrors it as a checklist with
+child and landed PR links. Children are created as `later`; the repository's
+normal event pass makes only the first unfinished child `ready`. The normal
+drain and worker admission both check the parent list. A child is offered
+once; a later deferral is retained instead of repeatedly paying to replan
+unchanged work. A manually applied
+engine label cannot admit a later child. Completion requires a merged PR,
+not merely a closed issue. Nested splits complete through their own lists.
+Issue, PR and turn-completion events advance the list without a parent job.
+
+Generated children are admitted only through local durable creation receipts;
+reused issues still require a configured author. Planning never changes
+`inbox.authors`. Comments and edit histories always require configured
+authors, including on generated children. Outside-text labels retain their
+existing protection. An edited parent pauses child
+admission and posts a notice; the task list and completed work remain on
+disk for replanning rather than silently executing the old scope.
+
+Each child creation has a durable receipt marker. A lost creation response
+is reconciled against all issues, including closed ones, before any further
+creation. An ambiguous POST is not repeated when reconciliation cannot find
+it: the task remains pending and the inbox retries, reporting the failed
+pass through its existing stall path. Definite refusals can be retried.
+Checklist updates use the saved comment id, reconciled by marker if needed.
+
+A worker finding an oversized task writes the same JSON array to a file and
+runs `proj split FILE`, then ends its session. Its answer is posted before
+the old issue job is retired; the new child jobs start fresh. Publish any
+implementation progress before splitting, as before any job-ending action.
+Planning happens once before a worker starts. Its ordinary PR replies,
+questions and cutoff recovery retain the existing lifecycle; a worker
+splits again if its task grows. A split declaration freezes new turns while
+the host completes its durable child-creation transaction.
+Pre-deployment jobs keep their existing recovery and scratch until the
+explicit lane migration accounts for their outstanding work.

@@ -82,13 +82,16 @@ description says \"Fixes #7\" (or \"Refs #7\" if it doesn't settle the issue).";
 
 It's broken.
 
+
 sam commented:
 
 also this
 
+
 sam commented:
 
 and that
+
 
 {tail}"
         )
@@ -401,4 +404,29 @@ fn machine_issues_have_roles_while_person_issues_keep_label_engines() {
     assert_eq!(p.machine_role(&i).as_deref(), Some("stuck"));
     i["labels"] = json!([{"name":"drift"}]);
     assert_eq!(p.machine_role(&i).as_deref(), Some("career-drift"));
+}
+
+#[test]
+fn forgetting_a_repository_removes_every_plan_artifact_for_only_that_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    for repo in ["O_R-7", "o_r-8", "o_rx-7", "o_r-x-7", "p_r-7"] {
+        let d = tmp.path().join(".plans").join(repo);
+        fs::create_dir_all(&d).unwrap();
+        for file in ["input", "tasks.json", "worker-split", "stale-notice"] {
+            fs::write(
+                d.join(file),
+                "durable state including child creation receipts",
+            )
+            .unwrap();
+        }
+    }
+    forget(tmp.path(), "o/R").unwrap();
+    for repo in ["O_R-7", "o_r-8"] {
+        assert!(!tmp.path().join(".plans").join(repo).exists());
+    }
+    for repo in ["o_rx-7", "o_r-x-7", "p_r-7"] {
+        for file in ["input", "tasks.json", "worker-split", "stale-notice"] {
+            assert!(tmp.path().join(".plans").join(repo).join(file).exists());
+        }
+    }
 }

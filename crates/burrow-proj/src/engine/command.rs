@@ -14,6 +14,7 @@ pub const LONG: &str = "A command that can outlast one Bash call (ten minutes), 
 pub const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask --default \"TEXT\" [--one-way]` when your answer is a question only a person can settle (their reply resumes it; after the deadline a reversible default is taken, a one-way default is left for the owner), or `proj done` when the work is finished";
 
 pub const FACTS: &str = "Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.";
+const SPLIT: &str = " An inbox task is one self-contained PR. If it is too big, publish progress and write 2 to 16 smaller self-contained tasks as a JSON array with title, body and check, run `proj split FILE`, then end the session. Preserve the original authorization boundaries, outstanding work and PR links in those tasks; never carry a lane indefinitely.";
 
 /// Parent exec flags precede resume: its subcommand accepts model and JSON,
 /// but not the parent's own flags (pinned CLI's exec/resume help).
@@ -139,7 +140,13 @@ pub fn spawn(
             "This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped."
         )
     };
-    let instructions = format!("{instructions} {FACTS}");
+    let split =
+        if job.path("inbox-issue").exists() && cfg.inbox.as_ref().is_some_and(|i| i.planning) {
+            SPLIT
+        } else {
+            ""
+        };
+    let instructions = format!("{instructions} {FACTS}{split}");
     if choice.engine == Engine::Claude {
         args.extend(["--append-system-prompt".into(), instructions]);
     } else {

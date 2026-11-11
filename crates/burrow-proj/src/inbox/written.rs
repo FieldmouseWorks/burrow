@@ -60,18 +60,21 @@ impl Pass<'_> {
                 continue;
             }
             issue["comments"]["nodes"] = json!(comments);
-            return self.checked(rest, &issue);
+            return self.checked(repo, rest, &issue);
         }
     }
 
-    fn checked(&self, rest: &Value, issue: &Value) -> Option<Written> {
+    fn checked(&self, repo: &str, rest: &Value, issue: &Value) -> Option<Written> {
         let nodes = issue["comments"]["nodes"].as_array()?;
         // Fail closed if pagination did not establish the complete history.
         if issue["comments"]["totalCount"].as_u64() != Some(nodes.len() as u64) {
             return None;
         }
         let mut safe = rest.clone();
-        if self.authored(issue) && self.writers(&issue["timelineItems"], "actor") {
+        if (self.writer(&issue["author"]) || self.generated_child(repo, rest))
+            && self.writers(&issue["userContentEdits"], "editor")
+            && self.writers(&issue["timelineItems"], "actor")
+        {
             safe["title"] = issue["title"].clone();
             safe["body"] = issue["body"].clone();
         } else {
@@ -185,7 +188,7 @@ mod tests {
                 issue: safe,
                 comments,
                 ..
-            } = b.pass().checked(&rest, &edited).unwrap();
+            } = b.pass().checked("sam/box", &rest, &edited).unwrap();
             let prompt = b.pass().task("sam/box", &safe, &comments);
             assert!(!prompt.contains("trusted title"), "{field}: {prompt}");
             assert!(!prompt.contains("trusted body"), "{field}: {prompt}");
@@ -196,7 +199,7 @@ mod tests {
             issue: safe,
             comments,
             ..
-        } = b.pass().checked(&rest, &edited).unwrap();
+        } = b.pass().checked("sam/box", &rest, &edited).unwrap();
         assert!(
             !b.pass()
                 .task("sam/box", &safe, &comments)
@@ -210,7 +213,10 @@ mod tests {
             issue: safe,
             comments,
             ..
-        } = b.pass().checked(&issue(7, "sam", &[]), &text()).unwrap();
+        } = b
+            .pass()
+            .checked("sam/box", &issue(7, "sam", &[]), &text())
+            .unwrap();
         let prompt = b.pass().task("sam/box", &safe, &comments);
         for s in ["trusted title", "trusted body", "trusted reply"] {
             assert!(prompt.contains(s));
@@ -229,13 +235,13 @@ mod tests {
             let mut t = text();
             t["userContentEdits"] = history;
             assert_eq!(
-                b.pass().checked(&rest, &t).unwrap().issue["title"],
+                b.pass().checked("sam/box", &rest, &t).unwrap().issue["title"],
                 "Issue text withheld"
             );
         }
         let mut t = text();
         t["comments"]["totalCount"] = json!(2);
-        assert!(b.pass().checked(&rest, &t).is_none());
+        assert!(b.pass().checked("sam/box", &rest, &t).is_none());
     }
 
     #[test]
@@ -257,7 +263,10 @@ mod tests {
             issue: safe,
             comments,
             ..
-        } = b.pass().checked(&issue(7, "worker[bot]", &[]), &t).unwrap();
+        } = b
+            .pass()
+            .checked("sam/box", &issue(7, "worker[bot]", &[]), &t)
+            .unwrap();
         assert_eq!(safe["title"], "trusted title");
         assert!(b.pass().heard(&comments[0]));
         // An old bot issue at the cap is still unprovable. Its publisher
@@ -265,7 +274,7 @@ mod tests {
         t["userContentEdits"] = json!({"totalCount":100,"nodes":vec![json!({"editor":{"login":"worker","__typename":"Bot","databaseId":burrow_github::fake::author("worker[bot]").id}});100]});
         assert_eq!(
             b.pass()
-                .checked(&issue(7, "worker[bot]", &[]), &t)
+                .checked("sam/box", &issue(7, "worker[bot]", &[]), &t)
                 .unwrap()
                 .issue["title"],
             "Issue text withheld"
@@ -275,7 +284,10 @@ mod tests {
         t["userContentEdits"] = json!({"totalCount":0,"nodes":[]});
         let comment = t["comments"]["nodes"][0].clone();
         t["comments"] = json!({"totalCount":105,"nodes":vec![comment;105]});
-        let written = b.pass().checked(&issue(7, "worker[bot]", &[]), &t).unwrap();
+        let written = b
+            .pass()
+            .checked("sam/box", &issue(7, "worker[bot]", &[]), &t)
+            .unwrap();
         assert_eq!(written.issue["title"], "trusted title");
         assert_eq!(written.comments.len(), 105);
         assert!(written.comments.iter().all(|c| b.pass().heard(c)));
@@ -294,7 +306,10 @@ mod tests {
                 }
                 let Written {
                     issue, comments, ..
-                } = b.pass().checked(&issue(7, "sam", &[]), &t).unwrap();
+                } = b
+                    .pass()
+                    .checked("sam/box", &issue(7, "sam", &[]), &t)
+                    .unwrap();
                 let prompt = b.pass().task("sam/box", &issue, &comments);
                 let retained = if comment {
                     "trusted reply"

@@ -21,11 +21,11 @@ fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value
 #[test]
 fn the_drain_picks() {
     let b = Box::new();
-    let p = b.pass();
+    let mut p = b.pass();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let old = "2026-10-01T00:00:00Z";
     let new = "2026-11-01T00:00:00Z";
-    let pick = |items: &[Value]| p.pick_ready(&t, items);
+    let mut pick = |items: &[Value]| p.pick_ready(&t, items);
 
     let game = found("sam/game", 4, "sam", &["ready"], old);
     let game_newer = found("sam/game", 5, "sam", &["ready"], new);
@@ -365,11 +365,11 @@ fn running_handed_references_are_not_drained() {
     fs::rename(&d, &lane).unwrap();
     fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    let p = b.pass();
+    let mut p = b.pass();
     assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
-    assert!(p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     for (repo, n, claimed) in [
         ("sam/box", 8, true),
         ("sam/box", 10, true),
@@ -389,7 +389,10 @@ fn running_handed_references_are_not_drained() {
     fs::remove_file(b.cfg.jobs.join("lane/1.slot")).unwrap();
     assert_eq!(b.pass().pick_ready(t, std::slice::from_ref(&seven)), None);
     fs::remove_file(b.path("active")).unwrap();
-    assert!(!b.pass().sorted(t, &unsorted, &b.pass().claimed("sam/box")));
+    assert!(
+        !b.pass()
+            .sorted("sam/box", t, &unsorted, &b.pass().claimed("sam/box"))
+    );
     b.pass().drain().unwrap();
     assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
 }
@@ -631,7 +634,7 @@ fn awaiting_handed_references_are_not_drained() {
     let wait = format!("sam/box#200\t{}\t{{\"state\":\"open\"}}\n", crate::now());
     let seven = found("sam/box", 7, "sam", &["ready"], "2026-10-01T00:00:00Z");
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    let p = b.pass();
+    let mut p = b.pass();
     // A declaration for a future turn and an empty live wait do not own work.
     fs::write(job.join("await.next"), &wait).unwrap();
     fs::write(job.join("await"), "").unwrap();
@@ -640,7 +643,7 @@ fn awaiting_handed_references_are_not_drained() {
     assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
-    assert!(p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    assert!(p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     p.note_ready("sam/box", std::slice::from_ref(&seven))
         .unwrap();
     on_github(&b, &seven);
@@ -648,7 +651,7 @@ fn awaiting_handed_references_are_not_drained() {
     assert!(!b.log().contains("labels[]=codex"));
     // Stopping or finishing the job removes its live wait, releasing the brief.
     fs::remove_file(job.join("await")).unwrap();
-    assert!(!p.sorted(t, &unsorted, &p.claimed("sam/box")));
+    assert!(!p.sorted("sam/box", t, &unsorted, &p.claimed("sam/box")));
     b.pass().drain().unwrap();
     assert!(b.log().contains("issues/7/labels -f labels[]=codex"));
 }
@@ -747,7 +750,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
 #[test]
 fn priorities_precede_pipeline_and_age_and_drive_queue() {
     let b = Box::new();
-    let p = b.pass();
+    let mut p = b.pass();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let items = [
         found("sam/box", 1, "sam", &["ready"], "2026-01-01"),
@@ -804,4 +807,48 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         "{}",
         b.log()
     );
+}
+
+#[test]
+fn full_drain_only_fetches_cached_repair_candidates() {
+    let b = Box::new();
+    let state = &b.cfg.inbox.as_ref().unwrap().state;
+    let busy = state.join("sam_game-99");
+    fs::create_dir_all(&busy).unwrap();
+    fs::write(busy.join("drained"), "sam/game#99\n").unwrap();
+    fs::write(busy.join("job"), "busy\n").unwrap();
+    let old = "2026-10-01T00:00:00Z";
+    let mut queued: Vec<_> = (4..10)
+        .map(|n| found("sam/game", n, "sam", &["ready"], old))
+        .collect();
+    b.pass().note_ready("sam/game", &queued).unwrap();
+    let before = b.log();
+    b.pass().drain().unwrap();
+    assert_eq!(
+        b.log(),
+        before,
+        "a full drain must not fetch ordinary candidates"
+    );
+    let repair_label = b.cfg.inbox.as_ref().unwrap().unstick_label.clone();
+    let repair = found("sam/game", 10, "sam", &["ready", &repair_label], old);
+    queued.push(repair.clone());
+    b.pass().note_ready("sam/game", &queued).unwrap();
+    // Cached repair status only permits the refresh, not admission: losing
+    // the live label must still respect ordinary capacity.
+    let mut ordinary_now = repair.clone();
+    ordinary_now["labels"] = json!([{"name":"ready"}]);
+    on_github(&b, &ordinary_now);
+    b.pass().drain().unwrap();
+    assert!(!b.log().contains("labels[]="), "{}", b.log());
+    on_github(&b, &repair);
+    b.pass().drain().unwrap();
+    let log = b.log();
+    for n in 4..10 {
+        assert!(
+            !log.contains(&format!("api repos/sam/game/issues/{n}")),
+            "{log}"
+        );
+    }
+    assert!(log.contains("api repos/sam/game/issues/10"), "{log}");
+    assert!(log.contains("issues/10/labels -f labels[]=codex"), "{log}");
 }

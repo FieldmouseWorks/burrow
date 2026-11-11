@@ -55,6 +55,7 @@ fn start_with(
     answered: bool,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
+    crate::planning::admit(&job)?;
     let unit = job.unit();
     let end = job.end_unit();
     // The last turn reads as ended once it has written its outcome, but its

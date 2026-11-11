@@ -17,6 +17,9 @@
   assert builtins.elem "proj-config" inbox.config.burrow.updates.requiredHealth;
   assert builtins.elem "switch-engines" inbox.config.burrow.proj.inbox.triage.skip;
   assert builtins.elem "custom" inbox.config.burrow.proj.inbox.triage.skip;
+  assert inbox.config.burrow.proj.inbox.planning;
+  assert !(builtins.elem "${inbox.config.burrow.github.machineApp.slug}[bot]" inbox.config.burrow.proj.inbox.authors);
+  assert builtins.elem "pull_request" inbox.config.burrow.events.handlers.proj-inbox.events;
   pkgs.runCommand "proj-config-check" { } ''
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
