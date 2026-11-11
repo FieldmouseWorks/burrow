@@ -255,10 +255,16 @@ too. Take a label off to have an issue sorted again.
 
 With `triage.drain` set to an engine, the drain hands `ready` issues to it: each
 pass, if that engine has an idle slot and fewer than `triage.drainJobs` handed-on
-issues have a job, the oldest `ready` issue in any repo's last-listed open issues
-(the pipeline's repos first), checked with GitHub as it stands, gets
+issues have a job, the first `ready` issue in any repo's last-listed open issues,
+checked with GitHub as it stands, gets
 the engine's inbox label and is a job like any other from there, closed when
 it's done. A handed-on job takes its place in line rather than going first.
+Rank issues with `priority: high`, `priority: medium` or `priority: low`.
+Priority comes first (no label means medium), then pipeline repos, then oldest
+first. Triage includes a priority in its verdict and adds it only if no priority
+label exists when it acts. `proj status` and the probe's `queue` show the next
+five candidates from the drain's cached lists; eligibility and slot availability
+are checked when handing one on.
 While a `ready` issue waits for a slot, every job turn's end kicks a pass, since
 any of them frees one; a usage hold books one for when it resets.
 

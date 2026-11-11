@@ -1,8 +1,8 @@
 //! The drain enrolls issues triage sorted [`READY`] using its configured
-//! engine label. It admits the oldest candidate whose resolved engine has
+//! engine label. It admits the highest ranked candidate whose resolved engine has
 //! room; roles may choose another engine. From there it's an inbox issue
-//! like any other: its job, its answers, closed when it's done. The pipeline's own repos go first, then the rest,
-//! oldest first within each. At most `drain_jobs` of the
+//! like any other: its job, its answers, closed when it's done. Priority
+//! goes first, then pipeline repos, then age. At most `drain_jobs` of the
 //! issues it handed on have a job at once, and one goes each pass at most;
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
 //! waits in line like any other, never ahead of work someone asked for
@@ -269,6 +269,15 @@ impl Pass<'_> {
         self.ranked(t, &items)
     }
 
+    pub(super) fn ready_queue(&self, t: &Triage) -> String {
+        self.next_ready(t)
+            .into_iter()
+            .take(5)
+            .enumerate()
+            .map(|(index, (repo, n))| format!("ready {}: {repo}#{n}\n", index + 1))
+            .collect()
+    }
+
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
     pub(super) fn pick_ready(&self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
         self.ranked(t, items).into_iter().next()
@@ -276,7 +285,7 @@ impl Pass<'_> {
 
     /// Of ready issues, the ones to hand on, in order: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
-    /// pipeline's repos first, then the rest, oldest first.
+    /// priority first, then pipeline repos, then oldest first.
     fn ranked(&self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
@@ -325,11 +334,29 @@ impl Pass<'_> {
                     .join(format!("{}-{n}", key(&repo)))
                     .exists();
                 (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n))
-                    .then(|| (rank(&repo), raw(&i["created_at"]), repo, n))
+                    .then(|| (priority(i), rank(&repo), raw(&i["created_at"]), repo, n))
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|(_, _, repo, n)| (repo, n))
+            .map(|(_, _, _, repo, n)| (repo, n))
             .collect()
     }
+}
+
+/// Highest explicit priority wins; an unlabeled issue is medium.
+pub(super) fn priority(issue: &Value) -> u8 {
+    priority_label(issue).map_or(1, |l| match l {
+        "priority: high" => 0,
+        "priority: low" => 2,
+        _ => 1,
+    })
+}
+pub(super) fn priority_label(issue: &Value) -> Option<&str> {
+    ["priority: high", "priority: medium", "priority: low"]
+        .into_iter()
+        .find(|label| {
+            issue["labels"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(*label)))
+        })
 }
