@@ -30,7 +30,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     // A hold #428's watchdog kept for itself: proj's, machine-wide, now.
     // Kept to hand over again if proj didn't take it.
     let limit = limit.filter(|&t| t > now).filter(|t| {
-        let (ok, _) = world.proj(&["usage", "hold", &format!("{}", t.ceil() as i64)]);
+        let (ok, _) = world.proj(&["usage", "adopt", &format!("{}", t.ceil() as i64)]);
         !ok
     });
     // A state from before it kept these has every job its stalls on the stuck

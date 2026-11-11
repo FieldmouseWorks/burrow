@@ -700,6 +700,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     let t = now();
     let raw = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)";
     let original = Spent {
+        owner: false,
         until: t + 7200,
         said: raw.into(),
         job: "web-1".into(),
@@ -768,4 +769,73 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     // Direct callers of record() cannot introduce the old instructions either.
     let fresh = record(&cfg, "web-3", Some(t + 10000), raw, t).unwrap();
     assert_eq!(fresh.said, expected.said);
+}
+
+#[test]
+fn owner_hold_after_release_is_fresh_and_only_explicitly_released() {
+    let (_d, cfg) = rig();
+    back(&cfg, None);
+    let args = [
+        "usage",
+        "hold",
+        &(now() + 7200).to_string(),
+        "--reason",
+        "save usage",
+    ]
+    .map(String::from);
+    crate::cmd::dispatch(&cfg, &args).unwrap();
+    let held = out(&cfg).unwrap();
+    assert!(held.owner);
+    assert_eq!(held.said, "save usage");
+    back(&cfg, Some(held.at + 1));
+    assert_eq!(out(&cfg), Some(held));
+    back(&cfg, None);
+    assert!(out(&cfg).is_none());
+    // Stale watchdog imports remain suppressed, unlike fresh owner holds.
+    earlier(&cfg, "watchdog", now() + 7200, None).unwrap();
+    assert!(out(&cfg).is_none());
+    hold(&cfg, now() + 3600, "another pause").unwrap();
+    assert!(out(&cfg).unwrap().owner);
+}
+
+#[test]
+fn owner_hold_rejects_invalid_deadlines_and_arguments_without_changing_state() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 7200, "pause").unwrap();
+    let before = kept(&cfg);
+    for words in [
+        vec!["usage", "hold", "0"],
+        vec!["usage", "hold", "9999999999", "--reason"],
+        vec!["usage", "hold", "9999999999", "--reason", ""],
+        vec!["usage", "hold", "9999999999", "--unknown"],
+    ] {
+        assert!(
+            crate::cmd::dispatch(
+                &cfg,
+                &words.into_iter().map(String::from).collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+        assert_eq!(kept(&cfg), before);
+    }
+}
+
+#[test]
+fn owner_deadline_survives_refusals_and_expires_normally() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 60, "owner deadline").unwrap();
+    let held = out(&cfg).unwrap();
+    record(&cfg, "running", Some(now() + 7200), "refused", now()).unwrap();
+    assert_eq!(out(&cfg), Some(held.clone()));
+    let expired = Spent {
+        until: now() - 1,
+        ..held
+    };
+    keep(&cfg, &expired).unwrap();
+    assert!(out(&cfg).is_none());
+    back(&cfg, Some(now() + 1));
+    assert!(kept(&cfg).unwrap().back.is_some());
+    // A new refusal after expiry is an ordinary usage hold again.
+    record(&cfg, "running", Some(now() + 7200), "refused", now()).unwrap();
+    assert!(!out(&cfg).unwrap().owner);
 }

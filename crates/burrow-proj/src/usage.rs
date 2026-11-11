@@ -10,7 +10,9 @@
 //! usage` tells it), and the owner hears once, with the cause and when it
 //! resets. The first run that started after the refusal and isn't refused
 //! ends it ([`back`]), and the notice is closed; so does `proj usage back`,
-//! once usage is available before the recorded reset.
+//! once usage is available before the recorded reset. An explicit owner
+//! hold (`proj usage hold`) instead lasts until its deadline or `usage back`;
+//! running turns and fresh meters cannot release it early.
 //!
 //! Every change to it goes under jobs/.usage.lock, so turns refused at once,
 //! and runs that finish meanwhile, each see the last one's. Its record
@@ -57,6 +59,9 @@ const RETRY: i64 = RETELL / 12;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spent {
+    /// An explicit owner pause: only the owner or its deadline releases it.
+    #[serde(default)]
+    pub owner: bool,
     pub until: i64,
     pub said: String,
     pub job: String,
@@ -121,7 +126,9 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Spent>(&text)
             .map(|mut s| {
-                s.said = crate::engine::claude::normalize_refusal(&s.said);
+                if !s.owner {
+                    s.said = crate::engine::claude::normalize_refusal(&s.said);
+                }
                 Some(s)
             })
             .map_err(|e| format!("proj: {}: {e}", path.display())),
@@ -176,6 +183,29 @@ pub fn record(
     put(cfg, id, until, said, at, at)
 }
 
+/// A fresh owner pause, independent of releases of earlier usage limits.
+pub fn hold(cfg: &Config, until: i64, reason: &str) -> Result<(), String> {
+    let _lock = lock(cfg)?;
+    let at = now();
+    if until <= at {
+        return Err("proj usage hold: UNTIL must be a future Unix timestamp".into());
+    }
+    let spent = Spent {
+        owner: true,
+        until,
+        said: reason.to_owned(),
+        job: "owner".into(),
+        at,
+        back: None,
+        told: at,
+        last: Some(at),
+    };
+    keep(cfg, &spent)?;
+    tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
+    changed(cfg);
+    Ok(())
+}
+
 /// [`record`], under the lock, with `last` when it was refused: only a run
 /// started after that ends it.
 fn put(
@@ -187,7 +217,10 @@ fn put(
     last: i64,
 ) -> Result<Spent, String> {
     let until = until.filter(|&t| t > at).unwrap_or(at + UNSAID);
-    let was = kept(cfg).filter(|w| w.back.is_none());
+    if let Some(owner) = kept(cfg).filter(|w| w.owner && w.holds(at)) {
+        return Ok(owner);
+    }
+    let was = kept(cfg).filter(|w| w.back.is_none() && !w.owner);
     let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
     let spent = match &was {
         // Every running turn is refused at once: the first tells the owner,
@@ -199,6 +232,7 @@ fn put(
             ..w.clone()
         },
         None => Spent {
+            owner: false,
             until,
             said: crate::engine::claude::normalize_refusal(said),
             job: id.to_owned(),
@@ -254,7 +288,8 @@ pub fn remind(cfg: &Config) {
 /// Usage is back: a run that started at `started` (in seconds) and wasn't
 /// refused, or `proj usage back` (None: usage is available sooner). The
 /// turns waiting take slots again, every turn in line has its deadline
-/// moved, and the owner's notice is closed. A run that started no later
+/// moved, and the owner's notice is closed. An owner hold cannot be ended
+/// early by a successful run. A run that started no later
 /// than the last refusal proves nothing: its last call may have come before
 /// it. Once it has ended, each call settles what's left ([`settle`]). The
 /// owner's release is kept ([`RELEASED`]) with or without a hold to end,
@@ -269,6 +304,9 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     let now = now();
     let s = kept(cfg);
     let ends = s.as_ref().is_some_and(|s| s.back.is_none());
+    if !owner && s.as_ref().is_some_and(|s| s.owner && s.holds(now)) {
+        return;
+    }
     if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {
         return;
     }
@@ -452,6 +490,13 @@ fn pending(cfg: &Config) -> bool {
 
 /// It, in a line: `proj status`'s, and the turn's journal's.
 pub fn line(s: &Spent) -> String {
+    if s.owner {
+        return format!(
+            "Claude work is paused by the owner until {}: {}",
+            when(s.until),
+            s.said
+        );
+    }
     format!(
         "Claude is out of usage until {}: no Claude turn starts till then (\"{}\")",
         when(s.until),
@@ -460,10 +505,20 @@ pub fn line(s: &Spent) -> String {
 }
 
 fn title(s: &Spent) -> String {
+    if s.owner {
+        return format!("Claude work paused by the owner until {}", when(s.until));
+    }
     format!("Claude is out of usage until {}", when(s.until))
 }
 
 fn body(cfg: &Config, s: &Spent) -> String {
+    if s.owner {
+        return format!(
+            "The owner paused Claude work until {}. Reason: {}. Running turns continue; Codex work remains eligible. Use `proj usage back` to release this pause early.",
+            when(s.until),
+            s.said
+        );
+    }
     format!(
         "Since {}, Claude Code refuses every Claude job here. It answered job {}:\n\n> {}\n\n\
          proj starts no Claude turn until {}. The turns that were refused wait in line and run again then, by themselves, \
