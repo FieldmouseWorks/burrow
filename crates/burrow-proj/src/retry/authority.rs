@@ -21,8 +21,16 @@ impl Identity {
         if Self::load(job, n)?.is_some() {
             return Ok(());
         }
-        let choice = engine::choice(job.cfg, job)?;
-        Self::save(job, n, choice)
+        Self::capture_choice(job, n, &engine::choice(job.cfg, job)?)
+    }
+    pub fn capture_choice(job: &Job, n: &str, choice: &engine::Choice) -> Result<(), String> {
+        if let Some(saved) = Self::load(job, n)? {
+            if saved.choice != *choice {
+                return Err("execution identity disagrees with resolved startup choice".into());
+            }
+            return Ok(());
+        }
+        Self::save(job, n, choice.clone())
     }
     pub fn capture_legacy(job: &Job, n: &str) -> Result<(), String> {
         if Self::load(job, n)?.is_some() {
@@ -60,15 +68,18 @@ impl Identity {
         for (key, value) in identity.files {
             let path = job.path(&key);
             match value {
-                Some(value) => swap(&path, &value).map_err(|e| e.to_string())?,
-                None => match fs::remove_file(path) {
+                Some(value) => {
+                    crate::state_reads::write(&path, &value).map_err(|e| e.to_string())?
+                }
+                None => match crate::state_reads::remove(path) {
                     Ok(()) => (),
                     Err(e) if e.kind() == io::ErrorKind::NotFound => (),
                     Err(e) => return Err(e.to_string()),
                 },
             }
         }
-        swap(&job.turn(n, "engine"), identity.choice.engine.name()).map_err(|e| e.to_string())
+        crate::state_reads::write(job.turn(n, "engine"), identity.choice.engine.name())
+            .map_err(|e| e.to_string())
     }
 }
 

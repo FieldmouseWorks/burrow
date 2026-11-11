@@ -185,7 +185,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
 /// stop. One withdrawn while it waits here is stopped with no slot.
 fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    fs::write(job.turn(n, "slot"), format!("{s}\n"))
+    crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))
 }
 
 /// Say this job's turn N may be withdrawn no more, under the job's lock, so none
@@ -195,7 +195,7 @@ fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
 /// at the top of its [`take`].
 fn unmark(job: &Job, n: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    match fs::remove_file(job.turn(n, "withdrawable")) {
+    match crate::state_reads::remove(job.turn(n, "withdrawable")) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -298,7 +298,7 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             // A dead parent's place may have been cleared by another census.
             // Restore its committed position before deciding the cohort drained.
             let path = queue.join(name);
-            crate::swap(&path, "pending\n")?;
+            crate::state_reads::write(&path, "pending\n")?;
             File::open(path)?.set_times(
                 FileTimes::new()
                     .set_modified(UNIX_EPOCH + Duration::from_nanos((*arrived).max(0) as u64)),
@@ -357,7 +357,7 @@ fn codex_slot(
     fs::create_dir_all(&slots)?;
     fs::create_dir_all(cfg.jobs.join(".slots"))?;
     let job = Job::new(cfg, id);
-    fs::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
     // A turn that waited in Claude's line and was handed to this proj brings
     // its place with it, under this pid. It is Codex's now, and a place left in
     // Claude's line would count as a live waiter there (waiter_alive) while it
@@ -425,7 +425,7 @@ pub fn take(
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
     // from the moment this one hands it over ([`unmark`]).
-    fs::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
     // maxWait goes by when this turn came, not its name's WHEN, which for a job
     // run --since is when its work began.
     let retry = crate::retry::Checkpoint::load(&job, n)?;

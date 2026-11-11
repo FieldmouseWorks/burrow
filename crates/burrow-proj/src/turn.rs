@@ -1,7 +1,7 @@
 //! A turn of a job: [`start`]ed as the job's systemd unit, which runs it
 //! ([`exec`]): its wait for a slot, then its engine, as many runs as it takes.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::{Child, Command, ExitStatus};
@@ -16,7 +16,7 @@ use crate::job::{Job, USAGE_LIMIT, kick};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
 use crate::{
-    Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, swap, systemd, usage,
+    Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, systemd, usage,
 };
 
 /// What a run killed for memory before it answered is told in the next.
@@ -40,8 +40,8 @@ pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Re
 /// A failed write may leave a truncated file. Never leave that prompt in
 /// the live history, even when the caller cannot publish the new turn.
 pub(crate) fn write_prompt(path: &Path, message: &str) -> std::io::Result<()> {
-    if let Err(e) = fs::write(path, format!("{message}\n")) {
-        let _ = fs::remove_file(path);
+    if let Err(e) = crate::state_reads::write(path, format!("{message}\n")) {
+        let _ = crate::state_reads::remove(path);
         return Err(e);
     }
     Ok(())
@@ -100,11 +100,11 @@ fn start_with(
     let couldnt = || format!("proj: turn {n} of {id} couldn't start");
     let undo = || {
         if n == 1 {
-            let _ = fs::remove_file(job.path("turns"));
+            let _ = crate::state_reads::remove(job.path("turns"));
         } else {
             let _ = job.set_turns(n - 1);
         }
-        let _ = fs::remove_file(&prompt);
+        let _ = crate::state_reads::remove(&prompt);
     };
     if let Err(e) = write_prompt(&prompt, &msg) {
         // write can leave a truncated or partial prompt even on failure.
@@ -177,7 +177,7 @@ pub(crate) fn initialize_deadline(
 ) -> std::io::Result<()> {
     if retry.is_none_or(|s| s.initial()) {
         for f in ["deadline", "wait", "late"] {
-            fs::remove_file(job.turn(n, f)).or_else(|e| {
+            crate::state_reads::remove(job.turn(n, f)).or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     Ok(())
                 } else {
@@ -187,7 +187,7 @@ pub(crate) fn initialize_deadline(
         }
         if total > 0 {
             let taken = mtime_nanos(&job.turn(n, "slot")).unwrap_or_else(now_nanos);
-            swap(&job.turn(n, "deadline"), &format!("{}\n", taken + total))?;
+            crate::state_reads::write(job.turn(n, "deadline"), format!("{}\n", taken + total))?;
         }
     }
     Ok(())
@@ -210,18 +210,18 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // Distinguish a failed checkpoint-aware startup from a completed old
         // turn whose leftover checkpoint must never replay its conversation.
         if job.turn(&n, "retry-migration").exists()
-            && swap(&job.turn(&n, "retry-startup-failed"), "").is_err()
+            && crate::state_reads::write(job.turn(&n, "retry-startup-failed"), "").is_err()
         {
             return;
         }
-        let _ = fs::write(job.turn(&n, "outcome"), format!("{text}\n"));
+        let _ = crate::state_reads::write(job.turn(&n, "outcome"), format!("{text}\n"));
     };
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
     for f in ["await", "await.next", "end.next", "ask.next"] {
         if !job.turn(&n, "retry-migration").exists() {
-            let _ = fs::remove_file(job.path(f));
+            let _ = crate::state_reads::remove(job.path(f));
         }
     }
     let retry =
@@ -247,8 +247,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         outcome("codex cannot run a --vm job; agent sandboxes are Claude-only");
         return Err(Fail::quiet(1));
     }
-    crate::retry::Identity::capture(&job, &n).map_err(|e| Fail::new(1, e))?;
-    let _ = fs::write(job.turn(&n, "engine"), choice.engine.name());
+    crate::retry::Identity::capture_choice(&job, &n, &choice).map_err(|e| Fail::new(1, e))?;
+    crate::state_reads::write(job.turn(&n, "engine"), choice.engine.name())
+        .map_err(|e| Fail::new(1, e.to_string()))?;
     // As its App, or not at all ([`github_app`]). Its env, read now, is what
     // every run of the turn starts in, so none starts as the user if the App
     // goes while the turn waits for a slot: it acts as an App that's gone,
@@ -306,19 +307,18 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     if retry.is_none() {
         let _ = fs::remove_dir_all(&waitdir);
     }
-    fs::create_dir_all(&waitdir)
+    crate::state_reads::directory(&waitdir)
         .map_err(|e| Fail::new(1, format!("proj: {}: {e}", waitdir.display())))?;
     // Whether its turns must say what comes next: an --owned job's starter
     // acts on each end itself.
     let agent = read(&job.path("agent")).filter(|a| !a.is_empty());
     let must = !job.path("owned").exists();
     let stream = job.turn(&n, "jsonl");
-    fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(retry.is_none())
-        .open(&stream)
-        .map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
+    if retry.is_none() {
+        crate::state_reads::write(&stream, "").map_err(|e| Fail::new(1, e.to_string()))?;
+    } else {
+        crate::state_reads::append(&stream).map_err(|e| Fail::new(1, e.to_string()))?;
+    }
     // What it's asked, after what its engine's conversation missed of the
     // job, if it moved here from the other engine (engine/handoff.rs).
     let first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
@@ -407,9 +407,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // `text`, kept in its N.KIND.
         let again = |text: &str, kind: &str| -> PathBuf {
             let told = job.turn(&n, kind);
-            let _ = fs::write(&told, format!("{text}\n"));
+            let _ = crate::state_reads::write(&told, format!("{text}\n"));
             // The next run's quiet counts from its start, and is its own.
-            let _ = fs::remove_file(job.turn(&n, "quiet"));
+            let _ = crate::state_reads::remove(job.turn(&n, "quiet"));
             touch(&stream);
             // The last run's look telling the watchdog its wait was over may
             // not have got through before the rest of it went: told again.
@@ -426,21 +426,24 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
         if choice.engine == Engine::Codex {
             if let Some((Some(due), _)) = &refusal {
-                if let Err(e) = swap(
-                    &job.path("await"),
-                    &format!("{USAGE_LIMIT}\t{}\t{due}\n", now()),
+                if let Err(e) = crate::state_reads::write(
+                    job.path("await"),
+                    format!("{USAGE_LIMIT}\t{}\t{due}\n", now()),
                 ) {
                     outcome(&format!("couldn't keep Codex's usage wait: {e}"));
                     return Err(Fail::quiet(1));
                 }
-                let _ = fs::write(job.turn(&n, "result"), format!("{}\n", answer(&stream)));
+                let _ = crate::state_reads::write(
+                    job.turn(&n, "result"),
+                    format!("{}\n", answer(&stream)),
+                );
                 outcome("usage limit; waiting for Codex's reset");
                 return Ok(());
             }
             if last.as_ref().is_some_and(|l| {
                 is_error(l) && burrow_codex::logged_out(l["result"].as_str().unwrap_or_default())
             }) {
-                let _ = fs::write(
+                let _ = crate::state_reads::write(
                     job.turn(&n, "result"),
                     "codex is logged out; run autoland-codex-login job\n",
                 );
@@ -472,7 +475,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     // took_slot).
                     {
                         let _lock = job.lock();
-                        let _ = fs::remove_file(job.turn(&n, "slot"));
+                        let _ = crate::state_reads::remove(job.turn(&n, "slot"));
                     }
                     drop(held.take());
                     rewatch(cfg, &[id]);
@@ -524,8 +527,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // if the turn has time left). A sandbox is stopped before retrying.
         let mut told = String::new();
         if let Some(error) = declaration_error {
-            let _ = fs::remove_file(job.path("end.next"));
-            let _ = fs::remove_file(job.path("await.next"));
+            let _ = crate::state_reads::remove(job.path("end.next"));
+            let _ = crate::state_reads::remove(job.path("await.next"));
             told.push_str(&format!("The host couldn't register your sandbox next step: {error}. Check what you await and declare the next step again. "));
         }
         if cut {
@@ -561,7 +564,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The turn ends as its last run did; its answer is every run's.
     let text = answer(&stream);
     if !text.is_empty() {
-        let _ = fs::write(job.turn(&n, "result"), format!("{text}\n"));
+        let _ = crate::state_reads::write(job.turn(&n, "result"), format!("{text}\n"));
     }
     if let Some(last) = last {
         rc = 0;
@@ -572,7 +575,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             end = "undeclared".into();
         }
         if !is_error(&last) && !end.is_empty() {
-            let _ = fs::write(job.turn(&n, "end"), format!("{end}\n"));
+            let _ = crate::state_reads::write(job.turn(&n, "end"), format!("{end}\n"));
         }
         let done = !is_error(&last);
         if done {
@@ -593,10 +596,10 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 }
             }
             // Swapped in whole, so _watch never reads half of it.
-            let _ = swap(&job.path("await"), &kept);
+            let _ = crate::state_reads::write(job.path("await"), &kept);
         }
         for f in ["await.next", "end.next"] {
-            let _ = fs::remove_file(job.path(f));
+            let _ = crate::state_reads::remove(job.path(f));
         }
     } else if job.turn(&n, "quiet").exists() {
         let idle = read(&job.path("idle")).unwrap_or_default();
@@ -649,7 +652,7 @@ fn deadline(job: &Job, n: &str) -> Option<i64> {
 
 /// The file's mtime moved on to now, made if it isn't there.
 fn touch(path: &Path) {
-    if let Ok(f) = File::options().append(true).create(true).open(path) {
+    if let Ok(f) = crate::state_reads::append(path) {
         let _ = f.set_modified(SystemTime::now());
     }
 }
@@ -769,17 +772,17 @@ impl Clock {
             && let Some(d) = dl
         {
             let moved = d + now - self.last;
-            let _ = swap(&job.turn(n, "deadline"), &format!("{moved}\n"));
+            let _ = crate::state_reads::write(job.turn(n, "deadline"), format!("{moved}\n"));
             dl = Some(moved);
         }
         self.last = now;
         if w != self.was {
             match &w {
                 Some(w) => {
-                    let _ = fs::write(job.turn(n, "wait"), format!("{w}\n"));
+                    let _ = crate::state_reads::write(job.turn(n, "wait"), format!("{w}\n"));
                 }
                 None => {
-                    let _ = fs::remove_file(job.turn(n, "wait"));
+                    let _ = crate::state_reads::remove(job.turn(n, "wait"));
                 }
             }
             self.was = w.clone();
@@ -817,7 +820,7 @@ impl Clock {
         }
         self.done = true;
         if self.was.take().is_some() {
-            let _ = fs::remove_file(run.job.turn(run.n, "wait"));
+            let _ = crate::state_reads::remove(run.job.turn(run.n, "wait"));
             rewatch_later(run.cfg, run.job.id);
         }
     }

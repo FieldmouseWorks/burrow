@@ -19,7 +19,7 @@
 //! issue an ended turn awaits: TARGET, since, its fingerprint then, a tab
 //! apart), with the running turn's own in `await.next` and `end.next`.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -29,7 +29,7 @@ mod start;
 use crate::config::Config;
 use crate::engine::last_result;
 use crate::waits::Facts;
-use crate::{filled, mtime, now, read, swap, systemd, usage};
+use crate::{filled, mtime, now, read, systemd, usage};
 
 /// Numeric owner of a per-turn artifact, including temporary writes.
 pub(crate) fn turn_number(name: &str) -> Option<u64> {
@@ -87,7 +87,7 @@ impl<'a> Job<'a> {
     /// Swapped in whole, so a reader never finds it missing or half written.
     pub fn set_turns(&self, n: u64) -> io::Result<()> {
         crate::ask::ensure(self).map_err(io::Error::other)?;
-        swap(&self.path("turns"), &format!("{n}\n"))
+        crate::state_reads::write(self.path("turns"), format!("{n}\n"))
     }
 
     /// Before publishing another turn, remove every artifact beyond the last
@@ -152,10 +152,7 @@ impl<'a> Job<'a> {
     }
 
     fn lock_file(&self) -> io::Result<File> {
-        OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(self.path("lock"))
+        crate::state_reads::append(&self.path("lock"))
     }
 
     /// Jobs from before each turn kept its own files have the last turn's
@@ -270,7 +267,7 @@ impl<'a> Job<'a> {
     pub fn mark_ended(&self) {
         let Some(n) = self.turns() else { return };
         if !self.turn(&n, "outcome").exists() && !self.turn(&n, "ended").exists() {
-            let _ = fs::write(self.turn(&n, "ended"), "");
+            let _ = crate::state_reads::write(self.turn(&n, "ended"), "");
         }
     }
 

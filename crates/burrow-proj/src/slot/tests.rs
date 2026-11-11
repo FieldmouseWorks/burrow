@@ -122,6 +122,10 @@ fn child() {
     let jobs = env::var(JOBS_ENV).unwrap();
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let mut cfg = config(Path::new(&jobs), max_jobs);
+    if what == "codex-pool-release" {
+        pools::release_codex_pool();
+        return;
+    }
     let mut held = None;
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
@@ -900,32 +904,13 @@ fn a_slot_stays_with_what_its_turn_left() {
 
 #[test]
 fn codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage() {
-    use crate::engine::Engine;
-    let d = tempfile::tempdir().unwrap();
-    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-    cfg.jobs = d.path().to_owned();
-    cfg.codex_slots = 1;
-    let job = Job::new(&cfg, "code");
-    fs::create_dir_all(&job.dir).unwrap();
-    fs::write(
-        cfg.jobs.join(crate::usage::FILE),
-        serde_json::json!({"until": crate::now()+10000,
-        "said":"limit", "job":"claude", "at":crate::now()})
-        .to_string(),
-    )
-    .unwrap();
-    // A planner's unstick flag cannot escape the selected engine's cap.
-    fs::write(job.path("unstick"), "").unwrap();
-    let slot = super::take_engine(&cfg, "code", "1", Class::Normal, false, Engine::Codex).unwrap();
-    assert_eq!(
-        crate::read(&job.turn("1", "slot")).as_deref(),
-        Some("codex-1")
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut child = spawn_child("codex-pool-release", &jobs, 1, &[]);
+    assert!(
+        child.0.wait().unwrap().success(),
+        "isolated pool accounting failed"
     );
-    assert!(!cfg.jobs.join(".slots/1").exists());
-    let other = File::create(cfg.jobs.join(".codex-slots/1")).unwrap();
-    assert!(other.try_lock().is_err());
-    drop(slot);
-    assert!(other.try_lock().is_ok());
 }
 
 // A Claude turn handed over to a proj that resolves its engine to Codex has
@@ -981,3 +966,5 @@ fn retained_queue_renames_occupy_one_logical_project_place() {
     assert_eq!(seen.line[0].name, "1-100-renamed");
     assert_eq!(fs::read_dir(queue).unwrap().count(), 1);
 }
+
+mod pools;

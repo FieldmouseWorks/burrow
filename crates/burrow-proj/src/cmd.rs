@@ -468,7 +468,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // Marked first, so the turn's end already finds it stopped rather than
     // failed: nobody waits on it.
     if let Some(n) = &n {
-        let _ = fs::write(job.turn(n, "stopped"), "");
+        let _ = crate::state_reads::write(job.turn(n, "stopped"), "");
     }
     // No turn of it running, so no end of one to clear its scratch: this does.
     let idle = systemd::gone(cfg, &unit);
@@ -538,7 +538,8 @@ pub fn unstick(cfg: &Config, id: &str) -> Result<(), Fail> {
     if !job.dir.is_dir() {
         return Err(Fail::new(1, format!("no job {id}")));
     }
-    fs::write(job.path("unstick"), "").map_err(|e| io_fail(&job.path("unstick"), e))?;
+    crate::state_reads::write(job.path("unstick"), "")
+        .map_err(|e| io_fail(&job.path("unstick"), e))?;
     rewatch(cfg, &[id]);
     Ok(())
 }
@@ -583,7 +584,8 @@ pub(crate) fn record_wait(
         .open(&next)
         .and_then(|mut f| f.write_all(text.as_bytes()))
         .map_err(|e| io_fail(&next, e))?;
-    fs::write(job.path("end.next"), "await\n").map_err(|e| io_fail(&job.path("end.next"), e))?;
+    crate::state_reads::write(job.path("end.next"), "await\n")
+        .map_err(|e| io_fail(&job.path("end.next"), e))?;
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
         targets.join(" ")
@@ -651,7 +653,7 @@ fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
 /// Record the declaration and return the instruction the engine receives.
 fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
     let _ = fs::remove_file(job.path("await.next"));
-    fs::write(job.path("end.next"), format!("{how}\n"))
+    crate::state_reads::write(job.path("end.next"), format!("{how}\n"))
         .map_err(|e| io_fail(&job.path("end.next"), e))?;
     if how == "done" {
         let _ = fs::remove_file(job.path("open-question"));
@@ -688,7 +690,8 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         // The unit is gone, but its committed transfer is still pending.
         // Wake the filesystem consumer even when it failed after launch.
         if let Some(n) = job.turns() {
-            fs::write(job.turn(&n, "retry-wake"), "").map_err(|e| Fail::new(1, e.to_string()))?;
+            crate::state_reads::write(job.turn(&n, "retry-wake"), "")
+                .map_err(|e| Fail::new(1, e.to_string()))?;
         }
         return Ok(());
     }

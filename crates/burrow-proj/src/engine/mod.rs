@@ -3,7 +3,9 @@
 use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::fs::{self, File};
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 

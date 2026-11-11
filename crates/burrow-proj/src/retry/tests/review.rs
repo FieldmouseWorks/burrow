@@ -150,6 +150,7 @@ fn old_parent_skipped_for_a_busy_lock_is_explicitly_retried() {
     let lock = job.lock().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     drop(lock);
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     assert!(Checkpoint::load(&job, "1").unwrap().is_some());
     usage::back(&r.cfg, None);

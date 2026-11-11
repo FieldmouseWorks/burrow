@@ -69,3 +69,19 @@ obsolete names under the admission lock. Every replacement launch records its
 next retry delay first, including startups unable to write an outcome; delayed
 jobs do not hold up healthy jobs or independent pools. Confirmed cancellation
 finishes deferred end processing once, irrespective of end-hook ordering.
+
+A saved execution identity does not prove that a parent is waiting. Transfer
+requires either its pending host-owned checkpoint or the kernel census-wait
+proof, regardless of engine or pool. Deleting guest slot/outcome files cannot
+authorize stopping active work. Startup saves the exact engine/model/effort
+choice it resolved and executes that same value; changing settings between
+resolution and persistence cannot change the saved identity.
+
+Recovery writes into job directories use pinned, symlink-free directory
+handles. Record replacement creates a fresh temporary file and renames it
+relative to that handle, without opening a guest-chosen destination or staging
+link. Transcript appends and timestamp updates pin regular files and reject
+aliases. Engine prompt input is opened through the same confined reader before
+launch. A concurrent pathname replacement cannot redirect these operations to
+another host directory. Host-owned records outside guest storage retain their
+separate compatibility protocol.

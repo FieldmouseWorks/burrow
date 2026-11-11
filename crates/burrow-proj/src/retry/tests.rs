@@ -138,14 +138,14 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     fs::write(job.path("session"), "conversation-123\n").unwrap();
     fs::write(
         job.turn("1", "engine"),
-        if matches!(mode, "old-codex" | "new-codex") {
+        if mode.ends_with("codex") {
             "codex\n"
         } else {
             "claude\n"
         },
     )
     .unwrap();
-    if mode == "old-unstick" {
+    if mode.ends_with("unstick") {
         fs::write(job.path("unstick"), "").unwrap();
     }
     fs::write(
@@ -197,10 +197,18 @@ fn child() {
         .nth(1)
         .unwrap();
     let job = Job::new(&cfg, &id);
-    if mode == "old-running" {
-        let file = File::create(cfg.jobs.join(".slots/1")).unwrap();
+    if mode.starts_with("old-running") {
+        let (path, label) = if mode.ends_with("codex") {
+            fs::create_dir_all(cfg.jobs.join(".codex-slots")).unwrap();
+            (".codex-slots/1", "codex-1")
+        } else if mode.ends_with("unstick") {
+            (".slots/unstick", "unstick")
+        } else {
+            (".slots/1", "1")
+        };
+        let file = File::create(cfg.jobs.join(path)).unwrap();
         file.lock().unwrap();
-        fs::write(job.turn("1", "slot"), "1\n").unwrap();
+        fs::write(job.turn("1", "slot"), label).unwrap();
         fs::write(job.path("running"), "").unwrap();
         while !job.path("refuse").exists() {
             sleep(Duration::from_millis(10));
@@ -249,6 +257,50 @@ fn child() {
     }
 }
 
+// A host-authenticated native wait, paired with the frozen scheduler to test
+// the checkpoint protocol independently of legacy kernel-lock adoption.
+fn native_waits(r: &Rig) {
+    for entry in fs::read_dir(&r.cfg.jobs).unwrap().filter_map(Result::ok) {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if id.starts_with('.') || !entry.path().is_dir() {
+            continue;
+        }
+        let job = Job::new(&r.cfg, &id);
+        if job.turn("1", "slot").exists() || job.turn("1", "retry-migration").exists() {
+            continue;
+        }
+        if let Some(pid) = read(&job.path("pid")).and_then(|s| s.parse().ok()) {
+            let state = checkpoint(&r.cfg, &job, "1", pid, false).unwrap();
+            swap(
+                &job.turn("1", "retry-migration"),
+                &serde_json::to_string(&state).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn legacy_reset(r: &Rig) {
+    usage::back(&r.cfg, None);
+    until(|| {
+        let mut waiting = false;
+        for (pid, id, _) in parents().unwrap() {
+            let job = Job::new(&r.cfg, &id);
+            if !job.dir.is_dir()
+                || read(&job.path("pid")).as_deref() != Some(pid.to_string().as_str())
+                || job.turn("1", "slot").exists()
+            {
+                continue;
+            }
+            waiting = true;
+            if !authority::legacy_waiting(&r.cfg, pid).unwrap() {
+                return false;
+            }
+        }
+        waiting
+    });
+}
+
 #[test]
 fn preexisting_old_retries_are_fenced_and_transferred_without_losing_the_turn() {
     let mut r = rig();
@@ -272,8 +324,8 @@ fn preexisting_old_retries_are_fenced_and_transferred_without_losing_the_turn() 
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
+    legacy_reset(&r);
     pass(&r.cfg).unwrap();
-    usage::back(&r.cfg, None);
     until(|| took(&r.cfg) == 2);
     sleep(Duration::from_secs(3));
     assert_eq!(took(&r.cfg), 2);
@@ -325,8 +377,8 @@ fn post_deploy_refusal_cannot_enter_the_old_scheduler() {
     for i in 0..4 {
         start(&mut r, &format!("w{i}"), "old", "/ordinary");
     }
+    legacy_reset(&r);
     pass(&r.cfg).unwrap();
-    usage::back(&r.cfg, None);
     until(|| took(&r.cfg) == 2);
     sleep(Duration::from_secs(3));
     assert_eq!(took(&r.cfg), 2);
@@ -374,6 +426,7 @@ fn transfer_checkpoint_survives_failed_launch_and_preserves_paused_deadline() {
     barrier.lock().unwrap();
     let launcher = fs::read(&r.cfg.tools.systemd_run).unwrap();
     burrow_test::executable(&r.cfg.tools.systemd_run, "#!/bin/sh\nexit 1\n");
+    native_waits(&r);
     assert!(pass(&r.cfg).is_err());
     let job = Job::new(&r.cfg, "retry");
     let state = Checkpoint::load(&job, "1").unwrap().unwrap();
@@ -383,6 +436,7 @@ fn transfer_checkpoint_survives_failed_launch_and_preserves_paused_deadline() {
     burrow_test::executable(&r.cfg.tools.systemd_run, launcher);
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     sleep(Duration::from_secs(2));
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     sleep(Duration::from_millis(100));
     usage::back(&r.cfg, None);
@@ -414,6 +468,7 @@ fn existing_holders_count_toward_the_transferred_retry_cap() {
     until(|| fs::read_dir(r.cfg.jobs.join(".queue")).unwrap().count() == 4);
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     usage::back(&r.cfg, None);
     until(|| took(&r.cfg) == 1);
@@ -476,6 +531,7 @@ fn transferred_pipeline_retries_keep_both_reserved_shares_ahead_of_lead_backlog(
     until(|| fs::read_dir(r.cfg.jobs.join(".queue")).unwrap().count() == 6);
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     usage::back(&r.cfg, None);
     until(|| took(&r.cfg) == 2);
@@ -512,6 +568,7 @@ fn deployment_barrier_leaves_codex_and_emergency_pools_independent() {
     until(|| fs::read_dir(r.cfg.jobs.join(".queue")).unwrap().count() >= 3);
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     usage::back(&r.cfg, None);
     until(|| took(&r.cfg) == 5);
@@ -547,6 +604,8 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
         .unwrap();
     r.children.push(consumer);
     fs::write(r.cfg.jobs.join("running/refuse"), "").unwrap();
+    until(|| !r.cfg.jobs.join("running/1.slot").exists());
+    usage::back(&r.cfg, None);
     until(|| {
         Job::new(&r.cfg, "running")
             .turn("1", "retry-migration")
@@ -631,8 +690,8 @@ fn failed_checkpoint_write_keeps_the_old_turn_alive_behind_the_barrier() {
     assert!(systemd::active(&r.cfg, &job.unit()));
     assert!(Checkpoint::load(&job, "1").unwrap().is_none());
     fs::remove_dir(job.turn("1", "retry-migration.new")).unwrap();
+    legacy_reset(&r);
     pass(&r.cfg).unwrap();
-    usage::back(&r.cfg, None);
     until(|| job.path("took").exists());
 }
 
@@ -653,6 +712,7 @@ fn transferred_retries_trickle_at_natural_expiry_too() {
     until(|| fs::read_dir(r.cfg.jobs.join(".queue")).unwrap().count() == 5);
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     let path = r.cfg.jobs.join(usage::FILE);
     let mut spent: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -734,13 +794,13 @@ fn failed_resume_write_retains_checkpoint_and_does_not_double_extend_the_deadlin
         &serde_json::to_string(&state).unwrap(),
     )
     .unwrap();
-    fs::create_dir(job.turn("1", "spent.new")).unwrap();
+    fs::create_dir(job.turn("1", "spent")).unwrap();
     assert!(state.resume(&job, "1", &job.path("prompt.1")).is_err());
     assert!(Checkpoint::load(&job, "1").unwrap().is_some());
     crate::cmd::finish(&r.cfg, "retry").unwrap();
     assert!(job.turn("1", "retry-wake").exists());
     assert!(!job.turn("1", "ended").exists());
-    fs::remove_dir(job.turn("1", "spent.new")).unwrap();
+    fs::remove_dir(job.turn("1", "spent")).unwrap();
     state.resume(&job, "1", &job.path("prompt.1")).unwrap();
     let deadline: i64 = read(&job.turn("1", "deadline")).unwrap().parse().unwrap();
     assert!(deadline <= state.deadline.unwrap() + now_nanos() - state.waited);
@@ -762,6 +822,7 @@ fn waiting_codex_turn_transfers_back_to_its_own_pool() {
     until(|| r.cfg.jobs.join("codex/1.withdrawable").exists());
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
+    native_waits(&r);
     pass(&r.cfg).unwrap();
     assert!(
         Job::new(&r.cfg, "codex")
@@ -863,3 +924,5 @@ fn an_initial_waiter_keeps_no_deadline_but_a_retained_retry_does() {
 }
 
 mod review2;
+
+mod review3;

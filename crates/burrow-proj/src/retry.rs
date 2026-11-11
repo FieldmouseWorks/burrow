@@ -121,20 +121,22 @@ impl Checkpoint {
                 "retry was cancelled or superseded",
             ));
         }
+        // A missing or redirected prompt is not an empty conversation. Leave
+        // the checkpoint pending until its actual prompt can be opened safely.
+        let asked = String::from_utf8_lossy(&crate::state_reads::bytes(first)?).into_owned();
         if !self.initial()
             && let Some(dl) = self.deadline
         {
-            swap(
-                &job.turn(n, "deadline"),
-                &format!("{}\n", dl + now_nanos() - self.waited),
+            crate::state_reads::write(
+                job.turn(n, "deadline"),
+                format!("{}\n", dl + now_nanos() - self.waited),
             )?;
         }
         let prompt = if let Some(said) = &self.said {
-            let asked = read(first).unwrap_or_default();
             let prompt = job.turn(n, "spent");
-            swap(
+            crate::state_reads::write(
                 &prompt,
-                &format!(
+                format!(
                     "{}\n\n{said}. {}\n\n{asked}",
                     turn::SPENT,
                     crate::usage::policy(job.cfg)
@@ -147,15 +149,12 @@ impl Checkpoint {
         // Match an in-process retry: waiting consumed neither its turn
         // budget nor its next run's idle allowance. Keep the stream contents.
         if job.turn(n, "quiet").exists() {
-            fs::remove_file(job.turn(n, "quiet"))?;
+            crate::state_reads::remove(job.turn(n, "quiet"))?;
         }
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(job.turn(n, "jsonl"))?
+        crate::state_reads::append(&job.turn(n, "jsonl"))?
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
-        fs::remove_file(job.turn(n, "retry-migration"))?;
-        let _ = fs::remove_file(job.turn(n, "retry-startup-failed"));
+        crate::state_reads::remove(job.turn(n, "retry-migration"))?;
+        let _ = crate::state_reads::remove(job.turn(n, "retry-startup-failed"));
         Ok(prompt)
     }
 
@@ -318,11 +317,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if systemd::show(cfg, &job.unit(), "MainPID") != pid.to_string() {
             continue;
         }
-        if Identity::load(&job, &n)
-            .map_err(io::Error::other)?
-            .is_none()
-            && !authority::legacy_waiting(cfg, pid)?
-        {
+        if Checkpoint::load(&job, &n)?.is_none() && !authority::legacy_waiting(cfg, pid)? {
             busy = true;
             continue;
         }
@@ -371,7 +366,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         // One locked snapshot owns cancellation, turn identity and launch.
         let Some(n) = job.turns() else { continue };
         if job.turn(&n, "stopped").exists() || job.retry_completed(&n) {
-            match fs::remove_file(job.turn(&n, "retry-migration")) {
+            match crate::state_reads::remove(job.turn(&n, "retry-migration")) {
                 Ok(()) => (),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e),
@@ -404,7 +399,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             swap(&attempt, &now_nanos().to_string())?;
             Identity::restore(&job, &n).map_err(io::Error::other)?;
             if job.turn(&n, "outcome").exists() {
-                fs::remove_file(job.turn(&n, "outcome"))?;
+                crate::state_reads::remove(job.turn(&n, "outcome"))?;
             }
             Ok(())
         };
