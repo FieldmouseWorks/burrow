@@ -57,6 +57,10 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&said);
             Ok(())
         }
+        Some("settings") => {
+            put(&crate::settings::command(cfg, &args[1..]).map_err(|e| Fail::new(1, e))?);
+            Ok(())
+        }
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
@@ -170,16 +174,6 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "usage: proj usage [back | hold UNTIL [--reason TEXT] | adopt UNTIL]",
             )),
         },
-        Some("settings") => {
-            let settings = cfg
-                .settings
-                .as_ref()
-                .ok_or_else(|| Fail::new(1, "settings are not configured"))?;
-            put(&settings
-                .command(&args[1..], "proj")
-                .map_err(|e| Fail::new(1, e))?);
-            Ok(())
-        }
         Some("await") => wait_on(cfg, &args[1..]),
         Some("split") => {
             let id = this_job("PROJ_JOB", "proj split is for the inbox job being split")?;

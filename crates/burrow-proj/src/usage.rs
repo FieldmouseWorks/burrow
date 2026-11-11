@@ -129,7 +129,14 @@ impl Spent {
 
 /// The machine's state as it stands: Some while it's out of usage.
 pub fn out(cfg: &Config) -> Option<Spent> {
-    kept(cfg).filter(|s| s.holds(now()))
+    held(cfg).ok().flatten()
+}
+
+/// The same, or why its record (or the owner hold it refers to) couldn't
+/// be read: for what must say so rather than take it for no hold (`proj
+/// settings show`). Reads only.
+pub fn held(cfg: &Config) -> Result<Option<Spent>, String> {
+    Ok(read(cfg)?.filter(|s| s.holds(now())))
 }
 
 /// A scheduling pass can discover usage is back without starting a refused
@@ -814,7 +821,7 @@ fn tell(cfg: &Config, args: &[&str]) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod owner_tests;

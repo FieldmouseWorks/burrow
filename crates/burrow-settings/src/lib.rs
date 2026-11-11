@@ -63,6 +63,15 @@ pub fn valid_command(args: &[String]) -> bool {
 }
 
 impl Config {
+    /// The operational values consumed by the typed settings read door.
+    pub fn readings(&self) -> Result<(BTreeMap<String, bool>, Option<i64>), String> {
+        let overlay = self.read()?;
+        Ok((
+            overlay.repos,
+            overlay.pipeline_until.filter(|until| *until > now()),
+        ))
+    }
+
     fn read(&self) -> Result<Overlay, String> {
         match fs::read(&self.overlay) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
@@ -313,3 +322,6 @@ mod tests {
         );
     }
 }
+
+pub mod schema;
+pub mod show;

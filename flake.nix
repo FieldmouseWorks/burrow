@@ -104,10 +104,8 @@
           dir = "crates";
           members = true;
           include = [
-            ".github/workflows/flake-check.yml"
+            ".github/workflows"
             ".github/flake-check"
-            ".github/workflows/flake.yml"
-            ".github/workflows/flake-retarget.yml"
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"

@@ -487,6 +487,7 @@ name = "burrow-watchdog"
 version = "0.0.0"
 dependencies = [
  "burrow-events",
+ "burrow-github",
  "burrow-settings",
  "burrow-test",
  "jiff",

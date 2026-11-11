@@ -1,6 +1,6 @@
 [package]
 name = "burrow-settings"
-description = "Live repository admission policy and its independent write door"
+description = "Typed pipeline settings and live repository admission through an independent write door"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
