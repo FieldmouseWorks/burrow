@@ -419,12 +419,42 @@ fn shift_waits(job: &Job, elapsed: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Restoration is admitted only once its place is visible to the scheduler.
 pub(crate) fn accepted(job: &Job) -> Result<(), String> {
     match fs::remove_file(path(job, "restoring")) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            wake(job.cfg);
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// systemd accepting a unit does not mean its queue entry is published yet.
+/// Reserve earlier restored places until their owning pool has registered them.
+pub(crate) fn earlier_pending(job: &Job) -> bool {
+    let Some(order) = read(&path(job, "order")) else {
+        return false;
+    };
+    let Ok(choice) = crate::engine::choice(job.cfg, job) else {
+        return true;
+    };
+    fs::read_dir(&job.cfg.jobs)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if id == job.id || id.starts_with('.') {
+                return false;
+            }
+            let other = Job::new(job.cfg, &id);
+            path(&other, "restoring").exists()
+                && read(&path(&other, "order")).is_some_and(|earlier| earlier < order)
+                && !denied(&other)
+                && crate::engine::choice(job.cfg, &other).is_ok_and(|c| c.engine == choice.engine)
+        })
 }
 
 fn agent_command(cfg: &Config, verb: &str, id: &str) -> Result<(), String> {

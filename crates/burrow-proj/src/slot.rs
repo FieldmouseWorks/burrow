@@ -174,7 +174,8 @@ fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
         return Err(io::Error::from(io::ErrorKind::WouldBlock));
     }
     let _ = fs::remove_file(crate::policy::path(job, "order"));
-    fs::write(job.turn(n, "slot"), format!("{s}\n"))
+    fs::write(job.turn(n, "slot"), format!("{s}\n"))?;
+    crate::policy::accepted(job).map_err(io::Error::other)
 }
 
 /// Say this job's turn N may be withdrawn no more, under the job's lock, so none
@@ -343,7 +344,7 @@ fn codex_slot(
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
         }
-        if automation_paused(cfg, &job) {
+        if automation_paused(cfg, &job) || crate::policy::earlier_pending(&job) {
             sleep(Duration::from_secs(2));
             continue;
         }
@@ -490,6 +491,11 @@ pub fn take(
             sleep(Duration::from_secs(2));
             continue;
         }
+        if crate::policy::earlier_pending(&job) {
+            drop(lk);
+            sleep(Duration::from_secs(2));
+            continue;
+        }
         // A slot is taken only under this lock, so one a look sees free stays
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
@@ -577,6 +583,7 @@ fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<bool> {
         fs::write(&tmp, format!("{}\n", process::id()))?;
         fs::rename(&tmp, queue.join(me))?;
     }
+    crate::policy::accepted(&Job::new(cfg, job_of(me))).map_err(io::Error::other)?;
     Ok(true)
 }
 

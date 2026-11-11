@@ -74,7 +74,11 @@ in pkgs.testers.runNixOSTest {
     def state(j):
         return dev("proj state " + j)
     def eventually(j, expected):
-        machine.wait_until_succeeds("runuser -u dev -- proj state " + j + " | grep -x " + expected, timeout=45)
+        try:
+            machine.wait_until_succeeds("runuser -u dev -- proj state " + j + " | grep -x " + expected, timeout=45)
+        except Exception:
+            machine.succeed("runuser -u dev -- proj status 100; ls -la /data/dev/jobs/.queue; journalctl --user-unit='proj-*' -n 80 --no-pager", check=False)
+            raise
     def data(endpoint, value):
         path="/tmp/gh/"+endpoint.replace("/", "_")
         machine.succeed("mkdir -p /tmp/gh && printf %s " + shlex.quote(json.dumps(value)) + " >" + path + "; chmod -R a+rwX /tmp/gh")

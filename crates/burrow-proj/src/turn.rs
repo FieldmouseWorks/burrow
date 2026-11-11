@@ -211,7 +211,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     {
         let _lock = job.lock().map_err(|e| Fail::new(1, e.to_string()))?;
         crate::question::accept(&job, &n).map_err(|e| Fail::new(1, e))?;
-        crate::policy::accepted(&job).map_err(|e| Fail::new(1, e))?;
     }
     let outcome = |text: &str| {
         let _ = fs::write(job.turn(&n, "outcome"), format!("{text}\n"));

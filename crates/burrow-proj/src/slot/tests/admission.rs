@@ -305,3 +305,52 @@ fn legacy_inbox_identity_comes_from_its_host_owned_source() {
         "writable metadata cannot replace trusted legacy source"
     );
 }
+
+#[test]
+fn restoration_reserves_order_until_the_earlier_worker_registers() {
+    for codex in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        clones(&tmp);
+        let jobs = jobs_dir(&tmp);
+        let cfg = config(&jobs, 1);
+        for (id, order) in [("earlier", "1-1-earlier"), ("later", "2-2-later")] {
+            let job = Job::new(&cfg, id);
+            fs::create_dir_all(&job.dir).unwrap();
+            fs::write(
+                job.path("project"),
+                tmp.path().join("web").to_str().unwrap(),
+            )
+            .unwrap();
+            job.set_turns(1).unwrap();
+            crate::policy::bind(
+                &job,
+                crate::policy::Identity::Local,
+                crate::policy::Kind::Manual,
+            )
+            .unwrap();
+            fs::write(crate::policy::path(&job, "order"), order).unwrap();
+            fs::write(crate::policy::path(&job, "restoring"), "reserved").unwrap();
+            if codex {
+                fs::write(job.path("engine"), "codex").unwrap();
+            }
+        }
+        let later = Job::new(&cfg, "later");
+        assert!(crate::policy::earlier_pending(&later));
+        let _child = spawn_child(
+            if codex { "codex" } else { "take" },
+            &jobs,
+            1,
+            &["_exec".into(), "later".into(), "1".into(), "normal".into()],
+        );
+        sleep(Duration::from_secs(3));
+        assert!(
+            !later.path("took").exists(),
+            "later restoration overtook unpublished earlier work"
+        );
+        crate::policy::accepted(&Job::new(&cfg, "earlier")).unwrap();
+        until("the registered restoration's slot", || {
+            later.path("took").exists()
+        });
+        assert!(!crate::policy::path(&later, "restoring").exists());
+    }
+}
