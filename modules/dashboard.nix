@@ -16,11 +16,14 @@ let
   inherit (lib) mkOption types;
   account = "burrow-dashboard";
   stateDir = "${config.burrow.stateDir}/dashboard";
+  # Where browsers reach it: what they send as Origin, and WebAuthn's
+  # expected origin. The RP ID is the host alone (crates' Config::rp_id).
+  origin = "https://${cfg.host}" + lib.optionalString (cfg.serve.httpsPort != 443) ":${toString cfg.serve.httpsPort}";
 
   # What crates/burrow-dashboard reads (its Config).
   dashboardConfig = pkgs.writeText "burrow-dashboard.json" (builtins.toJSON {
     inherit (cfg) title port;
-    origin = "https://${cfg.host}";
+    inherit origin;
     state = stateDir;
     # The crate's assets/ alone, so the config changes only with them.
     shell = builtins.path { path = ../crates/burrow-dashboard/assets; name = "burrow-dashboard-shell"; };
@@ -117,7 +120,10 @@ in
       httpsPort = mkOption {
         type = types.port;
         default = 443;
-        description = "The port on the ts.net name it's served at.";
+        description = ''
+          The port on the ts.net name it's served at: the dashboard is
+          `https://HOST` on 443, `https://HOST:PORT` on any other.
+        '';
       };
     };
   };

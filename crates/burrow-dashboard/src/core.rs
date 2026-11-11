@@ -1,13 +1,16 @@
 //! The owner's passkeys, their sessions and the WebAuthn ceremonies in
 //! flight, with no HTTP: the routes (web.rs) hold one of these behind a
-//! lock. What has to outlive the process (passkeys, sessions) is written to
-//! the state directory as it changes; a ceremony lasts minutes, and lives
+//! lock. What has to outlive the process (passkeys, sessions) is one file,
+//! state.json, stamped with the owner's account id: state of any other
+//! owner is never loaded. Every change is made to a copy, saved, and only
+//! then taken as the state, so a save that fails changes nothing and the
+//! same request can be tried again. A ceremony lasts minutes, and lives
 //! only here.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -17,8 +20,9 @@ use webauthn_rs::prelude::{
     Webauthn, WebauthnBuilder,
 };
 
-use crate::session::{Limits, Session, Sessions, Use};
-use crate::{Config, Owner, digest, enroll, store, token};
+use crate::enroll::{Codes, Refused};
+use crate::session::{Activity, Limits, Session, Sessions, Use};
+use crate::{Config, Owner, digest, store, token};
 
 /// Seconds a ceremony may take, from its options to its answer.
 pub const CEREMONY_TTL: u64 = 5 * 60;
@@ -27,6 +31,15 @@ pub const CEREMONY_TTL: u64 = 5 * 60;
 pub const MAX_PENDING: usize = 32;
 /// The longest name a passkey gets.
 pub const MAX_NAME: usize = 40;
+
+/// What's saved: the owner's passkeys and sessions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct State {
+    /// The GitHub account id it all belongs to.
+    owner: u64,
+    passkeys: Vec<Enrolled>,
+    sessions: Sessions,
+}
 
 /// A passkey the owner enrolled.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,14 +129,18 @@ pub struct Core {
     webauthn: Webauthn,
     owner: Owner,
     limits: Limits,
-    state: PathBuf,
-    passkeys: Vec<Enrolled>,
-    sessions: Sessions,
+    file: PathBuf,
+    codes: Codes,
+    state: State,
+    /// Session uses not saved yet.
+    activity: Activity,
     pending: HashMap<String, (Ceremony, u64)>,
 }
 
 impl Core {
-    /// The dashboard's state, read from its directory.
+    /// The dashboard's state, read from its directory. State saved for
+    /// another owner is dropped, on disk too, so a change of owner (and
+    /// back) never lets the other's passkeys or sessions in.
     pub fn open(cfg: &Config) -> std::result::Result<Core, String> {
         let origin = Url::parse(&cfg.origin).map_err(|e| format!("origin {}: {e}", cfg.origin))?;
         let webauthn = WebauthnBuilder::new(cfg.rp_id()?, &origin)
@@ -133,13 +150,8 @@ impl Core {
                     .build()
             })
             .map_err(|e| format!("WebAuthn for {}: {e}", cfg.origin))?;
-        let file = |name: &str| cfg.state.join(name);
-        let passkeys = store::load(&file("passkeys.json"))
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        let sessions = store::load(&file("sessions.json"))
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
+        let file = cfg.state.join("state.json");
+        let state = load(&file, cfg.owner.id).map_err(|e| format!("{}: {e}", file.display()))?;
         Ok(Core {
             webauthn,
             owner: cfg.owner.clone(),
@@ -147,31 +159,32 @@ impl Core {
                 idle: cfg.idle_timeout,
                 max: cfg.max_age,
             },
-            state: cfg.state.clone(),
-            passkeys,
-            sessions,
+            file,
+            codes: Codes::new(&cfg.state, cfg.owner.id),
+            state,
+            activity: Activity::default(),
             pending: HashMap::new(),
         })
     }
 
-    pub fn code_file(&self) -> PathBuf {
-        self.state.join("enroll.json")
+    /// The enrolment codes, for this owner.
+    pub fn codes(&self) -> &Codes {
+        &self.codes
     }
 
     pub fn passkeys(&self) -> &[Enrolled] {
-        &self.passkeys
+        &self.state.passkeys
     }
 
     pub fn limits(&self) -> Limits {
         self.limits
     }
 
-    fn save_passkeys(&self) -> io::Result<()> {
-        store::save(&self.state.join("passkeys.json"), &self.passkeys)
-    }
-
-    fn save_sessions(&self) -> io::Result<()> {
-        store::save(&self.state.join("sessions.json"), &self.sessions)
+    /// Save `next`, then take it as the state; failing, nothing changes.
+    fn commit(&mut self, next: State) -> io::Result<()> {
+        store::save(&self.file, &next)?;
+        self.state = next;
+        Ok(())
     }
 
     /// Hold a ceremony for its answer, under a fresh id.
@@ -201,14 +214,13 @@ impl Core {
         }
     }
 
-    /// Begin a session for the passkey named `passkey`: its token, for the
-    /// cookie.
-    fn begin(&mut self, passkey: String, now: u64) -> Result<String> {
+    /// `next` with a session begun for the passkey named `passkey`, and the
+    /// session's token, for the cookie.
+    fn begin(&self, next: &mut State, passkey: String, now: u64) -> String {
         let token = token();
-        self.sessions.sweep(now, self.limits);
-        self.sessions.begin(digest(&token), passkey, now);
-        self.save_sessions()?;
-        Ok(token)
+        next.sessions.sweep(now, self.limits);
+        next.sessions.begin(digest(&token), passkey, now);
+        token
     }
 
     /// Start enrolling a device, if `code` is the pending code: the
@@ -219,13 +231,14 @@ impl Core {
         name: &str,
         now: u64,
     ) -> Result<(String, CreationChallengeResponse)> {
-        let code = match enroll::check(&self.code_file(), code, now)? {
+        let code = match self.codes.check(code, now)? {
             Ok(d) => d,
-            Err(enroll::Refused::NoCode) => return Err(Error::NoCode),
-            Err(enroll::Refused::Wrong { left }) => return Err(Error::WrongCode { left }),
+            Err(Refused::NoCode) => return Err(Error::NoCode),
+            Err(Refused::Wrong { left }) => return Err(Error::WrongCode { left }),
         };
         let name = self.name(name);
         let exclude = self
+            .state
             .passkeys
             .iter()
             .map(|p| p.passkey.cred_id().clone())
@@ -243,8 +256,9 @@ impl Core {
         Ok((id, options))
     }
 
-    /// Finish enrolling: keep the passkey, use up the code, and begin a
-    /// session with it (the device has just proven its owner is there).
+    /// Finish enrolling: keep the passkey and begin a session with it (the
+    /// device has just proven its owner is there), and only once that's
+    /// saved use up the code.
     pub fn enrol_finish(
         &mut self,
         id: &str,
@@ -259,32 +273,40 @@ impl Core {
             .finish_passkey_registration(answer, &state)
             .map_err(|e| Error::Rejected(e.to_string()))?;
         if self
+            .state
             .passkeys
             .iter()
             .any(|p| p.passkey.cred_id() == passkey.cred_id())
         {
             return Err(Error::Enrolled);
         }
-        if !enroll::redeem(&self.code_file(), &code, now)? {
-            return Err(Error::NoCode);
-        }
-        self.passkeys.push(Enrolled {
+        let mut next = self.state.clone();
+        next.passkeys.push(Enrolled {
             name: name.clone(),
             added: now,
             used: Some(now),
             passkey,
         });
-        self.save_passkeys()?;
-        self.begin(name, now)
+        let token = self.begin(&mut next, name, now);
+        let codes = self.codes.clone();
+        codes
+            .redeem(&code, now, || self.commit(next).map_err(Error::Io))?
+            .ok_or(Error::NoCode)?;
+        Ok(token)
     }
 
     /// Start signing in: the ceremony's id and the options for
     /// `navigator.credentials.get`.
     pub fn login_start(&mut self, now: u64) -> Result<(String, RequestChallengeResponse)> {
-        if self.passkeys.is_empty() {
+        if self.state.passkeys.is_empty() {
             return Err(Error::NoPasskeys);
         }
-        let keys: Vec<Passkey> = self.passkeys.iter().map(|p| p.passkey.clone()).collect();
+        let keys: Vec<Passkey> = self
+            .state
+            .passkeys
+            .iter()
+            .map(|p| p.passkey.clone())
+            .collect();
         let (options, state) = self
             .webauthn
             .start_passkey_authentication(&keys)
@@ -307,7 +329,8 @@ impl Core {
             .webauthn
             .finish_passkey_authentication(answer, &state)
             .map_err(|e| Error::Rejected(e.to_string()))?;
-        let Some(key) = self
+        let mut next = self.state.clone();
+        let Some(key) = next
             .passkeys
             .iter_mut()
             .find(|p| p.passkey.cred_id() == result.cred_id())
@@ -317,17 +340,27 @@ impl Core {
         key.passkey.update_credential(&result);
         key.used = Some(now);
         let name = key.name.clone();
-        self.save_passkeys()?;
-        self.begin(name, now)
+        let token = self.begin(&mut next, name, now);
+        self.commit(next)?;
+        Ok(token)
     }
 
-    /// The session the cookie's token names, if it's live.
+    /// The session the cookie's token names, if it's live. A use a grain
+    /// past what's saved is saved now; if that fails, so does the request,
+    /// and the use is held to be saved on the next.
     pub fn session(&mut self, token: &str, now: u64) -> Result<Option<Live>> {
-        match self.sessions.use_(&digest(token), now, self.limits) {
+        let key = digest(token);
+        match self
+            .activity
+            .use_(&self.state.sessions, &key, now, self.limits)
+        {
             Use::None => Ok(None),
-            Use::Live { session, dirty } => {
-                if dirty {
-                    self.save_sessions()?;
+            Use::Live { session, save } => {
+                if save {
+                    let mut next = self.state.clone();
+                    next.sessions.touch(&key, session.seen);
+                    self.commit(next)?;
+                    self.activity.saved(&key);
                 }
                 let ends = session.ends(self.limits);
                 Ok(Some(Live { session, ends }))
@@ -335,9 +368,14 @@ impl Core {
         }
     }
 
+    /// End the session `token` names. Failing to save, it isn't ended
+    /// (here or on disk), and signing out again tries again.
     pub fn logout(&mut self, token: &str) -> Result<()> {
-        if self.sessions.end(&digest(token)) {
-            self.save_sessions()?;
+        let key = digest(token);
+        let mut next = self.state.clone();
+        if next.sessions.end(&key) {
+            self.commit(next)?;
+            self.activity.saved(&key);
         }
         Ok(())
     }
@@ -355,7 +393,7 @@ impl Core {
             .filter(|c| !c.is_control())
             .take(MAX_NAME)
             .collect();
-        let taken = |n: &str| self.passkeys.iter().any(|p| p.name == n);
+        let taken = |n: &str| self.state.passkeys.iter().any(|p| p.name == n);
         let (base, first) = match base.is_empty() {
             true => ("Passkey".to_owned(), 1),
             false if !taken(&base) => return base,
@@ -365,6 +403,27 @@ impl Core {
             .map(|i| format!("{base} {i}"))
             .find(|n| !taken(n))
             .unwrap_or(base)
+    }
+}
+
+/// The state saved in `file`, if it's `owner`'s. Another owner's is
+/// replaced on disk with none at once.
+fn load(file: &Path, owner: u64) -> io::Result<State> {
+    let fresh = State {
+        owner,
+        ..State::default()
+    };
+    match store::load::<State>(file)? {
+        Some(s) if s.owner == owner => Ok(s),
+        Some(s) => {
+            eprintln!(
+                "burrow-dashboard: the saved passkeys and sessions were account {}'s, not {owner}'s: dropped",
+                s.owner
+            );
+            store::save(file, &fresh)?;
+            Ok(fresh)
+        }
+        None => Ok(fresh),
     }
 }
 

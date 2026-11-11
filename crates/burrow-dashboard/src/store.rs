@@ -23,13 +23,16 @@ pub fn load<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     }
 }
 
-/// Write the value in place of the file, all of it or none.
+/// Write the value in place of the file, all of it or none. The new file is
+/// made fresh beside it: whatever was at its name (a symlink, say) is
+/// removed, not followed, and if something takes the name meanwhile the
+/// save fails rather than write through it.
 pub fn save<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
+    remove(&tmp)?;
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
     serde_json::to_writer(&mut file, value)?;
@@ -70,6 +73,18 @@ mod tests {
         remove(&path).unwrap();
         remove(&path).unwrap();
         assert_eq!(load::<Vec<u8>>(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn a_symlink_where_the_new_file_goes_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let precious = dir.path().join("precious");
+        fs::write(&precious, "keep").unwrap();
+        let path = dir.path().join("x.json");
+        std::os::unix::fs::symlink(&precious, path.with_extension("tmp")).unwrap();
+        save(&path, &1u8).unwrap();
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "keep");
+        assert_eq!(load::<u8>(&path).unwrap(), Some(1));
     }
 
     #[test]

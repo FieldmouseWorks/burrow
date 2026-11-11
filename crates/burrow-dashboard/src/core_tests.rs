@@ -36,7 +36,7 @@ fn device() -> SoftPasskey {
 
 /// Enrol `dev` as `name` with a fresh code: the session's token.
 fn enrol(core: &mut Core, dev: &mut SoftPasskey, name: &str, now: u64) -> Result<String> {
-    let code = enroll::issue(&core.code_file(), now).unwrap();
+    let code = core.codes().issue(now).unwrap();
     let (id, options) = core.enrol_start(&code, name, now)?;
     let answer = dev.do_registration(origin(), options).unwrap();
     core.enrol_finish(&id, &answer, now)
@@ -81,7 +81,7 @@ fn enrolment_refuses_a_wrong_code() {
         core.enrol_start("ABCDE-FGHJK", "", 0),
         Err(Error::NoCode)
     ));
-    enroll::issue(&core.code_file(), 0).unwrap();
+    core.codes().issue(0).unwrap();
     assert!(matches!(
         core.enrol_start("ABCDE-FGHJK", "", 1),
         Err(Error::WrongCode { left: 4 })
@@ -96,7 +96,7 @@ fn each_code_enrols_one_device_and_the_owner_may_have_several() {
     let mut core = Core::open(&config(dir.path())).unwrap();
     let (mut laptop, mut phone) = (device(), device());
 
-    let code = enroll::issue(&core.code_file(), 0).unwrap();
+    let code = core.codes().issue(0).unwrap();
     let (id, options) = core.enrol_start(&code, "Laptop", 1).unwrap();
     // A second ceremony on the same code, before the first is answered...
     let (id2, options2) = core.enrol_start(&code, "Phone", 1).unwrap();
@@ -136,9 +136,9 @@ fn a_new_code_mid_ceremony_voids_the_old_one() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = Core::open(&config(dir.path())).unwrap();
     let mut dev = device();
-    let code = enroll::issue(&core.code_file(), 0).unwrap();
+    let code = core.codes().issue(0).unwrap();
     let (id, options) = core.enrol_start(&code, "", 1).unwrap();
-    enroll::issue(&core.code_file(), 2).unwrap();
+    core.codes().issue(2).unwrap();
     let answer = dev.do_registration(origin(), options).unwrap();
     assert!(matches!(
         core.enrol_finish(&id, &answer, 3),
@@ -152,7 +152,7 @@ fn enrolment_asks_devices_not_to_enrol_twice() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = Core::open(&config(dir.path())).unwrap();
     enrol(&mut core, &mut device(), "One", 0).unwrap();
-    let code = enroll::issue(&core.code_file(), 1).unwrap();
+    let code = core.codes().issue(1).unwrap();
     let (_, options) = core.enrol_start(&code, "Two", 1).unwrap();
     let excluded: Vec<_> = options
         .public_key
@@ -213,7 +213,7 @@ fn an_answer_for_another_site_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = Core::open(&config(dir.path())).unwrap();
     let mut dev = device();
-    let code = enroll::issue(&core.code_file(), 0).unwrap();
+    let code = core.codes().issue(0).unwrap();
     let (id, mut options) = core.enrol_start(&code, "", 0).unwrap();
     // A page elsewhere relaying our options under its own RP ID.
     options.public_key.rp.id = "elsewhere.example".into();
@@ -281,4 +281,142 @@ fn names_are_tidied() {
     assert_eq!(core.name(" my\n  phone\u{7} "), "my phone");
     assert_eq!(core.name(&"x".repeat(100)).len(), MAX_NAME);
     assert_eq!(core.name(""), "Passkey 1");
+}
+
+/// Saving the state fails until what's returned is dropped: a directory
+/// where its new file goes, which nothing (root included) can write over.
+struct Jammed(std::path::PathBuf);
+
+fn jam(dir: &std::path::Path) -> Jammed {
+    let tmp = dir.join("state.tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    std::fs::write(tmp.join("x"), "").unwrap();
+    Jammed(tmp)
+}
+
+impl Drop for Jammed {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn passkeys_and_sessions_are_the_configured_owners() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let mut dev = device();
+    let token = enrol(&mut core, &mut dev, "Phone", 0).unwrap();
+
+    // The same account under a new login keeps them.
+    let mut renamed = config(dir.path());
+    renamed.owner.login = "sam-renamed".into();
+    let mut same = Core::open(&renamed).unwrap();
+    assert_eq!(same.passkeys().len(), 1);
+    assert!(same.session(&token, 1).unwrap().is_some());
+
+    // Another account gets none of them, and no pending code either.
+    let code = core.codes().issue(1).unwrap();
+    let mut other = config(dir.path());
+    other.owner.id = 999;
+    let mut theirs = Core::open(&other).unwrap();
+    assert!(theirs.passkeys().is_empty());
+    assert!(theirs.session(&token, 2).unwrap().is_none());
+    assert!(matches!(
+        theirs.enrol_start(&code, "", 2),
+        Err(Error::NoCode)
+    ));
+
+    // And they're gone for good: the first owner back finds none.
+    let mut back = Core::open(&config(dir.path())).unwrap();
+    assert!(back.passkeys().is_empty());
+    assert!(back.session(&token, 3).unwrap().is_none());
+}
+
+#[test]
+fn a_sign_out_that_fails_to_save_signs_nothing_out_and_can_be_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let token = enrol(&mut core, &mut device(), "", 0).unwrap();
+    {
+        let _jammed = jam(dir.path());
+        assert!(matches!(core.logout(&token), Err(Error::Io(_))));
+        // Still signed in, here and on disk: the failure says so.
+        assert!(core.session(&token, 1).unwrap().is_some());
+    }
+    core.logout(&token).unwrap();
+    assert!(core.session(&token, 2).unwrap().is_none());
+    let mut again = Core::open(&config(dir.path())).unwrap();
+    assert!(again.session(&token, 3).unwrap().is_none());
+}
+
+#[test]
+fn a_sign_in_that_fails_to_save_begins_no_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let mut dev = device();
+    enrol(&mut core, &mut dev, "", 0).unwrap();
+    let (id, options) = core.login_start(10).unwrap();
+    let answer = dev.do_authentication(origin(), options).unwrap();
+    let jammed = jam(dir.path());
+    assert!(matches!(
+        core.login_finish(&id, &answer, 11),
+        Err(Error::Io(_))
+    ));
+    drop(jammed);
+    // Nothing changed, not even the passkey's last use.
+    assert_eq!(core.passkeys()[0].used, Some(0));
+    login(&mut core, &mut dev, 12).unwrap();
+    assert_eq!(core.passkeys()[0].used, Some(12));
+}
+
+#[test]
+fn an_enrolment_that_fails_to_save_keeps_its_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let mut dev = device();
+    let code = core.codes().issue(0).unwrap();
+    let (id, options) = core.enrol_start(&code, "Phone", 0).unwrap();
+    let answer = dev.do_registration(origin(), options).unwrap();
+    let jammed = jam(dir.path());
+    assert!(matches!(
+        core.enrol_finish(&id, &answer, 1),
+        Err(Error::Io(_))
+    ));
+    drop(jammed);
+    assert!(core.passkeys().is_empty());
+    // The code is still good for another go.
+    let (id, options) = core.enrol_start(&code, "Phone", 2).unwrap();
+    let answer = dev.do_registration(origin(), options).unwrap();
+    core.enrol_finish(&id, &answer, 3).unwrap();
+    assert_eq!(core.passkeys().len(), 1);
+}
+
+#[test]
+fn a_session_used_often_outlives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let token = enrol(&mut core, &mut device(), "", 0).unwrap();
+    // Used every half minute for two hours: more than the idle timeout.
+    let mut t = 0;
+    while t < 2 * HOUR {
+        t += 30;
+        assert!(core.session(&token, t).unwrap().is_some(), "at {t}");
+    }
+    // A restart forgets what wasn't saved, and the session lives on.
+    let mut again = Core::open(&config(dir.path())).unwrap();
+    assert!(again.session(&token, t + HOUR - 60).unwrap().is_some());
+}
+
+#[test]
+fn a_use_that_fails_to_save_is_saved_on_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let token = enrol(&mut core, &mut device(), "", 0).unwrap();
+    let jammed = jam(dir.path());
+    assert!(matches!(core.session(&token, 600), Err(Error::Io(_))));
+    drop(jammed);
+    assert!(core.session(&token, 601).unwrap().is_some());
+    let mut again = Core::open(&config(dir.path())).unwrap();
+    // Saved at 601, so it lasts an hour from then.
+    assert!(again.session(&token, 601 + HOUR - 1).unwrap().is_some());
 }

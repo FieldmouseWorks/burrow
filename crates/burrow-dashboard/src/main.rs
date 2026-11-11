@@ -6,12 +6,13 @@
 use std::env;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::unix::fs::{MetadataExt, chown};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::Arc;
 
-use burrow_dashboard::enroll::{self, CODE_TTL};
+use burrow_dashboard::enroll::{CODE_TTL, Codes};
 use burrow_dashboard::pages::span;
 use burrow_dashboard::web::{App, router};
 use burrow_dashboard::{Config, now};
@@ -31,7 +32,7 @@ fn main() -> ExitCode {
     };
     let done = match command {
         "serve" => serve(cfg),
-        "enroll" => code(&cfg),
+        "enroll" => code(&cfg, config),
         _ => return usage(),
     };
     match done {
@@ -51,21 +52,42 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
-/// Print a fresh code. The state directory is the service's alone, so this
-/// runs as root (or the service's user), and the code's file is handed to
-/// whoever owns the directory.
-fn code(cfg: &Config) -> Result<(), String> {
+/// Print a fresh code. The state directory is the service's alone. Run as
+/// root, this runs itself again as the directory's owner before it touches
+/// anything in it, so root never opens a path the service's user could
+/// have pointed elsewhere.
+fn code(cfg: &Config, config: &Path) -> Result<(), String> {
     let dir = fs::metadata(&cfg.state).map_err(|e| format!("{}: {e}", cfg.state.display()))?;
-    let path = cfg.state.join("enroll.json");
-    let code = enroll::issue(&path, now()).map_err(|e| match e.kind() {
-        std::io::ErrorKind::PermissionDenied => format!(
-            "{} is the dashboard's own: run this as root (sudo burrow-dashboard enroll)",
-            cfg.state.display()
-        ),
-        _ => format!("{}: {e}", path.display()),
-    })?;
-    chown(&path, Some(dir.uid()), Some(dir.gid()))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // The process's own directory is its effective user's.
+    let me = fs::metadata("/proc/self")
+        .map_err(|e| format!("/proc/self: {e}"))?
+        .uid();
+    if me != dir.uid() {
+        if me != 0 {
+            return Err(format!(
+                "{} is the dashboard's own: run this as root (sudo burrow-dashboard enroll)",
+                cfg.state.display()
+            ));
+        }
+        let exe = env::current_exe().map_err(|e| format!("this program: {e}"))?;
+        // std drops root's supplementary groups along with its uid.
+        let status = Command::new(exe)
+            .arg(config)
+            .arg("enroll")
+            .uid(dir.uid())
+            .gid(dir.gid())
+            .env_clear()
+            .current_dir("/")
+            .status()
+            .map_err(|e| format!("as the dashboard's user: {e}"))?;
+        return match status.success() {
+            true => Ok(()),
+            false => Err(format!("as the dashboard's user, it failed ({status})")),
+        };
+    }
+    let code = Codes::new(&cfg.state, cfg.owner.id)
+        .issue(now())
+        .map_err(|e| format!("{}: {e}", cfg.state.display()))?;
     println!("{code}");
     eprintln!(
         "Type it on the device at {}/enroll within {}. It adds one passkey; a new code replaces it.",

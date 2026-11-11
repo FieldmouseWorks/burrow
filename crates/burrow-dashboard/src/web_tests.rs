@@ -13,7 +13,8 @@ use webauthn_authenticator_rs::softpasskey::SoftPasskey;
 use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse, Url};
 
 use super::*;
-use crate::{Owner, enroll};
+use crate::Owner;
+use crate::enroll::Codes;
 
 const ORIGIN: &str = "https://box.tail1.ts.net";
 const IDLE: u64 = 3600;
@@ -116,7 +117,9 @@ impl Rig {
 
     fn code(&self) -> String {
         let now = self.clock.load(Ordering::SeqCst);
-        enroll::issue(&self.app.cfg.state.join("enroll.json"), now).unwrap()
+        Codes::new(&self.app.cfg.state, self.app.cfg.owner.id)
+            .issue(now)
+            .unwrap()
     }
 
     /// Enrol `dev` the way the page does: the session's token.

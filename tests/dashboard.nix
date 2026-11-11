@@ -3,7 +3,9 @@
 # so, not the firewall), a page asked for with no session, or a forged one,
 # is sent to sign in, a POST from another origin is turned away, and
 # enrolment refuses a wrong code and takes the right one, which only root
-# can print. The ceremonies themselves, with a software authenticator, and
+# can print, as the service's user, so a link that user plants doesn't
+# send root's write elsewhere. It's served on a port other than 443, so
+# its origin carries the port. The ceremonies themselves, with a software authenticator, and
 # when sessions end, are crates/burrow-dashboard's tests; `tailscale serve`
 # needs a tailnet, so it's evaluated here (the standalone check) but not run.
 #
@@ -11,7 +13,8 @@
 { self, pkgs }:
 let
   host = "machine.tail1234.ts.net";
-  origin = "https://${host}";
+  # Served on a port of its own, so its origin has to carry it.
+  origin = "https://${host}:8443";
   port = 8473;
   local = "http://127.0.0.1:${toString port}";
 in
@@ -25,7 +28,10 @@ pkgs.testers.runNixOSTest {
         enable = true;
         inherit host port;
         owner = { id = 583231; login = "sam"; };
-        serve.enable = false;
+        serve = {
+          enable = false;
+          httpsPort = 8443;
+        };
       };
       networking.firewall.enable = false;
       virtualisation.vlans = [ 1 ];
@@ -74,15 +80,21 @@ pkgs.testers.runNixOSTest {
         page = machine.succeed("curl -fsS ${local}/login")
         assert "Add this device" in page, page
 
-    with subtest("only root prints a code"):
+    with subtest("only root prints a code, and never as root writes where the service points it"):
         machine.fail("su dev -c 'burrow-dashboard enroll'")
+        machine.succeed("echo keep > /root/precious")
+        # The service's user plants links where the command writes.
+        for name in ["enroll.tmp", "enroll.json"]:
+            machine.succeed(f"runuser -u burrow-dashboard -- ln -s /root/precious /var/lib/burrow/dashboard/{name}")
         code = machine.succeed("burrow-dashboard enroll 2>/dev/null").strip()
         print(f"code: {code}")
         assert machine.succeed("stat -c '%U %a' /var/lib/burrow/dashboard/enroll.json").strip() == "burrow-dashboard 600"
         assert machine.succeed("stat -c '%U %a' /var/lib/burrow/dashboard").strip() == "burrow-dashboard 700"
+        assert machine.succeed("cat /root/precious").strip() == "keep"
+        assert machine.succeed("stat -c '%U' /root/precious").strip() == "root"
 
     with subtest("a POST from another origin is turned away"):
-        for origin in [None, "https://elsewhere.example"]:
+        for origin in [None, "https://elsewhere.example", "https://${host}"]:
             got = post("/enroll/start", {"code": code}, origin)
             assert got == "403", (origin, got)
 

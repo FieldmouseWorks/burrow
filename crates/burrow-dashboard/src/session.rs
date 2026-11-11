@@ -1,8 +1,14 @@
 //! Sessions: a random token in a cookie, kept here only as its digest.
 //! A session ends when it goes unused for the idle timeout, or at the hard
 //! cap after it began, whichever comes first; using it moves only the first.
+//!
+//! What's saved ([`Sessions`]) says when each session was last used as of
+//! its last save; [`Activity`] holds the uses since, in memory, so a page
+//! load isn't a disk write. A use is saved once it's `SEEN_GRAIN` past
+//! what's saved, measured from the save, so however often a session is used
+//! the file is never more than a grain behind.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +21,7 @@ pub struct Limits {
     pub max: u64,
 }
 
-/// Using a session moves `seen` at once; the file catches up only when
-/// it's this many seconds behind, so a page load isn't a disk write.
+/// Seconds the saved last use may lag behind the real one.
 pub const SEEN_GRAIN: u64 = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,18 +45,9 @@ impl Session {
     }
 }
 
-/// Every live session, by its token's digest.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Every session as saved, by its token's digest.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sessions(BTreeMap<String, Session>);
-
-/// What `use_` found.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Use {
-    /// No such session, or it has ended (and is gone now).
-    None,
-    /// Live; `dirty` when the file should be written.
-    Live { session: Session, dirty: bool },
-}
 
 impl Sessions {
     /// Begin a session; its token's digest is `key`.
@@ -66,21 +62,14 @@ impl Sessions {
         );
     }
 
-    /// Use the session `key` at `now`: a live one is seen again, an ended
-    /// one is dropped.
-    pub fn use_(&mut self, key: &str, now: u64, limits: Limits) -> Use {
-        let Some(s) = self.0.get_mut(key) else {
-            return Use::None;
-        };
-        if !s.live(now, limits) {
-            self.0.remove(key);
-            return Use::None;
-        }
-        let dirty = now.saturating_sub(s.seen) >= SEEN_GRAIN;
-        s.seen = s.seen.max(now);
-        Use::Live {
-            session: s.clone(),
-            dirty,
+    pub fn get(&self, key: &str) -> Option<&Session> {
+        self.0.get(key)
+    }
+
+    /// Record a use of `key` at `seen`, never moving it back.
+    pub fn touch(&mut self, key: &str, seen: u64) {
+        if let Some(s) = self.0.get_mut(key) {
+            s.seen = s.seen.max(seen);
         }
     }
 
@@ -89,11 +78,9 @@ impl Sessions {
         self.0.remove(key).is_some()
     }
 
-    /// Drop every ended session; whether any went.
-    pub fn sweep(&mut self, now: u64, limits: Limits) -> bool {
-        let before = self.0.len();
+    /// Drop every ended session.
+    pub fn sweep(&mut self, now: u64, limits: Limits) {
         self.0.retain(|_, s| s.live(now, limits));
-        self.0.len() != before
     }
 
     pub fn len(&self) -> usize {
@@ -102,6 +89,45 @@ impl Sessions {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+/// Uses not yet saved, by session.
+#[derive(Debug, Default)]
+pub struct Activity(HashMap<String, u64>);
+
+/// What using a session found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Use {
+    /// No such session, or it has ended.
+    None,
+    /// Live, as it now stands; `save` when its use has to be saved now.
+    Live { session: Session, save: bool },
+}
+
+impl Activity {
+    /// Use the session `key` at `now`. Its use is held here until it's
+    /// saved (`saved`), so a save that fails is tried again on the next.
+    pub fn use_(&mut self, saved: &Sessions, key: &str, now: u64, limits: Limits) -> Use {
+        let Some(s) = saved.get(key) else {
+            self.0.remove(key);
+            return Use::None;
+        };
+        let mut session = s.clone();
+        session.seen = session.seen.max(self.0.get(key).copied().unwrap_or(0));
+        if !session.live(now, limits) {
+            self.0.remove(key);
+            return Use::None;
+        }
+        session.seen = session.seen.max(now);
+        self.0.insert(key.to_owned(), session.seen);
+        let save = session.seen - s.seen >= SEEN_GRAIN;
+        Use::Live { session, save }
+    }
+
+    /// The use of `key` is saved.
+    pub fn saved(&mut self, key: &str) {
+        self.0.remove(key);
     }
 }
 
@@ -114,39 +140,49 @@ mod tests {
         max: 86400,
     };
 
-    fn one(at: u64) -> Sessions {
+    /// One session, `k`, begun at `at`.
+    fn one(at: u64) -> (Sessions, Activity) {
         let mut s = Sessions::default();
         s.begin("k".into(), "Phone".into(), at);
-        s
+        (s, Activity::default())
     }
 
-    fn live(u: &Use) -> bool {
-        matches!(u, Use::Live { .. })
+    /// Use `k` at `now`, saving when asked to: whether it's live.
+    fn use_(s: &mut Sessions, a: &mut Activity, now: u64) -> bool {
+        match a.use_(s, "k", now, LIMITS) {
+            Use::None => false,
+            Use::Live { session, save } => {
+                if save {
+                    s.touch("k", session.seen);
+                    a.saved("k");
+                }
+                true
+            }
+        }
     }
 
     #[test]
     fn an_unused_session_ends_at_the_idle_timeout() {
-        let mut s = one(1000);
-        assert!(live(&s.use_("k", 1000 + 3599, LIMITS)));
-        let mut s2 = one(1000);
-        assert_eq!(s2.use_("k", 1000 + 3600, LIMITS), Use::None);
-        // And it's gone, not just refused.
-        assert!(s2.is_empty());
-        // Seen at 4599, it lasts until 8199.
-        assert!(live(&s.use_("k", 8198, LIMITS)));
+        let (mut s, mut a) = one(1000);
+        assert!(use_(&mut s, &mut a, 1000 + 3599));
+        // Used at 4599, it lasts until 8199.
+        assert!(use_(&mut s, &mut a, 8198));
+        assert!(!use_(&mut s, &mut a, 8198 + 3600));
+        let (mut s, mut a) = one(1000);
+        assert!(!use_(&mut s, &mut a, 1000 + 3600));
     }
 
     #[test]
     fn using_a_session_never_takes_it_past_the_hard_cap() {
-        let mut s = one(0);
-        // Seen every half hour, it never goes idle...
+        let (mut s, mut a) = one(0);
+        // Used every half hour, it never goes idle...
         let mut t = 0;
         while t + 1800 < 86400 {
             t += 1800;
-            assert!(live(&s.use_("k", t, LIMITS)), "at {t}");
+            assert!(use_(&mut s, &mut a, t), "at {t}");
         }
         // ...and still ends a day after it began.
-        assert_eq!(s.use_("k", 86400, LIMITS), Use::None);
+        assert!(!use_(&mut s, &mut a, 86400));
     }
 
     #[test]
@@ -167,49 +203,71 @@ mod tests {
 
     #[test]
     fn a_clock_that_steps_back_doesnt_rewind_seen() {
-        let mut s = one(5000);
-        let Use::Live { session, .. } = s.use_("k", 4000, LIMITS) else {
+        let (s, mut a) = one(5000);
+        let Use::Live { session, .. } = a.use_(&s, "k", 4000, LIMITS) else {
             panic!("live");
         };
         assert_eq!(session.seen, 5000);
     }
 
     #[test]
-    fn the_file_is_written_only_once_seen_moves_a_grain() {
-        let mut s = one(0);
-        assert_eq!(
-            s.use_("k", SEEN_GRAIN - 1, LIMITS),
-            Use::Live {
-                session: Session {
-                    began: 0,
-                    seen: SEEN_GRAIN - 1,
-                    passkey: "Phone".into()
-                },
-                dirty: false
-            }
-        );
-        let Use::Live { dirty, .. } = s.use_("k", 2 * SEEN_GRAIN, LIMITS) else {
+    fn frequent_uses_are_saved_a_grain_after_the_last_save() {
+        let (mut s, mut a) = one(0);
+        // Used every half grain for an hour: what's saved is never more
+        // than a grain behind.
+        let mut t = 0;
+        while t < 3600 {
+            t += SEEN_GRAIN / 2;
+            assert!(use_(&mut s, &mut a, t));
+            let saved = s.get("k").unwrap().seen;
+            assert!(t - saved < SEEN_GRAIN, "at {t}, saved {saved}");
+        }
+        // So after a restart (no activity) it lives on from the last save.
+        let mut fresh = Activity::default();
+        assert!(matches!(
+            fresh.use_(&s, "k", t + 3600 - SEEN_GRAIN, LIMITS),
+            Use::Live { .. }
+        ));
+    }
+
+    #[test]
+    fn a_use_whose_save_failed_is_saved_on_the_next() {
+        let (s, mut a) = one(0);
+        // Asked to save, and the save fails: s stays as it was.
+        assert!(matches!(
+            a.use_(&s, "k", SEEN_GRAIN, LIMITS),
+            Use::Live { save: true, .. }
+        ));
+        // The next use still asks, and the session still counts the use.
+        let Use::Live { session, save } = a.use_(&s, "k", SEEN_GRAIN + 1, LIMITS) else {
             panic!("live");
         };
-        assert!(dirty);
+        assert!(save);
+        assert_eq!(session.seen, SEEN_GRAIN + 1);
+        // Held in memory, the failed use keeps the session alive past the
+        // saved idle limit.
+        assert!(matches!(
+            a.use_(&s, "k", 3600 + 1, LIMITS),
+            Use::Live { .. }
+        ));
     }
 
     #[test]
     fn ending_and_sweeping() {
-        let mut s = one(0);
+        let (mut s, mut a) = one(0);
         s.begin("j".into(), "Laptop".into(), 3000);
-        assert!(!s.sweep(3599, LIMITS));
-        assert!(s.sweep(3600, LIMITS));
+        s.sweep(3599, LIMITS);
+        assert_eq!(s.len(), 2);
+        s.sweep(3600, LIMITS);
         assert_eq!(s.len(), 1);
         assert!(s.end("j"));
         assert!(!s.end("j"));
-        assert_eq!(s.use_("j", 3001, LIMITS), Use::None);
+        assert_eq!(a.use_(&s, "j", 3001, LIMITS), Use::None);
     }
 
     #[test]
     fn an_unknown_token_is_no_session() {
-        let mut s = one(0);
-        assert_eq!(s.use_("nope", 1, LIMITS), Use::None);
-        assert_eq!(s.len(), 1);
+        let (s, mut a) = one(0);
+        assert_eq!(a.use_(&s, "nope", 1, LIMITS), Use::None);
     }
 }
