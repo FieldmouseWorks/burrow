@@ -69,7 +69,9 @@ stand_in()
 
 # Scope narrows the same allow list, with no cached reader state.
 C.CFG["settings"] = admission(["sam/r", "sam/other"], ["sam/other"], 4102444800)
+C.WAKE.pop("sam/r", None)
 assert C.paused("sam/r")
+assert C.WAKE["sam/r"] == 4102444800
 assert not C.paused("sam/other")
 assert C.paused("sam/new")
 C.CFG.pop("settings")

@@ -203,6 +203,10 @@ impl Config {
             .is_some_and(|s| !s.allows(repo).unwrap_or(false))
     }
 
+    pub fn retry_at(&self, repo: &str) -> Option<i64> {
+        self.settings.as_ref()?.decision(repo).ok()?.retry_at
+    }
+
     pub fn settings_line(&self) -> String {
         let Some(settings) = &self.settings else {
             return String::new();

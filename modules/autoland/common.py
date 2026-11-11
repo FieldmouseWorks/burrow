@@ -694,9 +694,14 @@ class JobPaused(Exception):
 def paused(repo):
     settings = CFG.get("settings")
     if settings:
-        result = subprocess.run([settings["command"], settings["config"], "allows", repo],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return result.returncode != 0
+        result = subprocess.run([settings["command"], settings["config"], "decision", repo],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            return True
+        decision = json.loads(result.stdout)
+        if decision["retryAt"] is not None:
+            wake(repo, decision["retryAt"])  # ends: the scoped pause expires
+        return not decision["allowed"]
     return False
 
 

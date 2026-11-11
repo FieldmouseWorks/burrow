@@ -63,6 +63,15 @@ impl Pass<'_> {
         let Some(engine) = t.drain else {
             return Ok(());
         };
+        if let Some(until) = self
+            .cfg
+            .settings
+            .as_ref()
+            .and_then(|s| s.scope_until().ok().flatten())
+            && let Some(repo) = self.wake_repo()
+        {
+            self.book(&repo, until);
+        }
         let Some(label) = self
             .inbox
             .labels

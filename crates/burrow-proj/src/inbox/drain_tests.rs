@@ -833,13 +833,18 @@ fn opt_in_and_pipeline_scope_gate_the_real_drain() {
             .pick_ready(&t, std::slice::from_ref(&game))
             .is_some()
     );
+    let until = crate::now() + 3600;
     settings
-        .command(
-            &["pipeline".into(), (crate::now() + 60).to_string()],
-            "test",
-        )
+        .command(&["pipeline".into(), until.to_string()], "test")
         .unwrap();
     b.pass().note_ready("sam/game", &[game]).unwrap();
+    let mut held = b.pass();
+    held.drain().unwrap();
+    assert!(
+        held.wake.values().any(|t| *t == until),
+        "scope expiry books a pass with no eligible candidates"
+    );
+    assert!(!b.log().contains("labels[]=codex"));
     b.pass()
         .note_ready("sam/box", std::slice::from_ref(&pipeline))
         .unwrap();

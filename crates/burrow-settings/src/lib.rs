@@ -19,6 +19,14 @@ pub struct Config {
     pub pipeline_repos: Vec<String>,
 }
 
+/// A scheduling decision and its next change without another external event.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Decision {
+    pub allowed: bool,
+    pub retry_at: Option<i64>,
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Overlay {
@@ -64,7 +72,20 @@ impl Config {
 
     /// Read again on every admission, including a long-lived reader's next job.
     pub fn allows(&self, repo: &str) -> Result<bool, String> {
-        Ok(self.permits(&self.read()?, repo))
+        Ok(self.decision(repo)?.allowed)
+    }
+
+    pub fn decision(&self, repo: &str) -> Result<Decision, String> {
+        let state = self.read()?;
+        let allowed = self.permits(&state, repo);
+        Ok(Decision {
+            allowed,
+            retry_at: state.pipeline_until.filter(|t| !allowed && *t > now()),
+        })
+    }
+
+    pub fn scope_until(&self) -> Result<Option<i64>, String> {
+        Ok(self.read()?.pipeline_until.filter(|t| *t > now()))
     }
 
     fn permits(&self, state: &Overlay, repo: &str) -> bool {

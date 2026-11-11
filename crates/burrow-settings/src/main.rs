@@ -17,6 +17,11 @@ fn main() -> ExitCode {
         let cfg: Config = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if let [verb, repo] = args.as_slice()
+            && verb == "decision"
+        {
+            return serde_json::to_string(&cfg.decision(repo)?).map_err(|e| e.to_string());
+        }
+        if let [verb, repo] = args.as_slice()
             && verb == "allows"
         {
             return cfg.allows(repo).and_then(|ok| {
