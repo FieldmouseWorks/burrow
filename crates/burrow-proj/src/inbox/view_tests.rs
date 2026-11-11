@@ -131,3 +131,39 @@ fn the_11_11_stall() {
         "proj status prints the snapshot"
     );
 }
+
+// A sorting job parked on `proj await` still takes one of the `atOnce`
+// sorting slots: the snapshot shows that slot parked, what holds it, on
+// what, and for how long.
+#[test]
+fn a_parked_sorting_job_holds_its_slot() {
+    let mut b = Box::new();
+    b.cfg.projects = b.path("src");
+    parked(&b, "sort-21", 21, 121, 900);
+    let state = &b.cfg.inbox.as_ref().unwrap().state;
+    // Its record is the sorting pass's, not the drain's.
+    fs::remove_dir_all(state.join("sam_game-21")).unwrap();
+    let r = state.join(".triage").join("sam_game-21");
+    fs::create_dir_all(&r).unwrap();
+    fs::write(r.join("job"), "sort-21\n").unwrap();
+    let snap = Snapshot::take(&b.cfg, 15).unwrap();
+    let sorting: Vec<_> = snap
+        .slots
+        .iter()
+        .filter(|s| s.kind == SlotKind::Sorting)
+        .collect();
+    assert_eq!(sorting.len(), 2, "{sorting:#?}");
+    let s = sorting[0];
+    assert_eq!(s.state, SlotState::Parked, "{s:#?}");
+    let h = s.holder.as_ref().unwrap();
+    assert_eq!(h.job.as_deref(), Some("sort-21"));
+    assert_eq!(h.awaits, ["sam/game#121"]);
+    assert_eq!(
+        (h.engine, h.model.as_deref(), h.effort.as_deref()),
+        (Some(Engine::Codex), Some("small"), Some("high"))
+    );
+    let age = s.age.unwrap();
+    assert!((900..905).contains(&age), "{age}s, not 900s");
+    assert_eq!(s.since.unwrap() + age, snap.at);
+    assert_eq!(sorting[1].state, SlotState::Idle);
+}
