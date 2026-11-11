@@ -62,16 +62,19 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       out = machine.fail(f"su - dev -c 'proj log {e}'")
       assert "ended without an answer" in out and "refused" in out, out
 
-  with subtest("a job's role runs it on the model the machine's roles file gives it, and only then"):
-      machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"# kinds of work\\nquick claude:chosen\\n\" >~/.config/proj/roles'")
+  with subtest("a job's role runs it at the model and effort the machine's models file gives it, and only then"):
+      machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"# kinds of work\\nquick claude\\n\" >~/.config/proj/roles'")
+      machine.succeed("su - dev -c 'printf \"quick claude chosen medium\\nquick codex other low\\n\" >~/.config/proj/models'")
       r = proj('run --role quick web "sleep 1"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
       args = machine.succeed("cat /tmp/args").split()
       assert args[args.index("--model") + 1] == "chosen", args
+      assert args[args.index("--effort") + 1] == "medium", args
       r = proj('run --role other web "sleep 1"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {r}' | grep -x done", timeout=120)
-      assert "--model" not in machine.succeed("cat /tmp/args").split(), machine.succeed("cat /tmp/args")
-      machine.succeed("su - dev -c 'rm ~/.config/proj/roles'")
+      args = machine.succeed("cat /tmp/args").split()
+      assert "--model" not in args and "--effort" not in args, args
+      machine.succeed("su - dev -c 'rm ~/.config/proj/roles ~/.config/proj/models'")
 
   with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):
       for d in (".dotted", "..dotted", ".-dotted"):

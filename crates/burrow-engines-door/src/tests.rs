@@ -46,11 +46,7 @@ fn switch_bad_setup_and_non_authors() {
     let roles = d.path().join("roles");
     fs::create_dir(d.path().join("roles.d")).unwrap();
     fs::write(d.path().join("roles.d/first"), "work claude\n").unwrap();
-    fs::write(
-        d.path().join("roles.d/next"),
-        "work@sam/code codex:chosen\n",
-    )
-    .unwrap();
+    fs::write(d.path().join("roles.d/next"), "work@sam/code codex\n").unwrap();
     fs::write(
         d.path().join("roles.d/bad"),
         "# comment\njudge old-format\n",
@@ -81,7 +77,6 @@ fn switch_bad_setup_and_non_authors() {
         comment.contains("Was active: first\nActive: next")
             && comment.contains("work@sam/code codex")
     );
-    assert!(!comment.contains("chosen"));
     assert_eq!(gh.asked("PATCH").len(), 1);
     for body in [
         "use bad",
@@ -210,7 +205,7 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
     for (name, text) in [
         ("one", "work claude\n"),
         ("two", "work codex\n"),
-        ("three", "work claude:chosen\n"),
+        ("three", "work codex over 80 claude\n"),
     ] {
         fs::write(d.path().join("roles.d").join(name), text).unwrap();
     }
@@ -243,6 +238,6 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
     pass(&mut gh, &cfg).unwrap();
     assert_eq!(
         fs::read_to_string(&cfg.roles).unwrap(),
-        "work claude:chosen\n"
+        "work codex over 80 claude\n"
     );
 }

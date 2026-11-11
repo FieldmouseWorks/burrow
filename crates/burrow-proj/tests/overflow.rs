@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use burrow_proj::config::Config;
-use burrow_proj::engine::{Choice, Engine};
+use burrow_proj::engine::Engine;
 use serde_json::{Value, json};
 
 /// The module's config, its jobs, roles and meters in DIR.
@@ -38,6 +38,7 @@ fn config(dir: &Path) -> Config {
         "apps": {},
         "notify": "/bin/notify",
         "roles": path("roles"),
+        "models": path("models"),
         "meters": path("meters"),
         "codexSlots": 2,
         "codexHooks": "/hooks",
@@ -63,22 +64,15 @@ fn meter(dir: &Path, engine: &str, windows: &[(&str, f64)], credits: bool) {
     .unwrap();
 }
 
-fn on(engine: Engine, model: &str) -> Choice {
-    Choice {
-        engine,
-        model: Some(model.into()),
-    }
-}
-
 #[test]
 fn claude_short_overflows_to_codex_while_codex_has_room_or_credits() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path();
     let cfg = config(dir);
     fs::create_dir_all(dir.join("jobs")).unwrap();
-    fs::write(dir.join("roles"), "work claude:main over 90 codex:burst\n").unwrap();
-    let stays = on(Engine::Claude, "main");
-    let moves = on(Engine::Codex, "burst");
+    fs::write(dir.join("roles"), "work claude over 90 codex\n").unwrap();
+    let stays = Engine::Claude;
+    let moves = Engine::Codex;
 
     // No meters yet: nothing to move it.
     assert_eq!(cfg.engine("work", None).unwrap(), stays);
@@ -127,14 +121,11 @@ fn overflow_belongs_to_the_winning_scoped_line() {
     let cfg = config(dir);
     fs::write(
         dir.join("roles"),
-        "work codex:bare\nwork@sam/code claude:scoped over 80 codex:burst\n",
+        "work codex\nwork@sam/code claude over 80 codex\n",
     )
     .unwrap();
     meter(dir, "codex", &[("300m", 1.0)], false);
-    for (used, expected) in [
-        (79.0, on(Engine::Claude, "scoped")),
-        (80.0, on(Engine::Codex, "burst")),
-    ] {
+    for (used, expected) in [(79.0, Engine::Claude), (80.0, Engine::Codex)] {
         meter(dir, "claude", &[("seven_day", used)], false);
         assert_eq!(cfg.engine("work", Some("sam/code")).unwrap(), expected);
     }

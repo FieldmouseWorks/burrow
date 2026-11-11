@@ -106,7 +106,7 @@ Each has an entry below, and each can be imported on its own.
   on); anything that breaks reverts and goes to a Claude job. It deploys main
   too, so a merged PR goes live the same way. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
-  and every line of the machine’s roles file before confirmation. Failed
+  and every line of the machine’s roles and models files before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
@@ -177,15 +177,12 @@ Each has an entry below, and each can be imported on its own.
   releases the hold and closes its notice when every window is below 100%
   (or credits are available). Missing, stale or ambiguously ordered readings keep the hold.
   `proj usage back` also releases it once usage is available.
-  Roles in `~/.config/proj/roles` pick `claude` or `codex`, optionally a
-  model and an overflow to the other engine when its own is short and the
-  other has room ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO`
-  key overrides the bare role for that repo, matched case-insensitively.
-  Claude's default model comes from the job user's `~/.claude/settings.json`
-  `model` setting. A role's `:MODEL` overrides it for that role. New sandbox
-  guests (`agent new`, `proj run --vm`) copy that setting at creation;
-  without it they use Claude Code's default. The model is never baked into
-  the guest image.
+  Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
+  overflow to the other engine when its own is short and the other has
+  room; `~/.config/proj/models` gives each role its model and effort on
+  each engine, and keeps them when an engine setup switches
+  ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO` key overrides
+  the bare role for that repo, matched case-insensitively.
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
   `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the
@@ -264,7 +261,10 @@ Each has an entry below, and each can be imported on its own.
   later. So does each flaky test a gate quarantines
   ([docs/flaky-tests.md](docs/flaky-tests.md)): a Claude job fixes it, which
   lifts the quarantine. Keeps every repo at
-  [docs/repo-baseline.md](docs/repo-baseline.md).
+  [docs/repo-baseline.md](docs/repo-baseline.md). Repos in `shadow` have
+  Conary's landing flow, the steward's replacement, decide beside each pass
+  without acting (`cn flow compare`, in `autoland-shadow@`'s journal after
+  each pass), showing where the two part before a repo switches over.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

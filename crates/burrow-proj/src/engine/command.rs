@@ -36,6 +36,13 @@ fn args(choice: &Choice, session: Option<String>) -> Vec<String> {
         // refused. The profile is the whole sandbox.
         Engine::Codex => ["--no-daemon", "exec"].map(String::from).to_vec(),
     };
+    if let Some(e) = &choice.effort {
+        // Codex's is exec's own config, so it goes before resume too.
+        match choice.engine {
+            Engine::Claude => args.extend(["--effort".into(), e.clone()]),
+            Engine::Codex => args.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]),
+        }
+    }
     if let Some(s) = session {
         match choice.engine {
             Engine::Claude => args.extend(["--resume".into(), s]),
@@ -306,7 +313,7 @@ mod tests {
                         "",
                         &Choice {
                             engine,
-                            model: None,
+                            ..Choice::default()
                         },
                     )
                     .unwrap();
@@ -353,7 +360,7 @@ mod tests {
     fn the_profile_alone_is_the_sandbox_and_resume_flags_are_in_the_parent_command() {
         let c = Choice {
             engine: Engine::Codex,
-            model: None,
+            ..Choice::default()
         };
         assert_eq!(args(&c, None), ["--no-daemon", "exec", "--json"]);
         assert_eq!(
@@ -365,6 +372,37 @@ mod tests {
             ..c
         };
         assert!(args(&c, None).ends_with(&["-m".into(), "chosen".into()]));
+        let c = Choice {
+            effort: Some("xhigh".into()),
+            ..c
+        };
+        assert_eq!(
+            args(&c, Some("thread".into()))[..4],
+            [
+                "--no-daemon",
+                "exec",
+                "-c",
+                "model_reasoning_effort=\"xhigh\""
+            ]
+        );
+    }
+
+    #[test]
+    fn a_claude_turn_takes_its_model_and_effort() {
+        let c = Choice::default();
+        let plain = args(&c, None);
+        assert!(!plain.contains(&"--model".into()) && !plain.contains(&"--effort".into()));
+        let c = Choice {
+            model: Some("chosen".into()),
+            effort: Some("medium".into()),
+            ..c
+        };
+        let given = args(&c, Some("session".into())).join(" ");
+        assert!(
+            given.contains("--effort medium") && given.contains("--model chosen"),
+            "{given}"
+        );
+        assert!(given.contains("--resume session"), "{given}");
     }
     #[test]
     fn app_git_configuration_is_extended_after_the_login_shell() {
@@ -430,7 +468,7 @@ mod tests {
         };
         let c = Choice {
             engine: Engine::Codex,
-            model: None,
+            ..Choice::default()
         };
         let mut given = args(&c, Some("thread".into()));
         given.push("-".into());
@@ -464,7 +502,7 @@ mod tests {
     fn exec_flags_go_before_resume() {
         let c = Choice {
             engine: Engine::Codex,
-            model: None,
+            ..Choice::default()
         };
         let mut args = args(&c, Some("thread".into()));
         exec_flags(&mut args, vec!["--skip-git-repo-check".to_owned()]);
