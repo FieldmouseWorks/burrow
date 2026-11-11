@@ -420,3 +420,48 @@ fn a_use_that_fails_to_save_is_saved_on_the_next() {
     // Saved at 601, so it lasts an hour from then.
     assert!(again.session(&token, 601 + HOUR - 1).unwrap().is_some());
 }
+
+#[test]
+fn a_code_stays_spent_if_its_file_outlives_the_enrolment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::open(&config(dir.path())).unwrap();
+    let code = core.codes().issue(0).unwrap();
+    let file = dir.path().join("enroll.json");
+    let pending = std::fs::read(&file).unwrap();
+    let (id, options) = core.enrol_start(&code, "Laptop", 1).unwrap();
+    let answer = device().do_registration(origin(), options).unwrap();
+    core.enrol_finish(&id, &answer, 2).unwrap();
+    // A crash (or a failed removal) after the passkey was saved and before
+    // the code's file went: the file is still there.
+    std::fs::write(&file, &pending).unwrap();
+    assert!(matches!(
+        core.enrol_start(&code, "Phone", 3),
+        Err(Error::NoCode)
+    ));
+    let mut again = Core::open(&config(dir.path())).unwrap();
+    assert!(matches!(
+        again.enrol_start(&code, "Phone", 4),
+        Err(Error::NoCode)
+    ));
+    assert_eq!(again.passkeys().len(), 1);
+}
+
+#[test]
+fn a_new_session_never_sweeps_one_in_use_but_not_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.idle_timeout = 30;
+    let mut core = Core::open(&cfg).unwrap();
+    let mut dev = device();
+    let a = enrol(&mut core, &mut dev, "", 0).unwrap();
+    // Used every 10 s: alive, and never a grain past its save.
+    for t in [10, 20, 30, 40] {
+        assert!(core.session(&a, t).unwrap().is_some(), "at {t}");
+    }
+    // Another sign-in sweeps ended sessions: not this one.
+    login(&mut core, &mut dev, 45).unwrap();
+    assert!(core.session(&a, 50).unwrap().is_some());
+    // And the uses it counted were saved with the new session.
+    let mut again = Core::open(&cfg).unwrap();
+    assert!(again.session(&a, 69).unwrap().is_some());
+}

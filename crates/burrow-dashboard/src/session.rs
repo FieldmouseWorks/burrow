@@ -129,6 +129,18 @@ impl Activity {
     pub fn saved(&mut self, key: &str) {
         self.0.remove(key);
     }
+
+    /// Every use not saved yet, into `sessions`, to be saved with them.
+    pub fn fold(&self, sessions: &mut Sessions) {
+        for (key, seen) in &self.0 {
+            sessions.touch(key, *seen);
+        }
+    }
+
+    /// Every use is saved.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 #[cfg(test)]

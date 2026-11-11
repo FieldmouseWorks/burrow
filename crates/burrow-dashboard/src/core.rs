@@ -20,9 +20,10 @@ use webauthn_rs::prelude::{
     Webauthn, WebauthnBuilder,
 };
 
+use crate::enroll::CODE_TTL;
 use crate::enroll::{Codes, Refused};
 use crate::session::{Activity, Limits, Session, Sessions, Use};
-use crate::{Config, Owner, digest, store, token};
+use crate::{Config, Owner, digest, same, store, token};
 
 /// Seconds a ceremony may take, from its options to its answer.
 pub const CEREMONY_TTL: u64 = 5 * 60;
@@ -39,6 +40,26 @@ struct State {
     owner: u64,
     passkeys: Vec<Enrolled>,
     sessions: Sessions,
+    /// The codes that have enrolled a passkey, saved with it: the code's
+    /// own file is removed after, and a crash or a failed removal between
+    /// the two must not leave it good for another.
+    #[serde(default)]
+    spent: Vec<Spent>,
+}
+
+/// A code that's been used, kept until it would have run out anyway.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Spent {
+    digest: String,
+    until: u64,
+}
+
+impl State {
+    fn spent(&self, code: &str, now: u64) -> bool {
+        self.spent
+            .iter()
+            .any(|s| now < s.until && same(&s.digest, code))
+    }
 }
 
 /// A passkey the owner enrolled.
@@ -216,8 +237,11 @@ impl Core {
 
     /// `next` with a session begun for the passkey named `passkey`, and the
     /// session's token, for the cookie.
+    /// The sweep counts uses not saved yet, and saves them with `next`:
+    /// once that's committed, `self.activity` is to be cleared.
     fn begin(&self, next: &mut State, passkey: String, now: u64) -> String {
         let token = token();
+        self.activity.fold(&mut next.sessions);
         next.sessions.sweep(now, self.limits);
         next.sessions.begin(digest(&token), passkey, now);
         token
@@ -236,6 +260,9 @@ impl Core {
             Err(Refused::NoCode) => return Err(Error::NoCode),
             Err(Refused::Wrong { left }) => return Err(Error::WrongCode { left }),
         };
+        if self.state.spent(&code, now) {
+            return Err(Error::NoCode);
+        }
         let name = self.name(name);
         let exclude = self
             .state
@@ -287,10 +314,22 @@ impl Core {
             used: Some(now),
             passkey,
         });
+        if self.state.spent(&code, now) {
+            return Err(Error::NoCode);
+        }
+        next.spent.retain(|s| now < s.until);
+        next.spent.push(Spent {
+            digest: code.clone(),
+            until: now + CODE_TTL,
+        });
         let token = self.begin(&mut next, name, now);
         let codes = self.codes.clone();
         codes
-            .redeem(&code, now, || self.commit(next).map_err(Error::Io))?
+            .redeem(&code, now, || {
+                self.commit(next)?;
+                self.activity.clear();
+                Ok::<_, Error>(())
+            })?
             .ok_or(Error::NoCode)?;
         Ok(token)
     }
@@ -342,6 +381,7 @@ impl Core {
         let name = key.name.clone();
         let token = self.begin(&mut next, name, now);
         self.commit(next)?;
+        self.activity.clear();
         Ok(token)
     }
 
