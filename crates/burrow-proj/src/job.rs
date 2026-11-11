@@ -7,7 +7,8 @@
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
-//! stop it while it waits), `N.slot` (the slot it took, once it has one),
+//! stop it while it waits), `N.slot` (the slot it took, once it has one,
+//! and `N.class`, the class it took it as),
 //! `N.started` (immutable first execution time, Unix seconds), `N.engine`,
 //! `N.model` and `N.effort` (what it runs on: no model or effort file for
 //! the engine's own), `N.jsonl`

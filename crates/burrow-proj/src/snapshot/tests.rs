@@ -247,13 +247,15 @@ fn an_idle_machine() {
     assert_eq!(snap.status(), "");
 }
 
-// A shared slot a job holds keeps the class its N.who recorded as it was
-// taken, and dates from the turn's N.slot; one held by nothing proj knows
-// dates from its N.who; one whose lock can't be looked at is unknown, and
-// no room for anyone.
+// A taken slot's holder is the job whose turn runner the kernel says took
+// its lock, with the class its turn took it as and the time it did. A slot
+// reused by something else is never put down to the job that held it before
+// (whose records still name it); one whose taker hasn't said so yet is
+// starting; one whose lock can't be looked at is unknown, and no room.
 #[test]
 fn held_slots_say_whose_and_since_when() {
     use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.jobs = tmp.path().join("jobs");
@@ -266,22 +268,43 @@ fn held_slots_say_whose_and_since_when() {
     );
     let slots = cfg.jobs.join(".slots");
     fs::create_dir_all(&slots).unwrap();
-    let mut locks = Vec::new();
-    for (i, who) in [(2, "lead\t/src/burrow"), (3, "first\t/src/game")] {
-        fs::write(slots.join(format!("{i}.who")), format!("{who}\n")).unwrap();
-        let f = fs::File::create(slots.join(i.to_string())).unwrap();
-        f.lock().unwrap();
-        locks.push(f);
+    // j1 runs in slot 2; j0 ran in slot 3 before; j2 has slot 4's lock and
+    // hasn't written its N.slot yet.
+    for (id, slot) in [("j1", Some("2")), ("j0", Some("3")), ("j2", None)] {
+        let job = cfg.jobs.join(id);
+        fs::create_dir_all(&job).unwrap();
+        for (f, v) in [("turns", "1"), ("prompt.1", "x"), ("1.engine", "claude")] {
+            fs::write(job.join(f), v).unwrap();
+        }
+        if let Some(slot) = slot {
+            fs::write(job.join("1.slot"), slot).unwrap();
+            fs::write(job.join("1.class"), "lead").unwrap();
+        }
     }
-    let job = cfg.jobs.join("j1");
-    fs::create_dir_all(&job).unwrap();
-    for (f, v) in [
-        ("turns", "1"),
-        ("prompt.1", "x"),
-        ("1.slot", "2"),
-        ("1.engine", "claude"),
-    ] {
-        fs::write(job.join(f), v).unwrap();
+    let lock_path = |i: u32| slots.join(i.to_string());
+    for i in 1..=4 {
+        fs::write(lock_path(i), "").unwrap();
+    }
+    // A turn runner, as the kernel sees it: `_exec ID CLASS` in the command
+    // line of the process that took the lock.
+    let runner = |i: u32, id: &str| {
+        Command::new("flock")
+            .arg(lock_path(i))
+            .args(["sh", "-c", "sleep 60", "_exec", id, "normal"])
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut runners = [runner(2, "j1"), runner(4, "j2")];
+    // Slot 3 reused by something that isn't a turn runner.
+    let reused = fs::File::open(lock_path(3)).unwrap();
+    reused.lock().unwrap();
+    for i in [2, 4] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while fs::File::open(lock_path(i)).unwrap().try_lock().is_ok() {
+            assert!(std::time::Instant::now() < deadline, "slot {i} never taken");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
     let codex = cfg.jobs.join(".codex-slots");
     fs::create_dir_all(&codex).unwrap();
@@ -291,6 +314,10 @@ fn held_slots_say_whose_and_since_when() {
         fs::set_permissions(&f, fs::Permissions::from_mode(0o000)).unwrap();
     }
     let snap = Snapshot::take(&cfg, 0).unwrap();
+    for r in &mut runners {
+        let _ = r.kill();
+        let _ = r.wait();
+    }
     let two = &snap.slots[1];
     assert_eq!(two.state, SlotState::Running, "{two:?}");
     let h = two.holder.as_ref().unwrap();
@@ -298,14 +325,16 @@ fn held_slots_say_whose_and_since_when() {
         (h.job.as_deref(), h.class.as_deref()),
         (Some("j1"), Some("lead"))
     );
-    assert_eq!(two.since, crate::mtime(&job.join("1.slot")));
+    assert_eq!(two.since, crate::mtime(&cfg.jobs.join("j1/1.slot")));
     let three = &snap.slots[2];
-    assert_eq!(three.state, SlotState::Busy, "{three:?}");
     assert_eq!(
-        three.holder.as_ref().unwrap().class.as_deref(),
-        Some("first")
+        (three.state, &three.holder, three.since),
+        (SlotState::Busy, &None, None),
+        "slot 3 was put down to j0, which held it before"
     );
-    assert_eq!(three.since, crate::mtime(&slots.join("3.who")));
+    let four = &snap.slots[3];
+    assert_eq!(four.state, SlotState::Starting, "{four:?}");
+    assert_eq!(four.holder.as_ref().unwrap().job.as_deref(), Some("j2"));
     // Unreadable as the owner too only when the owner isn't root.
     if fs::File::open(codex.join("1")).is_err() {
         let states: Vec<_> = snap
@@ -323,87 +352,4 @@ fn held_slots_say_whose_and_since_when() {
             "an unknown slot was room"
         );
     }
-}
-
-// A slot taken again by a job still waiting on its own lock to publish its
-// N.slot shows the past holder's record older than the new N.who: the past
-// holder isn't named, in Claude's pool, unstick and Codex's alike.
-#[test]
-fn a_reused_slot_is_not_its_past_holders() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut cfg: Config = serde_json::from_value(example()).unwrap();
-    cfg.jobs = tmp.path().join("jobs");
-    cfg.projects = tmp.path().join("src");
-    cfg.inbox = None;
-    cfg.tools.systemctl = tmp.path().join("systemctl");
-    burrow_test::executable(
-        &cfg.tools.systemctl,
-        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 0;; esac\nexit 0\n",
-    );
-    let slots = cfg.jobs.join(".slots");
-    let codex = cfg.jobs.join(".codex-slots");
-    fs::create_dir_all(&slots).unwrap();
-    fs::create_dir_all(&codex).unwrap();
-    // The past holder A of each, its record written first.
-    let job = cfg.jobs.join("a");
-    fs::create_dir_all(&job).unwrap();
-    for (f, v) in [
-        ("turns", "1"),
-        ("prompt.1", "x"),
-        ("1.slot", "1"),
-        ("1.engine", "claude"),
-    ] {
-        fs::write(job.join(f), v).unwrap();
-    }
-    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
-    pause();
-    // B takes slot 1 and writes its N.who; its N.slot isn't there yet.
-    fs::write(slots.join("1.who"), "lead\t/src/new\n").unwrap();
-    let mut locks = Vec::new();
-    for p in [slots.join("1"), slots.join("unstick"), codex.join("1")] {
-        let f = fs::File::create(p).unwrap();
-        f.lock().unwrap();
-        locks.push(f);
-    }
-    fs::write(slots.join("unstick.who"), "unstick\t/src/new\n").unwrap();
-    fs::write(codex.join("1.who"), "normal\t/src/new\n").unwrap();
-    let snap = Snapshot::take(&cfg, 0).unwrap();
-    for s in snap.slots.iter().filter(|s| {
-        (s.kind == SlotKind::Claude && s.name == "1")
-            || s.kind == SlotKind::Unstick
-            || (s.kind == SlotKind::Codex && s.name == "1")
-    }) {
-        assert_eq!(s.state, SlotState::Busy, "{s:?}");
-        let h = s.holder.as_ref().unwrap();
-        assert_eq!(h.job, None, "{s:?} named the past holder");
-        assert!(h.class.is_some() && h.project.is_some(), "{s:?}");
-    }
-    // Once B publishes its N.slot, B is named.
-    pause();
-    let b = cfg.jobs.join("b");
-    fs::create_dir_all(&b).unwrap();
-    for (f, v) in [
-        ("turns", "1"),
-        ("prompt.1", "x"),
-        ("1.slot", "1"),
-        ("1.engine", "claude"),
-    ] {
-        fs::write(b.join(f), v).unwrap();
-    }
-    let snap = Snapshot::take(&cfg, 0).unwrap();
-    let one = snap
-        .slots
-        .iter()
-        .find(|s| s.kind == SlotKind::Claude && s.name == "1")
-        .unwrap();
-    assert_eq!(one.holder.as_ref().unwrap().job.as_deref(), Some("b"));
-    // A taken slot with no N.who is an owner not known, not the past one.
-    fs::remove_file(slots.join("1.who")).unwrap();
-    let snap = Snapshot::take(&cfg, 0).unwrap();
-    let one = snap
-        .slots
-        .iter()
-        .find(|s| s.kind == SlotKind::Claude && s.name == "1")
-        .unwrap();
-    assert_eq!(one.holder.as_ref().unwrap().job, None, "{one:?}");
 }

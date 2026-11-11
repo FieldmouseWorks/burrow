@@ -48,7 +48,7 @@ use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::snapshot::{self, Waiting};
-use crate::{mtime, mtime_nanos, now, now_nanos, read, usage};
+use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
 const NEXT_FRESH: i64 = 2;
@@ -147,9 +147,6 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     fs::create_dir_all(&slots)?;
     let slot = File::create(slots.join("unstick"))?;
     slot.lock()?;
-    // The last holder's N.who is no longer this slot's: [`view`] reads a
-    // missing one as an owner it can't name, not as the old one.
-    let _ = fs::remove_file(slots.join("unstick.who"));
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
     if usage::out(cfg).is_some() {
@@ -160,16 +157,18 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
         slots.join("unstick.who"),
         format!("unstick\t{}\n", project(&job.dir)),
     )?;
-    took_slot(&job, n, "unstick")?;
+    took_slot(&job, n, "unstick", "unstick")?;
     Ok(Some(slot))
 }
 
 /// Say that this job's turn N has slot S (N.slot, which proj state reads as
-/// running), under the job's lock: proj withdraw stops a turn only while it has
-/// none, and looks under that lock, so none takes one between its look and its
-/// stop. One withdrawn while it waits here is stopped with no slot.
-fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
+/// running), and the class it took it as (N.class), under the job's lock: proj
+/// withdraw stops a turn only while it has none, and looks under that lock, so
+/// none takes one between its look and its stop. One withdrawn while it waits
+/// here is stopped with no slot.
+fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     let _held = job.lock()?;
+    fs::write(job.turn(n, "class"), format!("{class}\n"))?;
     fs::write(job.turn(n, "slot"), format!("{s}\n"))
 }
 
@@ -336,12 +335,7 @@ fn codex_slot(
             let slot = File::create(slots.join(i.to_string()))?;
             if slot.try_lock().is_ok() {
                 let slot = held(slot)?;
-                // As Claude's pool does: N.who says whose acquisition this is
-                // ([`view`] checks N.slot against it), cleared first.
-                let who = slots.join(format!("{i}.who"));
-                let _ = fs::remove_file(&who);
-                fs::write(&who, format!("{}\t{}\n", given.name(), project(&job.dir)))?;
-                took_slot(&job, n, &format!("codex-{i}"))?;
+                took_slot(&job, n, &format!("codex-{i}"), given.name())?;
                 return Ok(slot);
             }
         }
@@ -519,7 +513,6 @@ pub fn take(
             let slot = File::create(slots.join(n_slot.to_string()))?;
             if slot.try_lock().is_ok() {
                 let slot = held(slot)?;
-                let _ = fs::remove_file(slots.join(format!("{n_slot}.who")));
                 fs::write(
                     slots.join(format!("{n_slot}.who")),
                     format!("{}\t{}\n", class.name(), project(&job.dir)),
@@ -529,7 +522,7 @@ pub fn take(
                 fs::write(slots.join(".next"), "")?;
                 let _ = fs::remove_file(queue.join(&me));
                 drop(lk);
-                took_slot(&job, n, &n_slot.to_string())?;
+                took_slot(&job, n, &n_slot.to_string(), class.name())?;
                 return Ok(slot);
             }
         }
@@ -630,83 +623,77 @@ fn lock(path: &Path) -> Lock {
     }
 }
 
+/// The pid that took the flock on a file, as the kernel has it (/proc/locks):
+/// the process that placed it, which may be gone while what it left holds it.
+fn lock_owner(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(path).ok()?;
+    let want = format!(
+        "{:02x}:{:02x}:{}",
+        rustix::fs::major(m.dev()),
+        rustix::fs::minor(m.dev()),
+        m.ino()
+    );
+    let locks = fs::read_to_string("/proc/locks").ok()?;
+    locks.lines().find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        // N: FLOCK ADVISORY WRITE PID MAJ:MIN:INODE START END; a waiter's
+        // line has -> after N:.
+        (f.get(1) == Some(&"FLOCK") && f.get(5) == Some(&want.as_str())).then(|| f[4].to_owned())
+    })
+}
+
+/// The job whose `_exec` the process with this pid is, as its command line
+/// says: `proj _exec ID CLASS`, or a hand-over's shell carrying those words.
+fn exec_job(pid: &str) -> Option<String> {
+    let cmdline = fs::read(Path::new("/proc").join(pid).join("cmdline")).ok()?;
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    let at = args.iter().position(|a| *a == b"_exec")?;
+    let id = String::from_utf8_lossy(args.get(at + 1)?).into_owned();
+    (!id.is_empty()).then_some(id)
+}
+
 /// Every slot of the line's, Codex's pool and the machine's heavy work, for
-/// the live snapshot: each one taken with the job whose latest turn took it
-/// (its N.slot, the newest that names it, and only if no older than the N.who
-/// of the acquisition that holds it now), and the class its N.who gives it.
-/// One taken by nothing proj has a record of for its current holder is busy, since its N.who was
-/// written (as it was taken), or since an unknown time for one with none.
+/// the live snapshot. A taken one's holder is the job whose `_exec` the kernel
+/// says took its lock, the turn runner, which holds it for the whole turn:
+/// with what that job's latest turn says (its state, and the class it took the
+/// slot as) once that turn's N.slot names the slot, and as starting until it
+/// does. One taken by anything else (what an ended turn left running, heavy's
+/// users) is busy, with no holder or time it can vouch for.
 pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
     use snapshot::{Holder, SlotKind, SlotState, held, job_slot};
-    // Which job last took each slot: one look through every job's latest turn.
-    let mut took: std::collections::HashMap<String, (i64, String)> = Default::default();
-    for e in fs::read_dir(&cfg.jobs).into_iter().flatten().flatten() {
-        let id = e.file_name().to_string_lossy().into_owned();
-        if id.starts_with('.') {
-            continue;
-        }
-        let job = Job::new(cfg, &id);
-        let Some(n) = job.turns() else { continue };
-        let at_slot = job.turn(&n, "slot");
-        let (Some(name), Some(when)) = (read(&at_slot), crate::mtime_nanos(&at_slot)) else {
-            continue;
-        };
-        let newest = took.get(&name).is_none_or(|(t, _)| when > *t);
-        if newest {
-            took.insert(name, (when, id));
-        }
-    }
     let mut slots = Vec::new();
     // Each slot by its name in its kind, the name a turn's N.slot gives it,
-    // its lock, what a missing lock file means, and its N.who.
-    let mut one = |kind: SlotKind,
-                   name: String,
-                   key: String,
-                   path: PathBuf,
-                   missing: Lock,
-                   who: Option<PathBuf>| {
+    // its lock, and what a missing lock file means.
+    let mut one = |kind: SlotKind, name: String, key: String, path: PathBuf, missing: Lock| {
         let state = match lock(&path) {
             Lock::Missing => missing,
             l => l,
         };
-        // The slot's current acquisition writes its N.who, then (after a wait
-        // for its job's lock) its job's N.slot. So a job's N.slot names the
-        // holder only if it is no older than the N.who, which stays the same
-        // through the look: an older one is a past holder's, and a newer
-        // acquisition's job isn't known yet.
-        let who_at = who.as_deref().and_then(mtime_nanos);
-        let who_said = who.as_ref().and_then(|w| read(w)).unwrap_or_default();
-        let (class, project) = who_said.split_once('\t').unwrap_or((&who_said, ""));
-        let known = |v: &str| Some(v.to_owned()).filter(|v| !v.is_empty() && v != "-");
         let slot = match state {
             Lock::Free | Lock::Missing => held(kind, name, SlotState::Idle, None, at),
             Lock::Unknown => held(kind, name, SlotState::Unknown, None, at),
-            Lock::Taken => match took.get(&key).filter(|(when, _)| {
-                who_at.is_some_and(|w| *when >= w)
-                    && who.as_deref().and_then(mtime_nanos) == who_at
-                    && lock(&path) == Lock::Taken
-            }) {
-                Some((_, id)) => {
-                    let mut s = job_slot(cfg, kind, name, id, None, at);
-                    if let Some(h) = s.holder.as_mut() {
-                        h.class = known(class);
+            Lock::Taken => match lock_owner(&path).and_then(|pid| exec_job(&pid)) {
+                Some(id) => {
+                    let job = Job::new(cfg, &id);
+                    let n = job.turns().unwrap_or_default();
+                    if read(&job.turn(&n, "slot")).as_deref() == Some(key.as_str()) {
+                        let mut s = job_slot(cfg, kind, name, &id, None, at);
+                        if let Some(h) = s.holder.as_mut() {
+                            h.class = read(&job.turn(&n, "class")).filter(|c| !c.is_empty());
+                        }
+                        s
+                    } else {
+                        snapshot::Slot {
+                            holder: Some(Holder {
+                                job: Some(id),
+                                ..Holder::default()
+                            }),
+                            ..held(kind, name, SlotState::Starting, None, at)
+                        }
                     }
-                    s
                 }
-                None => snapshot::Slot {
-                    holder: Some(Holder {
-                        class: known(class),
-                        project: known(project),
-                        ..Holder::default()
-                    }),
-                    ..held(
-                        kind,
-                        name,
-                        SlotState::Busy,
-                        who.as_deref().and_then(mtime),
-                        at,
-                    )
-                },
+                None => held(kind, name, SlotState::Busy, None, at),
             },
         };
         slots.push(slot);
@@ -719,7 +706,6 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             i.to_string(),
             dir.join(i.to_string()),
             Lock::Free,
-            Some(dir.join(format!("{i}.who"))),
         );
     }
     one(
@@ -728,7 +714,6 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
         "unstick".into(),
         dir.join("unstick"),
         Lock::Free,
-        Some(dir.join("unstick.who")),
     );
     let codex = cfg.jobs.join(".codex-slots");
     for i in 1..=cfg.codex_slots {
@@ -738,7 +723,6 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             format!("codex-{i}"),
             codex.join(i.to_string()),
             Lock::Free,
-            Some(codex.join(format!("{i}.who"))),
         );
     }
     if let Some(heavy) = &cfg.heavy_dir {
@@ -750,7 +734,6 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
                 String::new(),
                 burrow_heavy::config::slot_file(heavy, i),
                 Lock::Unknown,
-                None,
             );
         }
     }
