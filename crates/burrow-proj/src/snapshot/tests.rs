@@ -266,6 +266,13 @@ fn held_slots_say_whose_and_since_when() {
     );
     let slots = cfg.jobs.join(".slots");
     fs::create_dir_all(&slots).unwrap();
+    let mut locks = Vec::new();
+    for (i, who) in [(2, "lead\t/src/burrow"), (3, "first\t/src/game")] {
+        fs::write(slots.join(format!("{i}.who")), format!("{who}\n")).unwrap();
+        let f = fs::File::create(slots.join(i.to_string())).unwrap();
+        f.lock().unwrap();
+        locks.push(f);
+    }
     let job = cfg.jobs.join("j1");
     fs::create_dir_all(&job).unwrap();
     for (f, v) in [
@@ -275,13 +282,6 @@ fn held_slots_say_whose_and_since_when() {
         ("1.engine", "claude"),
     ] {
         fs::write(job.join(f), v).unwrap();
-    }
-    let mut locks = Vec::new();
-    for (i, who) in [(2, "lead\t/src/burrow"), (3, "first\t/src/game")] {
-        fs::write(slots.join(format!("{i}.who")), format!("{who}\n")).unwrap();
-        let f = fs::File::create(slots.join(i.to_string())).unwrap();
-        f.lock().unwrap();
-        locks.push(f);
     }
     let codex = cfg.jobs.join(".codex-slots");
     fs::create_dir_all(&codex).unwrap();
@@ -323,4 +323,87 @@ fn held_slots_say_whose_and_since_when() {
             "an unknown slot was room"
         );
     }
+}
+
+// A slot taken again by a job still waiting on its own lock to publish its
+// N.slot shows the past holder's record older than the new N.who: the past
+// holder isn't named, in Claude's pool, unstick and Codex's alike.
+#[test]
+fn a_reused_slot_is_not_its_past_holders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = tmp.path().join("jobs");
+    cfg.projects = tmp.path().join("src");
+    cfg.inbox = None;
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 0;; esac\nexit 0\n",
+    );
+    let slots = cfg.jobs.join(".slots");
+    let codex = cfg.jobs.join(".codex-slots");
+    fs::create_dir_all(&slots).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    // The past holder A of each, its record written first.
+    let job = cfg.jobs.join("a");
+    fs::create_dir_all(&job).unwrap();
+    for (f, v) in [
+        ("turns", "1"),
+        ("prompt.1", "x"),
+        ("1.slot", "1"),
+        ("1.engine", "claude"),
+    ] {
+        fs::write(job.join(f), v).unwrap();
+    }
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    pause();
+    // B takes slot 1 and writes its N.who; its N.slot isn't there yet.
+    fs::write(slots.join("1.who"), "lead\t/src/new\n").unwrap();
+    let mut locks = Vec::new();
+    for p in [slots.join("1"), slots.join("unstick"), codex.join("1")] {
+        let f = fs::File::create(p).unwrap();
+        f.lock().unwrap();
+        locks.push(f);
+    }
+    fs::write(slots.join("unstick.who"), "unstick\t/src/new\n").unwrap();
+    fs::write(codex.join("1.who"), "normal\t/src/new\n").unwrap();
+    let snap = Snapshot::take(&cfg, 0).unwrap();
+    for s in snap.slots.iter().filter(|s| {
+        (s.kind == SlotKind::Claude && s.name == "1")
+            || s.kind == SlotKind::Unstick
+            || (s.kind == SlotKind::Codex && s.name == "1")
+    }) {
+        assert_eq!(s.state, SlotState::Busy, "{s:?}");
+        let h = s.holder.as_ref().unwrap();
+        assert_eq!(h.job, None, "{s:?} named the past holder");
+        assert!(h.class.is_some() && h.project.is_some(), "{s:?}");
+    }
+    // Once B publishes its N.slot, B is named.
+    pause();
+    let b = cfg.jobs.join("b");
+    fs::create_dir_all(&b).unwrap();
+    for (f, v) in [
+        ("turns", "1"),
+        ("prompt.1", "x"),
+        ("1.slot", "1"),
+        ("1.engine", "claude"),
+    ] {
+        fs::write(b.join(f), v).unwrap();
+    }
+    let snap = Snapshot::take(&cfg, 0).unwrap();
+    let one = snap
+        .slots
+        .iter()
+        .find(|s| s.kind == SlotKind::Claude && s.name == "1")
+        .unwrap();
+    assert_eq!(one.holder.as_ref().unwrap().job.as_deref(), Some("b"));
+    // A taken slot with no N.who is an owner not known, not the past one.
+    fs::remove_file(slots.join("1.who")).unwrap();
+    let snap = Snapshot::take(&cfg, 0).unwrap();
+    let one = snap
+        .slots
+        .iter()
+        .find(|s| s.kind == SlotKind::Claude && s.name == "1")
+        .unwrap();
+    assert_eq!(one.holder.as_ref().unwrap().job, None, "{one:?}");
 }

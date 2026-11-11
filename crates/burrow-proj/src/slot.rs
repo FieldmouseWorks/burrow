@@ -48,7 +48,7 @@ use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::snapshot::{self, Waiting};
-use crate::{mtime, now, now_nanos, read, usage};
+use crate::{mtime, mtime_nanos, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
 const NEXT_FRESH: i64 = 2;
@@ -147,6 +147,9 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     fs::create_dir_all(&slots)?;
     let slot = File::create(slots.join("unstick"))?;
     slot.lock()?;
+    // The last holder's N.who is no longer this slot's: [`view`] reads a
+    // missing one as an owner it can't name, not as the old one.
+    let _ = fs::remove_file(slots.join("unstick.who"));
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
     if usage::out(cfg).is_some() {
@@ -333,6 +336,11 @@ fn codex_slot(
             let slot = File::create(slots.join(i.to_string()))?;
             if slot.try_lock().is_ok() {
                 let slot = held(slot)?;
+                // As Claude's pool does: N.who says whose acquisition this is
+                // ([`view`] checks N.slot against it), cleared first.
+                let who = slots.join(format!("{i}.who"));
+                let _ = fs::remove_file(&who);
+                fs::write(&who, format!("{}\t{}\n", given.name(), project(&job.dir)))?;
                 took_slot(&job, n, &format!("codex-{i}"))?;
                 return Ok(slot);
             }
@@ -511,6 +519,7 @@ pub fn take(
             let slot = File::create(slots.join(n_slot.to_string()))?;
             if slot.try_lock().is_ok() {
                 let slot = held(slot)?;
+                let _ = fs::remove_file(slots.join(format!("{n_slot}.who")));
                 fs::write(
                     slots.join(format!("{n_slot}.who")),
                     format!("{}\t{}\n", class.name(), project(&job.dir)),
@@ -623,8 +632,9 @@ fn lock(path: &Path) -> Lock {
 
 /// Every slot of the line's, Codex's pool and the machine's heavy work, for
 /// the live snapshot: each one taken with the job whose latest turn took it
-/// (its N.slot, the newest that names it), and the class its N.who gives it.
-/// One taken by nothing proj has a record of is busy, since its N.who was
+/// (its N.slot, the newest that names it, and only if no older than the N.who
+/// of the acquisition that holds it now), and the class its N.who gives it.
+/// One taken by nothing proj has a record of for its current holder is busy, since its N.who was
 /// written (as it was taken), or since an unknown time for one with none.
 pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
     use snapshot::{Holder, SlotKind, SlotState, held, job_slot};
@@ -659,13 +669,23 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             Lock::Missing => missing,
             l => l,
         };
+        // The slot's current acquisition writes its N.who, then (after a wait
+        // for its job's lock) its job's N.slot. So a job's N.slot names the
+        // holder only if it is no older than the N.who, which stays the same
+        // through the look: an older one is a past holder's, and a newer
+        // acquisition's job isn't known yet.
+        let who_at = who.as_deref().and_then(mtime_nanos);
         let who_said = who.as_ref().and_then(|w| read(w)).unwrap_or_default();
         let (class, project) = who_said.split_once('\t').unwrap_or((&who_said, ""));
         let known = |v: &str| Some(v.to_owned()).filter(|v| !v.is_empty() && v != "-");
         let slot = match state {
             Lock::Free | Lock::Missing => held(kind, name, SlotState::Idle, None, at),
             Lock::Unknown => held(kind, name, SlotState::Unknown, None, at),
-            Lock::Taken => match took.get(&key) {
+            Lock::Taken => match took.get(&key).filter(|(when, _)| {
+                who_at.is_some_and(|w| *when >= w)
+                    && who.as_deref().and_then(mtime_nanos) == who_at
+                    && lock(&path) == Lock::Taken
+            }) {
                 Some((_, id)) => {
                     let mut s = job_slot(cfg, kind, name, id, None, at);
                     if let Some(h) = s.holder.as_mut() {
@@ -718,7 +738,7 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             format!("codex-{i}"),
             codex.join(i.to_string()),
             Lock::Free,
-            None,
+            Some(codex.join(format!("{i}.who"))),
         );
     }
     if let Some(heavy) = &cfg.heavy_dir {
