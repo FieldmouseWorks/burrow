@@ -662,6 +662,9 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             if !only.is_empty() && repo.to_lowercase() != only.to_lowercase() {
                 continue;
             }
+            if self.cfg.paused(&repo) {
+                continue;
+            }
             self.looked.push(repo.clone());
             self.label(&repo);
             // None when GitHub can't be asked: the repo is skipped this
