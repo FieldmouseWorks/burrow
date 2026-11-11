@@ -84,3 +84,31 @@ impl Api for Fake {
         self.paused.push(secs);
     }
 }
+
+/// Stable toy identities for API fixtures, never a production login lookup.
+pub fn author(login: &str) -> Author {
+    let normalized = login.to_ascii_lowercase();
+    let id = normalized.bytes().fold(2166136261_u32, |n, b| {
+        n.wrapping_mul(16777619) ^ u32::from(b)
+    });
+    Author {
+        login: login.into(),
+        id: u64::from(id) + 1,
+    }
+}
+
+/// REST and GraphQL actor fields for the same toy account.
+pub fn actor(login: &str) -> Value {
+    let id = author(login).id;
+    serde_json::json!({"login":login,"id":id,"databaseId":id,"__typename":if login.ends_with("[bot]") {"Bot"} else {"User"},"type":if login.ends_with("[bot]") {"Bot"} else {"User"}})
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn a_person_and_a_bot_with_the_same_slug_have_distinct_ids() {
+        assert_ne!(author("worker").id, author("worker[bot]").id);
+        assert_eq!(author("sam").id, author("Sam").id);
+    }
+}

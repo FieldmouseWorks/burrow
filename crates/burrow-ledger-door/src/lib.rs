@@ -34,7 +34,7 @@ pub struct Config {
     /// The label that makes an issue a request.
     pub label: String,
     /// Who may ask (GitHub logins, any case).
-    pub authors: Vec<String>,
+    pub authors: Vec<burrow_github::Author>,
     /// The machine's name, for the answer's first line.
     pub host: String,
     /// `cn`, on the ledger, as its writers run it.

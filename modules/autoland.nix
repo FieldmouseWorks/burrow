@@ -124,6 +124,7 @@ let
     # inbox forget a remade repo's issues (repos.py reset).
     inbox = {
       inherit (config.burrow.proj.inbox) enable labels unstickLabel authors;
+      postingAccountId = cfg.app.accountId;
       command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
     };
     # Whose login Renovate runs as: the machine's own App, else the user
@@ -333,6 +334,10 @@ in
           its Claude jobs and every Claude session share: so only the App
           can post its `context` status or its reviewers' reviews.
         '';
+      };
+      accountId = mkOption {
+        type = types.ints.positive;
+        description = "The steward bot account’s numeric user ID, distinct from the App ID.";
       };
       slug = mkOption {
         type = types.strMatching "[a-z0-9][a-z0-9-]*";
@@ -833,7 +838,7 @@ in
     burrow.notify.enable = true;
     # What the pipeline is stuck on goes to the inbox as an issue the App
     # opens (repos.py publish).
-    burrow.proj.inbox.authors = [ "${cfg.app.slug}[bot]" ];
+    burrow.proj.inbox.authors = [ { login = "${cfg.app.slug}[bot]"; id = cfg.app.accountId; } ];
 
     environment.systemPackages = [ steward ];
 

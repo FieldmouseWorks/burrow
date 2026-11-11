@@ -23,7 +23,7 @@ const WRITTEN: &str = "query($owner: String!, $name: String!, $n: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $n) {
       id
-      author { login }
+      author { login ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId } }
       title
       body
       openCycle: timelineItems(itemTypes: [REOPENED_EVENT], last: 1) {
@@ -31,11 +31,11 @@ const WRITTEN: &str = "query($owner: String!, $name: String!, $n: Int!) {
       }
       userContentEdits(first: 100) {
         totalCount
-        nodes { editor { login } deletedBy { login } }
+        nodes { editor { login ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId } } deletedBy { login ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId } } }
       }
       timelineItems(itemTypes: [RENAMED_TITLE_EVENT], first: 100) {
         totalCount
-        nodes { ... on RenamedTitleEvent { actor { login } } }
+        nodes { ... on RenamedTitleEvent { actor { login ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId } } } }
       }
     }
   }
@@ -46,8 +46,8 @@ pub struct Door<'a> {
     /// OWNER/NAME.
     pub repo: &'a str,
     pub label: &'a str,
-    /// Who may ask (GitHub logins, any case).
-    pub authors: &'a [String],
+    /// Who may ask, by immutable GitHub account ID.
+    pub authors: &'a [burrow_github::Author],
     /// What they ask, as a refusal names it: "this machine's probe".
     pub what: &'a str,
 }
@@ -58,6 +58,7 @@ pub struct Issue {
     pub number: u64,
     /// Who opened it.
     pub opener: String,
+    pub opener_id: Option<u64>,
 }
 
 impl Door<'_> {
@@ -82,6 +83,7 @@ impl Door<'_> {
             .filter(|i| i.get("pull_request").is_none())
             .filter_map(|i| {
                 Some(Issue {
+                    opener_id: i.pointer("/user/id").and_then(Value::as_u64),
                     number: i.get("number").and_then(Value::as_u64)?,
                     opener: i
                         .pointer("/user/login")
@@ -93,8 +95,8 @@ impl Door<'_> {
             .collect())
     }
 
-    pub fn is_author(&self, login: &str) -> bool {
-        self.authors.iter().any(|a| a.eq_ignore_ascii_case(login))
+    pub fn is_author(&self, id: Option<u64>) -> bool {
+        self.authors.iter().any(|a| a.matches(id))
     }
 
     /// The issue's title and body as GitHub has them now (`{title, body}`),
@@ -141,8 +143,8 @@ impl Door<'_> {
     }
 
     fn vetted(&self, api: &mut dyn Api, issue: &Issue) -> Result<Result<Value, String>, Error> {
-        let who = self.authors.join(" or ");
-        if !self.is_author(&issue.opener) {
+        let who = burrow_github::author_names(self.authors, " or ");
+        if !self.is_author(issue.opener_id) {
             return Ok(Err(format!(
                 "Only {who} can ask {}, so nothing was run.",
                 self.what
@@ -159,20 +161,17 @@ impl Door<'_> {
             json!({ "owner": owner, "name": name, "n": issue.number }),
         )?;
         let issue = &data["repository"]["issue"];
-        let by_author = |v: &Value| v.as_str().is_some_and(|l| self.is_author(l));
+        let by_author = |v: &Value| self.is_author(v["databaseId"].as_u64());
         let every = |list: &Value, ok: &dyn Fn(&Value) -> bool| {
             list["nodes"].as_array().is_some_and(|nodes| {
                 list["totalCount"].as_u64() == Some(nodes.len() as u64) && nodes.iter().all(ok)
             })
         };
         let edits = every(&issue["userContentEdits"], &|e| {
-            by_author(&e["editor"]["login"])
-                && (e["deletedBy"].is_null() || by_author(&e["deletedBy"]["login"]))
+            by_author(&e["editor"]) && (e["deletedBy"].is_null() || by_author(&e["deletedBy"]))
         });
-        let renames = every(&issue["timelineItems"], &|r| {
-            by_author(&r["actor"]["login"])
-        });
-        if !by_author(&issue["author"]["login"]) || !edits || !renames {
+        let renames = every(&issue["timelineItems"], &|r| by_author(&r["actor"]));
+        if !by_author(&issue["author"]) || !edits || !renames {
             return Ok(Err(format!(
                 "This issue's text was written or changed by someone other than {who}, or by someone GitHub doesn't name, so nothing was run. Ask in a new issue."
             )));

@@ -90,7 +90,7 @@ let
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     machinery = if machineApp == null then null else machineApp.name;
-    stewardLogin = if config.burrow.autoland.enable or false then "${config.burrow.autoland.app.slug}[bot]" else null;
+    stewardAccount = if config.burrow.autoland.enable or false then { login = "${config.burrow.autoland.app.slug}[bot]"; id = config.burrow.autoland.app.accountId; } else null;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     inherit (config.burrow) mcpServers;
     codexSlots = cfg.codex.slots;
@@ -335,10 +335,10 @@ in
         description = "The label on an issue asking for list, use NAME or use back.";
       };
       authors = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
+        type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
         default = cfg.inbox.authors;
         defaultText = lib.literalExpression "config.burrow.proj.inbox.authors";
-        description = "GitHub logins whose issues may switch setups. Anyone else's text, including an edit, is ignored.";
+        description = "GitHub accounts, with immutable numeric IDs, whose issues may switch setups. Anyone else's text, including an edit, is ignored.";
       };
     };
 
@@ -371,11 +371,11 @@ in
         '';
       };
       authors = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
+        type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
         default = [ ];
-        example = [ "octocat" ];
+        example = [ { login = "octocat"; id = 1; } ];
         description = ''
-          GitHub logins whose issues and replies the agents act on. Anyone else's
+          GitHub accounts, with immutable numeric IDs, whose issues and replies the agents act on. Anyone else's
           are left alone, labelled or not: an issue is a task given to an agent
           with your logins.
         '';
@@ -651,7 +651,7 @@ in
 
     burrow.claude.machineMd = lib.mkOrder 701 ''
       Issues work too: label one `${lib.concatStringsSep "` or `" (lib.attrNames cfg.inbox.labels)}` in a project's GitHub repo
-      (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within seconds it's a job there.
+      (opened by ${lib.concatStringsSep " or " (map (a: a.login) cfg.inbox.authors)}) and within seconds it's a job there.
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows
       which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as

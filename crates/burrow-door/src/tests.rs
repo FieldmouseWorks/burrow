@@ -38,7 +38,7 @@ fn what_an_issue_asks() {
 
 #[test]
 fn only_an_author_s_issue_is_read_and_its_refusal_names_the_door() {
-    let authors = ["Sam".to_owned()];
+    let authors = [burrow_github::fake::author("Sam")];
     let door = Door {
         repo: "sam/box",
         label: "undo",
@@ -49,6 +49,7 @@ fn only_an_author_s_issue_is_read_and_its_refusal_names_the_door() {
     let them = Issue {
         number: 3,
         opener: "mallory".into(),
+        opener_id: Some(burrow_github::fake::author("mallory").id),
     };
     assert_eq!(
         door.written(&mut gh, &them).unwrap(),
@@ -60,8 +61,8 @@ fn only_an_author_s_issue_is_read_and_its_refusal_names_the_door() {
     gh.on("POST", "graphql", vec![ok(
         200,
         json!({ "data": { "repository": { "issue": {
-            "author": { "login": "sam" }, "title": "t", "body": "b",
-            "userContentEdits": { "totalCount": 1, "nodes": [{ "editor": { "login": "mallory" }, "deletedBy": null }] },
+            "author": burrow_github::fake::actor("sam"), "title": "t", "body": "b",
+            "userContentEdits": { "totalCount": 1, "nodes": [{ "editor": burrow_github::fake::actor("mallory"), "deletedBy": null }] },
             "timelineItems": { "totalCount": 0, "nodes": [] },
         } } } }),
         &[],
@@ -69,6 +70,7 @@ fn only_an_author_s_issue_is_read_and_its_refusal_names_the_door() {
     let ours = Issue {
         number: 4,
         opener: "sam".into(),
+        opener_id: Some(burrow_github::fake::author("sam").id),
     };
     let said = door.written(&mut gh, &ours).unwrap().unwrap_err();
     assert!(said.contains("changed by someone other than Sam"), "{said}");
@@ -76,7 +78,7 @@ fn only_an_author_s_issue_is_read_and_its_refusal_names_the_door() {
 
 #[test]
 fn a_reply_is_cut_to_what_a_comment_holds() {
-    let authors = ["Sam".to_owned()];
+    let authors = [burrow_github::fake::author("Sam")];
     let door = Door {
         repo: "sam/box",
         label: "undo",
@@ -98,4 +100,44 @@ fn a_reply_is_cut_to_what_a_comment_holds() {
     assert_eq!(bounded("short"), "short");
     let exact = "x".repeat(MAX_COMMENT);
     assert_eq!(bounded(&exact), exact);
+}
+
+#[test]
+fn a_reused_login_never_authorizes_an_opener_or_writer() {
+    let authors = [burrow_github::fake::author("sam")];
+    let door = Door {
+        repo: "sam/box",
+        label: "probe",
+        authors: &authors,
+        what: "this machine's probe",
+    };
+    let spoof = json!({"login":"sam","databaseId":999});
+    let history = json!({"totalCount":0,"nodes":[]});
+    let original = json!({"author":burrow_github::fake::actor("sam"), "title":"trusted", "body":"trusted", "userContentEdits":history, "timelineItems":history});
+    for role in ["opener", "author", "editor", "renamer", "deleter"] {
+        let mut issue = Issue {
+            number: 7,
+            opener: "sam".into(),
+            opener_id: Some(authors[0].id),
+        };
+        let mut text = original.clone();
+        match role {
+            "opener" => issue.opener_id = Some(999),
+            "author" => text["author"] = spoof.clone(),
+            "editor" => {
+                text["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":spoof}]})
+            }
+            "renamer" => text["timelineItems"] = json!({"totalCount":1,"nodes":[{"actor":spoof}]}),
+            _ => {
+                text["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":burrow_github::fake::actor("sam"),"deletedBy":spoof}]})
+            }
+        }
+        let mut gh = Fake::default();
+        gh.on(
+            "POST",
+            "graphql",
+            vec![ok(200, json!({"data":{"repository":{"issue":text}}}), &[])],
+        );
+        assert!(door.written(&mut gh, &issue).unwrap().is_err(), "{role}");
+    }
 }

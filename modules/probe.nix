@@ -24,7 +24,7 @@ let
   settings = {
     inherit (cfg) repo label authors;
     machinery = if config.burrow.github.machineApp == null then null
-      else "${config.burrow.github.machineApp.slug}[bot]";
+      else { login = "${config.burrow.github.machineApp.slug}[bot]"; id = config.burrow.github.machineApp.accountId; };
     host = config.networking.hostName;
     inherit user;
     inherit (config.burrow) stateDir;
@@ -78,11 +78,11 @@ in
     };
 
     authors = mkOption {
-      type = types.listOf types.str;
+      type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
       default = config.burrow.proj.inbox.authors or [ ];
       defaultText = lib.literalExpression "config.burrow.proj.inbox.authors";
       description = ''
-        The GitHub logins whose issues are answered: the inbox's, unless set.
+        The GitHub accounts, with immutable numeric IDs, whose issues are answered: the inbox's, unless set.
         Anyone else's gets a line saying nothing ran, and is closed.
       '';
     };
@@ -181,7 +181,7 @@ in
 
     burrow.claude.machineMd = lib.mkOrder 702 ''
       Read-only questions about this machine need no Claude: open an issue in
-      ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " cfg.authors}), a question a line
+      ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
       (`memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
       `usage [SINCE]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.

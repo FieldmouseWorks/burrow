@@ -12,7 +12,7 @@ fn config() -> Config {
         machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
-        authors: vec!["Sam".into()],
+        authors: vec![burrow_github::fake::author("Sam")],
         host: "box".into(),
         user: "dev".into(),
         journal: Journal {
@@ -30,7 +30,7 @@ fn config() -> Config {
 }
 
 fn issue(n: u64, login: &str, title: &str, body: Value) -> Value {
-    json!({ "number": n, "user": { "login": login }, "title": title, "body": body })
+    json!({ "number": n, "user": burrow_github::fake::actor(login), "title": title, "body": body })
 }
 
 /// GitHub's word on who wrote an issue: `opener`, then each edit's editor
@@ -38,14 +38,14 @@ fn issue(n: u64, login: &str, title: &str, body: Value) -> Value {
 fn writers(opener: &str, title: &str, body: Value, editors: &[Value], renamers: &[Value]) -> Value {
     let edits: Vec<Value> = editors
         .iter()
-        .map(|e| json!({ "editor": if e.is_null() { Value::Null } else { json!({ "login": e }) }, "deletedBy": null }))
+        .map(|e| json!({ "editor": if e.is_null() { Value::Null } else { json!(burrow_github::fake::actor(e.as_str().unwrap())) }, "deletedBy": null }))
         .collect();
     let renames: Vec<Value> = renamers
         .iter()
-        .map(|a| json!({ "actor": if a.is_null() { Value::Null } else { json!({ "login": a }) } }))
+        .map(|a| json!({ "actor": if a.is_null() { Value::Null } else { json!(burrow_github::fake::actor(a.as_str().unwrap())) } }))
         .collect();
     json!({ "data": { "repository": { "issue": {
-        "author": { "login": opener },
+        "author": burrow_github::fake::actor(opener),
         "title": title,
         "body": body,
         "userContentEdits": { "totalCount": edits.len(), "nodes": edits },
@@ -295,7 +295,7 @@ fn pull_requests_and_every_page() {
         "repos/sam/box/issues?",
         vec![ok(
             200,
-            json!([{ "number": 1, "pull_request": {}, "user": { "login": "sam" } }]),
+            json!([{ "number": 1, "pull_request": {}, "user": burrow_github::fake::actor("sam") }]),
             &[(
                 "Link",
                 "<https://api.github.com/repos/sam/box/issues/page2>; rel=\"next\"",
@@ -434,7 +434,7 @@ fn what_runs_is_text_only_authors_wrote() {
     too_many["data"]["repository"]["issue"]["userContentEdits"]["totalCount"] = json!(101);
     let mut deleted = writers("sam", "probe", body.clone(), &[json!("sam")], &[]);
     deleted["data"]["repository"]["issue"]["userContentEdits"]["nodes"][0]["deletedBy"] =
-        json!({ "login": "mallory" });
+        json!(burrow_github::fake::actor("mallory"));
     for said in [
         // Its body, edited by someone else, before a first pass or after a reopen.
         writers(
@@ -600,7 +600,7 @@ fn machinery_can_read_deployed_but_other_apps_cannot() {
     for allowed in [false, true] {
         let login = "workers[bot]";
         let mut cfg = config();
-        cfg.machinery = allowed.then(|| login.into());
+        cfg.machinery = allowed.then(|| burrow_github::fake::author(login));
         let mut gh = github(true, json!([issue(7, login, "deployed", json!(""))]));
         gh.on(
             "POST",

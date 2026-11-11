@@ -249,7 +249,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       # The stand-in gh runs as dev and appends what it posts here.
       machine.succeed("mkdir -p /tmp/gh && install -m 666 /dev/null /tmp/gh/posted")
       machine.succeed("su - dev -c 'git -C /data/dev/src/ib init -q && git -C /data/dev/src/ib remote add origin https://github.com/o/r'")
-      issue = {"number": 7, "user": {"login": "sam"}, "html_url": "https://github.com/o/r/issues/7",
+      issue = {"number": 7, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/r/issues/7",
                "title": "t", "body": "inbox-slow", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/r/issues", json.dumps([issue]))
       github("repos/o/r/issues/7/comments", "[]")
@@ -274,9 +274,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
 
   with subtest("an issue a bot opened is the machine's work, and acts as the machinery's App"):
       machine.succeed("su - dev -c 'git -C /data/dev/src/bt init -q && git -C /data/dev/src/bt remote add origin https://github.com/o/b'")
-      bot = {"number": 3, "user": {"login": "sam-steward[bot]"}, "html_url": "https://github.com/o/b/issues/3",
+      bot = {"number": 3, "user": {"login": "sam-steward[bot]", "id": 2, "type": "Bot"}, "html_url": "https://github.com/o/b/issues/3",
              "title": "t", "body": "showenv", "state": "open", "labels": [{"name": "claude"}]}
-      person = {**bot, "number": 4, "user": {"login": "sam"}, "html_url": "https://github.com/o/b/issues/4"}
+      person = {**bot, "number": 4, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/b/issues/4"}
       github("repos/o/b/issues", json.dumps([bot, person]))
       github("repos/o/b/issues/3/comments", "[]")
       github("repos/o/b/issues/4/comments", "[]")
@@ -296,9 +296,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("a labelled issue from outside the authors starts no job, and says so once"):
       machine.succeed("install -d -o dev -g dev /data/dev/src/ox")
       machine.succeed("su - dev -c 'git -C /data/dev/src/ox init -q && git -C /data/dev/src/ox remote add origin https://github.com/o/x'")
-      outside = {"number": 1, "user": {"login": "sam-workers[bot]"}, "html_url": "https://github.com/o/x/issues/1",
+      outside = {"number": 1, "user": {"login": "sam-workers[bot]", "id": 99, "type": "Bot"}, "html_url": "https://github.com/o/x/issues/1",
                  "title": "t", "body": "from-outside", "state": "open", "labels": [{"name": "claude"}]}
-      inside = {**outside, "number": 2, "user": {"login": "sam"}, "html_url": "https://github.com/o/x/issues/2", "body": "from-inside"}
+      inside = {**outside, "number": 2, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/x/issues/2", "body": "from-inside"}
       github("repos/o/x/issues", json.dumps([outside]))
       github("repos/o/x/issues/2/comments", "[]")
       def refusals():
@@ -337,7 +337,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.succeed("install -m 666 /dev/null /tmp/gh/calls")
       machine.succeed("install -d -o dev -g dev /data/dev/src/dn")
       machine.succeed("su - dev -c 'git -C /data/dev/src/dn init -q && git -C /data/dev/src/dn remote add origin https://github.com/o/d'")
-      done = {"number": 1, "user": {"login": "sam"}, "html_url": "https://github.com/o/d/issues/1",
+      done = {"number": 1, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/d/issues/1",
               "title": "t", "body": "inbox-done", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/d/issues", json.dumps([done]))
       # A finished job's close is decided on the issue as GitHub has it then.
@@ -358,7 +358,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
 
   with subtest("an issue edited while its job ran stays open, and the job is handed it as it stands"):
       machine.succeed("install -m 666 /dev/null /tmp/gh/calls")
-      first = {"number": 2, "user": {"login": "sam"}, "html_url": "https://github.com/o/d/issues/2",
+      first = {"number": 2, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/d/issues/2",
                "title": "t", "body": "inbox-done", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/d/issues", json.dumps([first]))
       github("repos/o/d/issues/2", json.dumps(first))
@@ -398,7 +398,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       def inbox_jobs():
           listed = machine.succeed("su - dev -c 'proj-inbox status'").splitlines()
           return dict(line.split()[0::2] for line in listed if line.startswith("o/u#"))
-      ui = {"number": 1, "user": {"login": "sam-steward[bot]"}, "html_url": "https://github.com/o/u/issues/1",
+      ui = {"number": 1, "user": {"login": "sam-steward[bot]", "id": 2, "type": "Bot"}, "html_url": "https://github.com/o/u/issues/1",
             "title": "[autoland] Stuck in the pipeline", "body": "stuck", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/u/issues", json.dumps([ui]))
       github("repos/o/u/issues/1/comments", "[]")
@@ -450,7 +450,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.fail("find /var/lib/burrow/proj-inbox/.retired -name job | grep .")
       now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
       github("repos/o/r/issues/7", json.dumps(issue))
-      github("repos/o/r/issues/7/comments", json.dumps([{"id": 50, "user": {"login": "sam"}, "body": "and the tests", "created_at": now}]))
+      github("repos/o/r/issues/7/comments", json.dumps([{"id": 50, "user": {"login": "sam", "id": 1, "type": "User"}, "body": "and the tests", "created_at": now}]))
       machine.succeed("su - dev -c 'proj-inbox o/r'")
       assert machine.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
       wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
@@ -462,8 +462,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       # Its own answer, or someone else's comment, is nothing to hand on.
       now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
       github("repos/o/r/issues/7/comments", json.dumps([
-          {"id": 51, "user": {"login": "sam"}, "body": "did it <!-- proj-inbox -->", "created_at": now},
-          {"id": 52, "user": {"login": "eve"}, "body": "me too", "created_at": now}]))
+          {"id": 51, "user": {"login": "sam", "id": 1, "type": "User"}, "body": "did it <!-- proj-inbox -->", "created_at": now},
+          {"id": 52, "user": {"login": "eve", "id": 99, "type": "User"}, "body": "me too", "created_at": now}]))
       machine.succeed("su - dev -c 'proj-inbox o/r'")
       assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")) == {}
       github("repos/o/r/issues/7/comments", "[]")
@@ -471,7 +471,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
 
   with subtest("a reply whose turn can't start is tried again in five minutes"):
       old = machine.succeed("date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ").strip()
-      github("repos/o/r/issues/7/comments", json.dumps([{"id": 60, "user": {"login": "sam"}, "body": "and the docs", "created_at": old}]))
+      github("repos/o/r/issues/7/comments", json.dumps([{"id": 60, "user": {"login": "sam", "id": 1, "type": "User"}, "body": "and the docs", "created_at": old}]))
       before = int(machine.succeed("date +%s"))
       machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox o/r'")
       assert machine.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
@@ -598,7 +598,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       closed = {**issues[0], "state": "closed"}
       github("repos/o/r/issues/8", json.dumps(closed))
       github("repos/o/r/issues/8/comments", json.dumps([
-          {"id": 80, "user": {"login": "sam"}, "body": "one more run", "created_at": "2026-01-01T00:00:00Z"}]))
+          {"id": 80, "user": {"login": "sam", "id": 1, "type": "User"}, "body": "one more run", "created_at": "2026-01-01T00:00:00Z"}]))
       github("repos/o/r/issues", json.dumps(issues[1:]))
       before = int(machine.succeed("date +%s"))
       machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox'")
@@ -687,7 +687,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       for d, repo, n in ((".github", ".github", 8), (".mirror", "m", 9)):
           machine.succeed(f"install -d -o dev -g dev /data/dev/src/{d}")
           machine.succeed(f"su - dev -c 'git init -q /data/dev/src/{d} && git -C /data/dev/src/{d} remote add origin https://github.com/o/{repo}'")
-          issue = {"number": n, "user": {"login": "sam"}, "html_url": f"https://github.com/o/{repo}/issues/{n}",
+          issue = {"number": n, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": f"https://github.com/o/{repo}/issues/{n}",
                    "title": "t", "body": "sleep 1", "state": "open", "labels": [{"name": "claude"}]}
           github(f"repos/o/{repo}/issues", json.dumps([issue]))
           github(f"repos/o/{repo}/issues/{n}/comments", "[]")
@@ -699,7 +699,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("an issue's turn cut off before it answers carries on in its own session, twice in a row at most"):
       machine.succeed("install -d -o dev -g dev /data/dev/src/cut")
       machine.succeed("su - dev -c 'git init -q /data/dev/src/cut && git -C /data/dev/src/cut remote add origin https://github.com/o/c'")
-      hung = {"number": 1, "user": {"login": "sam"}, "html_url": "https://github.com/o/c/issues/1",
+      hung = {"number": 1, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/c/issues/1",
               "title": "t", "body": "inbox-hang", "state": "open", "labels": [{"name": "claude"}]}
       github("repos/o/c/issues", json.dumps([hung]))
       github("repos/o/c/issues/1/comments", "[]")

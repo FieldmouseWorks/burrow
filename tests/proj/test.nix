@@ -68,7 +68,7 @@ pkgs.testers.runNixOSTest {
       # what's checked is that a job runs in its env.
       github = {
         apps.workers = {
-          id = 7;
+          id = 7; accountId = 8;
           slug = "sam-workers";
           keyFile = "/run/keys/workers.pem";
           users = [ "dev" ];

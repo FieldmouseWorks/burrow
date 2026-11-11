@@ -6,12 +6,12 @@ use std::fs;
 fn github(author: &str, body: &str, editor: Option<&str>) -> Fake {
     let mut gh = Fake::default();
     let edits = editor
-        .map(|e| vec![json!({"editor":{"login":e},"deletedBy":null})])
+        .map(|e| vec![json!({"editor":burrow_github::fake::actor(e),"deletedBy":null})])
         .unwrap_or_default();
     gh.on(
         "GET",
         "repos/sam/box/issues",
-        vec![ok(200, json!([{"number":1,"user":{"login":author}}]), &[])],
+        vec![ok(200, json!([{"number":1,"user":burrow_github::fake::actor(author)}]), &[])],
     )
     .on(
         "POST",
@@ -19,7 +19,7 @@ fn github(author: &str, body: &str, editor: Option<&str>) -> Fake {
         vec![ok(
             200,
             json!({"data":{"repository":{"issue":{
-                "id":"issue-one", "author":{"login":author},"title":"engines","body":body,
+                "id":"issue-one", "author":burrow_github::fake::actor(author),"title":"engines","body":body,
                 "openCycle":{"nodes":[]},
                 "userContentEdits":{"totalCount":edits.len(),"nodes":edits},
                 "timelineItems":{"totalCount":0,"nodes":[]}
@@ -56,7 +56,7 @@ fn switch_bad_setup_and_non_authors() {
     let cfg = Config {
         repo: "sam/box".into(),
         label: "engines".into(),
-        authors: vec!["sam".into()],
+        authors: vec![burrow_github::fake::author("sam")],
         roles,
         state: d.path().join("state"),
     };
@@ -122,7 +122,7 @@ fn a_failed_reply_does_not_repeat_back() {
     let cfg = Config {
         repo: "sam/box".into(),
         label: "engines".into(),
-        authors: vec!["sam".into()],
+        authors: vec![burrow_github::fake::author("sam")],
         roles,
         state: d.path().join("state"),
     };
@@ -171,7 +171,7 @@ fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
     let cfg = Config {
         repo: "sam/box".into(),
         label: "engines".into(),
-        authors: vec!["sam".into()],
+        authors: vec![burrow_github::fake::author("sam")],
         roles,
         state: d.path().join("state"),
     };
@@ -216,7 +216,7 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
     let cfg = Config {
         repo: "sam/box".into(),
         label: "engines".into(),
-        authors: vec!["sam".into()],
+        authors: vec![burrow_github::fake::author("sam")],
         roles,
         state: d.path().join("state"),
     };
@@ -257,7 +257,7 @@ fn rate_limits_defer_at_every_door_stage() {
         let cfg = Config {
             repo: "sam/box".into(),
             label: "engines".into(),
-            authors: vec!["sam".into()],
+            authors: vec![burrow_github::fake::author("sam")],
             roles: dir.path().join("roles"),
             state: dir.path().join("receipts"),
         };

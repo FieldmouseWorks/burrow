@@ -457,7 +457,9 @@ fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
             b.cfg.roles = b.path("roles");
             fs::write(&b.cfg.roles, roles).unwrap();
             let inbox = b.cfg.inbox.as_mut().unwrap();
-            inbox.authors.push("worker[bot]".into());
+            inbox
+                .authors
+                .push(burrow_github::fake::author("worker[bot]"));
             if let Some(label) = mapping {
                 inbox.roles.insert(label.into(), "special".into());
             }
@@ -508,7 +510,7 @@ fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
                 .as_mut()
                 .unwrap()
                 .authors
-                .push("worker[bot]".into());
+                .push(burrow_github::fake::author("worker[bot]"));
             fs::create_dir_all(&b.cfg.jobs).unwrap();
             let until = crate::now() + 3600;
             fs::write(
@@ -574,7 +576,7 @@ fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
         .as_mut()
         .unwrap()
         .authors
-        .push("worker[bot]".into());
+        .push(burrow_github::fake::author("worker[bot]"));
     let older = found(
         "sam/game",
         4,

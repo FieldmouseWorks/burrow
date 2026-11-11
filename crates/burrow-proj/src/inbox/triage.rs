@@ -274,9 +274,9 @@ impl Pass<'_> {
             .machinery
             .clone()
             .filter(|m| !m.is_empty() && !self.inbox.vm)
-            .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
+            .filter(|_| issue["user"]["type"] == "Bot");
         let new = New {
-            usage_kind: Some(super::usage::kind(self.cfg.steward_login.as_deref(), issue)),
+            usage_kind: Some(super::usage::kind(self.cfg.steward_account.as_ref(), issue)),
             vm: self.inbox.vm,
             owned: true,
             kicks: vec!["proj-inbox".into()],

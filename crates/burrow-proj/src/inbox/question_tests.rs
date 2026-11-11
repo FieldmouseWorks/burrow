@@ -226,7 +226,7 @@ fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
         ("sam", "Bot", false),
         ("sam", "User", true),
     ] {
-        fs::write(b.path("comments"), json!([{"id":19,"user":{"login":login,"__typename":kind,"type":kind},"body":"Use the new release.","created_at":burrow_probe::answer::utc(crate::now())}]).to_string()).unwrap();
+        fs::write(b.path("comments"), json!([{"id":19,"user":{"login":login,"id":burrow_github::fake::author(login).id,"__typename":kind,"type":kind},"body":"Use the new release.","created_at":burrow_probe::answer::utc(crate::now())}]).to_string()).unwrap();
         b.pass()
             .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
             .unwrap();
@@ -374,7 +374,7 @@ fn sorting_reply_is_consumed_once_despite_accepted_reconciliation_errors() {
         );
         b.cfg.tools.systemd_run = runner;
         let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-        fs::write(b.path("comments"), json!([{"id":19,"user":{"login":"sam","type":"User"},"body":"Use the new release.","created_at":burrow_probe::answer::utc(crate::now())}]).to_string()).unwrap();
+        fs::write(b.path("comments"), json!([{"id":19,"user":burrow_github::fake::actor("sam"),"body":"Use the new release.","created_at":burrow_probe::answer::utc(crate::now())}]).to_string()).unwrap();
         b.pass()
             .verdicts("sam/box", &t, &[issue(7, "sam", &[])])
             .unwrap();

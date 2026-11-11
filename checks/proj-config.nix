@@ -5,7 +5,7 @@
   let
     inbox = self.nixosConfigurations.example.extendModules {
       modules = [ {
-        burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; };
+        burrow.proj.inbox = { enable = true; authors = [ { login = "octocat"; id = 1; } ]; };
         burrow.proj.engines.door = { enable = true; repo = "sam/homelab"; label = "switch-engines"; };
         burrow.proj.inbox.triage.skip = [ "custom" ];
       } ];

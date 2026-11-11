@@ -349,12 +349,9 @@ impl Pass<'_> {
                     }
                 }
                 let whole = self.issue_text(repo, &now_issue, &comments);
-                let human_reply = comments.iter().any(|c| {
-                    after(c)
-                        && self.heard(c)
-                        && c["user"]["type"] != "Bot"
-                        && !raw(&c["user"]["login"]).ends_with("[bot]")
-                });
+                let human_reply = comments
+                    .iter()
+                    .any(|c| after(c) && self.heard(c) && c["user"]["type"] != "Bot");
                 let msg = if changed {
                     format!(
                         "The issue has changed since you were handed it: its title or text edited, or a comment on it edited or deleted. As it stands now:\n\n{whole}"
