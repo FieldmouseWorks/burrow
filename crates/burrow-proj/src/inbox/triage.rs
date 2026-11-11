@@ -156,10 +156,10 @@ impl Pass<'_> {
     }
 
     /// Whether an issue is sorted already, or isn't triage's to sort.
-    pub(super) fn sorted(&self, t: &Triage, issue: &Value, claimed: &BTreeSet<String>) -> bool {
+    pub(super) fn sorted(&mut self, t: &Triage, issue: &Value, claimed: &BTreeSet<String>) -> bool {
         if issue.get("pull_request").is_some()
             || !self.eligible(issue)
-            || (!self.inbox.planning && claimed.contains(&raw(&issue["number"])))
+            || claimed.contains(&raw(&issue["number"]))
         {
             return true;
         }
@@ -191,7 +191,13 @@ impl Pass<'_> {
             return true;
         }
         if self.inbox.planning && labels.contains(&TRACKER) {
-            return self.has_task_list(repo_from(issue).as_deref(), &raw(&issue["number"]));
+            return self.has_task_list(repo_from(issue).as_deref(), &raw(&issue["number"]))
+                && !repo_from(issue).is_some_and(|repo| {
+                    self.sorting_dir()
+                        .join(format!("{}-{}", key(&repo), raw(&issue["number"])))
+                        .join("plan")
+                        .exists()
+                });
         }
         if self.inbox.planning
             && !labels.contains(&TRACKER)
@@ -228,8 +234,8 @@ impl Pass<'_> {
             .count();
         let mut room = t.at_once.saturating_sub(going);
         for issue in all {
-            if room == 0 {
-                break;
+            if room == 0 && !self.lane(issue) {
+                continue;
             }
             let n = raw(&issue["number"]);
             if self.sorted(&t, issue, &claimed) || handled.contains(&n) {
@@ -263,7 +269,7 @@ impl Pass<'_> {
             }
             Self::hand(&d, &input)?;
             fs::write(d.join("seen"), seen.to_string()).map_err(|e| io_fail(&d, e))?;
-            room -= 1;
+            room = room.saturating_sub(1);
         }
         Ok(())
     }
@@ -321,6 +327,7 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
         let new = New {
+            unstick: self.lane(issue),
             task_source: (self.inbox.planning && input.len() > crate::planning::MAX_INPUT)
                 .then(|| input.clone()),
             usage_kind: Some(super::usage::kind(self.cfg.steward_login.as_deref(), issue)),
@@ -572,7 +579,7 @@ impl Pass<'_> {
                 }
                 Step::Close(reason) => self.close(repo, n, reason),
                 Step::Split(tasks) => {
-                    let Some(input) = read(&d.join("input")) else {
+                    let Ok(input) = fs::read_to_string(d.join("input")) else {
                         return false;
                     };
                     self.keep_planned(repo, n, &input).is_ok()
@@ -588,7 +595,7 @@ impl Pass<'_> {
                 .iter()
                 .any(|s| matches!(s, Step::Label(l) if l == READY))
         {
-            let Some(input) = read(&d.join("input")) else {
+            let Ok(input) = fs::read_to_string(d.join("input")) else {
                 return false;
             };
             if self.keep_planned(repo, n, &input).is_err() {

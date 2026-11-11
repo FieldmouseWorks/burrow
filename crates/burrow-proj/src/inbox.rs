@@ -157,13 +157,15 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             ));
         }
     }
-    for (name, path) in names(&state.join(".triage")) {
-        if name
-            .to_lowercase()
-            .rsplit_once('-')
-            .is_some_and(|(k, _)| k == want)
-        {
-            fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+    for namespace in [".triage", ".plans"] {
+        for (name, path) in names(&state.join(namespace)) {
+            if name
+                .to_lowercase()
+                .rsplit_once('-')
+                .is_some_and(|(k, _)| k == want)
+            {
+                fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+            }
         }
     }
     for (name, path) in names(&state.join(".retired")) {

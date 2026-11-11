@@ -3,7 +3,7 @@ use super::{Pass, dirs, key, raw};
 use crate::{
     github::{api, every},
     planning::Task,
-    read, swap,
+    swap,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -133,10 +133,10 @@ impl Pass<'_> {
     }
 
     /// A child cannot bypass its parent by receiving an engine/ready label.
-    pub(super) fn child_admissible(&self, repo: &str, n: &str) -> bool {
+    pub(super) fn child_admissible(&mut self, repo: &str, n: &str) -> bool {
         self.child_admissible_at(repo, n, 0)
     }
-    fn child_admissible_at(&self, repo: &str, n: &str, depth: usize) -> bool {
+    fn child_admissible_at(&mut self, repo: &str, n: &str, depth: usize) -> bool {
         if depth >= 64 {
             return false;
         }
@@ -164,12 +164,16 @@ impl Pass<'_> {
             else {
                 return false;
             };
+            if self.claimed(repo).contains(parent) {
+                return false;
+            }
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{parent}")) else {
+                self.miss(repo);
                 return false;
             };
             if !self.eligible(&issue)
                 || issue["state"] != "open"
-                || !self.same_source(repo, &issue)
+                || !self.verified_source(repo, &issue).unwrap_or(false)
                 || list.next() != Some(index)
                 || !self.child_admissible_at(repo, parent, depth + 1)
             {
@@ -178,7 +182,7 @@ impl Pass<'_> {
         }
         true
     }
-    pub(super) fn child_can_close(&self, repo: &str, n: &str) -> bool {
+    pub(super) fn child_can_close(&mut self, repo: &str, n: &str) -> bool {
         if !self.inbox.planning {
             return true;
         }
@@ -194,11 +198,13 @@ impl Pass<'_> {
                 .iter()
                 .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
             {
-                return n
-                    .parse()
-                    .ok()
-                    .and_then(|n| self.merged_child(repo, n))
-                    .is_some();
+                return match n.parse().ok().and_then(|n| self.merged_child(repo, n)) {
+                    Some(pr) => pr.is_some(),
+                    None => {
+                        self.miss(repo);
+                        false
+                    }
+                };
             }
         }
         true
@@ -209,7 +215,7 @@ impl Pass<'_> {
             .join(".plans")
             .join(format!("{}-{n}", key(repo)))
     }
-    pub(super) fn planned(&self, repo: Option<&str>, issue: &Value) -> bool {
+    pub(super) fn planned(&mut self, repo: Option<&str>, issue: &Value) -> bool {
         if !self.inbox.planning {
             return true;
         }
@@ -218,15 +224,24 @@ impl Pass<'_> {
         if self.plan_dir(repo, &n).join("tasks.json").exists() {
             return false;
         }
-        self.same_source(repo, issue)
+        // Unavailable verification must never approve implementation.
+        self.verified_source(repo, issue).unwrap_or(false)
     }
-    fn same_source(&self, repo: &str, issue: &Value) -> bool {
+    fn verified_source(&mut self, repo: &str, issue: &Value) -> Option<bool> {
+        let result = self.same_source(repo, issue);
+        if result.is_none() {
+            self.miss(repo);
+        }
+        result
+    }
+    fn same_source(&self, repo: &str, issue: &Value) -> Option<bool> {
         let n = raw(&issue["number"]);
-        let Some(had) = read(&self.plan_dir(repo, &n).join("input")) else {
-            return false;
+        let had = match fs::read_to_string(self.plan_dir(repo, &n).join("input")) {
+            Ok(had) => had,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
+            Err(_) => return None,
         };
-        self.input(repo, issue)
-            .is_some_and(|input| input.trim_end() == had)
+        self.input(repo, issue).map(|input| input == had)
     }
     pub(super) fn keep_planned(&self, repo: &str, n: &str, input: &str) -> std::io::Result<()> {
         let d = self.plan_dir(repo, n);
@@ -266,11 +281,11 @@ impl Pass<'_> {
         if !self.save_list(repo, n, &list) {
             return false;
         }
-        for i in 0..tasks.len() {
+        for (i, task) in tasks.iter().enumerate() {
             if list.children[i].number.is_some() {
                 continue;
             }
-            if let Some(existing) = tasks[i].issue {
+            if let Some(existing) = task.issue {
                 if existing.to_string() == n {
                     return false;
                 }
@@ -315,7 +330,6 @@ impl Pass<'_> {
                 if !self.save_list(repo, n, &list) {
                     return false;
                 }
-                let task = &tasks[i];
                 let body = Self::child_body(repo, n, i, task);
                 let result = burrow_github::call_once(
                     &mut crate::github::client(self.cfg),
@@ -342,7 +356,7 @@ impl Pass<'_> {
                 return false;
             }
         }
-        for i in 0..tasks.len() {
+        for (i, task) in tasks.iter().enumerate() {
             // The parent already sized this exact generated child. Retain
             // that approval instead of paying a second planner to repeat it.
             let number = list.children[i].number.unwrap().to_string();
@@ -352,12 +366,12 @@ impl Pass<'_> {
             let Some(child) = api(self.cfg, &format!("repos/{repo}/issues/{number}")) else {
                 return false;
             };
-            let expected = if tasks[i].issue.is_some() {
-                tasks[i].body.clone()
+            let expected = if task.issue.is_some() {
+                task.body.clone()
             } else {
-                Self::child_body(repo, n, i, &tasks[i])
+                Self::child_body(repo, n, i, task)
             };
-            if child["title"].as_str() == Some(tasks[i].title.as_str())
+            if child["title"].as_str() == Some(task.title.as_str())
                 && child["body"].as_str() == Some(expected.as_str())
                 && self.eligible(&child)
             {
@@ -403,7 +417,13 @@ impl Pass<'_> {
                 self.retry(repo);
                 continue;
             };
-            if !self.same_source(repo, parent) {
+            if self.claimed(repo).contains(n) {
+                continue;
+            }
+            let Some(same) = self.verified_source(repo, parent) else {
+                continue;
+            };
+            if !same {
                 let stale = d.join("stale-notice");
                 if !stale.exists() && self.post(repo, n, "The parent task changed after its split. Child admission is paused; the existing task list and completed work are retained for replanning.") {
                     let _ = fs::write(stale, "paused\n");
@@ -433,7 +453,11 @@ impl Pass<'_> {
             }
             let mut advanced = false;
             if issue["state"] == "closed" {
-                if let Some(pr) = self.merged_child(repo, child) {
+                let Some(merged) = self.merged_child(repo, child) else {
+                    self.miss(repo);
+                    continue;
+                };
+                if let Some(pr) = merged {
                     list.children[index].merged_pr = Some(pr);
                     if !self.save_list(repo, n, &list) {
                         self.retry(repo);
@@ -469,15 +493,16 @@ impl Pass<'_> {
             }
         }
     }
-    fn merged_child(&self, repo: &str, n: u64) -> Option<String> {
+    fn merged_child(&self, repo: &str, n: u64) -> Option<Option<String>> {
         if let Ok(bytes) = fs::read(self.plan_dir(repo, &n.to_string()).join("tasks.json"))
             && let Ok(list) = serde_json::from_slice::<List>(&bytes)
             && !list.children.is_empty()
         {
-            return list
-                .next()
-                .is_none()
-                .then(|| format!("https://github.com/{repo}/issues/{n}"));
+            return Some(
+                list.next()
+                    .is_none()
+                    .then(|| format!("https://github.com/{repo}/issues/{n}")),
+            );
         }
         let (owner, name) = repo.split_once('/')?;
         let query = "query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){closedByPullRequestsReferences(first:100,includeClosedPrs:true){nodes{merged url}}}}}";
@@ -487,337 +512,17 @@ impl Pass<'_> {
             query,
             json!({"owner":owner,"name":name,"n":n}),
         )?;
-        got["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"]
-            .as_array()?
-            .iter()
-            .find(|pr| pr["merged"] == true)
-            .and_then(|pr| pr["url"].as_str())
-            .map(str::to_owned)
+        Some(
+            got["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"]
+                .as_array()?
+                .iter()
+                .find(|pr| pr["merged"] == true)
+                .and_then(|pr| pr["url"].as_str())
+                .map(str::to_owned),
+        )
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::sorting_tests::{Box, issue};
-    use super::*;
-
-    fn parent_fixture() -> (Box, Value, List) {
-        let mut b = Box::new();
-        b.cfg.inbox.as_mut().unwrap().planning = true;
-        let mut parent = issue(7, "sam", &["tracker"]);
-        parent["state"] = json!("open");
-        fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
-        let p = b.pass();
-        let source = p.issue_text("sam/box", &parent, &[]);
-        p.keep_planned("sam/box", "7", &source).unwrap();
-        let mut list = List {
-            tasks: (0..2)
-                .map(|i| Task {
-                    issue: None,
-                    title: format!("task {i}"),
-                    body: "one PR".into(),
-                    check: "regression".into(),
-                })
-                .collect(),
-            children: vec![
-                Child {
-                    number: Some(8),
-                    ..Child::default()
-                },
-                Child {
-                    number: Some(9),
-                    ..Child::default()
-                },
-            ],
-            comment: Some(100),
-            rendered: String::new(),
-        };
-        list.rendered = list.checklist("sam/box", "7");
-        assert!(p.save_list("sam/box", "7", &list));
-        (b, parent, list)
-    }
-
-    #[test]
-    fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
-        let (b, parent, _) = parent_fixture();
-        let mut child = issue(8, "sam", &["later"]);
-        child["state"] = json!("open");
-        fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
-        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-        assert!(
-            b.log().contains("issues/8/labels -f labels[]=ready"),
-            "{}",
-            b.log()
-        );
-        assert!(!b.log().contains("issues/9/labels"));
-        assert!(b.pass().child_admissible("sam/box", "8"));
-        assert!(!b.pass().child_admissible("sam/box", "9"));
-        let ready = |n| {
-            let mut issue = super::super::sorting_tests::issue(n, "sam", &["ready"]);
-            issue["repository_url"] = json!("https://api.github.com/repos/sam/box");
-            issue["created_at"] = json!("2026-11-01T00:00:00Z");
-            issue
-        };
-        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-        assert_eq!(b.pass().pick_ready(t, &[ready(9)]), None);
-        assert_eq!(
-            b.pass().pick_ready(t, &[ready(8)]),
-            Some(("sam/box".into(), "8".into()))
-        );
-        // Closing an issue alone does not release another implementation.
-        child["state"] = json!("closed");
-        fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
-        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-        assert!(!b.pass().child_admissible("sam/box", "9"));
-        assert!(!b.pass().child_can_close("sam/box", "8"));
-        fs::write(b.path("merged-8"), json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[{"merged":true,"url":"https://github.com/sam/box/pull/10"}]}}}}}).to_string()).unwrap();
-        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-        assert!(b.pass().child_admissible("sam/box", "9"));
-        assert_eq!(
-            b.pass().pick_ready(t, &[ready(9)]),
-            Some(("sam/box".into(), "9".into()))
-        );
-        assert!(b.pass().child_can_close("sam/box", "8"));
-        let stored: List = serde_json::from_slice(
-            &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(stored.checklist("sam/box", "7").contains("[x] #8"));
-        assert!(stored.checklist("sam/box", "7").contains("/pull/10"));
-    }
-
-    #[test]
-    fn edited_and_untrusted_parents_cannot_admit_children() {
-        for change in ["edit", "outside", "opener"] {
-            let (b, mut parent, _) = parent_fixture();
-            match change {
-                "edit" => parent["body"] = json!("Changed scope"),
-                "outside" => parent["labels"] = json!([{"name":"outside text"}]),
-                _ => parent["user"]["login"] = json!("stranger"),
-            }
-            fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
-            assert!(!b.pass().child_admissible("sam/box", "8"), "{change}");
-        }
-    }
-
-    #[test]
-    fn a_partial_split_never_marks_its_parent_ready_for_implementation() {
-        let (b, parent, _) = parent_fixture();
-        assert!(!b.pass().planned(Some("sam/box"), &parent));
-    }
-    #[test]
-    fn a_deferred_child_is_not_repeatedly_released_and_replanned() {
-        let (b, parent, _) = parent_fixture();
-        let mut child = issue(8, "sam", &["later"]);
-        child["state"] = json!("open");
-        fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
-        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-        b.pass().sequence("sam/box", &[parent]);
-        assert_eq!(
-            b.log().matches("issues/8/labels -f labels[]=ready").count(),
-            1
-        );
-    }
-    #[test]
-    fn an_exact_child_keeps_its_parent_size_approval_without_another_planner() {
-        let (b, _parent, list) = parent_fixture();
-        for (i, task) in list.tasks.iter().enumerate() {
-            let mut child = issue(8 + i as u64, "sam", &["ready"]);
-            child["title"] = json!(task.title);
-            child["body"] = json!(Pass::child_body("sam/box", "7", i, task));
-            fs::write(
-                b.path(&format!("repos_sam_box_issues_{}", 8 + i)),
-                child.to_string(),
-            )
-            .unwrap();
-        }
-        assert!(b.pass().split_children("sam/box", "7", &list.tasks));
-        let child: Value =
-            serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_8")).unwrap()).unwrap();
-        assert!(b.pass().planned(Some("sam/box"), &child));
-    }
-
-    #[test]
-    fn lost_creation_answers_are_reconciled_without_another_child_post() {
-        let (b, _parent, mut list) = parent_fixture();
-        for child in &mut list.children {
-            child.number = None;
-            child.attempted = true;
-        }
-        list.rendered.clear();
-        assert!(b.pass().save_list("sam/box", "7", &list));
-        let found: Vec<_> = (0..2)
-            .map(|i| {
-                let mut child = issue(8 + i, "sam", &["later"]);
-                child["body"] = json!(format!(
-                    "task body\n<!-- proj-child sam/box#7 {} -->",
-                    i + 1
-                ));
-                child
-            })
-            .collect();
-        fs::write(b.path("repos_sam_box_issues"), json!(found).to_string()).unwrap();
-        assert!(b.pass().split_children("sam/box", "7", &list.tasks));
-        assert!(b.pass().split_children("sam/box", "7", &list.tasks));
-        assert!(
-            !b.log().contains("-X POST repos/sam/box/issues "),
-            "{}",
-            b.log()
-        );
-        assert_eq!(
-            b.log()
-                .matches("-X PATCH repos/sam/box/issues/comments/100")
-                .count(),
-            1
-        );
-    }
-    #[test]
-    fn a_worker_split_posts_its_answer_before_retiring_and_can_retry_a_partial_plan() {
-        let (b, parent, list) = parent_fixture();
-        b.job_ending("j1", "done", Some("split"), "Split into bounded tasks.");
-        let record = b.record("j1");
-        fs::write(
-            b.cfg.jobs.join("j1/1.split"),
-            serde_json::to_string(&list.tasks).unwrap(),
-        )
-        .unwrap();
-        let mut enrolled = parent;
-        enrolled["labels"] = json!([{"name":"claude"}]);
-        enrolled["repository_url"] = json!("https://api.github.com/repos/sam/box");
-        b.pass()
-            .jobs("sam/box", "box", std::slice::from_ref(&enrolled))
-            .unwrap();
-        assert_eq!(read(&record.join("answered")).as_deref(), Some("1"));
-        assert!(b.posted().contains("Split into bounded tasks."));
-        assert!(b.pass().worker_split_pending(Some("sam/box"), "7"));
-        assert!(b.log().contains("labels[]=tracker"));
-        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-        assert!(
-            b.pass().sorted(t, &enrolled, &Default::default()),
-            "the host resumes the split instead of starting another planner"
-        );
-        assert!(!b.log().contains("-X POST repos/sam/box/issues "));
-    }
-    #[test]
-    fn a_human_claude_issue_is_sized_on_a_fresh_codex_job_before_implementation() {
-        let mut b = Box::new();
-        b.cfg.inbox.as_mut().unwrap().planning = true;
-        b.cfg.projects = b.path("projects");
-        fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
-        b.cfg.tools.systemd_run = "true".into();
-        b.cfg.tools.systemctl = "false".into();
-        b.cfg
-            .inbox
-            .as_mut()
-            .unwrap()
-            .triage
-            .as_mut()
-            .unwrap()
-            .sort_unlabelled = false;
-        let mut issue = issue(7, "sam", &["claude"]);
-        issue["repository_url"] = json!("https://api.github.com/repos/sam/box");
-        b.pass()
-            .triage(
-                "sam/box",
-                &[issue, super::super::sorting_tests::issue(8, "sam", &[])],
-            )
-            .unwrap();
-        let record = b
-            .cfg
-            .inbox
-            .as_ref()
-            .unwrap()
-            .state
-            .join(".triage/sam_box-7");
-        let id = read(&record.join("job")).expect("a size-planning job");
-        let job = crate::job::Job::new(&b.cfg, &id);
-        assert_eq!(
-            crate::engine::choice(&b.cfg, &job).unwrap().engine,
-            crate::engine::Engine::Codex
-        );
-        assert!(
-            !b.cfg
-                .inbox
-                .as_ref()
-                .unwrap()
-                .state
-                .join(".triage/sam_box-8")
-                .exists()
-        );
-        assert!(!job.path("session").exists());
-        assert!(
-            read(&job.path("prompt.1"))
-                .unwrap()
-                .contains("Plan the size")
-        );
-        assert!(
-            !b.cfg
-                .inbox
-                .as_ref()
-                .unwrap()
-                .state
-                .join("sam_box-7/job")
-                .exists()
-        );
-    }
-    #[test]
-    fn existing_cutoff_recovery_and_answer_accounting_are_preserved() {
-        let (mut b, mut issue, _) = parent_fixture();
-        b.cfg.tools.systemctl = "false".into();
-        b.cfg.tools.systemd_run = "true".into();
-        fs::remove_file(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
-        b.job_ending("j1", "done", None, "");
-        let record = b.record("j1");
-        let job = crate::job::Job::new(&b.cfg, "j1");
-        fs::remove_file(job.turn("1", "outcome")).unwrap();
-        fs::write(
-            job.turn("1", "jsonl"),
-            "{\"type\":\"system\",\"session_id\":\"s\"}\n",
-        )
-        .unwrap();
-        fs::write(job.path("session"), "s").unwrap();
-        assert!(job.cut_off("1"));
-        issue["labels"] = json!([{"name":"claude"}]);
-        fs::write(b.path("repos_sam_box_issues_7"), issue.to_string()).unwrap();
-        b.pass()
-            .jobs("sam/box", "box", std::slice::from_ref(&issue))
-            .unwrap();
-        assert_eq!(job.turns().as_deref(), Some("2"));
-        assert!(read(&job.path("prompt.2")).unwrap().contains("cut off"));
-        assert_eq!(read(&record.join("answered")).as_deref(), Some("1"));
-    }
-    #[test]
-    fn existing_workers_are_not_resized_on_every_reply() {
-        let mut b = Box::new();
-        b.cfg.inbox.as_mut().unwrap().planning = true;
-        b.job("j1", "done", "unfinished PR #4");
-        b.record("j1");
-        let mut issue = issue(7, "sam", &["claude"]);
-        issue["repository_url"] = json!("https://api.github.com/repos/sam/box");
-        assert!(b.pass().started_issue_job(Some("sam/box"), "7"));
-        let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-        assert!(b.pass().sorted(t, &issue, &Default::default()));
-    }
-    #[test]
-    fn a_parent_advances_only_past_a_recorded_merged_pr() {
-        let mut list = List {
-            tasks: vec![],
-            children: vec![Child::default(); 100],
-            comment: None,
-            rendered: String::new(),
-        };
-        for n in 0..100 {
-            assert_eq!(list.next(), Some(n));
-            list.children[n].number = Some(n as u64 + 1);
-            assert_eq!(
-                list.next(),
-                Some(n),
-                "an issue number alone is not completion"
-            );
-            list.children[n].merged_pr = Some(format!("https://github.com/o/r/pull/{n}"));
-            let disk = serde_json::to_string(&list).unwrap();
-            list = serde_json::from_str(&disk).unwrap();
-        }
-        assert_eq!(list.next(), None);
-    }
-}
+#[path = "plans_tests.rs"]
+mod tests;

@@ -325,7 +325,7 @@ fn verdicts_read() {
 #[test]
 fn what_counts_as_sorted() {
     let b = Box::new();
-    let p = b.pass();
+    let mut p = b.pass();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     for (i, sorted) in [
         (issue(1, "sam", &[]), false),

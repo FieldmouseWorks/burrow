@@ -12,8 +12,10 @@ import ./proj/test.nix { inherit self pkgs; planning = true; } "proj-planning" '
       for endpoint, data in [("repos_o_r_issues", [task]), ("repos_o_r_issues_7", task), ("repos_o_r_issues_7_comments", [])]:
           machine.succeed("printf %s " + shlex.quote(json.dumps(data)) + " >/tmp/gh/" + endpoint + " && chmod 666 /tmp/gh/" + endpoint)
       machine.succeed("su - dev -c 'proj-inbox o/r'")
-      assert machine.succeed("su - dev -c 'proj-inbox status'").strip() == ""
       planner = machine.succeed("cat /var/lib/burrow/proj-inbox/.triage/o_r-7/job").strip()
+      status = machine.succeed("su - dev -c 'proj-inbox status'").strip()
+      assert status.endswith(planner) and "sorting" in status, status
+      machine.fail("test -e /var/lib/burrow/proj-inbox/o_r-7/job")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {planner}' | grep -x done", timeout=120)
       assert machine.succeed(f"cat /data/dev/jobs/{planner}/role").strip() == "planner"
       assert machine.succeed(f"wc -c </data/dev/jobs/{planner}/prompt.1").strip().isdigit()

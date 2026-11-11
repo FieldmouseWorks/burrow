@@ -170,8 +170,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             let n = job.turns().ok_or_else(|| Fail::new(2, "no active turn"))?;
             let path = job.turn(&n, "split");
-            crate::swap(&path, &serde_json::to_string(&tasks).unwrap())
-                .map_err(|e| io_fail(&path, e))?;
+            crate::planning::declare_split(&job, &n, &tasks).map_err(|e| io_fail(&path, e))?;
             put(declare_end(&job, "split")?);
             Ok(())
         }

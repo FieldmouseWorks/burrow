@@ -897,6 +897,8 @@ fn codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage() {
         .to_string(),
     )
     .unwrap();
+    // A planner's unstick flag cannot escape the selected engine's cap.
+    fs::write(job.path("unstick"), "").unwrap();
     let slot = super::take_engine(&cfg, "code", "1", Class::Normal, false, Engine::Codex).unwrap();
     assert_eq!(
         crate::read(&job.turn("1", "slot")).as_deref(),
@@ -928,6 +930,8 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
     // Another job's place, and the same job's under another pid, stay.
     fs::write(queue.join("2-6000000000-other"), &mine).unwrap();
     fs::write(queue.join("2-7000000000-code-2"), "1\n").unwrap();
+    // A planner's unstick flag cannot escape the selected engine's cap.
+    fs::write(job.path("unstick"), "").unwrap();
     let slot = super::take_engine(&cfg, "code", "1", Class::Normal, false, Engine::Codex).unwrap();
     assert!(!queue.join("2-5000000000-code").exists());
     assert!(queue.join("2-6000000000-other").exists());

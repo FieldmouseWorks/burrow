@@ -21,11 +21,11 @@ fn found(repo: &str, n: u64, opener: &str, labels: &[&str], made: &str) -> Value
 #[test]
 fn the_drain_picks() {
     let b = Box::new();
-    let p = b.pass();
+    let mut p = b.pass();
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let old = "2026-10-01T00:00:00Z";
     let new = "2026-11-01T00:00:00Z";
-    let pick = |items: &[Value]| p.pick_ready(&t, items);
+    let mut pick = |items: &[Value]| p.pick_ready(&t, items);
 
     let game = found("sam/game", 4, "sam", &["ready"], old);
     let game_newer = found("sam/game", 5, "sam", &["ready"], new);
@@ -365,7 +365,7 @@ fn running_handed_references_are_not_drained() {
     fs::rename(&d, &lane).unwrap();
     fs::write(lane.join("issue"), "sam/box#100\n").unwrap();
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    let p = b.pass();
+    let mut p = b.pass();
     assert_eq!(p.pick_ready(t, std::slice::from_ref(&seven)), None);
     let mut unsorted = seven.clone();
     unsorted["labels"] = json!([]);
@@ -629,7 +629,7 @@ fn awaiting_handed_references_are_not_drained() {
     let wait = format!("sam/box#200\t{}\t{{\"state\":\"open\"}}\n", crate::now());
     let seven = found("sam/box", 7, "sam", &["ready"], "2026-10-01T00:00:00Z");
     let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-    let p = b.pass();
+    let mut p = b.pass();
     // A declaration for a future turn and an empty live wait do not own work.
     fs::write(job.join("await.next"), &wait).unwrap();
     fs::write(job.join("await"), "").unwrap();

@@ -253,7 +253,7 @@ impl Pass<'_> {
 
     /// The ready issues to hand on, next first, as (OWNER/REPO, N), of every
     /// repo's as its last pass listed them.
-    fn next_ready(&self, t: &Triage) -> Vec<(String, String)> {
+    fn next_ready(&mut self, t: &Triage) -> Vec<(String, String)> {
         let dir = self.inbox.state.join(READY_LISTS);
         let items: Vec<Value> = fs::read_dir(&dir)
             .map(|d| {
@@ -270,31 +270,32 @@ impl Pass<'_> {
     }
 
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
-    pub(super) fn pick_ready(&self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
+    pub(super) fn pick_ready(&mut self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
         self.ranked(t, items).into_iter().next()
     }
 
     /// Of ready issues, the ones to hand on, in order: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
     /// pipeline's repos first, then the rest, oldest first.
-    fn ranked(&self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
+    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
             .keys()
             .map(|repo| (repo.clone(), self.claimed(repo)))
             .collect();
+        let cfg = self.cfg;
         let rank = |repo: &str| {
-            !self
-                .cfg
-                .pipeline_repos
+            !cfg.pipeline_repos
                 .iter()
                 .any(|r| r.eq_ignore_ascii_case(repo))
         };
         items
             .iter()
             .filter(|i| i.get("pull_request").is_none())
-            .filter(|i| self.eligible(i))
             .filter_map(|i| {
+                if !self.eligible(i) {
+                    return None;
+                }
                 let url = raw(&i["repository_url"]);
                 let named = url.rsplit('/').take(2).collect::<Vec<_>>();
                 let [name, owner] = named[..] else {

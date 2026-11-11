@@ -7,10 +7,21 @@ pub const MAX_INPUT: usize = 64_000;
 
 /// All turn-start paths, including question defaults, honor the same hold.
 pub(crate) fn admit(job: &crate::job::Job) -> Result<(), String> {
-    if job.path("planning-hold").exists() {
+    if job.path("planning-hold").exists() || pending_split(job).is_some() {
         return Err(format!("{} is waiting for a bounded task plan", job.id));
     }
     Ok(())
+}
+
+/// The per-turn split file is the durable intent, published under the job lock.
+/// Admission also checks it if the process dies before the hold/end is written.
+pub(crate) fn pending_split(job: &crate::job::Job) -> Option<String> {
+    job.turns().filter(|n| job.turn(n, "split").exists())
+}
+
+pub(crate) fn declare_split(job: &crate::job::Job, n: &str, tasks: &[Task]) -> std::io::Result<()> {
+    crate::swap(&job.turn(n, "split"), &serde_json::to_string(tasks)?)?;
+    crate::swap(&job.path("planning-hold"), n)
 }
 
 pub fn prompt(input: &str, source: &std::path::Path) -> String {
@@ -183,5 +194,41 @@ mod tests {
             assert_eq!(crate::read(&job.path("engine")).as_deref(), Some("codex"));
             previous.push(id);
         }
+    }
+    #[test]
+    fn split_intent_and_admission_serialize_even_before_the_hold_is_published() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: crate::config::Config =
+            serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = tmp.path().join("jobs");
+        let job = crate::job::Job::new(&cfg, "split");
+        std::fs::create_dir_all(&job.dir).unwrap();
+        std::fs::write(job.path("turns"), "1").unwrap();
+        let held = job.lock().unwrap();
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _held = job.lock().unwrap();
+                send.send(crate::turn::start_answer(
+                    &cfg,
+                    "split",
+                    "concurrent reply",
+                    false,
+                ))
+                .unwrap();
+            });
+            assert!(recv.try_recv().is_err());
+            std::fs::write(job.turn("1", "split"), "[]").unwrap();
+            drop(held);
+            assert!(
+                recv.recv()
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("bounded task plan")
+            );
+        });
+        assert!(!job.path("prompt.2").exists());
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        assert!(crate::turn::start(&cfg, "split", "watcher resume", false).is_err());
     }
 }

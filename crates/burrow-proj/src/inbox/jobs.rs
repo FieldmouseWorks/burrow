@@ -88,7 +88,7 @@ impl Pass<'_> {
             // GitHub says now: closing it lets the turn finish only while
             // its issue may still be read.
             let mine = listed.iter().find(|i| raw(&i["number"]) == n);
-            let split_pending = job.path("planning-hold").exists();
+            let split_pending = crate::planning::admit(&job).is_err();
             if (mine.is_some() || busy) && {
                 let Some(barred) = self.barred(repo, n, mine) else {
                     self.miss(repo);
@@ -200,13 +200,22 @@ impl Pass<'_> {
                 continue;
             }
             if self.inbox.planning
-                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("split")
-                && now_open.is_some_and(|i| self.begin_worker_split(repo, i))
+                && crate::planning::pending_split(&job).as_deref() == Some(&turns.to_string())
             {
                 {
                     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    if job.turns().as_deref() != Some(&turns.to_string())
+                        || matches!(job.state().as_str(), "queued" | "running")
+                    {
+                        self.retry(repo);
+                        continue;
+                    }
                     fs::write(job.path("planning-hold"), "finishing the task split\n")
                         .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
+                }
+                if !now_open.is_some_and(|i| self.begin_worker_split(repo, i)) {
+                    self.miss(repo);
+                    continue;
                 }
                 let tasks = read(&job.turn(&turns.to_string(), "split"))
                     .and_then(|text| crate::planning::parse(&text).ok());
