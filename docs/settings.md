@@ -3,7 +3,7 @@
 `burrow.settings.allowed` is the tracked allow list, set by the importing
 machine's flake. It defaults to empty: new repos cannot drain issues or
 start automated inbox, steward fix, judge or proof jobs until opted in.
-Triage can still sort issues in every repo. Running turns finish and
+Triage and its planner sessions can still sort issues in every repo; offering planned children and implementation stay gated. Running turns finish and
 settled PRs can merge without starting an agent.
 
 The reusable `burrow-settings` crate reads that starting policy and one

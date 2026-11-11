@@ -29,6 +29,8 @@ fn queued_automation_reloads_scope_but_triage_can_sort_everywhere() {
     assert!(cfg.settings_line().contains("paused: sam/burrow, sam/web"));
     fs::write(job.path("role"), "triage").unwrap();
     assert!(!crate::slot::automation_paused(&cfg, &job));
+    fs::write(job.path("role"), "planner").unwrap();
+    assert!(!crate::slot::automation_paused(&cfg, &job));
     fs::remove_file(job.path("role")).unwrap();
     fs::write(job.path("usage-kind"), "inbox").unwrap();
     assert!(

@@ -1,7 +1,6 @@
 """The steward's adapter to the shared Rust admission decision."""
 import json
 import subprocess
-import common as C
 
 
 class JobPaused(Exception):
@@ -9,6 +8,8 @@ class JobPaused(Exception):
 
 
 def paused(repo):
+    import common as C
+
     settings = C.CFG.get("settings")
     if settings:
         result = subprocess.run([settings["command"], settings["config"], "decision", repo],

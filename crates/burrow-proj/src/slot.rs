@@ -348,7 +348,9 @@ fn codex_slot(
 /// explicit interactive work (no automation role or inbox mark) is unaffected.
 fn automation_paused(cfg: &Config, job: &Job) -> bool {
     let role = crate::read(&job.path("role")).unwrap_or_default();
-    if role == "triage" || (role.is_empty() && !job.path("usage-kind").exists()) {
+    if matches!(role.as_str(), "triage" | "planner")
+        || (role.is_empty() && !job.path("usage-kind").exists())
+    {
         return false;
     }
     let repo = crate::pick::github_repo(cfg, &project(&job.dir));
