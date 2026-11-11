@@ -114,7 +114,9 @@ impl Checkpoint {
                 "retry was cancelled or superseded",
             ));
         }
-        if let Some(dl) = self.deadline {
+        if !self.initial()
+            && let Some(dl) = self.deadline
+        {
             swap(
                 &job.turn(n, "deadline"),
                 &format!("{}\n", dl + now_nanos() - self.waited),

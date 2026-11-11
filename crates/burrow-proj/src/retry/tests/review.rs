@@ -304,3 +304,24 @@ fn checkpoint_creation_yields_to_emergency_promotion_during_census_contention() 
         Some("unstick")
     );
 }
+
+#[test]
+fn explicit_initial_transfer_does_not_restore_a_stale_prestartup_deadline() {
+    let r = rig();
+    let mut state = saved(&r, "initial");
+    state.retained = Some(false);
+    state.deadline = Some(1);
+    state.said = None;
+    let job = Job::new(&r.cfg, "initial");
+    fs::write(job.turn("1", "slot"), "1\n").unwrap();
+    let acquired = crate::mtime_nanos(&job.turn("1", "slot")).unwrap();
+    crate::turn::initialize_deadline(&job, "1", Some(&state), 30_000_000_000).unwrap();
+    state.resume(&job, "1", &job.path("prompt.1")).unwrap();
+    assert_eq!(
+        read(&job.turn("1", "deadline"))
+            .unwrap()
+            .parse::<i64>()
+            .unwrap(),
+        acquired + 30_000_000_000
+    );
+}
