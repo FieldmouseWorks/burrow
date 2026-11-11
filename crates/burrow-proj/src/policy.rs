@@ -70,7 +70,12 @@ fn admission(job: &Job) -> Result<Admission, String> {
     match fs::read(path(job, "admission")) {
         Ok(b) => serde_json::from_slice(&b).map_err(|e| e.to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let identity = identify(job.cfg, &crate::pick::project(&job.dir), true, false)?;
+            let source = read(&crate::ask::host_path(job, "source"))
+                .and_then(|s| s.split_once('#').map(|(repo, _)| repo.to_owned()));
+            let identity = match source {
+                Some(repo) => Identity::Repository(repo),
+                None => identify(job.cfg, &crate::pick::project(&job.dir), true, false)?,
+            };
             // Legacy automation is never inferred to be local from a failed
             // lookup. Modern launchers bind identity before exposing job state.
             bind(job, identity, Kind::Automated)?;

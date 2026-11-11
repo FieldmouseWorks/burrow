@@ -112,6 +112,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         cfg.waits = None;
         let inbox = cfg.inbox.as_mut().unwrap();
         inbox.state = at("state");
+        inbox.wake = at("wake.json");
         inbox.outside_label = "outside text".into();
         inbox.triage = Some(Triage {
             sort_unlabelled: true,

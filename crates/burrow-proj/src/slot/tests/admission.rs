@@ -279,3 +279,29 @@ fn an_unparsed_nonempty_origin_never_grants_a_local_exemption() {
         Ok(crate::policy::Identity::Local)
     ));
 }
+
+#[test]
+fn legacy_inbox_identity_comes_from_its_host_owned_source() {
+    let tmp = TempDir::new().unwrap();
+    clones(&tmp);
+    let jobs = jobs_dir(&tmp);
+    let cfg = config(&jobs, 1);
+    let job = Job::new(&cfg, "legacy");
+    fs::create_dir_all(&job.dir).unwrap();
+    crate::ask::ensure(&job).unwrap();
+    fs::write(crate::ask::host_path(&job, "source"), "sam/web#7").unwrap();
+    fs::write(
+        job.path("project"),
+        tmp.path().join("box").to_str().unwrap(),
+    )
+    .unwrap();
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(&["pause".into(), "sam/web".into()], "test")
+        .unwrap();
+    assert!(
+        crate::policy::denied(&job),
+        "writable metadata cannot replace trusted legacy source"
+    );
+}
