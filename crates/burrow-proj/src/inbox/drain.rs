@@ -3,7 +3,8 @@
 //! room; roles may choose another engine. From there it's an inbox issue
 //! like any other: its job, its answers, closed when it's done. Priority
 //! goes first, then pipeline repos, then age. At most `drain_jobs` of the
-//! issues it handed on have a job at once, and one goes each pass at most;
+//! issues it handed on have a queued or running turn at once; one goes each
+//! pass at most.
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
 //! waits in line like any other, never ahead of work someone asked for
 //! (`first` is off for it): a `drained` mark in its issue's record says so,
@@ -89,7 +90,7 @@ impl Pass<'_> {
             return Ok(());
         };
         let waiting = self.inbox.state.join(WAITING);
-        // Its own still going: a record with the mark and a job, or a mark
+        // Count queued/running turns in enabled repos, plus enrollments
         // whose job hasn't started yet. One that hasn't after ten minutes is
         // let go only once GitHub says the issue no longer carries the label
         // (it didn't take, someone took it off, or the issue closed): while
@@ -211,22 +212,33 @@ impl Pass<'_> {
     }
 
     /// The records that hold one of the drain's `drain_jobs`, oldest mark
-    /// first: each with its `drained` mark, on a repo that isn't paused or
-    /// with its job still going, and not a planned parent (its children hold
-    /// the slots). The drain counts them, and the live snapshot shows them.
+    /// first: each with its `drained` mark in an enabled repo, not a planned
+    /// parent (its children hold the slots), and either enrolling or with a
+    /// turn queued or running. The drain counts them, and the live snapshot
+    /// shows them.
     pub(super) fn drain_records(&self) -> Vec<std::path::PathBuf> {
         let mut held: Vec<_> = dirs(&self.inbox.state, "")
             .into_iter()
-            .filter(|d| d.join("drained").exists() && self.record_uses_capacity(d))
-            .filter(|d| {
-                let named = fs::read_to_string(d.join("drained")).unwrap_or_default();
-                !named.trim().split_once('#').is_some_and(|(repo, n)| {
-                    self.inbox.planning && self.has_task_list(Some(repo), n)
-                })
-            })
+            .filter(|d| self.drain_user(d).is_some())
             .collect();
         held.sort_by_key(|d| (mtime(&d.join("drained")).unwrap_or(0), d.clone()));
         held
+    }
+
+    /// Active turns and enrollments reserve capacity only in enabled repos.
+    fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
+        let named = crate::read(&dir.join("drained"))?;
+        let (repo, n) = named.split_once('#')?;
+        if self.cfg.paused(repo) || (self.inbox.planning && self.has_task_list(Some(repo), n)) {
+            return None;
+        }
+        if let Some(id) = crate::read(&dir.join("job")) {
+            let state = crate::job::Job::new(self.cfg, &id).state();
+            matches!(state.as_str(), "queued" | "running")
+                .then(|| format!("{named} ({id}: {state})"))
+        } else {
+            Some(format!("{named} (enrolling)"))
+        }
     }
 
     /// Whether the issue a `drained` mark names (OWNER/REPO#N) is open with
@@ -400,5 +412,32 @@ pub(super) fn priority_label(issue: &Value) -> Option<&str> {
             issue["labels"]
                 .as_array()
                 .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(*label)))
+        })
+}
+
+/// Automated inbox wakeups retain their waits while the repo is paused.
+pub(crate) fn job_paused(cfg: &crate::config::Config, id: &str) -> bool {
+    if cfg.paused.is_empty() {
+        return false;
+    }
+    let Some(inbox) = &cfg.inbox else {
+        return false;
+    };
+    // Legacy sorting/planner records have only KEY-N and job, without
+    // source metadata. Both record roots use the same repository key.
+    [inbox.state.clone(), inbox.state.join(".triage")]
+        .iter()
+        .flat_map(|root| dirs(root, ""))
+        .any(|dir| {
+            crate::read(&dir.join("job")).as_deref() == Some(id)
+                && dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.rsplit_once('-'))
+                    .is_some_and(|(repo, _)| {
+                        cfg.paused
+                            .iter()
+                            .any(|paused| key(paused).eq_ignore_ascii_case(repo))
+                    })
         })
 }

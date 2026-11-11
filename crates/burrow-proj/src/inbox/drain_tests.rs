@@ -822,6 +822,89 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
 }
 
 #[test]
+fn drain_counts_turns_instead_of_parked_jobs() {
+    for state in ["await", "ask", "queued", "running", "paused"] {
+        let mut b = Box::new();
+        b.cfg
+            .inbox
+            .as_mut()
+            .unwrap()
+            .triage
+            .as_mut()
+            .unwrap()
+            .drain_jobs = 3;
+        for n in 1..=3 {
+            let id = format!("drained-{n}");
+            let dir = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(format!("sam_box-{n}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("drained"), format!("sam/box#{n}\n")).unwrap();
+            fs::write(dir.join("job"), &id).unwrap();
+            let job = crate::job::Job::new(&b.cfg, &id);
+            fs::create_dir_all(&job.dir).unwrap();
+            fs::write(job.path("turns"), "1").unwrap();
+            fs::write(job.turn("1", "outcome"), state).unwrap();
+            if state == "running" || state == "paused" {
+                fs::write(job.turn("1", "slot"), "1").unwrap();
+            }
+            if state == "paused" {
+                b.cfg.paused = vec!["SAM/BOX".into()];
+                assert!(super::job_paused(&b.cfg, &id));
+            } else {
+                assert!(!super::job_paused(&b.cfg, &id));
+            }
+        }
+        if matches!(state, "queued" | "running" | "paused") {
+            fs::write(b.path("active"), "").unwrap();
+        }
+        let ready = found("sam/game", 4, "sam", &["ready"], "2026-11-01");
+        b.pass()
+            .note_ready("sam/game", std::slice::from_ref(&ready))
+            .unwrap();
+        on_github(&b, &ready);
+        let blocked = matches!(state, "queued" | "running");
+        let view = b.pass().view(
+            b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap(),
+            crate::now(),
+        );
+        let used = view
+            .slots
+            .iter()
+            .filter(|s| {
+                s.kind == crate::snapshot::SlotKind::Drain
+                    && s.state != crate::snapshot::SlotState::Idle
+            })
+            .count();
+        assert_eq!(
+            used,
+            if blocked { 3 } else { 0 },
+            "{state}: {:?}",
+            view.slots
+        );
+        if blocked {
+            let holders: Vec<_> = view
+                .slots
+                .iter()
+                .filter_map(|s| s.holder.as_ref()?.job.clone())
+                .collect();
+            assert!(holders.contains(&"drained-1".to_owned()), "{holders:?}");
+        }
+        b.pass().drain().unwrap();
+        assert_eq!(
+            b.log().contains("issues/4/labels -f labels[]=codex"),
+            !blocked,
+            "{state}: {}",
+            b.log()
+        );
+    }
+}
+
+#[test]
 fn full_drain_only_fetches_cached_repair_candidates() {
     let b = Box::new();
     let state = &b.cfg.inbox.as_ref().unwrap().state;
@@ -829,6 +912,12 @@ fn full_drain_only_fetches_cached_repair_candidates() {
     fs::create_dir_all(&busy).unwrap();
     fs::write(busy.join("drained"), "sam/game#99\n").unwrap();
     fs::write(busy.join("job"), "busy\n").unwrap();
+    let job = crate::job::Job::new(&b.cfg, "busy");
+    fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("turns"), "1").unwrap();
+    fs::write(job.turn("1", "outcome"), "running").unwrap();
+    fs::write(job.turn("1", "slot"), "1").unwrap();
+    fs::write(b.path("active"), "").unwrap();
     let old = "2026-10-01T00:00:00Z";
     let mut queued: Vec<_> = (4..10)
         .map(|n| found("sam/game", n, "sam", &["ready"], old))

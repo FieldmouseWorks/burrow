@@ -49,9 +49,9 @@ fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
 }
 
 /// 2026-11-11's stall: three jobs the drain handed on, each parked on an
-/// await, held all three drain slots, and nothing said so. The snapshot
-/// shows each slot parked, what holds it, on what, and for how long, and
-/// `proj status` prints the same snapshot.
+/// await, held all three drain slots. They don't now, and the snapshot says
+/// so: every slot is idle and the jobs show what they await. `proj status`
+/// prints the same snapshot.
 #[test]
 fn the_11_11_stall() {
     let mut b = Box::new();
@@ -72,39 +72,18 @@ fn the_11_11_stall() {
         .filter(|s| s.kind == SlotKind::Drain)
         .collect();
     assert_eq!(drain.len(), 3, "{drain:#?}");
+    // A job parked on `proj await` holds no drain slot: all three are free,
+    // and the jobs show what each waits on, and since when.
+    assert!(
+        drain
+            .iter()
+            .all(|s| s.state == SlotState::Idle && s.holder.is_none()),
+        "{drain:#?}"
+    );
     let mut seen = Vec::new();
-    for s in &drain {
-        assert_eq!(s.state, SlotState::Parked, "{s:#?}");
-        let h = s.holder.as_ref().unwrap();
-        let job = h.job.clone().unwrap();
-        let n: u64 = job.trim_start_matches("job-").parse().unwrap();
-        assert_eq!(h.awaits, [format!("sam/game#{}", 100 + n)]);
-        assert_eq!(
-            h.issue.as_deref(),
-            Some(format!("https://github.com/sam/game/issues/{n}").as_str())
-        );
-        assert_eq!(
-            (
-                h.engine,
-                h.model.as_deref(),
-                h.effort.as_deref(),
-                h.role.as_deref()
-            ),
-            (
-                Some(Engine::Codex),
-                Some("small"),
-                Some("high"),
-                Some("inbox")
-            )
-        );
-        // Parked since its await, for as long as it has waited.
-        let want = 600 * (n as i64 - 10);
-        let age = s.age.unwrap();
-        assert!(
-            (want..want + 5).contains(&age),
-            "{job}: {age}s, not {want}s"
-        );
-        assert_eq!(s.since.unwrap() + age, snap.at);
+    for j in &snap.jobs {
+        let n: u64 = j.id.trim_start_matches("job-").parse().unwrap();
+        assert_eq!(j.awaits, [format!("sam/game#{}", 100 + n)]);
         seen.push(n);
     }
     seen.sort();
