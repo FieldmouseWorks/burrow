@@ -66,7 +66,7 @@ pub fn evaluate(
     File { at: now, items }
 }
 
-/// GitHub's PR/head association authenticates the observed snapshot, while
+/// GitHub's run-to-PR association authenticates PR identity, while
 /// the PR resource supplies its author. Event actors are not authors. Check
 /// this before consulting cached observations too. A PR may since have moved
 /// on: its recorded run snapshot remains associated with that same PR.
@@ -96,7 +96,10 @@ pub fn trusted(
         && pr["number"]
             .as_u64()
             .is_some_and(|n| association["number"].as_u64() == Some(n))
-        && sha.is_some_and(|s| association["head"]["sha"].as_str() == Some(s))
+        // The association's head SHA is mutable: it follows later pushes,
+        // unlike the run's head_sha. Authenticate the immutable PR ID instead.
+        && sha.is_some()
+        && pr["id"].as_u64().is_some_and(|id| association["id"].as_u64() == Some(id))
         && head_id.is_some_and(|id| {
             association["head"]["repo"]["id"].as_u64() == Some(id)
                 && run["head_repository"]["id"].as_u64() == Some(id)
@@ -226,8 +229,8 @@ mod tests {
         let sha = "a".repeat(40);
         let run = serde_json::json!({"head_sha":sha,"actor":{"login":"outsider"},
             "triggering_actor":{"login":"sam"},"head_repository":{"id":7,"full_name":"o/r"},
-            "pull_requests":[{"number":3,"head":{"sha":sha,"repo":{"id":7}}}]});
-        let pr = serde_json::json!({"number":3,"user":{"login":"sam"},
+            "pull_requests":[{"id":1003,"number":3,"head":{"sha":"b".repeat(40),"repo":{"id":7}}}]});
+        let pr = serde_json::json!({"id":1003,"number":3,"user":{"login":"sam"},
             "head":{"sha":"b".repeat(40),"repo":{"id":7,"full_name":"o/r"}}});
         let authors = ["Sam".into()];
         assert!(trusted(&run, &pr, "O/R", &authors));
@@ -239,7 +242,7 @@ mod tests {
         assert!(!trusted(&reopened, &outsider, "o/r", &authors));
         for pointer in [
             "/head_sha",
-            "/pull_requests/0/head/sha",
+            "/pull_requests/0/id",
             "/head_repository/id",
             "/pull_requests",
             "/pull_requests/0/number",

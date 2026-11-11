@@ -108,17 +108,18 @@ fn pr_runs_need_a_configured_author_and_partial_reruns_keep_signals() {
     .unwrap();
     let at = jiff::Timestamp::now().to_string();
     let pr = |id: u64, author: &str, head: &str| {
+        let number = if id >= 4 { 99 } else { id };
         fs::write(
-            d.join(format!("pr-{id}.json")),
-            json!({"number":id,"user":{"login":author},
+            d.join(format!("pr-{number}.json")),
+            json!({"id":number+1000,"number":number,"user":{"login":author},
             "head":{"repo":{"id":7,"full_name":head}}})
             .to_string(),
         )
         .unwrap();
         json!({"id":id,"run_attempt":2,"created_at":at,"html_url":format!("https://example.org/{id}"),
-        "actor":{"login":"sam"},"triggering_actor":{"login":"sam"},"head_sha":"a".repeat(40),
+        "actor":{"login":"sam"},"triggering_actor":{"login":"sam"},"head_sha":format!("{id:040x}"),
         "head_repository":{"id":7,"full_name":head},
-        "pull_requests":[{"number":id,"head":{"sha":"a".repeat(40),"repo":{"id":7}}}]})
+        "pull_requests":[{"id":number+1000,"number":number,"head":{"sha":"b".repeat(40),"repo":{"id":7}}}]})
     };
     let write_runs = |runs: Vec<serde_json::Value>| {
         fs::write(
@@ -176,11 +177,26 @@ esac
         pr(6, "sam", "sam/repo"),
     ]);
     assert_eq!(run(), 1, "three trusted runs, signal kept past the rerun");
+    let before: serde_json::Value = serde_json::from_slice(&fs::read(&watch).unwrap()).unwrap();
+    let mut advanced: serde_json::Value =
+        serde_json::from_slice(&fs::read(d.join("prs.json")).unwrap()).unwrap();
+    for r in advanced["workflow_runs"].as_array_mut().unwrap() {
+        // GitHub updates this field after pushes, rebases and force-pushes;
+        // the completed run's own head_sha and attempt remain unchanged.
+        r["pull_requests"][0]["head"]["sha"] = "c".repeat(40).into();
+    }
+    fs::write(d.join("prs.json"), advanced.to_string()).unwrap();
+    assert_eq!(run(), 1, "earlier runs remain eligible after head advances");
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(&watch).unwrap()).unwrap();
+    assert_eq!(
+        after["items"], before["items"],
+        "head movement preserves escalation identity and since"
+    );
     // Recheck provenance before using a cached observation: event actors
-    // remain trusted, but one PR no longer has an authorized author.
+    // remain trusted, but the shared PR no longer has an authorized author.
     fs::write(
-        d.join("pr-6.json"),
-        json!({"number":6,"user":{"login":"eve"},
+        d.join("pr-99.json"),
+        json!({"id":1099,"number":99,"user":{"login":"eve"},
         "head":{"repo":{"id":7,"full_name":"sam/repo"}}})
         .to_string(),
     )

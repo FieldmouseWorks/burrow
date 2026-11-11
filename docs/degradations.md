@@ -46,9 +46,10 @@ runs in that window, creates a stall. Matrix legs and attempts of one run
 count once, and a run's signals are the current result of each of its jobs:
 a partial rerun keeps the jobs it didn't rerun and replaces the ones it did.
 PR runs count only when the PR resource names one of `authors` and GitHub's
-run record associates the observed head SHA and repository with that PR.
-The current head may have moved on; an earlier associated snapshot still
-counts. Both repositories must be this repository. Event actors (including
+run record associates the run with that PR by immutable PR ID, number and
+repository IDs. The association's head SHA follows later pushes, so it is
+not compared to the run's original SHA. Earlier associated runs still count
+after pushes, rebases and force-pushes, including when observations are cached. Both repositories must be this repository. Event actors (including
 reopen, edit and rerun actors) never substitute for PR authorship. Provenance
 is rechecked before reading cached observations. Unknown provenance is ignored.
 Repositories and workflows have separate keys.
