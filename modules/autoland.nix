@@ -59,9 +59,9 @@ let
     (lib.filter (c: lib.elem (lib.toLower c) (map lib.toLower (lib.attrNames (rc.proofBuilds or { }))))
       (lib.attrNames (rc.proofRuns or { })))) cfg.repos);
   # Every setting a repo in `repos` may have: the steward's defaults, and the
-  # three read only where they're set (keepBranches by the branch cleanup,
-  # proofSlots by the proof line, skipPaths by the reviewers' snapshot).
-  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "skipPaths" ];
+  # settings read only where they're set (branch cleanup, proof limits and
+  # the reviewers' snapshot).
+  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "proofTimeoutMinutes" "proofToolsRef" "skipPaths" ];
   # "REPO".SETTING, for each setting a repo has that isn't one of those.
   unknown = lib.concatLists (lib.mapAttrsToList (repo: rc: map (k: "\"${repo}\".${k}")
     (lib.filter (k: !lib.elem k known) (lib.attrNames rc))) cfg.repos);
@@ -507,7 +507,7 @@ in
         proofBuilds or proofRuns) may take, a build's wait for a heavy slot
         included, before it's stopped and started again: long enough for a
         NixOS test's own hour (its driver's globalTimeout) after a slot has
-        come free.
+        come free. A repo may override this with its own proofTimeoutMinutes.
       '';
     };
 
@@ -739,9 +739,10 @@ in
         in bash, in a fresh worktree of the repo's checkout in projectsDir
         at the PR's head, with what the user's own units start with (its
         PATH) and PROOF_REPO, PROOF_NUMBER, PROOF_HEAD and PROOF_CHECK set.
-        Only the head is fetched: a run proves the commit, whatever the PR
-        targets, so a command that wants more of origin (its default
-        branch's tools) fetches it itself. Exit 0 posts the check as
+        Only the head is fetched by default: a run proves the commit,
+        whatever the PR targets. proofToolsRef can supply a managed trusted
+        tools checkout; a command needing other refs fetches those itself.
+        Exit 0 posts the check as
         passed, 1 to 125 as failed; anything else (a signal, a command not
         found, past proofTimeoutMinutes, which bounds the whole run) is the
         machine failing, and it runs again later. Each command runs in a
@@ -753,6 +754,13 @@ in
         needs (`heavy --`, a gate's own). A check can't be in both
         proofBuilds and proofRuns; one in proofRuns and proofJobs is a run;
         none runs on a head in the docs lane),
+        proofToolsRef (an optional origin branch such as "refs/heads/main":
+        command proofs get a separate clean checkout of that branch in
+        PROOF_TOOLS, fetched independently of the head and removed with the
+        run's other worktrees; unset, no tools checkout),
+        proofTimeoutMinutes (a positive integer, overriding the machine's
+        proofTimeoutMinutes for this repo's builds and runs, independently
+        of jobTimeoutMinutes; long serial replays need not extend agent turns),
         proofSlots (how many of those proofs, jobs, builds and runs, the repo may
         have building at once, for proofs that take the whole machine: the
         rest wait their turn, those labelled `labels.first` first, then the
@@ -800,6 +808,14 @@ in
         (lib.filter (c: lib.elem (lib.toLower c) (names kind)) (lib.attrNames (rc.proofJobs or { })));
     in shadowed "proofBuilds" "builds" ++ shadowed "proofRuns" "runs") cfg.repos);
     assertions = [{
+      assertion = lib.all (rc: !(rc ? proofToolsRef) || rc.proofToolsRef == null ||
+        (builtins.isString rc.proofToolsRef && builtins.match "refs/heads/[A-Za-z0-9/._+@=,-]+" rc.proofToolsRef != null)) (lib.attrValues cfg.repos);
+      message = "burrow.autoland.repos: proofToolsRef must name a branch under refs/heads/.";
+    } {
+      assertion = lib.all (rc: !(rc ? proofTimeoutMinutes) ||
+        (builtins.isInt rc.proofTimeoutMinutes && rc.proofTimeoutMinutes > 0)) (lib.attrValues cfg.repos);
+      message = "burrow.autoland.repos: proofTimeoutMinutes must be a positive integer.";
+    } {
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
     } {

@@ -189,7 +189,12 @@ root only.
    itself too ([burrow-proof](../crates/burrow-proof/src/lib.rs)), in a
    worktree at the head and a cgroup of its own, after the builds and
    before any Claude job, posting only what the command writes to
-   `PROOF_SUMMARY`. A red one goes to a fix job like any red CI.
+   `PROOF_SUMMARY`. A repo may set `proofToolsRef = "refs/heads/main"` to
+   supply a separately fetched trusted tools checkout in `PROOF_TOOLS`;
+   the command still runs in its head worktree. Both checkouts belong to
+   the run and are removed after its processes end. Per-repo
+   `proofTimeoutMinutes` bounds the serial proof without extending agent
+   job deadlines. A red proof goes to a fix job like any red CI.
 8. A red default branch (CI failed on what was merged): one Claude job
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Before

@@ -8,15 +8,29 @@ use std::{
     path::Path,
 };
 
+pub(crate) struct Permit {
+    _guard: Option<File>,
+}
+
 pub(crate) enum Resume {
-    Ready(Option<File>),
+    Ready(Permit),
     Waiting,
 }
 
 pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     let Some(inbox) = &cfg.inbox else {
-        return Ok(Resume::Ready(None));
+        return Ok(Resume::Ready(Permit { _guard: None }));
     };
+    let mine = |d: &Path| read(&d.join("job")).as_deref() == Some(job.id);
+    let associated = dirs(&inbox.state, "")
+        .iter()
+        .any(|d| mine(d) && d.join("drained").exists())
+        || dirs(&inbox.state.join(".triage"), "")
+            .iter()
+            .any(|d| mine(d));
+    if !associated || inbox.triage.is_none() || job.path("unstick").exists() {
+        return Ok(Resume::Ready(Permit { _guard: None }));
+    }
     let lock = OpenOptions::new()
         .append(true)
         .create(true)
@@ -28,7 +42,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
         Err(e) => return Err(e.to_string()),
     }
     let Some(t) = &inbox.triage else {
-        return Ok(Resume::Ready(Some(lock)));
+        return Ok(Resume::Ready(Permit { _guard: Some(lock) }));
     };
     let pass = Pass {
         cfg,
@@ -63,21 +77,37 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     {
         return Ok(Resume::Waiting);
     }
-    Ok(Resume::Ready(Some(lock)))
+    Ok(Resume::Ready(Permit { _guard: Some(lock) }))
 }
 
 impl Pass<'_> {
+    /// A paused record retains its results, but only an active turn consumes
+    /// shared admission capacity. Unstarted handoffs cannot start while paused.
+    pub(super) fn record_uses_capacity(&self, dir: &Path) -> bool {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        let paused = name
+            .rsplit_once('-')
+            .is_some_and(|(repo, _)| self.cfg.paused(&repo.replacen('_', "/", 1)));
+        if let Some(id) = read(&dir.join("job")) {
+            let job = Job::new(self.cfg, &id);
+            if !job.dir.is_dir() {
+                return !paused;
+            }
+            if crate::policy::parked(&job) {
+                return !crate::systemd::gone(self.cfg, &job.unit());
+            }
+            if crate::policy::denied(&job) {
+                return job.state() == "running";
+            }
+            return true;
+        }
+        !paused
+    }
+
     /// Shared occupancy predicate. A stale pending handoff is conservative
     /// until the normal pass can reconcile it with GitHub.
     pub(super) fn draining_record(&self, d: &Path) -> bool {
-        if !d.join("drained").exists() || !self.record_uses_capacity(d) {
-            return false;
-        }
-        let named = read(&d.join("drained")).unwrap_or_default();
-        !named
-            .trim()
-            .split_once('#')
-            .is_some_and(|(repo, n)| self.inbox.planning && self.has_task_list(Some(repo), n))
+        self.drain_user(d).is_some()
     }
 }
 
@@ -104,6 +134,10 @@ mod tests {
                 .at_once = 1;
             for id in ["parked", "other"] {
                 fixture.job_ending(id, "done", Some("ask"), "kept question");
+                if !sorting {
+                    fs::write(fixture.path("active"), "").unwrap();
+                    fs::write(fixture.cfg.jobs.join(id).join("1.slot"), "1").unwrap();
+                }
                 let job = Job::new(&fixture.cfg, id);
                 policy::bind(
                     &job,
@@ -145,5 +179,62 @@ mod tests {
                 "serialized with both new and restored work"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+    use crate::inbox::sorting_tests::Box;
+    use std::fs;
+
+    #[test]
+    fn a_waiting_drained_jobs_next_turn_reacquires_capacity_before_launch() {
+        let mut fixture = Box::new();
+        fixture.cfg.inbox.as_mut().unwrap().wake = fixture.path("wake.json");
+        fixture.cfg.kick.clear();
+        fixture.cfg.notify = None;
+        let active = fixture.path("active");
+        burrow_test::executable(
+            &fixture.cfg.tools.systemctl,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n*is-active*) test -e '{}';;\n*LoadState*) echo not-found;;\n*ActiveState*) echo inactive;;\nesac\n",
+                active.display()
+            ),
+        );
+
+        let launched = fixture.path("launched");
+        fixture.cfg.tools.systemd_run = fixture.path("systemd-run");
+        burrow_test::executable(
+            &fixture.cfg.tools.systemd_run,
+            format!("#!/bin/sh\ntouch '{}'\n", launched.display()),
+        );
+        for id in ["waiting", "active"] {
+            fixture.job_ending(id, "done", Some("await"), "kept");
+            let d = fixture.cfg.inbox.as_ref().unwrap().state.join(id);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("drained"), "sam/box#1").unwrap();
+            fs::write(d.join("job"), id).unwrap();
+        }
+        fs::write(fixture.path("active"), "").unwrap();
+        fs::write(fixture.cfg.jobs.join("active/1.slot"), "1").unwrap();
+        let job = Job::new(&fixture.cfg, "waiting");
+        let held = job.lock().unwrap();
+        crate::turn::start(&fixture.cfg, job.id, "the await changed", false).unwrap();
+        drop(held);
+        assert!(crate::policy::parked(&job));
+        assert_eq!(job.turns().as_deref(), Some("2"));
+        assert!(
+            !launched.exists(),
+            "capacity-full resume must not start a unit"
+        );
+        fs::remove_file(fixture.path("active")).unwrap();
+        crate::policy::reconcile(&fixture.cfg).unwrap();
+        assert!(launched.exists());
+        assert_eq!(
+            job.turns().as_deref(),
+            Some("2"),
+            "resume the queued turn itself"
+        );
     }
 }

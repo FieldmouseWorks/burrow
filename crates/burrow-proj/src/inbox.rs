@@ -99,8 +99,10 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         unreached: Vec::new(),
         looked: Vec::new(),
     };
-    p.run(only)?;
-    p.finish(only)
+    let result = p.run(only).and_then(|()| p.finish(only));
+    drop(pass);
+    crate::policy::wake(cfg);
+    result
 }
 
 /// The lock, once whoever holds it lets go, if that's within `wait`.
@@ -335,29 +337,6 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
-    /// A paused record retains its results, but only an active turn consumes
-    /// shared admission capacity. Unstarted handoffs cannot start while paused.
-    pub(super) fn record_uses_capacity(&self, dir: &Path) -> bool {
-        let name = dir.file_name().unwrap_or_default().to_string_lossy();
-        let paused = name
-            .rsplit_once('-')
-            .is_some_and(|(repo, _)| self.cfg.paused(&repo.replacen('_', "/", 1)));
-        if let Some(id) = read(&dir.join("job")) {
-            let job = Job::new(self.cfg, &id);
-            if !job.dir.is_dir() {
-                return !paused;
-            }
-            if crate::policy::parked(&job) {
-                return false;
-            }
-            if crate::policy::denied(&job) {
-                return job.state() == "running";
-            }
-            return true;
-        }
-        !paused
-    }
-
     fn book(&mut self, repo: &str, at: i64) {
         let e = self.wake.entry(repo.to_owned()).or_insert(at);
         *e = (*e).min(at);
@@ -448,15 +427,23 @@ impl Pass<'_> {
         Ok(id)
     }
 
+    /// A machine role picks the engine itself; the owner role only tunes the
+    /// model, so an authors' issue still runs on its label's engine.
     fn routing(&self, issue: &Value) -> (Option<String>, Option<crate::engine::Engine>) {
-        let role = self.machine_role(issue);
-        let pinned = role.is_none().then(|| self.engine(issue)).flatten();
-        (role, pinned)
+        match self.machine_role(issue) {
+            Some(role) => (Some(role), None),
+            None => (self.inbox.owner_role.clone(), self.engine(issue)),
+        }
     }
 
-    /// Machine labels route by role even without an App; other bot issues
-    /// have a generic role. Ordinary human issues keep label routing.
+    /// The unstick label comes first, so the pipeline's repair job keeps its
+    /// own role whatever else the issue carries; then machine labels, which
+    /// route by role even without an App; other bot issues have a generic
+    /// role. Ordinary human issues keep label routing.
     fn machine_role(&self, issue: &Value) -> Option<String> {
+        if self.lane(issue) {
+            return Some("stuck".into());
+        }
         self.inbox
             .roles
             .iter()
@@ -467,7 +454,6 @@ impl Pass<'_> {
                 })
             })
             .map(|(_, role)| role.clone())
-            .or_else(|| self.lane(issue).then(|| "stuck".into()))
             .or_else(|| {
                 raw(&issue["user"]["login"])
                     .ends_with("[bot]")
@@ -972,6 +958,7 @@ fn say(f: Fail) {
 
 mod claims;
 mod drain;
+pub(crate) use drain::job_paused;
 mod jobs;
 mod plans;
 pub(crate) mod resumption;

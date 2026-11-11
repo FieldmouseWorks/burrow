@@ -115,13 +115,14 @@ pub fn parked(job: &Job) -> bool {
     path(job, "park").exists()
 }
 
-pub fn mark(job: &Job, state: &str, first: bool) -> Result<(), String> {
+pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
     let turn = job.turns().unwrap_or_default();
     if let Ok(bytes) = fs::read(path(job, "park")) {
         let prior: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if prior.turn == turn {
             return Ok(());
         }
+        first |= prior.first;
     }
     let record = Park {
         state: state.into(),
@@ -139,6 +140,7 @@ pub fn mark(job: &Job, state: &str, first: bool) -> Result<(), String> {
         }
     }
     let order = order
+        .or_else(|| read(&path(job, "order")))
         .or_else(|| read(&job.turn(&turn, "queue-order")))
         .unwrap_or_else(|| {
             format!(
@@ -154,7 +156,9 @@ pub fn mark(job: &Job, state: &str, first: bool) -> Result<(), String> {
         &path(job, "park"),
         &serde_json::to_string(&record).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    wake(job.cfg);
+    Ok(())
 }
 
 /// Runs in its own independent unit, so vacating the caller cannot kill the
@@ -169,9 +173,9 @@ pub fn reconcile(cfg: &Config) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
     loop {
-        let before = overlay(cfg)?;
+        let before = (overlay(cfg)?, read(&cfg.jobs.join(".policy-wake")));
         reconcile_pass(cfg)?;
-        if before == overlay(cfg)? {
+        if before == (overlay(cfg)?, read(&cfg.jobs.join(".policy-wake"))) {
             return Ok(());
         }
     }
@@ -339,7 +343,7 @@ fn reconcile_job(cfg: &Config, id: &str) -> Result<(), String> {
                     read(&job.path(&format!("prompt.{}", rec.turn))).unwrap_or_default()
                 )
             };
-            crate::turn::start(cfg, id, &prompt, rec.first)
+            crate::turn::start_admitted(cfg, id, &prompt, rec.first, &_capacity)
         } else {
             Ok(())
         };
@@ -444,4 +448,21 @@ pub(crate) fn cancel(job: &Job) -> Result<(), String> {
         }
     }
     remove_places(job.cfg, job.id)
+}
+
+/// Job completions and newly parked turns wake control directly, even with
+/// the inbox/event dispatcher stopped. The epoch retains wakes during a pass.
+pub(crate) fn wake(cfg: &Config) {
+    let Some(unit) = &cfg.policy_unit else {
+        return;
+    };
+    if let Err(error) = swap(
+        &cfg.jobs.join(".policy-wake"),
+        &crate::now_nanos().to_string(),
+    ) {
+        eprintln!("proj: could not retain policy wake: {error}");
+    }
+    let _ = systemd::systemctl(cfg)
+        .args(["start", "--no-block", unit])
+        .output();
 }

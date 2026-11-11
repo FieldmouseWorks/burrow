@@ -2,7 +2,7 @@
 # proof fences. Only engine/GitHub replies are fixtures.
 { self, pkgs }:
 let
-  inherit (import ./proj/stand-ins.nix { inherit pkgs; }) gh;
+  inherit (import ./proj/stand-ins.nix { inherit pkgs; filterLabels = true; }) gh;
   engine = name: pkgs.writeShellScriptBin name ''
     prompt=$(cat)
     case $prompt in *$'\n## This turn, asked\n'*) prompt=''${prompt##*$'\n## This turn, asked\n\n'} ;; esac
@@ -113,8 +113,8 @@ in pkgs.testers.runNixOSTest {
     tools=json.loads(machine.succeed("cat /etc/test-proof-tools"))
     proof="proof-o-r-1-aaaaaaaaaaaa-1"
     folder="/var/lib/burrow/autoland/builds/"+proof
-    record={"repo":"o/r","number":1,"head":head,"checkout":"/data/proof-checkout","unit":"autoland-"+proof+".service","timeout":600,"bash":tools["bash"],"git":tools["git"],"trees":"/data/proof-trees","kick":None,"commentBytes":1000,
-      "runs":{"a-complete":"echo complete >>/data/proof-events", "b-hold":"echo preserved >preserved; if [ ! -e /data/release-proof ]; then "+tools["heavy"]+" --all -- sleep 600; fi; echo resumed >>/data/proof-events"}}
+    record={"repo":"o/r","number":1,"head":head,"checkout":"/data/proof-checkout","toolsRef":dev("git -C /data/dev/src/ib symbolic-ref HEAD"),"unit":"autoland-"+proof+".service","timeout":600,"bash":tools["bash"],"git":tools["git"],"trees":"/data/proof-trees","kick":None,"commentBytes":1000,
+      "runs":{"a-complete":"echo complete >>/data/proof-events", "b-hold":"echo preserved >preserved; if [ ! -e \"$PROOF_TOOLS/preserved\" ]; then echo initialized >>/data/proof-events; echo kept >\"$PROOF_TOOLS/preserved\"; fi; if [ ! -e /data/release-proof ]; then "+tools["heavy"]+" --all -- sleep 600; fi; echo resumed >>/data/proof-events"}}
     machine.succeed("install -d -o dev -g dev "+folder+"; touch /data/proof-events; chown dev:dev /data/proof-events")
     machine.succeed("printf %s "+shlex.quote(json.dumps(record))+" >"+folder+"/build.json; chown dev:dev "+folder+"/build.json")
     dev("burrow-proof start "+folder)
@@ -128,6 +128,7 @@ in pkgs.testers.runNixOSTest {
     for j in [run,queued,code]:
         machine.fail("runuser -u dev -- systemctl --user is-active 'proj-"+j.replace("-","\\x2d")+".service'")
     machine.wait_until_succeeds("test -e "+folder+"/policy-paused")
+    machine.succeed("test -e /data/proof-trees/"+proof+"-tools1/preserved")
     machine.wait_until_succeeds("runuser -u dev -- heavy --wait 1 -- true")
     for j in [run,code]:
         machine.succeed("test -f /data/dev/scratch/jobs/"+j+"/preserved")
@@ -161,7 +162,8 @@ in pkgs.testers.runNixOSTest {
         assert machine.succeed("cat /data/dev/jobs/"+j+"/session")==sessions[j]
     assert dev("proj state "+ask)=="done" and "[asks]" in dev("proj status 100")
     assert machine.succeed("cat /data/dev/jobs/"+aw+"/await").split("\t")[0]==awaiting[0]
+    machine.wait_until_succeeds("grep -F 'kept interrupted tools' "+folder+"/log")
     machine.wait_until_succeeds("jq -e '.state == \"done\"' "+folder+"/end.json")
-    machine.succeed("test $(grep -c complete /data/proof-events) = 1; grep -x resumed /data/proof-events")
+    machine.succeed("test $(grep -c complete /data/proof-events) = 1; test $(grep -c initialized /data/proof-events) = 2; grep -x resumed /data/proof-events")
   '';
 }

@@ -807,7 +807,7 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
     }
     assert_eq!(
         p.ready_queue(&t),
-        "ready 1: sam/box#4\nready 2: sam/box#3\nready 3: sam/game#2\nready 4: sam/box#1\nready 5: sam/box#5\n"
+        "drain: 0/1 used\nready 1: sam/box#4\nready 2: sam/box#3\nready 3: sam/game#2\nready 4: sam/box#1\nready 5: sam/box#5\n"
     );
     b.pass().drain().unwrap();
     assert!(
@@ -818,70 +818,86 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
 }
 
 #[test]
-fn opt_in_and_pipeline_scope_gate_the_real_drain() {
-    let mut b = Box::new();
-    let game = found("sam/game", 4, "sam", &["ready"], "2026-10-01T00:00:00Z");
-    let pipeline = found("sam/box", 8, "sam", &["ready"], "2026-11-01T00:00:00Z");
-    let settings = burrow_settings::Config {
-        overlay: b.path("settings-overlay.json"),
-        allowed: vec!["sam/box".into()],
-        pipeline_repos: vec!["sam/box".into()],
-    };
-    b.cfg.settings = Some(settings.clone());
-    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-    assert!(
+fn drain_counts_turns_instead_of_parked_jobs() {
+    for state in ["await", "ask", "queued", "running", "paused"] {
+        let mut b = Box::new();
+        b.cfg
+            .inbox
+            .as_mut()
+            .unwrap()
+            .triage
+            .as_mut()
+            .unwrap()
+            .drain_jobs = 3;
+        for n in 1..=3 {
+            let id = format!("drained-{n}");
+            let dir = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(format!("sam_box-{n}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("drained"), format!("sam/box#{n}\n")).unwrap();
+            fs::write(dir.join("job"), &id).unwrap();
+            let job = crate::job::Job::new(&b.cfg, &id);
+            fs::create_dir_all(&job.dir).unwrap();
+            crate::policy::bind(
+                &job,
+                crate::policy::Identity::Repository("sam/box".into()),
+                crate::policy::Kind::Automated,
+            )
+            .unwrap();
+            fs::write(job.path("turns"), "1").unwrap();
+            fs::write(job.turn("1", "outcome"), state).unwrap();
+            if state == "running" || state == "paused" {
+                fs::write(job.turn("1", "slot"), "1").unwrap();
+            }
+            if state == "paused" {
+                crate::policy::mark(&job, "running", false).unwrap();
+                b.cfg
+                    .settings
+                    .as_mut()
+                    .unwrap()
+                    .allowed
+                    .retain(|r| r != "sam/box");
+                assert!(super::job_paused(&b.cfg, &id));
+            } else {
+                assert!(!super::job_paused(&b.cfg, &id));
+            }
+        }
+        if matches!(state, "queued" | "running" | "paused") {
+            fs::write(b.path("active"), "").unwrap();
+        }
+        let ready = found("sam/game", 4, "sam", &["ready"], "2026-11-01");
         b.pass()
-            .pick_ready(&t, std::slice::from_ref(&game))
-            .is_none()
-    );
-    settings
-        .command(&["allow".into(), "sam/game".into()], "test")
-        .unwrap();
-    assert!(
-        b.pass()
-            .pick_ready(&t, std::slice::from_ref(&game))
-            .is_some()
-    );
-    let until = crate::now() + 3600;
-    settings
-        .command(&["pipeline".into(), until.to_string()], "test")
-        .unwrap();
-    b.pass().note_ready("sam/game", &[game]).unwrap();
-    let mut held = b.pass();
-    held.drain().unwrap();
-    assert!(
-        held.wake.values().any(|t| *t == until),
-        "scope expiry books a pass with no eligible candidates"
-    );
-    assert!(!b.log().contains("labels[]=codex"));
-    b.pass()
-        .note_ready("sam/box", std::slice::from_ref(&pipeline))
-        .unwrap();
-    on_github(&b, &pipeline);
-    b.pass().drain().unwrap();
-    assert!(
-        b.log().contains("issues/8/labels -f labels[]=codex"),
-        "{}",
-        b.log()
-    );
-    assert!(!b.log().contains("repos/sam/game/issues/4"), "{}", b.log());
-    assert!(b.cfg.paused("sam/new"));
-}
-
-#[test]
-fn an_unlisted_repo_can_still_be_triaged() {
-    let mut b = Box::new();
-    b.cfg.settings = Some(burrow_settings::Config {
-        overlay: b.path("settings-overlay.json"),
-        ..Default::default()
-    });
-    assert!(b.cfg.paused("sam/box"));
-    let mut p = b.pass();
-    p.triage("sam/box", &[issue(7, "sam", &[])]).unwrap();
-    assert!(
-        p.wake.contains_key("sam/box"),
-        "triage still attempts sorting with the stand-in launcher"
-    );
+            .note_ready("sam/game", std::slice::from_ref(&ready))
+            .unwrap();
+        on_github(&b, &ready);
+        let blocked = matches!(state, "queued" | "running");
+        let status = b
+            .pass()
+            .ready_queue(b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap());
+        assert!(
+            status.starts_with(if blocked {
+                "drain: 3/3 used"
+            } else {
+                "drain: 0/3 used"
+            }),
+            "{state}: {status}"
+        );
+        if blocked {
+            assert!(status.contains("sam/box#1 (drained-1:"), "{status}");
+        }
+        b.pass().drain().unwrap();
+        assert_eq!(
+            b.log().contains("issues/4/labels -f labels[]=codex"),
+            !blocked,
+            "{state}: {}",
+            b.log()
+        );
+    }
 }
 
 #[test]
@@ -892,6 +908,12 @@ fn full_drain_only_fetches_cached_repair_candidates() {
     fs::create_dir_all(&busy).unwrap();
     fs::write(busy.join("drained"), "sam/game#99\n").unwrap();
     fs::write(busy.join("job"), "busy\n").unwrap();
+    let job = crate::job::Job::new(&b.cfg, "busy");
+    fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("turns"), "1").unwrap();
+    fs::write(job.turn("1", "outcome"), "running").unwrap();
+    fs::write(job.turn("1", "slot"), "1").unwrap();
+    fs::write(b.path("active"), "").unwrap();
     let old = "2026-10-01T00:00:00Z";
     let mut queued: Vec<_> = (4..10)
         .map(|n| found("sam/game", n, "sam", &["ready"], old))
@@ -927,3 +949,5 @@ fn full_drain_only_fetches_cached_repair_candidates() {
     assert!(log.contains("api repos/sam/game/issues/10"), "{log}");
     assert!(log.contains("issues/10/labels -f labels[]=codex"), "{log}");
 }
+
+mod admission;

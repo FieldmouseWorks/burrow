@@ -28,11 +28,6 @@ use crate::{
 /// why it ended short, in words, also in its log.
 pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
     let rec = Record::read(dir)?;
-    match fs::remove_file(dir.join("policy-restoring")) {
-        Ok(()) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-        Err(e) => return Err(e.to_string()),
-    }
     let id = id(dir)?;
     let log = OpenOptions::new()
         .create(true)
@@ -66,6 +61,9 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
             rec.checkout.display()
         ));
     }
+    if let Err(why) = crate::tools::sweep(&rec, builds, id) {
+        return short(why);
+    }
     let mut ran: Ran = match fs::read(dir.join(RAN)) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ran::default(),
@@ -98,6 +96,7 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
         ran.exits.insert(check.clone(), exit);
         save(&dir.join(RAN), &ran).map_err(|e| e.to_string())?;
     }
+    accepted(dir)?;
     if let Some(text) = comment::comment(&rec, dir, id, &ran)
         && let Err(e) = write_whole(&dir.join(COMMENT), text.as_bytes())
     {
@@ -166,6 +165,7 @@ fn one(
     fence: &mut dyn Fence,
     log: &File,
 ) -> Result<i32, String> {
+    crate::tools::prepare(rec, id, i, log)?;
     let tree = rec.trees.join(format!("{id}-{i}"));
     let made = if tree.exists() {
         Command::new(&rec.git)
@@ -184,6 +184,9 @@ fn one(
         });
     }
     let ended = fenced(rec, dir, i, check, cmd, fence, log, &tree);
+    if ended.is_err() && dir.join("policy-restoring").exists() {
+        return ended;
+    }
     // Its fence first, then its worktree: nothing of it can still be in
     // there. A fence that won't clear keeps its worktree, for `end` to
     // remove once systemd has ended every process of the unit.
@@ -194,6 +197,14 @@ fn one(
         let _ = writeln!(
             &mut &*log,
             "autoland: {check}: can't remove its worktree: {e}"
+        );
+    }
+    if rec.tools_ref.is_some()
+        && let Err(e) = trees::remove(&rec.git, &rec.checkout, &crate::tools::path(rec, id, i))
+    {
+        let _ = writeln!(
+            &mut &*log,
+            "autoland: {check}: can't remove its tools worktree: {e}"
         );
     }
     ended
@@ -219,6 +230,10 @@ fn fenced(
     let (Ok(out), Ok(err)) = (out, err) else {
         return Err("can't hand it its log".into());
     };
+    c.env_remove("PROOF_TOOLS");
+    if rec.tools_ref.is_some() {
+        c.env("PROOF_TOOLS", crate::tools::path(rec, id(dir)?, i));
+    }
     c.current_dir(tree)
         .env("PROOF_REPO", &rec.repo)
         .env("PROOF_NUMBER", rec.number.to_string())
@@ -228,10 +243,22 @@ fn fenced(
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
-    let status = c
-        .status()
+    let mut child = c
+        .spawn()
         .map_err(|e| format!("can't start {}: {e}", rec.bash.display()))?;
+    accepted(dir)?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("can't wait for {}: {e}", rec.bash.display()))?;
     Ok(status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or_default()))
+}
+
+fn accepted(dir: &Path) -> Result<(), String> {
+    match fs::remove_file(dir.join("policy-restoring")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }

@@ -50,7 +50,7 @@ impl Ended {
 /// cleared, `end.json` written, its repo kicked. What `end.json` says, or
 /// why it couldn't be written.
 pub fn end(dir: &Path, how: &Ended) -> Result<Value, String> {
-    if dir.join("policy-paused").exists() {
+    if dir.join("policy-paused").exists() || dir.join("policy-restoring").exists() {
         let value = json!({"state":"parked"});
         save(&dir.join(END), &value).map_err(|e| e.to_string())?;
         return Ok(value);
@@ -76,6 +76,9 @@ pub fn end(dir: &Path, how: &Ended) -> Result<Value, String> {
     };
     match (&rec, cleared) {
         (Ok(rec), Ok(())) => {
+            if let Err(e) = crate::tools::forget(rec, id) {
+                note(&e);
+            }
             for said in own_trees(rec, id) {
                 note(&said);
             }

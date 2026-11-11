@@ -209,9 +209,13 @@ Each has an entry below, and each can be imported on its own.
   `steward-conflictFixed`, `steward-proved`, and `steward-judged` roles. Inbox issues use `stuck` when they
   have `inbox.unstickLabel`; other bot issues use `machine-inbox`. Machines map
   their own labels to roles with `burrow.proj.inbox.roles` (for example
-  career drift), including machines without an App. Engine labels enroll
+  career drift), including machines without an App; the unstick label
+  wins over that map. Engine labels enroll
   these issues but their roles choose
   the engine each turn, defaulting to Claude when no line matches.
+  The authors' own issues run as `burrow.proj.inbox.ownerRole` when it's
+  set, so the models file can tune them; their engine label still picks
+  the engine.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
   proj jobs retain the roleless form for work an agent hands on.

@@ -681,6 +681,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     job.mark_ended();
+    crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
     if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {

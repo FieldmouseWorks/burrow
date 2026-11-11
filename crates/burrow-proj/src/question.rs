@@ -337,18 +337,34 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         .map_err(|e| format!("invalid committed turn {n}: {e}"))?;
     let stopped = job.turn(&n, "stopped").exists();
     let end = read(&job.turn(&n, "end"));
-    let finished = stopped || end.as_deref() == Some("done");
+    let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
+    // A one-way timeout publishes a synthetic done turn to release the job,
+    // while its original question still needs the owner's decision.
+    let finished = stopped || (end.as_deref() == Some("done") && !pending_owner);
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
         .unwrap_or(0);
     let entries = committed_entries(job, latest)?;
+    let last_ask = entries
+        .iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
+            (read(&e.path()).as_deref() == Some("ask")).then_some(t)
+        })
+        .max()
+        .unwrap_or(0);
     let last_done = entries
         .iter()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let t = name.strip_suffix(".end")?.parse::<u64>().ok()?;
-            (read(&e.path()).as_deref() == Some("done")).then_some(t)
+            // Ignore the timeout's synthetic completion, even after an
+            // abandoned human resume publishes a newer failed turn. Earlier
+            // completed conversations still bound the outstanding question.
+            (read(&e.path()).as_deref() == Some("done") && (!pending_owner || t < last_ask))
+                .then_some(t)
         })
         .max()
         .unwrap_or(0);

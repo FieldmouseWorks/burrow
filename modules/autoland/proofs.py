@@ -327,6 +327,11 @@ def superseded(repo, pr, st):
     return [j for j in js if j not in keep]
 
 
+def timeout(repo):
+    """Minutes a machine proof may run, independently of agent turns."""
+    return C.repo_cfg(repo).get("proofTimeoutMinutes", CFG["proofTimeout"])
+
+
 def build(repo, pr, checks, st):
     """Starts building checks' derivations on PR's head (outputs worked
     them out: they're in st) in a unit of the machine user's own, which
@@ -369,7 +374,7 @@ def start_run(repo, pr, checks, st):
         return None
     # burrow-proof's Record: what it runs, and how, from this steward's config.
     return start(jid, {"repo": repo, "number": n, "head": head, "checkout": os.path.join(CFG["projectsDir"], folder),
-                       "runs": runs, "unit": C.build_unit(jid), "timeout": int(CFG["proofTimeout"] * C.MIN),
+                       "runs": runs, "toolsRef": C.repo_cfg(repo).get("proofToolsRef"), "unit": C.build_unit(jid), "timeout": int(timeout(repo) * C.MIN),
                        "bash": CFG["bash"], "git": CFG["git"], "trees": CFG["runsDir"],
                        "kick": f"{CFG['kick']}/{repo}", "commentBytes": COMMENT_BYTES},
                  f"the run of {', '.join(checks)}", [CFG["proofRun"], "start"])
@@ -432,7 +437,7 @@ def drop_inputs(st, key):
 def building(repo, rec):
     """"building", for the prebuild rec at work: its end kicks a pass, and
     a wake at its deadline sees it if that kick never comes."""
-    due = rec["at"] + (CFG["proofTimeout"] + 5) * C.MIN
+    due = rec["at"] + (timeout(repo) + 5) * C.MIN
     C.wake(repo, due if due > C.NOW else C.NOW + 15 * C.MIN)  # ends: its PR's wait, unchanged, is overdue at its deadline
     return "building"
 
@@ -530,7 +535,7 @@ def run(jid):
         with open(os.path.join(STATE, "builds", jid, "log"), "ab" if resumed else "wb") as out:
             p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
             try:
-                rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)
+                rc = p.wait(timeout=timeout(b["repo"]) * C.MIN)
             except subprocess.TimeoutExpired:
                 p.terminate()  # heavy stops all of it, then frees its slot
                 p.wait()
@@ -669,6 +674,8 @@ def fits(st, stage):
     alone."""
     jid = st.get("provedJob")
     was = st.get("provedFor") or ["build" if jid and jid.startswith(C.BUILD) else "job"]
+    if was[3:] != stage[3:]:
+        return False
     if was[0] != stage[0] or len(was) == 1:
         return was[0] == stage[0]
     return set(stage[1]) <= set(was[1]) and all(was[2].get(c) == stage[2].get(c) for c in stage[1])
@@ -681,7 +688,9 @@ def still(st, said, rc):
     or command that proof had. A check dropped, remapped or made the other
     kind since gets none of it."""
     was = st.get("provedFor") or []
-    if len(was) != 3 or was[0] not in ("build", "run"):
+    if len(was) not in (3, 4) or was[0] not in ("build", "run"):
+        return {}
+    if was[0] == "run" and (was[3] if len(was) == 4 else None) != rc.get("proofToolsRef"):
         return {}
     now = rc["proofBuilds" if was[0] == "build" else "proofRuns"]
     return {c: v for c, v in said.items() if c in now and now[c] == was[2].get(c)}

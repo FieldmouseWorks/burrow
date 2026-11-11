@@ -98,6 +98,7 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     inherit (cfg) meters;
     settings = config.burrow.settings.effective;
+    policyUnit = "proj-policy.service";
     agentTool = "${agents}/bin/agent";
     proofsState = "${stateDir}/autoland/builds";
     proofRun = "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof}/bin/burrow-proof";
@@ -107,7 +108,7 @@ let
     inherit roles models;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
       inherit (cfg.inbox) planning;
       host = config.networking.hostName;
       wake = inboxWake;
@@ -370,7 +371,13 @@ in
       roles = lib.mkOption {
         type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
         default = {};
-        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label comes first and uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+      };
+      ownerRole = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9-]+");
+        default = null;
+        example = "inbox";
+        description = "The role the authors' own issues run as when no rule above names one, so the models file can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
@@ -457,7 +464,7 @@ in
         drainJobs = lib.mkOption {
           type = lib.types.ints.positive;
           default = 2;
-          description = "Handed-on issues with a job at once, across every repo.";
+          description = "Handed-on issues with a queued or running turn, plus enrollments awaiting a job, across enabled repos.";
         };
       };
     };
@@ -535,6 +542,12 @@ in
     # (systemd-oomd) leaves it be. The job comes in its environment, from the
     # instance name: a job's id is its project's folder name, spaces, `%` and
     # all.
+    systemd.user.services.proj-policy = {
+      description = "Reconcile repository work when admission capacity changes";
+      restartIfChanged = false;
+      unitConfig.ConditionUser = user;
+      serviceConfig = { Type = "oneshot"; ExecStart = "${proj}/bin/proj _policy"; TimeoutStartSec = "2min"; };
+    };
     systemd.user.services."proj-ended@" = {
       description = "The end of a turn of proj job %I";
       unitConfig.ConditionUser = user;
