@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "13mk5gfmqzqh8dqp856ae3fap3",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 697,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/697",
+  "summary": "proj: wait out a fork's hold on the usage lock where nothing else is held",
+  "task": "fieldmouseworks/burrow#675",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "f9426461300a1f0f69c52b5fbd0ee9a6812ae2de0c25a22dba74f5cc1a318d38",
+    "before": "cb2273119705bf8b571843f9fba41ab955d8553d",
+    "after": "e891dfb9e319606ab4047129bd0bea5f1f8d88db",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794437435236
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811860643"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811860459"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#697)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#697)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#697)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#697)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#697)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#697)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723384/job/130811859242"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811937280"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811937154"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130818723446"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811937259"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811937214"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/697#pullrequestreview-5865902738"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43106723367/job/130811860061"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/697"
+    }
+  ]
+}
