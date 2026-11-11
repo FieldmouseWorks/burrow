@@ -591,7 +591,7 @@ fn a_look_that_cant_tend_books_another() {
 /// Job `id`'s latest turn ended on a usage limit an earlier proj wrote,
 /// resetting at `reset`, its N.resets written at `written`; `owned` for an
 /// --owned job's.
-fn earlier_resets(cfg: &Config, id: &str, reset: i64, written: i64, owned: bool) {
+pub(super) fn earlier_resets(cfg: &Config, id: &str, reset: i64, written: i64, owned: bool) {
     let dir = cfg.jobs.join(id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("turns"), "1\n").unwrap();

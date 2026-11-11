@@ -95,6 +95,17 @@ impl Spent {
         self.back.is_none() && self.until > now
     }
 
+    /// Expiry suppresses only pre-deadline imports; explicit releases are inclusive.
+    fn release_cutoff(&self) -> Option<i64> {
+        self.back.map(|back| {
+            if self.owner && back == self.until {
+                back - 1
+            } else {
+                back
+            }
+        })
+    }
+
     /// When a run was last refused: a run that started then or before
     /// proves nothing of usage now.
     pub fn refused(&self) -> i64 {
@@ -130,16 +141,13 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                 // Legacy writers preserve the metadata reference in job. Their
                 // last-refusal update distinguishes a real refusal at/after the
                 // deadline from the compatibility fence (deadline minus one).
-                if owner_reference(&s.job) && s.back.is_none() {
-                    let bytes = fs::read(cfg.jobs.join(&s.job))
-                        .map_err(|e| format!("proj: {}: {e}", s.job))?;
-                    let mut owner: Spent = serde_json::from_slice(&bytes)
-                        .map_err(|e| format!("proj: {}: {e}", s.job))?;
+                if let Some(mut owner) = owner_metadata(cfg, &s.job)? {
                     if s.refused() >= owner.until {
                         s.said = EARLIER.into();
                     } else {
                         owner.owner = true;
                         owner.told = s.told;
+                        owner.back = s.back;
                         return Ok(owner);
                     }
                 }
@@ -183,6 +191,54 @@ fn owner_reference(job: &str) -> bool {
     })
 }
 
+fn owner_metadata(cfg: &Config, job: &str) -> Result<Option<Spent>, String> {
+    if !owner_reference(job) {
+        return Ok(None);
+    }
+    let bytes = fs::read(cfg.jobs.join(job)).map_err(|e| format!("proj: {job}: {e}"))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| format!("proj: {job}: {e}"))
+}
+
+/// Under the usage lock, persist expiry's stale-import cutoff before any
+/// writer can replace its reference. The cutoff is inclusive, so expiry at
+/// UNTIL suppresses imports before UNTIL while preserving refusals at UNTIL.
+fn reconcile_expiry(cfg: &Config) -> Result<(), String> {
+    let Some(mut spent) = read(cfg)? else {
+        return Ok(());
+    };
+    // An explicitly released owner already recorded its own cutoff. Its
+    // original deadline cannot later supersede that earlier release.
+    if spent.owner && spent.back.is_some() {
+        return Ok(());
+    }
+    let Some(owner) = owner_metadata(cfg, &spent.job)? else {
+        return Ok(());
+    };
+    if owner.until > now() {
+        return Ok(());
+    }
+    let cutoff = owner.until - 1;
+    let newly = released(cfg)? < cutoff;
+    if newly {
+        mark(cfg, cutoff)?;
+    }
+    if spent.owner && spent.back.is_none() {
+        spent.back = Some(spent.until);
+        spent.told = now();
+        keep(cfg, &spent)?;
+        tell(cfg, &["close", NOTICE, CLOSED]);
+        changed(cfg);
+    } else if newly && spent.back.is_none() {
+        // A legacy refusal replaced the owner in the compatible record.
+        // Keep that genuine limit and publish its current cause/deadline.
+        tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
+        changed(cfg);
+    }
+    Ok(())
+}
+
 /// Prepare immutable metadata first; publishing the compatible record is the
 /// only commit point. Old generations remain readable by concurrent readers.
 fn owner_generation(cfg: &Config, s: &Spent) -> Result<Spent, String> {
@@ -222,7 +278,7 @@ fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
     } else {
         s.clone()
     };
-    if s.owner && s.back.is_none() {
+    if s.owner {
         mirror.last = Some(s.until - 1);
     }
     let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
@@ -242,6 +298,22 @@ pub fn record(
     at: i64,
 ) -> Result<Spent, String> {
     let _lock = lock(cfg)?;
+    let stale_owner_refusal = read(cfg)?
+        .map(|s| {
+            if s.owner && s.back.is_some_and(|back| back < s.until) {
+                Ok(None)
+            } else {
+                owner_metadata(cfg, &s.job)
+            }
+        })
+        .transpose()?
+        .flatten()
+        .is_some_and(|owner| owner.until <= now() && at < owner.until);
+    reconcile_expiry(cfg)?;
+    if stale_owner_refusal {
+        return read(cfg)?
+            .ok_or_else(|| "proj: expired owner record disappeared under its lock".into());
+    }
     put(cfg, id, until, said, at, at)
 }
 
@@ -252,6 +324,7 @@ pub fn hold(cfg: &Config, until: i64, reason: &str) -> Result<(), String> {
     if until <= at {
         return Err("proj usage hold: UNTIL must be a future Unix timestamp".into());
     }
+    reconcile_expiry(cfg)?;
     let spent = Spent {
         owner: true,
         until,
@@ -339,6 +412,10 @@ pub fn remind(cfg: &Config) {
         return;
     }
     let Ok(_lock) = lock(cfg) else { return };
+    if let Err(e) = reconcile_expiry(cfg) {
+        eprintln!("{e}");
+        return;
+    }
     if let Some(mut s) = kept(cfg).filter(|s| due(s)) {
         s.told = now();
         if keep(cfg, &s).is_ok() {
@@ -363,6 +440,10 @@ pub fn back(cfg: &Config, started: Option<i64>) {
         return;
     }
     let Ok(_lock) = lock(cfg) else { return };
+    if let Err(e) = reconcile_expiry(cfg) {
+        eprintln!("{e}");
+        return;
+    }
     let now = now();
     let s = kept(cfg);
     let ends = s.as_ref().is_some_and(|s| s.back.is_none());
@@ -425,6 +506,13 @@ fn mark(cfg: &Config, now: i64) -> Result<(), String> {
 pub fn tend(cfg: &Config) -> Option<i64> {
     let now = now();
     let retry = Some(now + RETRY);
+    {
+        let Ok(_lock) = lock(cfg) else { return retry };
+        if let Err(e) = reconcile_expiry(cfg) {
+            eprintln!("{e}");
+            return retry;
+        }
+    }
     let s = match read(cfg) {
         Ok(s) => s?,
         Err(e) => {
@@ -432,24 +520,6 @@ pub fn tend(cfg: &Config) -> Option<i64> {
             return retry;
         }
     };
-    if s.owner && s.back.is_none() && s.until <= now {
-        let Ok(_lock) = lock(cfg) else { return retry };
-        if let Some(mut expired) =
-            kept(cfg).filter(|s| s.owner && s.back.is_none() && s.until <= now)
-        {
-            expired.back = Some(expired.until);
-            expired.told = now;
-            if mark(cfg, expired.until)
-                .and_then(|_| keep(cfg, &expired))
-                .is_err()
-            {
-                return retry;
-            }
-            tell(cfg, &["close", NOTICE, CLOSED]);
-            changed(cfg);
-        }
-        return retry;
-    }
     let next = if s.holds(now) {
         remind(cfg);
         kept(cfg).map(|s| {
@@ -513,7 +583,8 @@ pub fn earlier(cfg: &Config, id: &str, reset: i64, written: Option<i64>) -> Resu
 }
 
 fn earlier_locked(cfg: &Config, id: &str, reset: i64, written: Option<i64>) -> Result<(), String> {
-    let released = released(cfg)?.max(read(cfg)?.and_then(|s| s.back).unwrap_or(0));
+    reconcile_expiry(cfg)?;
+    let released = released(cfg)?.max(read(cfg)?.and_then(|s| s.release_cutoff()).unwrap_or(0));
     let ended = match written {
         Some(w) => w <= released,
         None => released > 0,
@@ -535,6 +606,7 @@ fn earlier_locked(cfg: &Config, id: &str, reset: i64, written: Option<i64>) -> R
 /// every pass, which runs this first.
 pub fn adopt(cfg: &Config) -> Result<(), String> {
     let _lock = lock(cfg)?;
+    reconcile_expiry(cfg)?;
     let dirs = fs::read_dir(&cfg.jobs).map_err(|e| format!("proj: {}: {e}", cfg.jobs.display()))?;
     for e in dirs.filter_map(|e| e.ok()) {
         let id = e.file_name().to_string_lossy().into_owned();

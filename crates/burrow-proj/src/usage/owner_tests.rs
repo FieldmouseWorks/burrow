@@ -1,5 +1,5 @@
 //! Owner pauses: compatibility, deadline reconciliation and atomic generations.
-use super::tests::{rig, told};
+use super::tests::{earlier_resets, rig, told};
 use super::*;
 use std::fs;
 
@@ -279,4 +279,111 @@ fn failed_creation_and_expiry_do_not_publish_partial_owner_state() {
     tend(&cfg);
     assert!(kept(&cfg).unwrap().back.is_some());
     assert!(told(&d).iter().any(|s| s.starts_with("close ")));
+}
+
+#[test]
+fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
+    for first in [
+        "tend", "dated", "undated", "adopt", "current", "legacy", "hold",
+    ] {
+        let (_d, cfg) = rig();
+        hold(&cfg, now() + 3600, "expires").unwrap();
+        let deadline = now() - 30;
+        let mut expired = kept(&cfg).unwrap();
+        expired.until = deadline;
+        keep(&cfg, &expired).unwrap();
+        let reset = now() + 3600;
+        match first {
+            "tend" => {
+                tend(&cfg);
+            }
+            "dated" => {
+                earlier(&cfg, "await", reset, Some(deadline - 1)).unwrap();
+            }
+            "undated" => {
+                earlier(&cfg, "watchdog", reset, None).unwrap();
+            }
+            "adopt" => {
+                earlier_resets(&cfg, "owned", reset, deadline - 1, true);
+                earlier_resets(&cfg, "unowned", reset, deadline - 1, false);
+                adopt(&cfg).unwrap();
+            }
+            "current" => {
+                record(&cfg, "fresh", Some(reset), "refused", deadline).unwrap();
+            }
+            "legacy" => {
+                let mut raw: LegacySpent =
+                    serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+                raw.until = reset;
+                raw.last = Some(deadline);
+                fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&raw).unwrap()).unwrap();
+                // Even the import, rather than tend, can first see this write.
+                earlier(&cfg, "await", reset + 1000, Some(deadline - 1)).unwrap();
+            }
+            "hold" => {
+                hold(&cfg, reset, "replacement").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let expected = out(&cfg);
+        assert!(released(&cfg).unwrap() >= deadline - 1, "{first}");
+        if matches!(first, "current" | "legacy" | "hold") {
+            assert_eq!(expected.as_ref().unwrap().until, reset, "{first}");
+        } else {
+            assert!(expected.is_none(), "{first}");
+        }
+        // Every adoption route sees the durable cutoff, even after replacement.
+        earlier(&cfg, "await", reset + 1000, Some(deadline - 1)).unwrap();
+        earlier(&cfg, "watchdog", reset + 1000, None).unwrap();
+        earlier_resets(&cfg, "owned-stale", reset + 1000, deadline - 1, true);
+        earlier_resets(&cfg, "unowned-stale", reset + 1000, deadline - 1, false);
+        adopt(&cfg).unwrap();
+        tend(&cfg);
+        assert_eq!(out(&cfg), expected, "{first}");
+        if first != "hold" {
+            // Cleanup cannot erase the cutoff; a refusal exactly at or after
+            // expiry is still new and eligible, including through imports.
+            fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+            earlier(&cfg, "stale", reset + 1000, Some(deadline - 1)).unwrap();
+            assert!(out(&cfg).is_none(), "{first}");
+            earlier(&cfg, "boundary", reset + 2000, Some(deadline)).unwrap();
+            assert_eq!(out(&cfg).unwrap().until, reset + 2000, "{first}");
+            earlier(&cfg, "after", reset + 3000, Some(deadline + 1)).unwrap();
+            assert_eq!(out(&cfg).unwrap().until, reset + 3000, "{first}");
+        }
+    }
+}
+
+#[test]
+fn early_owner_release_is_not_later_replaced_by_its_original_deadline() {
+    for writer in ["import", "refusal"] {
+        let (_d, cfg) = rig();
+        hold(&cfg, now() + 3600, "released early").unwrap();
+        let deadline = now() - 30;
+        let released_at = deadline - 60;
+        let mut retired = kept(&cfg).unwrap();
+        retired.until = deadline;
+        keep(&cfg, &retired).unwrap();
+        retired = kept(&cfg).unwrap();
+        retired.back = Some(released_at);
+        mark(&cfg, released_at).unwrap();
+        keep(&cfg, &retired).unwrap();
+        tend(&cfg);
+        assert_eq!(released(&cfg).unwrap(), released_at);
+        let reset = now() + 7200;
+        if writer == "import" {
+            earlier(&cfg, "after release", reset, Some(released_at + 1)).unwrap();
+        } else {
+            record(
+                &cfg,
+                "after release",
+                Some(reset),
+                "refused",
+                released_at + 1,
+            )
+            .unwrap();
+        }
+        assert_eq!(out(&cfg).unwrap().until, reset, "{writer}");
+        assert!(!out(&cfg).unwrap().owner, "{writer}");
+    }
 }
