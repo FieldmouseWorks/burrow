@@ -102,11 +102,13 @@ let
     inherit roles models;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) planning;
       host = config.networking.hostName;
       wake = inboxWake;
-      triage = if cfg.inbox.triage.enable then {
+      triage = if cfg.inbox.triage.enable || cfg.inbox.planning then {
         inherit (cfg.inbox.triage) ownerLabel owner skip atOnce drain drainJobs;
+        sortUnlabelled = cfg.inbox.triage.enable;
       } else null;
     } else null;
     tools = {
@@ -343,6 +345,17 @@ in
     };
 
     inbox = {
+      planning = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Plan inbox tasks on fresh planner-role sessions before implementation.
+          This role defaults to Codex; Claude requires an explicit small model.
+          Large tasks become ordered child issues, with a durable parent
+          checklist. Durable creation receipts admit generated children without
+          adding their creator to inbox.authors.
+        '';
+      };
       enable = lib.mkEnableOption ''
         proj-inbox: an open issue carrying a label in `inbox.labels` in a project's GitHub repo,
         opened by one of `inbox.authors`, becomes a proj job in that project; its
@@ -356,7 +369,13 @@ in
       roles = lib.mkOption {
         type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
         default = {};
-        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label comes first and uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+      };
+      ownerRole = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9-]+");
+        default = null;
+        example = "inbox";
+        description = "The role the authors' own issues run as when no rule above names one, so the models file can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
@@ -443,7 +462,7 @@ in
         drainJobs = lib.mkOption {
           type = lib.types.ints.positive;
           default = 2;
-          description = "Handed-on issues with a job at once, across every repo.";
+          description = "Handed-on issues with a queued or running turn, plus enrollments awaiting a job, across enabled repos.";
         };
       };
     };
@@ -453,6 +472,9 @@ in
     assertions = [{
       assertion = cfg.pipelineSlots < cfg.maxJobs;
       message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
+    } {
+      assertion = !cfg.inbox.planning || !cfg.inbox.vm;
+      message = "burrow.proj.inbox.planning requires host Codex jobs; it cannot run inside an agent VM.";
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package agents ];
@@ -566,7 +588,8 @@ in
       `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
       other repos and jobs with no repo use the bare role. Duplicate keys fail
       the turn with both lines named. Engines are claude and codex; unlisted
-      roles use Claude. Each role's model and effort on each engine live in
+      roles use Claude, except planner, which defaults to Codex and requires
+      an explicit small model to use Claude. Each role's model and effort on each engine live in
       ~/.config/proj/models, one `ROLE ENGINE MODEL|- [EFFORT]` line each
       (`-` keeps the engine's own model); unlisted roles keep the engine's
       own settings. Either kind of roles line may end with `over PCT ENGINE`:
@@ -633,7 +656,7 @@ in
     # do the start and end of each of its jobs' turns (proj run --kick): it
     # posts the answer once one has ended.
     burrow.events.handlers.proj-inbox = {
-      events = [ "issues" "issue_comment" ];
+      events = [ "issues" "issue_comment" "pull_request" ];
       unit = "proj-inbox";
       wake = inboxWake;
     };

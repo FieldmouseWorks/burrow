@@ -9,6 +9,7 @@ use super::jobs::revived;
 use super::{Pass, forget, key, lock_within, named_for, raw, repo_of, seconds, uri};
 use crate::config::Config;
 use crate::config::tests::example;
+use crate::engine::Engine;
 
 #[test]
 fn repos() {
@@ -82,13 +83,16 @@ description says \"Fixes #7\" (or \"Refs #7\" if it doesn't settle the issue).";
 
 It's broken.
 
+
 sam commented:
 
 also this
 
+
 sam commented:
 
 and that
+
 
 {tail}"
         )
@@ -337,6 +341,40 @@ fn an_old_label_marker_is_replaced_for_the_new_engine_map() {
 }
 
 #[test]
+fn the_unstick_label_beats_a_role_mapped_to_an_engine_label() {
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.inbox
+        .as_mut()
+        .unwrap()
+        .roles
+        .insert("claude".into(), "inbox".into());
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["user"]["login"] = json!("steward[bot]");
+    i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
+    assert_eq!(p.routing(&i).0.as_deref(), Some("stuck"));
+}
+
+#[test]
+fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["labels"] = json!([{"name":"claude"}]);
+    assert_eq!(p.routing(&i), (None, Some(Engine::Claude)));
+    cfg.inbox.as_mut().unwrap().owner_role = Some("inbox".into());
+    let p = pass(&cfg);
+    assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Claude)));
+    i["labels"] = json!([{"name":"codex"}]);
+    assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Codex)));
+    i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
+    assert_eq!(p.routing(&i), (Some("stuck".into()), None));
+    i["labels"] = json!([{"name":"claude"}]);
+    i["user"]["login"] = json!("steward[bot]");
+    assert_eq!(p.routing(&i), (Some("machine-inbox".into()), None));
+}
+
+#[test]
 fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identity() {
     let tmp = tempfile::TempDir::new().unwrap();
     let state = tmp.path();
@@ -398,4 +436,29 @@ fn machine_issues_have_roles_while_person_issues_keep_label_engines() {
     assert_eq!(p.machine_role(&i).as_deref(), Some("stuck"));
     i["labels"] = json!([{"name":"drift"}]);
     assert_eq!(p.machine_role(&i).as_deref(), Some("career-drift"));
+}
+
+#[test]
+fn forgetting_a_repository_removes_every_plan_artifact_for_only_that_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    for repo in ["O_R-7", "o_r-8", "o_rx-7", "o_r-x-7", "p_r-7"] {
+        let d = tmp.path().join(".plans").join(repo);
+        fs::create_dir_all(&d).unwrap();
+        for file in ["input", "tasks.json", "worker-split", "stale-notice"] {
+            fs::write(
+                d.join(file),
+                "durable state including child creation receipts",
+            )
+            .unwrap();
+        }
+    }
+    forget(tmp.path(), "o/R").unwrap();
+    for repo in ["O_R-7", "o_r-8"] {
+        assert!(!tmp.path().join(".plans").join(repo).exists());
+    }
+    for repo in ["o_rx-7", "o_r-x-7", "p_r-7"] {
+        for file in ["input", "tasks.json", "worker-split", "stale-notice"] {
+            assert!(tmp.path().join(".plans").join(repo).join(file).exists());
+        }
+    }
 }

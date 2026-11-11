@@ -184,6 +184,13 @@ Each has an entry below, and each can be imported on its own.
   future Unix timestamp, even after a previous release. Successful turns and
   fresh meters cannot release an owner pause; `proj usage back` can.
   Running turns continue, and Codex work remains eligible.
+  `burrow.proj.inbox.planning` defaults on: a fresh Codex
+  planner sizes each inbox task before implementation. Large tasks become
+  ordered child issues, one outstanding child per parent, with a checklist
+  updated when each child's PR lands. Durable creation receipts admit
+  generated children without widening `inbox.authors`. A worker can
+  use `proj split FILE` when its task needs another split. See
+  [task planning](docs/task-planning.md) for the state and retry protocol.
   After a reset, `burrow.proj.usageTrickle` (default 2) caps concurrent Claude
   turns while the pre-reset queue drains, including pipeline turns. The emergency
   `--unstick` slot and Codex remain independent; ordinary concurrency returns
@@ -196,14 +203,18 @@ Each has an entry below, and each can be imported on its own.
   the bare role for that repo, matched case-insensitively.
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
-  `red-main`, `renovate-sweep`, `watchdog`, `triage`, and the
+  `red-main`, `renovate-sweep`, `watchdog`, `triage`, `planner`, and the
   steward's `steward-handed`, `steward-redFixed`, `steward-failFixed`,
   `steward-conflictFixed`, `steward-proved`, and `steward-judged` roles. Inbox issues use `stuck` when they
   have `inbox.unstickLabel`; other bot issues use `machine-inbox`. Machines map
   their own labels to roles with `burrow.proj.inbox.roles` (for example
-  career drift), including machines without an App. Engine labels enroll
+  career drift), including machines without an App; the unstick label
+  wins over that map. Engine labels enroll
   these issues but their roles choose
   the engine each turn, defaulting to Claude when no line matches.
+  The authors' own issues run as `burrow.proj.inbox.ownerRole` when it's
+  set, so the models file can tune them; their engine label still picks
+  the engine.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
   proj jobs retain the roleless form for work an agent hands on.
@@ -309,7 +320,9 @@ Each has an entry below, and each can be imported on its own.
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The
   watchdog's job clears a crash whose cause it fixed with
-  `burrow-units clear EXE`, and a later one is back.
+  `burrow-units clear EXE`, and a later one is back. With
+  `degradations.enable`, repeated soft CI failures feed the same ladder:
+  [workflow degradations](docs/degradations.md) describes the signal and options.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
   on together, the machine's Actions runners and its deploy, keeps moving. A
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that

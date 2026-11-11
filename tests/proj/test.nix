@@ -9,7 +9,7 @@
 # its first is stopped, proj-slots.nix who waits in line and who goes first,
 # and proj-github.nix its GitHub side. They're tests of their own so CI runs
 # them side by side, each on a machine of its own.
-{ self, pkgs }:
+{ self, pkgs, planning ? false }:
 name: script:
 let
   inherit (import ./stand-ins.nix { inherit pkgs; }) claude gh notify;
@@ -60,6 +60,9 @@ pkgs.testers.runNixOSTest {
         maxWait = 45;
         inherit gh;
         inbox = {
+          # The shared lifecycle suite covers the supported planning-off
+          # configuration. proj-planning runs this fixture with planning on.
+          inherit planning;
           enable = true;
           authors = [ "sam" "sam-steward[bot]" ];
         };
@@ -166,6 +169,9 @@ pkgs.testers.runNixOSTest {
             # Only the host-owned question notice may follow the exact empty-token line.
             assert len(lines) == 3 and lines[1] == "", out
             assert re.fullmatch(r"Without an answer by [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z: continue[.] The job will take this reversible default and report the outcome[.]", lines[2]), out
+  ''
+  + pkgs.lib.optionalString planning ''
+    machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"planner claude\\n\" >~/.config/proj/roles && printf \"planner claude selected low\\n\" >~/.config/proj/models'")
   ''
   + script;
 }

@@ -46,6 +46,12 @@
     echo "$args" >/tmp/args
     echo "''${ENABLE_CLAUDEAI_MCP_SERVERS-unset}" >/tmp/connectors
     init() { echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$1\"}"; }
+    case $prompt in
+      *"Plan the size of this task before implementation"*)
+        init planner
+        echo '{"type":"result","session_id":"planner","result":"ready","is_error":false}'
+        exit 0 ;;
+    esac
     bloat() { init bloat; x=$(head -c 512M /dev/zero | tr '\0' x); }
     hang() {
       init hang

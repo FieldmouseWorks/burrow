@@ -35,6 +35,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
+        let paused = crate::inbox::job_paused(cfg, &id);
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             if let Err(e) = crate::question::recover(&job) {
@@ -42,21 +43,20 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 retry.push((String::new(), now() + RETRY));
                 continue 'jobs;
             }
-            match crate::ask::expire(cfg, &job) {
-                Ok(Some(at)) => retry.push((String::new(), at)),
-                Ok(None) => (),
-                Err(e) => {
-                    eprintln!("proj question: {e}");
-                    retry.push((String::new(), now() + RETRY));
+            if !paused {
+                match crate::ask::expire(cfg, &job) {
+                    Ok(Some(at)) => retry.push((String::new(), at)),
+                    Ok(None) => (),
+                    Err(e) => {
+                        eprintln!("proj question: {e}");
+                        retry.push((String::new(), now() + RETRY));
+                    }
                 }
             }
         }
         if let Err(error) = crate::ask::visibility(cfg, &job) {
             eprintln!("proj question: {error}");
             retry.push((String::new(), now() + RETRY));
-        }
-        if crate::ask::host_path(&job, "question-needs-owner").exists() {
-            continue;
         }
         // Notifications are independent of GitHub waits and include stopped
         // and completed jobs. Serialize with starts so rollback stays atomic.
@@ -72,7 +72,21 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             }
             drop(held);
         }
+        // Pausing stops automatic turns, not question reconciliation or
+        // durable notification delivery (including stopped/completed jobs).
+        if paused {
+            if filled(&job.path("await")) || crate::ask::load(&job).is_some() {
+                retry.push((String::new(), now() + RETRY));
+            }
+            continue;
+        }
+        if crate::ask::host_path(&job, "question-needs-owner").exists() {
+            continue;
+        }
         let f = job.path("await");
+        if crate::planning::admit(&job).is_err() {
+            continue;
+        }
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;
         }
@@ -345,6 +359,26 @@ mod codex_tests {
             format!("usage-limit\t1000\t{}\n", now() - 1),
         )
         .unwrap();
+        // A due wake from an inbox job remains parked while its repo is
+        // paused, then joins the ordinary turn queue when enabled again.
+        drop(job);
+        let inbox = cfg.inbox.as_mut().unwrap();
+        inbox.state = d.path().join("inbox");
+        let record = inbox.state.join("sam_r-7");
+        fs::create_dir_all(&record).unwrap();
+        fs::write(record.join("job"), "code").unwrap();
+        fs::write(record.join("drained"), "sam/r#7").unwrap();
+        cfg.paused = vec!["SAM/R".into()];
+        let job = Job::new(&cfg, "code");
+        let parked = fs::read_to_string(job.path("await")).unwrap();
+        look(&cfg, "").unwrap();
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        assert_eq!(fs::read_to_string(job.path("await")).unwrap(), parked);
+        let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();
+        assert!(wake[""].as_i64().unwrap() > now());
+        drop(job);
+        cfg.paused.clear();
+        let job = Job::new(&cfg, "code");
         look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));
         assert!(

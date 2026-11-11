@@ -1,9 +1,10 @@
 //! The drain enrolls issues triage sorted [`READY`] using its configured
-//! engine label. It admits the oldest candidate whose resolved engine has
+//! engine label. It admits the highest ranked candidate whose resolved engine has
 //! room; roles may choose another engine. From there it's an inbox issue
-//! like any other: its job, its answers, closed when it's done. The pipeline's own repos go first, then the rest,
-//! oldest first within each. At most `drain_jobs` of the
-//! issues it handed on have a job at once, and one goes each pass at most;
+//! like any other: its job, its answers, closed when it's done. Priority
+//! goes first, then pipeline repos, then age. At most `drain_jobs` of the
+//! issues it handed on have a queued or running turn at once; one goes each
+//! pass at most.
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
 //! waits in line like any other, never ahead of work someone asked for
 //! (`first` is off for it): a `drained` mark in its issue's record says so,
@@ -73,7 +74,7 @@ impl Pass<'_> {
             return Ok(());
         };
         let waiting = self.inbox.state.join(WAITING);
-        // Its own still going: a record with the mark and a job, or a mark
+        // Count queued/running turns in enabled repos, plus enrollments
         // whose job hasn't started yet. One that hasn't after ten minutes is
         // let go only once GitHub says the issue no longer carries the label
         // (it didn't take, someone took it off, or the issue closed): while
@@ -83,7 +84,7 @@ impl Pass<'_> {
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
-            if !mark.exists() || !self.record_uses_capacity(&d) {
+            if !mark.exists() || self.drain_user(&d).is_none() {
                 continue;
             }
             if d.join("job").exists() {
@@ -99,12 +100,8 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
         }
-        if going >= t.drain_jobs {
-            let _ = fs::remove_file(&waiting);
-            return Ok(());
-        }
         let ranked = self.next_ready(&t);
-        let Some((first, _)) = ranked.first() else {
+        let Some((first, _, _)) = ranked.first() else {
             let _ = fs::remove_file(&waiting);
             return Ok(());
         };
@@ -120,8 +117,10 @@ impl Pass<'_> {
         // the rest of that repo's wait for its pass, and the next repo's go
         // on: one repo can't hold up the others. One is handed on at most.
         let mut passed: BTreeSet<String> = BTreeSet::new();
-        for (repo, n) in ranked {
-            if passed.contains(&repo) {
+        for (repo, n, repair) in ranked {
+            // A full drain only refreshes cached repair candidates. Recheck the
+            // live labels below before granting their capacity exemption.
+            if (going >= t.drain_jobs && !repair) || passed.contains(&repo) {
                 continue;
             }
             let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
@@ -136,6 +135,12 @@ impl Pass<'_> {
             {
                 self.book(&repo, now());
                 passed.insert(repo);
+                continue;
+            }
+            // Repair children bypass ordinary drain capacity and slot reservation.
+            // Their queued turn still enforces the selected engine's hard cap.
+            let unstick = self.lane(&now_issue);
+            if going >= t.drain_jobs && !unstick {
                 continue;
             }
             // Resolve the exact routing metadata the enrollment event will
@@ -160,7 +165,7 @@ impl Pass<'_> {
                     continue;
                 }
             };
-            if !slot::room(self.cfg, engine) {
+            if !unstick && !slot::room(self.cfg, engine) {
                 blocked = true;
                 if engine == Engine::Claude
                     && let Some(spent) = usage::out(self.cfg)
@@ -188,6 +193,22 @@ impl Pass<'_> {
             let _ = fs::remove_file(&waiting);
         }
         Ok(())
+    }
+
+    /// Active turns and enrollments reserve capacity only in enabled repos.
+    fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
+        let named = crate::read(&dir.join("drained"))?;
+        let (repo, n) = named.split_once('#')?;
+        if self.cfg.paused(repo) || (self.inbox.planning && self.has_task_list(Some(repo), n)) {
+            return None;
+        }
+        if let Some(id) = crate::read(&dir.join("job")) {
+            let state = crate::job::Job::new(self.cfg, &id).state();
+            matches!(state.as_str(), "queued" | "running")
+                .then(|| format!("{named} ({id}: {state})"))
+        } else {
+            Some(format!("{named} (enrolling)"))
+        }
     }
 
     /// Whether the issue a `drained` mark names (OWNER/REPO#N) is open with
@@ -251,9 +272,9 @@ impl Pass<'_> {
         swap(&f, &Value::from(ready).to_string()).map_err(|e| io_fail(&f, e))
     }
 
-    /// The ready issues to hand on, next first, as (OWNER/REPO, N), of every
-    /// repo's as its last pass listed them.
-    fn next_ready(&self, t: &Triage) -> Vec<(String, String)> {
+    /// The ready issues to hand on, next first, as (OWNER/REPO, N, repair),
+    /// from every repo's last pass. Repair status comes from the cached labels.
+    fn next_ready(&mut self, t: &Triage) -> Vec<(String, String, bool)> {
         let dir = self.inbox.state.join(READY_LISTS);
         let items: Vec<Value> = fs::read_dir(&dir)
             .map(|d| {
@@ -269,31 +290,53 @@ impl Pass<'_> {
         self.ranked(t, &items)
     }
 
+    pub(super) fn ready_queue(&mut self, t: &Triage) -> String {
+        let users: Vec<_> = dirs(&self.inbox.state, "")
+            .iter()
+            .filter_map(|dir| self.drain_user(dir))
+            .collect();
+        let mut output = format!("drain: {}/{} used\n", users.len(), t.drain_jobs);
+        for user in users {
+            output.push_str(&format!("  {user}\n"));
+        }
+        output.push_str(
+            &self
+                .next_ready(t)
+                .into_iter()
+                .take(5)
+                .enumerate()
+                .map(|(index, (repo, n, _))| format!("ready {}: {repo}#{n}\n", index + 1))
+                .collect::<String>(),
+        );
+        output
+    }
+
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
-    pub(super) fn pick_ready(&self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
-        self.ranked(t, items).into_iter().next()
+    pub(super) fn pick_ready(&mut self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
+        self.ranked(t, items)
+            .into_iter()
+            .next()
+            .map(|(repo, n, _)| (repo, n))
     }
 
     /// Of ready issues, the ones to hand on, in order: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
-    /// pipeline's repos first, then the rest, oldest first.
-    fn ranked(&self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
+    /// priority first, then pipeline repos, then oldest first.
+    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<(String, String, bool)> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
             .keys()
             .map(|repo| (repo.clone(), self.claimed(repo)))
             .collect();
+        let cfg = self.cfg;
         let rank = |repo: &str| {
-            !self
-                .cfg
-                .pipeline_repos
+            !cfg.pipeline_repos
                 .iter()
                 .any(|r| r.eq_ignore_ascii_case(repo))
         };
         items
             .iter()
             .filter(|i| i.get("pull_request").is_none())
-            .filter(|i| self.eligible(i))
             .filter_map(|i| {
                 let url = raw(&i["repository_url"]);
                 let named = url.rsplit('/').take(2).collect::<Vec<_>>();
@@ -305,7 +348,7 @@ impl Pass<'_> {
                     .keys()
                     .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
                     .clone();
-                if self.cfg.paused(&repo) {
+                if !self.eligible(&repo, i) || self.cfg.paused(&repo) {
                     return None;
                 }
                 let labels: Vec<&str> = i["labels"]
@@ -315,21 +358,99 @@ impl Pass<'_> {
                 let theirs = labels.iter().any(|l| {
                     self.inbox.labels.contains_key(*l)
                         || *l == t.owner_label
-                        || *l == self.inbox.unstick_label
                         || t.skip.iter().any(|s| s == l)
                 });
                 let n = raw(&i["number"]);
+                if (self.inbox.planning && self.has_task_list(Some(&repo), &n))
+                    || !self.child_admissible(&repo, &n)
+                {
+                    return None;
+                }
                 let kept = self
                     .inbox
                     .state
                     .join(format!("{}-{n}", key(&repo)))
                     .exists();
-                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n))
-                    .then(|| (rank(&repo), raw(&i["created_at"]), repo, n))
+                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n)).then(
+                    || {
+                        (
+                            priority(i),
+                            rank(&repo),
+                            raw(&i["created_at"]),
+                            repo,
+                            n,
+                            self.lane(i),
+                        )
+                    },
+                )
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|(_, _, repo, n)| (repo, n))
+            .map(|(_, _, _, repo, n, repair)| (repo, n, repair))
             .collect()
     }
+}
+
+/// Highest explicit priority wins; an unlabeled issue is medium.
+pub(super) fn priority(issue: &Value) -> u8 {
+    priority_label(issue).map_or(1, |l| match l {
+        "priority: high" => 0,
+        "priority: low" => 2,
+        _ => 1,
+    })
+}
+pub(super) fn priority_label(issue: &Value) -> Option<&str> {
+    ["priority: high", "priority: medium", "priority: low"]
+        .into_iter()
+        .find(|label| {
+            issue["labels"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(*label)))
+        })
+}
+
+/// Automated inbox wakeups retain their waits while the repo is paused.
+pub(crate) fn job_paused(cfg: &crate::config::Config, id: &str) -> bool {
+    if cfg.paused.is_empty() {
+        return false;
+    }
+    let Some(inbox) = &cfg.inbox else {
+        return false;
+    };
+    // Legacy sorting/planner records have only KEY-N and job, without
+    // source metadata. Both record roots use the same repository key.
+    [inbox.state.clone(), inbox.state.join(".triage")]
+        .iter()
+        .flat_map(|root| dirs(root, ""))
+        .any(|dir| {
+            crate::read(&dir.join("job")).as_deref() == Some(id)
+                && dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.rsplit_once('-'))
+                    .is_some_and(|(repo, _)| {
+                        cfg.paused
+                            .iter()
+                            .any(|paused| key(paused).eq_ignore_ascii_case(repo))
+                    })
+        })
+}
+
+/// The next candidates from the drain's own lists and ranking.
+pub(crate) fn ready_queue(cfg: &crate::config::Config) -> String {
+    let Some(inbox) = cfg.inbox.as_ref() else {
+        return String::new();
+    };
+    let Some(t) = inbox.triage.as_ref().filter(|t| t.drain.is_some()) else {
+        return String::new();
+    };
+    let mut pass = Pass {
+        cfg,
+        inbox,
+        project: super::projects(cfg),
+        wake: std::collections::BTreeMap::new(),
+        unreached: Vec::new(),
+        looked: Vec::new(),
+    };
+    pass.ready_queue(t)
 }
