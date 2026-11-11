@@ -179,7 +179,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl stop proj-retry-transfer.service")
         proj(f"usage hold {int(time.time()) + 3600} --reason transfer-test")
         name, pid = place(job_id)
-        unit = machine.succeed(f"systemd-escape --template=proj-.service '{job_id}'").strip()
+        unit = "proj-" + machine.succeed(f"systemd-escape '{job_id}'").strip() + ".service"
         machine.succeed(f"systemctl --user -M dev@ stop '{unit}'")
         now = int(time.time() * 1_000_000_000)
         checkpoint = {"waited": now - 3600_000_000_000, "said": None,
