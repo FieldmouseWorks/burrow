@@ -322,7 +322,8 @@ pub(crate) mod tests {
 
     use super::{Config, Engine};
 
-    /// A config as the module writes one, for the tests to change.
+    /// A config as the module writes one, with host event publication disabled.
+    /// Tests that exercise publication must supply their own file and receiver.
     pub(crate) fn example() -> Value {
         json!({
             "projects": "/data/dev/src",
@@ -338,9 +339,9 @@ pub(crate) mod tests {
             "maxWait": 1800,
             "stallAfterMinutes": 120,
             "awaitHours": 24,
-            "kick": "http://127.0.0.1:8788/kick",
+            "kick": "",
             "wake": "/var/lib/burrow/proj-watch/wake.json",
-            "waits": "/data/dev/jobs/.waits.json",
+            "waits": null,
             "inboxMark": "<!-- proj-inbox -->",
             "pipelineRepos": ["sam/burrow", "sam/box"],
             "leadRepos": ["sam/burrow"],
@@ -357,6 +358,19 @@ pub(crate) mod tests {
             "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
+    }
+
+    #[test]
+    fn test_configuration_cannot_publish_to_the_host_watchdog() {
+        let cfg: Config = serde_json::from_value(example()).unwrap();
+        assert!(
+            cfg.waits.is_none(),
+            "tests must opt into a temporary watch file"
+        );
+        assert!(
+            cfg.kick.is_empty(),
+            "tests must opt into their own event receiver"
+        );
     }
 
     #[test]
