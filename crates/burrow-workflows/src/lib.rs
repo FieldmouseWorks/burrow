@@ -14,6 +14,7 @@
 
 mod attestation;
 mod commit_signatures;
+mod degradations;
 mod expr;
 mod gate;
 mod harness;
