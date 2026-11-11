@@ -1,0 +1,42 @@
+{
+  "conary": "note v1",
+  "change": "23jm6kvyec6s0m4v6tmvrcn9nf",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 670,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/670",
+  "summary": "proj-inbox: count active turns toward drain capacity",
+  "task": "fieldmouseworks/burrow#661",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "72f3158323fff46c9056fc936de7eec19463150a2ec7335f290c362cadb88f74",
+    "before": "30e9607b809fe838666afb42d85fb1d1991d90ee",
+    "after": "770b5b13f45adf04549106f34dc7593f6012151b",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794433802068
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/670#pullrequestreview-5865239545"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/670"
+    }
+  ]
+}
