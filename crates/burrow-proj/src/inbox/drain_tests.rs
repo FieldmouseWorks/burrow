@@ -806,3 +806,47 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         b.log()
     );
 }
+
+#[test]
+fn full_drain_only_fetches_cached_repair_candidates() {
+    let b = Box::new();
+    let state = &b.cfg.inbox.as_ref().unwrap().state;
+    let busy = state.join("sam_game-99");
+    fs::create_dir_all(&busy).unwrap();
+    fs::write(busy.join("drained"), "sam/game#99\n").unwrap();
+    fs::write(busy.join("job"), "busy\n").unwrap();
+    let old = "2026-10-01T00:00:00Z";
+    let mut queued: Vec<_> = (4..10)
+        .map(|n| found("sam/game", n, "sam", &["ready"], old))
+        .collect();
+    b.pass().note_ready("sam/game", &queued).unwrap();
+    let before = b.log();
+    b.pass().drain().unwrap();
+    assert_eq!(
+        b.log(),
+        before,
+        "a full drain must not fetch ordinary candidates"
+    );
+    let repair_label = b.cfg.inbox.as_ref().unwrap().unstick_label.clone();
+    let repair = found("sam/game", 10, "sam", &["ready", &repair_label], old);
+    queued.push(repair.clone());
+    b.pass().note_ready("sam/game", &queued).unwrap();
+    // Cached repair status only permits the refresh, not admission: losing
+    // the live label must still respect ordinary capacity.
+    let mut ordinary_now = repair.clone();
+    ordinary_now["labels"] = json!([{"name":"ready"}]);
+    on_github(&b, &ordinary_now);
+    b.pass().drain().unwrap();
+    assert!(!b.log().contains("labels[]="), "{}", b.log());
+    on_github(&b, &repair);
+    b.pass().drain().unwrap();
+    let log = b.log();
+    for n in 4..10 {
+        assert!(
+            !log.contains(&format!("api repos/sam/game/issues/{n}")),
+            "{log}"
+        );
+    }
+    assert!(log.contains("api repos/sam/game/issues/10"), "{log}");
+    assert!(log.contains("issues/10/labels -f labels[]=codex"), "{log}");
+}

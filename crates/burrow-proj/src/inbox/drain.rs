@@ -108,7 +108,7 @@ impl Pass<'_> {
             }
         }
         let ranked = self.next_ready(&t);
-        let Some((first, _)) = ranked.first() else {
+        let Some((first, _, _)) = ranked.first() else {
             let _ = fs::remove_file(&waiting);
             return Ok(());
         };
@@ -124,8 +124,10 @@ impl Pass<'_> {
         // the rest of that repo's wait for its pass, and the next repo's go
         // on: one repo can't hold up the others. One is handed on at most.
         let mut passed: BTreeSet<String> = BTreeSet::new();
-        for (repo, n) in ranked {
-            if passed.contains(&repo) {
+        for (repo, n, repair) in ranked {
+            // A full drain only refreshes cached repair candidates. Recheck the
+            // live labels below before granting their capacity exemption.
+            if (going >= t.drain_jobs && !repair) || passed.contains(&repo) {
                 continue;
             }
             let Some(now_issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
@@ -261,9 +263,9 @@ impl Pass<'_> {
         swap(&f, &Value::from(ready).to_string()).map_err(|e| io_fail(&f, e))
     }
 
-    /// The ready issues to hand on, next first, as (OWNER/REPO, N), of every
-    /// repo's as its last pass listed them.
-    fn next_ready(&mut self, t: &Triage) -> Vec<(String, String)> {
+    /// The ready issues to hand on, next first, as (OWNER/REPO, N, repair),
+    /// from every repo's last pass. Repair status comes from the cached labels.
+    fn next_ready(&mut self, t: &Triage) -> Vec<(String, String, bool)> {
         let dir = self.inbox.state.join(READY_LISTS);
         let items: Vec<Value> = fs::read_dir(&dir)
             .map(|d| {
@@ -284,19 +286,22 @@ impl Pass<'_> {
             .into_iter()
             .take(5)
             .enumerate()
-            .map(|(index, (repo, n))| format!("ready {}: {repo}#{n}\n", index + 1))
+            .map(|(index, (repo, n, _))| format!("ready {}: {repo}#{n}\n", index + 1))
             .collect()
     }
 
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
     pub(super) fn pick_ready(&mut self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
-        self.ranked(t, items).into_iter().next()
+        self.ranked(t, items)
+            .into_iter()
+            .next()
+            .map(|(repo, n, _)| (repo, n))
     }
 
     /// Of ready issues, the ones to hand on, in order: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
     /// priority first, then pipeline repos, then oldest first.
-    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<(String, String)> {
+    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<(String, String, bool)> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
             .keys()
@@ -345,12 +350,22 @@ impl Pass<'_> {
                     .state
                     .join(format!("{}-{n}", key(&repo)))
                     .exists();
-                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n))
-                    .then(|| (priority(i), rank(&repo), raw(&i["created_at"]), repo, n))
+                (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n)).then(
+                    || {
+                        (
+                            priority(i),
+                            rank(&repo),
+                            raw(&i["created_at"]),
+                            repo,
+                            n,
+                            self.lane(i),
+                        )
+                    },
+                )
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|(_, _, _, repo, n)| (repo, n))
+            .map(|(_, _, _, repo, n, repair)| (repo, n, repair))
             .collect()
     }
 }
