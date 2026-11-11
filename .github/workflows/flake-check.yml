@@ -678,8 +678,145 @@ jobs:
       - if: inputs.keep-builds && inputs.install-nix
         shell: bash
         run: mkdir -p "$RUNNER_TEMP/kept"
+      # keep-builds: what the last push to the default branch's gate kept,
+      # as the gate's legs restore it, and on the same terms (no PR from a
+      # fork takes any), for nix to substitute from. Every leg's: the checks
+      # a PR's tests change can be any leg's, and each leg kept what its own
+      # checks needed. Each restore unpacks its leg's binary cache into the
+      # one directory, which every leg's entry names (a restore finds an
+      # entry saved from the same path only), so they add up to one cache;
+      # up to eight legs. Restore before installing Nix: opening an empty
+      # file cache in the daemon creates root-owned log/ and nar/, which
+      # prevents Actions extracting it. A lookup distinguishes a genuine
+      # cold cache from an extraction failure: when an entry exists, failing
+      # to restore it must fail this job rather than silently build cold.
+      # Checks the negative tree changes have derivations of their own,
+      # which no gate built, so it builds and runs them; it takes from these
+      # only what they're built from.
+      - id: kept-1
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 1 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-1-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-1-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 1 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-1.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-1-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-1-of-${{ inputs.legs }}-
+      - id: kept-2
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 2 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-2-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-2-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 2 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-2.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-2-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-2-of-${{ inputs.legs }}-
+      - id: kept-3
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 3 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-3-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-3-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 3 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-3.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-3-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-3-of-${{ inputs.legs }}-
+      - id: kept-4
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 4 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-4-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-4-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 4 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-4.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-4-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-4-of-${{ inputs.legs }}-
+      - id: kept-5
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 5 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-5-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-5-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 5 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-5.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-5-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-5-of-${{ inputs.legs }}-
+      - id: kept-6
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 6 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-6-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-6-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 6 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-6.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-6-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-6-of-${{ inputs.legs }}-
+      - id: kept-7
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 7 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-7-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-7-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 7 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-7.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-7-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-7-of-${{ inputs.legs }}-
+      - id: kept-8
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 8 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-
+      - if: ${{ inputs.keep-builds && inputs.install-nix && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 8 }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          fail-on-cache-miss: ${{ steps.kept-8.outputs.cache-hit != '' }}
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-
       - if: inputs.install-nix
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
       # Whether it needs a negative, which git alone can tell.
       - id: paths
         shell: bash
@@ -690,66 +827,6 @@ jobs:
           PATHS_ONLY: 'true'
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
         run: bash "$TOOLS/negative.sh"
-      # keep-builds: what the last push to the default branch's gate kept,
-      # as the gate's legs restore it, and on the same terms (no PR from a
-      # fork takes any), for nix to substitute from. Every leg's: the checks
-      # a PR's tests change can be any leg's, and each leg kept what its own
-      # checks needed. Each restore unpacks its leg's binary cache into the
-      # one directory, which every leg's entry names (a restore finds an
-      # entry saved from the same path only), so they add up to one cache;
-      # one step a leg, up to the eight legs can have, since an expression
-      # has no loop. Only a PR with a negative to build needs them. The
-      # checks the negative tree changes have derivations of their own,
-      # which no gate built, so it builds and runs them; it takes from these
-      # only what they're built from.
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 1 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-1-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-1-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 2 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-2-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-2-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 3 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-3-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-3-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 4 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-4-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-4-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 5 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-5-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-5-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 6 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-6-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-6-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 7 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-7-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-7-of-${{ inputs.legs }}-
-      - if: ${{ inputs.keep-builds && inputs.install-nix && steps.paths.outputs.needs == 'true' && github.event.pull_request.head.repo.full_name == github.repository && inputs.legs >= 8 }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-${{ github.sha }}
-          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-8-of-${{ inputs.legs }}-
       - id: negative
         if: steps.paths.outputs.needs == 'true'
         shell: bash
@@ -757,10 +834,6 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SKIP: ${{ inputs.build-skip }}
-          # Delay opening the file cache until Actions has unpacked it.
-          # The daemon creates root-owned nar/ in an empty cache, which
-          # makes every restore fail with tar's Permission denied.
-          NIX_CONFIG: ${{ inputs.keep-builds && inputs.install-nix && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
           PATHS_ONLY: 'false'
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
         run: bash "$TOOLS/negative.sh"
