@@ -1,5 +1,5 @@
 use burrow_engines_door::{Config, pass};
-use burrow_github::Gh;
+use burrow_github::deferred;
 use std::{fs, process::ExitCode};
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -10,9 +10,9 @@ fn main() -> ExitCode {
     let result = fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|s| serde_json::from_slice::<Config>(&s).map_err(|e| e.to_string()))
-        .and_then(|cfg| pass(&mut Gh::default(), &cfg));
+        .and_then(|cfg| deferred::configured(|api| pass(api, &cfg)));
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("burrow-engines-door: {e}");
             ExitCode::FAILURE

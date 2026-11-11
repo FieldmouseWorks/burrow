@@ -4,7 +4,7 @@
 use std::fs;
 use std::process::{Command, ExitCode};
 
-use burrow_github::Gh;
+use burrow_github::deferred;
 use burrow_ledger_door::Config;
 use burrow_ledger_door::pass::{Cn, Ran, pass};
 
@@ -41,8 +41,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match pass(&mut Gh::default(), &cfg, &Run(&cfg)) {
-        Ok(done) => {
+    match deferred::configured(|api| pass(api, &cfg, &Run(&cfg))) {
+        Ok(Some(done)) => {
             for n in &done.answered {
                 eprintln!("undid {}#{n}", cfg.repo);
             }
@@ -51,6 +51,7 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Ok(None) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("burrow-ledger-door: {e}");
             ExitCode::FAILURE

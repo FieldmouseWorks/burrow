@@ -243,7 +243,7 @@ fn a_repo_that_isnt_private_gets_nothing() {
         "now",
     )
     .unwrap_err();
-    assert!(e.contains("isn't private"), "{e}");
+    assert!(e.why.contains("isn't private"), "{e}");
     assert_eq!(ran, 0);
     assert!(gh.asked("POST").is_empty() && gh.asked("PATCH").is_empty());
     // Nor one GitHub says nothing about.
@@ -282,7 +282,7 @@ fn a_comment_that_fails_leaves_the_issue_open() {
             vec![ok(200, json!({}), &[])],
         );
     let e = pass(&mut gh, &config(), &mut answer, "now").unwrap_err();
-    assert!(e.contains("#3"), "{e}");
+    assert!(e.why.contains("#3"), "{e}");
     let closed: Vec<&str> = gh.asked("PATCH").iter().map(|a| a.1.as_str()).collect();
     assert_eq!(closed, ["repos/sam/box/issues/4"]);
 }
@@ -627,4 +627,97 @@ fn machinery_can_read_deployed_but_other_apps_cannot() {
         assert_eq!(done.answered == vec![7], allowed);
         assert_eq!(bodies(&gh)[0].contains("abc123"), allowed);
     }
+}
+
+#[test]
+fn rate_limits_defer_at_every_door_stage() {
+    for stage in [
+        "list",
+        "author",
+        "comment",
+        "close",
+        "graphql-primary",
+        "graphql-secondary",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let cfg = config();
+        let mut gh = github(
+            true,
+            json!([
+                issue(1, "sam", "probe", json!("memory")),
+                issue(2, "sam", "probe", json!("memory"))
+            ]),
+        );
+        let now = burrow_github::Api::now(&gh);
+        let reset = (now + 600).to_string();
+        let (status, body) = match stage {
+            "graphql-primary" => (
+                200,
+                json!({"errors":[{"type":"RATE_LIMITED","message":"budget exhausted"}]}),
+            ),
+            "graphql-secondary" => (
+                200,
+                json!({"errors":[{"message":"You have exceeded a secondary rate limit"}]}),
+            ),
+            _ => (403, json!({"message":"API rate limit exceeded"})),
+        };
+        for (method, path, replies) in &mut gh.answers {
+            let matches = match stage {
+                "list" => method == "GET" && path.ends_with("/issues"),
+                "author" | "graphql-primary" | "graphql-secondary" => path == "graphql",
+                "comment" => method == "POST" && path.contains("/issues/"),
+                "close" => method == "PATCH",
+                _ => false,
+            };
+            if matches {
+                *replies = vec![ok(
+                    status,
+                    body.clone(),
+                    &[
+                        ("x-ratelimit-remaining", "0"),
+                        ("x-ratelimit-reset", &reset),
+                    ],
+                )]
+                .into();
+            }
+        }
+        let result = burrow_github::deferred::run(Some(&wake), &mut gh, now, |api| {
+            pass(api, &cfg, &mut answer, "now")
+        });
+        assert!(matches!(result, Ok(None)), "{stage}: {result:?}");
+        let booked: Value = serde_json::from_slice(&std::fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked[""], now + 600, "{stage}");
+        if stage != "close" {
+            assert!(gh.asked("PATCH").is_empty(), "{stage}: request closed");
+        }
+    }
+}
+
+#[test]
+fn a_permission_failure_mixed_with_a_rate_limit_remains_a_failure() {
+    let cfg = config();
+    let mut gh = github(
+        true,
+        json!([
+            issue(1, "sam", "probe", json!("memory")),
+            issue(2, "sam", "probe", json!("memory"))
+        ]),
+    );
+    for (method, path, replies) in &mut gh.answers {
+        if method == "POST" && path.contains("/issues/") {
+            *replies = vec![
+                ok(403, json!({"message":"rate limit exceeded"}), &[]),
+                ok(403, json!({"message":"permission denied"}), &[]),
+            ]
+            .into();
+        }
+    }
+    let api = &mut gh as &mut dyn burrow_github::Api;
+    let error = pass(api, &cfg, &mut answer, "now").unwrap_err();
+    assert!(error.retry_at.is_none(), "{error:?}");
+    assert!(
+        error.why.contains("#1") && error.why.contains("#2"),
+        "{error}"
+    );
 }

@@ -1,6 +1,6 @@
 //! The engines door shares proj's checked switch; issue text is never a command.
 use burrow_door::{Door, asked, fenced};
-use burrow_github::Api;
+use burrow_github::{Api, Error};
 use burrow_proj::setups::{Store, valid_name};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,7 +32,7 @@ fn stored<T>(path: &Path, result: std::io::Result<T>) -> Result<T, String> {
     result.map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
+pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
     let door = Door {
         repo: &cfg.repo,
         label: &cfg.label,
@@ -77,7 +77,7 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
                     .map_err(|e| format!("{}: {e}", receipt.display()))?,
             ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", receipt.display())),
+            Err(e) => return Err(format!("{}: {e}", receipt.display()).into()),
         };
         if let Some(pending) = pending {
             door.reply(api, issue.number, &pending.body, &pending.reason)?;
@@ -104,7 +104,7 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), String> {
                 // Keep just the location, never echo issue text or model choices.
                 Err(e) => {
                     if store.pending()? || operation.try_exists().map_err(|e| e.to_string())? {
-                        return Err(e);
+                        return Err(e.into());
                     }
                     let why = diagnostic(&e);
                     let current = store

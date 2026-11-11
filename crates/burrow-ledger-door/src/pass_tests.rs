@@ -215,7 +215,7 @@ fn cn_s_refusal_is_the_answer_and_github_unavailable_leaves_it_open() {
     let mut gh = github(json!([issue(6, "sam", "undo sam/web#5")]));
     let cn = FakeCn::says(75, "", "GitHub: unavailable\n");
     let err = pass(&mut gh, &config(), &cn).unwrap_err();
-    assert!(err.contains("#6: GitHub is unavailable"), "{err}");
+    assert!(err.why.contains("#6: GitHub is unavailable"), "{err}");
     assert!(bodies(&gh).is_empty());
     assert!(closed_as(&gh).is_empty());
 }
@@ -301,4 +301,92 @@ fn an_answer_too_long_for_a_comment_is_cut_and_posted_once() {
     }
     // The long line was refused without running; the long answer ran once.
     assert_eq!(cn.asked.borrow().len(), 1);
+}
+
+#[test]
+fn rate_limits_defer_at_every_door_stage() {
+    for stage in [
+        "list",
+        "author",
+        "comment",
+        "close",
+        "graphql-primary",
+        "graphql-secondary",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let cfg = config();
+        let mut gh = github(json!([
+            issue(1, "sam", "undo sam/web#12"),
+            issue(2, "sam", "undo sam/web#13")
+        ]));
+        let cn = FakeCn::says(0, OPENED, "");
+        let now = burrow_github::Api::now(&gh);
+        let reset = (now + 600).to_string();
+        let (status, body) = match stage {
+            "graphql-primary" => (
+                200,
+                json!({"errors":[{"type":"RATE_LIMITED","message":"budget exhausted"}]}),
+            ),
+            "graphql-secondary" => (
+                200,
+                json!({"errors":[{"message":"You have exceeded a secondary rate limit"}]}),
+            ),
+            _ => (403, json!({"message":"API rate limit exceeded"})),
+        };
+        for (method, path, replies) in &mut gh.answers {
+            let matches = match stage {
+                "list" => method == "GET" && path.ends_with("/issues"),
+                "author" | "graphql-primary" | "graphql-secondary" => path == "graphql",
+                "comment" => method == "POST" && path.contains("/issues/"),
+                "close" => method == "PATCH",
+                _ => false,
+            };
+            if matches {
+                *replies = vec![ok(
+                    status,
+                    body.clone(),
+                    &[
+                        ("x-ratelimit-remaining", "0"),
+                        ("x-ratelimit-reset", &reset),
+                    ],
+                )]
+                .into();
+            }
+        }
+        let result =
+            burrow_github::deferred::run(Some(&wake), &mut gh, now, |api| pass(api, &cfg, &cn));
+        assert!(matches!(result, Ok(None)), "{stage}: {result:?}");
+        let booked: Value = serde_json::from_slice(&std::fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked[""], now + 600, "{stage}");
+        if stage != "close" {
+            assert!(gh.asked("PATCH").is_empty(), "{stage}: request closed");
+        }
+    }
+}
+
+#[test]
+fn a_permission_failure_mixed_with_a_rate_limit_remains_a_failure() {
+    let cfg = config();
+    let mut gh = github(json!([
+        issue(1, "sam", "undo sam/web#12"),
+        issue(2, "sam", "undo sam/web#13")
+    ]));
+    let cn = FakeCn::says(0, OPENED, "");
+    for (method, path, replies) in &mut gh.answers {
+        if method == "POST" && path.contains("/issues/") {
+            *replies = vec![
+                ok(403, json!({"message":"rate limit exceeded"}), &[]),
+                ok(403, json!({"message":"permission denied"}), &[]),
+            ]
+            .into();
+        }
+    }
+    let api = &mut gh as &mut dyn burrow_github::Api;
+    let error = pass(api, &cfg, &cn).unwrap_err();
+    assert!(error.retry_at.is_none(), "{error:?}");
+    assert!(
+        error.why.contains("#1") && error.why.contains("#2"),
+        "{error}"
+    );
 }

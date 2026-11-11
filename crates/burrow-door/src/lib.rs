@@ -13,7 +13,7 @@
 //! close that failed: the issue stays open, and the next pass answers it
 //! again.
 
-use burrow_github::{Api, call, encode, query};
+use burrow_github::{Api, Error, call, encode, query};
 use serde_json::{Value, json};
 
 /// An issue's text, and everyone who wrote it: its opener, each version of
@@ -62,7 +62,7 @@ pub struct Issue {
 
 impl Door<'_> {
     /// The open issues with the label, oldest first: PRs aren't issues.
-    pub fn issues(&self, api: &mut dyn Api) -> Result<Vec<Issue>, String> {
+    pub fn issues(&self, api: &mut dyn Api) -> Result<Vec<Issue>, Error> {
         let repo = self.repo;
         let mut items = Vec::new();
         let mut page = Some(format!(
@@ -70,11 +70,11 @@ impl Door<'_> {
             encode(self.label)
         ));
         while let Some(path) = page {
-            let r = call(api, "GET", &path, None, None).map_err(|e| e.to_string())?;
+            let r = call(api, "GET", &path, None, None)?;
             page = r.next();
-            match r.json().map_err(|e| e.to_string())? {
+            match r.json()? {
                 Value::Array(more) => items.extend(more),
-                _ => return Err(format!("GitHub's list of {repo}'s issues isn't a list")),
+                _ => return Err(format!("GitHub's list of {repo}'s issues isn't a list").into()),
             }
         }
         Ok(items
@@ -106,7 +106,7 @@ impl Door<'_> {
         &self,
         api: &mut dyn Api,
         issue: &Issue,
-    ) -> Result<Result<Value, String>, String> {
+    ) -> Result<Result<Value, String>, Error> {
         self.vetted(api, issue)
             .map(|r| r.map(|i| json!({"title": i["title"], "body": i["body"]})))
     }
@@ -117,7 +117,7 @@ impl Door<'_> {
         &self,
         api: &mut dyn Api,
         issue: &Issue,
-    ) -> Result<Result<(Value, String), String>, String> {
+    ) -> Result<Result<(Value, String), String>, Error> {
         self.vetted(api, issue).map(|r| {
             r.and_then(|i| {
                 let nodes = i["openCycle"]["nodes"]
@@ -140,7 +140,7 @@ impl Door<'_> {
         })
     }
 
-    fn vetted(&self, api: &mut dyn Api, issue: &Issue) -> Result<Result<Value, String>, String> {
+    fn vetted(&self, api: &mut dyn Api, issue: &Issue) -> Result<Result<Value, String>, Error> {
         let who = self.authors.join(" or ");
         if !self.is_author(&issue.opener) {
             return Ok(Err(format!(
@@ -157,8 +157,7 @@ impl Door<'_> {
             owner,
             WRITTEN,
             json!({ "owner": owner, "name": name, "n": issue.number }),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         let issue = &data["repository"]["issue"];
         let by_author = |v: &Value| v.as_str().is_some_and(|l| self.is_author(l));
         let every = |list: &Value, ok: &dyn Fn(&Value) -> bool| {
@@ -185,7 +184,7 @@ impl Door<'_> {
     /// close, as `reason` (GitHub's `state_reason`: `completed`,
     /// `not_planned`). A comment longer than GitHub takes would be refused
     /// on every pass, its issue answered never; cut, it's answered once.
-    pub fn reply(&self, api: &mut dyn Api, n: u64, body: &str, reason: &str) -> Result<(), String> {
+    pub fn reply(&self, api: &mut dyn Api, n: u64, body: &str, reason: &str) -> Result<(), Error> {
         let repo = self.repo;
         call(
             api,
@@ -193,16 +192,14 @@ impl Door<'_> {
             &format!("repos/{repo}/issues/{n}/comments"),
             Some(&json!({ "body": bounded(body) })),
             None,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         call(
             api,
             "PATCH",
             &format!("repos/{repo}/issues/{n}"),
             Some(&json!({ "state": "closed", "state_reason": reason })),
             None,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         Ok(())
     }
 }
