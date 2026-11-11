@@ -46,7 +46,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::job::Job;
-use crate::pick::{Class, Classes, Slot, Waiter, pick, project};
+use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
@@ -315,9 +315,12 @@ fn codex_slot(
     // Claude's line would count as a live waiter there (waiter_alive) while it
     // waits for, or runs in, Codex's pool.
     let queue = cfg.jobs.join(".queue");
+    let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
+    lk.lock()?;
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
     }
+    drop(lk);
     loop {
         if may_hand_over && let Some(to) = successor(cfg) {
             unmark(&job, n)?;
@@ -382,20 +385,15 @@ pub fn take(
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
         if job.path("unstick").exists() && !spent {
+            let lk = File::create(slots.join(".lock"))?;
+            lk.lock()?;
             let _ = fs::remove_file(queue.join(&me));
+            drop(lk);
             // Out of usage by the time it had the slot: back in line.
             if let Some(slot) = unstick_slot(cfg, id, n)? {
                 return Ok(slot);
             }
             continue;
-        }
-        // Waited long enough: among the --first ones now, in its place by WHEN.
-        if let Some(rest) = me.strip_prefix("2-")
-            && now() - came >= cfg.max_wait as i64
-        {
-            let to = format!("1-{rest}");
-            let _ = fs::rename(queue.join(&me), queue.join(&to));
-            me = to;
         }
         // A switch since the last pass: on with the deployed proj, in this
         // place, whether or not a look is due (one the note skips can wait
@@ -408,15 +406,27 @@ pub fn take(
             drop(lk);
             return Err(failed);
         }
+        let lk = File::create(slots.join(".lock"))?;
+        lk.lock()?;
+        // Waited long enough: among the --first ones now, in its place by WHEN.
+        if let Some(rest) = me.strip_prefix("2-")
+            && now() - came >= cfg.max_wait as i64
+        {
+            let to = format!("1-{rest}");
+            let _ = fs::rename(queue.join(&me), queue.join(&to));
+            me = to;
+        }
         if spent {
             if !job.path("unstick").exists() {
                 publish(&queue, &me)?;
             }
+            drop(lk);
             usage::remind(cfg);
             sleep(Duration::from_secs(2));
             continue;
         }
         if !due(&slots, &queue.join(&me), looked) {
+            drop(lk);
             sleep(Duration::from_secs(2));
             continue;
         }
@@ -433,8 +443,6 @@ pub fn take(
         // A slot is taken only under this lock, so one a look sees free stays
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
-        let lk = File::create(slots.join(".lock"))?;
-        lk.lock()?;
         // Out of usage while it waited for the lock: no look, no slot.
         if !due(&slots, &queue.join(&me), looked) || usage::out(cfg).is_some() {
             drop(lk);
@@ -443,13 +451,19 @@ pub fn take(
         }
         let seen = look(cfg, &me, &job.dir, class)?;
         looked = now();
-        let mut picked = pick(cfg, &seen.slots, &seen.line);
-        let draining = usage::last_release(cfg).is_some_and(|release| {
-            seen.line
-                .iter()
-                .any(|w| mtime(&queue.join(&w.name)).is_some_and(|came| came <= release))
-        });
-        trickle(&mut picked, &seen.slots, draining, cfg.usage_trickle);
+        let draining = usage::admission_cutoff(cfg)
+            .is_some_and(|release| draining(&queue, &seen.line, release));
+        let active = seen
+            .slots
+            .iter()
+            .filter(|s| matches!(s, Slot::Held { .. }))
+            .count();
+        let budget = if draining {
+            cfg.usage_trickle.saturating_sub(active)
+        } else {
+            usize::MAX
+        };
+        let picked = pick_budget(cfg, &seen.slots, &seen.line, budget);
         let names: Vec<String> = picked
             .iter()
             .map(|&(i, _)| {
@@ -475,8 +489,8 @@ pub fn take(
                 // The note named this one: the next to go needn't wait it
                 // out, and any others it named find theirs in the next look.
                 fs::write(slots.join(".next"), "")?;
-                drop(lk);
                 let _ = fs::remove_file(queue.join(&me));
+                drop(lk);
                 took_slot(&job, n, &n_slot.to_string())?;
                 return Ok(slot);
             }
@@ -594,17 +608,16 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
     }
 }
 
-/// Apply the reset cap to the already prioritized selection, under the same
-/// admission lock as slot acquisition. Each subsequent look counts the slots
-/// acquired by earlier looks, so separate waiters cannot multiply the cap.
-fn trickle(picked: &mut Vec<(usize, usize)>, slots: &[Slot], draining: bool, limit: usize) {
-    if draining {
-        let active = slots
-            .iter()
-            .filter(|s| matches!(s, Slot::Held { .. }))
-            .count();
-        picked.truncate(limit.saturating_sub(active));
-    }
+/// Queue mutations and this census share the admission lock. An unreadable
+/// place is uncertainty, never evidence that the old queue has drained.
+fn draining(queue: &Path, line: &[Waiter], release: i64) -> bool {
+    line.iter().any(|w| {
+        fs::metadata(queue.join(&w.name))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_none_or(|came| came.as_nanos() < release as u128)
+    })
 }
 
 /// Memory to spare, in MiB: what the kernel says is available, plus what the

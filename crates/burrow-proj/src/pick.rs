@@ -129,6 +129,16 @@ pub struct Waiter {
 /// takes the lowest free slot unless a turn chosen after it needs that one
 /// and only the pipeline's are left for it.
 pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)> {
+    pick_budget(cfg, slots, line, usize::MAX)
+}
+
+/// Allocate reserved shares within the available admission budget.
+pub fn pick_budget(
+    cfg: &Config,
+    slots: &[Slot],
+    line: &[Waiter],
+    budget: usize,
+) -> Vec<(usize, usize)> {
     let general = cfg.max_jobs.saturating_sub(cfg.pipeline_slots);
     let mut held: HashMap<&str, Share> = HashMap::new();
     let (mut theirs, mut ours) = (Vec::new(), Vec::new());
@@ -170,18 +180,20 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
                 .filter(|(_, w)| w.class != Class::Lead),
         );
     for (i, w) in order {
-        if went.len() >= theirs.len() + ours.len() {
+        if went.len() >= (theirs.len() + ours.len()).min(budget) {
             break;
         }
         match w.class {
             Class::Lead => {
-                if lead >= spare + open {
+                if lead
+                    >= (spare + open).min(budget.saturating_sub(owed + pipeline.min(ours.len())))
+                {
                     continue;
                 }
                 lead += 1;
             }
             Class::Pipeline => {
-                if went.len() - others >= spare + ours.len() {
+                if went.len() - others >= (spare + ours.len()).min(budget.saturating_sub(owed)) {
                     continue;
                 }
             }

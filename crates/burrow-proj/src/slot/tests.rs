@@ -32,56 +32,6 @@ const CHILD_ENV: &str = "BURROW_PROJ_TEST_CHILD";
 const JOBS_ENV: &str = "BURROW_PROJ_TEST_JOBS";
 const MAX_JOBS_ENV: &str = "BURROW_PROJ_TEST_MAX_JOBS";
 
-#[test]
-fn reset_backlog_releases_only_the_available_trickle_share() {
-    use crate::pick::{Waiter, pick};
-    let mut cfg: Config = serde_json::from_value(example()).unwrap();
-    cfg.max_jobs = 6;
-    cfg.pipeline_slots = 1;
-    cfg.max_jobs_per_project = 4;
-    let line: Vec<_> = (0..6)
-        .map(|i| Waiter {
-            name: format!("job-{i}"),
-            class: Class::Normal,
-            project: format!("project-{i}"),
-        })
-        .collect();
-    let mut slots = vec![Slot::Free; 6];
-    let mut selected = pick(&cfg, &slots, &line);
-    assert_eq!(selected.len(), 5, "ordinary admission would burst at reset");
-    super::trickle(&mut selected, &slots, true, 2);
-    assert_eq!(selected.len(), 2);
-    let first = selected[0];
-    slots[first.1 - 1] = Slot::Held {
-        class: Some(Class::Normal),
-        project: line[first.0].project.clone(),
-    };
-    let mut selected = pick(&cfg, &slots, &line[1..]);
-    super::trickle(&mut selected, &slots, true, 2);
-    assert_eq!(
-        selected.len(),
-        1,
-        "another waiter must count the first admission"
-    );
-    slots[selected[0].1 - 1] = Slot::Held {
-        class: Some(Class::Pipeline),
-        project: "pipeline".into(),
-    };
-    let mut selected = pick(&cfg, &slots, &line[2..]);
-    super::trickle(&mut selected, &slots, true, 2);
-    assert!(
-        selected.is_empty(),
-        "pipeline work also consumes reset capacity"
-    );
-    let mut selected = pick(&cfg, &slots, &line[2..]);
-    let ordinary = selected.clone();
-    super::trickle(&mut selected, &slots, false, 2);
-    assert_eq!(
-        selected, ordinary,
-        "normal admission returns after the backlog drains"
-    );
-}
-
 fn config(jobs: &Path, max_jobs: usize) -> Config {
     let mut v = example();
     v["jobs"] = jobs.to_str().unwrap().into();
@@ -860,31 +810,6 @@ fn out_of_usage_no_turn_takes_a_slot() {
     until("w0 takes its slot", || took(&jobs, "w0").is_some());
 }
 
-#[test]
-fn usage_reset_trickles_real_waiters_under_the_admission_lock() {
-    let tmp = TempDir::new().unwrap();
-    let jobs = jobs_dir(&tmp);
-    out_of_usage(&jobs);
-    let mut kids = waiters(&jobs, &tmp, &["w0", "w1", "w2", "w3"], 6);
-    fs::write(jobs.join(".usage.released"), now().to_string()).unwrap();
-    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
-    until("two reset turns take slots", || {
-        took(&jobs, "w0").is_some() && took(&jobs, "w1").is_some()
-    });
-    sleep(Duration::from_secs(4));
-    assert_eq!(took(&jobs, "w2"), None, "reset admitted a third turn");
-    assert_eq!(took(&jobs, "w3"), None, "reset admitted a fourth turn");
-    kids.remove(0);
-    until("the next reset turn replaces a finished turn", || {
-        took(&jobs, "w2").is_some()
-    });
-    assert_eq!(took(&jobs, "w3"), None);
-    kids.remove(0);
-    until("the last queued reset turn progresses", || {
-        took(&jobs, "w3").is_some()
-    });
-}
-
 // An --unstick turn already waiting on the --unstick slot when the turn
 // holding it was refused for usage doesn't take it once that lets it go.
 #[test]
@@ -1005,3 +930,5 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
     assert!(queue.join("2-7000000000-code-2").exists());
     drop(slot);
 }
+
+mod reset;

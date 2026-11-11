@@ -110,6 +110,35 @@ pub fn last_release(cfg: &Config) -> Option<i64> {
     released(cfg).ok().filter(|at| *at > 0)
 }
 
+/// Admission's nanosecond cutoff, independent of the later successful-run
+/// watermark used to reject stale refusal records. Serialized with usage changes.
+pub fn admission_cutoff(cfg: &Config) -> Option<i64> {
+    let _lock = lock(cfg).ok()?;
+    match kept(cfg) {
+        Some(s) if s.holds(now()) => None,
+        Some(s) => admission_release(cfg, &s).ok(),
+        None => crate::read(&cfg.jobs.join(".usage.admission"))?
+            .split_once('\t')?
+            .1
+            .parse()
+            .ok(),
+    }
+}
+
+fn admission_release(cfg: &Config, s: &Spent) -> Result<i64, String> {
+    let path = cfg.jobs.join(".usage.admission");
+    if let Some(text) = crate::read(&path)
+        && let Some((at, cutoff)) = text.split_once('\t')
+        && at == format!("{}:{}", s.at, s.until)
+        && let Ok(cutoff) = cutoff.parse()
+    {
+        return Ok(cutoff);
+    }
+    let cutoff = s.release() * 1_000_000_000;
+    swap(&path, &format!("{}:{}\t{cutoff}\n", s.at, s.until)).map_err(|e| e.to_string())?;
+    Ok(cutoff)
+}
+
 /// Its record, holding or not, while it's kept.
 pub fn kept(cfg: &Config) -> Option<Spent> {
     read(cfg).ok().flatten()
@@ -272,6 +301,17 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {
         return;
     }
+    if ends {
+        let s = s.as_ref().unwrap();
+        let cutoff = crate::now_nanos().min(s.until * 1_000_000_000);
+        if let Err(e) = swap(
+            &cfg.jobs.join(".usage.admission"),
+            &format!("{}:{}\t{cutoff}\n", s.at, s.until),
+        ) {
+            eprintln!("proj: admission release: {e}");
+            return;
+        }
+    }
     // What it ended is kept first, past the record: without it, an earlier
     // proj's limit could hold it again.
     if (owner || ends)
@@ -354,6 +394,9 @@ pub fn tend(cfg: &Config) -> Option<i64> {
 /// until it got through, and the record gone a stall's time after the
 /// release.
 fn settle(cfg: &Config, mut s: Spent, now: i64) {
+    if admission_release(cfg, &s).is_err() {
+        return;
+    }
     let settled = !pending(cfg);
     if settled && now >= s.release() + cfg.stall_queued() {
         let _ = fs::remove_file(cfg.jobs.join(FILE));
