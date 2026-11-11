@@ -25,6 +25,7 @@ import urllib.request
 from datetime import datetime
 
 import seal as S
+from admission import JobPaused, paused
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
@@ -686,23 +687,6 @@ def rank(repo):
         return 0
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
-
-class JobPaused(Exception):
-    """Intentional admission hold, never a failed launch or a job id."""
-
-
-def paused(repo):
-    settings = CFG.get("settings")
-    if settings:
-        result = subprocess.run([settings["command"], settings["config"], "decision", repo],
-                                capture_output=True, text=True)
-        if result.returncode != 0:
-            return True
-        decision = json.loads(result.stdout)
-        if decision["retryAt"] is not None:
-            wake(repo, decision["retryAt"])  # ends: the scoped pause expires
-        return not decision["allowed"]
-    return True
 
 
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):
