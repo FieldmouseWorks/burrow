@@ -71,16 +71,23 @@ pub(crate) fn reconcile(cfg: &Config) -> Result<(), String> {
                 let mut cmd = systemd::systemd_run(cfg);
                 cmd.args(["--quiet", "--collect"])
                     .arg(format!("--unit={unit}"));
+                // The saved PATH keeps the proof's tools; its saved
+                // AUTOLAND_CONFIG is an earlier deployment's admission
+                // policy, so the current one replaces it.
                 for word in saved["environment"]
                     .as_str()
                     .unwrap_or("")
                     .split_whitespace()
                 {
                     let word = word.trim_matches('"');
-                    if word.starts_with("AUTOLAND_CONFIG=") || word.starts_with("PATH=") {
+                    if word.starts_with("PATH=") {
                         cmd.arg(format!("--setenv={word}"));
                     }
                 }
+                let Some(current) = &cfg.proof_driver_config else {
+                    return Err("proof build driver's current config is not set".into());
+                };
+                cmd.arg(format!("--setenv=AUTOLAND_CONFIG={}", current.display()));
                 cmd.arg("--")
                     .arg(program)
                     .args(args)
@@ -95,4 +102,47 @@ pub(crate) fn reconcile(cfg: &Config) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_restored_native_build_gets_the_current_admission_config_and_its_saved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let (_rig, mut cfg) = crate::usage::tests::rig();
+        cfg.tools.systemctl = tool("systemctl", "echo inactive");
+        cfg.tools.systemd_run = tool("run", &format!("echo \"$@\" > {}/args", dir.path().display()));
+        let state = dir.path().join("builds");
+        let proof = state.join("proof-o-r-1");
+        fs::create_dir_all(&proof).unwrap();
+        fs::write(proof.join("build.json"), r#"{"repo":"o/r"}"#).unwrap();
+        fs::write(proof.join("policy-paused"), "paused").unwrap();
+        fs::write(
+            proof.join("policy-env.json"),
+            json!({"environment":"PATH=/tools AUTOLAND_CONFIG=/old/autoland.json"}).to_string(),
+        )
+        .unwrap();
+        cfg.proofs_state = Some(state);
+        cfg.proof_build_driver = vec!["/driver".into(), "steward.py".into()];
+        cfg.proof_driver_config = Some("/new/autoland.json".into());
+        cfg.settings = Some(burrow_settings::Config {
+            overlay: dir.path().join("overlay.json"),
+            allowed: vec!["o/r".into()],
+            pipeline_repos: vec![],
+        });
+        reconcile(&cfg).unwrap();
+        let args = fs::read_to_string(dir.path().join("args")).unwrap();
+        assert!(args.contains("--setenv=AUTOLAND_CONFIG=/new/autoland.json"), "{args}");
+        assert!(args.contains("--setenv=PATH=/tools"), "{args}");
+        assert!(!args.contains("/old/"), "{args}");
+    }
 }

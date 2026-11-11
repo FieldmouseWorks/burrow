@@ -5,11 +5,17 @@
   let
     inbox = self.nixosConfigurations.example.extendModules {
       modules = [ {
-        burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; };
+        burrow.proj.inbox = { enable = true; authors = [ { login = "octocat"; id = 1; } ]; };
         burrow.proj.engines.door = { enable = true; repo = "sam/homelab"; label = "switch-engines"; };
         burrow.proj.inbox.triage.skip = [ "custom" ];
       } ];
     };
+    excludesMachinery = authors:
+      builtins.all (author: author.id != inbox.config.burrow.github.machineApp.accountId) authors;
+    injected = inbox.config.burrow.proj.inbox.authors ++ [ {
+      login = "renamed-machinery";
+      id = inbox.config.burrow.github.machineApp.accountId;
+    } ];
   in
   assert inbox.config.systemd.services.burrow-engines-door.serviceConfig.User == inbox.config.burrow.user;
   assert inbox.config.burrow.events.handlers.engines.events == [ "issues" ];
@@ -18,7 +24,8 @@
   assert builtins.elem "switch-engines" inbox.config.burrow.proj.inbox.triage.skip;
   assert builtins.elem "custom" inbox.config.burrow.proj.inbox.triage.skip;
   assert inbox.config.burrow.proj.inbox.planning;
-  assert !(builtins.elem "${inbox.config.burrow.github.machineApp.slug}[bot]" inbox.config.burrow.proj.inbox.authors);
+  assert excludesMachinery inbox.config.burrow.proj.inbox.authors;
+  assert !(excludesMachinery injected);
   assert builtins.elem "pull_request" inbox.config.burrow.events.handlers.proj-inbox.events;
   pkgs.runCommand "proj-config-check" { } ''
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)

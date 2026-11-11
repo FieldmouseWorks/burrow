@@ -98,7 +98,6 @@ impl Pass<'_> {
                 c["id"].as_i64().is_some_and(|id| id > seen)
                     && self.heard(c)
                     && c["user"]["type"] != "Bot"
-                    && !raw(&c["user"]["login"]).ends_with("[bot]")
                     && seconds(&raw(&c["created_at"])).is_some_and(|at| at >= since)
             })
             .collect();

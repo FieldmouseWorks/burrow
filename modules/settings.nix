@@ -36,7 +36,7 @@ in {
       gh = lib.mkOption { type = lib.types.package; default = config.burrow.github.machineGh; internal = true; };
       repo = lib.mkOption { type = lib.types.str; default = ""; description = "Repository accepting settings requests."; };
       label = lib.mkOption { type = lib.types.str; default = "settings"; };
-      authors = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; };
+      authors = lib.mkOption { type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; };
     };
   };
   config = lib.mkMerge [ {

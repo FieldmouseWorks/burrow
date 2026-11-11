@@ -378,10 +378,10 @@ in
         description = "The label that makes an issue an undo request.";
       };
       authors = mkOption {
-        type = types.listOf types.str;
+        type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
         default = config.burrow.probe.authors or [ ];
         defaultText = lib.literalExpression "config.burrow.probe.authors";
-        description = "Who may ask for an undo (GitHub logins): the probe's, by default.";
+        description = "Who may ask for an undo (GitHub accounts and numeric IDs): the probe's, by default.";
       };
     };
 
@@ -458,7 +458,7 @@ in
     };
     burrow.claude.machineMd = lib.mkIf cfg.door.enable (lib.mkOrder 703 ''
       An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
-      `${cfg.door.label}` (as ${lib.concatStringsSep " or " cfg.door.authors}), its body one line:
+      `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.door.authors)}), its body one line:
       `undo OWNER/REPO#N`, `undo --actor SESSION_URL` or
       `undo --since RFC3339_TIME --repo OWNER/REPO`. The undo's PR comes back as
       a comment, and the steward settles it like any other.

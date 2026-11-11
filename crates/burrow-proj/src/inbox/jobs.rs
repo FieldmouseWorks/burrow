@@ -438,12 +438,9 @@ impl Pass<'_> {
                     }
                 }
                 let whole = self.issue_text(repo, &now_issue, &comments);
-                let human_reply = comments.iter().any(|c| {
-                    after(c)
-                        && self.heard(c)
-                        && c["user"]["type"] != "Bot"
-                        && !raw(&c["user"]["login"]).ends_with("[bot]")
-                });
+                let human_reply = comments
+                    .iter()
+                    .any(|c| after(c) && self.heard(c) && c["user"]["type"] != "Bot");
                 let msg = if changed {
                     format!(
                         "The issue has changed since you were handed it: its title or text edited, or a comment on it added, edited or deleted. Any stale split proposal has been invalidated; its original tasks remain in your turn's split-invalid file and any existing children and creation receipts are retained by the host. Reassess the updated task before declaring a split again. As it stands now:\n\n{whole}"

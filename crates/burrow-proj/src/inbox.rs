@@ -357,8 +357,8 @@ impl Pass<'_> {
         self.retry(repo);
     }
 
-    fn allowed(&self, login: &str) -> bool {
-        self.inbox.authors.iter().any(|a| a == login)
+    fn allowed(&self, id: Option<u64>) -> bool {
+        self.inbox.authors.iter().any(|a| a.matches(id))
     }
 
     /// A comment a job may see: one of the authors', and not the inbox's
@@ -368,7 +368,7 @@ impl Pass<'_> {
             .as_str()
             .unwrap_or_default()
             .contains(&self.cfg.inbox_mark)
-            && self.allowed(&raw(&c["user"]["login"]))
+            && self.allowed(c["user"]["id"].as_u64())
     }
 
     /// A new job for the issue, from its text and the comments: its id.
@@ -376,8 +376,8 @@ impl Pass<'_> {
     /// itself: ahead of everything, in a slot kept for it. Anyone else's goes
     /// ahead of the line all the same, since someone's waiting on it, unless
     /// the drain handed it on. The
-    /// job of an issue opened by a bot (REST spells one SLUG[bot], which no
-    /// person's login can be) acts as the machine's App.
+    /// job of an issue GitHub identifies as opened by a bot acts as the
+    /// machine's App.
     fn start(&self, repo: &str, issue: &Value, comments: &[Value]) -> Result<String, Fail> {
         let pipeline = self
             .cfg
@@ -389,7 +389,7 @@ impl Pass<'_> {
             .machinery
             .clone()
             .filter(|m| !m.is_empty() && !self.inbox.vm)
-            .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
+            .filter(|_| issue["user"]["type"] == "Bot");
         // Handed on by the drain, nobody's waiting on it: it takes its place
         // in line.
         let drained = self.drained(repo, &raw(&issue["number"]));
@@ -397,7 +397,7 @@ impl Pass<'_> {
         let new = New {
             admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
             inbox_issue: true,
-            usage_kind: Some(usage::kind(self.cfg.steward_login.as_deref(), issue)),
+            usage_kind: Some(usage::kind(self.cfg.steward_account.as_ref(), issue)),
             vm: self.inbox.vm,
             engine,
             role,
@@ -415,11 +415,7 @@ impl Pass<'_> {
             &self.project[repo],
             &self.task(repo, issue, comments),
         )?;
-        if !drained
-            && !self.lane(issue)
-            && issue["user"]["type"] != "Bot"
-            && !raw(&issue["user"]["login"]).ends_with("[bot]")
-        {
+        if !drained && !self.lane(issue) && issue["user"]["type"] != "Bot" {
             let job = crate::job::Job::new(self.cfg, &id);
             let path = crate::ask::host_path(&job, "question-reader");
             fs::write(&path, "issue author\n").map_err(|e| io_fail(&path, e))?;
@@ -454,11 +450,7 @@ impl Pass<'_> {
                 })
             })
             .map(|(_, role)| role.clone())
-            .or_else(|| {
-                raw(&issue["user"]["login"])
-                    .ends_with("[bot]")
-                    .then(|| "machine-inbox".into())
-            })
+            .or_else(|| (issue["user"]["type"] == "Bot").then(|| "machine-inbox".into()))
     }
 
     /// A Codex label takes precedence when an issue has both labels.
@@ -737,11 +729,11 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             }
             let opener = raw(&issue["user"]["login"]);
-            if !self.allowed(&opener) && !self.generated_child(repo, issue) {
+            if !self.allowed(issue["user"]["id"].as_u64()) && !self.generated_child(repo, issue) {
                 let said = format!(
                     "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
                     self.inbox.host,
-                    self.inbox.authors.join(", "),
+                    burrow_github::author_names(&self.inbox.authors, ", "),
                 );
                 self.refuse(repo, &n, &said, &d)?;
                 continue;
@@ -801,7 +793,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// Whether an agent may read the issue: one of the authors opened it,
     /// and it isn't labelled outside text.
     pub(super) fn eligible(&self, repo: &str, issue: &Value) -> bool {
-        (self.allowed(&raw(&issue["user"]["login"])) || self.generated_child(repo, issue))
+        (self.allowed(issue["user"]["id"].as_u64()) || self.generated_child(repo, issue))
             && !self.outside(issue)
     }
 

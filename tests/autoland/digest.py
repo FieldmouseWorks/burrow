@@ -58,8 +58,8 @@ def fresh(enable=True, app=True, labels=None):
     fresh_pr_state()
     GH.update(fail="")
     R.CFG["inbox"] = {"enable": enable, "labels": {"claude": "claude", "codex": "codex"} if labels is None else labels,
-                      "unstickLabel": "unstick",
-                      "authors": ["sam"] + (["steward[bot]"] if app else [])}
+                      "unstickLabel": "unstick", "postingAccountId": 2,
+                      "authors": [{"login":"sam","id":1}] + ([{"login":"steward[bot]","id":2}] if app else [])}
 
 
 def later(digest):
@@ -193,7 +193,7 @@ OPEN["claude"] = 9
 R.publish(DIGEST)
 owner = made("autoland")
 assert owner and all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
-assert "the steward's login, steward[bot], isn't one of its authors" in owner["--body"], owner["--body"]
+assert "the steward's account, steward[bot], isn't one of its authors" in owner["--body"], owner["--body"]
 assert made("claude") is None and ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
 # Nor when notify.repo isn't cloned where proj-inbox looks; and the clone
 # going away later is seen on the next pass.

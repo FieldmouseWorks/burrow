@@ -13,7 +13,7 @@ let
         cat >/dev/null
         if [ -e /var/lib/settings-fixture/pause ]; then
           cat <<'JSON'
-{"data":{"repository":{"issue":{"id":"one","author":{"login":"sam"},"title":"settings","body":"pause sam/code","openCycle":{"nodes":[]},"userContentEdits":{"totalCount":0,"nodes":[]},"timelineItems":{"totalCount":0,"nodes":[]}}}}}
+{"data":{"repository":{"issue":{"id":"one","author":{"login":"sam","databaseId":1},"title":"settings","body":"pause sam/code","openCycle":{"nodes":[]},"userContentEdits":{"totalCount":0,"nodes":[]},"timelineItems":{"totalCount":0,"nodes":[]}}}}}
 JSON
         else
           printf '{}'
@@ -23,7 +23,7 @@ JSON
       *issues/1*) cat >/dev/null; printf '{}' ;;
       *issues*)
         if [ -e /var/lib/settings-fixture/pause ]; then
-          printf '[{"number":1,"user":{"login":"sam"}}]'
+          printf '[{"number":1,"user":{"login":"sam","id":1}}]'
         else printf '[]'; fi
         ;;
       *) printf '[]' ;;
@@ -38,8 +38,8 @@ in pkgs.testers.runNixOSTest {
     burrow.autoland = {
       enable = true;
       owners = [ "sam" ];
-      authors = [ "sam" ];
-      app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
+      authors = [ { login = "sam"; id = 1; } ];
+      app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
       reviewers.codex.enable = true;
       pipelineRepos = [ "sam/box" ];
     };
@@ -52,11 +52,11 @@ in pkgs.testers.runNixOSTest {
     burrow.proj = {
       enable = true;
       inherit gh;
-      inbox = { enable = true; authors = [ "sam" ]; };
+      inbox = { enable = true; authors = [ { login = "sam"; id = 1; } ]; };
     };
     burrow.settings = {
       allowed = [ "sam/code" "sam/box" ];
-      door = { enable = true; repo = "sam/box"; authors = [ "sam" ]; inherit gh; };
+      door = { enable = true; repo = "sam/box"; authors = [ { login = "sam"; id = 1; } ]; inherit gh; };
     };
     environment.etc."settings-tracked".source = config.burrow.settings.file;
     environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-settings ];

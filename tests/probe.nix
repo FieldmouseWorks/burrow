@@ -46,7 +46,7 @@ let
         reply 200 "$(${pkgs.jq}/bin/jq -c --argjson n "$n" --argjson edits "$edits" '
           .[] | select(.number == $n)
           | { data: { repository: { issue: {
-              author: { login: .user.login }, title, body,
+              author: { login: .user.login, databaseId: .user.id }, title, body,
               userContentEdits: { totalCount: ($edits | length), nodes: $edits },
               timelineItems: { totalCount: 0, nodes: [] } } } } }' $d/issues)" ;;
       "POST repos/sam/homelab/issues/"*/comments)
@@ -74,7 +74,7 @@ pkgs.testers.runNixOSTest {
     burrow.probe = {
       enable = true;
       repo = "sam/homelab";
-      authors = [ "sam" ];
+      authors = [ { login = "sam"; id = 1; } ];
       inherit gh;
       journal.units = [ "leaky.service" ];
     };
@@ -116,7 +116,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"cat >/var/lib/gh/{name} <<'EOF'\n{json.dumps(value)}\nEOF")
 
     def issue(n, login, body):
-        return {"number": n, "user": {"login": login}, "title": "probe", "body": body}
+        return {"number": n, "user": {"login": login, "id": 1 if login == "sam" else 99}, "title": "probe", "body": body}
 
     def posted(n):
         return json.loads(machine.succeed(f"cat /var/lib/gh/posted-{n}"))["body"]
@@ -161,7 +161,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("an author's probe someone else edited runs nothing, and is closed"):
         github("issues", [issue(5, "sam", "journal leaky -1h now")])
-        github("edits-5", [{"editor": {"login": "sam"}, "deletedBy": None}, {"editor": {"login": "mallory"}, "deletedBy": None}])
+        github("edits-5", [{"editor": {"login": "sam", "databaseId": 1}, "deletedBy": None}, {"editor": {"login": "mallory", "databaseId": 99}, "deletedBy": None}])
         machine.succeed("systemctl start burrow-probe.service")
         assert "written or changed by someone other than sam" in posted(5), posted(5)
         assert "leaky:" not in posted(5), posted(5)

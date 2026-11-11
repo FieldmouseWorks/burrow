@@ -1,7 +1,20 @@
 use super::*;
 
-fn admission_cutoff(cfg: &Config) -> Option<i64> {
-    super::super::admission_cutoff(cfg).unwrap()
+use super::cutoff as admission_cutoff;
+
+#[test]
+fn a_moments_hold_is_tried_again_as_admission_tries() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 3600, "pause").unwrap();
+    back(&cfg, None);
+    let want = admission_cutoff(&cfg);
+    assert!(want.is_some());
+    let moment = held_a_moment(&cfg);
+    // One try says taken: slot.rs lets the census go and tries again.
+    let err = super::super::admission_cutoff(&cfg).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(admission_cutoff(&cfg), want);
+    moment.join().unwrap();
 }
 
 #[test]

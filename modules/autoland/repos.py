@@ -514,8 +514,8 @@ def inbox_off():
         return "notify.repo isn't set"
     if not C.project_dir(nrepo):
         return f"{nrepo} isn't cloned in {CFG['projectsDir']}"
-    if C.me() not in ib["authors"]:
-        return f"the steward's login, {C.me()}, isn't one of its authors"
+    if not any(a["id"] == ib["postingAccountId"] for a in ib["authors"]):
+        return f"the steward's account, {C.me()}, isn't one of its authors"
     return ""
 
 

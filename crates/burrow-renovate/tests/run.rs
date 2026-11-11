@@ -51,6 +51,16 @@ if [ "$1" = api ]; then
   fi
   [ "$2 $3 $4" = '-i -X GET' ] || exit 2
   path=$5
+  # GitHub's rate limit, till the time in FAKE/OWNER-limited (an owner's
+  # installation's list) or FAKE/OWNER_REPO-limited (a repo).
+  case "$path" in
+    installation/repositories) limited=$FAKE/$GH_TOKEN_OWNER-limited ;;
+    repos/*/*) limited=$(echo "${path#repos/}" | tr / _); limited=$FAKE/$limited-limited ;;
+  esac
+  if [ -e "$limited" ]; then
+    printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: %s\n\n{"message":"API rate limit exceeded for installation ID 1."}' "$(cat "$limited")"
+    exit 1
+  fi
   case "$path" in
     repos/*)
       case "$path" in
@@ -133,7 +143,7 @@ impl Machine {
         });
         m.config(serde_json::json!({
             "name": "renovate-run", "runLock": m.path("fake/lock"), "runs": m.path("runs"),
-            "app": app,
+            "wake": m.path("wake.json"), "app": app,
             "tools": {"gh": b.join("gh"), "renovate": b.join("renovate"), "covers": b.join("covers")},
         }));
         m
@@ -206,6 +216,13 @@ impl Machine {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// The passes booked in the wake file: none when there's none.
+    fn booked(&self) -> serde_json::Value {
+        fs::read(self.path("wake.json"))
+            .map(|b| serde_json::from_slice(&b).unwrap())
+            .unwrap_or(serde_json::json!({}))
     }
 
     /// When the runs noted for `name` ended.
@@ -484,6 +501,8 @@ fn a_repo_or_an_owner_that_fails_holds_up_none_of_the_rest_but_fails_the_pass() 
         )
     );
     assert_eq!(m.runs(), [filter("kim/c")]);
+    // GitHub's no is a failure, not a wait: nothing is booked.
+    assert_eq!(m.booked(), serde_json::json!({}));
 
     let m = Machine::new(Some(&["sam"]));
     m.set("sam-repos", "sam/broken\nsam/a\n");
@@ -505,7 +524,7 @@ fn what_it_cant_lock_or_note_it_says_and_exits_1() {
     let m = Machine::new(None);
     let lock = m.path("nowhere/run.lock");
     m.config(serde_json::json!({
-        "name": "renovate-run", "runLock": lock, "runs": m.path("runs"), "app": null,
+        "name": "renovate-run", "runLock": lock, "runs": m.path("runs"), "wake": m.path("wake.json"), "app": null,
         "tools": {"gh": bin().join("gh"), "renovate": bin().join("renovate"), "covers": bin().join("covers")},
     }));
     let (code, out, err) = m.run(&[]);
@@ -526,4 +545,111 @@ fn what_it_cant_lock_or_note_it_says_and_exits_1() {
         "{err}"
     );
     assert_eq!(m.runs(), [""]);
+}
+
+/// An hour from now, as GitHub's x-ratelimit-reset has it.
+fn in_an_hour() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600
+}
+
+/// What renovate-run says of a pass it booked again for AT.
+fn booked_again(what: &str, at: u64) -> String {
+    let at = jiff::Timestamp::from_second(at as i64).unwrap();
+    format!("{what}: booked again for {at}, when GitHub's rate limit lifts")
+}
+
+#[test]
+fn a_repo_github_rate_limits_is_booked_again_for_when_it_lifts_not_failed() {
+    for app in [None, Some(&["sam"][..])] {
+        let m = Machine::new(app);
+        let at = in_an_hour();
+        m.set("sam_r-limited", &at.to_string());
+        assert_eq!(
+            m.run(&["sam/r"]),
+            ok(&format!(
+                "{}: GET repos/sam/r: HTTP 403: API rate limit exceeded for installation ID 1.\n",
+                booked_again("sam/r", at)
+            )),
+            "{app:?}"
+        );
+        assert_eq!(m.runs(), Vec::<String>::new());
+        assert_eq!(m.noted(), Vec::<String>::new());
+        assert_eq!(m.booked(), serde_json::json!({"sam/r": at}));
+
+        // The pass burrow-events starts for it once it's due uses it up, and
+        // leaves the rest.
+        fs::remove_file(m.path("fake/sam_r-limited")).unwrap();
+        fs::write(m.path("wake.json"), r#"{"sam/r": 1, "kim/q": 5}"#).unwrap();
+        assert_eq!(m.run(&["sam/r"]), ok(""));
+        assert_eq!(m.runs(), [filter("Sam/R")]);
+        assert_eq!(m.booked(), serde_json::json!({"kim/q": 5}));
+    }
+}
+
+#[test]
+fn a_full_run_books_what_the_rate_limit_held_off_and_runs_the_rest() {
+    let m = Machine::new(Some(&["sam", "kim", "lee"]));
+    let (at, later) = (in_an_hour(), in_an_hour() + 600);
+    m.set("sam-repos", "sam/a\nsam/b\nsam/c\n");
+    m.set("sam_b-limited", &at.to_string());
+    m.set("kim-limited", &later.to_string());
+    m.set("lee-repos", "lee/d\n");
+    assert_eq!(
+        m.run(&[]),
+        ok(&format!(
+            "{}: GET repos/sam/b: HTTP 403: API rate limit exceeded for installation ID 1.\n{}\n{}: GET installation/repositories: HTTP 403: API rate limit exceeded for installation ID 1.\n",
+            booked_again("sam/b", at),
+            booked_again("sam/c", at),
+            booked_again("every repo", later),
+        ))
+    );
+    let calls = m.calls();
+    // sam's limit holds for the rest of sam's repos: not asked again.
+    assert!(
+        !calls.iter().any(|c| c.contains("repos/sam/c")),
+        "{calls:#?}"
+    );
+    let runs: Vec<String> = calls
+        .iter()
+        .filter_map(|c| c.strip_prefix("renovate "))
+        .map(|r| r.split(" token=").next().unwrap().to_string())
+        .collect();
+    // Another owner's installation has a limit of its own.
+    assert_eq!(runs, [filter("sam/a"), filter("lee/d")]);
+    assert_eq!(
+        m.booked(),
+        serde_json::json!({"sam/b": at, "sam/c": at, "": later})
+    );
+
+    // A run that failed still fails the pass, with what was held off booked.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("sam-repos", "sam/a\nsam/b\n");
+    m.set("sam_b-limited", &at.to_string());
+    m.set("renovate-fails", "sam/a");
+    let (code, out, err) = m.run(&[]);
+    assert_eq!(code, Some(1));
+    assert!(out.starts_with(&booked_again("sam/b", at)), "{out}");
+    assert_eq!(err, "sam/a: Renovate's run failed\n");
+    assert_eq!(m.booked(), serde_json::json!({"sam/b": at}));
+
+    // The full pass it starts once due uses its booking up.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("sam-repos", "sam/a\n");
+    fs::write(m.path("wake.json"), r#"{"": 1}"#).unwrap();
+    assert_eq!(m.run(&[]), ok(""));
+    assert_eq!(m.booked(), serde_json::json!({}));
+}
+
+#[test]
+fn a_wait_it_cant_book_is_a_failure() {
+    let m = Machine::new(Some(&["sam"]));
+    m.set("sam_r-limited", &in_an_hour().to_string());
+    fs::create_dir(m.path("wake.json")).unwrap();
+    let (code, _, err) = m.run(&["sam/r"]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("renovate-run: "), "{err}");
 }

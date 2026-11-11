@@ -1,12 +1,12 @@
 //! Persist attribution while the authenticated issue snapshot is in hand.
 use serde_json::Value;
-pub(super) fn kind(steward: Option<&str>, issue: &Value) -> String {
-    let opener = issue["user"]["login"].as_str().unwrap_or_default();
-    let who = if steward.is_some_and(|m| opener.eq_ignore_ascii_case(m)) {
+pub(super) fn kind(steward: Option<&burrow_github::Author>, issue: &Value) -> String {
+    let opener = issue["user"]["id"].as_u64();
+    let who = if steward.is_some_and(|m| m.matches(opener)) {
         "steward App"
-    } else if opener.ends_with("[bot]") || issue["user"]["type"] == "Bot" {
+    } else if issue["user"]["type"] == "Bot" {
         "another App"
-    } else if opener.is_empty() {
+    } else if opener.is_none() {
         "unknown"
     } else {
         "owner"
@@ -33,8 +33,8 @@ mod tests {
             ("workers[bot]", "another App"),
         ] {
             let got = kind(
-                Some("steward[bot]"),
-                &json!({"user":{"login":login},"labels":[{"name":"codex"},{"name":"ready"}],"title":"private", "body":"private"}),
+                Some(&burrow_github::fake::author("steward[bot]")),
+                &json!({"user":burrow_github::fake::actor(login),"labels":[{"name":"codex"},{"name":"ready"}],"title":"private", "body":"private"}),
             );
             assert_eq!(got, format!("inbox labels=codex,ready opener={expected}"));
         }
