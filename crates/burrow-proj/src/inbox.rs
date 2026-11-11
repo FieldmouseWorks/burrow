@@ -333,6 +333,25 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
+    /// A paused record retains its results, but only an active turn consumes
+    /// shared admission capacity. Unstarted handoffs cannot start while paused.
+    pub(super) fn record_uses_capacity(&self, dir: &Path) -> bool {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        let paused = name.rsplit_once('-').is_some_and(|(repo, _)| {
+            self.cfg
+                .paused
+                .iter()
+                .any(|r| key(r).eq_ignore_ascii_case(repo))
+        });
+        !paused
+            || read(&dir.join("job")).is_some_and(|id| {
+                matches!(
+                    Job::new(self.cfg, &id).state().as_str(),
+                    "queued" | "running"
+                )
+            })
+    }
+
     fn book(&mut self, repo: &str, at: i64) {
         let e = self.wake.entry(repo.to_owned()).or_insert(at);
         *e = (*e).min(at);

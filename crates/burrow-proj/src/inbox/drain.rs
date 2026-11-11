@@ -83,7 +83,7 @@ impl Pass<'_> {
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
-            if !mark.exists() {
+            if !mark.exists() || !self.record_uses_capacity(&d) {
                 continue;
             }
             if d.join("job").exists() {

@@ -656,8 +656,12 @@ fn paused_ready_issues_wait_without_relabelling() {
     let mut b = Box::new();
     let paused = found("sam/box", 8, "sam", &["ready"], "2026-10-01T00:00:00Z");
     let active = found("sam/game", 4, "sam", &["ready"], "2026-11-01T00:00:00Z");
-    b.pass().note_ready("sam/box", &[paused.clone()]).unwrap();
-    b.pass().note_ready("sam/game", &[active.clone()]).unwrap();
+    b.pass()
+        .note_ready("sam/box", std::slice::from_ref(&paused))
+        .unwrap();
+    b.pass()
+        .note_ready("sam/game", std::slice::from_ref(&active))
+        .unwrap();
     b.cfg.paused = vec!["SAM/BOX".into()];
     on_github(&b, &active);
     b.pass().drain().unwrap();
@@ -683,4 +687,57 @@ fn a_paused_inbox_pass_and_triage_do_no_work() {
     b.pass().triage("sam/box", &[issue(7, "sam", &[])]).unwrap();
     b.pass().run("sam/box").unwrap();
     assert!(b.log().is_empty(), "{}", b.log());
+}
+
+#[test]
+fn paused_records_keep_results_without_holding_shared_capacity() {
+    let mut b = Box::new();
+    let sorting = super::sorting_tests::sorting(&b, "deferred verdict");
+    let state = b.cfg.inbox.as_ref().unwrap().state.clone();
+    let drained = state.join("sam_box-8");
+    fs::create_dir_all(&drained).unwrap();
+    fs::write(drained.join("drained"), "sam/box#8\n").unwrap();
+    fs::write(drained.join("job"), "s1\n").unwrap();
+    b.cfg.paused = vec!["SAM/BOX".into()];
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .triage
+        .as_mut()
+        .unwrap()
+        .at_once = 1;
+    let p = b.pass();
+    assert!(!p.sorting_slot(&sorting));
+    assert!(!p.record_uses_capacity(&drained));
+    // A genuinely active paused turn still consumes shared capacity.
+    fs::write(b.path("active"), "").unwrap();
+    assert!(p.sorting_slot(&sorting));
+    assert!(p.record_uses_capacity(&drained));
+    fs::remove_file(b.path("active")).unwrap();
+    let ready = found("sam/game", 4, "sam", &["ready"], "2026-11-01T00:00:00Z");
+    p.note_ready("sam/game", std::slice::from_ref(&ready))
+        .unwrap();
+    on_github(&b, &ready);
+    b.pass().drain().unwrap();
+    assert!(
+        b.log().contains("issues/4/labels -f labels[]=codex"),
+        "{}",
+        b.log()
+    );
+    assert!(drained.join("job").exists());
+    assert!(sorting.join("job").exists());
+    // A paused handoff that never got a job reserves no capacity either.
+    fs::remove_file(drained.join("job")).unwrap();
+    assert!(!b.pass().record_uses_capacity(&drained));
+    // Triage uses this predicate to budget atOnce before starting work.
+    assert_eq!(
+        super::dirs(&state.join(".triage"), "")
+            .iter()
+            .filter(|d| b.pass().sorting_slot(d))
+            .count(),
+        0
+    );
+    assert!(sorting.join("job").exists());
+    assert!(!b.posted().contains("deferred verdict"));
 }

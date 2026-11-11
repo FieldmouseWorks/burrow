@@ -6,6 +6,9 @@ use std::{fs, path::Path};
 
 impl Pass<'_> {
     pub(super) fn sorting_slot(&self, d: &Path) -> bool {
+        if !self.record_uses_capacity(d) {
+            return false;
+        }
         read(&d.join("job")).is_some_and(|id| {
             let job = Job::new(self.cfg, &id);
             let Ok(_held) = job.lock() else { return true };
