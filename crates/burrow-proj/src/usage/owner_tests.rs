@@ -570,3 +570,33 @@ fn committed_reference_recovers_precision_even_without_the_retention_journal() {
         assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
     }
 }
+
+#[test]
+fn deploy_scan_repairs_intermediate_records_before_old_running_writers_refuse() {
+    for owner in [false, true] {
+        let (_d, cfg) = rig();
+        if owner {
+            hold(&cfg, now() + 3600, "owner pause").unwrap();
+        } else {
+            record(&cfg, "legacy", Some(now() + 3600), "refused", now() - 10).unwrap();
+        }
+        back(&cfg, None);
+        let released = kept(&cfg).unwrap();
+        // The deployed intermediate generation committed these fields together,
+        // before switching to the fixed writer: no waiter need have run yet.
+        let mut intermediate = serde_json::to_value(&released).unwrap();
+        intermediate["admission"] = released.admission.unwrap().into();
+        fs::write(
+            cfg.jobs.join(FILE),
+            serde_json::to_vec(&intermediate).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            serde_json::from_slice::<LegacySpent>(&fs::read(cfg.jobs.join(FILE)).unwrap()).is_err()
+        );
+        crate::retry::pass(&cfg).unwrap();
+        let _: LegacySpent =
+            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+        assert_eq!(kept(&cfg), Some(released));
+    }
+}

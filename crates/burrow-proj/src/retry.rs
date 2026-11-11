@@ -268,6 +268,11 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
 /// barrier; the system service owns it for the entire deployment, including
 /// this consumer's restarts. A health check verifies its unit is active.
 pub fn pass(cfg: &Config) -> io::Result<()> {
+    // Repair the intermediate generation's serialized admission field before
+    // replacing parents: still-running old writers must be able to record a
+    // refusal while the rest of the transfer is in progress. A busy usage
+    // lock defers this repair without blocking progress in independent pools.
+    let release_error = crate::usage::admission_cutoff(cfg).err();
     let mut busy = false;
     for (pid, id, first) in parents()? {
         let job = Job::new(cfg, &id);
@@ -364,6 +369,9 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if !turn::launch(cfg, &job, state.first) {
             return Err(io::Error::other(format!("couldn't resume {id}")));
         }
+    }
+    if let Some(error) = release_error {
+        return Err(error);
     }
     if busy {
         // The consumer retries this deferred pass explicitly. No lock file
