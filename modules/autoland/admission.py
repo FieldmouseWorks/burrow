@@ -21,4 +21,3 @@ def paused(repo):
             C.wake(repo, decision["retryAt"])  # ends: the scoped pause expires
         return not decision["allowed"]
     return True
-

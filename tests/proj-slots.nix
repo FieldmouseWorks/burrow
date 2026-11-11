@@ -221,7 +221,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj-slots" ''
       assert f"[{demoted}]" in listed, listed
       # A line a job, whatever columns it has: each starts with its id.
       jobs = machine.succeed("ls -1 /data/dev/jobs").splitlines()
-      assert all(any(line.startswith(j + " ") for j in jobs) for line in listed.splitlines()), listed
+      rows = listed.splitlines()
+      assert rows[0].startswith("Automated work: allow list"), listed
+      assert all(any(line.startswith(j + " ") for j in jobs) for line in rows[1:]), listed
       machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
       machine.wait_until_succeeds(f"journalctl -q '_SYSTEMD_USER_UNIT={unit(q)}' | grep -qF \"proj: {demoted}\"", timeout=30)
 ''

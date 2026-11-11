@@ -688,7 +688,6 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
