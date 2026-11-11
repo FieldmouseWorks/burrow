@@ -77,6 +77,18 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// What turn N runs on, in its N.engine, N.model and N.effort: no model
+    /// or effort file for the engine's own.
+    pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) {
+        let _ = fs::write(self.turn(n, "engine"), choice.engine.name());
+        for (kind, said) in [("model", &choice.model), ("effort", &choice.effort)] {
+            match said {
+                Some(v) => drop(fs::write(self.turn(n, kind), v)),
+                None => drop(fs::remove_file(self.turn(n, kind))),
+            }
+        }
+    }
+
     /// The latest turn's number, as written; None before the first.
     pub fn turns(&self) -> Option<String> {
         read(&self.path("turns")).filter(|n| valid_turn(n))

@@ -265,6 +265,9 @@ impl Pass<'_> {
             if self.claimed(repo).contains(parent) {
                 return false;
             }
+            // An observing pass asks GitHub nothing: the child's place rests
+            // on its plan's order alone. The drain asks about the one it
+            // picks, its parents included, before it hands it on.
             if self.observe {
                 if list.next() != Some(index) || !self.child_admissible_at(repo, parent, depth + 1)
                 {

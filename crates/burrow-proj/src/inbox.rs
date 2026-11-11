@@ -333,10 +333,7 @@ struct Pass<'a> {
     /// Repos GitHub couldn't be asked about this pass.
     unreached: Vec<String>,
     looked: Vec<String>,
-    /// Only observing, for the live snapshot: it asks GitHub nothing, and
-    /// takes what the records here say. A planned child's queue place then
-    /// rests on its plan's own order alone; the drain asks GitHub about the
-    /// one it picks, its parents included, before it hands it on.
+    /// Only observing, for the live snapshot: GitHub isn't asked (plans.rs).
     observe: bool,
 }
 
