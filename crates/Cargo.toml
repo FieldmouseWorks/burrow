@@ -10,6 +10,7 @@ members = [
     "burrow-boot",
     "burrow-browser-close",
     "burrow-codex",
+    "burrow-dashboard",
     "burrow-dispatch",
     "burrow-door",
     "burrow-events",

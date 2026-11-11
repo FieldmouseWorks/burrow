@@ -42,7 +42,7 @@ The modules, by job:
 - **The safety net:** `claude`, `undo`, `switch`, `backup`, `ops`,
   `heartbeat`, `robot`
 - **Doing the work:** `remote-control`, `proj`, `probe`, `agents`, `browser`,
-  `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
+  `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
 - **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`
 - **Keeping it current:** `updates`, `house`, `notify`
 
@@ -406,6 +406,18 @@ Each has an entry below, and each can be imported on its own.
   neither the sandboxes' proxy nor the reviewers nor CI can drive it. The
   machine's CLAUDE.md tells Claude to go at a person's pace and to ask before
   anything that posts, sends, pays or deletes as you.
+- **`dashboard`** (`burrow.dashboard`): The machine's own web app, for your
+  devices, on the tailnet alone ([crates/burrow-dashboard](crates/burrow-dashboard)).
+  It listens on localhost and `tailscale serve` puts it on the machine's
+  ts.net name (`host`) over HTTPS: no public name, no open port, no ACME
+  token (the tailnet needs HTTPS certificates on). You sign in with a
+  passkey bound to that name, as the GitHub account `owner`; a device is added
+  with a one-time code printed on the machine, `sudo burrow-dashboard
+  enroll`, as many as you like. Sessions are a cookie (Secure, HttpOnly,
+  SameSite=Strict) that ends after `idleTimeout` unused or `maxAge` at most.
+  It installs as an app (Safari on iOS too), its service worker keeps only
+  the shell, never data, and it says when it's offline. Its passkeys and
+  sessions are in `burrow.stateDir`/dashboard.
 - **`robot`** (`burrow.robot`): `robot status / rescue / reset / wol` for a
   Hetzner dedicated server, through the Robot webservice. The way back in when
   the box is down.

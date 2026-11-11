@@ -60,6 +60,14 @@
       gates.slices = [ "ci" ];
     };
     browser.enable = true;
+    dashboard = {
+      enable = true;
+      host = "burrow.tail1234.ts.net";
+      owner = { id = 583231; login = "sam"; };
+      # A real machine has services.tailscale on and serves it there; the
+      # example has no tailnet.
+      serve.enable = false;
+    };
     # The App the machine's own jobs act as, rather than as sam.
     github = {
       apps.workers = {
