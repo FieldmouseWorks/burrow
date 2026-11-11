@@ -89,7 +89,8 @@ in pkgs.testers.runNixOSTest {
       "repos/o/r/pulls/1/reviews":[], "repos/o/r/commits/a/check-runs":{"check_runs":[]},
       "repos/o/r/commits/a/status":{"state":"success","total_count":0}, "repos/o/r/issues/1/comments":[]
     }.items(): data(path,val)
-    opts="--owned --kick proj-inbox/o/r "
+    baseopts="--owned --kick proj-inbox/o/r "
+    opts="--role testing "+baseopts
     ask=dev("proj run "+opts+"ib fixture-ask")
     eventually(ask,"done")
     aw=dev("proj run "+opts+"ib fixture-await")
@@ -102,7 +103,7 @@ in pkgs.testers.runNixOSTest {
     eventually(queued,"queued")
     queued_turn=machine.succeed("cat /data/dev/jobs/"+queued+"/turns")
     dev("mkdir -p ~/.config/proj && printf 'coding codex\\n' >~/.config/proj/roles")
-    code=dev("proj run --role coding "+opts+"ib hold")
+    code=dev("proj run --role coding "+baseopts+"ib hold")
     eventually(code,"running")
     for j in [run,code]: machine.wait_until_succeeds("test -s /data/dev/jobs/"+j+"/session")
     sessions={j:machine.succeed("cat /data/dev/jobs/"+j+"/session") for j in [run,code]}
@@ -119,7 +120,7 @@ in pkgs.testers.runNixOSTest {
     dev("burrow-proof start "+folder)
     machine.wait_until_succeeds("test -s "+folder+"/ran.json && test -e /data/proof-trees/"+proof+"-1/preserved")
     machine.wait_until_fails("runuser -u dev -- heavy --wait 1 -- true", timeout=15)
-    permitted=dev("proj run --owned --kick proj-inbox/o/web web fixture-finish")
+    permitted=dev("proj run --role testing --owned --kick proj-inbox/o/web web fixture-finish")
     eventually(permitted,"queued")
     dev("settings pause o/r")
     for j in [ask,aw,run,queued,code]: eventually(j,"parked")
