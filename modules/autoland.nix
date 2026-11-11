@@ -288,6 +288,11 @@ let
     export PATH="${lib.makeBinPath stewardTools}''${PATH:+:$PATH}"
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
+  # The hooks' secret and the App's key, which burrow-upkeep reads (hook.rs,
+  # token.rs), and the steward's token.
+  credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
+  # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
+  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward user credentials; git = config.programs.git.package; };
 in
 {
   imports = [
@@ -672,6 +677,21 @@ in
       };
     };
 
+    shadow = mkOption {
+      type = types.listOf (types.strMatching "[^/]+/[^/]+");
+      default = [ ];
+      example = [ "sam/homelab" ];
+      description = ''
+        Repos (OWNER/NAME) whose steward passes Conary's landing flow
+        shadows: after each pass of one, `cn flow compare` decides each of
+        its open PRs as the flow would, writing nothing, and logs those
+        decisions beside the steward's labels and status, in the journal of
+        `autoland-shadow@OWNER-NAME` (autoland/shadow.nix). Read-only: for
+        checking the flow against the steward before a repo switches over.
+        Needs a burrow.ledger.package whose `cn` has `flow compare`.
+      '';
+    };
+
     repos = mkOption {
       type = types.attrsOf types.attrs;
       default = { };
@@ -860,11 +880,11 @@ in
           + (if cfg.dryRun then " status" else lib.optionalString (name == "autoland@") " kick %I");
         TimeoutStartSec = "20min";
         Nice = 10;
-        # The hooks' secret and the App's key, which burrow-upkeep reads
-        # (hook.rs, token.rs).
-        LoadCredential = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
+        LoadCredential = credentials;
       };
-    });
+      # Conary's flow beside a shadowed repo's pass, once it's done.
+      unitConfig.OnSuccess = lib.optionals (name == "autoland@") shadow.onSuccess;
+    }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; };
     # The steward's state, and the reviews: it queues them and takes the
     # snapshots (their checkouts in snapDir, what each keeps of its base in
     # snap/); the reviewers' user reads those, answers in done/, takes
