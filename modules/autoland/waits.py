@@ -87,6 +87,10 @@ def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None, usage_re
     longest recovery from the date a lock file refresh waits for (ripe), or
     else from after the longest taking back of a request. Past that the job
     is told what the sweep's would be."""
+    # A configured pause is deliberate, with no watchdog repair deadline.
+    # The switch event starts a fresh pass when the pause is removed.
+    if C.paused(repo):
+        wait = None
     if wait is None:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return

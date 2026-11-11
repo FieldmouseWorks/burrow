@@ -83,7 +83,7 @@ impl Pass<'_> {
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
-            if !mark.exists() {
+            if !mark.exists() || !self.record_uses_capacity(&d) {
                 continue;
             }
             if d.join("job").exists() {
@@ -305,6 +305,9 @@ impl Pass<'_> {
                     .keys()
                     .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
                     .clone();
+                if self.cfg.paused(&repo) {
+                    return None;
+                }
                 let labels: Vec<&str> = i["labels"]
                     .as_array()
                     .map(|ls| ls.iter().filter_map(|l| l["name"].as_str()).collect())

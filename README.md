@@ -146,8 +146,11 @@ Each has an entry below, and each can be imported on its own.
   slice), and each may have a cap of its own (`jobMemoryMax`, none by
   default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
   GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
-  comes back as a comment and a reply there continues it, and a job that ends
-  `proj done` closes its issue. With `inbox.triage`, every other issue the
+  comes back as a comment and a reply there continues it; `proj done` closes its issue.
+  `burrow.proj.paused = [ "OWNER/REPO" ];` pauses automated inbox, triage,
+  drain and steward jobs for those repositories, without changing labels.
+  Removing a repository resumes it; running jobs continue and settled PRs may merge.
+  With `inbox.triage`, every other issue the
   authors open is sorted by a job of its own (`ready`, `later`, `tracker`, the
   owner's call, or closed as a duplicate or done), and `triage.drain` hands
   `ready` ones to an engine's idle slots ([front door](docs/front-door.md#triage-and-the-drain-issues-nobody-labelled)).
@@ -173,8 +176,10 @@ Each has an entry below, and each can be imported on its own.
   runs again by itself after, `proj status` says why and until when, and
   `HOST-notify` tells you once. `burrow.proj.usage.paid` defaults to false:
   paid extra usage is off, so limits mean waiting for reset, never asking
-  the owner to raise a cap. `proj usage back` releases a stale hold once
-  usage is available.
+  the owner to raise a cap. A fresh engine meter requested after the latest refusal
+  releases the hold and closes its notice when every window is below 100%
+  (or credits are available). Missing, stale or ambiguously ordered readings keep the hold.
+  `proj usage back` also releases it once usage is available.
   `burrow.proj.inbox.planning` defaults on: a fresh Codex
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist

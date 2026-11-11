@@ -10,6 +10,9 @@ use crate::engine::{Choice, Engine};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    /// Repositories whose automated work is paused, without changing labels.
+    #[serde(default)]
+    pub paused: Vec<String>,
     #[serde(default)]
     pub usage_paid: bool,
     /// Where the projects are: each folder in it is one (burrow.projectsDir).
@@ -200,6 +203,10 @@ fn sort_unlabelled() -> bool {
 }
 
 impl Config {
+    pub fn paused(&self, repo: &str) -> bool {
+        self.paused.iter().any(|r| r.eq_ignore_ascii_case(repo))
+    }
+
     /// The config PROJ_CONFIG names.
     pub fn load() -> Result<Config, String> {
         let path = std::env::var_os("PROJ_CONFIG").ok_or("PROJ_CONFIG isn't set")?;

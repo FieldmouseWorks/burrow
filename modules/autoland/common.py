@@ -673,6 +673,14 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
+class JobPaused(Exception):
+    """Intentional admission hold, never a failed launch or a job id."""
+
+
+def paused(repo):
+    return any(repo.casefold() == r.casefold() for r in CFG.get("paused", []))
+
+
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
@@ -684,6 +692,8 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=No
     --key), for whatever finds it by that rather than its id: a key a job
     has is refused. role, the kind of work it is (proj run --role), which
     the machine may run on a model of its own. Returns the job id."""
+    if paused(repo):
+        raise JobPaused(f"{repo}: automated jobs paused")
     if retiring(repo):
         log(f"{repo}: no job until the deleted repo whose name it took on is retired")
         return None
