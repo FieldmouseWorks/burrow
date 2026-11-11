@@ -117,7 +117,7 @@ mod tests {
             for (name, engine) in [
                 ("one", "claude"),
                 ("two", "codex"),
-                ("three", "claude:chosen"),
+                ("three", "codex over 80 claude"),
             ] {
                 fs::write(
                     d.path().join("roles.d").join(name),

@@ -63,6 +63,7 @@ let
   '');
 
   roles = "${config.users.users.${user}.home}/.config/proj/roles";
+  models = "${config.users.users.${user}.home}/.config/proj/models";
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
     inherit (cfg.engines.door) repo label authors;
     state = "${stateDir}/proj-engines";
@@ -96,7 +97,7 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     inherit (cfg) meters;
     usagePaid = cfg.usage.paid;
-    inherit roles;
+    inherit roles models;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
@@ -537,11 +538,14 @@ in
       relay (`proj status` marks it [asks]; `proj reply` answers; a reversible default runs after ${toString cfg.askTimeout}s without an answer, a one-way default stays open for the owner), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.
-      Roles live in ~/.config/proj/roles, one `ROLE ENGINE[:MODEL]` line each.
+      Roles live in ~/.config/proj/roles, one `ROLE ENGINE` line each.
       `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
       other repos and jobs with no repo use the bare role. Duplicate keys fail
       the turn with both lines named. Engines are claude and codex; unlisted
-      roles use Claude. Either kind of line may end with `over PCT ENGINE[:MODEL]`:
+      roles use Claude. Each role's model and effort on each engine live in
+      ~/.config/proj/models, one `ROLE ENGINE MODEL|- [EFFORT]` line each
+      (`-` keeps the engine's own model); unlisted roles keep the engine's
+      own settings. Either kind of roles line may end with `over PCT ENGINE`:
       the turn moves when its engine's fresh meter has any window (five-hour or
       weekly) at PCT and no credits, or Claude is out of usage, and the other
       engine's fresh meter has room (credits, or no window used up).

@@ -161,6 +161,7 @@ pub mod github;
 pub mod guest;
 pub mod inbox;
 pub mod job;
+mod models;
 pub mod pick;
 pub mod probe;
 mod question;

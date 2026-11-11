@@ -10,8 +10,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use super::Engine;
 use super::stream::{answer, resume, stream_names_session};
-use super::{Choice, Engine};
 use crate::{job::Job, read};
 
 /// How much of one answer is passed on: a long one is cut in its middle,
@@ -23,8 +23,8 @@ const KEEP: usize = 16_000;
 /// Claude.
 fn engine_of(job: &Job, m: u64) -> Engine {
     read(&job.turn(&m.to_string(), "engine"))
-        .and_then(|e| Choice::parse(&e).ok())
-        .map_or(Engine::Claude, |c| c.engine)
+        .and_then(|e| Engine::parse(&e).ok())
+        .unwrap_or(Engine::Claude)
 }
 
 /// The turns before turn `n` that `engine`'s conversation hasn't seen, oldest

@@ -213,7 +213,9 @@ pub fn make(agent: &Agent, ask: &Ask) -> Result<String, String> {
     Ok(id)
 }
 
-/// Only the host's model belongs in the guest, never its permissions or hooks.
+/// Only the host's model choices belong in the guest: its `model`, and the
+/// model its subagents run on. Never its other environment, permissions or
+/// hooks.
 fn claude_settings(host_home: &Path) -> Result<serde_json::Value, String> {
     let path = host_home.join(".claude/settings.json");
     let text = match fs::read_to_string(&path) {
@@ -230,6 +232,23 @@ fn claude_settings(host_home: &Path) -> Result<serde_json::Value, String> {
         .filter(|s| !s.is_empty())
     {
         guest["model"] = model.into();
+    }
+    // Explore names `inherit`, so it moves only with the FORCE switch too.
+    let mut env = serde_json::Map::new();
+    for key in [
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    ] {
+        if let Some(v) = settings
+            .pointer(&format!("/env/{key}"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            env.insert(key.into(), v.into());
+        }
+    }
+    if !env.is_empty() {
+        guest["env"] = env.into();
     }
     Ok(guest)
 }
@@ -307,7 +326,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn guest_inherits_only_the_model_at_creation() {
+    fn guest_inherits_only_the_models_at_creation() {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(claude_settings(home.path()).unwrap(), serde_json::json!({}));
         fs::create_dir(home.path().join(".claude")).unwrap();
@@ -321,7 +340,16 @@ pub(crate) mod tests {
             claude_settings(home.path()).unwrap(),
             serde_json::json!({"model":"sandbox-test-id"})
         );
-        fs::write(&settings, r#"{"effortLevel":"high"}"#).unwrap();
+        fs::write(
+            &settings,
+            r#"{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"small-id","CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"1","GH_TOKEN":"secret"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_settings(home.path()).unwrap(),
+            serde_json::json!({"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"small-id","CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"1"}})
+        );
+        fs::write(&settings, r#"{"effortLevel":"high","env":{"OTHER":"x"}}"#).unwrap();
         assert_eq!(claude_settings(home.path()).unwrap(), serde_json::json!({}));
     }
 

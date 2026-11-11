@@ -75,9 +75,13 @@ pub struct Config {
     pub steward_login: Option<String>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
-    /// ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]], outside the repos.
-    /// Missing roles use Claude's default; malformed lines fail the turn.
+    /// ROLE[@OWNER/REPO] ENGINE [over PCT ENGINE], outside the repos.
+    /// Missing roles use Claude; malformed lines fail the turn.
     pub roles: PathBuf,
+    /// ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]: each role's model and
+    /// effort on each engine ([`crate::models`]). Missing roles keep the
+    /// engine's own; malformed lines fail the turn.
+    pub models: PathBuf,
     /// The engines' meters (claude.json, codex.json), written by
     /// usage-reset; absent disables overflow.
     pub meters: Option<PathBuf>,
@@ -226,7 +230,7 @@ impl Config {
     /// Resolve one role once per turn. Every non-comment line must parse,
     /// so a typo never silently sends work to a different engine. Repo scopes
     /// beat bare roles; duplicate keys fail with both lines, even on other roles.
-    pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Choice, String> {
+    pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
         let text = crate::roles::read(&self.roles)?;
         let entries = crate::roles::parse(
             &self.roles,
@@ -237,18 +241,31 @@ impl Config {
         )?;
         Ok(entries
             .into_iter()
-            .filter_map(|(key, choice)| key.specificity(role, repo).map(|rank| (rank, choice)))
+            .filter_map(|(key, engine)| key.specificity(role, repo).map(|rank| (rank, engine)))
             .max_by_key(|(rank, _)| *rank)
-            .map(|(_, choice)| choice)
+            .map(|(_, engine)| engine)
             .unwrap_or_default())
     }
 
+    /// What a turn of ROLE in REPO runs on ENGINE: the models file's model
+    /// and effort for that role on that engine.
+    pub fn choice(&self, role: &str, repo: Option<&str>, engine: Engine) -> Result<Choice, String> {
+        let tuning = crate::models::tuning(&self.models, role, repo, engine)?;
+        Ok(Choice {
+            engine,
+            model: tuning.model,
+            effort: tuning.effort,
+        })
+    }
+
     /// Validate the turn-start configuration without starting a job. Config::load
-    /// already parses the module's JSON; engine validates every external role,
-    /// including unused scopes and overflow choices. Runtime state (meters,
-    /// usage holds and individual jobs) is not machine configuration.
+    /// already parses the module's JSON; engine and choice validate every
+    /// external role and models line, including unused scopes and overflow
+    /// choices. Runtime state (meters, usage holds and individual jobs) is
+    /// not machine configuration.
     pub fn check_config(&self) -> Result<(), String> {
-        self.engine("", None).map(|_| ())
+        self.engine("", None)?;
+        self.choice("", None, Engine::Claude).map(|_| ())
     }
 
     /// How long a turn may wait in line, in seconds.
@@ -272,7 +289,7 @@ fn needs_owner_label() -> String {
 pub(crate) mod tests {
     use serde_json::{Value, json};
 
-    use super::{Choice, Config, Engine};
+    use super::{Config, Engine};
 
     /// A config as the module writes one, for the tests to change.
     pub(crate) fn example() -> Value {
@@ -301,7 +318,7 @@ pub(crate) mod tests {
             "apps": {"workers": "/run/workers.env"},
             "machinery": "workers",
             "notify": "/bin/notify",
-            "roles": "/nowhere/roles",
+            "roles": "/nowhere/roles", "models": "/nowhere/models",
             "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box",
@@ -328,6 +345,20 @@ pub(crate) mod tests {
         assert!(said.contains("unknown engine old-model"), "{said}");
         std::fs::write(&cfg.roles, "unused claude\nother codex over 80 claude\n").unwrap();
         crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
+        // The models file is checked too, an unused role's line included.
+        cfg.models = dir.path().join("models");
+        std::fs::write(&cfg.models, "unused claude - none\n").unwrap();
+        let said = crate::cmd::dispatch(&cfg, &["check-config".into()])
+            .unwrap_err()
+            .say
+            .unwrap();
+        assert!(said.contains("claude takes no effort none"), "{said}");
+        std::fs::write(
+            &cfg.models,
+            "unused codex small max\nother claude - max\nother@sam/code claude -\n",
+        )
+        .unwrap();
+        crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
         // An existing but unreadable roles path must not mean defaults.
         std::fs::remove_file(&cfg.roles).unwrap();
         std::fs::create_dir(&cfg.roles).unwrap();
@@ -344,23 +375,18 @@ pub(crate) mod tests {
         let roles = dir.path().join("roles");
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.roles = roles.clone();
-        assert_eq!(cfg.engine("routine", None).unwrap(), Choice::default());
-        std::fs::write(&roles, "# comment\nroutine codex:chosen\njudge claude\n").unwrap();
-        assert_eq!(
-            cfg.engine("routine", None).unwrap(),
-            Choice {
-                engine: Engine::Codex,
-                model: Some("chosen".into())
-            }
-        );
-        assert_eq!(cfg.engine("judge", None).unwrap(), Choice::default());
-        assert_eq!(cfg.engine("missing", None).unwrap(), Choice::default());
+        assert_eq!(cfg.engine("routine", None).unwrap(), Engine::Claude);
+        std::fs::write(&roles, "# comment\nroutine codex\njudge claude\n").unwrap();
+        assert_eq!(cfg.engine("routine", None).unwrap(), Engine::Codex);
+        assert_eq!(cfg.engine("judge", None).unwrap(), Engine::Claude);
+        assert_eq!(cfg.engine("missing", None).unwrap(), Engine::Claude);
         for bad in [
             "bare",
             "routine old-format",
             "routine unknown",
-            "routine codex:",
-            "routine codex:a$b",
+            // A model is the models file's, never a role's.
+            "routine codex:chosen",
+            "routine claude over 80 codex:burst",
             "routine codex extra",
             "routine claude over 101 codex",
             "routine claude over nope codex",
@@ -384,36 +410,24 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.roles = dir.path().join("roles");
-        let scoped = "work@Sam/Code codex:scoped";
-        let bare = "work claude:bare";
+        let scoped = "work@Sam/Code codex";
+        let bare = "work claude over 80 codex";
         for lines in [format!("{scoped}\n{bare}\n"), format!("{bare}\n{scoped}\n")] {
             std::fs::write(&cfg.roles, lines).unwrap();
-            assert_eq!(
-                cfg.engine("work", Some("sAM/cODE")).unwrap(),
-                Choice {
-                    engine: Engine::Codex,
-                    model: Some("scoped".into())
-                }
-            );
+            assert_eq!(cfg.engine("work", Some("sAM/cODE")).unwrap(), Engine::Codex);
             for repo in [Some("sam/other"), Some("other/code"), None] {
-                assert_eq!(
-                    cfg.engine("work", repo).unwrap(),
-                    Choice {
-                        engine: Engine::Claude,
-                        model: Some("bare".into())
-                    }
-                );
+                assert_eq!(cfg.engine("work", repo).unwrap(), Engine::Claude);
             }
             assert_eq!(
                 cfg.engine("missing", Some("sam/code")).unwrap(),
-                Choice::default()
+                Engine::Claude
             );
         }
         std::fs::write(&cfg.roles, scoped).unwrap();
-        assert_eq!(cfg.engine("work", None).unwrap(), Choice::default());
+        assert_eq!(cfg.engine("work", None).unwrap(), Engine::Claude);
         assert_eq!(
             cfg.engine("work", Some("sam/other")).unwrap(),
-            Choice::default()
+            Engine::Claude
         );
     }
 
@@ -423,7 +437,7 @@ pub(crate) mod tests {
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.roles = dir.path().join("roles");
         for (first, second) in [
-            ("work claude:bare", "work codex"),
+            ("work claude", "work codex"),
             ("work@Sam/Code claude", "work@sam/code codex over 80 claude"),
         ] {
             std::fs::write(

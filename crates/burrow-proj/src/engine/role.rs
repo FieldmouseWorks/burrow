@@ -1,6 +1,6 @@
 //! Role grammar and the fresh weekly reading that may select overflow.
 
-use super::{Choice, Engine};
+use super::Engine;
 use std::path::Path;
 
 /// A scope is one GitHub repo, folded once for matching and duplicate keys.
@@ -12,7 +12,7 @@ pub(crate) struct RoleKey<'a> {
 }
 
 impl<'a> RoleKey<'a> {
-    fn parse(key: &'a str) -> Result<Self, String> {
+    pub(crate) fn parse(key: &'a str) -> Result<Self, String> {
         let (name, repo) = key
             .split_once('@')
             .map_or((key, None), |(name, repo)| (name, Some(repo)));
@@ -35,29 +35,6 @@ impl<'a> RoleKey<'a> {
             Some(scope) if repo.is_some_and(|r| scope.eq_ignore_ascii_case(r)) => Some(1),
             Some(_) => None,
         }
-    }
-}
-
-impl Choice {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        let (engine, model) = s.split_once(':').map_or((s, None), |(e, m)| (e, Some(m)));
-        let engine = match engine {
-            "claude" => Engine::Claude,
-            "codex" => Engine::Codex,
-            _ => return Err(format!("unknown engine {engine}")),
-        };
-        if model.is_some_and(|m| {
-            m.is_empty()
-                || !m
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._:[]-".contains(&b))
-        }) {
-            return Err("invalid model choice".into());
-        }
-        Ok(Self {
-            engine,
-            model: model.map(str::to_owned),
-        })
     }
 }
 
@@ -84,7 +61,7 @@ pub(crate) fn role<'a>(
     meters: Option<&Path>,
     held: bool,
     now: i64,
-) -> Result<(RoleKey<'a>, Choice), String> {
+) -> Result<(RoleKey<'a>, Engine), String> {
     let words: Vec<_> = line.split_whitespace().collect();
     let (name, primary, overflow) = match words.as_slice() {
         [name, choice] => (*name, *choice, None),
@@ -93,21 +70,17 @@ pub(crate) fn role<'a>(
             if !(0.0..=100.0).contains(&pct) {
                 return Err("overflow percent must be 0 to 100".into());
             }
-            (*name, *choice, Some((pct, Choice::parse(other)?)))
+            (*name, *choice, Some((pct, Engine::parse(other)?)))
         }
         _ => {
-            return Err(
-                "expected ROLE[@OWNER/REPO] ENGINE[:MODEL] [over PCT ENGINE[:MODEL]]".into(),
-            );
+            return Err("expected ROLE[@OWNER/REPO] ENGINE [over PCT ENGINE]".into());
         }
     };
-    let primary = Choice::parse(primary)?;
+    let primary = Engine::parse(primary)?;
     Ok((
         RoleKey::parse(name)?,
         match overflow {
-            Some((pct, other)) if over(meters, held, primary.engine, other.engine, pct, now) => {
-                other
-            }
+            Some((pct, other)) if over(meters, held, primary, other, pct, now) => other,
             _ => primary,
         },
     ))
@@ -134,7 +107,6 @@ mod tests {
         role("work claude over 80 codex", Some(dir), held, 10000)
             .unwrap()
             .1
-            .engine
     }
 
     #[test]
@@ -202,17 +174,17 @@ mod tests {
         let back = role("work codex over 80 claude", Some(dir), true, 10000)
             .unwrap()
             .1;
-        assert_eq!(back.engine, Engine::Codex);
+        assert_eq!(back, Engine::Codex);
         meter(dir, "codex", &[("300m", 90.0)], false, 9999);
         let back = role("work codex over 80 claude", Some(dir), false, 10000)
             .unwrap()
             .1;
-        assert_eq!(back.engine, Engine::Claude);
+        assert_eq!(back, Engine::Claude);
         // Nor does it move a turn onto a Claude that's out, whatever its
         // last reading said.
         let back = role("work codex over 80 claude", Some(dir), true, 10000)
             .unwrap()
             .1;
-        assert_eq!(back.engine, Engine::Codex);
+        assert_eq!(back, Engine::Codex);
     }
 }
