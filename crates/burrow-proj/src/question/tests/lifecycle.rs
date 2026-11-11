@@ -32,7 +32,11 @@ esac
 }
 
 fn question(f: &Fixture, one_way: bool, due: i64) -> String {
-    f.ending(1, "ask");
+    question_at(f, 1, one_way, due)
+}
+
+fn question_at(f: &Fixture, turn: u64, one_way: bool, due: i64) -> String {
+    f.ending(turn, "ask");
     crate::ask::ensure(&f.job()).unwrap();
     let text = serde_json::json!({"recommendation":{"default":"original default", "one_way":one_way}, "due":due}).to_string();
     fs::write(crate::ask::host_path(&f.job(), "question"), &text).unwrap();
@@ -235,4 +239,199 @@ fn queued_starts_and_unknown_jobs_preserve_replies_until_exec() {
             }
         }
     }
+}
+
+fn paused_inbox(kind: &str) -> Fixture {
+    let mut f = watched();
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    f.cfg.inbox = cfg.inbox;
+    f.cfg.inbox.as_mut().unwrap().state = f.dir.path().join("inbox");
+    f.cfg.paused = vec!["SAM/R".into()];
+    let root = &f.cfg.inbox.as_ref().unwrap().state;
+    let record = root.join(if matches!(kind, "sorting" | "planner") {
+        ".triage/sam_r-7"
+    } else {
+        "sam_r-7"
+    });
+    fs::create_dir_all(&record).unwrap();
+    fs::write(record.join("job"), "j1").unwrap();
+    if kind == "ordinary" {
+        fs::write(record.join("issue"), "sam/r#7").unwrap();
+    } else if kind == "drained" {
+        fs::write(record.join("drained"), "sam/r#7").unwrap();
+    }
+    // Sorting records intentionally have no source metadata, as on old jobs.
+    if kind == "planner" {
+        fs::write(record.join("planner"), "1").unwrap();
+    }
+    let gh = f.dir.path().join("gh");
+    burrow_test::executable(
+        &gh,
+        "#!/bin/sh\ncase \"$*\" in\n*comments*) printf 'HTTP/2.0 200 OK\\n\\n[]' ;;\n*) printf 'HTTP/2.0 200 OK\\n\\n{\"state\":\"open\",\"labels\":[]}' ;;\nesac\n",
+    );
+    f.cfg.tools.gh = gh;
+    f
+}
+
+#[test]
+fn paused_inbox_kinds_preserve_all_automatic_waits() {
+    for kind in ["ordinary", "drained", "sorting", "planner"] {
+        for wait in ["github", "usage", "question"] {
+            let mut f = paused_inbox(kind);
+            if wait == "question" {
+                question(&f, false, crate::now() - 10);
+            } else {
+                f.ending(1, "await");
+                fs::write(f.job().turn("1", "engine"), "codex").unwrap();
+                let text = if wait == "usage" {
+                    format!("usage-limit\t1000\t{}\n", crate::now() - 1)
+                } else {
+                    format!(
+                        "sam/r#7\t{}\t{{\"state\":\"closed\",\"comments\":0}}\n",
+                        crate::now()
+                    )
+                };
+                fs::write(f.job().path("await"), text).unwrap();
+            }
+            let before = read(&f.job().path("await"));
+            crate::watch::look(&f.cfg, "").unwrap();
+            assert_eq!(f.job().turns().as_deref(), Some("1"), "{kind}: {wait}");
+            assert_eq!(read(&f.job().path("await")), before, "{kind}: {wait}");
+            if wait == "question" {
+                assert!(crate::ask::load(&f.job()).is_some());
+            }
+            f.cfg.paused.clear();
+            crate::watch::look(&f.cfg, "").unwrap();
+            assert_eq!(f.job().turns().as_deref(), Some("2"), "{kind}: {wait}");
+            assert!(f.job().path("prompt.2").exists());
+        }
+    }
+}
+
+#[test]
+fn paused_question_maintenance_retries_open_close_and_recovery() {
+    for end in ["stop", "done", "answer"] {
+        let f = paused_inbox("ordinary");
+        f.flag("fail-open");
+        question(&f, false, crate::now() + 3600);
+        crate::watch::look(&f.cfg, "").unwrap();
+        assert!(f.deliveries().is_empty());
+        f.clear("fail-open");
+        crate::watch::look(&f.cfg, "").unwrap();
+        assert!(f.deliveries().contains("Question 1?"));
+
+        // A failed human resume is recovered even while automatic turns pause.
+        publish(&f, true, false);
+        crate::watch::look(&f.cfg, "").unwrap();
+        assert!(crate::ask::load(&f.job()).is_some());
+        assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("1"));
+
+        // Cleanup survives stop and failed durable notification delivery.
+        fs::write(
+            crate::ask::host_path(&f.job(), "label"),
+            serde_json::json!({"repo":"sam/r","number":"7","name":f.cfg.waiting_owner_label})
+                .to_string(),
+        )
+        .unwrap();
+        f.flag("fail-close");
+        match end {
+            "stop" => crate::cmd::stop(&f.cfg, "j1", false).unwrap(),
+            "done" => {
+                f.ending(3, "done");
+                crate::ask::finish(&f.cfg, &f.job(), "done").unwrap();
+                crate::cmd::finish(&f.cfg, "j1").unwrap();
+            }
+            "answer" => crate::turn::start_answer(&f.cfg, "j1", "approved", false).unwrap(),
+            _ => unreachable!(),
+        }
+        crate::watch::look(&f.cfg, "").unwrap();
+        assert!(!crate::ask::host_path(&f.job(), "label").exists(), "{end}");
+        assert!(!f.job().turn("1", "question-closed").exists());
+        assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+        f.clear("fail-close");
+        crate::watch::look(&f.cfg, "").unwrap();
+        assert!(f.job().turn("1", "question-closed").exists());
+    }
+}
+
+#[test]
+fn one_way_notices_survive_timeout_and_pause_until_answered_or_stopped() {
+    for kind in ["ordinary", "drained", "sorting", "planner", "manual"] {
+        for end in ["answer", "stop"] {
+            let mut f = paused_inbox(kind);
+            if kind == "manual" {
+                f.cfg.inbox = None;
+            }
+            question(&f, true, crate::now() - 1);
+            f.cfg.paused.clear();
+            f.flag("fail-open");
+            crate::watch::look(&f.cfg, "").unwrap();
+            assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
+            assert_eq!(f.job().turns().as_deref(), Some("2"));
+            assert!(
+                !f.job().turn("1", "question-close").exists(),
+                "{kind}: {end}"
+            );
+            f.clear("fail-open");
+            for paused in [false, true, true, false, false] {
+                f.cfg.paused = if paused { vec!["sam/r".into()] } else { vec![] };
+                crate::watch::look(&f.cfg, "").unwrap();
+                assert_eq!(f.job().turns().as_deref(), Some("2"));
+                assert!(
+                    !f.job().turn("1", "question-close").exists(),
+                    "{kind}: {end}: {paused}"
+                );
+                assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+            }
+            // Failed human starts must not close the still-unanswered notice.
+            let resume = Resume::prepare(&f.job(), true).unwrap();
+            crate::turn::write_prompt(
+                &f.job().path("prompt.3"),
+                &resume.prompt("undelivered answer"),
+            )
+            .unwrap();
+            f.job().set_turns(3).unwrap();
+            std::mem::forget(resume);
+            crate::watch::look(&f.cfg, "").unwrap();
+            assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
+            assert!(!f.job().turn("1", "question-close").exists());
+            f.flag("fail-close");
+            if end == "answer" {
+                crate::turn::start_answer(&f.cfg, "j1", "owner decision", false).unwrap();
+            } else {
+                crate::cmd::stop(&f.cfg, "j1", false).unwrap();
+            }
+            crate::watch::look(&f.cfg, "").unwrap();
+            assert!(!crate::ask::host_path(&f.job(), "question-needs-owner").exists());
+            assert!(f.job().turn("1", "question-close").exists());
+            assert!(!f.job().turn("1", "question-closed").exists());
+            f.clear("fail-close");
+            crate::watch::look(&f.cfg, "").unwrap();
+            assert!(f.job().turn("1", "question-closed").exists());
+        }
+    }
+}
+
+#[test]
+fn pending_owner_notice_does_not_block_an_older_close_or_its_own_open() {
+    let f = watched();
+    question(&f, false, crate::now() + 3600);
+    f.flag("fail-close");
+    f.ending(2, "done");
+    crate::ask::finish(&f.cfg, &f.job(), "done").unwrap();
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(!f.job().turn("1", "question-closed").exists());
+
+    f.flag("fail-open");
+    question_at(&f, 3, true, crate::now() - 1);
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
+    assert!(!f.job().turn("3", "question-close").exists());
+    assert!(!f.dir.path().join("remote-proj-question-j1-3").exists());
+    f.clear("fail-open");
+    f.clear("fail-close");
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(f.job().turn("1", "question-closed").exists());
+    assert!(!f.job().turn("3", "question-close").exists());
+    assert!(f.dir.path().join("remote-proj-question-j1-3").exists());
 }

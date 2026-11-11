@@ -965,6 +965,7 @@ fn say(f: Fail) {
 
 mod claims;
 mod drain;
+pub(crate) use drain::job_paused;
 mod jobs;
 mod plans;
 mod retirement;
