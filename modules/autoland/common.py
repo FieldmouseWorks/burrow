@@ -26,7 +26,7 @@ from datetime import datetime
 
 import seal as S
 from admission import JobPaused, paused
-from proof_state import build_unit, user_systemctl, user_systemctl_run, build_state
+from proof_state import build_unit, user_systemctl, user_systemctl_run as user_systemctl_run, build_state
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
@@ -829,7 +829,6 @@ def holding(lines, key):
 # ended (end.json); everything that asks after a job asks after it the same
 # way (lifecycle, stop_job).
 BUILD = "proof-"
-
 
 
 def jobs():
