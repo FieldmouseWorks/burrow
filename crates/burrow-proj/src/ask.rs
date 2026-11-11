@@ -146,6 +146,9 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         return Ok(Some(crate::now() + 60));
     }
     let Some(q) = load(job) else { return Ok(None) };
+    if crate::planning::admit(job).is_err() {
+        return Ok(Some(crate::now() + 60));
+    }
     if job.end_pending() || matches!(job.state().as_str(), "queued" | "running") {
         return Ok(Some(q.due.max(crate::now() + 60)));
     }
@@ -319,6 +322,42 @@ mod tests {
         assert!(prompt.contains("Take your reversible recommended answer now: keep the change"));
         assert!(!prompt.contains("question is still posted"));
         assert!(load(&job).is_none());
+    }
+    #[test]
+    fn split_intent_defers_both_question_expiry_transitions_without_losing_state() {
+        for one_way in [false, true] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, one_way);
+            fs::write(job.turn("1", "split"), "[]").unwrap();
+            let before = fs::read(host_path(&job, "question")).unwrap();
+            let _held = job.lock().unwrap();
+            assert!(expire(&cfg, &job).unwrap().is_some());
+            assert_eq!(job.turns().as_deref(), Some("1"));
+            assert_eq!(fs::read(host_path(&job, "question")).unwrap(), before);
+            assert!(!job.turn("2", "end").exists());
+            // Even a legacy synthetic turn cannot hide an earlier intent.
+            job.set_turns(2).unwrap();
+            assert_eq!(crate::planning::pending_split(&job).as_deref(), Some("1"));
+            assert!(crate::planning::admit(&job).is_err());
+        }
+    }
+    #[test]
+    fn split_holds_without_question_work_do_not_schedule_wakes() {
+        for state in ["held", "retired", "closed", "unenrolled"] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, true);
+            fs::write(job.turn("1", "split"), "[]").unwrap();
+            fs::write(job.path("planning-hold"), "1").unwrap();
+            if state == "held" {
+                clear(&job);
+            } else {
+                crate::cmd::stop(&cfg, "j1", false).unwrap();
+                assert!(job.turn("1", "stopped").exists());
+            }
+            let _held = job.lock().unwrap();
+            assert_eq!(expire(&cfg, &job).unwrap(), None, "{state}");
+            assert_eq!(job.turns().as_deref(), Some("1"));
+        }
     }
     #[test]
     fn expired_one_way_question_completes_without_an_engine_and_stays_visible() {

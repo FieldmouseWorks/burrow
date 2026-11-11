@@ -84,14 +84,29 @@ pub(crate) fn resolve(
     repo: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<Choice, String> {
-    let mut engine = cfg.engine(role, repo)?;
+    let mut engine = cfg.engine_default(
+        role,
+        repo,
+        if role == "planner" {
+            Engine::Codex
+        } else {
+            Engine::Claude
+        },
+    )?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
     }
     if role == "steward-judged" {
         engine = Engine::Claude;
     }
-    cfg.choice(role, repo, engine)
+    let choice = cfg.choice(role, repo, engine)?;
+    if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
+        return Err(
+            "the planner role requires an explicit small model on Claude; its default is Codex"
+                .into(),
+        );
+    }
+    Ok(choice)
 }
 
 /// Normalized terminal records let the job lifecycle and log reader share outcomes.
@@ -187,6 +202,27 @@ pub fn ended(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn planning_defaults_to_codex_and_never_falls_through_to_the_claude_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.roles = tmp.path().join("roles");
+        cfg.models = tmp.path().join("models");
+        assert_eq!(
+            resolve(&cfg, "planner", None, None).unwrap().engine,
+            Engine::Codex
+        );
+        fs::write(&cfg.roles, "planner claude\n").unwrap();
+        assert!(
+            resolve(&cfg, "planner", None, None)
+                .unwrap_err()
+                .contains("explicit small model")
+        );
+        fs::write(&cfg.models, "planner claude selected\n").unwrap();
+        let chosen = resolve(&cfg, "planner", None, None).unwrap();
+        assert_eq!(chosen.engine, Engine::Claude);
+        assert_eq!(chosen.model.as_deref(), Some("selected"));
+    }
     #[test]
     fn a_judge_never_routes_to_codex_even_with_a_role_or_inbox_override() {
         let dir = tempfile::tempdir().unwrap();

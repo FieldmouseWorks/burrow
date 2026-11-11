@@ -165,6 +165,7 @@ pub mod inbox;
 pub mod job;
 mod models;
 pub mod pick;
+pub mod planning;
 pub mod probe;
 mod question;
 pub mod retry;

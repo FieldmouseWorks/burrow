@@ -55,6 +55,7 @@ fn start_with(
     answered: bool,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
+    crate::planning::admit(&job)?;
     let unit = job.unit();
     if job
         .turns()
