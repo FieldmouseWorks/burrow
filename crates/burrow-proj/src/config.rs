@@ -85,9 +85,9 @@ pub struct Config {
     /// `apps`: what a bot's issue's job, and every Codex turn with no App
     /// of its own, acts as ([`crate::turn::github_app`]). None for none.
     pub machinery: Option<String>,
-    /// The steward App's GitHub login, distinct from the App running jobs.
+    /// The steward App's account, distinct from the App running jobs.
     #[serde(default)]
-    pub steward_login: Option<String>,
+    pub steward_account: Option<burrow_github::Author>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// ROLE[@OWNER/REPO] ENGINE [over PCT ENGINE], outside the repos.
@@ -179,7 +179,7 @@ pub struct Inbox {
     /// line (proj run --unstick): the steward's stuck issue's.
     pub unstick_label: String,
     /// Whose issues and replies it acts on.
-    pub authors: Vec<String>,
+    pub authors: Vec<burrow_github::Author>,
     /// Its jobs run in agent sandboxes (proj run --vm).
     pub vm: bool,
     /// The machine's name, as its comments sign it.
@@ -396,7 +396,7 @@ pub(crate) mod tests {
             "roles": "/nowhere/roles", "models": "/nowhere/models",
             "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
-                      "authors": ["sam"], "vm": false, "host": "box",
+                      "authors": [burrow_github::fake::author("sam")], "vm": false, "host": "box",
                       "wake": "/var/lib/burrow/proj-inbox/wake.json"},
             "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}

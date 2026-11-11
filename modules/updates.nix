@@ -282,10 +282,14 @@ let
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
   # renovate-run (crates/burrow-renovate), with its config built in.
+  renovateWake = "${cfg.renovate.dir}/wake.json";
   renovateRunConfig = pkgs.writeText "renovate-run.json" (builtins.toJSON {
     name = "renovate-run";
     runLock = "${cfg.renovate.dir}/run.lock";
     runs = "${cfg.renovate.dir}/runs";
+    # The renovate handler's: what GitHub's rate limit holds off is booked
+    # again there for when it lifts.
+    wake = renovateWake;
     app = if machineApp == null then null else {
       inherit (machineApp) env;
       inherit (cfg.renovate) owners;
@@ -835,6 +839,7 @@ in
         renovate = {
           events = [ "push" "pull_request" "check_suite" "status" ];
           unit = "renovate";
+          wake = renovateWake;
           pushes = "default";
           branches = [ "renovate/*" ];
         };

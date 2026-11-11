@@ -331,13 +331,13 @@ impl Pass<'_> {
             .machinery
             .clone()
             .filter(|m| !m.is_empty() && !self.inbox.vm)
-            .filter(|_| raw(&issue["user"]["login"]).ends_with("[bot]"));
+            .filter(|_| issue["user"]["type"] == "Bot");
         let new = New {
             admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
             unstick: self.lane(issue),
             task_source: (self.inbox.planning && input.len() > crate::planning::MAX_INPUT)
                 .then(|| input.clone()),
-            usage_kind: Some(super::usage::kind(self.cfg.steward_login.as_deref(), issue)),
+            usage_kind: Some(super::usage::kind(self.cfg.steward_account.as_ref(), issue)),
             vm: self.inbox.vm && !self.inbox.planning,
             owned: true,
             kicks: vec!["proj-inbox".into()],

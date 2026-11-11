@@ -223,7 +223,7 @@ const UPDATED: &str = "2026-11-01T00:00:00Z";
 pub(super) fn issue(n: u64, opener: &str, labels: &[&str]) -> Value {
     json!({
         "number": n,
-        "user": {"login": opener},
+        "user": burrow_github::fake::actor(opener),
         "title": "Fix it",
         "body": "It's broken.",
         "html_url": format!("https://github.com/sam/box/issues/{n}"),
@@ -285,7 +285,7 @@ fn an_unfinished_job_keeps_its_issue_open() {
         .to_string();
     fs::write(
         b.path("comments"),
-        json!([[{"id": 9, "user": {"login": "sam"}, "body": "one more thing", "created_at": now}]])
+        json!([[{"id": 9, "user": burrow_github::fake::actor("sam"), "body": "one more thing", "created_at": now}]])
             .to_string(),
     )
     .unwrap();
@@ -552,7 +552,7 @@ fn a_job_lets_go_of_an_issue_it_may_no_longer_read() {
         let d = b.record("j1");
         fs::write(
             b.path("comments"),
-            json!([[{"id": 9, "user": {"login": "sam"}, "body": "the red one",
+            json!([[{"id": 9, "user": burrow_github::fake::actor("sam"), "body": "the red one",
                      "created_at": "2026-11-01T00:00:00Z"}]])
             .to_string(),
         )
@@ -667,7 +667,7 @@ fn a_verdict_on_a_changed_issue_is_dropped() {
         .unwrap();
     assert_eq!(fs::read_to_string(d.join("did")).unwrap(), "2\n");
     fs::remove_file(b.path("fail")).unwrap();
-    let said = |who: &str, id: u64, body: &str| json!({"id": id, "user": {"login": who}, "body": body, "created_at": UPDATED});
+    let said = |who: &str, id: u64, body: &str| json!({"id": id, "user": burrow_github::fake::actor(who), "body": body, "created_at": UPDATED});
     let mark = &b.cfg.inbox_mark;
     // Its own answer alone isn't a change: the close goes ahead.
     fs::write(
@@ -906,7 +906,7 @@ fn existing_machine_issue_jobs_adopt_the_role_and_drop_the_label_pin() {
         .as_mut()
         .unwrap()
         .authors
-        .push("steward[bot]".into());
+        .push(burrow_github::fake::author("steward[bot]"));
     b.job("j1", "done", "Nothing's stuck.");
     b.record("j1");
     let job = crate::job::Job::new(&b.cfg, "j1");

@@ -211,6 +211,14 @@ into project jobs.
   from stopping the old job, so a reopened issue starts afresh even while a
   notice is pending. Long lists of unread replies are delivered in batches.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
+  Author lists use `{ login = "NAME"; id = ACCOUNT_ID; }`, shared by the inbox,
+  engines door, probe and undo door. The positive numeric account ID grants
+  access; the login is only a display label. GitHub's authenticated REST
+  `user.id` and GraphQL `databaseId` identify openers and every writer,
+  including editors, title changers, commenters and edit deleters. A reused
+  login never transfers access. An App's `accountId` is its bot user's ID,
+  distinct from its App `id`.
+
   and comments are ignored, labelled or not, except that a labelled issue
   someone else opened gets one comment saying no job will start. Claude jobs
   have the box user's permissions. Codex jobs write

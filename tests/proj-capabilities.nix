@@ -57,7 +57,7 @@ in pkgs.testers.runNixOSTest {
         readPaths = [ "/run/reach" ];
       };
       github.apps.workers = {
-        id = 7; slug = "test-workers"; keyFile = "/run/keys/workers.pem"; users = [ "dev" ];
+        id = 7; accountId = 8; slug = "test-workers"; keyFile = "/run/keys/workers.pem"; users = [ "dev" ];
       };
       github.machinery = "workers";
     };

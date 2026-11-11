@@ -32,10 +32,10 @@ pub struct Config {
     /// The label that makes an issue a probe.
     pub label: String,
     /// Who may ask (GitHub logins, any case).
-    pub authors: Vec<String>,
+    pub authors: Vec<burrow_github::Author>,
     /// The configured machinery App, using the same read-only door.
     #[serde(default)]
-    pub machinery: Option<String>,
+    pub machinery: Option<burrow_github::Author>,
     /// The machine's name, for the answer's first line.
     pub host: String,
     /// The user it runs as, whose user manager `units`, `rc` and `queue`

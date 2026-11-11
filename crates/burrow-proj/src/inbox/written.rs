@@ -2,7 +2,7 @@
 use super::Pass;
 use serde_json::{Value, json};
 
-const QUERY: &str = "query($owner:String!,$name:String!,$n:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$n){author{login __typename} title body userContentEdits(first:100){totalCount nodes{editor{login __typename} deletedBy{login __typename}}} timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){totalCount nodes{... on RenamedTitleEvent{actor{login __typename}}}} comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} totalCount nodes{databaseId author{login __typename} body createdAt userContentEdits(first:100){totalCount nodes{editor{login __typename} deletedBy{login __typename}}}}}}}}";
+const QUERY: &str = "query($owner:String!,$name:String!,$n:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$n){author{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} title body userContentEdits(first:100){totalCount nodes{editor{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} deletedBy{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }}}} timelineItems(itemTypes:[RENAMED_TITLE_EVENT],first:100){totalCount nodes{... on RenamedTitleEvent{actor{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }}}}} comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} totalCount nodes{databaseId author{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} body createdAt userContentEdits(first:100){totalCount nodes{editor{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }} deletedBy{login __typename ... on User { databaseId } ... on Bot { databaseId } ... on Organization { databaseId }}}}}}}}}";
 /// Verified text plus the original snapshot, retained only for refresh comparisons.
 pub(super) struct Written {
     pub issue: Value,
@@ -20,14 +20,7 @@ impl Written {
 
 impl Pass<'_> {
     fn writer(&self, actor: &Value) -> bool {
-        actor["login"].as_str().is_some_and(|login| {
-            let login = if actor["__typename"] == "Bot" && !login.ends_with("[bot]") {
-                format!("{login}[bot]")
-            } else {
-                login.to_owned()
-            };
-            self.allowed(&login)
-        })
+        self.allowed(actor["databaseId"].as_u64())
     }
     fn writers(&self, list: &Value, field: &str) -> bool {
         list["nodes"].as_array().is_some_and(|nodes| {
@@ -90,7 +83,7 @@ impl Pass<'_> {
                 "The issue's title or body has an untrusted or unknown writer. Ask an authorized author for a new issue."
             );
         }
-        let comments = nodes.iter().filter(|c| self.authored(c)).map(|c| json!({"id":c["databaseId"], "user":{"login": if c["author"]["__typename"] == "Bot" { json!(format!("{}[bot]", c["author"]["login"].as_str().unwrap_or_default().trim_end_matches("[bot]"))) } else { c["author"]["login"].clone() }}, "body":c["body"], "created_at":c["createdAt"]})).collect();
+        let comments = nodes.iter().filter(|c| self.authored(c)).map(|c| json!({"id":c["databaseId"], "user":{"id":c["author"]["databaseId"],"type":c["author"]["__typename"],"login": if c["author"]["__typename"] == "Bot" { json!(format!("{}[bot]", c["author"]["login"].as_str().unwrap_or_default().trim_end_matches("[bot]"))) } else { c["author"]["login"].clone() }}, "body":c["body"], "created_at":c["createdAt"]})).collect();
         Some(Written {
             issue: safe,
             comments,
@@ -135,13 +128,59 @@ mod tests {
     }
     fn text() -> Value {
         let edits = json!({"totalCount":0,"nodes":[]});
-        json!({"author":{"login":"sam"},"title":"trusted title","body":"trusted body", "userContentEdits":edits,"timelineItems":edits,"comments":{"totalCount":1,"nodes":[{"databaseId":9,"author":{"login":"sam"},"body":"trusted reply","createdAt":"2026-11-01T00:00:00Z","userContentEdits":edits}]}})
+        json!({"author":burrow_github::fake::actor("sam"),"title":"trusted title","body":"trusted body", "userContentEdits":edits,"timelineItems":edits,"comments":{"totalCount":1,"nodes":[{"databaseId":9,"author":burrow_github::fake::actor("sam"),"body":"trusted reply","createdAt":"2026-11-01T00:00:00Z","userContentEdits":edits}]}})
+    }
+    #[test]
+    fn a_reused_login_does_not_authorize_any_issue_text() {
+        let b = Box::new();
+        let mut rest = issue(7, "sam", &["claude"]);
+        rest["user"]["id"] = json!(999);
+        let mut exposed = vec![("opener", b.pass().eligible("sam/box", &rest))];
+        for role in ["author", "editor", "actor", "commenter", "deleter"] {
+            let mut t = text();
+            let spoof = json!({"login":"sam","databaseId":999});
+            match role {
+                "author" => t["author"] = spoof,
+                "editor" => {
+                    t["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":spoof}]})
+                }
+                "deleter" => {
+                    t["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":burrow_github::fake::actor("sam"),"deletedBy":spoof}]})
+                }
+                "actor" => t["timelineItems"] = json!({"totalCount":1,"nodes":[{"actor":spoof}]}),
+                _ => t["comments"]["nodes"][0]["author"] = spoof,
+            }
+            let written = b.pass().checked("sam/box", &rest, &t).unwrap();
+            if role == "commenter" {
+                exposed.push((role, !written.comments.is_empty()));
+            } else {
+                exposed.push((role, written.issue["title"] != "Issue text withheld"));
+            }
+        }
+        assert!(
+            exposed.iter().all(|(_, unsafe_text)| !unsafe_text),
+            "{exposed:?}"
+        );
+    }
+    #[test]
+    fn an_account_keeps_its_authority_after_a_login_change() {
+        let b = Box::new();
+        let mut rest = issue(7, "sam", &[]);
+        rest["user"]["login"] = json!("renamed-account");
+        assert!(b.pass().eligible("sam/box", &rest));
+        let mut t = text();
+        t["author"]["login"] = json!("renamed-account");
+        t["comments"]["nodes"][0]["author"]["login"] = json!("renamed-account");
+        let written = b.pass().checked("sam/box", &rest, &t).unwrap();
+        assert_eq!(written.issue["title"], "trusted title");
+        assert_eq!(written.comments.len(), 1);
+        assert!(b.pass().heard(&written.comments[0]));
     }
     #[test]
     fn outside_edits_never_reach_a_job() {
         let b = Box::new();
         let rest = issue(7, "sam", &["claude"]);
-        let bad = json!({"totalCount":1,"nodes":[{"editor":{"login":"mallory"},"actor":{"login":"mallory"}}]});
+        let bad = json!({"totalCount":1,"nodes":[{"editor":burrow_github::fake::actor("mallory"),"actor":burrow_github::fake::actor("mallory")}]});
         for field in ["userContentEdits", "timelineItems"] {
             let mut edited = text();
             edited[field] = bad.clone();
@@ -191,7 +230,7 @@ mod tests {
             Value::Null,
             json!({"totalCount":101,"nodes":[]}),
             json!({"totalCount":1,"nodes":[{"editor":null}]}),
-            json!({"totalCount":1,"nodes":[{"editor":{"login":"sam"},"deletedBy":{"login":"mallory"}}]}),
+            json!({"totalCount":1,"nodes":[{"editor":burrow_github::fake::actor("sam"),"deletedBy":burrow_github::fake::actor("mallory")}]}),
         ] {
             let mut t = text();
             t["userContentEdits"] = history;
@@ -206,15 +245,16 @@ mod tests {
     }
 
     #[test]
-    fn graphql_bot_names_match_rest_authors() {
+    fn graphql_bot_ids_match_rest_authors() {
         let mut b = Box::new();
         b.cfg
             .inbox
             .as_mut()
             .unwrap()
             .authors
-            .push("worker[bot]".into());
-        let bot = json!({"login":"worker","__typename":"Bot"});
+            .push(burrow_github::fake::author("worker[bot]"));
+        let bot = json!({"login":"worker","__typename":"Bot","databaseId":burrow_github::fake::author("worker[bot]").id});
+        assert!(!b.pass().writer(&json!({"login":"worker", "__typename":"User", "databaseId":burrow_github::fake::author("worker").id})));
         let mut t = text();
         t["author"] = bot.clone();
         t["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":bot}]});
@@ -231,7 +271,7 @@ mod tests {
         assert!(b.pass().heard(&comments[0]));
         // An old bot issue at the cap is still unprovable. Its publisher
         // must replace it, not receive an exception to the trust boundary.
-        t["userContentEdits"] = json!({"totalCount":100,"nodes":vec![json!({"editor":{"login":"worker","__typename":"Bot"}});100]});
+        t["userContentEdits"] = json!({"totalCount":100,"nodes":vec![json!({"editor":{"login":"worker","__typename":"Bot","databaseId":burrow_github::fake::author("worker[bot]").id}});100]});
         assert_eq!(
             b.pass()
                 .checked("sam/box", &issue(7, "worker[bot]", &[]), &t)
@@ -256,8 +296,7 @@ mod tests {
     fn retained_authorized_edits_cannot_hide_a_pruned_outsider() {
         let b = Box::new();
         for count in [99, 100] {
-            let history =
-                json!({"totalCount":count,"nodes":vec![json!({"editor":{"login":"sam"}}); count]});
+            let history = json!({"totalCount":count,"nodes":vec![json!({"editor":burrow_github::fake::actor("sam")}); count]});
             for comment in [false, true] {
                 let mut t = text();
                 if comment {

@@ -173,6 +173,10 @@ in
           type = types.ints.positive;
           description = "The App's ID, from its settings page.";
         };
+        accountId = mkOption {
+          type = types.ints.positive;
+          description = "The bot account’s numeric user ID, distinct from the App ID.";
+        };
         slug = mkOption {
           type = types.str;
           description = "The App's slug: GitHub shows its bot as SLUG[bot].";
