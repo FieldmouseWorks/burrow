@@ -200,7 +200,7 @@ impl Config {
     pub fn paused(&self, repo: &str) -> bool {
         self.settings
             .as_ref()
-            .is_some_and(|s| !s.allows(repo).unwrap_or(false))
+            .is_none_or(|s| !s.allows(repo).unwrap_or(false))
     }
 
     pub fn retry_at(&self, repo: &str) -> Option<i64> {
@@ -330,6 +330,7 @@ pub(crate) mod tests {
     /// A config as the module writes one, for the tests to change.
     pub(crate) fn example() -> Value {
         json!({
+            "settings": {"overlay":"", "allowed":["sam/box","sam/burrow","sam/game","sam/web"], "pipelineRepos":[]},
             "projects": "/data/dev/src",
             "jobs": "/data/dev/jobs",
             "scratch": "/data/dev/scratch",

@@ -32,6 +32,18 @@ def admission(allowed, pipeline=(), until=None):
     return {"command": SETTINGS, "config": path}
 
 
+# Existing scenarios opt their fixture repos in; production has no such list.
+DEFAULT_ADMISSION = admission([
+    "sam/r", "sam/other", "sam/q", "sam/u", "sam/up", "sam/uu", "sam/p",
+    "sam/app", "sam/later", "sam/new", "sam/fresh", "sam/tool", "sam/swept",
+    "sam/old", "sam/was", "sam/took", "sam/config", "sam/.cfg", "sam/.github",
+    "sam/empty", "sam/alias", "sam/plain", "sam/notes", "sam/now", "sam/latest",
+    "sam/mirrored", "sam/lo-k", "sam/flaky", "sam/homelab", "sam/absent", "sam/bad",
+    "sam/gone", "sam/nobody", "sam/none", "sam/skip", "sam/pipe", "sam/lead",
+    "eve/app", "eve/later", "eve/p", "eve/tool", "eve/permission", "eve/.cfg",
+    "kim/busy", "kim/r", "kim/x", "kim/z", "old-org/app", "old-org/later", "old-org/swept",
+])
+
 # burrow-events' kick port: which repos' passes were kicked.
 KICKS = []
 
@@ -262,6 +274,7 @@ WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for
 POLICY = sys.argv[2]
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
+        "settings": DEFAULT_ADMISSION,
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,

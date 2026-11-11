@@ -1,4 +1,4 @@
-from harness import admission
+from harness import admission, DEFAULT_ADMISSION
 """Paused repositories never reach the steward's cloning or job startup path."""
 from unittest.mock import patch
 
@@ -20,7 +20,7 @@ with patch.object(C, "retiring", side_effect=AssertionError("admitted")):
         assert str(error) == "admitted"
     else:
         raise AssertionError("pipeline repository was paused")
-C.CFG.pop("settings")
+C.CFG["settings"] = DEFAULT_ADMISSION
 
 # Exercise the PR transaction boundary: paused fix/judge/proof admissions
 # become holds with no strikes or failure digest. Already settled PRs merge.
@@ -64,7 +64,7 @@ with patch.object(C, "job", REAL["job"]):
     R.watch_default({"repo": "sam/r", "default": "main"}, info, [], mine)
     assert mine == [] and not C.load("repo-sam_r.json", {}).get("red", {}).get("job"), mine
 C.CFG["repos"]["sam/r"] = saved_repo
-C.CFG.pop("settings")
+C.CFG["settings"] = DEFAULT_ADMISSION
 stand_in()
 
 # Scope narrows the same allow list, with no cached reader state.
@@ -74,4 +74,4 @@ assert C.paused("sam/r")
 assert C.WAKE["sam/r"] == 4102444800
 assert not C.paused("sam/other")
 assert C.paused("sam/new")
-C.CFG.pop("settings")
+C.CFG["settings"] = DEFAULT_ADMISSION

@@ -702,7 +702,7 @@ def paused(repo):
         if decision["retryAt"] is not None:
             wake(repo, decision["retryAt"])  # ends: the scoped pause expires
         return not decision["allowed"]
-    return False
+    return True
 
 
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):

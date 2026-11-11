@@ -352,7 +352,8 @@ fn automation_paused(cfg: &Config, job: &Job) -> bool {
         return false;
     }
     let repo = crate::pick::github_repo(cfg, &project(&job.dir));
-    cfg.paused(&repo)
+    // Machine work without a GitHub origin has no repository to scope.
+    !repo.is_empty() && cfg.paused(&repo)
 }
 
 pub fn take_engine(

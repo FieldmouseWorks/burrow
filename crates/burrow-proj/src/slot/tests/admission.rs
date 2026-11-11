@@ -47,3 +47,11 @@ fn queued_automation_reloads_scope_but_triage_can_sort_everywhere() {
         .unwrap();
     assert!(crate::slot::automation_paused(&cfg, &job));
 }
+
+#[test]
+fn a_missing_policy_never_opts_a_repository_in() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(&jobs_dir(&tmp), 4);
+    cfg.settings = None;
+    assert!(cfg.paused("sam/new"));
+}
