@@ -353,3 +353,104 @@ fn held_slots_say_whose_and_since_when() {
         );
     }
 }
+
+#[test]
+fn all_physical_pools_require_a_live_acquirer_with_the_lock() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = tmp.path().join("jobs");
+    cfg.max_jobs = 1;
+    cfg.codex_slots = 1;
+    cfg.heavy_dir = Some(tmp.path().join("heavy"));
+    cfg.heavy_slots = 1;
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(&cfg.tools.systemctl, "#!/bin/sh\nexit 0\n");
+    for (kind, path) in [
+        (SlotKind::Claude, cfg.jobs.join(".slots/1")),
+        (SlotKind::Unstick, cfg.jobs.join(".slots/unstick")),
+        (SlotKind::Codex, cfg.jobs.join(".codex-slots/1")),
+        (
+            SlotKind::Heavy,
+            burrow_heavy::config::slot_file(cfg.heavy_dir.as_ref().unwrap(), 1),
+        ),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "").unwrap();
+        let id = format!("holder-{kind:?}");
+        let job = cfg.jobs.join(&id);
+        fs::create_dir_all(&job).unwrap();
+        fs::write(job.join("turns"), "1").unwrap();
+        fs::write(job.join("prompt.1"), "task").unwrap();
+        let child_pid = tmp.path().join("child");
+        // --no-fork makes the shell the acquirer. Its child inherits the
+        // description, then the acquirer exits, leaving a stale kernel PID.
+        let mut runner = Command::new("flock")
+            .args(["--no-fork"])
+            .arg(&path)
+            .args(["sh", "-c", "sleep 60 & echo $! > \"$2\"; wait", "_exec"])
+            .arg(&id)
+            .arg(&child_pid)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !child_pid.exists()
+            || fs::read_to_string(&child_pid)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let before = crate::slot::view(&cfg, now())
+            .into_iter()
+            .find(|s| s.kind == kind)
+            .unwrap();
+        assert_eq!(before.state, SlotState::Starting, "{kind:?}: {before:?}");
+        let key = match kind {
+            SlotKind::Claude => "1",
+            SlotKind::Unstick => "unstick",
+            SlotKind::Codex => "codex-1",
+            SlotKind::Heavy => "",
+            _ => unreachable!(),
+        };
+        fs::write(job.join("1.class"), "lead").unwrap();
+        fs::write(job.join("1.slot"), key).unwrap();
+        let published = crate::slot::view(&cfg, now())
+            .into_iter()
+            .find(|s| s.kind == kind)
+            .unwrap();
+        assert_eq!(published.state, SlotState::Running, "{published:?}");
+        let holder = published.holder.unwrap();
+        assert_eq!(holder.job.as_deref(), Some(id.as_str()));
+        assert_eq!(holder.class.as_deref(), Some("lead"));
+        assert_eq!(published.since, crate::mtime(&job.join("1.slot")));
+        // A retry must not use the earlier turn's class or acquisition time.
+        fs::write(job.join("turns"), "2").unwrap();
+        fs::write(job.join("prompt.2"), "retry").unwrap();
+        let retry = crate::slot::view(&cfg, now())
+            .into_iter()
+            .find(|s| s.kind == kind)
+            .unwrap();
+        assert_eq!((retry.state, retry.since), (SlotState::Starting, None));
+        assert_eq!(retry.holder.unwrap().class, None);
+        runner.kill().unwrap();
+        runner.wait().unwrap();
+        let after = crate::slot::view(&cfg, now())
+            .into_iter()
+            .find(|s| s.kind == kind)
+            .unwrap();
+        let pid = fs::read_to_string(&child_pid).unwrap();
+        let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        fs::remove_file(&child_pid).unwrap();
+        assert_eq!(
+            (after.state, after.holder, after.since),
+            (SlotState::Busy, None, None),
+            "{kind:?}"
+        );
+    }
+}

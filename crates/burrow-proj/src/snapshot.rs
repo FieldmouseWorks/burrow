@@ -296,7 +296,7 @@ impl Snapshot {
         })
     }
 
-    /// `proj status`: Claude's hold, each job, then the next five ready.
+    /// `proj status`: Claude's hold, jobs, drain occupancy and the next five ready.
     pub fn status(&self) -> String {
         let mut out = String::new();
         if let Some(h) = self
@@ -310,6 +310,31 @@ impl Snapshot {
         }
         for j in &self.jobs {
             out += &j.line();
+        }
+        if let Some(t) = self.holds.triage.as_ref().filter(|t| t.drain.is_some()) {
+            let used: Vec<_> = self
+                .slots
+                .iter()
+                .filter(|s| s.kind == SlotKind::Drain && s.state != SlotState::Idle)
+                .collect();
+            out += &format!("drain: {}/{} used\n", used.len(), t.drain_jobs);
+            for slot in used {
+                if let Some(h) = &slot.holder {
+                    let issue = h.issue.as_deref().unwrap_or("unknown");
+                    if let Some(job) = &h.job {
+                        out += &format!(
+                            "  {issue} ({job}: {})\n",
+                            match slot.state {
+                                SlotState::Running => "running",
+                                SlotState::Queued => "queued",
+                                _ => "starting",
+                            }
+                        );
+                    } else {
+                        out += &format!("  {issue} (enrolling)\n");
+                    }
+                }
+            }
         }
         for (i, r) in self.queue.iter().take(5).enumerate() {
             out += &format!("ready {}: {}#{}\n", i + 1, r.repo, r.number);

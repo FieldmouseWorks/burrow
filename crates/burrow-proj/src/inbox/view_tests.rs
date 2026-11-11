@@ -105,6 +105,7 @@ fn the_11_11_stall() {
     let status = snap.status();
     let rows: Vec<(String, String)> = status
         .lines()
+        .filter(|l| !l.starts_with("drain:"))
         .map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
             (f[0].to_owned(), f[1].to_owned())
@@ -166,4 +167,70 @@ fn a_parked_sorting_job_holds_its_slot() {
     assert!((900..905).contains(&age), "{age}s, not 900s");
     assert_eq!(s.since.unwrap() + age, snap.at);
     assert_eq!(sorting[1].state, SlotState::Idle);
+}
+
+#[test]
+fn status_shows_every_drain_handoff_beyond_the_job_limit() {
+    let mut b = Box::new();
+    b.cfg.projects = b.path("src");
+    let t = b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap();
+    t.drain = Some(Engine::Codex);
+    t.drain_jobs = 2;
+    fs::write(b.path("active"), "").unwrap();
+    for count in 0..=3 {
+        if count > 0 {
+            let r = b
+                .cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(format!("sam_game-{count}"));
+            fs::create_dir_all(&r).unwrap();
+            fs::write(r.join("drained"), format!("sam/game#{count}")).unwrap();
+            if count == 2 {
+                let job = b.cfg.jobs.join("old-job");
+                fs::create_dir_all(&job).unwrap();
+                fs::write(job.join("prompt.1"), "task").unwrap();
+                fs::write(job.join("turns"), "1").unwrap();
+                fs::write(r.join("job"), "old-job").unwrap();
+            }
+        }
+        let status = Snapshot::take(&b.cfg, 0).unwrap().status();
+        assert!(
+            status.contains(&format!("drain: {count}/2 used\n")),
+            "{status}"
+        );
+        for n in 1..=count {
+            let suffix = if n == 2 {
+                "old-job: queued"
+            } else {
+                "enrolling"
+            };
+            assert!(
+                status.contains(&format!("  sam/game#{n} ({suffix})\n")),
+                "{status}"
+            );
+        }
+    }
+    fs::write(b.cfg.jobs.join("old-job/1.slot"), "1").unwrap();
+    let status = Snapshot::take(&b.cfg, 0).unwrap().status();
+    assert!(status.contains("sam/game#2 (old-job: running)"), "{status}");
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .triage
+        .as_mut()
+        .unwrap()
+        .drain_jobs = 0;
+    let status = Snapshot::take(&b.cfg, 0).unwrap().status();
+    assert!(status.contains("drain: 3/0 used"), "{status}");
+    b.cfg.inbox.as_mut().unwrap().triage.as_mut().unwrap().drain = None;
+    assert!(
+        !Snapshot::take(&b.cfg, 0)
+            .unwrap()
+            .status()
+            .contains("drain:")
+    );
 }

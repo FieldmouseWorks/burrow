@@ -623,39 +623,12 @@ fn lock(path: &Path) -> Lock {
     }
 }
 
-/// The pid that took the flock on a file, as the kernel has it (/proc/locks):
-/// the process that placed it, which may be gone while what it left holds it.
-fn lock_owner(path: &Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    let m = fs::metadata(path).ok()?;
-    let want = format!(
-        "{:02x}:{:02x}:{}",
-        rustix::fs::major(m.dev()),
-        rustix::fs::minor(m.dev()),
-        m.ino()
-    );
-    let locks = fs::read_to_string("/proc/locks").ok()?;
-    locks.lines().find_map(|l| {
-        let f: Vec<&str> = l.split_whitespace().collect();
-        // N: FLOCK ADVISORY WRITE PID MAJ:MIN:INODE START END; a waiter's
-        // line has -> after N:.
-        (f.get(1) == Some(&"FLOCK") && f.get(5) == Some(&want.as_str())).then(|| f[4].to_owned())
-    })
-}
-
-/// The job whose `_exec` the process with this pid is, as its command line
-/// says: `proj _exec ID CLASS`, or a hand-over's shell carrying those words.
-fn exec_job(pid: &str) -> Option<String> {
-    let cmdline = fs::read(Path::new("/proc").join(pid).join("cmdline")).ok()?;
-    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-    let at = args.iter().position(|a| *a == b"_exec")?;
-    let id = String::from_utf8_lossy(args.get(at + 1)?).into_owned();
-    (!id.is_empty()).then_some(id)
-}
+mod owner;
 
 /// Every slot of the line's, Codex's pool and the machine's heavy work, for
 /// the live snapshot. A taken one's holder is the job whose `_exec` the kernel
-/// says took its lock, the turn runner, which holds it for the whole turn:
+/// says took its lock, with matching lock evidence on that live process's
+/// file descriptor, checked again after collecting the job metadata:
 /// with what that job's latest turn says (its state, and the class it took the
 /// slot as) once that turn's N.slot names the slot, and as starting until it
 /// does. One taken by anything else (what an ended turn left running, heavy's
@@ -670,11 +643,13 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             Lock::Missing => missing,
             l => l,
         };
+        let observed_owner = (state == Lock::Taken).then(|| owner::read(&path)).flatten();
         let slot = match state {
             Lock::Free | Lock::Missing => held(kind, name, SlotState::Idle, None, at),
             Lock::Unknown => held(kind, name, SlotState::Unknown, None, at),
-            Lock::Taken => match lock_owner(&path).and_then(|pid| exec_job(&pid)) {
-                Some(id) => {
+            Lock::Taken => match observed_owner.clone() {
+                Some(owner) => {
+                    let id = owner.job.clone();
                     let job = Job::new(cfg, &id);
                     let n = job.turns().unwrap_or_default();
                     if read(&job.turn(&n, "slot")).as_deref() == Some(key.as_str()) {
@@ -695,6 +670,14 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
                 }
                 None => held(kind, name, SlotState::Busy, None, at),
             },
+        };
+        let slot = if slot.holder.is_some()
+            && state == Lock::Taken
+            && owner::read(&path) != observed_owner
+        {
+            held(kind, slot.name.clone(), SlotState::Busy, None, at)
+        } else {
+            slot
         };
         slots.push(slot);
     };

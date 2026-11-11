@@ -1,7 +1,22 @@
 use super::*;
 
 fn admission_cutoff(cfg: &Config) -> Option<i64> {
-    super::super::admission_cutoff(cfg).unwrap()
+    // These assertions inspect durable state through the public API. Like
+    // a real waiter, retry its documented nonblocking contention result.
+    // Parallel test subprocesses can inherit the lock until they exec.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match super::super::admission_cutoff(cfg) {
+            Ok(cutoff) => return cutoff,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::yield_now()
+            }
+            Err(e) => panic!("admission cutoff: {e}"),
+        }
+    }
 }
 
 #[test]
@@ -126,4 +141,32 @@ fn interrupted_release_watermarks_cannot_override_active_or_extended_holds() {
         admission_release(&cfg, &replacement).unwrap(),
         replacement.until * 1_000_000_000
     );
+}
+
+#[test]
+fn admission_state_reads_retry_but_waiter_admission_remains_nonblocking() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (_d, cfg) = rig();
+    let t = now() - 100;
+    record(&cfg, "web", Some(t + 10), SAID, t).unwrap();
+    let held = lock(&cfg).unwrap();
+    assert_eq!(
+        super::super::admission_cutoff(&cfg).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    std::thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel();
+        let cfg = &cfg;
+        scope.spawn(move || tx.send(admission_cutoff(cfg)).unwrap());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(held);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some((t + 10) * 1_000_000_000)
+        );
+    });
 }
