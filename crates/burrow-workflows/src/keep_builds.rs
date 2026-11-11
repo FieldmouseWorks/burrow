@@ -274,8 +274,22 @@ fn a_negative_restores_every_legs_kept_builds() {
         }
     }
     assert!(condition(text(&made["if"]), &base(1)));
-    assert_eq!(
-        install["with"]["extra_nix_config"],
-        gate_install["with"]["extra_nix_config"]
-    );
+    // Opening an empty file:// cache in the daemon creates root-owned
+    // nar/ before Actions can unpack it. Do not expose it until restored.
+    assert!(install["with"].get("extra_nix_config").is_none());
+    let negative = &all[at(&|s| s["id"] == "negative")];
+    for (keep, install_nix) in [(true, true), (true, false), (false, true)] {
+        let mut c = base(4);
+        c.insert("inputs.keep-builds".into(), keep.into());
+        c.insert("inputs.install-nix".into(), install_nix.into());
+        let config = value(text(&negative["env"]["NIX_CONFIG"]), &c).text();
+        assert_eq!(
+            config,
+            if keep && install_nix {
+                value(text(&gate_install["with"]["extra_nix_config"]), &c).text()
+            } else {
+                String::new()
+            }
+        );
+    }
 }
