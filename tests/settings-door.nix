@@ -38,7 +38,7 @@ in pkgs.testers.runNixOSTest {
     burrow.autoland = {
       enable = true;
       owners = [ "sam" ];
-      authors = [ { login = "sam"; id = 1; } ];
+      authors = [ "sam" ];
       app = { id = 123456; accountId = 123457; slug = "sams-steward"; keyFile = "/run/secrets/steward"; };
       reviewers.codex.enable = true;
       pipelineRepos = [ "sam/box" ];
