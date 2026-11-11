@@ -19,6 +19,7 @@ let
   inherit (config.burrow.github) machineApp;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
+  enginesWake = "${stateDir}/proj-engines/wake.json";
   # The pipeline's own repos, whose projects' pipeline jobs get its slots,
   # and the lead ones, what it's built from, whose go first of all (pipeline
   # repos whether or not pipelineRepos lists them).
@@ -581,6 +582,7 @@ in
       unit = "burrow-engines-door";
       perRepo = false;
       repos = [ cfg.engines.door.repo ];
+      wake = enginesWake;
       gap = 2;
     };
     systemd.tmpfiles.rules = [ "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -" ];
@@ -591,6 +593,7 @@ in
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
+      environment.BURROW_DOOR_WAKE = enginesWake;
       serviceConfig = {
         Type = "oneshot";
         User = user;

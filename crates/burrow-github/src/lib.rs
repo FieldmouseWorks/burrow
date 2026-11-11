@@ -320,15 +320,19 @@ fn kept(what: &str, r: Response, allowed: &[u16]) -> Result<Response, Error> {
     }
     let said = message(&r.body);
     let why = format!("{what}: HTTP {}: {said}", r.status);
-    let limited = r.status == 403
-        && (r.header("x-ratelimit-remaining") == Some("0")
-            || r.header("retry-after").is_some()
-            || said.to_lowercase().contains("rate limit"));
-    Err(if r.status == 429 || r.status >= 500 || limited {
+    Err(if r.status >= 500 || rate_limited(&r) {
         Error::unanswered(why)
     } else {
         Error::said(why)
     })
+}
+
+fn rate_limited(r: &Response) -> bool {
+    r.status == 429
+        || r.status == 403
+            && (r.header("x-ratelimit-remaining") == Some("0")
+                || r.header("retry-after").is_some()
+                || message(&r.body).to_lowercase().contains("rate limit"))
 }
 
 fn message(body: &str) -> String {
@@ -353,6 +357,8 @@ pub fn encode(value: &str) -> String {
         })
         .collect()
 }
+
+pub mod deferred;
 
 mod transport;
 pub use transport::{Gh, parse};

@@ -50,6 +50,7 @@ let
   # burrow-events ({"OWNER/REPO": epoch}).
   passDir = "${config.burrow.stateDir}/ledger";
   wake = "${passDir}/wake.json";
+  doorWake = "${passDir}/door-wake.json";
 
   # How a writer of the ledger asks GitHub, and what it tells cn: the
   # passes' and the door's alike.
@@ -452,6 +453,7 @@ in
       unit = "burrow-ledger-door";
       perRepo = false;
       repos = [ cfg.door.repo ];
+      wake = doorWake;
       gap = 2;
     };
     burrow.claude.machineMd = lib.mkIf cfg.door.enable (lib.mkOrder 703 ''
@@ -501,6 +503,7 @@ in
         wants = [ "network-online.target" ];
         path = [ cfg.gh ];
         environment.GH_NO_UPDATE_NOTIFIER = "1";
+        environment.BURROW_DOOR_WAKE = doorWake;
         serviceConfig = {
           Type = "oneshot";
           # burrow.user, whose key signs the ledger's ops; cn takes the

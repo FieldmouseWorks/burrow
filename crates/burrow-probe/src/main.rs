@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use burrow_github::Gh;
+use burrow_github::deferred;
 use burrow_probe::Config;
 use burrow_probe::answer::{Commands, Machine, utc};
 use burrow_probe::pass::pass;
@@ -45,25 +45,28 @@ fn main() -> ExitCode {
         run: &Commands,
     };
     match rest.split_first() {
-        None => match pass(&mut Gh::default(), &cfg, &mut |q| m.answer(q), &utc(now)) {
-            Ok(done) => {
-                for n in &done.answered {
-                    eprintln!("answered {}#{n}", cfg.repo);
+        None => {
+            match deferred::configured(|api| pass(api, &cfg, &mut |q| m.answer(q), &utc(now))) {
+                Ok(Some(done)) => {
+                    for n in &done.answered {
+                        eprintln!("answered {}#{n}", cfg.repo);
+                    }
+                    for n in &done.refused {
+                        eprintln!(
+                            "turned away {}#{n}: its author isn't one of {}",
+                            cfg.repo,
+                            cfg.authors.join(", ")
+                        );
+                    }
+                    ExitCode::SUCCESS
                 }
-                for n in &done.refused {
-                    eprintln!(
-                        "turned away {}#{n}: its author isn't one of {}",
-                        cfg.repo,
-                        cfg.authors.join(", ")
-                    );
+                Ok(None) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("burrow-probe: {e}");
+                    ExitCode::FAILURE
                 }
-                ExitCode::SUCCESS
             }
-            Err(e) => {
-                eprintln!("burrow-probe: {e}");
-                ExitCode::FAILURE
-            }
-        },
+        }
         Some((ask, words)) if ask == "ask" => match Query::parse(&words.join(" ")) {
             Ok(q) => match m.answer(&q) {
                 Ok(text) => {
