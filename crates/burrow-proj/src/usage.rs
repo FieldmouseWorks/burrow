@@ -124,8 +124,12 @@ pub fn last_release(cfg: &Config) -> Option<i64> {
 
 /// Admission's nanosecond cutoff, independent of the later successful-run
 /// watermark used to reject stale refusal records. Serialized with usage changes.
-pub fn admission_cutoff(cfg: &Config) -> Option<i64> {
-    let _lock = lock(cfg).ok()?;
+pub fn admission_cutoff(cfg: &Config) -> std::io::Result<Option<i64>> {
+    let _lock = try_lock(cfg)?;
+    Ok(admission_cutoff_locked(cfg))
+}
+
+fn admission_cutoff_locked(cfg: &Config) -> Option<i64> {
     match kept(cfg) {
         Some(s) if s.holds(now()) => None,
         Some(s) => Some(s.admission_cutoff()),
@@ -188,6 +192,14 @@ pub(crate) fn lock(cfg: &Config) -> Result<File, String> {
     let f = File::create(&path).map_err(|e| format!("proj: {}: {e}", path.display()))?;
     f.lock()
         .map_err(|e| format!("proj: {}: {e}", path.display()))?;
+    Ok(f)
+}
+
+/// Waiters retry contention so an emergency promotion can bypass a stalled
+/// usage transaction. Other I/O failures retain their original meaning.
+pub(crate) fn try_lock(cfg: &Config) -> std::io::Result<File> {
+    let f = File::create(cfg.jobs.join(".usage.lock"))?;
+    f.try_lock().map_err(std::io::Error::from)?;
     Ok(f)
 }
 
@@ -280,7 +292,7 @@ pub fn remind(cfg: &Config) {
     if !kept(cfg).is_some_and(|s| due(&s)) {
         return;
     }
-    let Ok(_lock) = lock(cfg) else { return };
+    let Ok(_lock) = try_lock(cfg) else { return };
     if let Some(mut s) = kept(cfg).filter(|s| due(s)) {
         s.told = now();
         if keep(cfg, &s).is_ok() {

@@ -110,12 +110,12 @@ fn a_backlog_leaves_the_others_a_slot() {
             "a first /src/web",
         ],
     );
-    // Ordinary work keeps its share, but the pipeline holder in slot 1 already
-    // satisfies the non-lead pipeline share: lead work has priority over a
-    // second pipeline admission, whether or not another pipeline turn waits.
+    // Both rules at once: a lead turn can't have the slot kept for the others,
+    // nor the pipeline's own while a pipeline turn waits, so that turn takes
+    // it; and with none waiting, the lead turn takes it.
     case(
         &cfg,
-        "l 4\na 3",
+        "p 4\na 3",
         &[
             "pipeline /src/remi",
             "lead /src/burrow",

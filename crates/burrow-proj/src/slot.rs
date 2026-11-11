@@ -430,8 +430,10 @@ pub fn take(
             me = to;
         }
         if spent {
-            if !job.path("unstick").exists() {
-                publish(cfg, &queue, &me)?;
+            if !job.path("unstick").exists() && !publish(cfg, &queue, &me)? {
+                drop(lk);
+                sleep(Duration::from_secs(2));
+                continue;
             }
             drop(lk);
             usage::remind(cfg);
@@ -452,7 +454,11 @@ pub fn take(
             }
             me = new;
         }
-        publish(cfg, &queue, &me)?;
+        if !publish(cfg, &queue, &me)? {
+            drop(lk);
+            sleep(Duration::from_secs(2));
+            continue;
+        }
         // A slot is taken only under this lock, so one a look sees free stays
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
@@ -464,8 +470,16 @@ pub fn take(
         }
         let seen = look(cfg, &me, &job.dir, class)?;
         looked = now();
-        let draining = usage::admission_cutoff(cfg)
-            .is_some_and(|release| draining(&queue, &seen.line, release));
+        let cutoff = match usage::admission_cutoff(cfg) {
+            Ok(cutoff) => cutoff,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                drop(lk);
+                sleep(Duration::from_secs(2));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let draining = cutoff.is_some_and(|release| draining(&queue, &seen.line, release));
         let active = seen
             .slots
             .iter()
@@ -515,18 +529,23 @@ pub fn take(
 
 /// This waiter's place in line, `me`, published whole (a dot file, which the
 /// line skips, then renamed), so a waiter clearing out dead places never sees
-/// it without its pid. Put back if it went anyway.
-fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<()> {
+/// it without its pid. Put back if it went anyway. False means the usage
+/// transaction is busy; retry from the emergency check without publishing.
+fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<bool> {
     if !queue.join(me).exists() {
         // Birth and early release are ordered by the same usage lock, so a
         // queue entry cannot appear between capturing the cutoff and committing
         // the release. The independent pools never publish here.
-        let _usage = usage::lock(cfg).map_err(io::Error::other)?;
+        let _usage = match usage::try_lock(cfg) {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) => return Err(e),
+        };
         let tmp = queue.join(format!(".{me}.new"));
         fs::write(&tmp, format!("{}\n", process::id()))?;
         fs::rename(&tmp, queue.join(me))?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// `proj status --line`: every turn in line, in the order pick takes them

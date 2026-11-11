@@ -8,8 +8,7 @@
 //! next one. A lead turn (pipeline work in a lead repo's project, what the
 //! pipeline is built from) is a pipeline turn that goes first of all: ahead
 //! of the whole line, the other pipeline turns included, except that it
-//! leaves them any unsatisfied pipeline share while one waits, counting
-//! non-lead pipeline holders in any slot, so a lead repo's
+//! leaves them the pipeline's own slots while one waits, so a lead repo's
 //! backlog can't stop the work on what deploys it. Any other turn waits
 //! while its project holds maxJobsPerProject slots (pipeline turns not
 //! counted), and lets those behind it by meanwhile, so one project's jobs
@@ -179,15 +178,19 @@ pub fn pick_budget(
             )
         })
         .count();
-    let pipeline = line
-        .iter()
-        .filter(|w| w.class == Class::Pipeline)
-        .count()
+    let waiting_pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
+    let pipeline = waiting_pipeline
         .min(cfg.pipeline_slots.saturating_sub(pipeline_held))
         .min((theirs.len() + ours.len()).saturating_sub(owed));
     let capacity = (theirs.len() + ours.len()).min(budget);
-    let lead_capacity = capacity.saturating_sub(owed + pipeline);
-    let open = ours.len().saturating_sub(pipeline);
+    // Physical reservations remain the uncapped scheduler's contract. The
+    // reset budget adds a separate reservation for unsatisfied shares only.
+    let open = ours.len().saturating_sub(waiting_pipeline);
+    let lead_capacity = if budget >= theirs.len() + ours.len() {
+        spare + open
+    } else {
+        (spare + open).min(capacity.saturating_sub(owed + pipeline))
+    };
     let (mut lead, mut others) = (0, 0);
     let mut went = Vec::new();
     let order = line

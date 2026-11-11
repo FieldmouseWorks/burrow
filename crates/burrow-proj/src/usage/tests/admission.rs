@@ -1,5 +1,9 @@
 use super::*;
 
+fn admission_cutoff(cfg: &Config) -> Option<i64> {
+    super::super::admission_cutoff(cfg).unwrap()
+}
+
 #[test]
 fn admission_cutoff_survives_natural_completion_and_settlement() {
     let (_d, cfg) = rig();

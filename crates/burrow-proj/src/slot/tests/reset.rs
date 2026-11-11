@@ -238,6 +238,8 @@ fn independent_pools_start_while_claude_census_is_blocked() {
         let jobs = jobs_dir(&tmp);
         let census = File::create(jobs.join(".slots/.lock")).unwrap();
         census.lock().unwrap();
+        let cfg = config(&jobs, 1);
+        let _usage = crate::usage::lock(&cfg).unwrap();
         fs::create_dir_all(jobs.join("escape")).unwrap();
         if !codex {
             fs::write(jobs.join("escape/unstick"), "").unwrap();
@@ -409,4 +411,112 @@ fn queue_birth_is_ordered_with_the_release_commit() {
     until("waiter publishes after transaction", || {
         in_queue(&jobs) == 1
     });
+}
+
+#[test]
+fn usage_contention_yields_to_emergency_promotion() {
+    for published in [false, true] {
+        for released_hold in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let jobs = jobs_dir(&tmp);
+            let cfg = config(&jobs, 1);
+            let ordinary = File::create(jobs.join(".slots/1")).unwrap();
+            ordinary.lock().unwrap();
+            if released_hold {
+                out_of_usage(&jobs);
+            }
+            let mut kid = None;
+            if published {
+                kid = Some(waiter(&jobs, &tmp, "promoted", 1));
+                until("waiter joined before contention", || in_queue(&jobs) == 1);
+            }
+            let usage = crate::usage::lock(&cfg).unwrap();
+            if released_hold {
+                // A committed release whose notification still owns the lock.
+                let path = jobs.join(crate::usage::FILE);
+                let mut state: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+                state["back"] = now().into();
+                state["admission"] = crate::now_nanos().into();
+                fs::write(path, serde_json::to_string(&state).unwrap()).unwrap();
+            }
+            if !published {
+                kid = Some(waiter(&jobs, &tmp, "promoted", 1));
+            }
+            until("waiter is ready", || {
+                jobs.join("promoted/1.withdrawable").exists()
+            });
+            sleep(Duration::from_secs(3));
+            assert_eq!(in_queue(&jobs), usize::from(published));
+            // Retrying a busy usage transaction must also release the census.
+            let census = File::create(jobs.join(".slots/.lock")).unwrap();
+            census
+                .try_lock()
+                .expect("usage contention retained census lock");
+            fs::write(jobs.join("promoted/unstick"), "").unwrap();
+            until("promoted waiter escapes usage contention", || {
+                took(&jobs, "promoted").is_some()
+            });
+            assert_eq!(
+                fs::read_to_string(jobs.join("promoted/1.slot")).unwrap(),
+                "unstick\n"
+            );
+            assert_eq!(in_queue(&jobs), 0);
+            drop(kid);
+            drop(usage);
+        }
+    }
+}
+
+#[test]
+fn uncapped_physical_reservations_survive_holder_accounting() {
+    use crate::pick::{Waiter, pick_budget};
+    let mut cfg = config(Path::new("/unused"), 4);
+    cfg.pipeline_slots = 1;
+    let slots = [
+        Slot::Held {
+            class: Some(Class::Pipeline),
+            project: "pipeline".into(),
+        },
+        Slot::Held {
+            class: Some(Class::Lead),
+            project: "lead".into(),
+        },
+        Slot::Free,
+        Slot::Free,
+    ];
+    let line: Vec<_> = [Class::Lead, Class::Pipeline, Class::Normal]
+        .into_iter()
+        .enumerate()
+        .map(|(i, class)| Waiter {
+            name: i.to_string(),
+            class,
+            project: i.to_string(),
+        })
+        .collect();
+    for budget in [1, 2, 4, usize::MAX] {
+        let picked = pick_budget(&cfg, &slots, &line, budget);
+        assert!(
+            !picked.iter().any(|(i, _)| *i == 0),
+            "lead consumed a physical reservation"
+        );
+        assert!(picked.iter().any(|(i, _)| *i == 2), "ordinary share lost");
+        if budget >= 2 {
+            assert_eq!(picked, [(1, 4), (2, 3)]);
+        }
+    }
+    // A satisfied pipeline share does not reserve a second admission from
+    // the reset budget when lead work can use a general slot instead.
+    let mut slots = slots.to_vec();
+    slots[1] = Slot::Free;
+    for _ in 0..3 {
+        let picked = pick_budget(&cfg, &slots, &line[..2], 1);
+        assert_eq!(picked, [(0, 2)]);
+        slots[1] = Slot::Held {
+            class: Some(Class::Lead),
+            project: "lead".into(),
+        };
+        assert!(pick_budget(&cfg, &slots, &line[..2], 0).is_empty());
+        slots[1] = Slot::Free;
+    }
 }
