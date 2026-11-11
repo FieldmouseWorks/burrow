@@ -35,6 +35,10 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
+        if crate::inbox::job_paused(cfg, &id) {
+            retry.push((String::new(), now() + RETRY));
+            continue;
+        }
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             if let Err(e) = crate::question::recover(&job) {
@@ -345,6 +349,26 @@ mod codex_tests {
             format!("usage-limit\t1000\t{}\n", now() - 1),
         )
         .unwrap();
+        // A due wake from an inbox job remains parked while its repo is
+        // paused, then joins the ordinary turn queue when enabled again.
+        drop(job);
+        let inbox = cfg.inbox.as_mut().unwrap();
+        inbox.state = d.path().join("inbox");
+        let record = inbox.state.join("sam_r-7");
+        fs::create_dir_all(&record).unwrap();
+        fs::write(record.join("job"), "code").unwrap();
+        fs::write(record.join("drained"), "sam/r#7").unwrap();
+        cfg.paused = vec!["SAM/R".into()];
+        let job = Job::new(&cfg, "code");
+        let parked = fs::read_to_string(job.path("await")).unwrap();
+        look(&cfg, "").unwrap();
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        assert_eq!(fs::read_to_string(job.path("await")).unwrap(), parked);
+        let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();
+        assert!(wake[""].as_i64().unwrap() > now());
+        drop(job);
+        cfg.paused.clear();
+        let job = Job::new(&cfg, "code");
         look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));
         assert!(

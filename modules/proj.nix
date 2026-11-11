@@ -443,7 +443,7 @@ in
         drainJobs = lib.mkOption {
           type = lib.types.ints.positive;
           default = 2;
-          description = "Handed-on issues with a job at once, across every repo.";
+          description = "Handed-on issues with a queued or running turn, plus enrollments awaiting a job, across enabled repos.";
         };
       };
     };

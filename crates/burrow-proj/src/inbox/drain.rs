@@ -3,7 +3,8 @@
 //! room; roles may choose another engine. From there it's an inbox issue
 //! like any other: its job, its answers, closed when it's done. Priority
 //! goes first, then pipeline repos, then age. At most `drain_jobs` of the
-//! issues it handed on have a job at once, and one goes each pass at most;
+//! issues it handed on have a queued or running turn at once; one goes each
+//! pass at most.
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
 //! waits in line like any other, never ahead of work someone asked for
 //! (`first` is off for it): a `drained` mark in its issue's record says so,
@@ -73,7 +74,7 @@ impl Pass<'_> {
             return Ok(());
         };
         let waiting = self.inbox.state.join(WAITING);
-        // Its own still going: a record with the mark and a job, or a mark
+        // Count queued/running turns in enabled repos, plus enrollments
         // whose job hasn't started yet. One that hasn't after ten minutes is
         // let go only once GitHub says the issue no longer carries the label
         // (it didn't take, someone took it off, or the issue closed): while
@@ -83,7 +84,7 @@ impl Pass<'_> {
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
-            if !mark.exists() || !self.record_uses_capacity(&d) {
+            if !mark.exists() || self.drain_user(&d).is_none() {
                 continue;
             }
             if d.join("job").exists() {
@@ -190,6 +191,22 @@ impl Pass<'_> {
         Ok(())
     }
 
+    /// Active turns and enrollments reserve capacity only in enabled repos.
+    fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
+        let named = crate::read(&dir.join("drained"))?;
+        let (repo, _) = named.split_once('#')?;
+        if self.cfg.paused(repo) {
+            return None;
+        }
+        if let Some(id) = crate::read(&dir.join("job")) {
+            let state = crate::job::Job::new(self.cfg, &id).state();
+            matches!(state.as_str(), "queued" | "running")
+                .then(|| format!("{named} ({id}: {state})"))
+        } else {
+            Some(format!("{named} (enrolling)"))
+        }
+    }
+
     /// Whether the issue a `drained` mark names (OWNER/REPO#N) is open with
     /// the engine's label still on, as GitHub has it now. One GitHub won't
     /// say about counts as still handed on, its repo's retry booked; a mark
@@ -270,12 +287,24 @@ impl Pass<'_> {
     }
 
     pub(super) fn ready_queue(&self, t: &Triage) -> String {
-        self.next_ready(t)
-            .into_iter()
-            .take(5)
-            .enumerate()
-            .map(|(index, (repo, n))| format!("ready {}: {repo}#{n}\n", index + 1))
-            .collect()
+        let users: Vec<_> = dirs(&self.inbox.state, "")
+            .iter()
+            .filter_map(|dir| self.drain_user(dir))
+            .collect();
+        let mut output = format!("drain: {}/{} used\n", users.len(), t.drain_jobs);
+        for user in users {
+            output.push_str(&format!("  {user}\n"));
+        }
+        output.push_str(
+            &self
+                .next_ready(t)
+                .into_iter()
+                .take(5)
+                .enumerate()
+                .map(|(index, (repo, n))| format!("ready {}: {repo}#{n}\n", index + 1))
+                .collect::<String>(),
+        );
+        output
     }
 
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
@@ -359,4 +388,21 @@ pub(super) fn priority_label(issue: &Value) -> Option<&str> {
                 .as_array()
                 .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(*label)))
         })
+}
+
+/// Automated inbox wakeups retain their waits while the repo is paused.
+pub(crate) fn job_paused(cfg: &crate::config::Config, id: &str) -> bool {
+    let Some(inbox) = &cfg.inbox else {
+        return false;
+    };
+    if cfg.paused.is_empty() {
+        return false;
+    }
+    dirs(&inbox.state, "").iter().any(|dir| {
+        crate::read(&dir.join("job")).as_deref() == Some(id)
+            && crate::read(&dir.join("issue"))
+                .or_else(|| crate::read(&dir.join("drained")))
+                .and_then(|named| named.split_once('#').map(|(repo, _)| cfg.paused(repo)))
+                .unwrap_or(false)
+    })
 }
