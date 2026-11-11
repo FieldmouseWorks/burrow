@@ -35,6 +35,10 @@ const MAX_JOBS_ENV: &str = "BURROW_PROJ_TEST_MAX_JOBS";
 fn config(jobs: &Path, max_jobs: usize) -> Config {
     let mut v = example();
     v["jobs"] = jobs.to_str().unwrap().into();
+    v["meters"] = serde_json::json!(jobs.join("meters"));
+    if jobs.join("notify").exists() {
+        v["notify"] = serde_json::json!(jobs.join("notify"));
+    }
     v["maxJobs"] = max_jobs.into();
     v["pipelineSlots"] = 0.into();
     v["maxJobsPerProject"] = 4.into();
@@ -952,3 +956,4 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
 }
 
 mod reset;
+mod usage;

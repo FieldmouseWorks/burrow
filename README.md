@@ -173,11 +173,14 @@ Each has an entry below, and each can be imported on its own.
   runs again by itself after, `proj status` says why and until when, and
   `HOST-notify` tells you once. `burrow.proj.usage.paid` defaults to false:
   paid extra usage is off, so limits mean waiting for reset, never asking
-  the owner to raise a cap. `proj usage back` releases a stale hold once
-  usage is available. After a reset, `burrow.proj.usageTrickle` (default 2)
-  caps concurrent Claude turns while the pre-reset queue drains, including
-  pipeline turns. The emergency `--unstick` slot and Codex remain independent;
-  ordinary concurrency returns once no pre-reset turn remains queued.
+  the owner to raise a cap. A fresh engine meter requested after the latest refusal
+  releases the hold and closes its notice when every window is below 100%
+  (or credits are available). Missing, stale or ambiguously ordered readings keep the hold.
+  `proj usage back` also releases it once usage is available.
+  After a reset, `burrow.proj.usageTrickle` (default 2) caps concurrent Claude
+  turns while the pre-reset queue drains, including pipeline turns. The emergency
+  `--unstick` slot and Codex remain independent; ordinary concurrency returns
+  once no pre-reset turn remains queued.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
   overflow to the other engine when its own is short and the other has
   room; `~/.config/proj/models` gives each role its model and effort on
