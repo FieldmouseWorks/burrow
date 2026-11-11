@@ -19,6 +19,7 @@ let
   inherit (config.burrow.github) machineApp;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
+  enginesWake = "${stateDir}/engines-door/wake.json";
   # The pipeline's own repos, whose projects' pipeline jobs get its slots,
   # and the lead ones, what it's built from, whose go first of all (pipeline
   # repos whether or not pipelineRepos lists them).
@@ -97,6 +98,7 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     inherit (cfg) meters paused;
     usagePaid = cfg.usage.paid;
+    usageTrickle = cfg.usageTrickle;
     inherit roles models;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
@@ -193,6 +195,17 @@ in
         says queued), so a launcher can hand over as much work as it likes.
         Each headless Claude holds a few GB. One more, run `--unstick` (the
         stuck issue's, `inbox.unstickLabel`), has a slot of its own besides.
+      '';
+    };
+    usageTrickle = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2;
+      description = ''
+        Maximum concurrent ordinary Claude turns while the queue from a usage
+        hold drains after its reset. Running turns count towards this limit;
+        the usual priority and project limits still apply. Codex and the
+        emergency --unstick slot are independent. Once no pre-reset turn is
+        queued, maxJobs applies again.
       '';
     };
     pipelineSlots = lib.mkOption {
@@ -600,9 +613,13 @@ in
       unit = "burrow-engines-door";
       perRepo = false;
       repos = [ cfg.engines.door.repo ];
+      wake = enginesWake;
       gap = 2;
     };
-    systemd.tmpfiles.rules = [ "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -" ];
+    systemd.tmpfiles.rules = [
+      "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -"
+      "d ${stateDir}/engines-door 0755 ${user} ${config.users.users.${user}.group} -"
+    ];
     systemd.services.burrow-engines-door = {
       description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
       restartIfChanged = false;
@@ -610,6 +627,7 @@ in
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
+      environment.BURROW_DOOR_WAKE = enginesWake;
       serviceConfig = {
         Type = "oneshot";
         User = user;

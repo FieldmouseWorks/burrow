@@ -129,6 +129,16 @@ pub struct Waiter {
 /// takes the lowest free slot unless a turn chosen after it needs that one
 /// and only the pipeline's are left for it.
 pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)> {
+    pick_budget(cfg, slots, line, usize::MAX)
+}
+
+/// Allocate reserved shares within the available admission budget.
+pub fn pick_budget(
+    cfg: &Config,
+    slots: &[Slot],
+    line: &[Waiter],
+    budget: usize,
+) -> Vec<(usize, usize)> {
     let general = cfg.max_jobs.saturating_sub(cfg.pipeline_slots);
     let mut held: HashMap<&str, Share> = HashMap::new();
     let (mut theirs, mut ours) = (Vec::new(), Vec::new());
@@ -147,18 +157,45 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
     // and one of them may start: its project's cap can't be holding it back
     // when none of theirs runs, unless the cap is none.
     let owed = usize::from(
-        held.is_empty() && cfg.max_jobs_per_project > 0 && line.iter().any(|w| !w.class.pipeline()),
+        !theirs.is_empty()
+            && held.is_empty()
+            && cfg.max_jobs_per_project > 0
+            && line.iter().any(|w| !w.class.pipeline()),
     );
-    // Who goes: each in turn, while the slots still go round. lead counts the
-    // lead turns chosen and others the rest held to the slots anyone may
-    // take; spare is how many of those the slot owed leaves pipeline turns;
-    // open is how many of the pipeline's own slots the other pipeline turns
-    // in line leave lead ones; and need how many of the slots anyone may take
-    // lead ones must have.
+    // Reservations consume only usable admission capacity. A non-lead
+    // pipeline holder satisfies its share regardless of the physical slot it
+    // took; lead holders do not. Ordinary work needs a free general slot.
     let spare = theirs.len().saturating_sub(owed);
-    let pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
-    let open = ours.len().saturating_sub(pipeline);
-    let (mut lead, mut others) = (0, 0);
+    let pipeline_held = slots
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                Slot::Held {
+                    class: Some(Class::Pipeline),
+                    ..
+                }
+            )
+        })
+        .count();
+    let waiting_pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
+    let pipeline = waiting_pipeline
+        .min(cfg.pipeline_slots.saturating_sub(pipeline_held))
+        .min((theirs.len() + ours.len()).saturating_sub(owed));
+    let capacity = (theirs.len() + ours.len()).min(budget);
+    // Physical reservations remain the uncapped scheduler's contract. The
+    // reset budget adds a separate reservation for unsatisfied shares only.
+    let open = ours.len().saturating_sub(waiting_pipeline);
+    let lead_capacity = if budget >= theirs.len() + ours.len() {
+        spare + open
+    } else {
+        (spare + open).min(capacity.saturating_sub(owed + pipeline))
+    };
+    // Ordinary selections must leave room for the still-unsatisfied pipeline
+    // share too: filename order need not match the census's current classes.
+    // When the cap cannot fit both shares, retain the usable ordinary share.
+    let pipeline_budget = pipeline.min(capacity.saturating_sub(owed));
+    let (mut lead, mut others, mut pipelines) = (0, 0, 0);
     let mut went = Vec::new();
     let order = line
         .iter()
@@ -170,22 +207,28 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
                 .filter(|(_, w)| w.class != Class::Lead),
         );
     for (i, w) in order {
-        if went.len() >= theirs.len() + ours.len() {
+        if went.len() >= capacity {
             break;
         }
         match w.class {
             Class::Lead => {
-                if lead >= spare + open {
+                if lead >= lead_capacity {
                     continue;
                 }
                 lead += 1;
             }
             Class::Pipeline => {
-                if went.len() - others >= spare + ours.len() {
+                if went.len() - others >= (spare + ours.len()).min(budget.saturating_sub(owed)) {
                     continue;
                 }
             }
             Class::Steward | Class::First | Class::Normal => {
+                if budget < theirs.len() + ours.len()
+                    && went.len()
+                        >= capacity.saturating_sub(pipeline_budget.saturating_sub(pipelines))
+                {
+                    continue;
+                }
                 let need = lead.saturating_sub(open);
                 let h = held.entry(w.project.as_str()).or_default();
                 if !h.admits(w.class, cfg.max_jobs_per_project) || others + need >= theirs.len() {
@@ -194,6 +237,9 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
                 h.add(Some(w.class));
                 others += 1;
             }
+        }
+        if w.class == Class::Pipeline {
+            pipelines += 1;
         }
         went.push(i);
     }

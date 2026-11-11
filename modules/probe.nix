@@ -16,6 +16,7 @@ inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.probe;
+  probeWake = "${config.burrow.stateDir}/probe-door/wake.json";
   inherit (lib) mkOption types;
   inherit (config.burrow) user prefix;
 
@@ -142,8 +143,13 @@ in
       unit = "burrow-probe";
       perRepo = false;
       repos = [ cfg.repo ];
+      wake = probeWake;
       gap = 2;
     };
+
+    systemd.tmpfiles.rules = [
+      "d ${config.burrow.stateDir}/probe-door 0755 ${user} ${config.users.users.${user}.group} -"
+    ];
 
     systemd.services.burrow-probe = {
       description = "burrow-probe: answer the probe issues in ${cfg.repo}";
@@ -154,6 +160,7 @@ in
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
+      environment.BURROW_DOOR_WAKE = probeWake;
       serviceConfig = {
         Type = "oneshot";
         # The user, for its user manager (`units`, `rc`) and proj (`queue`);

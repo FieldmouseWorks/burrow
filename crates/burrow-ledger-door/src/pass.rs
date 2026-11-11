@@ -7,7 +7,7 @@
 //! or stopped partway: one that stopped tells what it opened before then.
 
 use burrow_door::{Door, asked, clip, fenced};
-use burrow_github::Api;
+use burrow_github::{Api, Error};
 use serde_json::Value;
 
 use crate::request::{Request, WORDS};
@@ -46,7 +46,7 @@ pub struct Done {
 }
 
 /// One pass.
-pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, String> {
+pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, Error> {
     let door = Door {
         repo: &cfg.repo,
         label: &cfg.label,
@@ -62,12 +62,12 @@ pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, String
             Ok(Err(why)) => {
                 match door.reply(api, n, &format!("{MARK}\n{why}"), "not_planned") {
                     Ok(()) => done.refused.push(n),
-                    Err(e) => failed.push(format!("#{n}: {e}")),
+                    Err(e) => failed.push(e.context(format!("#{n}"))),
                 }
                 continue;
             }
             Err(e) => {
-                failed.push(format!("#{n}: {e}"));
+                failed.push(e.context(format!("#{n}")));
                 continue;
             }
         };
@@ -82,14 +82,14 @@ pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, String
                 let ran = match cn.run(&request.args()) {
                     Ok(ran) => ran,
                     Err(e) => {
-                        failed.push(format!("#{n}: cn: {e}"));
+                        failed.push(Error::said(e).context(format!("#{n}: cn")));
                         continue;
                     }
                 };
                 if ran.code == Some(UNAVAILABLE) {
-                    failed.push(format!(
-                        "#{n}: GitHub is unavailable to cn; asked again next pass"
-                    ));
+                    failed.push(
+                        format!("#{n}: GitHub is unavailable to cn; asked again next pass").into(),
+                    );
                     continue;
                 }
                 answer(cfg, &request, &ran)
@@ -98,13 +98,13 @@ pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, String
         match door.reply(api, n, &body, reason) {
             Ok(()) if reason == "completed" => done.answered.push(n),
             Ok(()) => done.refused.push(n),
-            Err(e) => failed.push(format!("#{n}: {e}")),
+            Err(e) => failed.push(e.context(format!("#{n}"))),
         }
     }
     if failed.is_empty() {
         Ok(done)
     } else {
-        Err(format!("{}: {}", cfg.repo, failed.join("; ")))
+        Err(Error::aggregate(failed).context(&cfg.repo))
     }
 }
 

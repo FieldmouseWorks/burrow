@@ -706,6 +706,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
         job: "web-1".into(),
         at: t - 10,
         back: None,
+        admission: None,
         told: t - RETELL,
         last: Some(t - 5),
     };
@@ -771,6 +772,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     assert_eq!(fresh.said, expected.said);
 }
 
+mod admission;
 #[test]
 fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     use burrow_usage_reset::meter::{FRESH, Snapshot, Window};

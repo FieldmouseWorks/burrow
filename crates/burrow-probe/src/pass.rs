@@ -5,7 +5,7 @@
 //! nothing: the answers are the machine's own business.
 
 use burrow_door::{Door, MAX_COMMENT, asked, clip, fenced};
-use burrow_github::{Api, call};
+use burrow_github::{Api, Error, call};
 use serde_json::Value;
 
 use crate::query::Query;
@@ -33,15 +33,14 @@ pub fn pass(
     cfg: &Config,
     answer: &mut dyn FnMut(&Query) -> Result<String, String>,
     now: &str,
-) -> Result<Done, String> {
+) -> Result<Done, Error> {
     let repo = &cfg.repo;
-    let about = call(api, "GET", &format!("repos/{repo}"), None, None)
-        .and_then(|r| r.json())
-        .map_err(|e| e.to_string())?;
+    let about = call(api, "GET", &format!("repos/{repo}"), None, None).and_then(|r| r.json())?;
     if about.get("private").and_then(Value::as_bool) != Some(true) {
         return Err(format!(
             "{repo} isn't private, so no probe is answered there: its answers are the machine's own"
-        ));
+        )
+        .into());
     }
     let mut authors = cfg.authors.clone();
     authors.extend(cfg.machinery.iter().cloned());
@@ -58,7 +57,7 @@ pub fn pass(
         let vetted = match door.written(api, &issue) {
             Ok(v) => v,
             Err(e) => {
-                failed.push(format!("#{n}: {e}"));
+                failed.push(e.context(format!("#{n}")));
                 continue;
             }
         };
@@ -70,13 +69,13 @@ pub fn pass(
         match door.reply(api, n, body.as_str(), reason) {
             Ok(()) if author => done.answered.push(n),
             Ok(()) => done.refused.push(n),
-            Err(e) => failed.push(format!("#{n}: {e}")),
+            Err(e) => failed.push(e.context(format!("#{n}"))),
         }
     }
     if failed.is_empty() {
         Ok(done)
     } else {
-        Err(format!("{repo}: {}", failed.join("; ")))
+        Err(Error::aggregate(failed).context(repo))
     }
 }
 

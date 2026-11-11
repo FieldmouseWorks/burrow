@@ -577,6 +577,7 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
         let listed = Err(Error {
             why: why.into(),
             unanswered,
+            retry_at: None,
         });
         let (out, r) = at(cfg, hub, jobs, t, |p| {
             look(p, p.cfg.flaky.as_ref().unwrap(), listed)

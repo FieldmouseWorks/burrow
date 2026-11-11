@@ -191,6 +191,10 @@ Each has an entry below, and each can be imported on its own.
   `inbox.authors` so its children can enter the ready queue. A worker can
   use `proj split FILE` when its task needs another split. See
   [task planning](docs/task-planning.md) for the state and retry protocol.
+  After a reset, `burrow.proj.usageTrickle` (default 2) caps concurrent Claude
+  turns while the pre-reset queue drains, including pipeline turns. The emergency
+  `--unstick` slot and Codex remain independent; ordinary concurrency returns
+  once no pre-reset turn remains queued.
   Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
   overflow to the other engine when its own is short and the other has
   room; `~/.config/proj/models` gives each role its model and effort on

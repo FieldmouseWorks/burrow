@@ -241,3 +241,67 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
         "work codex over 80 claude\n"
     );
 }
+
+#[test]
+fn rate_limits_defer_at_every_door_stage() {
+    for stage in [
+        "list",
+        "author",
+        "comment",
+        "close",
+        "graphql-primary",
+        "graphql-secondary",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let cfg = Config {
+            repo: "sam/box".into(),
+            label: "engines".into(),
+            authors: vec!["sam".into()],
+            roles: dir.path().join("roles"),
+            state: dir.path().join("receipts"),
+        };
+        let mut gh = github("sam", "invalid request", None);
+        let now = burrow_github::Api::now(&gh);
+        let reset = (now + 600).to_string();
+        let (status, body) = match stage {
+            "graphql-primary" => (
+                200,
+                json!({"errors":[{"type":"RATE_LIMITED","message":"budget exhausted"}]}),
+            ),
+            "graphql-secondary" => (
+                200,
+                json!({"errors":[{"message":"You have exceeded a secondary rate limit"}]}),
+            ),
+            _ => (403, json!({"message":"API rate limit exceeded"})),
+        };
+        for (method, path, replies) in &mut gh.answers {
+            let matches = match stage {
+                "list" => method == "GET" && path.ends_with("/issues"),
+                "author" | "graphql-primary" | "graphql-secondary" => path == "graphql",
+                "comment" => method == "POST" && path.contains("/issues/"),
+                "close" => method == "PATCH",
+                _ => false,
+            };
+            if matches {
+                *replies = vec![ok(
+                    status,
+                    body.clone(),
+                    &[
+                        ("x-ratelimit-remaining", "0"),
+                        ("x-ratelimit-reset", &reset),
+                    ],
+                )]
+                .into();
+            }
+        }
+        let result = burrow_github::deferred::run(Some(&wake), &mut gh, now, |api| pass(api, &cfg));
+        assert!(matches!(result, Ok(None)), "{stage}: {result:?}");
+        let booked: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked[""], now + 600, "{stage}");
+        if stage != "close" {
+            assert!(gh.asked("PATCH").is_empty(), "{stage}: request closed");
+        }
+    }
+}
