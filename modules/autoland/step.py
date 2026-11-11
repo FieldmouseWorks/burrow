@@ -95,8 +95,6 @@ class Pass(Context, Jobs, Actions):
 
         self.session = bool(SESSION.search(self.pr.get("body") or ""))
 
-        self.refresh = {}  # what the watchdog's to count of a refresh of it renovate-sweep has (waits.note)
-
         # What its fix jobs left, posted once it's so (or they're stopped).
         if said := claims.look(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
             self.settle("pending", said, stage=S.FIX)

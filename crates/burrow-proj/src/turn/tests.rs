@@ -1,4 +1,3 @@
-
 use std::fs;
 
 use super::{github_app, gone_quiet, stopped};

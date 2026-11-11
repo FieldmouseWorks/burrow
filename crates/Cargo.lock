@@ -358,6 +358,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-codex",
  "burrow-events",
+ "burrow-settings",
  "burrow-test",
  "jiff",
  "rustix",

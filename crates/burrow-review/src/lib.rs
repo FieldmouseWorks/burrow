@@ -97,6 +97,8 @@ fn held<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Why a look has no answer.
 #[derive(Debug)]
 pub enum Failed {
+    /// Repository policy vacated this look; its queued brief is retained.
+    Paused { session: Option<String> },
     /// The reviewer can't review anything for now (usage spent, not logged
     /// in): the steward leaves it out until `until`, and PRs wait for it.
     Out { why: String, until: f64 },

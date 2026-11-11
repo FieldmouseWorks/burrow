@@ -9,6 +9,8 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub settings: Option<burrow_settings::Config>,
     /// The looks the steward's passes queue, a file each (burrow-upkeep's
     /// queue.rs), which this takes off once it has answered.
     pub queue: PathBuf,
@@ -74,6 +76,12 @@ pub struct Sandboxed {
 }
 
 impl Config {
+    pub fn paused(&self, repo: &str) -> bool {
+        self.settings
+            .as_ref()
+            .is_none_or(|s| !s.allows(repo).unwrap_or(false))
+    }
+
     /// The config REVIEW_CONFIG names.
     pub fn load() -> Result<Config, String> {
         let path = std::env::var_os("REVIEW_CONFIG").ok_or("REVIEW_CONFIG names no config")?;

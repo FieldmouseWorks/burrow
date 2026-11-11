@@ -258,3 +258,24 @@ fn a_bound_repository_survives_a_lost_origin_and_cannot_change_identity() {
         "metadata cannot change the repository"
     );
 }
+
+#[test]
+fn an_unparsed_nonempty_origin_never_grants_a_local_exemption() {
+    let tmp = TempDir::new().unwrap();
+    clones(&tmp);
+    let jobs = jobs_dir(&tmp);
+    let cfg = config(&jobs, 1);
+    let project = tmp.path().join("box");
+    git(&[
+        "-C",
+        project.to_str().unwrap(),
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com:443/sam/box.git",
+    ]);
+    assert!(!matches!(
+        crate::policy::identify(&cfg, project.to_str().unwrap(), true, false),
+        Ok(crate::policy::Identity::Local)
+    ));
+}

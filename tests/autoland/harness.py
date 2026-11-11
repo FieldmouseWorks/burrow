@@ -155,7 +155,7 @@ def review_service():
     """`autoland-review`: burrow-review works through the queue, as the
     module runs it, on the steward's state here."""
     with open(f"{tmp}/review.json", "w") as f:
-        json.dump({"queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
+        json.dump({"settings": json.load(open(C.CFG["settings"]["config"])), "queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
                    "sessions": f"{tmp}/state/review/sessions", "snapshots": f"{tmp}/trees",
                    "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2, "off": []}}, "timeoutMinutes": 5,
                    "agents": f"{tmp}/agents", "sandbox": f"{tmp}/bwrap",
