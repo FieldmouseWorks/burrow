@@ -58,7 +58,9 @@ own, say), in seconds and without starting a Claude.
   - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
   - `units`: failed units and jobs under way, the system's and the user's
   - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
-    units on `probe.journal.units` (and `userUnits`) only
+    units on `probe.journal.units` (and `userUnits`) only. The system defaults
+    include Renovate's full pass (`renovate.service`) and repository passes
+    (`renovate@*.service`), so jobs can diagnose their failed runs.
   - `rc`: each Remote Control server's state, memory and restarts
   - `queue`: `proj status`
   - `deployed`: the running and booted systems, the generation, the inputs'
