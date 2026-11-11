@@ -353,7 +353,7 @@ fn the_unstick_label_beats_a_role_mapped_to_an_engine_label() {
         .insert("claude".into(), "inbox".into());
     let p = pass(&cfg);
     let mut i = issue(json!("work"));
-    i["user"]["login"] = json!("steward[bot]");
+    i["user"] = burrow_github::fake::actor("steward[bot]");
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i).0.as_deref(), Some("stuck"));
 }
@@ -373,7 +373,7 @@ fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
     i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
     assert_eq!(p.routing(&i), (Some("stuck".into()), None));
     i["labels"] = json!([{"name":"claude"}]);
-    i["user"]["login"] = json!("steward[bot]");
+    i["user"] = burrow_github::fake::actor("steward[bot]");
     assert_eq!(p.routing(&i), (Some("machine-inbox".into()), None));
 }
 
@@ -464,4 +464,15 @@ fn forgetting_a_repository_removes_every_plan_artifact_for_only_that_identity() 
             assert!(tmp.path().join(".plans").join(repo).join(file).exists());
         }
     }
+}
+
+#[test]
+fn bot_routing_uses_the_authenticated_type_after_a_login_change() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["labels"] = json!([{"name":"claude"}]);
+    i["user"] = burrow_github::fake::actor("steward[bot]");
+    i["user"]["login"] = json!("renamed-account");
+    assert_eq!(p.routing(&i), (Some("machine-inbox".into()), None));
 }

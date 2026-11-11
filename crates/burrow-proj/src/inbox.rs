@@ -466,11 +466,7 @@ impl Pass<'_> {
                 })
             })
             .map(|(_, role)| role.clone())
-            .or_else(|| {
-                raw(&issue["user"]["login"])
-                    .ends_with("[bot]")
-                    .then(|| "machine-inbox".into())
-            })
+            .or_else(|| (issue["user"]["type"] == "Bot").then(|| "machine-inbox".into()))
     }
 
     /// A Codex label takes precedence when an issue has both labels.
