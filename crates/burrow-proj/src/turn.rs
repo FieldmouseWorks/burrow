@@ -24,7 +24,7 @@ const KILLED: &str = "Your last run was killed for memory before you answered, a
 
 /// What a run refused for usage is told in the next, once it's back, with
 /// what it was refused saying and the turn's prompt.
-const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every Claude job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
+pub(crate) const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every Claude job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
 
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
@@ -56,7 +56,14 @@ fn start_with(
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
     let unit = job.unit();
-    let end = job.end_unit();
+    if job
+        .turns()
+        .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+    {
+        return Err(format!(
+            "proj: {id}'s retained retry is being transferred; try again"
+        ));
+    }
     // The last turn reads as ended once it has written its outcome, but its
     // unit is there until it's over, and no unit starts under that name
     // until it's gone; its _ended (telling the watchdog, kicking proj-watch,
@@ -115,24 +122,7 @@ fn start_with(
     // what kills the turn's whole cgroup (systemd-oomd does) would take an
     // ExecStopPost with it. The name is doubled up on its backslashes, which
     // systemd-run reads as escapes.
-    let hook = end.replace('\\', "\\\\");
-    let started = systemd::systemd_run(cfg)
-        .args(["--quiet", "--collect"])
-        .arg(format!("--unit={unit}"))
-        .arg(format!("--slice={}", cfg.slice))
-        .arg(format!("--property=MemoryMax={}", cfg.job_memory_max))
-        .arg("--property=OOMPolicy=continue")
-        .arg("--property=OOMScoreAdjust=500")
-        .arg(format!(
-            "--property=WorkingDirectory={}",
-            read(&job.path("project")).unwrap_or_default()
-        ))
-        .arg(format!("--property=OnSuccess={hook}"))
-        .arg(format!("--property=OnFailure={hook}"))
-        .arg(&cfg.me)
-        .args(["_exec", id, if first { "first" } else { "normal" }])
-        .status()
-        .is_ok_and(|s| s.success());
+    let started = launch(cfg, &job, first);
     if !started {
         undo();
         return Err(couldnt());
@@ -155,6 +145,29 @@ fn start_with(
     Ok(())
 }
 
+pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
+    let unit = job.unit();
+    let end = job.end_unit();
+    let hook = end.replace('\\', "\\\\");
+    systemd::systemd_run(cfg)
+        .args(["--quiet", "--collect"])
+        .arg(format!("--unit={unit}"))
+        .arg(format!("--slice={}", cfg.slice))
+        .arg(format!("--property=MemoryMax={}", cfg.job_memory_max))
+        .arg("--property=OOMPolicy=continue")
+        .arg("--property=OOMScoreAdjust=500")
+        .arg(format!(
+            "--property=WorkingDirectory={}",
+            read(&job.path("project")).unwrap_or_default()
+        ))
+        .arg(format!("--property=OnSuccess={hook}"))
+        .arg(format!("--property=OnFailure={hook}"))
+        .arg(&cfg.me)
+        .args(["_exec", job.id, if first { "first" } else { "normal" }])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// One turn of a job, inside its own systemd unit: `first` or `normal`, as
 /// it was started.
 pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
@@ -175,8 +188,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
     for f in ["await", "await.next", "end.next", "ask.next"] {
-        let _ = fs::remove_file(job.path(f));
+        if !job.turn(&n, "retry-migration").exists() {
+            let _ = fs::remove_file(job.path(f));
+        }
     }
+    let retry =
+        crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;
     // Its scratch, made before it takes a slot: one that can't be made fails
     // the turn rather than leave its work nowhere to go. A sandbox's job works
     // in the VM's own clone.
@@ -229,10 +246,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     } else {
         Class::Normal
     };
-    // Handed over to the deployed proj while it waits, the first time only:
-    // that one starts the turn afresh, which a turn already under way (one
-    // waiting again after a refusal) would lose all of. It stays on this one,
-    // as a running turn does.
+    // Both initial waits and retained retries follow the deployed scheduler.
+    // A retry checkpoint makes that handover resume this turn in place.
     let take = |hand_over: bool| {
         slot::take_engine(cfg, id, &n, given, hand_over, choice.engine)
             .map_err(|e| Fail::new(1, format!("proj: {e}")))
@@ -251,17 +266,21 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         outcome("failed");
         return Err(Fail::quiet(2));
     };
-    for f in ["deadline", "wait", "late"] {
-        let _ = fs::remove_file(job.turn(&n, f));
+    if retry.is_none() {
+        for f in ["deadline", "wait", "late"] {
+            let _ = fs::remove_file(job.turn(&n, f));
+        }
     }
-    if total > 0 {
+    if retry.is_none() && total > 0 {
         let taken = mtime_nanos(&job.turn(&n, "slot")).unwrap_or_else(now_nanos);
         let _ = fs::write(job.turn(&n, "deadline"), format!("{}\n", taken + total));
     }
     // Where its commands say they're waiting in line (waits::waiting).
     let waitdir = job.turn(&n, "waits");
-    let _ = fs::remove_dir_all(&waitdir);
-    fs::create_dir(&waitdir)
+    if retry.is_none() {
+        let _ = fs::remove_dir_all(&waitdir);
+    }
+    fs::create_dir_all(&waitdir)
         .map_err(|e| Fail::new(1, format!("proj: {}: {e}", waitdir.display())))?;
     rewatch(cfg, &[id]);
     // Whether its turns must say what comes next: an --owned job's starter
@@ -269,7 +288,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let agent = read(&job.path("agent")).filter(|a| !a.is_empty());
     let must = !job.path("owned").exists();
     let stream = job.turn(&n, "jsonl");
-    File::create(&stream).map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(retry.is_none())
+        .open(&stream)
+        .map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
     // What it's asked, after what its engine's conversation missed of the
     // job, if it moved here from the other engine (engine/handoff.rs).
     let first = engine::first_prompt(&job, &n, choice.engine).map_err(|e| {
@@ -279,6 +303,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         )
     })?;
     let mut prompt = first.clone();
+    if let Some(retry) = retry {
+        prompt = retry
+            .resume(&job, &n, &first)
+            .map_err(|e| Fail::new(1, e.to_string()))?;
+    }
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
@@ -422,12 +451,16 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     drop(held.take());
                     rewatch(cfg, &[id]);
                     let waited = now_nanos();
-                    let _ = held.insert(take(false)?);
+                    crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, &said)
+                        .map_err(|e| Fail::new(1, e.to_string()))?;
+                    let _ = held.insert(take(true)?);
                     kick(cfg, lines(&job.path("kick")));
                     if let Some(dl) = deadline(&job, &n) {
                         let dl = dl + (now_nanos() - waited);
                         let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
                     }
+                    fs::remove_file(job.turn(&n, "retry-migration"))
+                        .map_err(|e| Fail::new(1, e.to_string()))?;
                     let asked = read(&first).unwrap_or_default();
                     prompt = again(
                         &format!("{SPENT}\n\n{said}. {}\n\n{asked}", usage::policy(cfg)),
@@ -848,151 +881,7 @@ fn oom_kills() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::{github_app, gone_quiet, stopped};
-    use crate::config::Config;
-    use crate::engine::Engine;
-
-    // A Codex turn reaches GitHub as an App, its job's own or the machine's,
-    // never as the user, whose logins its sandbox hides; with neither it
-    // doesn't start. Claude's acts as the user unless its job names an App.
-    #[test]
-    fn a_codex_turn_acts_as_an_app_or_not_at_all() {
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
-        assert_eq!(app(None, Engine::Codex), Ok(Some("workers".into())));
-        assert_eq!(app(Some(""), Engine::Codex), Ok(Some("workers".into())));
-        assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
-        assert_eq!(app(None, Engine::Claude), Ok(None));
-        assert_eq!(app(Some("other"), Engine::Claude), Ok(Some("other".into())));
-        for none in [None, Some(String::new())] {
-            cfg.machinery = none;
-            let app = |own: Option<&str>, engine| github_app(&cfg, own.map(str::to_owned), engine);
-            let refused = app(None, Engine::Codex).unwrap_err();
-            assert!(refused.contains("only as a GitHub App"), "{refused}");
-            assert_eq!(app(Some("other"), Engine::Codex), Ok(Some("other".into())));
-            assert_eq!(app(None, Engine::Claude), Ok(None));
-        }
-    }
-
-    // A sandbox's VM counts as stopped, everything a refused run left in it
-    // with it, only once `agent stop` says so: one that fails, or can't run,
-    // and the turn doesn't go on.
-    #[test]
-    fn a_sandbox_stopped_only_when_agent_says_so() {
-        let d = tempfile::tempdir().unwrap();
-        let agent = |code: i32| {
-            let f = d.path().join(format!("agent-{code}"));
-            let script = format!(
-                "#!/bin/sh\necho \"$*\" >>{}/asked\nexit {code}\n",
-                d.path().display()
-            );
-            burrow_test::executable(&f, script);
-            f.to_str().unwrap().to_owned()
-        };
-        assert!(stopped(&agent(0), "web-ab12"));
-        assert!(!stopped(&agent(1), "web-ab12"));
-        let missing = d.path().join("no-agent");
-        assert!(!stopped(missing.to_str().unwrap(), "web-ab12"));
-        let asked = fs::read_to_string(d.path().join("asked")).unwrap();
-        assert_eq!(asked, "stop web-ab12\nstop web-ab12\n");
-    }
-
-    const SECOND: i64 = 1_000_000_000;
-
-    #[test]
-    fn quiet_is_all_of_idle_wherever_in_a_second_the_stream_last_spoke() {
-        let spoke = 100 * SECOND + 900_000_000;
-        // The clock's second turned over fifteen times, in 14.1s of quiet.
-        assert!(!gone_quiet(115 * SECOND, spoke, 15 * SECOND));
-        assert!(!gone_quiet(spoke + 15 * SECOND - 1, spoke, 15 * SECOND));
-        assert!(gone_quiet(spoke + 15 * SECOND, spoke, 15 * SECOND));
-    }
-
-    #[test]
-    fn no_idle_never_goes_quiet() {
-        assert!(!gone_quiet(1000 * SECOND, 0, 0));
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod engine_tests {
-    use super::*;
-    use crate::config::tests::example;
-
-    /// A run killed for memory before it answered ends with nothing said,
-    /// for either engine, so the turn can carry it on in its session; a
-    /// failed exit of Codex's own is still its error, and an answer is
-    /// still the answer.
-    #[test]
-    fn a_run_killed_for_memory_says_nothing_for_either_engine() {
-        let dir = tempfile::tempdir().unwrap();
-        let stream = dir.path().join("1.jsonl");
-        let ended = |engine, text: &str, exit| {
-            fs::write(&stream, text).unwrap();
-            engine::ended(engine, &stream, 0, exit, "out of memory")
-        };
-        let codex =
-            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"turn.started\"}\n";
-        let claude = "{\"type\":\"system\",\"session_id\":\"s\"}\n";
-        for (engine, text) in [(Engine::Codex, codex), (Engine::Claude, claude)] {
-            fs::write(&stream, text).unwrap();
-            assert!(engine::stream_names_session(&stream, 0), "{text}");
-            assert_eq!(
-                ended(engine, text, exit(137, false, false, false, true)),
-                None
-            );
-            // Cut, quiet or late, likewise.
-            for (cut, quiet, late) in [
-                (true, false, false),
-                (false, true, false),
-                (false, false, true),
-            ] {
-                assert_eq!(
-                    ended(engine, text, exit(137, cut, quiet, late, false)),
-                    None
-                );
-            }
-        }
-        // Codex's own failed exit, not killed for memory: its error.
-        let error = ended(Engine::Codex, codex, exit(1, false, false, false, false)).unwrap();
-        assert!(is_error(&error));
-        assert_eq!(error["result"], "out of memory");
-        // An answer it gave before the kill is still its answer.
-        let answered = format!(
-            "{codex}{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}\n{{\"type\":\"turn.completed\"}}\n"
-        );
-        let last = ended(
-            Engine::Codex,
-            &answered,
-            exit(137, false, false, false, true),
-        )
-        .unwrap();
-        assert_eq!(last["result"], "done");
-    }
-
-    #[test]
-    fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(example()).unwrap();
-        cfg.jobs = dir.path().join("jobs");
-        cfg.scratch = dir.path().join("scratch");
-        cfg.roles = dir.path().join("roles");
-        let job = Job::new(&cfg, "job");
-        fs::create_dir_all(&job.dir).unwrap();
-        job.set_turns(1).unwrap();
-        fs::write(job.path("role"), "work").unwrap();
-        fs::write(job.path("agent"), "sandbox").unwrap();
-        for (line, expected) in [
-            ("work unknown", "line 1: work unknown"),
-            ("work codex", "codex cannot run a --vm job"),
-        ] {
-            fs::write(&cfg.roles, line).unwrap();
-            assert!(exec(&cfg, "job", "normal").is_err());
-            assert!(read(&job.turn("1", "outcome")).unwrap().contains(expected));
-            assert!(!job.turn("1", "slot").exists());
-        }
-    }
-}
+mod engine_tests;

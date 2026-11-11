@@ -123,7 +123,7 @@ fn queue_identity_changes_wait_for_the_census_lock() {
             .unwrap()
             .path();
         let made = fs::metadata(&old).unwrap().modified().unwrap();
-        let census = File::create(jobs.join(".slots/.lock")).unwrap();
+        let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
         census.lock().unwrap();
         if !promotion {
             fs::write(jobs.join("w0/pipeline"), "").unwrap();
@@ -236,7 +236,7 @@ fn independent_pools_start_while_claude_census_is_blocked() {
     for codex in [false, true] {
         let tmp = TempDir::new().unwrap();
         let jobs = jobs_dir(&tmp);
-        let census = File::create(jobs.join(".slots/.lock")).unwrap();
+        let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
         census.lock().unwrap();
         let cfg = config(&jobs, 1);
         let _usage = crate::usage::lock(&cfg).unwrap();
@@ -270,7 +270,7 @@ fn queue_to_unstick_and_usage_retry_escape_a_blocked_census() {
     ordinary.lock().unwrap();
     let _kid = waiter(&jobs, &tmp, "escape", 1);
     until("Claude waiter joined", || in_queue(&jobs) == 1);
-    let census = File::create(jobs.join(".slots/.lock")).unwrap();
+    let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
     census.lock().unwrap();
     out_of_usage(&jobs);
     fs::write(jobs.join("escape/unstick"), "").unwrap();
@@ -449,7 +449,7 @@ fn usage_contention_yields_to_emergency_promotion() {
             sleep(Duration::from_secs(3));
             assert_eq!(in_queue(&jobs), usize::from(published));
             // Retrying a busy usage transaction must also release the census.
-            let census = File::create(jobs.join(".slots/.lock")).unwrap();
+            let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
             census
                 .try_lock()
                 .expect("usage contention retained census lock");

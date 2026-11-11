@@ -44,6 +44,13 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
+        Some("_retry_format") => {
+            put(crate::slot::RETRY_HANDOVER_FORMAT);
+            Ok(())
+        }
+        Some("_retry-transfer") => {
+            crate::retry::watch(cfg).map_err(|e| Fail::new(1, e.to_string()))
+        }
         Some("check-config") => {
             if args.len() != 1 {
                 return Err(Fail::new(2, "usage: proj check-config"));
@@ -420,6 +427,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // failed: nobody waits on it.
     if let Some(n) = &n {
         let _ = fs::write(job.turn(n, "stopped"), "");
+        let _ = fs::remove_file(job.turn(n, "retry-migration"));
     }
     // No turn of it running, so no end of one to clear its scratch: this does.
     let idle = systemd::gone(cfg, &unit);
@@ -611,6 +619,17 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 
 pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
+    if job
+        .turns()
+        .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+    {
+        // The unit is gone, but its committed transfer is still pending.
+        // Wake the filesystem consumer even when it failed after launch.
+        if let Some(n) = job.turns() {
+            fs::write(job.turn(&n, "retry-wake"), "").map_err(|e| Fail::new(1, e.to_string()))?;
+        }
+        return Ok(());
+    }
     job.mark_ended();
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));

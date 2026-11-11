@@ -35,6 +35,13 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
+        if job
+            .turns()
+            .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+        {
+            continue;
+        }
+
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             if let Err(e) = crate::question::recover(&job) {

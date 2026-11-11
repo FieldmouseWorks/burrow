@@ -442,3 +442,132 @@ fn owner_expiry_retains_natural_admission_boundary() {
     back(&cfg, Some(now() + 1));
     assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
 }
+
+#[test]
+fn released_records_and_owner_metadata_remain_readable_by_the_previous_schema() {
+    for owner in [false, true] {
+        for early in [false, true] {
+            let (_d, cfg) = rig();
+            let t = now();
+            if owner {
+                hold(&cfg, t + 3600, "owner reason").unwrap();
+            } else {
+                record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
+            }
+            let before: LegacySpent =
+                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+            if owner {
+                let _: LegacySpent =
+                    serde_json::from_slice(&fs::read(cfg.jobs.join(&before.job)).unwrap()).unwrap();
+            }
+            if early {
+                back(&cfg, None);
+            } else {
+                let mut s = kept(&cfg).unwrap();
+                s.until = t - 1;
+                keep(&cfg, &s).unwrap();
+                back(&cfg, None);
+            }
+            let released = kept(&cfg).unwrap();
+            let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
+            // Old writers update told and preserve job/back, then settle by
+            // deleting the compatible record. The precise cutoff survives
+            // both that write and a rollback to the strict schema.
+            let mut old: LegacySpent =
+                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+            old.told += 1;
+            fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+            assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+            assert_eq!(kept(&cfg).unwrap().owner, owner);
+            fs::remove_file(cfg.jobs.join(FILE)).unwrap();
+            assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+            record(&cfg, "old retry", Some(t + 7200), "refused again", t + 1).unwrap();
+            let _: LegacySpent =
+                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+            assert!(out(&cfg).is_some());
+            assert_eq!(admission_cutoff(&cfg).unwrap(), None);
+            assert!(released.back.is_some());
+        }
+    }
+}
+
+#[test]
+fn failed_release_journal_or_record_never_poison_old_writers() {
+    for owner in [false, true] {
+        for boundary in [".usage.admission.new", ".usage.json.new"] {
+            let (_d, cfg) = rig();
+            let t = now();
+            if owner {
+                hold(&cfg, t + 3600, "pause").unwrap();
+            } else {
+                record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
+            }
+            fs::create_dir(cfg.jobs.join(boundary)).unwrap();
+            back(&cfg, None);
+            let mut old: LegacySpent =
+                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+            assert!(old.back.is_none());
+            // The real old put() update preserves all fields but until/last.
+            old.until = old.until.max(t + 7200);
+            old.last = Some(old.last.unwrap_or(old.at).max(t));
+            fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+            assert_eq!(admission_cutoff(&cfg).unwrap(), None);
+            fs::remove_dir(cfg.jobs.join(boundary)).unwrap();
+            back(&cfg, None);
+            let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
+            let _: LegacySpent =
+                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+            assert_eq!(kept(&cfg).unwrap().admission, Some(cutoff));
+        }
+    }
+}
+
+#[test]
+fn legacy_releases_include_same_second_waiters_and_keep_the_boundary_on_later_writes() {
+    for owner in [false, true] {
+        let (_d, cfg) = rig();
+        let t = now();
+        if owner {
+            hold(&cfg, t + 3600, "pause").unwrap();
+        } else {
+            record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
+        }
+        let mut old: LegacySpent =
+            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+        // The old back() publishes back, without knowing the new journal.
+        old.back = Some(now());
+        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+        let written = crate::mtime_nanos(&cfg.jobs.join(FILE)).unwrap();
+        let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
+        assert_eq!(cutoff, (written + 1).max(old.back.unwrap() * 1_000_000_000));
+        let mut released: LegacySpent =
+            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
+        released.told += 1;
+        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&released).unwrap()).unwrap();
+        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+        settle(&cfg, kept(&cfg).unwrap(), t + cfg.stall_queued() + 1);
+        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+    }
+}
+
+#[test]
+fn committed_reference_recovers_precision_even_without_the_retention_journal() {
+    for owner in [false, true] {
+        let (_d, cfg) = rig();
+        if owner {
+            hold(&cfg, now() + 3600, "pause").unwrap();
+        } else {
+            record(&cfg, "ordinary", Some(now() + 3600), "refused", now() - 10).unwrap();
+        }
+        back(&cfg, None);
+        let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
+        fs::remove_file(cfg.jobs.join(".usage.admission")).unwrap();
+        let s = kept(&cfg).unwrap();
+        assert_eq!(s.owner, owner);
+        assert_eq!(s.admission, Some(cutoff));
+        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+        settle(&cfg, s.clone(), s.release() + cfg.stall_queued() + 1);
+        assert!(kept(&cfg).is_none());
+        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
+    }
+}

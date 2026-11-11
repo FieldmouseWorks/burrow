@@ -167,6 +167,7 @@ mod models;
 pub mod pick;
 pub mod probe;
 mod question;
+pub mod retry;
 mod roles;
 pub mod scratch;
 pub mod setups;

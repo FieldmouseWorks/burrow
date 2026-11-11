@@ -62,11 +62,18 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     } else {
         crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
     };
+    let retained = job.turns().and_then(|n| {
+        job.turn(&n, "retry-migration")
+            .exists()
+            .then(|| read(&job.turn(&n, "engine")))
+            .flatten()
+    });
+    let pinned = retained.or_else(|| read(&job.path("engine")));
     resolve(
         cfg,
         &role,
         (!repo.is_empty()).then_some(repo.as_str()),
-        read(&job.path("engine")).as_deref(),
+        pinned.as_deref(),
     )
 }
 
