@@ -988,21 +988,4 @@ mod tests;
 
 mod usage;
 
-/// The next candidates from the drain's own lists and ranking.
-pub(crate) fn ready_queue(cfg: &Config) -> String {
-    let Some(inbox) = cfg.inbox.as_ref() else {
-        return String::new();
-    };
-    let Some(t) = inbox.triage.as_ref().filter(|t| t.drain.is_some()) else {
-        return String::new();
-    };
-    let mut pass = Pass {
-        cfg,
-        inbox,
-        project: projects(cfg),
-        wake: BTreeMap::new(),
-        unreached: Vec::new(),
-        looked: Vec::new(),
-    };
-    pass.ready_queue(t)
-}
+pub(crate) use drain::ready_queue;

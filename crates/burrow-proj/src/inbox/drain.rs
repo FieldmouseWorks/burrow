@@ -372,3 +372,22 @@ pub(super) fn priority_label(issue: &Value) -> Option<&str> {
                 .is_some_and(|ls| ls.iter().any(|l| l["name"].as_str() == Some(*label)))
         })
 }
+
+/// The next candidates from the drain's own lists and ranking.
+pub(crate) fn ready_queue(cfg: &crate::config::Config) -> String {
+    let Some(inbox) = cfg.inbox.as_ref() else {
+        return String::new();
+    };
+    let Some(t) = inbox.triage.as_ref().filter(|t| t.drain.is_some()) else {
+        return String::new();
+    };
+    let mut pass = Pass {
+        cfg,
+        inbox,
+        project: super::projects(cfg),
+        wake: std::collections::BTreeMap::new(),
+        unreached: Vec::new(),
+        looked: Vec::new(),
+    };
+    pass.ready_queue(t)
+}
