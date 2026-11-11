@@ -74,8 +74,8 @@ pub fn successor(cfg: &Config) -> Option<PathBuf> {
     (String::from_utf8_lossy(&said.stdout).trim_end() == HANDOVER_FORMAT).then_some(d)
 }
 
-/// A retained turn requires checkpoint-aware startup. Older generations
-/// accept ordinary handovers but would truncate its stream on a rollback.
+/// Every turn requires protected-state-aware startup. Even initial waiters
+/// already have an execution identity that older generations cannot maintain.
 pub(crate) fn retry_compatible(to: &Path) -> bool {
     Command::new(to)
         .arg("_retry_format")
@@ -369,11 +369,10 @@ fn codex_slot(
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
     }
-    let retry = crate::retry::Checkpoint::load(&job, n)?;
     loop {
         if may_hand_over
             && let Some(to) = successor(cfg)
-            && (retry.is_none() || retry_compatible(&to))
+            && retry_compatible(&to)
         {
             unmark(&job, n)?;
             let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
@@ -465,7 +464,7 @@ pub fn take(
         // LOOK_EVERY).
         if may_hand_over
             && let Some(to) = successor(cfg)
-            && (retry.is_none() || retry_compatible(&to))
+            && retry_compatible(&to)
         {
             unmark(&job, n)?;
             let lk = File::create(slots.join(".admission-lock"))?;

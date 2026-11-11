@@ -1,6 +1,6 @@
 use super::*;
 
-fn saved(r: &Rig, id: &str) -> Checkpoint {
+pub(super) fn saved(r: &Rig, id: &str) -> Checkpoint {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();

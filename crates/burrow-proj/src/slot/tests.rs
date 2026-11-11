@@ -139,6 +139,7 @@ fn child() {
                 r#"#!/bin/sh
 case $1 in
   _handover_format) echo 1 ;;
+  _retry_format) echo 2 ;;
   _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
 esac
 "#
@@ -778,8 +779,7 @@ fn an_unstick_turn_says_so_under_its_jobs_lock_too() {
 }
 
 // A turn handed over to the deployed proj stops saying it may be withdrawn
-// first, under its job's lock: what it's handed to may take its slot without
-// that lock (a proj from before took_slot, after a switch back to it).
+// first, under its job's lock, before the compatible successor can take a slot.
 #[test]
 fn a_turn_handed_over_may_be_withdrawn_no_more() {
     let tmp = TempDir::new().unwrap();

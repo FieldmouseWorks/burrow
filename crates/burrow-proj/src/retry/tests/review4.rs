@@ -124,6 +124,25 @@ fn only_the_exact_legacy_handover_shell_is_a_parent() {
         "/nix/store/x/bin/burrow-proj",
         "_exec"
     )));
+    for class in ["ordinary", "pipeline", "unstick"] {
+        for target in [
+            "/nix/store/current-proj/bin/proj",
+            "/nix/store/retained-proj/bin/proj",
+            "/nix/store/retained-binary/bin/burrow-proj",
+        ] {
+            let mut args = argv(script, &lock, target, "_exec");
+            args[8] = class.as_bytes().to_vec();
+            assert!(check(args), "{class}: {target}");
+        }
+    }
+    for target in [
+        "/tmp/proj",
+        "/tmp/burrow-proj",
+        "/nix/store/../tmp/proj",
+        "/nix/store/x/bin/other",
+    ] {
+        assert!(!check(argv(script, &lock, target, "_exec")));
+    }
     assert!(!check(argv(script, &lock, "/tmp/evil", "_exec")));
     assert!(!check(argv(
         script,
@@ -137,4 +156,53 @@ fn only_the_exact_legacy_handover_shell_is_a_parent() {
         Path::new("/bin/sh"),
         &refs
     ));
+}
+
+#[test]
+fn initial_and_retained_waiters_keep_identity_when_rollback_ignores_protected_state() {
+    for mode in ["new", "new-codex", "new-unstick"] {
+        for retained in [false, true] {
+            let mut r = rig();
+            let old = r.tmp.path().join("unaware");
+            let wrong = r.tmp.path().join("wrong-handover");
+            burrow_test::executable(
+                &old,
+                format!(
+                    "#!/bin/sh\ncase $1 in\n_handover_format) echo 1 ;;\n_exec) touch '{}' ;;\n*) exit 2 ;;\nesac\n",
+                    wrong.display()
+                ),
+            );
+            let path = r.tmp.path().join("config.json");
+            let mut cfg: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            cfg["deployed"] = old.to_str().unwrap().into();
+            fs::write(path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+            super::review::saved(&r, "waiter");
+            let job = Job::new(&r.cfg, "waiter");
+            if !retained {
+                fs::remove_file(job.turn("1", "retry-migration")).unwrap();
+            }
+            fs::remove_file(job.turn("1", "execution")).unwrap();
+            let choice = engine::Choice {
+                engine: if mode.ends_with("codex") {
+                    engine::Engine::Codex
+                } else {
+                    engine::Engine::Claude
+                },
+                model: Some("saved-choice".into()),
+                effort: Some("high".into()),
+            };
+            Identity::capture_choice(&job, "1", &choice).unwrap();
+            let identity = fs::read(job.turn("1", "execution")).unwrap();
+            // An unaware startup could resolve changed settings rather than
+            // honoring this identity. It must never get control of the turn.
+            fs::write(job.path("role"), "changed-role\n").unwrap();
+            drop(job);
+            start(&mut r, "waiter", mode, "/ordinary");
+            let job = Job::new(&r.cfg, "waiter");
+            until(|| job.path("took").exists() || wrong.exists());
+            assert!(!wrong.exists(), "{mode}, retained={retained}");
+            assert_eq!(fs::read(job.turn("1", "execution")).unwrap(), identity);
+        }
+    }
 }
