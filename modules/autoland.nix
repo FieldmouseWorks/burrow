@@ -94,7 +94,7 @@ let
     renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
     # proj's record of its jobs, which repos.py reads for a remade repo's.
-    inherit (config.burrow.proj) jobsDir;
+    inherit (config.burrow.proj) jobsDir paused;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
@@ -292,7 +292,7 @@ let
   # token.rs), and the steward's token.
   credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
   # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
-  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward user credentials; git = config.programs.git.package; };
+  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward user credentials; };
 in
 {
   imports = [

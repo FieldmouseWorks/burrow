@@ -99,6 +99,7 @@ fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
             .collect::<Vec<_>>(),
     );
     f.spent = Some(crate::usage::Spent {
+        owner: false,
         until: 50_000,
         said: "You've hit your monthly spend limit".into(),
         job: "web-1".into(),

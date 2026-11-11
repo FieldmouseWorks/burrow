@@ -51,7 +51,7 @@ impl World for Fake {
         match args[0] {
             // proj takes the hold (unless it refuses everything), and says
             // it's out from then on.
-            "usage" if args.get(1) == Some(&"hold") => {
+            "usage" if args.get(1) == Some(&"adopt") => {
                 if self.refuse.get() {
                     return (false, String::new());
                 }

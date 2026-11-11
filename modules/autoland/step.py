@@ -43,7 +43,12 @@ __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_
 
 
 def handle(repo, pr, repo_info, digest, held=None, below=None):
-    Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto).run()
+    p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
+    try:
+        p.run()
+    except C.JobPaused:
+        p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
+        save(p.key, p.st)
 
 
 class Pass(Context, Jobs, Actions):
@@ -52,6 +57,8 @@ class Pass(Context, Jobs, Actions):
         not (a check that never reports keeps it pending), is listed, unless
         it's listed already, watchdog or not. A Renovate update's own stuck
         ones are renovate-sweep's (swept)."""
+        if C.paused(self.repo):
+            return
         if (release := self.usage_grace()) and C.NOW < release + C.repo_cfg(self.repo)["stallAfter"] * MIN:
             return
         if not swept and C.NOW - ts(self.pr["createdAt"]) > 86400 and not any(x[1] == self.line for x in self.digest):

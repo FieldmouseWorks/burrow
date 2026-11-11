@@ -68,6 +68,20 @@ UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connecti
 LIMITED = []
 
 
+# A network call must return before the unit's twenty-minute deadline so
+# the pass can report what stalled and book its normal unavailable retry.
+REMOTE_TIMEOUT = 120
+
+
+def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
+    try:
+        return subprocess.run(command, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired:
+        # Command arguments can contain API bodies or credentials. Only
+        # identify the executable here, never captured output or the env.
+        raise Unavailable(f"{os.path.basename(command[0])} timed out after {timeout}s") from None
+
+
 def limited(stderr, env):
     """Note when the rate limit gh met resets. `gh api rate_limit` costs
     nothing against it; a limit with none spent (a secondary one) notes
@@ -75,8 +89,8 @@ def limited(stderr, env):
     that met one waits for it as if it were all of them."""
     if LIMITED or not re.search(r"rate limit", stderr, re.I):
         return
-    p = subprocess.run(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
-                       capture_output=True, text=True, env=env)
+    p = remote(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
+               capture_output=True, text=True, env=env)
     try:
         LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
     except ValueError:
@@ -169,7 +183,7 @@ def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
     Unavailable when GitHub didn't answer, RuntimeError when it said no."""
     env = gh_env()
-    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True, env=env)
+    p = remote(["gh", *args], input=input, capture_output=True, text=True, env=env)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
         limited(p.stderr, env)
@@ -209,8 +223,8 @@ def fresh(path, etag=None):
     rarely changes costs nothing most of the times it's taken. Raises as
     gh() does, and Gone when there's no such thing."""
     env = gh_env()
-    p = subprocess.run(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
-                       capture_output=True, text=True, env=env)
+    p = remote(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
+               capture_output=True, text=True, env=env)
     status, _, rest = p.stdout.partition("\n")
     code = status.split(" ")[1:2]
     if code == ["304"]:
@@ -673,6 +687,14 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
+class JobPaused(Exception):
+    """Intentional admission hold, never a failed launch or a job id."""
+
+
+def paused(repo):
+    return any(repo.casefold() == r.casefold() for r in CFG.get("paused", []))
+
+
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None, *, role):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
@@ -684,6 +706,8 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=No
     --key), for whatever finds it by that rather than its id: a key a job
     has is refused. role, the kind of work it is (proj run --role), which
     the machine may run on a model of its own. Returns the job id."""
+    if paused(repo):
+        raise JobPaused(f"{repo}: automated jobs paused")
     if retiring(repo):
         log(f"{repo}: no job until the deleted repo whose name it took on is retired")
         return None

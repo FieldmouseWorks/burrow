@@ -14,7 +14,7 @@
 # seal keys stay out of it: they're secrets, and a config is a store path.
 # Until the flow reads its producers' signed evidence instead (Conary#256,
 # 5b), a PR waiting on a sealed verdict can show as a disagreement.
-{ lib, pkgs, cfg, settings, ledger, steward, user, credentials, git }:
+{ lib, pkgs, cfg, settings, ledger, steward, user, credentials }:
 let
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
@@ -87,8 +87,6 @@ in
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     unitConfig.ConditionPathExists = config;
-    # cn reads each commit's trailers with git (Conary's flow/history.rs).
-    path = [ git ];
     environment = ledger.env // {
       CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
     };

@@ -132,7 +132,7 @@ fn a_hold_an_earlier_watchdog_kept_is_procs_now() {
             .proj
             .borrow()
             .iter()
-            .filter(|a| a[0] == "usage" && a.get(1).map(String::as_str) == Some("hold"))
+            .filter(|a| a[0] == "usage" && a.get(1).map(String::as_str) == Some("adopt"))
             .count();
         assert_eq!(holds, 1, "{refuse}");
         assert!(
@@ -156,7 +156,7 @@ fn a_hold_an_earlier_watchdog_kept_is_procs_now() {
             .proj
             .borrow()
             .iter()
-            .all(|a| a.get(1).map(String::as_str) != Some("hold"))
+            .all(|a| a.get(1).map(String::as_str) != Some("adopt"))
     );
 }
 

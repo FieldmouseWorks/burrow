@@ -190,6 +190,8 @@ def upkeep(repo, mine):
     for j in out["jobs"]:
         try:
             jid = C.job(repo, j["task"], clone=True, pipeline=j["pipeline"], timeout=j["timeout"], key=j["key"], role=j["role"])
+        except C.JobPaused:
+            continue
         except Exception as e:  # its own: the other part's job, and the pass, go on
             failing(repo, f"its {j['part']} job didn't start: {e}")
             mine.extend(tuple(x) for x in j["unstarted"])
@@ -259,7 +261,7 @@ def run_pass(kick):
                     # first push is heard, and that push's pass does the rest.
                     continue
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
-                        and C.NOW - failed.get(repo, 0) > 86400 and not C.taken(repo)):
+                        and C.NOW - failed.get(repo, 0) > 86400 and not C.taken(repo) and not C.paused(repo)):
                     jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True, role="baseline")
                     started += 1
                     if jid:
