@@ -262,7 +262,10 @@ Each has an entry below, and each can be imported on its own.
   later. So does each flaky test a gate quarantines
   ([docs/flaky-tests.md](docs/flaky-tests.md)): a Claude job fixes it, which
   lifts the quarantine. Keeps every repo at
-  [docs/repo-baseline.md](docs/repo-baseline.md).
+  [docs/repo-baseline.md](docs/repo-baseline.md). Repos in `shadow` have
+  Conary's landing flow, the steward's replacement, decide beside each pass
+  without acting (`cn flow compare`), its `shadow:` lines in the pass's
+  journal showing where the two part before a repo switches over.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every
