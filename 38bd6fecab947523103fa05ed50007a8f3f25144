@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "7e45vktp3z4yavcqb0s5dw0xzt",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 653,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/653",
+  "summary": "proj-inbox: drain ready issues by priority then age",
+  "task": "fieldmouseworks/burrow#652",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "2e3b668254bb4e63ffc4e9dc7a299a3d5851d490acc497b7fae748ca754b470e",
+    "before": "028cff4116d8cadad5149d18ebf426b9c48e74db",
+    "after": "38bd6fecab947523103fa05ed50007a8f3f25144",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794418879094
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681832072"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681832014"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#653)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#653)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#653)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#653)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#653)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#653)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236831/job/130681828148"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681831293"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681914631"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/653#pullrequestreview-5862718602"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681914629"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681914557"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130689177590"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43066236910/job/130681914546"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/653"
+    }
+  ]
+}
