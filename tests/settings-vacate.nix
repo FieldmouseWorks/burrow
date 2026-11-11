@@ -77,7 +77,7 @@ in pkgs.testers.runNixOSTest {
         try:
             machine.wait_until_succeeds("runuser -u dev -- proj state " + j + " | grep -x " + expected, timeout=45)
         except Exception:
-            machine.succeed("runuser -u dev -- proj status 100; ls -la /data/dev/jobs/.queue; journalctl --user-unit='proj-*' -n 80 --no-pager", check=False)
+            machine.execute("runuser -u dev -- proj status 100; ls -la /data/dev/jobs/.queue; journalctl --user-unit='proj-*' -n 80 --no-pager")
             raise
     def data(endpoint, value):
         path="/tmp/gh/"+endpoint.replace("/", "_")
