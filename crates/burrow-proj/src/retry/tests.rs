@@ -564,6 +564,7 @@ fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape()
         deadline: Some(now_nanos() + 1000),
         name: "2-100-queued".into(),
         first: false,
+        retained: Some(true),
     };
     swap(
         &job.turn("1", "retry-migration"),
@@ -700,6 +701,7 @@ fn failed_resume_write_retains_checkpoint_and_does_not_double_extend_the_deadlin
         deadline: Some(now_nanos() + 10_000_000_000),
         name: "2-100-retry".into(),
         first: false,
+        retained: Some(true),
     };
     swap(
         &job.turn("1", "retry-migration"),
@@ -747,3 +749,84 @@ fn waiting_codex_turn_transfers_back_to_its_own_pool() {
 }
 
 mod review;
+
+fn pending(r: &Rig, id: &str, retained: bool) -> (Checkpoint, String) {
+    let job = Job::new(&r.cfg, id);
+    fs::create_dir_all(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("prompt.1"), "the prompt\n").unwrap();
+    let name = format!("2-100-{id}");
+    let state = Checkpoint {
+        waited: now_nanos(),
+        said: retained.then(|| "refused".into()),
+        deadline: retained.then(|| now_nanos() + 10_000_000_000),
+        name: name.clone(),
+        first: false,
+        retained: Some(retained),
+    };
+    swap(
+        &job.turn("1", "retry-migration"),
+        &serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    (state, name)
+}
+
+#[test]
+fn pending_transfer_is_unfinished_work_until_stopped() {
+    let r = rig();
+    let job = Job::new(&r.cfg, "p");
+    pending(&r, "p", true);
+    // Unit inactive, outcome absent or left by a failed launch: not finished.
+    assert_eq!(job.state(), "queued");
+    fs::write(job.turn("1", "retry-startup-failed"), "").unwrap();
+    fs::write(job.turn("1", "outcome"), "failed\n").unwrap();
+    assert_eq!(job.state(), "queued");
+    assert_eq!(job.ended("1"), None);
+    assert_eq!(job.lifecycle().unwrap().0, "queued");
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    assert_eq!(job.state(), "failed");
+}
+
+#[test]
+fn pending_transfer_keeps_its_place_in_the_line() {
+    let r = rig();
+    let (_, name) = pending(&r, "p", true);
+    // Its old process is gone (no such pid).
+    fs::write(r.cfg.jobs.join(".queue").join(&name), "99999999\n").unwrap();
+    assert!(!slot::in_line(&r.cfg).is_empty());
+    let job = Job::new(&r.cfg, "p");
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    assert!(slot::in_line(&r.cfg).is_empty());
+}
+
+#[test]
+fn busy_job_lock_is_reported_for_retry_and_a_stopped_checkpoint_is_not_launched() {
+    let r = rig();
+    let job = Job::new(&r.cfg, "p");
+    pending(&r, "p", true);
+    let held = job.lock().unwrap();
+    assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    drop(held);
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    assert!(pass(&r.cfg).is_ok());
+    assert!(!job.turn("1", "retry-migration").exists());
+    assert!(!job.path("took").exists());
+}
+
+#[test]
+fn an_initial_waiter_keeps_no_deadline_but_a_retained_retry_does() {
+    let r = rig();
+    let job = Job::new(&r.cfg, "p");
+    let (initial, _) = pending(&r, "p", false);
+    assert!(initial.initial());
+    assert!(initial.deadline.is_none());
+    fs::write(job.turn("1", "deadline"), "5\n").unwrap();
+    initial.resume(&job, "1", &job.path("prompt.1")).unwrap();
+    assert_eq!(read(&job.turn("1", "deadline")).as_deref(), Some("5"));
+    let (kept, _) = pending(&r, "p", true);
+    let dl = kept.deadline.unwrap();
+    kept.resume(&job, "1", &job.path("prompt.1")).unwrap();
+    let moved: i64 = read(&job.turn("1", "deadline")).unwrap().parse().unwrap();
+    assert!(moved >= dl);
+}

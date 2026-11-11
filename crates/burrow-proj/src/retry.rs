@@ -23,6 +23,10 @@ pub(crate) struct Checkpoint {
     pub deadline: Option<i64>,
     name: String,
     first: bool,
+    /// An initial waiter differs from a turn which already ran, including an
+    /// unlimited retry whose refusal format the reader cannot recognize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<bool>,
 }
 
 impl Checkpoint {
@@ -51,7 +55,9 @@ impl Checkpoint {
     }
 
     pub fn initial(&self) -> bool {
-        self.deadline.is_none() && self.said.is_none()
+        !self
+            .retained
+            .unwrap_or(self.deadline.is_some() || self.said.is_some())
     }
 
     pub fn retry(job: &Job, n: &str, first: bool, waited: i64, said: &str) -> io::Result<()> {
@@ -59,6 +65,7 @@ impl Checkpoint {
             waited,
             said: Some(said.into()),
             first,
+            retained: Some(true),
             deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
             name: crate::slot::entry_at(
                 job,
@@ -250,6 +257,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         said,
         name,
         first,
+        retained: Some(fs::metadata(&stream).is_ok_and(|m| m.len() > 0)),
         deadline: read(&job.turn(n, "deadline")).and_then(|s| s.parse().ok()),
     })
 }

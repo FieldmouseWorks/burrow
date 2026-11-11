@@ -184,7 +184,7 @@ pkgs.testers.runNixOSTest {
         now = int(time.time() * 1_000_000_000)
         checkpoint = {"waited": now - 3600_000_000_000, "said": None,
                       "deadline": now - 3600_000_000_000 + budget * 1_000_000_000 if retained else None,
-                      "name": "2-" + name, "first": False}
+                      "name": "2-" + name, "first": False, "retained": retained}
         machine.succeed(f"printf '%s' '{json.dumps(checkpoint)}' >/data/dev/jobs/{job_id}/1.retry-migration")
         machine.succeed("systemctl start proj-retry-transfer.service")
         proj("usage back")

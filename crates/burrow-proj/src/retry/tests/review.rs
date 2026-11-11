@@ -13,6 +13,7 @@ fn saved(r: &Rig, id: &str) -> Checkpoint {
         deadline: Some(now_nanos() - 1_000_000_000),
         name: format!("2-100-{id}"),
         first: false,
+        retained: Some(true),
     };
     swap(
         &job.turn("1", "retry-migration"),
@@ -223,6 +224,7 @@ fn initial_transfers_start_a_budget_and_unlimited_retries_stay_unlimited() {
         let mut state = saved(&r, "initial");
         state.deadline = None;
         state.said = None;
+        state.retained = Some(false);
         let job = Job::new(&r.cfg, "initial");
         fs::write(job.turn("1", "slot"), slot).unwrap();
         let acquired = crate::mtime_nanos(&job.turn("1", "slot")).unwrap();
