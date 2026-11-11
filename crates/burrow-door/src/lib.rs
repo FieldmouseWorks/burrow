@@ -167,9 +167,15 @@ impl Door<'_> {
                 list["totalCount"].as_u64() == Some(nodes.len() as u64) && nodes.iter().all(ok)
             })
         };
-        let edits = every(&issue["userContentEdits"], &|e| {
-            by_author(&e["editor"]) && (e["deletedBy"].is_null() || by_author(&e["deletedBy"]))
-        });
+        // GitHub retains at most 100 body edits; at the cap an older
+        // outsider may have been pruned from the authenticated history.
+        let complete_edits = issue["userContentEdits"]["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.len() < 100);
+        let edits = complete_edits
+            && every(&issue["userContentEdits"], &|e| {
+                by_author(&e["editor"]) && (e["deletedBy"].is_null() || by_author(&e["deletedBy"]))
+            });
         let renames = every(&issue["timelineItems"], &|r| by_author(&r["actor"]));
         if !by_author(&issue["author"]) || !edits || !renames {
             return Ok(Err(format!(

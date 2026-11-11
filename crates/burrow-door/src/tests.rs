@@ -141,3 +141,33 @@ fn a_reused_login_never_authorizes_an_opener_or_writer() {
         assert!(door.written(&mut gh, &issue).unwrap().is_err(), "{role}");
     }
 }
+
+#[test]
+fn a_retained_edit_history_cannot_prove_every_writer_was_authorized() {
+    let authors = [burrow_github::fake::author("sam")];
+    let door = Door {
+        repo: "sam/box",
+        label: "probe",
+        authors: &authors,
+        what: "this machine's probe",
+    };
+    let issue = Issue {
+        number: 7,
+        opener: "sam".into(),
+        opener_id: Some(authors[0].id),
+    };
+    for count in [99, 100] {
+        let text = json!({"author":burrow_github::fake::actor("sam"), "title":"trusted", "body":"trusted", "userContentEdits":{"totalCount":count,"nodes":vec![json!({"editor":burrow_github::fake::actor("sam")});count]}, "timelineItems":{"totalCount":0,"nodes":[]}});
+        let mut gh = Fake::default();
+        gh.on(
+            "POST",
+            "graphql",
+            vec![ok(200, json!({"data":{"repository":{"issue":text}}}), &[])],
+        );
+        assert_eq!(
+            door.written(&mut gh, &issue).unwrap().is_ok(),
+            count < 100,
+            "{count} retained edits"
+        );
+    }
+}
