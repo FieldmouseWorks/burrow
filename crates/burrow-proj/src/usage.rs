@@ -262,13 +262,14 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                     s.admission = Some(cutoff);
                     s.job = job.to_owned();
                 }
-                if s.back.is_some() && s.admission.is_none() {
+                if let Some(back) = s.back
+                    && s.admission.is_none()
+                {
                     // An old writer supplies only a whole-second release.
                     // Its filesystem timestamp may be coarser than new queue
                     // timestamps. Include the whole release second so none of
                     // its same-second waiters can bypass the cap.
-                    s.admission =
-                        Some(((s.back.unwrap() + 1) * 1_000_000_000).min(s.until * 1_000_000_000));
+                    s.admission = Some(((back + 1) * 1_000_000_000).min(s.until * 1_000_000_000));
                 }
                 // Legacy writers preserve the metadata reference in job. Their
                 // last-refusal update distinguishes a real refusal at/after the
