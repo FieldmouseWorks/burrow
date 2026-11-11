@@ -217,6 +217,14 @@ impl Config {
         let mut file = File::create(&pending).map_err(|e| e.to_string())?;
         file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
+        // Readers include the isolated reviewer account. This overlay holds
+        // public operational policy, regardless of the writer's umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o644))
+                .map_err(|e| e.to_string())?;
+        }
         file.sync_all().map_err(|e| e.to_string())?;
         fs::rename(pending, &self.overlay).map_err(|e| e.to_string())?;
         File::open(parent)
@@ -284,5 +292,24 @@ mod tests {
         cfg.request(&receipt, &["allow".into(), "sam/box".into()], "github")
             .unwrap();
         assert!(!cfg.allows("sam/box").unwrap());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn the_overlay_is_readable_by_isolated_consumers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            overlay: dir.path().join("overlay.json"),
+            ..Default::default()
+        };
+        let pending = cfg.overlay.with_extension("pending");
+        fs::write(&pending, "interrupted").unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        cfg.command(&["pause".into(), "sam/box".into()], "test")
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&cfg.overlay).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 }

@@ -45,13 +45,15 @@ first option set in `burrow-settings`; other operational settings join the
 same tracked document, loader and overlay rather than acquiring another
 store.
 
-A pause vacates running turns and proofs through an independent settings
+A pause vacates running turns, native reviews and proofs through an independent settings
 reconciler. It kills their complete service groups, releasing job, Codex,
 proof and inherited heavy locks. Queued turns, questions and awaits are
 parked without holding admission capacity or producing stall alerts.
 Job scratch, worktrees, native sessions, conversations and proof checkpoints
 remain. On release, queued turns return at their original order and priority;
-interrupted turns continue their session, and proofs retain completed checks.
+interrupted turns and reviews continue their native sessions, and proofs
+retain completed checks. Native review queue entries keep their age and
+priority while releasing reviewer capacity.
 Question and await deadlines advance by the parked duration. The overlay path
 wakes reconciliation immediately, scope expiry books its own wake, and a
 short recovery timer handles a machine restart or interrupted reconciliation.

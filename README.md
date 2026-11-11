@@ -181,7 +181,10 @@ Each has an entry below, and each can be imported on its own.
   `proj usage hold UNTIL [--reason TEXT]` starts a fresh owner pause until a
   future Unix timestamp, even after a previous release. Successful turns and
   fresh meters cannot release an owner pause; `proj usage back` can.
-  Running turns continue, and Codex work remains eligible.
+  A plain budget hold lets running turns continue and keeps Codex eligible.
+  Add `--only pipeline` to vacate and park every excluded repository across
+  both engines, reviews and proofs; [runtime settings](docs/settings.md) own
+  the allow list and independent off switch.
   `burrow.proj.inbox.planning` defaults on: a fresh Codex
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist
