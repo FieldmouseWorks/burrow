@@ -974,6 +974,7 @@ mod claims;
 mod drain;
 mod jobs;
 mod plans;
+pub(crate) mod resumption;
 mod retirement;
 mod written;
 

@@ -509,6 +509,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             format!("proj: couldn't stop {id}"),
         ));
     }
+    crate::policy::cancel(job).map_err(|e| Fail::new(1, e))?;
     crate::ask::clear(job);
     if crate::ask::host_path(job, "label").exists() {
         kick(cfg, ["proj-watch".into()]);

@@ -724,6 +724,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     assert!(p.record_uses_capacity(&drained));
     // A queued automated worker of a paused repository is held, not counted.
     fs::write(b.cfg.jobs.join("s1/role"), "work\n").unwrap();
+    fs::remove_file(b.cfg.jobs.join("s1/1.slot")).unwrap();
     assert!(!p.record_uses_capacity(&drained));
     fs::remove_file(b.cfg.jobs.join("s1/role")).unwrap();
     fs::remove_file(b.path("active")).unwrap();

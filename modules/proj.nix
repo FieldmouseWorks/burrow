@@ -493,6 +493,7 @@ in
     systemd.services = {
       burrow-settings-reconcile = {
         description = "Vacate and restore repository work from live settings";
+        restartIfChanged = false;
         serviceConfig = {
           Type = "oneshot";
           User = user;

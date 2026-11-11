@@ -92,15 +92,7 @@ impl Pass<'_> {
         let mut going = 0;
         for d in dirs(&self.inbox.state, "") {
             let mark = d.join("drained");
-            if !mark.exists() || !self.record_uses_capacity(&d) {
-                continue;
-            }
-            let named = fs::read_to_string(&mark).unwrap_or_default();
-            if named
-                .trim()
-                .split_once('#')
-                .is_some_and(|(repo, n)| self.inbox.planning && self.has_task_list(Some(repo), n))
-            {
+            if !self.draining_record(&d) {
                 continue;
             }
             if d.join("job").exists() {

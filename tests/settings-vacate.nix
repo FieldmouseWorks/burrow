@@ -144,6 +144,8 @@ in pkgs.testers.runNixOSTest {
     dev("proj-inbox o/web")
     fresh=machine.succeed("cat /var/lib/burrow/proj-inbox/o_web-30/job").strip()
     eventually(fresh,"done")
+    dev("proj-inbox o/web")
+    machine.succeed("test ! -e /var/lib/burrow/proj-inbox/o_web-30/job")
     # Restore with the completed proof check, conversation and order intact.
     machine.succeed("touch /data/release-proof")
     dev("settings allow o/r")

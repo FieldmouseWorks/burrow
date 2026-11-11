@@ -109,13 +109,13 @@ impl Lifecycle {
     /// and both carry on once the question's answered or times out
     /// (remi#881).
     pub fn at_work(&self, own: Option<&str>) -> bool {
-        matches!(self.state.as_deref(), None | Some("queued" | "running"))
-            || self.holds.iter().any(|h| match h.trim().split_once(' ') {
-                Some(("await", target)) => {
-                    own.is_none_or(|o| !target.trim().eq_ignore_ascii_case(o))
-                }
-                _ => !h.trim().is_empty(),
-            })
+        matches!(
+            self.state.as_deref(),
+            None | Some("queued" | "running" | "parked")
+        ) || self.holds.iter().any(|h| match h.trim().split_once(' ') {
+            Some(("await", target)) => own.is_none_or(|o| !target.trim().eq_ignore_ascii_case(o)),
+            _ => !h.trim().is_empty(),
+        })
     }
 }
 
@@ -355,6 +355,15 @@ fn reset(v: &Value) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_parked_job_still_owns_its_maintenance_brief() {
+        let life = Lifecycle {
+            state: Some("parked".into()),
+            holds: Vec::new(),
+        };
+        assert!(life.at_work(None));
+    }
 
     #[test]
     fn a_rate_limit_resets_when_its_last_spent_one_does() {

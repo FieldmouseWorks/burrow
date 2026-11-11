@@ -119,7 +119,7 @@ fn start_with(
         job.turn(&n.to_string(), "priority"),
         if first { "first" } else { "normal" },
     );
-    let started = if crate::policy::denied(&job) {
+    let started = if crate::policy::denied(&job) || crate::policy::parked(&job) {
         crate::policy::mark(&job, "queued", first)?;
         true
     } else {

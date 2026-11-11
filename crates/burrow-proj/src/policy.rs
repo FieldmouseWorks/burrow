@@ -160,6 +160,27 @@ pub fn reconcile(cfg: &Config) -> Result<(), String> {
         .open(cfg.jobs.join(".policy.lock"))
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
+    loop {
+        let before = overlay(cfg)?;
+        reconcile_pass(cfg)?;
+        if before == overlay(cfg)? {
+            return Ok(());
+        }
+    }
+}
+
+fn overlay(cfg: &Config) -> Result<Vec<u8>, String> {
+    let Some(settings) = &cfg.settings else {
+        return Ok(Vec::new());
+    };
+    match fs::read(&settings.overlay) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn reconcile_pass(cfg: &Config) -> Result<(), String> {
     let mut ids: Vec<_> = fs::read_dir(&cfg.jobs)
         .map_err(|e| e.to_string())?
         .flatten()
@@ -268,6 +289,11 @@ fn reconcile_job(cfg: &Config, id: &str) -> Result<(), String> {
         remove_places(cfg, id)?;
     } else if parked(&job) {
         let held = job.lock().map_err(|e| e.to_string())?;
+        let crate::inbox::resumption::Resume::Ready(_capacity) =
+            crate::inbox::resumption::admission(cfg, &job)?
+        else {
+            return Ok(());
+        };
         let mut rec: Park =
             serde_json::from_slice(&fs::read(path(&job, "park")).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
@@ -395,4 +421,17 @@ fn agent_command(cfg: &Config, verb: &str, id: &str) -> Result<(), String> {
         return Err(format!("could not {verb} agent {id}"));
     }
     Ok(())
+}
+
+/// An explicit stop supersedes a park; release must never resurrect it.
+/// The caller holds the job's turn-start lock and has stopped its unit.
+pub(crate) fn cancel(job: &Job) -> Result<(), String> {
+    for name in ["park", "restoring", "order", "released"] {
+        match fs::remove_file(path(job, name)) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    remove_places(job.cfg, job.id)
 }
