@@ -47,6 +47,7 @@ fn pass(cfg: &Config) -> Pass<'_> {
         wake: BTreeMap::new(),
         unreached: Vec::new(),
         looked: Vec::new(),
+        observe: false,
     }
 }
 

@@ -1,7 +1,7 @@
 //! The inbox's part of the live snapshot ([`crate::snapshot`]): the ready
 //! issues in the drain's order, and the drain's and sorting's slots, each
 //! from the same records and ranking the passes act on. Only reads: no
-//! GitHub, no question recovered.
+//! GitHub (an observing pass, [`Pass::observe`]), no question recovered.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,6 +35,7 @@ pub(crate) fn view(cfg: &Config, at: i64) -> View {
         wake: BTreeMap::new(),
         unreached: Vec::new(),
         looked: Vec::new(),
+        observe: true,
     };
     pass.view(t, at)
 }

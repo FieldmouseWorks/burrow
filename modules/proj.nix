@@ -96,6 +96,7 @@ let
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
+    heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters paused;
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;

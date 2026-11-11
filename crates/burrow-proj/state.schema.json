@@ -533,6 +533,11 @@
           "description": "Taken, by something proj has no record of.",
           "type": "string",
           "const": "busy"
+        },
+        {
+          "description": "Its lock couldn't be looked at: neither free nor known to be taken.",
+          "type": "string",
+          "const": "unknown"
         }
       ]
     },

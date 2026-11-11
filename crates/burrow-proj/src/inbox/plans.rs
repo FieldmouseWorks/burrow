@@ -228,7 +228,7 @@ impl Pass<'_> {
                 if old.child.number.map(|v| v.to_string()).as_deref() == Some(n) {
                     return false;
                 }
-                if old.child.attempted && old.child.number.is_none() {
+                if old.child.attempted && old.child.number.is_none() && !self.observe {
                     let Some(issues) = every(
                         self.cfg,
                         &format!("repos/{repo}/issues?state=all&per_page=100"),
@@ -264,6 +264,13 @@ impl Pass<'_> {
             };
             if self.claimed(repo).contains(parent) {
                 return false;
+            }
+            if self.observe {
+                if list.next() != Some(index) || !self.child_admissible_at(repo, parent, depth + 1)
+                {
+                    return false;
+                }
+                continue;
             }
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{parent}")) else {
                 self.miss(repo);

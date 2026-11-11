@@ -591,21 +591,41 @@ pub fn line(cfg: &Config) -> Vec<Waiting> {
     rows
 }
 
-/// Whether the lock file at a path is taken: tried, and let go at once. A
-/// missing one is free.
-fn taken(path: &Path) -> bool {
-    File::open(path).is_ok_and(|f| match f.try_lock() {
+/// What a look at a slot's lock file finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lock {
+    /// Locked by nobody: tried, and let go at once.
+    Free,
+    Taken,
+    /// No file: proj's own pools make theirs as they're first taken, so for
+    /// them it's free; heavy's are made at boot, so one missing is unknown.
+    Missing,
+    /// It couldn't be opened or tried (permissions, too many files, I/O):
+    /// never counted as free.
+    Unknown,
+}
+
+fn lock(path: &Path) -> Lock {
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Lock::Missing,
+        Err(_) => return Lock::Unknown,
+    };
+    match f.try_lock() {
         Ok(()) => {
             let _ = f.unlock();
-            false
+            Lock::Free
         }
-        Err(_) => true,
-    })
+        Err(std::fs::TryLockError::WouldBlock) => Lock::Taken,
+        Err(std::fs::TryLockError::Error(_)) => Lock::Unknown,
+    }
 }
 
 /// Every slot of the line's, Codex's pool and the machine's heavy work, for
 /// the live snapshot: each one taken with the job whose latest turn took it
-/// (its N.slot, the newest that names it), else what its N.who says.
+/// (its N.slot, the newest that names it), and the class its N.who gives it.
+/// One taken by nothing proj has a record of is busy, since its N.who was
+/// written (as it was taken), or since an unknown time for one with none.
 pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
     use snapshot::{Holder, SlotKind, SlotState, held, job_slot};
     // Which job last took each slot: one look through every job's latest turn.
@@ -628,28 +648,49 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
     }
     let mut slots = Vec::new();
     // Each slot by its name in its kind, the name a turn's N.slot gives it,
-    // its lock and its N.who.
-    let mut one =
-        |kind: SlotKind, name: String, key: String, lock: PathBuf, who: Option<PathBuf>| {
-            let slot = if !taken(&lock) {
-                held(kind, name, SlotState::Idle, None, at)
-            } else if let Some((_, id)) = took.get(&key) {
-                job_slot(cfg, kind, name, id, None, at)
-            } else {
-                let who = who.and_then(|w| read(&w)).unwrap_or_default();
-                let (class, project) = who.split_once('\t').unwrap_or((&who, ""));
-                let since = mtime(&lock);
-                snapshot::Slot {
+    // its lock, what a missing lock file means, and its N.who.
+    let mut one = |kind: SlotKind,
+                   name: String,
+                   key: String,
+                   path: PathBuf,
+                   missing: Lock,
+                   who: Option<PathBuf>| {
+        let state = match lock(&path) {
+            Lock::Missing => missing,
+            l => l,
+        };
+        let who_said = who.as_ref().and_then(|w| read(w)).unwrap_or_default();
+        let (class, project) = who_said.split_once('\t').unwrap_or((&who_said, ""));
+        let known = |v: &str| Some(v.to_owned()).filter(|v| !v.is_empty() && v != "-");
+        let slot = match state {
+            Lock::Free | Lock::Missing => held(kind, name, SlotState::Idle, None, at),
+            Lock::Unknown => held(kind, name, SlotState::Unknown, None, at),
+            Lock::Taken => match took.get(&key) {
+                Some((_, id)) => {
+                    let mut s = job_slot(cfg, kind, name, id, None, at);
+                    if let Some(h) = s.holder.as_mut() {
+                        h.class = known(class);
+                    }
+                    s
+                }
+                None => snapshot::Slot {
                     holder: Some(Holder {
-                        class: Some(class.to_owned()).filter(|c| !c.is_empty() && c != "-"),
-                        project: Some(project.to_owned()).filter(|p| !p.is_empty() && p != "-"),
+                        class: known(class),
+                        project: known(project),
                         ..Holder::default()
                     }),
-                    ..held(kind, name, SlotState::Busy, since, at)
-                }
-            };
-            slots.push(slot);
+                    ..held(
+                        kind,
+                        name,
+                        SlotState::Busy,
+                        who.as_deref().and_then(mtime),
+                        at,
+                    )
+                },
+            },
         };
+        slots.push(slot);
+    };
     let dir = cfg.jobs.join(".slots");
     for i in 1..=cfg.max_jobs {
         one(
@@ -657,6 +698,7 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             i.to_string(),
             i.to_string(),
             dir.join(i.to_string()),
+            Lock::Free,
             Some(dir.join(format!("{i}.who"))),
         );
     }
@@ -665,6 +707,7 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
         "unstick".into(),
         "unstick".into(),
         dir.join("unstick"),
+        Lock::Free,
         Some(dir.join("unstick.who")),
     );
     let codex = cfg.jobs.join(".codex-slots");
@@ -674,17 +717,21 @@ pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
             i.to_string(),
             format!("codex-{i}"),
             codex.join(i.to_string()),
+            Lock::Free,
             None,
         );
     }
     if let Some(heavy) = &cfg.heavy_dir {
-        for i in 1.. {
-            let lock = burrow_heavy::config::slot_file(heavy, i);
-            if !lock.exists() {
-                break;
-            }
+        for i in 1..=cfg.heavy_slots {
             // Nothing of proj's takes these: whose they are is heavy's.
-            one(SlotKind::Heavy, i.to_string(), String::new(), lock, None);
+            one(
+                SlotKind::Heavy,
+                i.to_string(),
+                String::new(),
+                burrow_heavy::config::slot_file(heavy, i),
+                Lock::Unknown,
+                None,
+            );
         }
     }
     slots
@@ -725,7 +772,10 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
         if fs::create_dir_all(&dir).is_err() {
             return 0;
         }
-        (1..=n).filter(|i| !taken(&dir.join(i.to_string()))).count()
+        // Only a slot seen free is room: one that can't be looked at isn't.
+        (1..=n)
+            .filter(|i| matches!(lock(&dir.join(i.to_string())), Lock::Free | Lock::Missing))
+            .count()
     };
     match engine {
         Engine::Claude => {

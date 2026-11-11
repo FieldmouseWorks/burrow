@@ -140,6 +140,8 @@ pub enum SlotState {
     Starting,
     /// Taken, by something proj has no record of.
     Busy,
+    /// Its lock couldn't be looked at: neither free nor known to be taken.
+    Unknown,
 }
 
 /// One slot, and what holds it.

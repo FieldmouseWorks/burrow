@@ -96,6 +96,9 @@ pub struct Config {
     pub codex_hooks: PathBuf,
     /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
+    /// How many slots heavy has there (burrow.cpu.heavy.slots).
+    #[serde(default)]
+    pub heavy_slots: u32,
     /// Machine MCP servers, shared by every job engine.
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServer>,

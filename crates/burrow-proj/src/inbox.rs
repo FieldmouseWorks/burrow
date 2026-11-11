@@ -98,6 +98,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         wake: BTreeMap::new(),
         unreached: Vec::new(),
         looked: Vec::new(),
+        observe: false,
     };
     p.run(only)?;
     p.finish(only)
@@ -332,6 +333,11 @@ struct Pass<'a> {
     /// Repos GitHub couldn't be asked about this pass.
     unreached: Vec<String>,
     looked: Vec<String>,
+    /// Only observing, for the live snapshot: it asks GitHub nothing, and
+    /// takes what the records here say. A planned child's queue place then
+    /// rests on its plan's own order alone; the drain asks GitHub about the
+    /// one it picks, its parents included, before it hands it on.
+    observe: bool,
 }
 
 impl Pass<'_> {
