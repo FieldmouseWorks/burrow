@@ -443,15 +443,23 @@ impl Pass<'_> {
         Ok(id)
     }
 
+    /// A machine role picks the engine itself; the owner role only tunes the
+    /// model, so an authors' issue still runs on its label's engine.
     fn routing(&self, issue: &Value) -> (Option<String>, Option<crate::engine::Engine>) {
-        let role = self.machine_role(issue);
-        let pinned = role.is_none().then(|| self.engine(issue)).flatten();
-        (role, pinned)
+        match self.machine_role(issue) {
+            Some(role) => (Some(role), None),
+            None => (self.inbox.owner_role.clone(), self.engine(issue)),
+        }
     }
 
-    /// Machine labels route by role even without an App; other bot issues
-    /// have a generic role. Ordinary human issues keep label routing.
+    /// The unstick label comes first, so the pipeline's repair job keeps its
+    /// own role whatever else the issue carries; then machine labels, which
+    /// route by role even without an App; other bot issues have a generic
+    /// role. Ordinary human issues keep label routing.
     fn machine_role(&self, issue: &Value) -> Option<String> {
+        if self.lane(issue) {
+            return Some("stuck".into());
+        }
         self.inbox
             .roles
             .iter()
@@ -462,7 +470,6 @@ impl Pass<'_> {
                 })
             })
             .map(|(_, role)| role.clone())
-            .or_else(|| self.lane(issue).then(|| "stuck".into()))
             .or_else(|| {
                 raw(&issue["user"]["login"])
                     .ends_with("[bot]")
@@ -965,6 +972,7 @@ fn say(f: Fail) {
 
 mod claims;
 mod drain;
+pub(crate) use drain::job_paused;
 mod jobs;
 mod plans;
 mod retirement;

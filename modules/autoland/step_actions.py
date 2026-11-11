@@ -363,6 +363,8 @@ class Actions:
         # proofs.drop_inputs). One at work is stopped (the stopping path when
         # proj or systemd won't), and holds its slot till over (proofs.live).
         stage = [unit or "job", sorted(checks), {c: self.rc["proofBuilds" if builds else "proofRuns"].get(c) for c in checks}]
+        if runs and self.rc.get("proofToolsRef"):
+            stage.append(self.rc["proofToolsRef"])
         P.drop_inputs(self.st, [self.head, stage])
         if self.st.get("proved") == self.head and (jid := self.st.get("provedJob")) and not P.fits(self.st, stage):
             self.st["proofsLive"] = P.jobs(self.st)

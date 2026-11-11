@@ -62,6 +62,7 @@
 //! stall has gone, changing nothing.
 
 pub mod config;
+pub mod degradations;
 pub mod ladder;
 pub mod state;
 pub mod watch;

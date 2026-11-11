@@ -208,9 +208,13 @@ Each has an entry below, and each can be imported on its own.
   `steward-conflictFixed`, `steward-proved`, and `steward-judged` roles. Inbox issues use `stuck` when they
   have `inbox.unstickLabel`; other bot issues use `machine-inbox`. Machines map
   their own labels to roles with `burrow.proj.inbox.roles` (for example
-  career drift), including machines without an App. Engine labels enroll
+  career drift), including machines without an App; the unstick label
+  wins over that map. Engine labels enroll
   these issues but their roles choose
   the engine each turn, defaulting to Claude when no line matches.
+  The authors' own issues run as `burrow.proj.inbox.ownerRole` when it's
+  set, so the models file can tune them; their engine label still picks
+  the engine.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
   proj jobs retain the roleless form for work an agent hands on.
@@ -238,6 +242,10 @@ Each has an entry below, and each can be imported on its own.
   parser and must pass the update's health check before confirmation.
   With `engines.door.enable`, an author's `engines` issue in `engines.door.repo`
   switches setups without an agent ([engines door](docs/front-door.md#engines-with-no-agent)).
+
+  `proj settings show [--json]` prints every pipeline option in effect, its
+  value and where it came from (default, flake or live file), each declared
+  once in burrow-settings' schema ([settings](docs/settings.md)).
 
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
@@ -316,7 +324,9 @@ Each has an entry below, and each can be imported on its own.
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The
   watchdog's job clears a crash whose cause it fixed with
-  `burrow-units clear EXE`, and a later one is back.
+  `burrow-units clear EXE`, and a later one is back. With
+  `degradations.enable`, repeated soft CI failures feed the same ladder:
+  [workflow degradations](docs/degradations.md) describes the signal and options.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
   on together, the machine's Actions runners and its deploy, keeps moving. A
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that

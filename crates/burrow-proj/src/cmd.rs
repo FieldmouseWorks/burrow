@@ -57,6 +57,10 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&said);
             Ok(())
         }
+        Some("settings") => {
+            put(&crate::settings::command(cfg, &args[1..]).map_err(|e| Fail::new(1, e))?);
+            Ok(())
+        }
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),

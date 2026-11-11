@@ -9,6 +9,7 @@ use super::jobs::revived;
 use super::{Pass, forget, key, lock_within, named_for, raw, repo_of, seconds, uri};
 use crate::config::Config;
 use crate::config::tests::example;
+use crate::engine::Engine;
 
 #[test]
 fn repos() {
@@ -337,6 +338,40 @@ fn an_old_label_marker_is_replaced_for_the_new_engine_map() {
         fs::read_to_string(&marker).unwrap(),
         serde_json::to_string(&cfg.inbox.as_ref().unwrap().labels).unwrap()
     );
+}
+
+#[test]
+fn the_unstick_label_beats_a_role_mapped_to_an_engine_label() {
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.inbox
+        .as_mut()
+        .unwrap()
+        .roles
+        .insert("claude".into(), "inbox".into());
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["user"]["login"] = json!("steward[bot]");
+    i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
+    assert_eq!(p.routing(&i).0.as_deref(), Some("stuck"));
+}
+
+#[test]
+fn owner_issues_take_the_owner_role_and_keep_their_label_engine() {
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    let p = pass(&cfg);
+    let mut i = issue(json!("work"));
+    i["labels"] = json!([{"name":"claude"}]);
+    assert_eq!(p.routing(&i), (None, Some(Engine::Claude)));
+    cfg.inbox.as_mut().unwrap().owner_role = Some("inbox".into());
+    let p = pass(&cfg);
+    assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Claude)));
+    i["labels"] = json!([{"name":"codex"}]);
+    assert_eq!(p.routing(&i), (Some("inbox".into()), Some(Engine::Codex)));
+    i["labels"] = json!([{"name":"claude"}, {"name":p.inbox.unstick_label}]);
+    assert_eq!(p.routing(&i), (Some("stuck".into()), None));
+    i["labels"] = json!([{"name":"claude"}]);
+    i["user"]["login"] = json!("steward[bot]");
+    assert_eq!(p.routing(&i), (Some("machine-inbox".into()), None));
 }
 
 #[test]
