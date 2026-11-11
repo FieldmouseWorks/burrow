@@ -62,19 +62,14 @@ fn line(text: &str) -> Result<(RoleKey<'_>, Engine, Tuning), String> {
     ))
 }
 
-/// ROLE's model and effort on ENGINE in REPO. Every non-comment line must
-/// parse, so a typo never silently runs a role on the wrong model; a repo's
-/// line beats the bare one; two lines for one role and engine fail with
-/// both named, even on other roles. An absent file tunes nothing, and so does
-/// `ROLE ENGINE -`, which lets a repo's line put back the engine's own
-/// settings over a bare line's.
-pub(crate) fn tuning(
-    path: &Path,
-    role: &str,
-    repo: Option<&str>,
-    engine: Engine,
-) -> Result<Tuning, String> {
-    let text = crate::roles::read(path)?;
+/// Each line of a models file by its role and engine: the line's number,
+/// its text and what it tunes.
+type Entries<'a> = BTreeMap<(RoleKey<'a>, Engine), (usize, &'a str, Tuning)>;
+
+/// Every line of a models file, checked. Every non-comment line must parse,
+/// so a typo never silently runs a role on the wrong model; two lines for
+/// one role and engine fail with both named, even on other roles.
+fn entries<'a>(path: &Path, text: &'a str) -> Result<Entries<'a>, String> {
     let mut entries = BTreeMap::new();
     for (i, text) in text.lines().enumerate() {
         if text.trim().is_empty() || text.trim_start().starts_with('#') {
@@ -92,7 +87,21 @@ pub(crate) fn tuning(
         }
         entries.insert(key, (i + 1, text, tuning));
     }
-    Ok(entries
+    Ok(entries)
+}
+
+/// ROLE's model and effort on ENGINE in REPO ([`entries`]): a repo's line
+/// beats the bare one. An absent file tunes nothing, and so does
+/// `ROLE ENGINE -`, which lets a repo's line put back the engine's own
+/// settings over a bare line's.
+pub(crate) fn tuning(
+    path: &Path,
+    role: &str,
+    repo: Option<&str>,
+    engine: Engine,
+) -> Result<Tuning, String> {
+    let text = crate::roles::read(path)?;
+    Ok(entries(path, &text)?
         .into_iter()
         .filter(|((_, on), _)| *on == engine)
         .filter_map(|((key, _), (_, _, tuning))| {
@@ -101,6 +110,25 @@ pub(crate) fn tuning(
         .max_by_key(|(rank, _)| *rank)
         .map(|(_, tuning)| tuning)
         .unwrap_or_default())
+}
+
+/// Every line of the file, as `settings show` gives it: `ROLE[@OWNER/REPO]
+/// ENGINE`, as the line says it, to its model and effort (null for the
+/// engine's own).
+pub(crate) fn shown(
+    path: &Path,
+    text: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    Ok(entries(path, text)?
+        .into_iter()
+        .map(|((_, engine), (_, line, tuning))| {
+            let role = line.split_whitespace().next().unwrap_or_default();
+            (
+                format!("{role} {}", engine.name()),
+                serde_json::json!({"model": tuning.model, "effort": tuning.effort}),
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]

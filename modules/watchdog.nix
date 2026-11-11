@@ -50,6 +50,7 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    (import ./watchdog/degradations.nix inputs)
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }

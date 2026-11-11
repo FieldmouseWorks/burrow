@@ -10,7 +10,7 @@
 # their own wake-ups start them, never a timer. With the stall watchdog on,
 # proj is one of its sources: each job's wait, as of its last change.
 inputs:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, options, ... }:
 let
   cfg = config.burrow.proj;
   # What marks proj-inbox's own comments on an issue: never a reply, never news.
@@ -63,6 +63,9 @@ let
     PRs to the steward. There are no TTY sessions: run each command whole.
   '');
 
+  # The flake's value of each option in burrow-settings' schema, for `proj
+  # settings show`.
+  settingsFile = "burrow/settings.json";
   roles = "${config.users.users.${user}.home}/.config/proj/roles";
   models = "${config.users.users.${user}.home}/.config/proj/models";
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
@@ -100,9 +103,12 @@ let
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
     inherit roles models;
+    # A path, not the file: the flake's values include ones that run proj
+    # (a repo's proofRuns), so proj's config can't hold them.
+    settings = "/etc/${settingsFile}";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels roles unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
       inherit (cfg.inbox) planning;
       host = config.networking.hostName;
       wake = inboxWake;
@@ -404,7 +410,13 @@ in
       roles = lib.mkOption {
         type = lib.types.attrsOf (lib.types.strMatching "[a-zA-Z0-9-]+");
         default = {};
-        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+        description = "Machine issue labels mapped to roles (for example career-drift), including machines without a GitHub App. The unstick label comes first and uses stuck; other bot issues use machine-inbox. Roles select the engine each turn; engine labels only enroll these issues.";
+      };
+      ownerRole = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9-]+");
+        default = null;
+        example = "inbox";
+        description = "The role the authors' own issues run as when no rule above names one, so the models file can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
@@ -507,6 +519,7 @@ in
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package agents ];
+    environment.etc.${settingsFile}.text = builtins.toJSON (import ./settings/tracked.nix { inherit lib options; });
     burrow.updates.health.proj-config = ''
       if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
         exec ${proj}/bin/proj check-config

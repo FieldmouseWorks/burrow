@@ -70,6 +70,10 @@
       machinery = "workers";
     };
     watchdog.enable = true;
+    watchdog.degradations = {
+      enable = true;
+      repos."sam/homelab" = [ "flake.yml" ];
+    };
     usageReset.enable = true;
     dispatch = {
       enable = true;

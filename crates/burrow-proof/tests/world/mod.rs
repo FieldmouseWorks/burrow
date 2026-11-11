@@ -103,6 +103,7 @@ impl World {
     pub fn record(&self, runs: &[(&str, &str)]) -> Record {
         Record {
             repo: "sam/r".into(),
+            tools_ref: None,
             number: 5,
             head: self.head.clone(),
             checkout: self.checkout.clone(),
