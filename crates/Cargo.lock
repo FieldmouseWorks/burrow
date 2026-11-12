@@ -673,6 +673,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-rc-scan"
+version = "0.0.0"
+dependencies = [
+ "burrow-test",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
