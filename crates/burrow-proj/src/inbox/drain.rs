@@ -2,7 +2,9 @@
 //! engine label. It admits the highest ranked candidate whose resolved engine has
 //! room; roles may choose another engine. From there it's an inbox issue
 //! like any other: its job, its answers, closed when it's done. Priority
-//! goes first, then pipeline repos, then age. At most `drain_jobs` of the
+//! goes first, then pipeline repos, then age; the blockers of an urgent target
+//! go before all of them (the rules and their order are live settings, see
+//! [`super::deps`]). At most `drain_jobs` of the
 //! issues it handed on have a queued or running turn at once; one goes each
 //! pass at most.
 //! every turn's end, a sorting job's included, is a pass. A handed-on job
@@ -42,7 +44,8 @@ pub(crate) const WAITING: &str = ".drain-waiting";
 pub(crate) const READY_LISTS: &str = ".ready";
 
 /// A ready issue in the drain's order: its fields sort it, highest priority
-/// first, then the pipeline's repos, then the oldest.
+/// first, then the pipeline's repos, then the oldest. (The drain's own pick
+/// is ordered by `proj.inbox.drainOrder`: [`super::deps`].)
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Candidate {
     pub(crate) priority: Priority,
@@ -54,6 +57,10 @@ pub(crate) struct Candidate {
     pub(crate) n: String,
     /// A repair child: it takes no ordinary drain capacity.
     pub(crate) repair: bool,
+    /// It blocks an urgent target ([`super::deps`]); set when the drain
+    /// orders what it picks from, last so that the fields' own order stays
+    /// the plain one.
+    pub(crate) blocker: bool,
 }
 
 impl Pass<'_> {
@@ -122,7 +129,13 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
         }
-        let ranked = self.next_ready(&t);
+        // A full drain reads only its cache; with room, the order is each
+        // candidate's dependency facts as GitHub has them now.
+        let ranked = if going < t.drain_jobs {
+            self.next_ready_ordered(&t)
+        } else {
+            self.next_ready(&t)
+        };
         let Some(Candidate { repo: first, .. }) = ranked.first() else {
             let _ = fs::remove_file(&waiting);
             return Ok(());
@@ -309,6 +322,7 @@ impl Pass<'_> {
                     "user": {"login": i["user"]["login"], "id": i["user"]["id"], "type": i["user"]["type"]},
                     "labels": i["labels"],
                     "repository_url": i["repository_url"],
+                    "body": i["body"],
                 })
             })
             .collect();
@@ -323,8 +337,21 @@ impl Pass<'_> {
     /// The ready issues to hand on, next first, from every repo's last pass.
     /// Repair status comes from the cached labels.
     pub(super) fn next_ready(&mut self, t: &Triage) -> Vec<Candidate> {
+        let items = self.ready_items();
+        self.ranked(t, &items)
+    }
+
+    /// [`Pass::next_ready`] in the order of `proj.inbox.drainOrder`, the
+    /// dependency facts read from GitHub now ([`super::deps`]).
+    pub(super) fn next_ready_ordered(&mut self, t: &Triage) -> Vec<Candidate> {
+        let items = self.ready_items();
+        let ranked = self.ranked(t, &items);
+        self.order(ranked, &items)
+    }
+
+    fn ready_items(&self) -> Vec<Value> {
         let dir = self.inbox.state.join(READY_LISTS);
-        let items: Vec<Value> = fs::read_dir(&dir)
+        fs::read_dir(&dir)
             .map(|d| {
                 d.filter_map(|e| e.ok())
                     // Not one being written (swap's NAME.new).
@@ -334,8 +361,7 @@ impl Pass<'_> {
                     .flatten()
                     .collect()
             })
-            .unwrap_or_default();
-        self.ranked(t, &items)
+            .unwrap_or_default()
     }
 
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
@@ -404,6 +430,7 @@ impl Pass<'_> {
                         outside: rank(&repo),
                         opened: raw(&i["created_at"]),
                         repair: self.lane(i),
+                        blocker: false,
                         repo,
                         n,
                     },

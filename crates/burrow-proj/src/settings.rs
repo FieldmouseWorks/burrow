@@ -23,16 +23,32 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     let tracked: serde_json::Map<String, Value> =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut readings = show::flake(&tracked)?;
-    let (file, overrides, until) = if let Some(policy) = &cfg.settings {
+    let (file, overrides, until, drain) = if let Some(policy) = &cfg.settings {
         let (overrides, until) = policy.readings()?;
         (
             policy.overlay.clone(),
             there(&policy.overlay).then(|| json!(overrides)),
             there(&policy.overlay).then(|| json!(until)),
+            policy.drain_settings()?,
         )
     } else {
-        (cfg.jobs.join(".settings-unconfigured"), None, None)
+        (
+            cfg.jobs.join(".settings-unconfigured"),
+            None,
+            None,
+            Default::default(),
+        )
     };
+    readings.push(Reading::live(
+        "proj.inbox.drainOrder",
+        file.clone(),
+        drain.order.map(|v| json!(v)),
+    ));
+    readings.push(Reading::live(
+        "proj.inbox.drainUrgentBranches",
+        file.clone(),
+        drain.urgent_branches.map(|v| json!(v)),
+    ));
     readings.push(Reading::live(
         "settings.repositoryOverrides",
         file.clone(),

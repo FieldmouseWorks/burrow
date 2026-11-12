@@ -123,6 +123,10 @@ pub fn find(name: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.name == name)
 }
 
+/// The drain's ranking rules, which `proj.inbox.drainOrder` puts in order.
+pub const DRAIN_RULES: &[&str] = &["blockers", "priority", "pipeline", "age"];
+const DRAIN_ORDER: Kind = Kind::List(&Kind::OneOf(DRAIN_RULES));
+
 const REPOS: Kind = Kind::List(&Kind::Repo);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
@@ -447,6 +451,18 @@ pub static SETTINGS: &[Setting] = &[
         "Path regexes left out of what the reviewers read.",
     ),
     // What changes live, in proj's files.
+    live(
+        "proj.inbox.drainOrder",
+        &DRAIN_ORDER,
+        r#"["blockers", "priority", "pipeline", "age"]"#,
+        "The drain's ranking rules, first rule first, each once: blockers (those of an urgent target), priority, pipeline (pipeline repositories before others) and age (oldest first); ties end on repository and number.",
+    ),
+    live(
+        "proj.inbox.drainUrgentBranches",
+        &Kind::List(&Kind::Text),
+        r#"["autoland/red-"]"#,
+        "Head-branch prefixes of open pull requests (a red default branch's fix, a deploy's update branch) whose blockers the drain ranks first; open ready issues count as urgent targets too.",
+    ),
     live(
         "proj.roles",
         &ROLES,

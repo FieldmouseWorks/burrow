@@ -274,8 +274,17 @@ Jobs parked on awaits or questions release drain capacity; waking turns join the
 queue. Paused repos reserve no drain capacity and their automated wakeups wait
 for the pause to lift.
 Rank issues with `priority: high`, `priority: medium` or `priority: low`.
-Priority comes first (no label means medium), then pipeline repos, then oldest
-first. Triage includes a priority in its verdict and adds it only if no priority
+The rules apply in the order of the live setting `proj.inbox.drainOrder`,
+by default blockers, priority (no label means medium), pipeline repos, then
+oldest first; ties end on repository and number. A blocker is a candidate that
+blocks an urgent target: an open `ready` issue, or an open pull request from a
+branch with a prefix in `proj.inbox.drainUrgentBranches` (by default
+`autoland/red-`; add a deploy's update branch). Each drain decision with room
+reads the facts again: GitHub's issue dependencies, every page, plus explicit
+`Blocks:` / `Blocked by:` lines in bodies (`#N`, `OWNER/REPO#N` or an issue URL,
+in either direction, which also stand in where the dependency API is
+unavailable). A target GitHub no longer has open stops counting. `proj status`
+shows the cached order, without dependency facts. Triage includes a priority in its verdict and adds it only if no priority
 label exists when it acts. `proj status` and the probe's `queue` show drain
 capacity used/total and the handoffs using it, then the next five candidates from the drain's cached lists; eligibility and slot availability
 are checked when handing one on.
