@@ -14,6 +14,7 @@ let
   # Conary doesn't know (its types deny unknown fields), a missing evidence
   # block or empty trust. The stand-in stops there, as a dry run does.
   cn = pkgs.writeShellScriptBin "cn" ''
+    set -euo pipefail
     [ "$1 $2" = "flow compare" ] || exit 1
     shift 2
     while [ $# -gt 0 ]; do
@@ -42,6 +43,15 @@ in pkgs.runCommand "conary-flow-check" { nativeBuildInputs = [ cn pkgs.jq ]; } '
   jq -e '.trusted_authors == ["sam"] and .settings.review_authors == ["sams-steward[bot]"]' ${env.CONARY_FLOW_CONFIG}
   # The check fails on what it is for: a config with a key of its own.
   jq '. + {extra: 1}' ${env.CONARY_FLOW_CONFIG} >bad.json
-  ! cn flow compare --config bad.json --policy ${env.CONARY_POLICY} sam/homelab
+  if cn flow compare --config bad.json --policy ${env.CONARY_POLICY} sam/homelab; then
+    echo "a config with an unknown key was accepted"; exit 1
+  fi
+  echo '{' >broken.json
+  if cn flow compare --config broken.json --policy ${env.CONARY_POLICY} sam/homelab; then
+    echo "malformed JSON was accepted"; exit 1
+  fi
+  if cn flow compare --config missing.json --policy ${env.CONARY_POLICY} sam/homelab; then
+    echo "an unreadable config was accepted"; exit 1
+  fi
   touch $out
 ''
