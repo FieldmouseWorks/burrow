@@ -19,15 +19,17 @@ struct Evidence {
     at: u64,
 }
 
-pub(crate) fn run(
-    run: &mut Command,
-    gh: &str,
-    token: &str,
-    app: &str,
-    owner: &str,
-    dir: &Path,
-    refusals: Option<&Path>,
-) -> io::Result<i32> {
+#[derive(Clone, Copy)]
+pub(crate) struct Context<'a> {
+    pub gh: &'a str,
+    pub token: &'a str,
+    pub app: &'a str,
+    pub owner: &'a str,
+    pub dir: &'a Path,
+    pub refusals: Option<&'a Path>,
+    pub kick: Option<&'a str>,
+}
+pub(crate) fn run(run: &mut Command, context: Context<'_>) -> io::Result<i32> {
     // Failure here precedes execution. Once spawned, preserve the child result.
     let trace = tempfile::NamedTempFile::new()?;
     let mut child = run.env("BURROW_GH_RESPONSES", trace.path()).spawn()?;
@@ -40,44 +42,77 @@ pub(crate) fn run(
             1
         }
     };
-    if let Err(e) = observe(trace.as_file(), gh, token, app, owner, dir, refusals) {
+    if let Err(e) = observe(trace.as_file(), context) {
         eprintln!("gh-token: quota observation unavailable after gh exited {code}: {e}");
     }
     Ok(code)
 }
 
-fn observe(
-    trace: &std::fs::File,
-    gh: &str,
-    token: &str,
-    app: &str,
-    owner: &str,
-    dir: &Path,
-    refusals: Option<&Path>,
-) -> io::Result<()> {
-    let at = SystemTime::now()
+fn save(meter: &Meter, dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    meter.record(dir)
+}
+fn wake(context: Context<'_>) {
+    if let Some(url) = context.kick.filter(|s| !s.is_empty()) {
+        let _ = burrow_events::kick::kick(url, std::time::Duration::from_secs(1));
+    }
+}
+fn unix() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let mut meter = Meter::new(app, owner, at);
+        .as_secs()
+}
+fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
+    let Context {
+        gh,
+        token,
+        app,
+        owner,
+        dir,
+        refusals,
+        ..
+    } = context;
+    let mut meter = Meter::new(app, owner, unix());
+    let mut state_error = None;
+    let mut woke = false;
     for line in io::BufReader::new(trace).lines() {
         let record: Evidence = serde_json::from_str(&line?)?;
-        let mut refusal = Meter::new(app, owner, record.at);
-        refusal.response(&burrow_github::Response {
+        let response = burrow_github::Response {
             status: record.status,
             headers: record.headers.unwrap_or_default(),
             body: record.body,
-        });
-        if refusal.retry_at.is_some() {
-            if let Some(dir) = refusals {
-                std::fs::create_dir_all(dir)?;
-                refusal.record(dir)?;
+        };
+        let mut observed = Meter::new(app, owner, record.at);
+        observed.remaining = response
+            .header("x-ratelimit-remaining")
+            .and_then(|s| s.parse().ok());
+        observed.reset = response
+            .header("x-ratelimit-reset")
+            .and_then(|s| s.parse().ok());
+        observed.response(&response);
+        if observed.retry_at.is_some()
+            && let Some(dir) = refusals
+            && let Err(e) = save(&observed, dir)
+        {
+            state_error.get_or_insert(e);
+        }
+        meter.retry_at = meter.retry_at.into_iter().chain(observed.retry_at).max();
+        if observed.until(unix()).is_some() {
+            // Publish known holds before the optional free probe, so peers
+            // cannot start while a slow observation request is in flight.
+            match save(&observed, dir) {
+                Ok(()) if !woke => {
+                    wake(context);
+                    woke = true;
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    state_error.get_or_insert(e);
+                }
             }
-            meter.retry_at = meter.retry_at.into_iter().chain(refusal.retry_at).max();
         }
     }
-    // This read costs no budget, uses precisely the same token, and cannot
-    // recursively record evidence or alter the command's outcome.
     let budget = burrow_process::output(
         Command::new(gh)
             .args(["api", "rate_limit"])
@@ -91,14 +126,17 @@ fn observe(
         && budget.status.success()
         && let Ok(v) = serde_json::from_slice(&budget.stdout)
     {
-        meter.at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        meter.at = unix();
         meter.budget(&v);
     }
-    std::fs::create_dir_all(dir)?;
-    meter.record(dir)
+    match save(&meter, dir) {
+        Ok(()) if !woke && meter.until(unix()).is_some() => wake(context),
+        Ok(()) => {}
+        Err(e) => {
+            state_error.get_or_insert(e);
+        }
+    }
+    state_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -144,12 +182,15 @@ esac
             assert_eq!(
                 run(
                     Command::new(&gh).arg(command),
-                    gh.to_str().unwrap(),
-                    "fixture-token",
-                    "workers",
-                    "sam",
-                    &dir,
-                    Some(&refusals)
+                    Context {
+                        gh: gh.to_str().unwrap(),
+                        token: "fixture-token",
+                        app: "workers",
+                        owner: "sam",
+                        dir: &dir,
+                        refusals: Some(&refusals),
+                        kick: None
+                    }
                 )
                 .unwrap(),
                 code
@@ -168,12 +209,15 @@ esac
             assert_eq!(
                 run(
                     Command::new(&gh).arg(command),
-                    gh.to_str().unwrap(),
-                    "fixture-token",
-                    "workers",
-                    owner,
-                    &shared,
-                    Some(&refusals)
+                    Context {
+                        gh: gh.to_str().unwrap(),
+                        token: "fixture-token",
+                        app: "workers",
+                        owner,
+                        dir: &shared,
+                        refusals: Some(&refusals),
+                        kick: None
+                    }
                 )
                 .unwrap(),
                 1
@@ -206,12 +250,15 @@ esac
         assert_eq!(
             run(
                 Command::new(&gh).arg("limited"),
-                gh.to_str().unwrap(),
-                "fixture-token",
-                "workers",
-                "sam",
-                &blocked_meter,
-                Some(&independent_refusals)
+                Context {
+                    gh: gh.to_str().unwrap(),
+                    token: "fixture-token",
+                    app: "workers",
+                    owner: "sam",
+                    dir: &blocked_meter,
+                    refusals: Some(&independent_refusals),
+                    kick: None
+                }
             )
             .unwrap(),
             1
@@ -225,12 +272,15 @@ esac
             assert_eq!(
                 run(
                     Command::new(&gh).arg(command),
-                    gh.to_str().unwrap(),
-                    "fixture-token",
-                    "workers",
-                    "sam",
-                    &blocked,
-                    None
+                    Context {
+                        gh: gh.to_str().unwrap(),
+                        token: "fixture-token",
+                        app: "workers",
+                        owner: "sam",
+                        dir: &blocked,
+                        refusals: None,
+                        kick: None
+                    }
                 )
                 .unwrap(),
                 code

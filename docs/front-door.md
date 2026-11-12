@@ -475,9 +475,22 @@ turn ownership preventing old intent from parking a later turn after a
 crash. Baselines captured before a later quota refusal are restored without
 retaking them. `proj stop` cancels these saved targets along with other waits.
 
-The actual token door exports its App identity, independent of the engine's
-selected App. Host await registration and replay use `burrow.proj.gh`; its
+The token door derives App identity from the selected App socket's
+configured name, independent of the engine's selected App or inherited labels. Host await registration and replay use `burrow.proj.gh`; its
 `hostGithubApp` identity defaults to machinery for the default client.
-Wrapped overrides export their own identity; plain overrides can declare
+Wrapped overrides retain their selected socket identity; plain overrides can declare
 `hostGithubApp` explicitly. Both native and VM declarations route their
 observations to the job while retaining the configured client's identity.
+
+The watcher discovers committed quota intent even if its await marker was
+never published, and honors the maximum saved reset when those records
+were interrupted between writes. Its wake file books pending intent even
+while a turn is still running; the events service's startup pass also
+reconciles it after reboot. Only accepted resumption consumes failed
+registration intent; stopped jobs stay stopped.
+
+Known holds are published before optional budget sampling. Observations
+wake the host watcher, which refreshes queued watchdog records for matching
+Claude, Codex and emergency work. Their stall deadline includes the reset
+and ordinary queue grace after it, so a long API hold never looks like a
+stalled queue; unrelated installations keep their existing deadlines.

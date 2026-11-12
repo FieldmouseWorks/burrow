@@ -302,6 +302,9 @@ impl<'a> Job<'a> {
         let state = self.state();
         let mut held = self.holds()?;
         if let Some(facts) = self.facts() {
+            if let Some((_, reset)) = facts.quota_reset {
+                held.push(format!("quota GitHub {reset}"));
+            }
             let reset = facts.usage_reset.map(|(_, reset)| reset).or_else(|| {
                 (state == "queued")
                     .then(|| facts.spent.map(|s| s.release()))
@@ -317,9 +320,6 @@ impl<'a> Job<'a> {
                 let engine = self.engine_label(&facts.turn);
                 held.push(format!("usage {engine} {reset}"));
             }
-        }
-        if let Some((_, reset)) = self.facts().and_then(|f| f.quota_reset) {
-            held.push(format!("quota GitHub {reset}"));
         }
         Ok((state, held))
     }
@@ -415,12 +415,19 @@ impl<'a> Job<'a> {
             } else {
                 Vec::new()
             },
-            quota_reset: read(&self.path("await")).and_then(|text| {
-                awaits(&text)
-                    .into_iter()
-                    .find(|a| a.target == crate::github_quota::LIMIT)
-                    .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
-            }),
+            quota_reset: if state == "queued" {
+                let engine = read(&self.turn(&n, "engine"))
+                    .and_then(|s| crate::engine::Engine::parse(&s).ok())
+                    .unwrap_or(crate::engine::Engine::Claude);
+                let since = mtime(&prompt).unwrap_or(0);
+                crate::github_quota::admission_reset(self.cfg, self, engine)
+                    .filter(|reset| *reset > since)
+                    .map(|reset| (since, reset))
+            } else if state == "running" {
+                None
+            } else {
+                crate::github_quota::reset(self, &n)
+            },
             usage_reset: read(&self.path("await")).and_then(|text| {
                 awaits(&text)
                     .into_iter()

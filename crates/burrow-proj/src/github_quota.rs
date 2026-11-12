@@ -31,11 +31,7 @@ pub fn meters(cfg: &Config) -> Vec<Meter> {
             if let Some(mut m) = Meter::read(&file.path()) {
                 let key = (m.app.clone(), m.owner.clone());
                 if let Some(old) = latest.get_mut(&key) {
-                    let hold = old
-                        .until(now().max(0) as u64)
-                        .into_iter()
-                        .chain(m.until(now().max(0) as u64))
-                        .max();
+                    let hold = old.deadline().into_iter().chain(m.deadline()).max();
                     if old.at <= m.at {
                         m.retry_at = hold;
                         *old = m;
@@ -52,6 +48,13 @@ pub fn meters(cfg: &Config) -> Vec<Meter> {
 }
 
 pub(crate) fn held(cfg: &Config, job: &Job, engine: crate::engine::Engine) -> Option<i64> {
+    admission_reset(cfg, job, engine).filter(|t| *t > now())
+}
+pub(crate) fn admission_reset(
+    cfg: &Config,
+    job: &Job,
+    engine: crate::engine::Engine,
+) -> Option<i64> {
     let app = crate::turn::github_app(cfg, read(&job.path("app")), engine)
         .ok()
         .flatten()?;
@@ -62,7 +65,7 @@ pub(crate) fn held(cfg: &Config, job: &Job, engine: crate::engine::Engine) -> Op
     meters(cfg)
         .into_iter()
         .filter(|m| m.app == app && m.owner.eq_ignore_ascii_case(owner))
-        .filter_map(|m| m.until(now().max(0) as u64))
+        .filter_map(|m| m.deadline())
         .max()
         .map(|t| t as i64)
 }
@@ -74,6 +77,7 @@ pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(),
         meter
             .record(&job.path("github"))
             .map_err(|e| e.to_string())?;
+        crate::job::kick(cfg, ["proj-watch".into()]);
     }
     Ok(())
 }
@@ -81,7 +85,10 @@ pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(),
 /// Only actual failed API calls write refusal, never quoted tool results.
 pub(crate) fn refused(job: &Job) -> Option<i64> {
     let n = job.turns()?;
-    fs::read_dir(job.turn(&n, "github-refusals"))
+    refused_for(job, &n)
+}
+fn refused_for(job: &Job, n: &str) -> Option<i64> {
+    fs::read_dir(job.turn(n, "github-refusals"))
         .ok()?
         .filter_map(Result::ok)
         .filter(|e| e.path().extension().is_some_and(|s| s == "json"))
@@ -94,9 +101,7 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
     if job.turn(n, "stopped").exists() {
         return Ok(false);
     }
-    if read(&job.path("await"))
-        .is_some_and(|text| !crate::job::awaits(&text).iter().any(|a| a.target == LIMIT))
-    {
+    if read(&job.path("await")).is_some_and(|text| registered(&text)) {
         let _ = crate::state_reads::remove(job.path(PENDING));
         return Ok(false);
     }
@@ -110,11 +115,15 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
     else {
         return Ok(false);
     };
+    finish_at(job, n, due)?;
+    Ok(true)
+}
+fn finish_at(job: &Job, n: &str, due: i64) -> Result<(), String> {
     park(job, due)?;
     swap(job.turn(n, "result"), format!("GitHub quota is exhausted. This job is parked until {}; saved waits will be registered automatically.\n", crate::usage::when(due))).map_err(|e| e.to_string())?;
     swap(job.turn(n, "end"), "await\n").map_err(|e| e.to_string())?;
     swap(job.turn(n, "outcome"), "GitHub quota; waiting for reset\n").map_err(|e| e.to_string())?;
-    Ok(true)
+    Ok(())
 }
 
 pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
@@ -124,6 +133,86 @@ pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
         let _ = fs::remove_file(job.path(name));
     }
     Ok(())
+}
+
+pub(crate) fn registered(text: &str) -> bool {
+    let rows = crate::job::awaits(text);
+    !rows.is_empty()
+        && rows.iter().all(|a| {
+            crate::github::target(&a.target).is_some()
+                && a.since.parse::<i64>().is_ok()
+                && (a.was.is_empty()
+                    || serde_json::from_str::<serde_json::Value>(&a.was)
+                        .is_ok_and(|v| v.is_object()))
+        })
+}
+/// The same committed deadline feeds scheduling, wake booking and watchdog
+/// facts, even when publication of the await marker was interrupted.
+pub(crate) fn reset(job: &Job, n: &str) -> Option<(i64, i64)> {
+    if job.turn(n, "stopped").exists() {
+        return None;
+    }
+    let text = read(&job.path("await")).unwrap_or_default();
+    if registered(&text) {
+        return None;
+    }
+    let rows = crate::job::awaits(&text);
+    let marker = rows.iter().find(|a| a.target == LIMIT);
+    let pending = read(&job.path(PENDING));
+    let parsed = pending
+        .as_ref()
+        .and_then(|s| serde_json::from_str::<Pending>(s).ok());
+    let due = parsed
+        .as_ref()
+        .filter(|p| p.turn == n)
+        .map(|p| p.retry_at as i64)
+        .into_iter()
+        .chain(marker.and_then(|a| a.was.parse::<i64>().ok()))
+        .chain(refused_for(job, n))
+        .max()
+        .or_else(|| (pending.is_some() && parsed.is_none()).then_some(now()))?;
+    let since = marker
+        .and_then(|a| a.since.parse::<i64>().ok())
+        .or_else(|| read(&job.turn(n, "started")).and_then(|s| s.parse().ok()))
+        .unwrap_or_else(now);
+    Some((since, due))
+}
+
+/// Durable intent is authoritative even when finalization never published
+/// its await marker. Called by the host watcher under the job lock.
+pub(crate) fn reconcile(job: &Job) -> Result<Option<i64>, crate::Fail> {
+    let Some(n) = job.turns() else {
+        return Ok(None);
+    };
+    if job.turn(&n, "stopped").exists() || matches!(job.state().as_str(), "queued" | "running") {
+        return Ok(None);
+    }
+    let text = read(&job.path("await")).unwrap_or_default();
+    let awaits = crate::job::awaits(&text);
+    let marker = awaits
+        .iter()
+        .find(|a| a.target == LIMIT)
+        .and_then(|a| a.was.parse::<i64>().ok());
+    let registered = registered(&text);
+    if registered {
+        return Ok(None);
+    }
+    let pending = read(&job.path(PENDING));
+    let parsed = pending
+        .as_ref()
+        .and_then(|s| serde_json::from_str::<Pending>(s).ok());
+    if parsed.as_ref().is_some_and(|p| p.turn != n) {
+        crate::state_reads::remove(job.path(PENDING))
+            .map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
+        return Ok(None);
+    }
+    let due = reset(job, &n).map(|(_, due)| due);
+    if let Some(due) = due
+        && (marker != Some(due) || read(&job.turn(&n, "end")).as_deref() != Some("await"))
+    {
+        finish_at(job, &n, due).map_err(|e| crate::Fail::new(1, e))?;
+    }
+    Ok(due)
 }
 
 #[derive(Debug)]
@@ -136,13 +225,21 @@ impl From<crate::Fail> for RecoveryError {
         Self::State(error)
     }
 }
+fn join_records(before: &str, after: &str) -> String {
+    before
+        .lines()
+        .chain(after.lines())
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
 pub(crate) fn captured(job: &Job) -> String {
     read(&job.turn(&job.turns().unwrap_or_default(), "github-awaits"))
         .unwrap_or_else(|| read(&job.path("await.next")).unwrap_or_default())
 }
 pub(crate) fn remember(job: &Job, waits: &str) -> Result<(), crate::Fail> {
     let mut kept = captured(job);
-    kept.push_str(waits);
+    kept = join_records(&kept, waits);
     let path = job.turn(&job.turns().unwrap_or_default(), "github-awaits");
     swap(&path, kept).map_err(|e| crate::io_fail(&path, e))
 }
@@ -214,7 +311,7 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
     // Publish the complete wait before removing intent. Repeating after a
     // crash is safe: these are reads, never GitHub mutations.
     let mut kept = captured_text;
-    kept.push_str(&waits);
+    kept = join_records(&kept, &waits);
     publish(job, &kept)?;
     fs::remove_file(job.path(PENDING)).map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
     Ok(None)
@@ -316,6 +413,9 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         assert!(wake[""].as_i64().unwrap() > now());
         fs::remove_file(d.path().join("limited")).unwrap();
         // Move the scheduler deadline, without sleeping or an engine turn.
+        let mut intent: Pending = serde_json::from_str(&read(&job.path(PENDING)).unwrap()).unwrap();
+        intent.retry_at = (now() - 1) as u64;
+        swap(job.path(PENDING), serde_json::to_vec(&intent).unwrap()).unwrap();
         fs::write(job.path("await"), format!("{LIMIT}\t1000\t{}\n", now() - 1)).unwrap();
         crate::watch::look(&cfg, "").unwrap();
         assert!(!job.path(PENDING).exists());

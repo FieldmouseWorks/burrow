@@ -134,10 +134,8 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
     let given = std::env::var_os("GH_TOKEN");
     if given.as_deref().is_none_or(OsStr::is_empty)
         && let Some(socket) = socket
-        && let (Some(dir), Ok(app)) = (
-            std::env::var_os("PROJ_GITHUB_DIR"),
-            std::env::var("GH_TOKEN_APP"),
-        )
+        && let Some(dir) = std::env::var_os("PROJ_GITHUB_DIR")
+        && let Some(app) = socket.file_stem().and_then(OsStr::to_str)
     {
         let owner = match account::account(args, &context) {
             Ok(owner) => owner,
@@ -148,16 +146,19 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
             Err(e) => return e,
         };
         run.env("GH_TOKEN", &token);
+        let refusals = std::env::var_os("PROJ_GITHUB_REFUSALS");
+        let kick = std::env::var("PROJ_GITHUB_KICK").ok();
         return match crate::quota::run(
             &mut run,
-            gh,
-            &token,
-            &app,
-            &owner,
-            Path::new(&dir),
-            std::env::var_os("PROJ_GITHUB_REFUSALS")
-                .as_deref()
-                .map(Path::new),
+            crate::quota::Context {
+                gh,
+                token: &token,
+                app,
+                owner: &owner,
+                dir: Path::new(&dir),
+                refusals: refusals.as_deref().map(Path::new),
+                kick: kick.as_deref(),
+            },
         ) {
             Ok(code) => std::process::exit(code),
             Err(e) => Error::unavailable(format!("GitHub meter: {e}")),
@@ -217,7 +218,7 @@ mod tests {
         replies: Vec<&'static str>,
     ) -> (tempfile::TempDir, PathBuf, thread::JoinHandle<Vec<String>>) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sock");
+        let path = dir.path().join("actual-host-app.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let handle = thread::spawn(move || {
             let mut asked = Vec::new();
@@ -455,12 +456,54 @@ mod tests {
         let gh = dir.path().join("gh");
         std::fs::write(&gh,format!(r#"#!/bin/sh
 if [ "$1" = help ]; then cat '{0}/help-'"${{2:-root}}"; exit; fi
-if [ "$2" = rate_limit ]; then echo '{{"resources":{{"core":{{"remaining":99,"reset":4000000000}}}}}}'; exit; fi
+if [ "$2" = rate_limit ]; then touch '{0}/budget-started'; echo '{{"resources":{{"core":{{"remaining":99,"reset":4000000000}}}}}}'; exit; fi
 echo '{{"status":403,"at":2000000000,"headers":[["retry-after","120"]],"body":"{{}}"}}' >> "$BURROW_GH_RESPONSES"
 exit 7
 "#,dir.path().display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let kick = format!("http://{}/kick/proj-watch", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let budget_started = dir.path().join("budget-started");
+        let wake = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut reader = std::io::BufReader::new(&stream);
+                        let mut request = String::new();
+                        reader.read_line(&mut request).unwrap();
+                        loop {
+                            let mut line = String::new();
+                            assert!(
+                                reader.read_line(&mut line).unwrap() > 0,
+                                "kick request ended before its headers"
+                            );
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        assert!(
+                            !budget_started.exists(),
+                            "known hold was delayed until after the optional probe"
+                        );
+                        stream.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        return request;
+                    }
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("quota observation did not wake the host: {e}"),
+                }
+            }
+        });
         let meters = dir.path().join("meters");
         let out = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -472,9 +515,10 @@ exit 7
             .env("GH_TOKEN_SOCKET", socket)
             .env("GH_TOKEN", "")
             .env_remove("GH_HOST")
-            .env("GH_TOKEN_APP", "actual-host-app")
+            .env("GH_TOKEN_APP", "stale-engine-app")
             .env("PROJ_GITHUB_APP", "engine-app")
             .env("PROJ_GITHUB_DIR", &meters)
+            .env("PROJ_GITHUB_KICK", kick)
             .env("PROJ_GITHUB_REFUSALS", dir.path().join("refusals"))
             .output()
             .unwrap();
@@ -485,6 +529,7 @@ exit 7
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(server.join().unwrap(), ["sam\n"]);
+        assert!(wake.join().unwrap().starts_with("POST /kick/proj-watch "));
         let file = std::fs::read_dir(meters)
             .unwrap()
             .filter_map(Result::ok)

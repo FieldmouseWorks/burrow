@@ -152,6 +152,15 @@ pub(crate) fn client(cfg: &Config) -> Gh {
         program: Some(cfg.tools.gh.clone().into_os_string()),
         ..Default::default()
     };
+    gh.env.push((
+        "PROJ_GITHUB_KICK".into(),
+        if cfg.kick.is_empty() {
+            String::new()
+        } else {
+            format!("{}/proj-watch", cfg.kick)
+        }
+        .into(),
+    ));
     EVIDENCE.with(|paths| {
         if let Some((meters, refusals)) = paths.borrow().as_ref() {
             gh.env

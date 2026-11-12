@@ -413,6 +413,7 @@ pub fn take_engine(
     may_hand_over: bool,
     engine: Engine,
 ) -> io::Result<File> {
+    crate::waits::rewatch_later(cfg, id);
     match engine {
         Engine::Claude => take(cfg, id, n, given, may_hand_over),
         Engine::Codex => codex_slot(cfg, id, n, given, may_hand_over),

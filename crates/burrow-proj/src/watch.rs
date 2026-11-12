@@ -31,6 +31,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         .open(&lock)
         .map_err(|e| io_fail(&lock, e))?;
     pass.lock().map_err(|e| io_fail(&lock, e))?;
+    crate::waits::rewatch_all(cfg);
     let hours = cfg.await_hours as i64;
     let mut retry: Vec<(String, i64)> = Vec::new();
     'jobs: for id in job_ids(cfg) {
@@ -82,7 +83,10 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         // Pausing stops automatic turns, not question reconciliation or
         // durable notification delivery (including stopped/completed jobs).
         if paused {
-            if filled(&job.path("await")) || crate::ask::load(&job).is_some() {
+            if filled(&job.path("await"))
+                || job.path(crate::github_quota::PENDING).exists()
+                || crate::ask::load(&job).is_some()
+            {
                 retry.push((String::new(), now() + RETRY));
             }
             continue;
@@ -93,6 +97,23 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         let f = job.path("await");
         if crate::planning::admit(&job).is_err() {
             continue;
+        }
+        {
+            let Some(held) = job.try_lock().map_err(|e| io_fail(&job.path("lock"), e))? else {
+                retry.push((String::new(), now() + RETRY));
+                continue;
+            };
+            match crate::github_quota::reconcile(&job) {
+                Ok(Some(due)) if due > now() => retry.push((String::new(), due)),
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("proj: quota recovery: {:?}", e.say);
+                    retry.push((String::new(), now() + RETRY));
+                    drop(held);
+                    continue;
+                }
+            }
+            drop(held);
         }
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;
@@ -320,14 +341,33 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     }
     let hours = cfg.await_hours as i64;
     for id in job_ids(cfg) {
-        for a in awaits(&read(&Job::new(cfg, &id).path("await")).unwrap_or_default()) {
+        let job = Job::new(cfg, &id);
+        let turn = job.turns().unwrap_or_default();
+        if job.turn(&turn, "stopped").exists() {
+            continue;
+        }
+        let text = read(&job.path("await")).unwrap_or_default();
+        if let Some((_, deadline)) = crate::github_quota::reset(&job, &turn) {
+            add(
+                "",
+                if deadline > now {
+                    deadline
+                } else {
+                    now + RETRY
+                },
+            );
+        }
+        for a in awaits(&text) {
             let Some(since) = (!a.since.is_empty() && a.since.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| a.since.parse::<i64>().ok())
                 .flatten()
             else {
                 continue;
             };
-            if a.target == USAGE_LIMIT || a.target == crate::github_quota::LIMIT {
+            if a.target == crate::github_quota::LIMIT {
+                continue;
+            }
+            if a.target == USAGE_LIMIT {
                 if let Ok(due) = a.was.parse::<i64>()
                     && due > now
                 {

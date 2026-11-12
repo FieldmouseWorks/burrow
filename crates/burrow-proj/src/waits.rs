@@ -91,6 +91,23 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
                 "waiting for Codex's usage reset; proj-watch resumes it then".to_owned(),
             )
         }
+        "queued" if let Some((since, reset)) = f.quota_reset => (
+            since,
+            (reset + stall)
+                .max(f.queued + stall)
+                .max(f.spent.as_ref().map_or(0, |s| s.release() + stall)),
+            if reset > now() {
+                format!(
+                    "turn {turn} is waiting for GitHub quota reset at {}",
+                    crate::usage::when(reset)
+                )
+            } else {
+                format!(
+                    "turn {turn} is waiting for a slot after GitHub quota reset at {}",
+                    crate::usage::when(reset)
+                )
+            },
+        ),
         // Out of usage, no turn takes a slot till it's back (usage.rs): each
         // has stallAfterMinutes from then, its reset or the sooner end the
         // record has, which stays a while after.

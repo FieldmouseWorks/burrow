@@ -633,6 +633,7 @@ pub(crate) fn record_wait(
                 if let Err(e) = crate::github_quota::note(cfg, job, &limited_owner, due) {
                     eprintln!("proj: quota meter unavailable: {e}");
                 }
+                kick(cfg, ["proj-watch".into()]);
                 put(
                     "Noted durably. GitHub quota is exhausted; proj will register the wait after its reset. End your turn now.\n",
                 );

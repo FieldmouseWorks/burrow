@@ -26,12 +26,14 @@ impl Meter {
             retry_at: None,
         }
     }
-    pub fn until(&self, at: u64) -> Option<u64> {
+    pub fn deadline(&self) -> Option<u64> {
         self.retry_at
             .into_iter()
             .chain((self.remaining == Some(0)).then_some(self.reset).flatten())
-            .filter(|t| *t > at)
             .max()
+    }
+    pub fn until(&self, at: u64) -> Option<u64> {
+        self.deadline().filter(|t| *t > at)
     }
     /// GET /rate_limit is free and reports both REST and GraphQL budgets.
     pub fn budget(&mut self, body: &Value) {
@@ -221,5 +223,30 @@ mod ordering_tests {
             (m.at, m.remaining, m.retry_at),
             (1215, Some(115), Some(4015))
         );
+    }
+}
+
+#[cfg(test)]
+mod delayed_sample_test {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn a_late_older_sample_cannot_shrink_a_live_hold() {
+        let d = tempfile::tempdir().unwrap();
+        let mut newer = Meter::new("workers", "sam", 1100);
+        newer.budget(&json!({"resources":{"core":{"remaining":3400,"reset":5000}}}));
+        newer.record(d.path()).unwrap();
+        let mut older = Meter::new("workers", "sam", 1000);
+        older.retry_at = Some(1500);
+        older.record(d.path()).unwrap();
+        let file = std::fs::read_dir(d.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|f| f.path().extension().is_some_and(|s| s == "json"))
+            .unwrap()
+            .path();
+        let m = Meter::read(&file).unwrap();
+        assert_eq!((m.at, m.remaining), (1100, Some(3400)));
+        assert_eq!(m.until(1200), Some(1500));
     }
 }

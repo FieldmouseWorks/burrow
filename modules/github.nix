@@ -105,8 +105,7 @@ let
 
   # What a process acts as the App in: its socket, and git's and gh's
   # settings for it.
-  appEnv = name: socket: {
-    GH_TOKEN_APP = name;
+  appEnv = socket: {
     GH_TOKEN_SOCKET = socket;
     # A token the process already has, from a login's profile, say, is the
     # user's, and the wrapper would run with it as given (client.rs), so it
@@ -206,7 +205,7 @@ in
         env = mkOption {
           type = types.attrsOf types.str;
           readOnly = true;
-          default = appEnv name socket;
+          default = appEnv socket;
           defaultText = lib.literalMD "GH_TOKEN_SOCKET, and git's and gh's settings for it";
           description = "The environment a process acts as the App in.";
         };
@@ -219,7 +218,7 @@ in
         gh = mkOption {
           type = types.package;
           readOnly = true;
-          default = appGh (appEnv name socket);
+          default = appGh (appEnv socket);
           defaultText = lib.literalMD "gh in `env`";
           description = "gh as the App, whoever runs it, with whatever token they have.";
         };
