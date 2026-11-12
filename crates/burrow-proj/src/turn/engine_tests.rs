@@ -70,8 +70,8 @@ fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
         let (role, bad) = line.split_once(' ').unwrap();
         // The door refuses a bad engine, so a hand-edited overlay carries it.
         fs::write(
-            dir.path().join("overlay.json"),
-            serde_json::json!({"engines": {"roles": {role: bad}}}).to_string(),
+            dir.path().join("engines.json"),
+            serde_json::json!({"roles": {role: bad}}).to_string(),
         )
         .unwrap();
         assert!(exec(&cfg, "job", "normal").is_err());

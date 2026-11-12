@@ -43,6 +43,10 @@ pub struct Engines {
     pub saved: BTreeMap<String, Saved>,
     #[serde(default)]
     pub previous: Option<String>,
+    /// Completed requests by receipt, kept with the values they changed so
+    /// both publish in one rename.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub receipts: BTreeMap<String, String>,
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -238,12 +242,19 @@ impl Engines {
                     .get(&name)
                     .cloned()
                     .ok_or_else(|| format!("unknown setup: {name}"))?;
+                self.check(&target)
+                    .map_err(|e| format!("setup {name}: {e}"))?;
                 if before.as_deref() != Some(&name) {
                     let leaving = match &before {
                         Some(b) => b.clone(),
                         None => {
                             // Keep what is being replaced, so back returns to it.
-                            let kept = format!("unsaved-{now}");
+                            let mut kept = format!("unsaved-{now}");
+                            let mut n = 1;
+                            while self.saved.contains_key(&kept) || kept == name {
+                                n += 1;
+                                kept = format!("unsaved-{now}-{n}");
+                            }
                             self.saved.insert(kept.clone(), self.current());
                             kept
                         }
@@ -260,6 +271,29 @@ impl Engines {
             }
         }
         Ok(self.status(before.as_deref()))
+    }
+
+    /// A saved set held to what the door holds a live one to, so a hand edit
+    /// cannot put an invalid value in force.
+    fn check(&self, set: &Saved) -> Result<(), String> {
+        for (k, v) in &set.roles {
+            key(k)?;
+            spec(&v.split_whitespace().collect::<Vec<_>>())?;
+        }
+        for (k, t) in &set.models {
+            let (role, on) = k.split_once(' ').ok_or("bad models key")?;
+            key(role)?;
+            let on = engine(on)?;
+            if let Some(m) = &t.model
+                && !self.offered.get(on).is_some_and(|o| o.contains(m))
+            {
+                return Err(format!("{on} offers no model {m}"));
+            }
+            if let Some(e) = t.effort.as_deref().filter(|e| !effort_ok(on, e)) {
+                return Err(format!("{on} takes no effort {e}"));
+            }
+        }
+        Ok(())
     }
 
     pub fn status(&self, before: Option<&str>) -> String {
@@ -509,7 +543,10 @@ mod tests {
         std::fs::write(old.join("models"), "work claude small enormous\n").unwrap();
         let err = cfg.migrate().unwrap_err();
         assert!(err.contains("claude takes no effort enormous"), "{err}");
-        assert!(old.join("roles").symlink_metadata().is_ok() && !cfg.overlay.exists());
+        assert!(
+            old.join("roles").symlink_metadata().is_ok()
+                && !cfg.overlay.with_file_name("engines.json").exists()
+        );
         std::fs::write(
             old.join("models"),
             "work claude small low\nfix codex - high\n",
@@ -526,18 +563,54 @@ mod tests {
         assert_eq!(e.active().as_deref(), Some("usual"));
         assert_eq!(e.previous.as_deref(), Some("cheap"));
         assert_eq!(e.saved["cheap"].roles_text_for(), "work codex\n");
-        // The old files are gone from where they were read; a second call is a no-op.
-        for n in ["roles", "models", "roles.d", "roles.previous"] {
-            assert!(old.join(n).symlink_metadata().is_err(), "{n}");
-            assert!(
-                old.join(format!("{n}.migrated")).symlink_metadata().is_ok(),
-                "{n}"
-            );
-        }
-        let after = std::fs::read(&cfg.overlay).unwrap();
+        // The old files stay for a rollback; a second call is a no-op.
+        assert!(old.join("roles").symlink_metadata().is_ok());
+        let engines = cfg.overlay.with_file_name("engines.json");
+        let after = std::fs::read(&engines).unwrap();
         assert!(!cfg.migrate().unwrap());
-        assert_eq!(std::fs::read(&cfg.overlay).unwrap(), after);
+        assert_eq!(std::fs::read(&engines).unwrap(), after);
+        // The overlay a previous generation reads is untouched by any of it.
+        assert!(!cfg.overlay.exists());
         let log = std::fs::read_to_string(cfg.overlay.with_extension("log")).unwrap();
         assert!(log.contains("\"actor\":\"migration\""), "{log}");
+        // A link to nowhere is a broken setting, not an empty one, and nothing is written.
+        let d = tempfile::tempdir().unwrap();
+        let cfg = door(d.path());
+        std::fs::create_dir_all(d.path().join("proj")).unwrap();
+        std::os::unix::fs::symlink("/nowhere", d.path().join("proj/roles")).unwrap();
+        assert!(cfg.migrate().is_err());
+        assert!(!cfg.overlay.with_file_name("engines.json").exists());
+    }
+
+    #[test]
+    fn a_kept_unsaved_setup_never_overwrites_another_and_a_bad_saved_one_is_not_activated() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = door(d.path());
+        say(&cfg, "role a claude").unwrap();
+        say(&cfg, "engines save one").unwrap();
+        say(&cfg, "role a codex").unwrap();
+        say(&cfg, "engines save two").unwrap();
+        say(&cfg, "role b codex").unwrap();
+        say(&cfg, "engines use one").unwrap();
+        say(&cfg, "role c codex").unwrap();
+        say(&cfg, "engines use two").unwrap();
+        let kept = cfg
+            .engines()
+            .unwrap()
+            .saved
+            .keys()
+            .filter(|n| n.starts_with("unsaved-"))
+            .count();
+        assert_eq!(kept, 2);
+        // A hand-edited saved set that the door would refuse is not put in force.
+        let path = cfg.overlay.with_file_name("engines.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace("\"a\":\"claude\"", "\"a\":\"old-model\""),
+        )
+        .unwrap();
+        let err = say(&cfg, "engines use one").unwrap_err();
+        assert!(err.contains("setup one"), "{err}");
     }
 }

@@ -44,7 +44,7 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         .map(|s| s.engines())
         .transpose()?
         .unwrap_or_default();
-    let set = there(&file) && !engines.is_empty();
+    let set = !engines.is_empty();
     let tuning =
         |t: &burrow_settings::engines::Tuning| json!({"model": t.model, "effort": t.effort});
     let models: serde_json::Map<String, Value> = engines

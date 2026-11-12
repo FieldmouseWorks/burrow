@@ -326,7 +326,32 @@ impl Config {
         repo: Option<&str>,
         default: Engine,
     ) -> Result<Engine, String> {
-        let (path, text) = self.roles_text()?;
+        self.engine_in(&self.snapshot()?, role, repo, default)
+    }
+
+    /// The engines settings as of now: a turn's engine and tuning are read
+    /// from one of these, so a concurrent `engines use` can't split them.
+    pub(crate) fn snapshot(&self) -> Result<burrow_settings::engines::Engines, String> {
+        match &self.settings {
+            Some(s) => s.engines(),
+            None => Ok(Default::default()),
+        }
+    }
+
+    fn overlay_name(&self) -> PathBuf {
+        self.settings
+            .as_ref()
+            .map_or_else(|| PathBuf::from("(no settings)"), |s| s.overlay.clone())
+    }
+
+    pub(crate) fn engine_in(
+        &self,
+        engines: &burrow_settings::engines::Engines,
+        role: &str,
+        repo: Option<&str>,
+        default: Engine,
+    ) -> Result<Engine, String> {
+        let (path, text) = (self.overlay_name(), engines.roles_text());
         let entries = crate::roles::parse(
             &path,
             &text,
@@ -342,22 +367,20 @@ impl Config {
             .unwrap_or(default))
     }
 
-    /// The roles in the settings overlay as lines, and the file they are
-    /// named after in errors. Read fresh: the next turn sees a change.
-    fn roles_text(&self) -> Result<(PathBuf, String), String> {
-        match &self.settings {
-            Some(s) => Ok((s.overlay.clone(), s.engines()?.roles_text())),
-            None => Ok((PathBuf::from("(no settings)"), String::new())),
-        }
-    }
-
     /// What a turn of ROLE in REPO runs on ENGINE: the overlay's model
     /// and effort for that role on that engine.
     pub fn choice(&self, role: &str, repo: Option<&str>, engine: Engine) -> Result<Choice, String> {
-        let (path, text) = match &self.settings {
-            Some(s) => (s.overlay.clone(), s.engines()?.models_text()),
-            None => (PathBuf::from("(no settings)"), String::new()),
-        };
+        self.choice_in(&self.snapshot()?, role, repo, engine)
+    }
+
+    pub(crate) fn choice_in(
+        &self,
+        engines: &burrow_settings::engines::Engines,
+        role: &str,
+        repo: Option<&str>,
+        engine: Engine,
+    ) -> Result<Choice, String> {
+        let (path, text) = (self.overlay_name(), engines.models_text());
         let tuning = crate::models::tuning(&path, &text, role, repo, engine)?;
         Ok(Choice {
             engine,
@@ -524,8 +547,8 @@ pub(crate) mod tests {
         cfg.check_config().unwrap();
         // A hand-edited overlay that names a bad role fails the check, not defaults.
         std::fs::write(
-            &door.overlay,
-            r#"{"engines":{"roles":{"unused":"old-model"}}}"#,
+            door.overlay.with_file_name("engines.json"),
+            r#"{"roles":{"unused":"old-model"}}"#,
         )
         .unwrap();
         let said = crate::cmd::dispatch(&cfg, &["check-config".into()])
@@ -533,7 +556,7 @@ pub(crate) mod tests {
             .say
             .unwrap();
         assert!(said.contains("unknown engine old-model"), "{said}");
-        std::fs::write(&door.overlay, "bad JSON").unwrap();
+        std::fs::write(door.overlay.with_file_name("engines.json"), "bad JSON").unwrap();
         assert!(cfg.check_config().is_err());
     }
 

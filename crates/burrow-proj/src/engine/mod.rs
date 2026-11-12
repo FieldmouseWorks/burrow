@@ -98,7 +98,9 @@ pub(crate) fn resolve(
     repo: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<Choice, String> {
-    let mut engine = cfg.engine_default(
+    let engines = cfg.snapshot()?;
+    let mut engine = cfg.engine_in(
+        &engines,
         role,
         repo,
         if role == "planner" {
@@ -113,7 +115,7 @@ pub(crate) fn resolve(
     if role == "steward-judged" {
         engine = Engine::Claude;
     }
-    let choice = cfg.choice(role, repo, engine)?;
+    let choice = cfg.choice_in(&engines, role, repo, engine)?;
     if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
         return Err(
             "the planner role requires an explicit small model on Claude; its default is Codex"

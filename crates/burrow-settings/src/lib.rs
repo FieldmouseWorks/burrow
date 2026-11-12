@@ -42,7 +42,9 @@ struct Overlay {
     pipeline_until: Option<i64>,
     #[serde(default)]
     receipts: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "engines::Engines::is_empty")]
+    /// Kept in `engines.json` beside the overlay, not in it: a previous
+    /// generation that rolls back still reads the overlay it knows.
+    #[serde(skip)]
     engines: engines::Engines,
 }
 
@@ -63,8 +65,6 @@ pub fn valid_command(args: &[String]) -> bool {
         .as_slice()
     {
         ["show" | "back"] => true,
-        ["engines", "list"] => true,
-        ["engines", "use", name] => engines::valid_name(name),
         ["allow" | "pause", repo] => burrow_github::repo_name(repo),
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
         _ => false,
@@ -87,6 +87,29 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Overlay::default()),
             Err(e) => Err(e.to_string()),
         }
+        .and_then(|mut overlay: Overlay| {
+            overlay.engines = match fs::read(self.engines_path()) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("{}: {e}", self.engines_path().display()))?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                Err(e) => return Err(format!("{}: {e}", self.engines_path().display())),
+            };
+            Ok(overlay)
+        })
+    }
+
+    fn engines_path(&self) -> PathBuf {
+        self.overlay.with_file_name("engines.json")
+    }
+
+    /// The stored answer to an engines request's receipt, if it completed.
+    pub fn receipt(&self, receipt: &std::path::Path) -> Result<Option<String>, String> {
+        Ok(self
+            .read()?
+            .engines
+            .receipts
+            .get(receipt.to_string_lossy().as_ref())
+            .cloned())
     }
 
     /// Read again on every admission, including a long-lived reader's next job.
@@ -204,7 +227,12 @@ impl Config {
         lock.lock().map_err(|e| e.to_string())?;
         let mut state = self.read()?;
         let mut engines_answer = None;
-        if let Some(body) = receipt.and_then(|r| state.receipts.get(r)) {
+        if let Some(body) = receipt.and_then(|r| {
+            state
+                .receipts
+                .get(r)
+                .or_else(|| state.engines.receipts.get(r))
+        }) {
             return Ok(body.clone());
         }
         match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -228,10 +256,19 @@ impl Config {
         let answer = engines_answer.clone().unwrap_or_else(|| {
             "Settings changed; use settings show for the current policy.".to_owned()
         });
+        let engine_verb = matches!(
+            args.first().map(String::as_str),
+            Some("role" | "unrole" | "offer" | "model" | "unmodel" | "engines")
+        );
         if let Some(receipt) = receipt {
-            state.receipts.insert(receipt.into(), answer.clone());
+            let book = if engine_verb {
+                &mut state.engines.receipts
+            } else {
+                &mut state.receipts
+            };
+            book.insert(receipt.into(), answer.clone());
         }
-        self.persist(&state, actor, serde_json::json!(args))?;
+        self.persist(&state, actor, serde_json::json!(args), engine_verb)?;
         if receipt.is_some() || engines_answer.is_some() {
             Ok(answer)
         } else {
@@ -245,6 +282,7 @@ impl Config {
         state: &Overlay,
         actor: &str,
         change: serde_json::Value,
+        engines: bool,
     ) -> Result<(), String> {
         let parent = self
             .overlay
@@ -263,9 +301,14 @@ impl Config {
         )
         .map_err(|e| e.to_string())?;
         log.sync_all().map_err(|e| e.to_string())?;
-        let pending = self.overlay.with_extension("pending");
+        let (target, bytes) = if engines {
+            (self.engines_path(), serde_json::to_vec(&state.engines))
+        } else {
+            (self.overlay.clone(), serde_json::to_vec(state))
+        };
+        let pending = target.with_extension("pending");
         let mut file = File::create(&pending).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(state).map_err(|e| e.to_string())?)
+        file.write_all(&bytes.map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         // Readers include the isolated reviewer account. This overlay holds
         // public operational policy, regardless of the writer's umask.
@@ -276,7 +319,7 @@ impl Config {
                 .map_err(|e| e.to_string())?;
         }
         file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(pending, &self.overlay).map_err(|e| e.to_string())?;
+        fs::rename(pending, &target).map_err(|e| e.to_string())?;
         File::open(parent)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())
@@ -311,19 +354,24 @@ impl Config {
             let refs: Vec<&str> = models.iter().map(String::as_str).collect();
             state.engines.offer(&on, &refs)?;
         }
-        self.persist(&state, actor, serde_json::json!(["import"]))
+        self.persist(&state, actor, serde_json::json!(["import"]), true)
     }
 
-    /// Move the old roles, models and roles.d files into the overlay, once:
-    /// each is renamed `NAME.migrated` after the overlay holds its values, so
-    /// a second call finds nothing. Anything already set in the overlay wins.
-    /// A file that doesn't parse stops it with the old files untouched.
+    /// Read the old roles, models and roles.d files into `engines.json`,
+    /// once: a second call finds it there and does nothing. The old files stay.
+    /// A file that doesn't parse, or a link to nowhere, stops it with
+    /// nothing written.
     pub fn migrate(&self) -> Result<bool, String> {
         let Some(dir) = &self.legacy else {
             return Ok(false);
         };
         let names = ["roles", "models", "roles.d", "roles.previous"];
-        if !names.iter().any(|n| dir.join(n).symlink_metadata().is_ok()) {
+        // Once engines.json exists the overlay owns these values. The old
+        // files are left where they are, so a rollback to the generation that
+        // reads them still works (with the values they had).
+        if self.engines_path().exists()
+            || !names.iter().any(|n| dir.join(n).symlink_metadata().is_ok())
+        {
             return Ok(false);
         }
         let parent = self
@@ -340,7 +388,13 @@ impl Config {
         lock.lock().map_err(|e| e.to_string())?;
         let text = |name: &str| match fs::read_to_string(dir.join(name)) {
             Ok(t) => Ok(t),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            // Absent means unset; a link to nowhere is a broken setting.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && dir.join(name).symlink_metadata().is_err() =>
+            {
+                Ok(String::new())
+            }
             Err(e) => Err(format!("{}: {e}", dir.join(name).display())),
         };
         let mut setups = Vec::new();
@@ -385,14 +439,12 @@ impl Config {
         if mine.previous.is_none() {
             mine.previous = old.previous;
         }
-        self.persist(&state, "migration", serde_json::json!(["migrate", dir]))?;
-        for name in names {
-            let from = dir.join(name);
-            if from.symlink_metadata().is_ok() {
-                fs::rename(&from, dir.join(format!("{name}.migrated")))
-                    .map_err(|e| format!("{}: {e}", from.display()))?;
-            }
-        }
+        self.persist(
+            &state,
+            "migration",
+            serde_json::json!(["migrate", dir]),
+            true,
+        )?;
         Ok(true)
     }
 }

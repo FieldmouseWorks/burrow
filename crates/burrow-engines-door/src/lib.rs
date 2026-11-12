@@ -97,12 +97,29 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
                 let mut change = vec!["engines".to_owned()];
                 change.extend(args.iter().cloned());
                 let actor = format!("github:{}#{}", cfg.repo, issue.number);
-                match if args[0] == "use" {
+                // A completed request of the file-based door kept its result in
+                // this path; the open cycle it belongs to has been answered.
+                let earlier = legacy_result(&operation);
+                match if let Some(said) = earlier {
+                    Ok(said)
+                } else if args[0] == "use" {
                     cfg.settings.request(&operation, &change, &actor)
                 } else {
                     cfg.settings.command(&change, &actor)
                 } {
                     Ok(said) => (fenced(&said), "completed"),
+                    // Publishing can fail after the rename, with the result
+                    // already stored: that is a completed request.
+                    Err(_) if matches!(cfg.settings.receipt(&operation), Ok(Some(_))) => (
+                        fenced(
+                            &cfg.settings
+                                .receipt(&operation)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default(),
+                        ),
+                        "completed",
+                    ),
                     // The overlay publishes atomically, so an error changed
                     // nothing. Name the class of it, never a model choice.
                     Err(e) => {
@@ -143,6 +160,18 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
         door.reply(api, issue.number, &pending.body, reason)?;
     }
     Ok(())
+}
+
+/// The result a completed request of the earlier, file-based door left at
+/// `path`, if there is one.
+fn legacy_result(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Old {
+        result: Option<String>,
+    }
+    serde_json::from_slice::<Old>(&fs::read(path).ok()?)
+        .ok()?
+        .result
 }
 
 /// The class of an error, with no raw overlay content or model choice.
