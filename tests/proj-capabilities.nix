@@ -102,7 +102,7 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(18555)
     machine.succeed("${model} 18556 ${claudeCalls} >/tmp/claude-provider.log 2>&1 &")
     machine.wait_for_open_port(18556)
-    dev("mkdir -p ~/.codex ~/.config/proj && printf 'first claude\\nsecond codex\\n' >~/.config/proj/roles")
+    dev("mkdir -p ~/.codex && proj settings role first claude && proj settings role second codex")
     catalog = '{models: ([.models[] | select(.apply_patch_tool_type == "freeform" and .tool_mode == null)][:1] | map(.slug = "stand-in"))}'
     dev("codex debug models --bundled 2>/dev/null | jq " + shlex.quote(catalog) + " >~/catalog.json")
     dev("(echo 'model_catalog_json = \"'$HOME'/catalog.json\"' && cat ${config}) >~/.codex/config.toml")

@@ -129,30 +129,19 @@ The machine flake enables `burrow.proj.engines.door` and sets its `repo`;
 `label` defaults to `engines`, and `authors` to the inbox's authors.
 
 Open an issue there with that label, as an author, whose body is one line:
-`list`, `use NAME` or `use back`. The door uses proj's checked switch as the
-job user, comments with the old and new active setup and each role/scope's
-engine, then closes the issue. It never posts model choices. An unknown
-setup, bad file or different request changes nothing; text anyone outside
-the authors wrote or edited is ignored. Each open cycle is one request:
-reopening asks again even with unchanged text. Before a switch, proj records
-its resolved destination in a durable journal. The door and CLI recover it
-under the same lock before another change; completed results stay attached
-to that cycle, so interruption or a failed GitHub reply cannot repeat `back`.
+`list`, `use NAME` or `use back`. The door is a caller of the settings
+door: it runs `engines use NAME` there as the job user, comments with the
+old and new active setup and each role/scope's engine, then closes the
+issue. It never posts model choices. An unknown setup, one naming a model
+its engine no longer offers, or a different request changes nothing; text
+anyone outside the authors wrote or edited is ignored. Each open cycle is
+one request: reopening asks again even with unchanged text. The overlay
+keeps each cycle's receipt with the switch it made, published in one
+atomic write, so interruption or a failed GitHub reply cannot repeat
+`back`.
 
-On the machine, `proj engines` lists saved setups, marks the active one and
-names the previous one. `proj engines save NAME` checks the current roles
-file and saves it under `roles.d/NAME`, beside that file in the user's
-untracked config. Names use lowercase letters, digits and hyphens; `back`
-is reserved. Replacing a saved setup needs `--replace`.
-`proj engines use NAME` checks it with the turn's parser, then atomically
-replaces the roles path with a link to it. An unmatched plain roles file is
-kept as `roles.d/unsaved-<UTC time>` first. `proj engines use back` returns
-to the setup replaced by the last switch. Existing plain roles files keep
-working without creating setups.
-
-`proj check-config` checks the module's config and the current roles file.
-The update's health check runs it as the job user after every switch; it
-must pass before confirmation, and a failure notice names the bad line.
+What a setup holds and how `proj engines` switches them on the machine is
+in [settings](settings.md#engines-models-and-efforts-per-role).
 Malformed roles still fail every turn: the checked switch and deploy check
 stop those mistakes before new turns have to discover them.
 
@@ -292,58 +281,9 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
-Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE`, with
-`ENGINE` either `claude` or `codex`. Scope a key to one repo with
-`ROLE@OWNER/REPO`:
-
-```
-steward-handed@octocat/project  codex
-steward-handed                  claude
-```
-
-The scoped line wins for that repo, regardless of line order; repo names
-match case-insensitively. Other repos, and jobs with no repo, use the bare
-role. With neither, the role uses Claude. Duplicate keys fail the turn and
-name both lines, including scopes spelled in different cases. Other invalid
-lines fail the turn and name the line. `proj check-config` validates the
-deployed configuration, all roles and all models lines without starting a
-job; updates run it as the job user in their health check before confirming
-([updates](../README.md)). Add
-`over PCT ENGINE` to move a turn to that engine when its own engine
-is short: any window on its meter (the five-hour session or the week) at
-PCT with no credits to carry on, or, for Claude, the machine already out of
-Claude's usage. It moves only when the other engine's meter has room:
-credits, or no window used up, so Codex's credits count once its plan's
-windows are spent. Missing readings, or readings an hour old, move nothing.
-`burrow.usageReset` supplies both meters and keeps their history in
-`meters/log`.
-Each engine keeps its own conversation when a role moves between them.
-
-The roles file picks only the engine, so a saved engine setup swaps it
-whole. What each role runs at on each engine lives beside it, in
-`~/.config/proj/models`, and stays put when setups switch:
-`ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]`.
-
-```
-steward-conflictFixed  claude  SMALLER-MODEL-ID  medium
-steward-judged         claude  -                  high
-```
-
-`-` keeps the engine's own model, and a line of just `ROLE ENGINE -` keeps
-all of its own settings, so a repo's line can undo a bare one. Effort is
-Claude Code's `--effort` (`low`, `medium`, `high`, `xhigh`, `max`) or
-Codex's `model_reasoning_effort`, passed as written: any lowercase word,
-since Codex's models define their own levels. The line for the engine the
-turn ends on applies, overflow and the judge's Claude included; scopes,
-duplicates and bad lines work as in the roles file. A role with no line
-keeps the engine's own settings: for Claude, the job user's
-`~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`.
-New sandbox guests (`agent new`, `proj run --vm`) copy the user's `model`
-and its `env.CLAUDE_CODE_SUBAGENT_MODEL` (the model Claude Code's subagents
-run on) with `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` (which moves Explore,
-whose own definition inherits the session's model) at creation; without them they use Claude Code's defaults. This is
-runtime data, not part of the guest image. Model ids live only in these
-untracked files: which model does what is the machine's business.
+Which engine, model and effort runs each role (`ROLE` or
+`ROLE@OWNER/REPO`), and when a turn overflows to the other engine, are
+live settings: see [settings](settings.md#engines-models-and-efforts-per-role).
 
 Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
 an independent login: `autoland-codex-login job` logs the job user in,

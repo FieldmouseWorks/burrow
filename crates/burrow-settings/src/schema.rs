@@ -129,8 +129,28 @@ const SLOTS: Kind = Kind::Count { min: 1 };
 const ENGINE: Kind = Kind::OneOf(&["claude", "codex"]);
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
 const EFFORT: Kind = Kind::OneOf(&["low", "medium", "high", "xhigh"]);
-const ROLES: Kind = Kind::Map(&Kind::Text);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
+const OVERFLOW: Kind = Kind::Maybe(&Kind::Record(&[
+    Field {
+        name: "pct",
+        kind: &Kind::Count { min: 0 },
+    },
+    Field {
+        name: "engine",
+        kind: &ENGINE,
+    },
+]));
+const ROUTE: Kind = Kind::Record(&[
+    Field {
+        name: "engine",
+        kind: &ENGINE,
+    },
+    Field {
+        name: "over",
+        kind: &OVERFLOW,
+    },
+]);
+const ROLES: Kind = Kind::Map(&ROUTE);
 const TUNING: Kind = Kind::Record(&[
     Field {
         name: "model",
@@ -142,6 +162,27 @@ const TUNING: Kind = Kind::Record(&[
     },
 ]);
 const MODELS: Kind = Kind::Map(&TUNING);
+const WORDS: Kind = Kind::List(&Kind::Text);
+const OFFERS: Kind = Kind::Map(&Kind::Record(&[
+    Field {
+        name: "models",
+        kind: &WORDS,
+    },
+    Field {
+        name: "efforts",
+        kind: &WORDS,
+    },
+]));
+const SETUP: Kind = Kind::Record(&[
+    Field {
+        name: "roles",
+        kind: &ROLES,
+    },
+    Field {
+        name: "models",
+        kind: &MODELS,
+    },
+]);
 const SETUPS: Kind = Kind::Record(&[
     Field {
         name: "active",
@@ -149,7 +190,7 @@ const SETUPS: Kind = Kind::Record(&[
     },
     Field {
         name: "saved",
-        kind: &Kind::Map(&ROLES),
+        kind: &Kind::Map(&SETUP),
     },
 ]);
 const STAMP: Kind = Kind::Count { min: 0 };
@@ -450,20 +491,26 @@ pub static SETTINGS: &[Setting] = &[
     live(
         "proj.roles",
         &ROLES,
-        "{}",
-        "Which engine runs each role (ROLE or ROLE@OWNER/REPO): ENGINE [over PCT ENGINE]. A role with no line runs on Claude.",
+        r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}}"#,
+        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one.",
     ),
     live(
         "proj.models",
         &MODELS,
-        "{}",
-        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE). A role with no line keeps the engine's own.",
+        r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#,
+        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
+    ),
+    live(
+        "proj.engineOffers",
+        &OFFERS,
+        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "codex": {"models": [], "efforts": ["minimal", "low", "medium", "high", "xhigh"]}}"#,
+        "The models and efforts each engine offers on the machine: the only ones proj.models may name. Model ids live here, never in a tracked file.",
     ),
     live(
         "proj.engineSetups",
         &SETUPS,
         r#"{"active": null, "saved": {}}"#,
-        "Saved engine setups (proj engines save/use), each a whole roles file, and the one in force.",
+        "Saved engine setups (proj engines save/use), each a named set of proj.roles and proj.models values, and the one in force.",
     ),
     live(
         "proj.usageHold",
@@ -637,6 +684,15 @@ mod tests {
             .check(&json!({"fix codex": {"model": "m", "effort": 3}}))
             .unwrap_err();
         assert!(err.starts_with("fix codex: effort: "), "{err}");
+        assert!(
+            ROLES
+                .check(&json!({"fix": {"engine": "codex", "over": null}}))
+                .is_ok()
+        );
+        let err = ROLES
+            .check(&json!({"fix": {"engine": "gemini", "over": null}}))
+            .unwrap_err();
+        assert!(err.starts_with("fix: engine: "), "{err}");
     }
 
     #[test]

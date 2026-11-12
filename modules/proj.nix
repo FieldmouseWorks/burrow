@@ -66,12 +66,13 @@ let
   # The flake's value of each option in burrow-settings' schema, for `proj
   # settings show`.
   settingsFile = "burrow/settings.json";
-  roles = "${config.users.users.${user}.home}/.config/proj/roles";
-  models = "${config.users.users.${user}.home}/.config/proj/models";
+  # Where proj's old roles and models files were, which `proj settings
+  # migrate` moves into the settings overlay once.
+  oldConfig = "${config.users.users.${user}.home}/.config/proj";
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
     inherit (cfg.engines.door) repo label authors;
     state = "${stateDir}/proj-engines";
-    inherit roles;
+    settings = config.burrow.settings.effective;
   });
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
@@ -113,7 +114,7 @@ let
     proofBuildDriver = [ "${pkgs.python3}/bin/python3" "-E" "-s" "${./autoland}/steward.py" ];
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
-    inherit roles models;
+    inherit oldConfig;
     # A path, not the file: the flake's values include ones that run proj
     # (a repo's proofRuns), so proj's config can't hold them.
     trackedSettings = "/etc/${settingsFile}";
@@ -430,7 +431,7 @@ in
         type = lib.types.nullOr (lib.types.strMatching "[a-zA-Z0-9-]+");
         default = null;
         example = "inbox";
-        description = "The role the authors' own issues run as when no rule above names one, so the models file can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
+        description = "The role the authors' own issues run as when no rule above names one, so the role settings can tune them. Their engine label still picks the engine. Null keeps label routing alone.";
       };
       unstickLabel = lib.mkOption {
         type = lib.types.str;
@@ -557,6 +558,18 @@ in
       timerConfig = { OnBootSec = "1s"; OnUnitInactiveSec = "30s"; };
     };
     systemd.services = {
+      # Once: the overlay records that it took them, and renames them aside.
+      proj-settings-migrate = {
+        description = "Move proj's old roles and models files into the settings";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "burrow-settings-reconcile.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          User = user;
+          ExecStart = "${proj}/bin/proj settings migrate";
+        };
+      };
       burrow-settings-reconcile = {
         description = "Vacate and restore repository work from live settings";
         restartIfChanged = false;
@@ -655,7 +668,7 @@ in
           proj run --first web "the task"   the same, ahead of the line
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj run --app NAME web "task"    acting on GitHub as the App NAME
-          proj run --role NAME web "task"   on the engine ~/.config/proj/roles gives NAME
+          proj run --role NAME web "task"   on the engine the settings give the role NAME
           proj status                       what's running, what finished
           proj status --line                every turn in line, next first, and its wait
           proj state --json                 the live snapshot: queue, every slot and its holder, meters, holds
@@ -673,18 +686,16 @@ in
       relay (`proj status` marks it [asks]; `proj reply` answers; a reversible default runs after ${toString cfg.askTimeout}s without an answer, a one-way default stays open for the owner), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.
-      Roles live in ~/.config/proj/roles, one `ROLE ENGINE` line each.
-      `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
-      other repos and jobs with no repo use the bare role. Duplicate keys fail
-      the turn with both lines named. Engines are claude and codex; unlisted
-      roles use Claude, except planner, which defaults to Codex and requires
-      an explicit small model to use Claude. Each role's model and effort on each engine live in
-      ~/.config/proj/models, one `ROLE ENGINE MODEL|- [EFFORT]` line each
-      (`-` keeps the engine's own model); unlisted roles keep the engine's
-      own settings. Either kind of roles line may end with `over PCT ENGINE`:
-      the turn moves when its engine's fresh meter has any window (five-hour or
-      weekly) at PCT and no credits, or Claude is out of usage, and the other
-      engine's fresh meter has room (credits, or no window used up).
+      Which engine, model and effort runs each role are settings: `proj settings
+      show` has them and their declared defaults, `proj settings role ROLE ENGINE
+      [over PCT ENGINE]`, `model ROLE ENGINE MODEL|- [EFFORT]` and `offer ENGINE
+      models|efforts ...` change them, and `proj engines save|use NAME|use back`
+      keeps named sets of them. A model or effort must be one its engine offers.
+      `ROLE@OWNER/REPO` beats the bare role in that repo, a named role beats `*`.
+      A role moves to its `over PCT ENGINE` when its own engine's fresh meter has
+      any window at PCT and no credits, or Claude is out of usage, and the other
+      engine's has room. The planner defaults to Codex and needs an explicit
+      small model to use Claude.
       Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
       `autoland-codex-login job`, separately from the reviewer's login. Codex
       jobs cannot run in agent VMs. ${if machineApp == null

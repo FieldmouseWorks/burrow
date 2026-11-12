@@ -1,7 +1,9 @@
-//! The engines door shares proj's checked switch; issue text is never a command.
+//! The engines door is a caller of the settings door: `engines use NAME`
+//! there, with a receipt for the issue's open cycle. Issue text is never a
+//! command.
 use burrow_door::{Door, asked, fenced};
 use burrow_github::{Api, Error};
-use burrow_proj::setups::{Store, valid_name};
+use burrow_settings::roles::valid_setup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -14,7 +16,8 @@ pub struct Config {
     pub repo: String,
     pub label: String,
     pub authors: Vec<burrow_github::Author>,
-    pub roles: PathBuf,
+    /// The settings the setups are kept in, and switched through.
+    pub settings: burrow_settings::Config,
     pub state: PathBuf,
 }
 
@@ -85,50 +88,46 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
         }
         let lines = asked(&text);
         let args = match lines.as_slice() {
-            [line] if line == "list" => Some(vec!["list".into()]),
+            [line] if line == "list" => Some(vec!["engines".into(), "list".into()]),
             [line] => match line.split_whitespace().collect::<Vec<_>>().as_slice() {
-                ["use", name] if valid_name(name) => Some(vec!["use".into(), (*name).into()]),
+                ["use", name] if *name == "back" || valid_setup(name) => {
+                    Some(vec!["engines".into(), "use".into(), (*name).into()])
+                }
                 _ => None,
             },
             _ => None,
         };
-        let store = Store::new(&cfg.roles);
+        let current = || {
+            cfg.settings
+                .engines()
+                .map(|s| fenced(&s))
+                .unwrap_or_else(|e| diagnostic(&e))
+        };
         let (body, reason) = match args {
-            Some(args) => match if args[0] == "use" {
-                store.request(&operation, &args)
-            } else {
-                store.command(&args)
-            } {
+            // The receipt is the overlay's: a retried delivery of this open
+            // cycle's request answers again, never switches again.
+            Some(args) => match cfg.settings.request(
+                &operation,
+                &args,
+                &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
+            ) {
                 Ok(said) => (fenced(&said), "completed"),
-                // Roles errors include the raw line, which may name a model.
-                // Keep just the location, never echo issue text or model choices.
-                Err(e) => {
-                    if store.pending()? || operation.try_exists().map_err(|e| e.to_string())? {
-                        return Err(e.into());
-                    }
-                    let why = diagnostic(&e);
-                    let current = store
-                        .command(&["list".into()])
-                        .map(|s| fenced(&s))
-                        .unwrap_or_else(|e| diagnostic(&e));
-                    (
-                        format!("Nothing changed. {why}\n\n{current}"),
-                        "not_planned",
-                    )
+                // Published, though a step after it failed: it's done.
+                Err(_) if let Some(said) = cfg.settings.answered(&operation)? => {
+                    (fenced(&said), "completed")
                 }
-            },
-            None => {
-                let current = store
-                    .command(&["list".into()])
-                    .map(|s| fenced(&s))
-                    .unwrap_or_else(|e| diagnostic(&e));
-                (
-                    format!(
-                        "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{current}"
-                    ),
+                Err(e) => (
+                    format!("Nothing changed. {}\n\n{}", diagnostic(&e), current()),
                     "not_planned",
-                )
-            }
+                ),
+            },
+            None => (
+                format!(
+                    "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{}",
+                    current()
+                ),
+                "not_planned",
+            ),
         };
         let pending = Pending {
             body,
@@ -143,26 +142,14 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// The location and class of an error, with no raw roles line or model choice.
+/// The class of an error, with no model id, which a refusal can't name.
 fn diagnostic(error: &str) -> String {
-    let location = error.split(": ").next().unwrap_or("");
-    if location.starts_with('/') {
-        let line = error
-            .split("line ")
-            .nth(1)
-            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
-            .filter(|s| !s.is_empty());
-        if !location.contains(" line ")
-            && let Some(line) = line
-        {
-            return format!("Invalid configuration: {location} line {line}.");
-        }
-        return format!("Check {location}.");
-    }
     if error.starts_with("unknown setup:") {
         "Unknown setup.".into()
     } else if error == "no previous setup" {
         "No previous setup.".into()
+    } else if error.contains("doesn't offer") {
+        "The setup names a model or effort its engine doesn't offer now.".into()
     } else {
         "Configuration or switch failed.".into()
     }

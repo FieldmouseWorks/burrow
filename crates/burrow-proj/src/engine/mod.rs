@@ -19,7 +19,7 @@ mod sandbox;
 mod stream;
 pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
 pub use handoff::first_prompt;
-pub(crate) use role::{RoleKey, role};
+pub(crate) use role::route;
 pub use stream::{Said, answer, last_result, names_session, stream_names_session, stream_tail};
 
 #[derive(
@@ -58,7 +58,7 @@ impl Engine {
 }
 
 /// What one turn runs on: the engine its role gives it, and the model and
-/// effort the models file gives that role on that engine. None leaves the
+/// effort the settings give that role on that engine. None leaves the
 /// engine's own setting.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
@@ -67,7 +67,7 @@ pub struct Choice {
     pub effort: Option<String>,
 }
 
-/// Inbox jobs pin their label's engine; role jobs resolve the file each turn.
+/// Inbox jobs pin their label's engine; role jobs resolve the settings each turn.
 /// Judges always use Claude, so a role or overflow cannot make Codex judge itself.
 pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     let role = read(&job.path("role")).unwrap_or_default();
@@ -98,15 +98,7 @@ pub(crate) fn resolve(
     repo: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<Choice, String> {
-    let mut engine = cfg.engine_default(
-        role,
-        repo,
-        if role == "planner" {
-            Engine::Codex
-        } else {
-            Engine::Claude
-        },
-    )?;
+    let mut engine = cfg.engine(role, repo)?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
     }
@@ -216,46 +208,105 @@ pub fn ended(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::tests::set;
+
     #[test]
     fn planning_defaults_to_codex_and_never_falls_through_to_the_claude_default() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.roles = tmp.path().join("roles");
-        cfg.models = tmp.path().join("models");
         assert_eq!(
             resolve(&cfg, "planner", None, None).unwrap().engine,
             Engine::Codex
         );
-        fs::write(&cfg.roles, "planner claude\n").unwrap();
+        set(&mut cfg, tmp.path(), &["role planner claude"]);
         assert!(
             resolve(&cfg, "planner", None, None)
                 .unwrap_err()
                 .contains("explicit small model")
         );
-        fs::write(&cfg.models, "planner claude selected\n").unwrap();
+        set(
+            &mut cfg,
+            tmp.path(),
+            &[
+                "offer claude models selected",
+                "model planner claude selected",
+            ],
+        );
         let chosen = resolve(&cfg, "planner", None, None).unwrap();
         assert_eq!(chosen.engine, Engine::Claude);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
     }
+
+    #[test]
+    fn the_next_job_of_a_role_runs_on_the_model_the_door_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        set(&mut cfg, dir.path(), &[]);
+        let job = |cfg: &Config, id: &str| {
+            let job = Job::new(cfg, id);
+            fs::create_dir_all(&job.dir).unwrap();
+            fs::write(job.path("role"), "triage").unwrap();
+            choice(cfg, &job).unwrap()
+        };
+        // No model set: the engine's own, as the schema declares it.
+        assert_eq!(job(&cfg, "one"), Choice::default());
+        set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer claude models small mid",
+                "model triage claude small low",
+            ],
+        );
+        let c = job(&cfg, "two");
+        assert_eq!(
+            (c.engine, c.model.as_deref(), c.effort.as_deref()),
+            (Engine::Claude, Some("small"), Some("low"))
+        );
+        // One change through the door, and the next job of the role takes it.
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(
+                &["model", "triage", "claude", "mid"].map(String::from),
+                "test",
+            )
+            .unwrap();
+        let c = job(&cfg, "three");
+        assert_eq!((c.model.as_deref(), c.effort), (Some("mid"), None));
+        // Another role's is its own still.
+        let other = Job::new(&cfg, "four");
+        fs::create_dir_all(&other.dir).unwrap();
+        fs::write(other.path("role"), "fix").unwrap();
+        assert_eq!(choice(&cfg, &other).unwrap(), Choice::default());
+    }
+
     #[test]
     fn a_judge_never_routes_to_codex_even_with_a_role_or_inbox_override() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
-        fs::write(&cfg.roles, "steward-judged codex\n").unwrap();
+        set(&mut cfg, dir.path(), &["role steward-judged codex"]);
+        {
+            let job = Job::new(&cfg, "judge");
+            fs::create_dir_all(&job.dir).unwrap();
+            fs::write(job.path("role"), "steward-judged").unwrap();
+            fs::write(job.path("engine"), "codex").unwrap();
+            assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
+        }
+        // The judge's own model and effort are Claude's, not Codex's.
+        set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer codex models other",
+                "offer claude models chosen",
+                "model steward-judged codex other low",
+                "model steward-judged claude chosen max",
+            ],
+        );
         let job = Job::new(&cfg, "judge");
-        fs::create_dir_all(&job.dir).unwrap();
-        fs::write(job.path("role"), "steward-judged").unwrap();
-        fs::write(job.path("engine"), "codex").unwrap();
-        assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
-        // The judge's own model and effort are Claude's line, not Codex's.
-        fs::write(
-            &cfg.models,
-            "steward-judged codex other low\nsteward-judged claude chosen max\n",
-        )
-        .unwrap();
         let c = choice(&cfg, &job).unwrap();
         assert_eq!(
             (c.engine, c.model.as_deref(), c.effort.as_deref()),
@@ -275,8 +326,6 @@ mod scoped_tests {
         let project = dir.path().join("project");
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
         cfg.tools.git = "git".into();
         let git = |args: &[&str]| {
             assert!(
@@ -293,20 +342,23 @@ mod scoped_tests {
         fs::create_dir(&project).unwrap();
         git(&["init", "-q"]);
         git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
+        crate::config::tests::set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "role steward-handed claude",
+                "role steward-handed@sam/code codex",
+                "role steward-judged@sam/code codex",
+                "offer claude models bare scoped",
+                "model steward-handed claude bare",
+                "model steward-handed@sam/code claude scoped",
+            ],
+        );
+
         let job = Job::new(&cfg, "job");
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-handed").unwrap();
         fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        fs::write(
-            &cfg.roles,
-            "steward-handed claude\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n",
-        )
-        .unwrap();
-        fs::write(
-            &cfg.models,
-            "steward-handed claude bare\nsteward-handed@sam/code claude scoped\n",
-        )
-        .unwrap();
         for url in [
             "https://github.com/Sam/Code.git",
             "git@github.com:SAM/CODE.git",

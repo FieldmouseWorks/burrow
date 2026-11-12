@@ -40,29 +40,57 @@ fn github(author: &str, body: &str, editor: Option<&str>) -> Fake {
     gh
 }
 
-#[test]
-fn switch_bad_setup_and_non_authors() {
-    let d = tempfile::tempdir().unwrap();
-    let roles = d.path().join("roles");
-    fs::create_dir(d.path().join("roles.d")).unwrap();
-    fs::write(d.path().join("roles.d/first"), "work claude\n").unwrap();
-    fs::write(d.path().join("roles.d/next"), "work@sam/code codex\n").unwrap();
-    fs::write(
-        d.path().join("roles.d/bad"),
-        "# comment\njudge old-format\n",
-    )
-    .unwrap();
-    fs::write(&roles, "work claude\n").unwrap();
+/// A door on an overlay in D, with each settings change in LINES made.
+fn door(d: &std::path::Path, lines: &[&str]) -> Config {
     let cfg = Config {
         repo: "sam/box".into(),
         label: "engines".into(),
         authors: vec![burrow_github::fake::author("sam")],
-        roles,
-        state: d.path().join("state"),
+        settings: burrow_settings::Config {
+            overlay: d.join("overlay.json"),
+            ..Default::default()
+        },
+        state: d.join("state"),
     };
+    for line in lines {
+        set(&cfg, line);
+    }
+    cfg
+}
+
+fn set(cfg: &Config, line: &str) {
+    let args: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+    cfg.settings
+        .command(&args, "test")
+        .unwrap_or_else(|e| panic!("{line}: {e}"));
+}
+
+/// The engine `work` runs on now.
+fn work(cfg: &Config) -> String {
+    let force = cfg.settings.roles().unwrap();
+    force.route("work", None).text()
+}
+
+#[test]
+fn switch_bad_setup_and_non_authors() {
+    let d = tempfile::tempdir().unwrap();
+    let cfg = door(
+        d.path(),
+        &[
+            "offer claude models secret-model",
+            "model judge claude secret-model",
+            "engines save bad",
+            "model judge claude unset",
+            "offer claude models",
+            "role work claude",
+            "role work@sam/code codex",
+            "engines save next",
+            "role work@sam/code unset",
+            "engines save first",
+        ],
+    );
     let mut gh = github("sam", "use next", None);
     pass(&mut gh, &cfg).unwrap();
-    let link = fs::read_link(&cfg.roles).unwrap();
     let comment = gh
         .asked("POST")
         .into_iter()
@@ -72,12 +100,16 @@ fn switch_bad_setup_and_non_authors() {
         .as_ref()
         .unwrap()["body"]
         .as_str()
-        .unwrap();
+        .unwrap()
+        .to_owned();
     assert!(
         comment.contains("Was active: first\nActive: next")
-            && comment.contains("work@sam/code codex")
+            && comment.contains("work@sam/code codex"),
+        "{comment}"
     );
     assert_eq!(gh.asked("PATCH").len(), 1);
+    let routing = |cfg: &Config| cfg.settings.roles().unwrap().roles;
+    let next = routing(&cfg);
     for body in [
         "use bad",
         "use absent",
@@ -87,7 +119,7 @@ fn switch_bad_setup_and_non_authors() {
         let mut gh = github("sam", body, None);
         cycle(&mut gh, body);
         pass(&mut gh, &cfg).unwrap();
-        assert_eq!(fs::read_link(&cfg.roles).unwrap(), link);
+        assert_eq!(routing(&cfg), next, "{body}");
         let text = gh
             .asked("POST")
             .last()
@@ -96,15 +128,15 @@ fn switch_bad_setup_and_non_authors() {
             .as_ref()
             .unwrap()
             .to_string();
-        assert!(!text.contains("old-format"));
+        assert!(!text.contains("secret-model"), "{text}");
         if body == "use bad" {
-            assert!(text.contains("line 2"), "{text}");
+            assert!(text.contains("doesn't offer now"), "{text}");
         }
     }
     for (author, editor) in [("outsider", None), ("sam", Some("outsider"))] {
         let mut gh = github(author, "use first", editor);
         pass(&mut gh, &cfg).unwrap();
-        assert_eq!(fs::read_link(&cfg.roles).unwrap(), link);
+        assert_eq!(routing(&cfg), next);
         assert!(gh.asked("PATCH").is_empty());
     }
 }
@@ -112,20 +144,16 @@ fn switch_bad_setup_and_non_authors() {
 #[test]
 fn a_failed_reply_does_not_repeat_back() {
     let d = tempfile::tempdir().unwrap();
-    let roles = d.path().join("roles");
-    fs::create_dir(d.path().join("roles.d")).unwrap();
-    fs::write(&roles, "work claude\n").unwrap();
-    fs::write(d.path().join("roles.d/first"), "work claude\n").unwrap();
-    fs::write(d.path().join("roles.d/second"), "work codex\n").unwrap();
-    let store = Store::new(&roles);
-    store.command(&["use".into(), "second".into()]).unwrap();
-    let cfg = Config {
-        repo: "sam/box".into(),
-        label: "engines".into(),
-        authors: vec![burrow_github::fake::author("sam")],
-        roles,
-        state: d.path().join("state"),
-    };
+    let cfg = door(
+        d.path(),
+        &[
+            "role work codex",
+            "engines save second",
+            "role work claude",
+            "engines save first",
+            "engines use second",
+        ],
+    );
     let mut gh = github("sam", "use back", None);
     // Comment succeeds, close fails. The next pass must only repeat the reply.
     gh.answers
@@ -134,14 +162,14 @@ fn a_failed_reply_does_not_repeat_back() {
         .unwrap()
         .2 = vec![ok(403, json!({"message":"refused"}), &[])].into();
     assert!(pass(&mut gh, &cfg).is_err());
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    assert_eq!(work(&cfg), "claude");
     let mut gh = github("sam", "use back", None);
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    assert_eq!(work(&cfg), "claude");
     // Once closed successfully a reopened issue really does ask again.
     cycle(&mut gh, "second-open");
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
+    assert_eq!(work(&cfg), "codex");
 }
 
 fn cycle(gh: &mut Fake, id: &str) {
@@ -160,21 +188,17 @@ fn cycle(gh: &mut Fake, id: &str) {
 #[test]
 fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
     let d = tempfile::tempdir().unwrap();
-    let roles = d.path().join("roles");
-    fs::create_dir(d.path().join("roles.d")).unwrap();
-    fs::write(&roles, "work claude\n").unwrap();
-    fs::write(d.path().join("roles.d/one"), "work claude\n").unwrap();
-    fs::write(d.path().join("roles.d/two"), "work codex\n").unwrap();
-    Store::new(&roles)
-        .command(&["use".into(), "two".into()])
-        .unwrap();
-    let cfg = Config {
-        repo: "sam/box".into(),
-        label: "engines".into(),
-        authors: vec![burrow_github::fake::author("sam")],
-        roles,
-        state: d.path().join("state"),
-    };
+    let cfg = door(
+        d.path(),
+        &[
+            "role work claude",
+            "engines save one",
+            "role work codex",
+            "engines save two",
+            "engines use one",
+            "engines use two",
+        ],
+    );
     let mut gh = github("sam", "use back", None);
     gh.answers
         .iter_mut()
@@ -186,40 +210,34 @@ fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
     })]
     .into();
     assert!(pass(&mut gh, &cfg).is_err());
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
+    assert_eq!(work(&cfg), "claude");
     // GitHub may have closed it despite the lost response, or a person may
     // close it manually. The latest reopen event distinguishes both cases.
     let mut reopened = github("sam", "use back", None);
     cycle(&mut reopened, "reopened-after-ambiguous-close");
     pass(&mut reopened, &cfg).unwrap();
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
+    assert_eq!(work(&cfg), "codex");
     pass(&mut reopened, &cfg).unwrap(); // same open cycle: only a reply retry
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work codex\n");
+    assert_eq!(work(&cfg), "codex");
 }
 
 #[test]
 fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
     let d = tempfile::tempdir().unwrap();
-    let roles = d.path().join("roles");
-    fs::create_dir(d.path().join("roles.d")).unwrap();
-    for (name, text) in [
-        ("one", "work claude\n"),
-        ("two", "work codex\n"),
-        ("three", "work codex over 80 claude\n"),
-    ] {
-        fs::write(d.path().join("roles.d").join(name), text).unwrap();
-    }
-    let store = Store::new(&roles);
-    store.command(&["use".into(), "two".into()]).unwrap();
-    store.command(&["use".into(), "one".into()]).unwrap();
-    store.command(&["use".into(), "two".into()]).unwrap();
-    let cfg = Config {
-        repo: "sam/box".into(),
-        label: "engines".into(),
-        authors: vec![burrow_github::fake::author("sam")],
-        roles,
-        state: d.path().join("state"),
-    };
+    let cfg = door(
+        d.path(),
+        &[
+            "role work claude",
+            "engines save one",
+            "role work codex",
+            "engines save two",
+            "role work codex over 80 claude",
+            "engines save three",
+            "engines use two",
+            "engines use one",
+            "engines use two",
+        ],
+    );
     let state = cfg.state.join("sam--box");
     fs::create_dir_all(&state).unwrap();
     let hash: String = Sha256::digest(b"issue-one:initial")
@@ -230,16 +248,11 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
     fs::create_dir(&blocked).unwrap();
     let mut gh = github("sam", "use back", None);
     assert!(pass(&mut gh, &cfg).is_err());
-    assert_eq!(fs::read_to_string(&cfg.roles).unwrap(), "work claude\n");
-    Store::new(&cfg.roles)
-        .command(&["use".into(), "three".into()])
-        .unwrap();
+    assert_eq!(work(&cfg), "claude");
+    set(&cfg, "engines use three");
     fs::remove_dir(blocked).unwrap();
     pass(&mut gh, &cfg).unwrap();
-    assert_eq!(
-        fs::read_to_string(&cfg.roles).unwrap(),
-        "work codex over 80 claude\n"
-    );
+    assert_eq!(work(&cfg), "codex over 80 claude");
 }
 
 #[test]
@@ -258,7 +271,10 @@ fn rate_limits_defer_at_every_door_stage() {
             repo: "sam/box".into(),
             label: "engines".into(),
             authors: vec![burrow_github::fake::author("sam")],
-            roles: dir.path().join("roles"),
+            settings: burrow_settings::Config {
+                overlay: dir.path().join("overlay.json"),
+                ..Default::default()
+            },
             state: dir.path().join("receipts"),
         };
         let mut gh = github("sam", "invalid request", None);

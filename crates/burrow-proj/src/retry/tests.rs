@@ -664,8 +664,8 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
 #[test]
 fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape() {
     let mut r = rig();
-    r.cfg.roles = r.tmp.path().join("roles");
-    fs::write(&r.cfg.roles, "work codex\n").unwrap();
+    let dir = r.tmp.path().join("settings");
+    crate::config::tests::routes(&mut r.cfg, &dir, "work codex");
     let job = Job::new(&r.cfg, "queued");
     fs::create_dir(&job.dir).unwrap();
     fs::write(job.path("role"), "work\n").unwrap();

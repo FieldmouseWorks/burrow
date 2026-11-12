@@ -1,8 +1,9 @@
 //! `proj settings`: the read door of burrow-settings' schema. Each option
 //! is read from where it lives today: the flake's, from the values
-//! modules/settings/tracked.nix renders into the file proj's config names; the live ones,
-//! from proj's own files, through the parsers its turns use. The schema
-//! decides what may be shown ([`burrow_settings::show::Document`]).
+//! modules/settings/tracked.nix renders into the file proj's config names;
+//! the live ones, from the settings overlay (and proj's usage record), as
+//! its turns read them. The schema decides what may be shown
+//! ([`burrow_settings::show::Document`]).
 
 use std::path::Path;
 
@@ -10,8 +11,9 @@ use burrow_settings::show::{self, Document, Reading};
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::setups::Store;
 use crate::usage;
+
+mod migrate;
 
 /// Every option in effect, and where each came from.
 pub fn document(cfg: &Config) -> Result<Document, String> {
@@ -23,46 +25,53 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     let tracked: serde_json::Map<String, Value> =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut readings = show::flake(&tracked)?;
-    let (file, overrides, until) = if let Some(policy) = &cfg.settings {
-        let (overrides, until) = policy.readings()?;
-        (
-            policy.overlay.clone(),
-            there(&policy.overlay).then(|| json!(overrides)),
-            there(&policy.overlay).then(|| json!(until)),
-        )
-    } else {
-        (cfg.jobs.join(".settings-unconfigured"), None, None)
+    let nothing = (false, false, false);
+    let (file, overrides, until, set, setups) = match &cfg.settings {
+        Some(policy) if there(&policy.overlay) => {
+            let (overrides, until) = policy.readings()?;
+            (
+                policy.overlay.clone(),
+                Some(json!(overrides)),
+                Some(json!(until)),
+                policy.roles_set()?,
+                policy.setups()?,
+            )
+        }
+        Some(policy) => (policy.overlay.clone(), None, None, nothing, None),
+        None => (
+            cfg.jobs.join(".settings-unconfigured"),
+            None,
+            None,
+            nothing,
+            None,
+        ),
     };
     readings.push(Reading::live(
         "settings.repositoryOverrides",
         file.clone(),
         overrides,
     ));
-    readings.push(Reading::live("settings.pipelineUntil", file, until));
-    let roles = crate::roles::read(&cfg.roles)?;
+    readings.push(Reading::live("settings.pipelineUntil", file.clone(), until));
+    // Each role setting in force, the declared defaults with what the
+    // overlay sets over them; the default where it sets nothing.
+    let force = cfg.role_settings()?;
+    let (roles, models, offers) = set;
     readings.push(Reading::live(
         "proj.roles",
-        cfg.roles.clone(),
-        there(&cfg.roles)
-            .then(|| crate::roles::shown(&cfg.roles, &roles))
-            .transpose()?
-            .map(Value::Object),
+        file.clone(),
+        roles.then(|| json!(force.roles)),
     ));
-    let models = crate::roles::read(&cfg.models)?;
     readings.push(Reading::live(
         "proj.models",
-        cfg.models.clone(),
-        there(&cfg.models)
-            .then(|| crate::models::shown(&cfg.models, &models))
-            .transpose()?
-            .map(Value::Object),
+        file.clone(),
+        models.then(|| json!(force.models)),
     ));
-    let setups = Store::new(&cfg.roles);
     readings.push(Reading::live(
-        "proj.engineSetups",
-        setups.dir().to_owned(),
-        setups.shown()?,
+        "proj.engineOffers",
+        file.clone(),
+        offers.then(|| json!(force.offers)),
     ));
+    readings.push(Reading::live("proj.engineSetups", file, setups));
     readings.push(Reading::live(
         "proj.usageHold",
         cfg.jobs.join(usage::FILE),
@@ -70,6 +79,11 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
             .map(|s| json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said})),
     ));
     Document::build(readings)
+}
+
+/// proj's old roles and models files still in DIR, which nothing reads.
+pub(crate) fn old_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    migrate::left(dir)
 }
 
 /// Whether a live file is there to say anything: one that isn't leaves the
@@ -88,6 +102,12 @@ pub fn command(cfg: &Config, args: &[String]) -> Result<String, String> {
     {
         [] | ["show"] => Ok(document(cfg)?.text()),
         ["show", "--json"] => Ok(document(cfg)?.json()),
+        ["migrate"] => migrate::run(
+            cfg.settings.as_ref().ok_or("settings are not configured")?,
+            cfg.old_config
+                .as_deref()
+                .ok_or("proj's config names no old config folder")?,
+        ),
         ["schema"] => Ok(
             serde_json::to_string_pretty(&burrow_settings::schema::json_schema())
                 .expect("a schema is JSON")

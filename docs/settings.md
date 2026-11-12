@@ -7,7 +7,7 @@ reads it (`owner`), and how a change takes effect (`deploy`: it's set in the
 machine's flake; `live`: it's kept in a file its readers read again at their
 next decision). This is the first slice of
 [#655](https://github.com/FieldmouseWorks/burrow/issues/655): the read side.
-Repository admission is the first option moved to the independent write door and runtime overlay described below. Other options remain in their existing homes.
+Repository admission and each role's engine, model and effort have moved to the write door and runtime overlay described below. Other options remain in their existing homes.
 
 ## Reading them
 
@@ -29,9 +29,7 @@ machine, named beside it). What it covers today:
 | `autoland.reviewers.*` | `burrow.autoland.reviewers` in the flake |
 | `settings.allowed` | `burrow.settings` in the flake |
 | `settings.repositoryOverrides`, `settings.pipelineUntil` | the one runtime settings overlay |
-| `proj.roles` | the roles file (`~/.config/proj/roles`) |
-| `proj.models` | the models file beside it |
-| `proj.engineSetups` | the saved setups, `roles.d/`, and the one in force |
+| `proj.roles`, `proj.models`, `proj.engineOffers`, `proj.engineSetups` | the one runtime settings overlay ([below](#engines-models-and-efforts-per-role)) |
 | `proj.usageHold` | proj's usage record, `.usage.json` in its jobs dir |
 
 The JSON Schema marks each option with `x-owner` and `x-change`, gives each
@@ -54,7 +52,7 @@ dashboard can be built from it alone.
   the flake overrides the option, and a derived default (`pipelineSlots`,
   `maxJobsPerProject`) is worked out from the machine's own values by the
   schema's formula.
-- The live files are read with the parsers proj's turns use, so a line a turn
+- The live values are read as proj's turns read them, so an overlay a turn
   would refuse fails the show too.
 - `checks/settings.nix` runs it on a fixture machine with values from its
   flake and every live file, and validates the result against the generated
@@ -129,3 +127,66 @@ Automation binds its repository identity in host-owned control state before
 launch. A missing identity fails closed; deliberately local automated work
 uses `proj run --local-work`. A worker cannot evade policy by changing its
 project or role metadata, or by making its Git remote unreadable.
+
+## Engines, models and efforts per role
+
+Which engine, model and effort runs each kind of job are live settings in
+the same overlay, changed through the same door and logged the same way:
+
+```
+proj settings role ROLE ENGINE [over PCT ENGINE]   which engine runs ROLE
+proj settings role ROLE unset                      back to the declared default
+proj settings model ROLE ENGINE MODEL|- [EFFORT|-] its model and effort on ENGINE
+proj settings model ROLE ENGINE unset
+proj settings offer ENGINE models|efforts WORD...  what ENGINE offers
+proj engines [save NAME [--replace] | use NAME | use back]
+```
+
+A role key is `ROLE`, `ROLE@OWNER/REPO`, `*` (every role) or
+`*@OWNER/REPO`; the closest one wins: a named role over `*`, a repo's key
+over the bare one, the repo matched case-insensitively. Engines are
+`claude` and `codex`. `over PCT ENGINE` moves a turn to that engine when
+its own is short: any window on its meter (the five-hour session or the
+week) at PCT with no credits to carry on, or, for Claude, the machine
+already out of Claude's usage. It moves only when the other engine's meter
+has room: credits, or no window used up. Missing readings, or readings an
+hour old, move nothing. `burrow.usageReset` supplies both meters. Each
+engine keeps its own conversation when a role moves between them. A
+steward judge always runs on Claude.
+
+Nothing is an implicit fallback: the schema declares each default and
+`proj settings show` shows it as one. Every role runs on Claude (`*`)
+but the planner, on Codex, which needs an explicit model to run on Claude;
+a role with no model runs at its engine's own (`* claude`, `* codex`,
+model and effort null): for Claude, the job user's
+`~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`;
+for Codex, the job user's `.codex/config.toml`. The tuning for the engine a
+turn ends on applies, overflow and the judge's Claude included. New sandbox
+guests (`agent new`, `proj run --vm`) copy the user's Claude `model` and its
+`env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE`
+at creation.
+
+The door refuses a model or effort its engine doesn't offer
+(`proj.engineOffers`). Each engine offers the efforts its CLI takes by
+default and no model until `offer` lists them, and an offer a role is set
+to can't be withdrawn under it. Model ids live only in the overlay, never in
+a tracked file: which model does what is the machine's business.
+
+A saved engine setup is a named set of these same values, `proj.roles` and
+`proj.models` as set over the defaults, so it can't disagree with the
+settings in force. `engines save NAME` saves what's in force (`--replace`
+to overwrite; names are lowercase letters, digits and hyphens, and `back`
+is reserved), `engines use NAME` puts exactly its values in force, after
+checking them against the offers, and changes nothing else, and
+`engines use back` returns to what the last switch replaced. The active
+setup is the one whose values are in force; a change after it leaves none
+active until one matches again. `proj engines` lists them, with each role's
+engine, and never a model id: the [engines door](front-door.md#engines-with-no-agent)
+answers with it.
+
+`proj check-config` reads the role settings as each turn does; the update's
+health check runs it as the job user after every switch. proj's old files
+(`~/.config/proj/roles`, `models`, `roles.d/`) moved into the overlay once,
+by `proj settings migrate` (the `proj-settings-migrate` unit), which renames
+them `NAME.migrated`; nothing reads them, and check-config fails while one
+is back.

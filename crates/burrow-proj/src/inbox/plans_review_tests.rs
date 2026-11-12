@@ -731,8 +731,8 @@ fn unstick_children_keep_admission_execution_and_sequence() {
     for kind in ["generated", "reused", "nested", "offered"] {
         for engine in [Engine::Claude, Engine::Codex] {
             let (mut b, mut parent, mut list) = parent_fixture();
-            b.cfg.roles = b.path("roles");
-            fs::write(&b.cfg.roles, format!("stuck {}\n", engine.name())).unwrap();
+            let dir = b.path("settings");
+            crate::config::tests::routes(&mut b.cfg, &dir, &format!("stuck {}", engine.name()));
             b.cfg.projects = b.path("projects");
             fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
             b.cfg.tools.systemd_run = "true".into();

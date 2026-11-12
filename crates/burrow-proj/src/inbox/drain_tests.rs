@@ -457,8 +457,8 @@ fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
     ] {
         for full in [Engine::Claude, Engine::Codex] {
             let mut b = Box::new();
-            b.cfg.roles = b.path("roles");
-            fs::write(&b.cfg.roles, roles).unwrap();
+            let dir = b.path("settings");
+            crate::config::tests::routes(&mut b.cfg, &dir, roles);
             let inbox = b.cfg.inbox.as_mut().unwrap();
             inbox
                 .authors
@@ -506,8 +506,8 @@ fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
     ] {
         for full_codex in [false, true] {
             let mut b = Box::new();
-            b.cfg.roles = b.path("roles");
-            fs::write(&b.cfg.roles, roles).unwrap();
+            let dir = b.path("settings");
+            crate::config::tests::routes(&mut b.cfg, &dir, roles);
             b.cfg
                 .inbox
                 .as_mut()
@@ -572,8 +572,6 @@ fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
 #[test]
 fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
     let mut b = Box::new();
-    b.cfg.roles = b.path("roles");
-    fs::write(&b.cfg.roles, "").unwrap();
     b.cfg
         .inbox
         .as_mut()

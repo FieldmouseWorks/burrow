@@ -1,7 +1,7 @@
 # A fixture machine's `proj settings show --json`, with values from its
-# flake and from each live file, validates against the JSON Schema
-# burrow-settings generates (`proj settings schema`), checked by a validator
-# of its own; and a document with an option the schema doesn't declare, or
+# flake and from the live overlay (proj's old files moved into it once),
+# validates against the JSON Schema burrow-settings generates (`proj
+# settings schema`), checked by a validator of its own; and a document with an option the schema doesn't declare, or
 # a value from where its option can't come, doesn't. A module default that
 # isn't the schema's, hidden by the flake's own value, fails the show.
 { self, pkgs, ... }:
@@ -23,19 +23,24 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   # The fixture's own config, its live files moved where the build can write.
   config=$(grep -o '/nix/store/[^ ]*-proj\.json' ${proj}/bin/proj | head -n1)
   live=$TMPDIR/live
-  mkdir -p $live/jobs $live/config/roles.d
+  mkdir -p $live/jobs $live/config
   [ "$(jq -r .trackedSettings "$config")" = /etc/burrow/settings.json ]
   jq --arg live "$live" --arg pwd "$PWD" \
-    '.jobs = "\($live)/jobs" | .roles = "\($live)/config/roles" | .models = "\($live)/config/models" | .trackedSettings = "\($pwd)/settings.json"' \
+    '.jobs = "\($live)/jobs" | .oldConfig = "\($live)/config" | .settings.overlay = "\($live)/settings/overlay.json" | .trackedSettings = "\($pwd)/settings.json"' \
     "$config" >proj.json
   jq . ${tracked} >settings.json
-  printf 'triage codex\nfix@sam/homelab codex over 80 claude\n' >$live/config/roles.d/usual
-  ln -s $live/config/roles.d/usual $live/config/roles
-  printf 'triage codex - low\n' >$live/config/models
   now=$(date +%s)
   printf '{"until": %d, "said": "out of usage", "job": "j1", "at": %d, "told": %d}' \
     $((now + 3600)) $now $now >$live/jobs/.usage.json
   run() { PROJ_CONFIG=$PWD/proj.json PROJ_SELF=${proj}/bin/proj ${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj "$@"; }
+  # The old files, moved into the settings once; then each live value
+  # through the door.
+  printf 'triage codex\n' >$live/config/roles
+  printf 'triage codex - low\n' >$live/config/models
+  run settings migrate
+  [ -e $live/config/roles.migrated ] && [ ! -e $live/config/roles ]
+  run settings role fix@sam/homelab codex over 80 claude
+  run engines save usual
 
   run settings schema >schema.json
   run settings show --json >show.json
@@ -48,9 +53,11 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["proj.maxJobs"]' '{"value":6,"origin":"flake"}'
   want '.options["autoland.jobIdleMinutes"]' '{"value":20,"origin":"default"}'
   want '.options["settings.allowed"].value' '["sam/kept"]'
-  want '.options["proj.roles"].value' '{"triage":"codex","fix@sam/homelab":"codex over 80 claude"}'
-  want '.options["proj.models"].value' '{"triage codex":{"model":null,"effort":"low"}}'
+  want '.options["proj.roles"].value' '{"*":{"engine":"claude","over":null},"planner":{"engine":"codex","over":null},"triage":{"engine":"codex","over":null},"fix@sam/homelab":{"engine":"codex","over":{"pct":80,"engine":"claude"}}}'
+  want '.options["proj.models"].value' '{"* claude":{"model":null,"effort":null},"* codex":{"model":null,"effort":null},"triage codex":{"model":null,"effort":"low"}}'
+  want '.options["proj.roles"].file' "\"$live/settings/overlay.json\""
   want '.options["proj.engineSetups"].value.active' '"usual"'
+  want '.options["proj.engineOffers"].origin' '"default"'
   want '.options["proj.usageHold"].origin' '"live"'
   want '.options | length' "$(jq '.properties.options.required | length' schema.json)"
 

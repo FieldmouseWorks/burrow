@@ -57,17 +57,21 @@ fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.jobs = dir.path().join("jobs");
     cfg.scratch = dir.path().join("scratch");
-    cfg.roles = dir.path().join("roles");
+    crate::config::tests::set(&mut cfg, dir.path(), &[]);
+    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
     let job = Job::new(&cfg, "job");
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
     fs::write(job.path("role"), "work").unwrap();
     fs::write(job.path("agent"), "sandbox").unwrap();
-    for (line, expected) in [
-        ("work unknown", "line 1: work unknown"),
-        ("work codex", "codex cannot run a --vm job"),
+    for (engine, expected) in [
+        // An overlay a hand edit broke: the door never writes one.
+        ("unknown", "unknown engine unknown"),
+        ("codex", "codex cannot run a --vm job"),
     ] {
-        fs::write(&cfg.roles, line).unwrap();
+        let routing =
+            serde_json::json!({"routing": {"roles": {"work": {"engine": engine, "over": null}}}});
+        fs::write(&overlay, routing.to_string()).unwrap();
         assert!(exec(&cfg, "job", "normal").is_err());
         assert!(read(&job.turn("1", "outcome")).unwrap().contains(expected));
         assert!(!job.turn("1", "slot").exists());
