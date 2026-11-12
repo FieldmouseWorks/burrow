@@ -22,6 +22,16 @@ fn spenders() {
         ("hosts/x.nix", "  extraUsage = lib.mkDefault true;"),
         ("config.toml", "paid_usage = true"),
         (".github/x.yml", "drain: true"),
+        (
+            "hosts/x.nix",
+            "  burrow.proj.inbox.triage.drain = \"codex\";",
+        ),
+        ("hosts/x.nix", "  burrow.proj.usage.paid = true;"),
+        (
+            "hosts/x.nix",
+            "  fresh = { enable = true; owner = \"o\"; };",
+        ),
+        ("hosts/x.nix", "  /* opt in */ fresh.enable = true;"),
     ] {
         fails(&case(adding(path, line)), "on-by-default");
         passes(&case(adding(path, line)).body(REASON));
@@ -33,6 +43,12 @@ fn not_spenders() {
     for (path, line) in [
         ("hosts/x.nix", "  drain.enable = false;"),
         ("hosts/x.nix", "  # drain.enable = true;"),
+        ("hosts/x.nix", "  drain = null;"),
+        ("hosts/x.nix", "  usage.paid = false;"),
+        (
+            "hosts/x.nix",
+            "  fresh.enable = false; # was fresh.enable = true;",
+        ),
         ("docs/x.md", "Set `drain.enable = true` to turn it on."),
     ] {
         passes(&case(adding(path, line)));

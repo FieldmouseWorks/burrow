@@ -256,18 +256,53 @@ pub fn timer(line: &str) -> bool {
     TIMER.is_match(line)
 }
 
+/// A line's code: block comments written inside it and a trailing `#` or
+/// `//` comment taken out, comment marks inside quotes left alone.
+pub fn code(line: &str) -> String {
+    let (mut out, mut quote, mut block) = (String::new(), false, false);
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let two: String = chars[i..chars.len().min(i + 2)].iter().collect();
+        if block {
+            if two == "*/" {
+                block = false;
+                i += 1;
+            }
+        } else if !quote && two == "/*" {
+            block = true;
+            i += 1;
+        } else if !quote && (chars[i] == '#' || two == "//") {
+            break;
+        } else {
+            if chars[i] == '"' {
+                quote = !quote;
+            }
+            out.push(chars[i]);
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Whether a line turns an automated spender (a model drain, paid usage,
-/// runners, spend) on: its key set true, as Nix, TOML or YAML write it. An
-/// option declared `default = true` over several lines is the review's to
-/// catch; the key on a line of its own is what this reads.
+/// runners, spend) on, as Nix, TOML or YAML write it: its key set true
+/// (dotted, or inside an inline `{ }`), or the drain given an engine. Null,
+/// false and comments are not. An option declared `default = true` over
+/// several lines, or inside a multi-line block comment, is the review's to
+/// judge: this reads one line at a time.
 pub fn spender(line: &str) -> bool {
-    static SPENDER: LazyLock<Regex> = LazyLock::new(|| {
-        re(concat!(
-            r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|paid[-_]?usage|fresh|spend(ing)?|runners?)\b",
-            r"[\w.-]*\s*(\.\s*enable\s*)?[=:]\s*(lib\.(mkDefault|mkForce)\s+)?true\b",
-        ))
+    static SPENDER: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        let key = r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|paid([-_]?usage)?|fresh|spend(ing)?|runners?)\b";
+        let on = r"(lib\.(mkDefault|mkForce|mkOverride\s+\d+)\s+)?true\b";
+        vec![
+            re(&format!(r"{key}[\w.-]*\s*(\.\s*enable\s*)?[=:]\s*{on}")),
+            re(&format!(r"{key}[^;]*\{{[^}}]*\benable\s*=\s*{on}")),
+            re(r#"(?i)\bdrain\s*=\s*(lib\.(mkDefault|mkForce|mkOverride\s+\d+)\s+)?"[^"]+""#),
+        ]
     });
-    SPENDER.is_match(line)
+    let line = code(line);
+    SPENDER.iter().any(|r| r.is_match(&line))
 }
 
 /// Whether a line is a comment, in any of the house's languages.
@@ -308,6 +343,12 @@ mod tests {
             "fresh.enable = true;",
             "runners.x.enable = true;",
             "paid_usage = true",
+            "burrow.proj.usage.paid = true;",
+            "burrow.proj.inbox.triage.drain = \"codex\";",
+            "drain = lib.mkDefault \"claude\";",
+            "fresh = { enable = true; owner = \"x\"; };",
+            "fresh = { owner = \"x\"; enable = lib.mkForce true; };",
+            "/* opt in */ fresh.enable = true;",
         ] {
             assert!(spender(line), "{line}");
         }
@@ -316,6 +357,11 @@ mod tests {
             "drained = true;",
             "freshness = true;",
             "drain = null;",
+            "usage.paid = false;",
+            "fresh = { enable = false; };",
+            "fresh.enable = false; # previously fresh.enable = true;",
+            "/* fresh.enable = true; */ x = 1;",
+            "fresh.enable = false; // was true",
             "description = \"drain on\";",
         ] {
             assert!(!spender(line), "{line}");

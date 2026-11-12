@@ -164,7 +164,7 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
         if !markdown && new.iter().any(|l| rules::timer(l) && !rules::comment(l)) {
             diff.timers.push(file.to_owned());
         }
-        if !markdown && new.iter().any(|l| rules::spender(l) && !rules::comment(l)) {
+        if !markdown && new.iter().any(|l| rules::spender(l)) {
             diff.spenders.push(file.to_owned());
         }
         if new.iter().any(|l| rules::model(l)) {
