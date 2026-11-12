@@ -166,7 +166,7 @@ let
   canon = u:
     let
       n = aliasOf.${u} or u;
-      m = builtins.match "([^@]*@)[^.]*(\\..*)" n;
+      m = builtins.match "([^@]*@).*(\\.[^.]*)" n;
       tmpl = builtins.elemAt m 0 + builtins.elemAt m 1;
     in if declared ? ${n} || m == null then n else aliasOf.${tmpl} or tmpl;
   orderedAfter = s: map canon (words [ (s.after or [ ]) (s.unitConfig.After or [ ]) ]);

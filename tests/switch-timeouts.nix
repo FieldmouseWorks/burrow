@@ -93,6 +93,8 @@ let
     left = { after = [ "long.service" ]; restartIfChanged = false; serviceConfig.ExecStart = "true"; };
     quick = { after = [ "short.service" ]; serviceConfig = oneshotUnit; };
     instance = { after = [ "long@worker.service" ]; serviceConfig = oneshotUnit; };
+    # An instance name can hold dots (OWNER-.github): the unit type is the last.
+    dotted = { after = [ "long@owner-.github.service" ]; serviceConfig = oneshotUnit; };
     specifier = { after = [ "long@%i.service" ]; serviceConfig = oneshotUnit; };
     viaBefore = { serviceConfig = oneshotUnit; };
     viaNative = { unitConfig.After = "long.service"; serviceConfig = oneshotUnit; };
@@ -115,7 +117,7 @@ in
 assert lib.assertMsg (noEvents.probe.restartIfChanged == false && noEvents."probe@".restartIfChanged == false)
   "handler units restart on a switch when burrow.events is disabled";
 assert lib.assertMsg (builtins.length ordered == 1
-  && lib.hasInfix "behind, daemon, hop, instance, specifier, viaAlias, viaBefore, viaNative, viaTarget. Give each"
+  && lib.hasInfix "behind, daemon, dotted, hop, instance, specifier, viaAlias, viaBefore, viaNative, viaTarget. Give each"
     (builtins.head ordered).message)
   "switch accepted a restartable unit ordered after a long oneshot";
 assert lib.assertMsg (builtins.length mixed == 1 && lib.hasInfix
