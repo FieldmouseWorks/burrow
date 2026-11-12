@@ -34,6 +34,8 @@ pub struct Snapshot {
     pub unknown: BTreeMap<String, String>,
     /// HOST-update, and what its last run said.
     pub update: Option<(Unit, String)>,
+    /// When HOST-update last wrote to its logs, if it has.
+    pub progress: Option<f64>,
     /// HOST-update's own open PR, when its last run said it's waiting on
     /// that to land before it brings in anything newer.
     pub behind: Option<u64>,
@@ -156,6 +158,7 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             })
             .unwrap_or_else(|| "nothing yet".to_owned());
         snap.update = Some((world.unit(&d.unit), said));
+        snap.progress = newest(&d.logs);
         let mut compare: Vec<(&String, String)> = Vec::new();
         // Its own repo, at how far HOST-update found main live in the system
         // that runs; a record or a system that can't be read is a repo it
@@ -343,6 +346,17 @@ fn default_branch(world: &dyn World, repo: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("{repo} has no default branch"))
+}
+
+/// When a file in `dir` was last written, in seconds since the epoch; none
+/// when it has none, or can't be read.
+fn newest(dir: &std::path::Path) -> Option<f64> {
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok()?.metadata().ok()?.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .reduce(f64::max)
 }
 
 /// How far HOST-update found its own repo's main live.
@@ -535,7 +549,7 @@ pub mod tests {
             "gap": 120.0,
             "deploy": {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
-                "own": "sam/box", "live": dir.join("live.json"),
+                "logs": dir.join("logs"), "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
                 "after": 1800.0, "run": 5400.0, "ride": 18000.0,
             },
@@ -834,6 +848,22 @@ pub mod tests {
         );
         assert_eq!(snap.behind, Some(405));
         assert!(snap.unknown.is_empty());
+        // No logs yet: no sign of a run at work. Then the newest write to
+        // any of them.
+        assert_eq!(snap.progress, None);
+        let logs = dir.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        let at = |s: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s);
+        for (name, s) in [
+            ("build.log", 1_793_290_000),
+            ("check-agents.log", 1_793_291_000),
+        ] {
+            std::fs::File::create(logs.join(name))
+                .unwrap()
+                .set_modified(at(s))
+                .unwrap();
+        }
+        assert_eq!(take(&cfg, &w).progress, Some(1_793_291_000.0));
         // A system switched to since, by anyone: unknown until HOST-update
         // looks, never taken for live.
         w.running = Some("/nix/store/y".into());

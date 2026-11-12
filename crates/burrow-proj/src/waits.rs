@@ -193,6 +193,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         unstick: f.unstick,
         // A turn in line is `line`'s: none waits on a job of its own.
         claude: false,
+        refresh: false,
     })
 }
 
