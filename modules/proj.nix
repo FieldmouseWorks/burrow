@@ -616,8 +616,8 @@ in
       "L+ ${codexHome}/rules/burrow.rules - - - - ${rulesFile}"
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-questions 0700 ${user} ${config.users.users.${user}.group} -"
-      # The change stream's subscriber sockets: readers of the user's group bind here.
-      "d ${stateDir}/proj-stream 0770 ${user} ${config.users.users.${user}.group} -"
+      # The change stream's subscriber sockets: the user's own readers bind here.
+      "d ${stateDir}/proj-stream 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
       # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
       # job is over: no age here.

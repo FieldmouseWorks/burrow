@@ -324,8 +324,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         slot::take_engine(cfg, id, &n, given, hand_over, choice.engine)
             .map_err(|e| Fail::new(1, format!("proj: {e}")))
     };
-    // Declared before the slot, so it drops after: the slot's freeing is news.
-    let _freed = crate::snapshot::stream::OnDrop(cfg);
     let mut held = Some(take(true)?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
@@ -518,11 +516,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         let _ = crate::state_reads::remove(job.turn(&n, "slot"));
                     }
                     drop(held.take());
-                    crate::snapshot::stream::notify(cfg);
                     rewatch(cfg, &[id]);
                     let waited = now_nanos();
                     crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, &said)
                         .map_err(|e| Fail::new(1, e.to_string()))?;
+                    crate::snapshot::stream::notify(cfg);
                     let _ = held.insert(take(true)?);
                     kick(cfg, lines(&job.path("kick")));
                     let state = crate::retry::Checkpoint::load(&job, &n)
@@ -531,6 +529,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     prompt = state
                         .resume(&job, &n, &first)
                         .map_err(|e| Fail::new(1, e.to_string()))?;
+                    crate::snapshot::stream::notify(cfg);
                     rewatch_later(cfg, id);
                     continue;
                 }

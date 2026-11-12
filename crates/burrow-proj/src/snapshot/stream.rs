@@ -1,6 +1,6 @@
 //! The snapshot's change stream. proj has no daemon, so the "socket" is a
 //! directory of Unix datagram sockets, one per subscriber (`Config::stream`).
-//! Whatever writes proj's records (a slot taken or freed) calls [`notify`],
+//! Whatever writes proj's records (a slot taken, or a turn's unit ended) calls [`notify`],
 //! which sends one datagram to each subscriber; no timer is involved. A
 //! subscriber's first read is the current snapshot, then one snapshot per
 //! batch of changes: datagrams that arrived together are one event.
@@ -37,15 +37,6 @@ pub fn notify(cfg: &Config) {
             }
             _ => {}
         }
-    }
-}
-
-/// Calls [`notify`] when dropped: held across a scope that frees something.
-pub struct OnDrop<'a>(pub &'a Config);
-
-impl Drop for OnDrop<'_> {
-    fn drop(&mut self) {
-        notify(self.0);
     }
 }
 

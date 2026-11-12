@@ -197,7 +197,9 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     let _ = fs::remove_file(crate::policy::path(job, "order"));
     crate::state_reads::write(job.turn(n, "class"), format!("{class}\n"))?;
     crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))?;
-    crate::policy::accepted(job).map_err(io::Error::other)
+    crate::policy::accepted(job).map_err(io::Error::other)?;
+    snapshot::stream::notify(job.cfg);
+    Ok(())
 }
 
 /// Say this job's turn N may be withdrawn no more, under the job's lock, so none
@@ -630,7 +632,6 @@ pub fn take(
                 drop(lk);
                 fs::write(job.turn(n, "queue-order"), &me)?;
                 took_slot(&job, n, &n_slot.to_string(), class.name())?;
-                snapshot::stream::notify(cfg);
                 return Ok(slot);
             }
         }
