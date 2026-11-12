@@ -51,7 +51,7 @@ query($owner: String!, $name: String!, $cursor: String) {
             ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }
@@ -169,7 +169,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{flow} (failed to start)")
-    for s in unstarted(suites.get("nodes", []), stale):
+    for s in unstarted(suites.get("nodes", []), stale, contexts=contexts.get("nodes", [])):
         seen += 1
         flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
         pending.append(f"{flow} (never started, to be run again)")
@@ -231,30 +231,39 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 UNSTARTED_AFTER = 15 * 60
 
 
-def unstarted(suite_nodes, stale=(), now=None):
+def unstarted(suite_nodes, stale=(), now=None, contexts=()):
     """The suites of a head whose workflow run has had no job for longer than
     UNSTARTED_AFTER: still queued, with no check run at all. A run that has
     started (a job exists, even a queued one waiting for a runner) isn't, and
-    one a replacement run of the same workflow stands in for isn't owed
-    either: another suite of it that has a job or is under way or finished,
-    and didn't judge another diff than the PR's (stale, runs()). A run of
-    another workflow doesn't stand in for it."""
+    one a replacement run stands in for isn't owed either: another suite of
+    the same workflow (suite_flow: the shared CI's caller and its twin for a
+    new base are one) that didn't judge another diff than the PR's (stale,
+    runs()) and either is under way with a job, or has finished with a check
+    run that did its work (ran) - and, for the shared CI, a lane job that did,
+    which a push's or a dispatch's run has none of. A skipped caller, an empty
+    suite, or a run of another workflow doesn't stand in for it."""
     now = C.NOW if now is None else now
 
     def idle(s):
         return s.get("status") in ("QUEUED", "REQUESTED", "PENDING") and (s.get("checkRuns") or {}).get("totalCount", 1) == 0
 
     def flow(s):
-        w = (s.get("workflowRun") or {}).get("workflow") or {}
-        return w.get("id") or w.get("name")
+        return suite_flow(s) or ((s.get("workflowRun") or {}).get("workflow") or {}).get("name")
+
+    def covers(o, s):
+        if o is s or o.get("id") in stale or idle(o) or flow(o) != flow(s) or flow(s) is None:
+            return False
+        if o.get("status") != "COMPLETED":
+            return (o.get("checkRuns") or {}).get("totalCount", 1) > 0
+        mine = [x for x in contexts if x["__typename"] == "CheckRun" and suite(x).get("id") == o.get("id") and ran(x)]
+        return any(judged(x) for x in mine) if suite_flow(o) == FLAKE[0] else bool(mine)
 
     out = []
     for s in suite_nodes:
         made = (s.get("workflowRun") or {}).get("createdAt")
         if not idle(s) or not (s.get("workflowRun") or {}).get("databaseId") or not made or now - C.ts(made) <= UNSTARTED_AFTER:
             continue
-        if any(o is not s and o.get("id") not in stale and not idle(o) and flow(o) == flow(s) and flow(s) is not None
-               for o in suite_nodes):
+        if any(covers(o, s) for o in suite_nodes):
             continue
         out.append(s)
     return out
@@ -289,15 +298,23 @@ def dead_runs(pr, repo=None, now=None):
     (whole_run_fit)."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
-    contexts = ((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", [])
-    suites = (commit.get("checkSuites") or {}).get("nodes", [])
+    rollup = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
+    listed = commit.get("checkSuites") or {}
+    if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (rollup, listed)):
+        # A sibling job past the first 100 could be the failed one: no rerun
+        # is authorized from a part of the run (ci_state reads it pending).
+        return []
+    contexts, suites = rollup.get("nodes", []), listed.get("nodes", [])
     # Only a cancelled check needs runs() (which asks GitHub about the fork).
     stale = runs(pr, repo)[0] if any(c["__typename"] == "CheckRun" and cancelled(c) for c in contexts) or suites else set()
-    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, stale, now)]
+    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, stale, now, contexts)]
+    fit = {}  # each run judged once, however many of its jobs were cancelled
     for c in contexts:
         if c["__typename"] == "CheckRun" and cancelled(c) and suite(c).get("id") not in stale \
-                and after_cancel(c, contexts, stale) is None and whole_run_fit(c, contexts, repo):
-            if (run_id := (suite(c).get("workflowRun") or {}).get("databaseId")):
+                and after_cancel(c, contexts, stale) is None:
+            if (sid := suite(c).get("id")) not in fit:
+                fit[sid] = whole_run_fit(c, contexts, repo)
+            if fit[sid] and (run_id := (suite(c).get("workflowRun") or {}).get("databaseId")):
                 ids.append(run_id)
     return list(dict.fromkeys(ids))
 
@@ -325,7 +342,12 @@ def workflow(c):
     """Which workflow a check run's suite ran: its id, but one for the shared
     CI's caller and its twin for a new base (FLAKE), whose runs speak for each
     other. By file, not by name: a repo's unrelated workflows can share a name."""
-    run = suite(c).get("workflowRun") or {}
+    return suite_flow(suite(c))
+
+
+def suite_flow(s):
+    """The same for a check suite (workflow)."""
+    run = s.get("workflowRun") or {}
     return FLAKE[0] if (run.get("file") or {}).get("path") in FLAKE else (run.get("workflow") or {}).get("id")
 
 

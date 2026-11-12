@@ -117,8 +117,24 @@ class Pass(Context, Jobs, Actions):
         # would get the same answer.
         if self.ci != "green" and (dead := dead_runs(self.pr, self.repo)):
             asked = self.st.get("rerun") if (self.st.get("rerun") or {}).get("head") == self.head else {"head": self.head, "runs": []}
+            asked.setdefault("pending", {})  # run -> its attempt number when we last meant to ask
             for run in [r for r in dead if r not in asked["runs"]]:
                 try:
+                    # An earlier ask may have been taken without our hearing
+                    # (or finished cancelled before this pass): a run whose
+                    # attempt moved on was asked already, not asked again.
+                    attempt = C.gh("api", f"repos/{self.repo}/actions/runs/{run}", "--jq", ".run_attempt")
+                    if str(run) in asked["pending"] and attempt != asked["pending"][str(run)]:
+                        if not C.DRY:
+                            asked["runs"].append(run)
+                            asked["pending"].pop(str(run))
+                        log(f"  {self.key}: run {run} on {self.head[:7]} was asked to run again already (attempt {attempt})")
+                        continue
+                    if not C.DRY:
+                        # Kept before the ask, so a pass that dies in it knows.
+                        asked["pending"][str(run)] = attempt
+                        self.st["rerun"] = asked
+                        save(self.key, self.st)
                     C.write("api", "-X", "POST", f"repos/{self.repo}/actions/runs/{run}/rerun")
                     said = "asked GitHub to run it again"
                 except C.Unavailable as e:
@@ -128,6 +144,7 @@ class Pass(Context, Jobs, Actions):
                     said = f"GitHub refused to run it again ({C.said(e)})"
                 if not C.DRY:
                     asked["runs"].append(run)
+                    asked["pending"].pop(str(run), None)
                     log(f"  {self.key}: run {run} has no live job on {self.head[:7]}; {said}")
             if not C.DRY:
                 self.st["rerun"] = asked
