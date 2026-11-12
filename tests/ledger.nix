@@ -20,7 +20,7 @@ let
     case "$*" in
       "auth token") echo gho_stand_in ;;
       "api -i -X POST graphql --input -")
-        ${pkgs.jq}/bin/jq -e '.variables.owner == "sam" and (.query | contains("repositoryOwner"))' >/dev/null
+        ${pkgs.jq}/bin/jq -e '.variables.owner == "sam" and (.query | contains("repositoryOwner"))' >/dev/null || exit 1
         printf 'HTTP/2.0 200 OK\r\n\r\n%s' '{"data":{"repositoryOwner":{"repositories":{"nodes":[{"nameWithOwner":"sam/r"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;
       *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
     esac

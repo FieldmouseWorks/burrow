@@ -110,11 +110,15 @@ pub fn ran(wake: &Path, key: &str, now: u64) -> Result<(), String> {
 fn keyed(wake: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Result<(), String> {
     // Hold both protocols across upgrades and rollbacks: old Rust writers
     // use wake.lock; surviving shell units use wake.json.lock.
+    // For some names (`wake`, `.wake`) the two paths are one file, which
+    // is locked once: a second lock on it would wait on this call itself.
+    let mut locks = vec![wake.with_extension("lock")];
+    let shell = std::path::PathBuf::from(format!("{}.lock", wake.display()));
+    if !locks.contains(&shell) {
+        locks.push(shell);
+    }
     let mut held = Vec::new();
-    for lock in [
-        wake.with_extension("lock"),
-        std::path::PathBuf::from(format!("{}.lock", wake.display())),
-    ] {
+    for lock in locks {
         held.push(
             fs::OpenOptions::new()
                 .create(true)
@@ -465,6 +469,26 @@ mod tests {
                 assert_eq!(booked["sam/old"], 1500);
                 assert_eq!(booked[key], 2000);
             }
+        }
+    }
+
+    #[test]
+    fn bookings_finish_for_names_whose_two_lock_paths_are_one() {
+        for name in ["wake", ".wake", "wake.lock.json", "wake.tar.gz"] {
+            let dir = tempfile::tempdir().unwrap();
+            let wake = dir.path().join(name);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = wake.clone();
+            std::thread::spawn(move || {
+                book(&path, "sam/r", 2000).unwrap();
+                ran(&path, "sam/r", 2000).unwrap();
+                tx.send(()).unwrap();
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+                "{name} hung on its own lock"
+            );
+            assert_eq!(fs::read_to_string(&wake).unwrap(), "{}");
         }
     }
 
