@@ -752,7 +752,11 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
         "PROJ_ENDED",
         "proj _ended is for the end of a job turn, run by proj-ended@ID",
     )?;
-    finish(cfg, &id)
+    // The unit has ended and its slot is free, however it ended (a stop or
+    // an OOM kill included): news for the stream's subscribers.
+    let done = finish(cfg, &id);
+    crate::snapshot::stream::notify(cfg);
+    done
 }
 
 pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {

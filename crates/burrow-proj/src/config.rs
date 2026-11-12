@@ -59,6 +59,9 @@ pub struct Config {
     pub stall_after_minutes: u64,
     /// How long an await waits on a PR or issue that doesn't change.
     pub await_hours: u64,
+    /// The directory of the snapshot change stream's subscriber sockets.
+    #[serde(default)]
+    pub stream: Option<PathBuf>,
     #[serde(default = "ask_timeout")]
     pub ask_timeout: u64,
     #[serde(default)]
