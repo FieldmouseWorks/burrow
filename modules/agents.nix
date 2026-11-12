@@ -141,6 +141,13 @@ in
   options.burrow.agents = {
     enable = lib.mkEnableOption "agent sandboxes, a microVM per task (`agent`)";
 
+    package = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      default = agent;
+      description = "The configured `agent` wrapper, for modules that stop and start sandboxes.";
+    };
+
     dataDataset = lib.mkOption {
       type = lib.types.str;
       default = "rpool/safe/data";
