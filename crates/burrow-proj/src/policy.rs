@@ -129,6 +129,10 @@ pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
         }
         first |= prior.first;
     }
+    let retry = crate::retry::Checkpoint::load(job, &turn).ok().flatten();
+    if let Some(checkpoint) = &retry {
+        first |= checkpoint.first;
+    }
     let record = Park {
         state: state.into(),
         turn: turn.clone(),
@@ -147,6 +151,7 @@ pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
     let order = order
         .or_else(|| read(&path(job, "order")))
         .or_else(|| read(&job.turn(&turn, "queue-order")))
+        .or_else(|| retry.map(|checkpoint| checkpoint.queue().0.to_owned()))
         .unwrap_or_else(|| {
             format!(
                 "{}-{}-{}",
@@ -355,6 +360,9 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
             agent_command(cfg, "start", &agent)?;
         }
         let result = if rec.state == "queued" {
+            if job.retry_pending(&rec.turn) {
+                crate::retry::Identity::restore(&job, &rec.turn)?;
+            }
             crate::turn::launch(cfg, &job, rec.first)
                 .then_some(())
                 .ok_or_else(|| format!("could not restore queued {id}"))

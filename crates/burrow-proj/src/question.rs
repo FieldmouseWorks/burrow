@@ -64,9 +64,9 @@ fn apply_receipt(path: &Path, job_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     if r.answered {
-        swap(
-            &job_dir.join("question-answered-through"),
-            &r.through.to_string(),
+        crate::state_reads::write(
+            job_dir.join("question-answered-through"),
+            r.through.to_string(),
         )
         .map_err(|e| e.to_string())?;
     }
@@ -76,7 +76,7 @@ fn apply_receipt(path: &Path, job_dir: &Path) -> Result<(), String> {
             .map(|name| path.parent().unwrap().join(name))
             .chain(std::iter::once(job_dir.join("open-question")))
         {
-            match fs::remove_file(path) {
+            match crate::state_reads::remove(path) {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e.to_string()),
@@ -139,7 +139,7 @@ pub(crate) fn recover(job: &Job) -> Result<(), String> {
                 && !job.turn(&n.to_string(), "stopped").exists()
                 && read_state(&job.turn(&n.to_string(), "outcome"))?.is_none()
             {
-                swap(&job.turn(&n.to_string(), "outcome"), "failed\n")
+                crate::state_reads::write(job.turn(&n.to_string(), "outcome"), "failed\n")
                     .map_err(|e| e.to_string())?;
             }
         }
@@ -256,7 +256,7 @@ impl Resume {
 
     fn write(&self, value: Option<&str>) -> Result<(), String> {
         let result = if let Some(value) = value {
-            swap(&self.path, value)
+            crate::state_reads::write(&self.path, value)
         } else {
             match fs::remove_file(&self.path) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -444,16 +444,17 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             if let Some(question) = crate::ask::load(job) {
                 body.push_str(&question.notice());
             }
-            swap(
+            crate::state_reads::write(
                 &path,
-                &format!(
+                format!(
                     "Job {} needs your answer. Reply with proj reply {}.\n\n{}",
                     job.id, job.id, body
                 ),
             )
             .map_err(|e| e.to_string())?;
         }
-        swap(&job.path("open-question"), &format!("{source}\n")).map_err(|e| e.to_string())?;
+        crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
+            .map_err(|e| e.to_string())?;
     }
     let mut retry = false;
     let mut errors = Vec::new();
@@ -472,7 +473,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
         if (finished || active.as_deref() != Some(turn))
-            && let Err(e) = swap(&closing, "close\n")
+            && let Err(e) = crate::state_reads::write(&closing, "close\n")
         {
             errors.push(e.to_string());
             continue;
@@ -508,7 +509,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 .stdout(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.code() == Some(1))
-            && let Err(e) = swap(&closed, "closed\n")
+            && let Err(e) = crate::state_reads::write(&closed, "closed\n")
         {
             errors.push(e.to_string());
         }

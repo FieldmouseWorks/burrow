@@ -124,6 +124,10 @@ fn child() {
     let jobs = env::var(JOBS_ENV).unwrap();
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let mut cfg = config(Path::new(&jobs), max_jobs);
+    if what == "codex-pool-release" {
+        pools::release_codex_pool();
+        return;
+    }
     let mut held = None;
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
@@ -140,6 +144,7 @@ fn child() {
                 r#"#!/bin/sh
 case $1 in
   _handover_format) echo 1 ;;
+  _retry_format) echo 3 ;;
   _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
 esac
 "#
@@ -801,8 +806,7 @@ fn an_unstick_turn_says_so_under_its_jobs_lock_too() {
 }
 
 // A turn handed over to the deployed proj stops saying it may be withdrawn
-// first, under its job's lock: what it's handed to may take its slot without
-// that lock (a proj from before took_slot, after a switch back to it).
+// first, under its job's lock, before the compatible successor can take a slot.
 #[test]
 fn a_turn_handed_over_may_be_withdrawn_no_more() {
     let tmp = TempDir::new().unwrap();
@@ -862,7 +866,7 @@ fn out_of_usage_no_turn_takes_a_slot() {
 fn an_unstick_turn_waiting_on_its_slot_waits_out_a_refusal() {
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);
-    let census = File::create(jobs.join(".slots/.lock")).unwrap();
+    let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
     census.lock().unwrap();
     let held = File::create(jobs.join(".slots/unstick")).unwrap();
     held.try_lock().unwrap();
@@ -931,3 +935,6 @@ mod usage;
 mod admission;
 
 mod codex;
+
+mod pools;
+mod retained;

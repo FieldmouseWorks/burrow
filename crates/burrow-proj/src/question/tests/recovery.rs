@@ -1,3 +1,21 @@
+use std::os::unix::fs::PermissionsExt;
+
+struct BlockWrites(std::path::PathBuf, std::fs::Permissions);
+impl BlockWrites {
+    fn new(path: &std::path::Path) -> Self {
+        // Keep locking available so the failure is in receipt publication.
+        crate::state_reads::append(&path.join("lock")).unwrap();
+        let before = fs::metadata(path).unwrap().permissions();
+        burrow_test::permissions(path, before.mode() & !0o222);
+        Self(path.to_owned(), before)
+    }
+}
+impl Drop for BlockWrites {
+    fn drop(&mut self) {
+        burrow_test::permissions(&self.0, self.1.mode());
+    }
+}
+
 use super::*;
 
 #[test]
@@ -56,9 +74,10 @@ fn watcher_recovers_before_expiry_and_owner_wait_at_every_cleanup_prefix() {
                 if prefix > METADATA.len() + 1 {
                     fs::remove_file(f.job().path("open-question")).unwrap();
                 }
-                let blocked = f.job().path("question-answered-through.new");
                 if temporary_failure {
-                    fs::create_dir(&blocked).unwrap();
+                    // Fail publication without removing an already committed
+                    // answer boundary or depending on an implementation's temp name.
+                    let blocked = BlockWrites::new(&f.job().dir);
                     crate::watch::look(&f.cfg, "").unwrap();
                     assert_eq!(f.job().turns().as_deref(), Some("2"));
                     assert!(!f.job().path("prompt.3").exists());
@@ -68,7 +87,7 @@ fn watcher_recovers_before_expiry_and_owner_wait_at_every_cleanup_prefix() {
                         wake.contains("\"\""),
                         "recovery failure books a retry: {wake}"
                     );
-                    fs::remove_dir(blocked).unwrap();
+                    drop(blocked);
                 }
                 crate::watch::look(&f.cfg, "").unwrap();
                 assert_eq!(f.job().turns().as_deref(), Some("2"));

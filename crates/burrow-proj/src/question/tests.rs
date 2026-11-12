@@ -168,9 +168,9 @@ fn recovery_keeps_origin_across_automated_updates_and_unrelated_closes() {
         if legacy {
             fs::write(f.job().path("open-question"), "ask").unwrap();
         } else {
-            fs::create_dir(f.job().turn("2", "question.new")).unwrap();
+            fs::create_dir(f.job().turn("2", "question")).unwrap();
             assert!(notify(&f.cfg, &f.job()).is_err());
-            fs::remove_dir(f.job().turn("2", "question.new")).unwrap();
+            fs::remove_dir(f.job().turn("2", "question")).unwrap();
         }
         Resume::prepare(&f.job(), false).unwrap().commit().unwrap();
         f.ending(3, "ask");
@@ -263,14 +263,14 @@ fn failed_prompt_writes_preserve_questions_for_human_and_automated_starts() {
         f.ending(1, "ask");
         notify(&f.cfg, &f.job()).unwrap();
         let prompt = f.job().path("prompt.2");
-        // A pre-existing orphan whose write fails before the new start.
-        // The cleanup also covers partial/truncated regular-file writes.
-        std::os::unix::fs::symlink(f.dir.path().join("missing/prompt"), &prompt).unwrap();
+        // An invalid destination makes atomic publication fail before start.
+        // It stays quarantinable data, never a readable prompt or accepted reply.
+        fs::create_dir(&prompt).unwrap();
         let question = Resume::prepare(&f.job(), human).unwrap();
         let result = crate::turn::write_prompt(&prompt, "partial prompt");
         assert!(result.is_err());
         drop(question);
-        assert!(fs::symlink_metadata(&prompt).is_err());
+        assert!(crate::state_reads::open(&prompt).is_err());
         assert_eq!(f.job().turns().as_deref(), Some("1"));
         assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("1"));
         assert!(!f.job().path("question-answered-through").exists());
@@ -420,10 +420,10 @@ fn failed_answer_cleanup_is_recovered_from_accepted_receipt() {
     assert!(notify(&f.cfg, &f.job()).is_err());
     fs::remove_file(f.job().path("question-answered-through")).unwrap();
     let pending = Resume::prepare(&f.job(), true).unwrap();
-    fs::create_dir(f.job().path("question-answered-through.new")).unwrap();
+    fs::create_dir(f.job().path("question-answered-through")).unwrap();
     assert!(pending.commit().is_err());
     assert!(f.job().path("open-question").exists());
-    fs::remove_dir(f.job().path("question-answered-through.new")).unwrap();
+    fs::remove_dir(f.job().path("question-answered-through")).unwrap();
     f.job().set_turns(2).unwrap();
     notify(&f.cfg, &f.job()).unwrap();
     assert!(f.job().turn("1", "question-closed").exists());

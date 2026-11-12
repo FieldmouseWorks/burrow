@@ -236,6 +236,9 @@ Each has an entry below, and each can be imported on its own.
   Claude, so its author never grades its own head.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
+  Retained retries follow the deployed scheduler too;
+  [the deployment protocol](docs/proj-deploy.md) keeps their turn and legacy
+  usage records intact.
 
   Saved engine setups live beside the roles file in `roles.d/NAME`:
   `proj engines save NAME`, `proj engines use NAME` and `use back` check and

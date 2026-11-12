@@ -1,6 +1,6 @@
 [package]
 name = "burrow-process"
-description = "Bounded subprocess transport and confined process-state reads"
+description = "Bounded subprocess transport and confined process state"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,8 @@ publish.workspace = true
 
 [dependencies]
 rustix = { version = "1.1.6", features = ["fs", "process"] }
-
-[dev-dependencies]
 tempfile.workspace = true
+
 
 [lints]
 workspace = true

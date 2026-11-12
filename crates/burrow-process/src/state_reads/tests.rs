@@ -56,3 +56,30 @@ fn pinned_regular_files_survive_replacement_and_first_observations_are_immutable
     );
     assert_eq!(dir.text("started").unwrap(), "100");
 }
+
+#[test]
+fn replacement_is_confined_after_directory_rename_and_staging_link_attacks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("job")).unwrap();
+    fs::create_dir(root.join("outside")).unwrap();
+    fs::write(root.join("outside/value"), "secret").unwrap();
+    let job = Dir::open(&root.join("job")).unwrap();
+    symlink(root.join("outside/value"), root.join("job/value.new")).unwrap();
+    fs::rename(root.join("job"), root.join("retained")).unwrap();
+    symlink(root.join("outside"), root.join("job")).unwrap();
+    for _ in 0..20 {
+        job.replace(Path::new("value"), b"confined").unwrap();
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("outside/value")).unwrap(),
+        "secret"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("retained/value")).unwrap(),
+        "confined"
+    );
+    assert!(replace(&root.join("job/value"), b"escape").is_err());
+    assert!(append(&root.join("job/value")).is_err());
+    assert!(directory(&root.join("job/new")).is_err());
+}

@@ -48,7 +48,7 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
     cfg.jobs = d.path().to_owned();
     cfg.codex_slots = 1;
     fs::create_dir_all(cfg.jobs.join(".slots")).unwrap();
-    let census = File::create(cfg.jobs.join(".slots/.lock")).unwrap();
+    let census = File::create(cfg.jobs.join(".slots/.admission-lock")).unwrap();
     census.lock().unwrap();
     let job = Job::new(&cfg, "code");
     fs::create_dir_all(&job.dir).unwrap();
