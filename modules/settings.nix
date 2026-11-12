@@ -9,6 +9,7 @@ let
   settings = {
     overlay = "${stateDir}/settings/overlay.json";
     inherit (cfg) allowed;
+    legacy = "${config.users.users.${user}.home}/.config/proj";
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);

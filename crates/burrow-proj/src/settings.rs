@@ -38,16 +38,12 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         overrides,
     ));
     readings.push(Reading::live("settings.pipelineUntil", file.clone(), until));
-    let engines = cfg
+    let (engines, owner) = cfg
         .settings
         .as_ref()
-        .map(|s| s.engines())
+        .map(|s| s.engine_snapshot())
         .transpose()?
-        .unwrap_or_default();
-    let owner = cfg.settings.as_ref().map_or_else(
-        || cfg.jobs.join(".settings-unconfigured"),
-        |s| s.engines_path(),
-    );
+        .unwrap_or_else(|| (Default::default(), cfg.jobs.join(".settings-unconfigured")));
     let set = !engines.is_empty();
     let tuning =
         |t: &burrow_settings::engines::Tuning| json!({"model": t.model, "effort": t.effort});

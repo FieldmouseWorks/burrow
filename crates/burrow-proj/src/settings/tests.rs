@@ -40,6 +40,37 @@ fn show(cfg: &Config) -> Value {
 }
 
 #[test]
+fn legacy_readings_name_their_source_without_creating_settings() {
+    let (d, mut cfg) = crate::usage::tests::rig();
+    let legacy = d.path().join("legacy");
+    fs::create_dir_all(legacy.join("roles.d")).unwrap();
+    fs::write(legacy.join("roles"), "work codex\n").unwrap();
+    fs::write(legacy.join("models"), "work codex small low\n").unwrap();
+    fs::write(legacy.join("roles.d/kept"), "work claude\n").unwrap();
+    cfg.settings = Some(burrow_settings::Config {
+        overlay: d.path().join("no-writes/overlay.json"),
+        legacy: Some(legacy.clone()),
+        ..Default::default()
+    });
+    set(&mut cfg, tracked());
+    let doc = show(&cfg);
+    for name in [
+        "proj.roles",
+        "proj.models",
+        "proj.offeredModels",
+        "proj.engineSetups",
+    ] {
+        assert_eq!(doc["options"][name]["file"], json!(legacy));
+    }
+    assert_eq!(
+        doc["options"]["proj.roles"]["value"],
+        json!({"work":"codex"})
+    );
+    assert!(!d.path().join("no-writes").exists());
+    cfg.check_config().unwrap();
+}
+
+#[test]
 fn every_option_shown_comes_from_the_schema() {
     let (d, mut cfg) = crate::usage::tests::rig();
     let overlay = d.path().join("config/overlay.json");

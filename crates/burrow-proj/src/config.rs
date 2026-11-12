@@ -283,10 +283,6 @@ impl Config {
         let me = std::env::var_os("PROJ_SELF").ok_or("PROJ_SELF isn't set")?;
         let me =
             std::fs::canonicalize(&me).map_err(|e| format!("{}: {e}", me.to_string_lossy()))?;
-        // The old roles and models files move into the overlay on first sight.
-        if let Some(settings) = &cfg.settings {
-            settings.migrate()?;
-        }
         Ok(Config {
             path: path.into(),
             me,
@@ -499,6 +495,54 @@ pub(crate) mod tests {
         assert!(
             cfg.kick.is_empty(),
             "tests must opt into their own event receiver"
+        );
+    }
+
+    #[test]
+    fn loading_read_only_and_job_local_commands_never_opens_host_settings() {
+        let d = tempfile::tempdir().unwrap();
+        let mut value = example();
+        // A plain file as the parent makes even stat fail with ENOTDIR.
+        // Loading the machine config must not inspect this host state at all.
+        let blocked = d.path().join("host-settings");
+        std::fs::write(&blocked, "not accessible to this job").unwrap();
+        value["settings"]["overlay"] = json!(blocked.join("overlay.json"));
+        value["settings"]["legacy"] = json!(blocked.join("legacy"));
+        value["jobs"] = json!(d.path().join("jobs"));
+        let path = d.path().join("proj.json");
+        std::fs::write(&path, value.to_string()).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        // Env is scoped to a child test process so other tests cannot race it.
+        if std::env::var_os("BURROW_TEST_READ_ONLY_LOAD").is_some() {
+            let cfg = Config::load().unwrap();
+            crate::cmd::dispatch(&cfg, &["state".into(), "absent".into()]).unwrap();
+            std::fs::create_dir_all(cfg.jobs.join("local-test")).unwrap();
+            crate::cmd::dispatch(&cfg, &["done".into()]).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(cfg.jobs.join("local-test/end.next")).unwrap(),
+                "done\n"
+            );
+            let error = crate::cmd::dispatch(&cfg, &["await".into()]).unwrap_err();
+            assert!(error.say.unwrap().contains("usage: proj await"));
+            return;
+        }
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "config::tests::loading_read_only_and_job_local_commands_never_opens_host_settings",
+                "--nocapture",
+            ])
+            .env("BURROW_TEST_READ_ONLY_LOAD", "1")
+            .env("PROJ_CONFIG", path)
+            .env("PROJ_SELF", exe)
+            .env("PROJ_JOB", "local-test")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 

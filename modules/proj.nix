@@ -66,9 +66,7 @@ let
   # The flake's value of each option in burrow-settings' schema, for `proj
   # settings show`.
   settingsFile = "burrow/settings.json";
-  # Where the roles, models and roles.d files were kept: read once into the
-  # settings overlay, then renamed (burrow-settings' migrate).
-  settings = config.burrow.settings.effective // { legacy = "${config.users.users.${user}.home}/.config/proj"; };
+  settings = config.burrow.settings.effective;
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
     inherit (cfg.engines.door) repo label authors;
     state = "${stateDir}/proj-engines";

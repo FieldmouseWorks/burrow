@@ -29,8 +29,17 @@ machine, named beside it). What it covers today:
 | `autoland.reviewers.*` | `burrow.autoland.reviewers` in the flake |
 | `settings.allowed` | `burrow.settings` in the flake |
 | `settings.repositoryOverrides`, `settings.pipelineUntil` | the one runtime settings overlay |
-| `proj.roles`, `proj.models`, `proj.offeredModels`, `proj.engineSetups` | the one runtime settings overlay, written through the settings door and logged |
+| `proj.roles`, `proj.models`, `proj.offeredModels`, `proj.engineSetups` | `settings/engines.json`, written through the settings door and logged |
 | `proj.usageHold` | proj's usage record, `.usage.json` in its jobs dir |
+
+Before the engine store exists, engine readers parse the legacy
+`~/.config/proj/{roles,models,roles.d,roles.previous}` state without writing.
+The first writer imports it under both the settings lock and the legacy
+engine lock. All installed writers share that migration configuration.
+The old files and admission overlay stay compatible with a rolled-back
+generation. An unfinished legacy switch leaves requests open for recovery
+with the previous generation. Fresh, cached and adopted completion receipts
+are synced before the engines door acknowledges them.
 
 The JSON Schema marks each option with `x-owner` and `x-change`, gives each
 value's type and default, and requires every option once and no other: a

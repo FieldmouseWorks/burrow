@@ -219,6 +219,7 @@ impl Engines {
 
     /// The `engines` verbs: `save NAME [--replace]`, `use NAME|back`, `list`.
     pub fn apply(&mut self, args: &[&str], now: i64) -> Result<String, String> {
+        self.validate()?;
         let before = self.active();
         match args {
             ["list"] => {}
@@ -303,9 +304,25 @@ impl Engines {
 
     /// The live state and every saved set, checked as the door checks.
     pub fn validate(&self) -> Result<(), String> {
+        for (on, models) in &self.offered {
+            engine(on)?;
+            if models.iter().any(|m| !model_ok(m)) {
+                return Err("invalid offered model id".into());
+            }
+        }
         self.check(&self.current())?;
         for (name, set) in &self.saved {
+            if !valid_name(name) || name == "back" {
+                return Err("invalid saved setup name".into());
+            }
             self.check(set).map_err(|e| format!("setup {name}: {e}"))?;
+        }
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|name| !self.saved.contains_key(name))
+        {
+            return Err("previous setup is missing".into());
         }
         Ok(())
     }

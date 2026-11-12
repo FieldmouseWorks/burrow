@@ -3,6 +3,9 @@
 //! to change it. Other settings can join this document without another store.
 pub mod door;
 pub mod engines;
+mod legacy;
+#[cfg(test)]
+mod review_tests;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -48,6 +51,43 @@ struct Overlay {
     engines: engines::Engines,
 }
 
+/// Only a semantic refusal is safe to acknowledge without a completion receipt.
+/// Storage and migration failures leave the operation's outcome uncertain.
+#[derive(Debug)]
+pub enum RequestError {
+    Refused(String),
+    Retry(String),
+}
+
+impl From<String> for RequestError {
+    fn from(error: String) -> Self {
+        Self::Retry(error)
+    }
+}
+impl From<&str> for RequestError {
+    fn from(error: &str) -> Self {
+        Self::Retry(error.into())
+    }
+}
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(e) | Self::Retry(e) => f.write_str(e),
+        }
+    }
+}
+
+/// A visible result must also be durable before a caller acknowledges it.
+fn sync_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(test)]
+    review_tests::flush_failure()?;
+    File::open(path)
+        .and_then(|f| f.sync_all())
+        .and_then(|()| File::open(path.parent().unwrap_or(std::path::Path::new("."))))
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -81,26 +121,31 @@ impl Config {
         ))
     }
 
-    fn read(&self) -> Result<Overlay, String> {
+    fn read_overlay(&self) -> Result<Overlay, String> {
         match fs::read(&self.overlay) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Overlay::default()),
             Err(e) => Err(e.to_string()),
         }
-        .and_then(|mut overlay: Overlay| {
-            overlay.engines = match fs::read(self.engines_path()) {
-                Ok(bytes) => serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("{}: {e}", self.engines_path().display()))?,
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::NotFound
-                        && self.engines_path().symlink_metadata().is_err() =>
-                {
-                    Default::default()
-                }
-                Err(e) => return Err(format!("{}: {e}", self.engines_path().display())),
-            };
-            Ok(overlay)
-        })
+    }
+
+    fn read_engines(&self) -> Result<Option<engines::Engines>, String> {
+        let path = self.engines_path();
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !Self::present(&path)? => {
+                Ok(None)
+            }
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    fn read(&self) -> Result<Overlay, String> {
+        let mut overlay = self.read_overlay()?;
+        overlay.engines = self.read_engines()?.unwrap_or_default();
+        Ok(overlay)
     }
 
     /// The file the engine settings live in.
@@ -111,22 +156,21 @@ impl Config {
     /// Flush the engine store and its directory, for a result that must
     /// outlast a crash before anyone is told of it.
     pub fn sync_engines(&self) -> Result<(), String> {
-        let path = self.engines_path();
-        File::open(&path)
-            .and_then(|f| f.sync_all())
-            .and_then(|()| File::open(path.parent().unwrap_or(std::path::Path::new("."))))
-            .and_then(|d| d.sync_all())
-            .map_err(|e| format!("{}: {e}", path.display()))
+        sync_file(&self.engines_path())
     }
 
     /// The stored answer to an engines request's receipt, if it completed.
     pub fn receipt(&self, receipt: &std::path::Path) -> Result<Option<String>, String> {
-        Ok(self
-            .read()?
-            .engines
+        let engines = self.read()?.engines;
+        engines.validate()?;
+        let body = engines
             .receipts
             .get(receipt.to_string_lossy().as_ref())
-            .cloned())
+            .cloned();
+        if body.is_some() {
+            self.sync_engines()?;
+        }
+        Ok(body)
     }
 
     /// Read again on every admission, including a long-lived reader's next job.
@@ -217,22 +261,59 @@ impl Config {
         self.change(args, actor, Some(receipt.to_string_lossy().as_ref()))
     }
 
+    /// Engine requests distinguish a refused command from an uncertain write.
+    /// Legacy receipts are adopted under the same lock as legacy migration.
+    pub fn engine_request(
+        &self,
+        receipt: &std::path::Path,
+        args: &[String],
+        actor: &str,
+    ) -> Result<String, RequestError> {
+        self.change_checked(args, actor, Some(receipt.to_string_lossy().as_ref()))
+    }
+
     fn change(
         &self,
         args: &[String],
         actor: &str,
         receipt: Option<&str>,
     ) -> Result<String, String> {
+        self.change_checked(args, actor, receipt)
+            .map_err(|e| e.to_string())
+    }
+
+    fn change_checked(
+        &self,
+        args: &[String],
+        actor: &str,
+        receipt: Option<&str>,
+    ) -> Result<String, RequestError> {
         if args == ["show"] {
-            return self.show();
+            return self.show().map_err(Into::into);
         }
         if matches!(args, [e] | [e, _] if e == "engines") && args.get(1).is_none_or(|a| a == "list")
         {
-            return Ok(self.read()?.engines.status(None));
+            return Ok(self.engines()?.status(None));
         }
         let _lock = self.lock()?;
+        let _legacy_lock = self.legacy_lock()?;
+        let engine_verb = matches!(
+            args.first().map(String::as_str),
+            Some("role" | "unrole" | "offer" | "model" | "unmodel" | "engines")
+        );
+        if engine_verb && let Some(receipt) = receipt {
+            if let Some(body) = self.receipt(std::path::Path::new(receipt))? {
+                return Ok(body);
+            }
+            if let Some(body) = legacy::result(std::path::Path::new(receipt))? {
+                return Ok(body);
+            }
+        }
         self.migrate_locked()?;
         let mut state = self.read()?;
+        if engine_verb {
+            state.engines.validate()?;
+        }
         let mut engines_answer = None;
         if let Some(body) = receipt.and_then(|r| {
             state
@@ -257,16 +338,12 @@ impl Config {
             ["offer", on, models @ ..] if !models.is_empty() => state.engines.offer(on, models)?,
             ["model", rest @ ..] => state.engines.set_model(rest)?,
             ["unmodel", role, on] => state.engines.clear_model(role, on)?,
-            ["engines", rest @ ..] => engines_answer = Some(state.engines.apply(rest, now())?),
+            ["engines", rest @ ..] => engines_answer = Some(state.engines.apply(rest, now()).map_err(RequestError::Refused)?),
             _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back | role ROLE ENGINE [over PCT ENGINE] | unrole ROLE | offer ENGINE MODEL... | model ROLE ENGINE MODEL|- [EFFORT] | unmodel ROLE ENGINE | engines [list | save NAME [--replace] | use NAME|back]".into()),
         }
         let answer = engines_answer.clone().unwrap_or_else(|| {
             "Settings changed; use settings show for the current policy.".to_owned()
         });
-        let engine_verb = matches!(
-            args.first().map(String::as_str),
-            Some("role" | "unrole" | "offer" | "model" | "unmodel" | "engines")
-        );
         if let Some(receipt) = receipt {
             let book = if engine_verb {
                 &mut state.engines.receipts
@@ -276,10 +353,13 @@ impl Config {
             book.insert(receipt.into(), answer.clone());
         }
         self.persist(&state, actor, serde_json::json!(args), engine_verb)?;
+        if engine_verb && receipt.is_some() {
+            self.sync_engines()?;
+        }
         if receipt.is_some() || engines_answer.is_some() {
             Ok(answer)
         } else {
-            self.show()
+            self.show().map_err(Into::into)
         }
     }
 
@@ -327,6 +407,8 @@ impl Config {
         }
         file.sync_all().map_err(|e| e.to_string())?;
         fs::rename(pending, &target).map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        review_tests::publication_failure()?;
         File::open(parent)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())
@@ -334,11 +416,26 @@ impl Config {
 
     /// The engines, models and saved sets in force, read fresh.
     pub fn engines(&self) -> Result<engines::Engines, String> {
-        let engines = self.read()?.engines;
+        self.engine_snapshot().map(|(engines, _)| engines)
+    }
+
+    /// Values and their source from one read, including a read-only legacy import.
+    pub fn engine_snapshot(&self) -> Result<(engines::Engines, PathBuf), String> {
+        self.read_overlay()?;
+        let (engines, source) = match self.read_engines()? {
+            Some(engines) => (engines, self.engines_path()),
+            None => match self.legacy_engines()? {
+                Some(engines) => (
+                    engines,
+                    self.legacy.clone().expect("legacy values have a directory"),
+                ),
+                None => (Default::default(), self.engines_path()),
+            },
+        };
         engines
             .validate()
-            .map_err(|e| format!("{}: {e}", self.engines_path().display()))?;
-        Ok(engines)
+            .map_err(|e| format!("{}: {e}", source.display()))?;
+        Ok((engines, source))
     }
 
     /// Replace the roles and models with those the old file formats say
@@ -346,6 +443,7 @@ impl Config {
     /// lines), logged. Models they name become offered. Saved sets stay.
     pub fn import(&self, roles: &str, models: &str, actor: &str) -> Result<(), String> {
         let _lock = self.lock()?;
+        let _legacy_lock = self.legacy_lock()?;
         self.migrate_locked()?;
         let new = engines::import(roles, models, &[], None)?;
         let mut state = self.read()?;
@@ -367,6 +465,7 @@ impl Config {
             return Ok(false);
         }
         let _lock = self.lock()?;
+        let _legacy_lock = self.legacy_lock()?;
         self.migrate_locked()
     }
 
@@ -386,100 +485,22 @@ impl Config {
         Ok(lock)
     }
 
-    /// Whether PATH is there: a link to nowhere is, and so is one that can't
-    /// be looked at, which fails instead of passing for absent.
-    fn present(path: &std::path::Path) -> Result<bool, String> {
-        match path.symlink_metadata() {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
-    }
-
-    /// [`Config::migrate`], for a caller that holds the lock, so it runs
-    /// before any first write of the engine store and never beside one.
+    /// The writer lock and legacy lock are held until publication completes.
     fn migrate_locked(&self) -> Result<bool, String> {
-        let Some(dir) = &self.legacy else {
-            return Ok(false);
-        };
-        let names = ["roles", "models", "roles.d", "roles.previous"];
-        // Once engines.json exists the overlay owns these values. The old
-        // files are left where they are, so a rollback to the generation that
-        // reads them still works (with the values they had).
         if Self::present(&self.engines_path())? {
             return Ok(false);
         }
-        let mut any = false;
-        for n in names {
-            any |= Self::present(&dir.join(n))?;
-        }
-        if !any {
+        let Some(old) = self.legacy_engines()? else {
             return Ok(false);
-        }
-        // A switch the old door left half done can't be adopted here.
-        if Self::present(&dir.join("roles.operation"))? {
-            return Err(format!(
-                "{}: an unfinished engine switch; finish it with the previous proj, or remove the file",
-                dir.join("roles.operation").display()
-            ));
-        }
-        let text = |name: &str| match fs::read_to_string(dir.join(name)) {
-            Ok(t) => Ok(t),
-            // Absent means unset; a link to nowhere is a broken setting.
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound
-                    && dir.join(name).symlink_metadata().is_err() =>
-            {
-                Ok(String::new())
-            }
-            Err(e) => Err(format!("{}: {e}", dir.join(name).display())),
         };
-        let mut setups = Vec::new();
-        match fs::read_dir(dir.join("roles.d")) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry.map_err(|e| e.to_string())?;
-                    if entry.file_type().map_err(|e| e.to_string())?.is_file() {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        let body = fs::read_to_string(entry.path())
-                            .map_err(|e| format!("{}: {e}", entry.path().display()))?;
-                        setups.push((name, body));
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{}: {e}", dir.join("roles.d").display())),
-        }
-        let previous = text("roles.previous")?.trim().to_owned();
-        let old = engines::import(
-            &text("roles")?,
-            &text("models")?,
-            &setups,
-            (!previous.is_empty()).then_some(previous),
-        )
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
-        let mut state = self.read()?;
-        let mine = &mut state.engines;
-        for (k, v) in old.roles {
-            mine.roles.entry(k).or_insert(v);
-        }
-        for (k, v) in old.models {
-            mine.models.entry(k).or_insert(v);
-        }
-        for (on, models) in old.offered {
-            let refs: Vec<&str> = models.iter().map(String::as_str).collect();
-            mine.offer(&on, &refs)?;
-        }
-        for (k, v) in old.saved {
-            mine.saved.entry(k).or_insert(v);
-        }
-        if mine.previous.is_none() {
-            mine.previous = old.previous;
-        }
+        let state = Overlay {
+            engines: old,
+            ..self.read()?
+        };
         self.persist(
             &state,
             "migration",
-            serde_json::json!(["migrate", dir]),
+            serde_json::json!(["migrate", self.legacy]),
             true,
         )?;
         Ok(true)

@@ -24,10 +24,13 @@
   assert builtins.elem "switch-engines" inbox.config.burrow.proj.inbox.triage.skip;
   assert builtins.elem "custom" inbox.config.burrow.proj.inbox.triage.skip;
   assert inbox.config.burrow.proj.inbox.planning;
+  # The standalone writer, proj and both issue doors share this value.
+  assert inbox.config.burrow.settings.effective.legacy == "${inbox.config.users.users.${inbox.config.burrow.user}.home}/.config/proj";
   assert excludesMachinery inbox.config.burrow.proj.inbox.authors;
   assert !(excludesMachinery injected);
   assert builtins.elem "pull_request" inbox.config.burrow.events.handlers.proj-inbox.events;
   pkgs.runCommand "proj-config-check" { } ''
+    # These run in a Nix builder with no access to host settings locks.
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)

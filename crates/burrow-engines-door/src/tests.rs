@@ -166,6 +166,142 @@ fn cycle(gh: &mut Fake, id: &str) {
 }
 
 #[test]
+fn migration_and_storage_uncertainty_never_close_or_cache_a_refusal() {
+    for failure in [
+        "journal",
+        "pending-receipt",
+        "broken-receipt",
+        "publication",
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = config(d.path());
+        let legacy = d.path().join("legacy");
+        fs::create_dir_all(legacy.join("roles.d")).unwrap();
+        fs::write(legacy.join("roles"), "work codex\n").unwrap();
+        fs::write(legacy.join("roles.d/next"), "work claude\n").unwrap();
+        cfg.settings.legacy = Some(legacy.clone());
+        let state = cfg.state.join("sam--box");
+        fs::create_dir_all(&state).unwrap();
+        let hash: String = Sha256::digest(b"issue-one:initial")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let operation = state.join(format!("1-{hash}.operation"));
+        let blocked = match failure {
+            "journal" => legacy.join("roles.operation"),
+            "pending-receipt" | "broken-receipt" => operation.clone(),
+            _ => cfg.settings.engines_path().with_extension("pending"),
+        };
+        if failure == "publication" {
+            cfg.settings.migrate().unwrap();
+            fs::create_dir(&blocked).unwrap();
+        } else {
+            fs::write(
+                &blocked,
+                if failure == "pending-receipt" {
+                    r#"{"result":null}"#
+                } else {
+                    "unfinished"
+                },
+            )
+            .unwrap();
+        }
+        let mut gh = github("sam", "use next", None);
+        for _ in 0..2 {
+            assert!(pass(&mut gh, &cfg).is_err(), "{failure}");
+            assert!(gh.asked("PATCH").is_empty(), "{failure}");
+            assert!(!operation.with_extension("json").exists(), "{failure}");
+        }
+        if failure == "publication" {
+            fs::remove_dir(blocked).unwrap();
+        } else {
+            fs::remove_file(blocked).unwrap();
+        }
+        pass(&mut gh, &cfg).unwrap();
+        assert_eq!(engines(&cfg), "work claude\n");
+        assert_eq!(gh.asked("PATCH").len(), 1);
+    }
+}
+
+#[test]
+fn no_engine_status_reply_exposes_invalid_persisted_values() {
+    for body in ["list", "use absent", "invalid request"] {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = config(d.path());
+        fs::write(
+            cfg.settings.engines_path(),
+            r#"{"roles":{"work":"claude:chosen-model"}}"#,
+        )
+        .unwrap();
+        let mut gh = github("sam", body, None);
+        let _ = pass(&mut gh, &cfg);
+        for (_, _, payload, _) in gh.asked("POST") {
+            assert!(
+                !payload
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("chosen-model"),
+                "{body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_concurrently_finishing_legacy_switch_is_adopted_after_its_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = config(d.path());
+    let legacy = d.path().join("legacy");
+    fs::create_dir_all(legacy.join("roles.d")).unwrap();
+    fs::write(legacy.join("roles"), "work codex\n").unwrap();
+    fs::write(legacy.join("roles.operation"), "pending switch").unwrap();
+    cfg.settings.legacy = Some(legacy.clone());
+    let lock = File::create(legacy.join("roles.lock")).unwrap();
+    lock.lock().unwrap();
+    let (send, recv) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let cfg = &cfg;
+        scope.spawn(move || {
+            let mut gh = github("sam", "use back", None);
+            let result = pass(&mut gh, cfg).map_err(|e| e.to_string());
+            send.send((result, gh)).unwrap();
+        });
+        assert!(matches!(
+            recv.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        // The old generation finishes the already-resolved switch and receipt.
+        let state = cfg.state.join("sam--box");
+        fs::create_dir_all(&state).unwrap();
+        let hash: String = Sha256::digest(b"issue-one:initial")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        fs::write(legacy.join("roles"), "work claude\n").unwrap();
+        fs::write(
+            state.join(format!("1-{hash}.operation")),
+            json!({"result":"Already switched to first."}).to_string(),
+        )
+        .unwrap();
+        fs::remove_file(legacy.join("roles.operation")).unwrap();
+        lock.unlock().unwrap();
+        let (result, gh) = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        result.unwrap();
+        assert_eq!(gh.asked("PATCH").len(), 1);
+    });
+    assert_eq!(engines(&cfg), "work claude\n");
+    cfg.settings
+        .command(&["role".into(), "work".into(), "codex".into()], "test")
+        .unwrap();
+    let mut retry = github("sam", "use back", None);
+    pass(&mut retry, &cfg).unwrap();
+    assert_eq!(engines(&cfg), "work codex\n");
+}
+
+#[test]
 fn ambiguous_close_and_reopen_is_a_new_request_even_with_an_old_receipt() {
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());
