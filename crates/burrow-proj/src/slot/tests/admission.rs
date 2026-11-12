@@ -593,14 +593,40 @@ fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);
     let cfg = watch_config(&tmp, &jobs);
+    // systemd, noting what it was asked: one job's unit is up.
+    let asked = tmp.path().join("asked");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        format!(
+            "#!/bin/sh\necho \"$*\" >>'{}'\ncase \"$*\" in\n*list-units*) echo 'proj-running.service loaded active running proj job' ;;\n*is-active*proj-running.service) exit 0 ;;\n*is-active*) exit 3 ;;\n*ActiveState*proj-running.service) echo active ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+            asked.display()
+        ),
+    );
     awaiting(&cfg, "live", "sam/web");
+    let running = Job::new(&cfg, "running");
+    fs::create_dir_all(&running.dir).unwrap();
+    running.set_turns(1).unwrap();
+    fs::write(running.path("prompt.1"), "work").unwrap();
+    fs::write(running.turn("1", "slot"), "1").unwrap();
+    fs::write(running.turn("1", "deadline"), "4000000000").unwrap();
+    crate::policy::bind(
+        &running,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
     let settled = Job::new(&cfg, "settled");
     fs::create_dir_all(&settled.dir).unwrap();
     settled.set_turns(1).unwrap();
     fs::write(settled.path("prompt.1"), "work").unwrap();
-    // Nothing was ever published for either (no watchdog then).
+    // Nothing was ever published for any (no watchdog then).
     assert!(!jobs.join(".waits").exists());
-    crate::policy::reconcile(&cfg).unwrap();
+    crate::waits::rewatch_all(&cfg);
     assert!(jobs.join(".waits/live").exists());
+    assert!(jobs.join(".waits/running").exists());
     assert!(!jobs.join(".waits/settled").exists());
+    // The units that are up are asked once; a settled job's own never is.
+    let asked = fs::read_to_string(&asked).unwrap();
+    assert_eq!(asked.matches("list-units").count(), 1, "{asked}");
+    assert!(!asked.contains("proj-settled.service"), "{asked}");
 }

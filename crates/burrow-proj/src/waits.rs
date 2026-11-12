@@ -326,6 +326,10 @@ pub fn rewatch_all(cfg: &Config) {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
         .collect();
+    // Every job there is, so each is told live from its own files and one
+    // look at the units that are up: a turn's facts ask systemd about it,
+    // which across thousands of settled jobs is minutes.
+    let up = crate::systemd::up(cfg, "proj-*.service");
     ids.extend(
         fs::read_dir(&cfg.jobs)
             .into_iter()
@@ -333,7 +337,7 @@ pub fn rewatch_all(cfg: &Config) {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.') && live(cfg, n)),
+            .filter(|n| !n.starts_with('.') && live(cfg, n, up.as_ref())),
     );
     ids.sort();
     ids.dedup();
@@ -341,14 +345,25 @@ pub fn rewatch_all(cfg: &Config) {
 }
 
 /// A job with a turn queued or running, or outstanding awaits: work the
-/// watchdog must see whether or not it ever heard of the job.
-fn live(cfg: &Config, id: &str) -> bool {
-    Job::new(cfg, id).facts().is_some_and(|f| {
-        !f.stopped
-            && !f.owned
-            && (matches!(f.state.as_str(), "queued" | "running")
-                || (f.state == "done" && f.end.as_deref() == Some("await")))
-    })
+/// watchdog must see whether or not it ever heard of the job. Only a job
+/// whose unit is up (`up`, the units that are; asked of systemd itself when
+/// that couldn't be told), whose turn waits on a retry or which awaits
+/// something has its facts looked at.
+fn live(cfg: &Config, id: &str, up: Option<&std::collections::HashSet<String>>) -> bool {
+    let job = Job::new(cfg, id);
+    let unit = job.unit();
+    let maybe = up.map_or_else(
+        || crate::systemd::active(cfg, &unit),
+        |up| up.contains(&unit),
+    ) || crate::filled(&job.path("await"))
+        || job.turns().is_some_and(|n| job.retry_pending(&n));
+    maybe
+        && job.facts().is_some_and(|f| {
+            !f.stopped
+                && !f.owned
+                && (matches!(f.state.as_str(), "queued" | "running")
+                    || (f.state == "done" && f.end.as_deref() == Some("await")))
+        })
 }
 
 /// [`rewatch`] in the background, never waited for: the watchdog's lock, or
