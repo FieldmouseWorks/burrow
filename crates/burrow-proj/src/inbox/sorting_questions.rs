@@ -29,24 +29,18 @@ impl Pass<'_> {
             } else {
                 None
             };
-            if ask::host_path(&job, "question-needs-owner").exists() {
+            // Unknown holds retain capacity. Read them once, including before
+            // applying the owner-handoff exception.
+            let Ok(holds) = job.holds() else { return true };
+            if holds.iter().any(|h| h == "owner") {
                 return false;
             }
             // A job that has ended holds a slot only for its open question.
             // Its verdict's GitHub steps are the pass's own work, so one repo
             // whose steps keep failing can't hold every repo's planners.
-            let ended = job
-                .turns()
-                .is_some_and(|n| crate::filled(&job.turn(&n, "outcome")))
-                && !matches!(job.state().as_str(), "queued" | "running" | "parked");
-            !ended
-                || ask::load(&job).is_some()
-                || job
-                    .holds()
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|h| h == "ask" || h == "owner")
-                || !crate::job::awaits(&read(&job.path("await")).unwrap_or_default()).is_empty()
+            // state also recognizes terminal turns without an outcome (a
+            // killed unit or reboot), and keeps pending retries queued.
+            matches!(job.state().as_str(), "queued" | "running" | "parked") || !holds.is_empty()
         })
     }
 

@@ -979,5 +979,11 @@ fn an_unfinished_verdict_does_not_hold_other_repos_slots() {
         "{said}"
     );
     let snap = crate::snapshot::Snapshot::take(&b.cfg, 15).unwrap();
-    assert_eq!(snap.holds.triage.unwrap().waiting, [said]);
+    assert_eq!(
+        serde_json::to_value(snap).unwrap()["holds"]["triage"]["waiting"],
+        json!([said])
+    );
 }
+
+#[path = "sorting_slot_tests.rs"]
+mod slot_tests;

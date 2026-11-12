@@ -171,6 +171,15 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             }
         }
     }
+    for (name, path) in names(&state.join(".triage-waiting")) {
+        if name
+            .to_lowercase()
+            .rsplit_once('-')
+            .is_some_and(|(k, _)| k == want)
+        {
+            fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
+        }
+    }
     for (name, path) in names(&state.join(".retired")) {
         if name.eq_ignore_ascii_case(&want) {
             fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
@@ -642,6 +651,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     }
 
     fn run(&mut self, only: &str) -> Result<(), Fail> {
+        self.prune_planner_waits()?;
         let repos: Vec<(String, String)> = self
             .project
             .iter()
@@ -944,6 +954,7 @@ mod retirement;
 mod written;
 
 pub(crate) use drain::WAITING;
+mod planner_waits;
 mod sorting_questions;
 mod triage;
 mod write;
