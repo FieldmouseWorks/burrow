@@ -88,6 +88,7 @@ impl App {
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(home))
+        .route("/live", get(live))
         .route("/login", get(login_page))
         .route("/login/start", post(login_start))
         .route("/login/finish", post(login_finish))
@@ -193,6 +194,41 @@ fn signed_in(app: &App, token: Result<String, Error>) -> Response {
         )
             .into_response(),
         Err(e) => failed(e),
+    }
+}
+
+/// The live view: one `proj state --json`, rendered whole.
+async fn live(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    match app.session(&headers) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Redirect::to("/login").into_response(),
+        Err(e) => return failed(e),
+    }
+    let out = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("proj")
+            .args(["state", "--json"])
+            .output()
+    })
+    .await;
+    let snap = match out {
+        Ok(Ok(o)) if o.status.success() => {
+            serde_json::from_slice::<burrow_proj::snapshot::Snapshot>(&o.stdout)
+                .map_err(|e| e.to_string())
+        }
+        Ok(Ok(o)) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    match snap {
+        Ok(snap) => page(pages::live::live(&app.frame(), &snap, app.now())),
+        Err(e) => {
+            eprintln!("burrow-dashboard: proj state: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                "proj's state can't be read just now",
+            )
+                .into_response()
+        }
     }
 }
 
