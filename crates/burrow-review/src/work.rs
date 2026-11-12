@@ -268,8 +268,10 @@ fn remove_all(path: &Path) -> io::Result<()> {
 /// pipeline's own (`pipelineRepos`), then to the oldest PR's: by when it
 /// was opened, not when its head came, so a PR pushed again keeps its
 /// place. One look at a time in a session: a PR's next head waits for the
-/// look at its last one, and resumes it.
-pub fn work(s: Arc<Service>) {
+/// look at its last one, and resumes it. Looks the admission policy holds
+/// back wait here for it, until another generation is deployed: then this
+/// run ends, for that generation's program to take the queue (main.rs).
+pub fn work(s: Arc<Service>) -> Ended {
     forget(&s);
     let _watch = s.logins.watch();
     let (done_tx, done) = mpsc::channel::<String>();
@@ -324,6 +326,14 @@ pub fn work(s: Arc<Service>) {
                 name.clone(),
             ));
         }
+        // Another generation is deployed: the looks under way finish (the
+        // policy they're held to is the deployed one's), none starts, and
+        // the deployed program takes the queue as it stands.
+        let moved = s.cfg.moved();
+        let handed = moved && (parked || !waiting.is_empty());
+        if moved {
+            waiting.clear();
+        }
         let mut sessions: HashSet<String> = busy.iter().map(|n| queue::session_of(n)).collect();
         for (r, mut names) in waiting {
             let parallel = s.cfg.reviewer(&r).map_or(0, |(_, rv)| rv.parallel);
@@ -346,6 +356,13 @@ pub fn work(s: Arc<Service>) {
             }
         }
         if busy.is_empty() {
+            if moved {
+                if handed {
+                    s.say("another generation is deployed: its program takes the queue");
+                }
+                forget(&s);
+                return Ended::Moved;
+            }
             if parked {
                 thread::sleep(AGAIN_EVERY);
                 continue;
@@ -358,4 +375,15 @@ pub fn work(s: Arc<Service>) {
         }
     }
     forget(&s);
+    Ended::Done
+}
+
+/// How a run of the queue ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// Nothing left that it can take.
+    Done,
+    /// Another generation is deployed, and nothing is under way: the
+    /// deployed program, with its own config, takes the queue from here.
+    Moved,
 }

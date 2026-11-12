@@ -321,7 +321,7 @@ pub fn look(
     let mut cmd = Command::new(&s.cfg.sandbox);
     cmd.args(args).env_clear().envs([
         ("HOME", s.home.as_os_str()),
-        ("PATH", s.path.as_os_str()),
+        ("PATH", s.cfg.path.as_ref()),
         ("LANG", "C.UTF-8".as_ref()),
         ("SHELL", "/bin/bash".as_ref()),
         (

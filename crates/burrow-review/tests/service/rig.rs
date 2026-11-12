@@ -86,16 +86,12 @@ impl Rig {
         let kicks = Arc::new(Mutex::new(Vec::new()));
         let port = kick_port(kicks.clone());
         let p = |x: &str| t.join(x).to_string_lossy().into_owned();
-        fs::write(
-            t.join("settings.json"),
-            json!({"overlay":p("overlay.json"),"allowed":["sam/r","sam/q","sam/pipe","sam/lead"],"pipelineRepos":["sam/pipe"]}).to_string(),
-        )
-        .unwrap();
         let cfg = json!({
-            "settings": p("settings.json"),
+            "settings": {"overlay":p("overlay.json"),"allowed":["sam/r","sam/q","sam/pipe","sam/lead"],"pipelineRepos":["sam/pipe"]},
             "queue": p("queue"), "done": p("done"), "sessions": p("sessions"), "snapshots": p("trees"),
             "reviewers": {"codex": {"enable": true, "effort": "high", "parallel": 2, "off": []}},
             "timeoutMinutes": 30, "agents": p("agents"),
+            "path": std::env::var("PATH").unwrap(),
             "sandbox": fakes().join("bwrap"),
             "box": {"store": p("store-paths"), "caBundle": p("ca.crt"),
                     "links": {"/bin/sh": "/nix/store/dddd-bash/bin/sh", "/usr/bin/env": "/nix/store/eeee-coreutils/bin/env"}},
@@ -123,13 +119,39 @@ impl Rig {
 
     /// The service, as its config is now.
     pub fn service(&self) -> Arc<Service> {
-        let cfg = Config::parse(&self.cfg.to_string()).unwrap();
+        self.with(Config::parse(&self.cfg.to_string()).unwrap())
+    }
+
+    /// The config as a switch deploys it (modules/autoland/review.nix):
+    /// the generation's directory.
+    pub fn deploy(&self) -> PathBuf {
+        let dir = self.path("deployed");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), self.cfg.to_string()).unwrap();
+        dir
+    }
+
+    /// The service as systemd starts it, from a unit of the generation
+    /// deployed now.
+    pub fn deployed(&self) -> Arc<Service> {
+        self.started(&self.cfg)
+    }
+
+    /// The service started from a unit whose config is `ran`, with the
+    /// config as it is now deployed.
+    pub fn started(&self, ran: &Value) -> Arc<Service> {
+        let own = self.path("own.json");
+        fs::write(&own, ran.to_string()).unwrap();
+        let cfg = Config::read(&own, Some(self.deploy())).unwrap();
+        self.with(cfg)
+    }
+
+    fn with(&self, cfg: Config) -> Arc<Service> {
         let journal = self.journal.clone();
         Arc::new(Service::new(
             cfg,
             PathBuf::from(env!("CARGO_BIN_EXE_burrow-review")),
             self.home(),
-            std::env::var_os("PATH").unwrap_or_default(),
             upstream(self.upstream.clone()),
             Arc::new(move |line: &str| journal.lock().unwrap().push(line.to_owned())),
         ))

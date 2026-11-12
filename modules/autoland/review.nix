@@ -13,9 +13,9 @@ let
   service = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review;
   # The review agents (codex).
   agents = import ./agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
-  # What the reviewers' service runs commands with, and so what an agent
-  # reads the snapshot with, and runs the repo's own checks with (python3:
-  # the scripts a repo checks itself with).
+  # What an agent reads the snapshot with, and runs the repo's own checks
+  # with (python3: the scripts a repo checks itself with), and bubblewrap
+  # for codex's own sandbox inside theirs.
   reviewTools = with pkgs; [ bash config.programs.git.package bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
   # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
   # sandbox shows them; a machine without /bin/sh or /usr/bin/env gives the
@@ -39,12 +39,8 @@ let
   # The reviewers' service (crates/burrow-review, config.rs): the queue the
   # passes fill and what it leaves for them, its reviewers, and what a
   # look's sandbox shows.
-  # The admission policy lives at a path the deploy rewrites, not in the
-  # store, because a switch leaves a running service be: it reads the file
-  # again on every decision (config.rs `paused`).
-  policyPath = "/etc/burrow/review-settings.json";
   reviewConfig = pkgs.writeText "burrow-review.json" (builtins.toJSON {
-    settings = policyPath;
+    settings = config.burrow.settings.effective;
     queue = "${reviewDir}/queue";
     done = "${reviewDir}/done";
     sessions = "${reviewDir}/sessions";
@@ -55,6 +51,9 @@ let
     };
     inherit (rv) timeoutMinutes;
     agents = "${agents}/bin";
+    # What the agents run commands with: this generation's, which its
+    # sandbox's store holds, not the unit's PATH a run inherits.
+    path = lib.makeBinPath reviewTools;
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     box = {
       store = "${reviewStore}/store-paths";
@@ -68,12 +67,21 @@ let
     export REVIEW_CONFIG=''${REVIEW_CONFIG:-${reviewConfig}}
     exec ${service}/bin/burrow-review "$@"
   '';
+  # The generation deployed now, for a run that outlives a switch (looks
+  # the admission policy parks wait in it): the policy it holds looks to,
+  # and the program, with that config, it hands the queue to
+  # (crates/burrow-review, config.rs `Deployed`). One link in /etc, so
+  # they change together, before systemd reloads the unit.
+  deployedDir = "burrow/review";
+  deployed = pkgs.linkFarm "burrow-review-deployed" [
+    { name = "config.json"; path = reviewConfig; }
+    { name = "burrow-review"; path = "${review}/bin/burrow-review"; }
+  ];
 
 in
 {
   imports = [ { key = "burrow/codex-login"; imports = [ (import ../codex-login.nix inputs) ]; } ];
   config = lib.mkIf cfg.enable {
-    environment.etc."burrow/review-settings.json".text = builtins.toJSON config.burrow.settings.effective;
 
     users.users.${reviewer} = {
       isSystemUser = true;
@@ -92,12 +100,8 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # What the agents read the snapshot with, and bubblewrap for codex's
-      # own sandbox inside theirs.
-      path = reviewTools;
       environment.HOME = reviewerHome;
-      # The gate's TLS to the agents' APIs (crates/burrow-review, egress.rs).
-      environment.SSL_CERT_FILE = config.security.pki.caBundle;
+      environment.REVIEW_DEPLOYED = "/etc/${deployedDir}";
       serviceConfig = {
         Type = "oneshot";
         User = reviewer;
@@ -111,6 +115,7 @@ in
         ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ];
       };
     };
+    environment.etc.${deployedDir} = lib.mkIf (!cfg.dryRun) { source = deployed; };
     systemd.paths.autoland-review = lib.mkIf (!cfg.dryRun) {
       wantedBy = [ "paths.target" ];
       # A review to do, or a closed PR's sessions to delete.
