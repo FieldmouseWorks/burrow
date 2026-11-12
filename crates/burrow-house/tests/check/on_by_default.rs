@@ -34,6 +34,12 @@ fn spenders() {
         ("hosts/x.nix", "  /* opt in */ fresh.enable = true;"),
         // Comments aren't parsed, so a commented one asks for a reason too.
         ("hosts/x.nix", "  # drain.enable = true;"),
+        ("hosts/x.nix", "  fresh.enable = /* explanation */ true;"),
+        (
+            "hosts/x.nix",
+            "  usage.paid = /* explanation */ lib.mkForce true;",
+        ),
+        ("hosts/x.nix", "  drain = /* explanation */ \"codex\";"),
         (
             "hosts/x.nix",
             "  fresh.enable = false; # was fresh.enable = true;",
@@ -50,6 +56,10 @@ fn not_spenders() {
         ("hosts/x.nix", "  drain.enable = false;"),
         ("hosts/x.nix", "  drain = null;"),
         ("hosts/x.nix", "  usage.paid = false;"),
+        (
+            "hosts/x.nix",
+            "  fresh = { enable = false; owner = \"o\"; };",
+        ),
         ("docs/x.md", "Set `drain.enable = true` to turn it on."),
     ] {
         passes(&case(adding(path, line)));

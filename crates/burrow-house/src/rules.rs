@@ -256,22 +256,21 @@ pub fn timer(line: &str) -> bool {
     TIMER.is_match(line)
 }
 
-/// Whether a line turns an automated spender (a model drain, paid usage,
-/// runners, spend) on, as Nix, TOML or YAML write it: its key set true
-/// (dotted, or inside an inline `{ }`), or the drain given an engine. Null,
-/// false are not. Comments are not parsed: that takes each language's whole
-/// grammar, and a false alarm on a commented line costs one `Why on by
-/// default:` line, so the match is a superset of the live ones. An option
-/// declared `default = true` over several lines is the review's to judge:
-/// this reads one line at a time.
+/// Whether a line may turn an automated spender (a model drain, paid usage,
+/// runners, spend) on: it names the spender and says `true` after it (any
+/// form: dotted, inline `{ }`, `mkDefault`, a comment between the key and
+/// the value), or gives the drain a quoted engine. Plain `false` and `null`
+/// settings are not. Comments and strings are not parsed: that takes each
+/// language's whole grammar, so the match is a deliberate superset and a
+/// false alarm (a commented line, a description) costs one `Why on by
+/// default:` line. An option declared `default = true` over several lines is
+/// the review's to judge: this reads one line at a time.
 pub fn spender(line: &str) -> bool {
     static SPENDER: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         let key = r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|paid([-_]?usage)?|fresh|spend(ing)?|runners?)\b";
-        let on = r"(lib\.(mkDefault|mkForce|mkOverride\s+\d+)\s+)?true\b";
         vec![
-            re(&format!(r"{key}[\w.-]*\s*(\.\s*enable\s*)?[=:]\s*{on}")),
-            re(&format!(r"{key}[^;]*\{{[^}}]*\benable\s*=\s*{on}")),
-            re(r#"(?i)\bdrain\s*=\s*(lib\.(mkDefault|mkForce|mkOverride\s+\d+)\s+)?"[^"]+""#),
+            re(&format!(r"{key}.*\btrue\b")),
+            re(r#"(?i)\bdrain\b.*"[^"]+""#),
         ]
     });
     SPENDER.iter().any(|r| r.is_match(line))
