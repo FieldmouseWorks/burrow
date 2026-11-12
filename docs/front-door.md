@@ -93,6 +93,12 @@ own, say), in seconds and without starting a Claude.
     tokens exclude duplicate message IDs; output counts completed runs only.
     Incomplete cost is labelled `known-cost`, with unavailable coverage and
     gaps carried into a later session total marked separately.
+    Codex turns include stream token counts but no cost. Codex reports a
+    thread's running total, so a resumed turn counts its total minus the
+    thread's previous one; a run that reported no total marks the turn's
+    tokens partial and the thread's next turn as possibly including it. In
+    the table, Codex rows' cost reads `-`, and their missing, recovered and
+    outside-span runs count tokens rather than cost.
     Meter readings over the same span show five-hour and weekly utilization, including readings at 100%.
     No prompts or issue titles are reported. Attribution predating structured
     job metadata is marked unknown where unavailable. Filtering uses immutable

@@ -23,14 +23,33 @@ pub struct Report {
     pub missing: BTreeSet<String>,
     pub recovered: BTreeSet<String>,
     identity: String,
+    /// The engine's stream carries no price (Codex): cost is unknown, and
+    /// partial and earlier-gap notes speak of tokens instead.
+    pub unpriced: bool,
 }
 impl Report {
+    pub fn new(identity: &str) -> Report {
+        Report {
+            identity: identity.into(),
+            ..Report::default()
+        }
+    }
+    /// A run whose usage went unreported: its identity, kept by the
+    /// session or thread until a later total recovers it.
+    pub fn miss(&mut self) -> String {
+        let id = format!("{}:{}", self.identity, self.missing.len());
+        self.missing.insert(id.clone());
+        id
+    }
     fn add(&mut self, tokens: [u64; 4]) {
         for (sum, value) in self.tokens.iter_mut().zip(tokens) {
             *sum += value;
         }
     }
     pub fn show(&self) -> String {
+        if self.unpriced {
+            return self.show_unpriced();
+        }
         let cost_label = if self.cost_partial {
             "known-cost"
         } else {
@@ -48,6 +67,19 @@ impl Report {
         }
         if self.prior_gap {
             s += "; cost may include unreported earlier runs";
+        }
+        s
+    }
+    fn show_unpriced(&self) -> String {
+        let mut s = format!(
+            "input={} output={} cache-read={} cache-write={} cost unpriced",
+            self.tokens[0], self.tokens[1], self.tokens[2], self.tokens[3]
+        );
+        if self.tokens_partial {
+            s += "; partial tokens (a run reported no total)";
+        }
+        if self.prior_gap {
+            s += "; tokens may include unreported earlier runs";
         }
         s
     }
@@ -70,8 +102,7 @@ fn partial(
     *run = Run::default();
 }
 fn missing(session: &str, sessions: &mut BTreeMap<String, Session>, report: &mut Report) {
-    let id = format!("{}:{}", report.identity, report.missing.len());
-    report.missing.insert(id.clone());
+    let id = report.miss();
     sessions.entry(session.into()).or_default().gaps.insert(id);
 }
 fn partial_tokens(run: &mut Run, report: &mut Report) {
@@ -87,10 +118,7 @@ pub fn decode(
     sessions: &mut BTreeMap<String, Session>,
     fallback: &str,
 ) -> Report {
-    let mut report = Report {
-        identity: fallback.into(),
-        ..Report::default()
-    };
+    let mut report = Report::new(fallback);
     let mut run = Run::default();
     let mut session = fallback.to_owned();
     let mut any = false;

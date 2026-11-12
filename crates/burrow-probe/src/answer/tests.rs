@@ -597,12 +597,27 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     let result = r#"{"type":"result","session_id":"s","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40},"total_cost_usd":1.5,"result":"SECRET PROMPT"}"#;
     put(1, "claude", 100, result);
     put(2, "claude", 200, result);
-    put(3, "codex", 250, r#"{"type":"turn.completed"}"#);
+    // Codex totals are the thread's: turn 5 resumes turn 3's thread and
+    // counts only what it added.
+    put(
+        3,
+        "codex",
+        250,
+        r#"{"type":"thread.started","thread_id":"t"}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":60,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":4}}"#,
+    );
     put(
         4,
         "claude",
         300,
         r#"{"type":"assistant","message":{"id":"m","usage":{"input_tokens":7,"output_tokens":9},"content":"SECRET PROMPT"}}"#,
+    );
+    put(
+        5,
+        "codex",
+        350,
+        r#"{"type":"thread.started","thread_id":"t"}
+{"type":"turn.completed","usage":{"input_tokens":250,"cached_input_tokens":150,"cache_write_input_tokens":0,"output_tokens":25,"reasoning_output_tokens":9}}"#,
     );
     let other = jobs.join("manual");
     fs::create_dir_all(&other).unwrap();
@@ -633,11 +648,17 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     };
     let answer = m.answer(&Query::parse("usage @150").unwrap()).unwrap();
     assert!(answer.contains("claude: 2 turns"), "{answer}");
-    assert!(answer.contains("codex: 2 turns"));
+    assert!(answer.contains("codex: 3 turns"));
     assert!(answer.contains("role repair; inbox labels=codex opener=owner"));
     assert!(answer.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$0.000000"));
     assert!(answer.contains(
         "input=7 output=0 cache-read=0 cache-write=0 known-cost=$0.000000; partial tokens (output counts completed runs only); additional cost unavailable"
+    ));
+    assert!(answer.contains(
+        "example turn 5 1970-01-01 00:05:50Z input=60 output=15 cache-read=90 cache-write=0 cost unpriced\n"
+    ));
+    assert!(answer.contains(
+        "manual turn 1 1970-01-01 00:04:35Z input=0 output=0 cache-read=0 cache-write=0 cost unpriced; partial tokens (a run reported no total)\n"
     ));
     assert!(answer.contains("claude five_hour: 100% HIT 100%"));
     assert!(answer.contains("codex seven_day: 40%"));
@@ -655,13 +676,14 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     for row in [
         "engine role project turns input output cache-read cache-write cost unread missing-runs recovered-runs outside-span partial-tokens",
         "claude all all 2 17 20 30 40 $0.00 0 1 0 0 1",
-        "codex all all 2 - - - - - 2 0 0 0 0",
+        "codex all all 3 100 25 150 0 - 0 1 0 0 1",
         "claude repair all 2 17 20 30 40 $0.00 0 1 0 0 1",
-        "codex (none) all 1 - - - - - 1 0 0 0 0",
-        "codex all web 1 - - - - - 1 0 0 0 0",
-        "codex all (unknown) 1 - - - - - 1 0 0 0 0",
+        "codex (none) all 1 0 0 0 0 - 0 1 0 0 1",
+        "codex repair all 2 100 25 150 0 - 0 0 0 0 0",
+        "codex all web 2 100 25 150 0 - 0 0 0 0 0",
+        "codex all (unknown) 1 0 0 0 0 - 0 1 0 0 1",
         "claude repair web 2 17 20 30 40 $0.00 0 1 0 0 1",
-        "Cost: $0.00 recorded over 4 turns; 1 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside the selected turns whose cost may be included; 2 turns whose engine's cost and tokens aren't read.",
+        "Cost: $0.00 recorded over 5 turns; 2 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside the selected turns whose cost may be included; 3 turns whose engine's stream carries tokens but no cost (their runs' missing and recovered tokens count above); 0 turns whose engine's cost and tokens aren't read.",
     ] {
         assert!(table.iter().any(|l| l == row), "{row}: {answer}");
     }
@@ -674,13 +696,26 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         "{totals}"
     );
     assert!(answer.starts_with(&totals), "{totals}");
+    // From turn 5 alone, the thread's earlier turn stays out.
+    let late = m
+        .answer(&Query::parse("usage @300 --totals").unwrap())
+        .unwrap();
+    let late: Vec<String> = late
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert!(
+        late.iter()
+            .any(|l| l == "codex repair web 1 60 15 90 0 - 0 0 0 0 0"),
+        "{late:?}"
+    );
     let full = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
     assert!(
         full.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$1.500000"),
         "{full}"
     );
     assert!(
-        full.contains("Cost: $1.50 recorded over 5 turns; 1 runs with cost still missing"),
+        full.contains("Cost: $1.50 recorded over 6 turns; 2 runs with cost still missing"),
         "{full}"
     );
     assert!(fake.asked.borrow().is_empty());
