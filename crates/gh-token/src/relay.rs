@@ -108,15 +108,7 @@ fn fetch(
 }
 fn publish(config: &Config, meter: &Meter) -> io::Result<()> {
     std::fs::create_dir_all(&config.meters)?;
-    meter.record(&config.meters)?;
-    // Host-owned records are readable by proj, never writable by jobs.
-    use std::os::unix::fs::PermissionsExt;
-    for entry in std::fs::read_dir(&config.meters)? {
-        let entry = entry?;
-        if entry.path().extension().is_some_and(|s| s == "json") {
-            std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o644))?;
-        }
-    }
+    meter.record_public(&config.meters)?;
     Ok(())
 }
 pub fn answer(

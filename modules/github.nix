@@ -166,6 +166,14 @@ in
 {
   imports = [ (import ./common.nix inputs) ];
 
+  options.burrow.github.quotaDir = mkOption {
+    type = types.str;
+    internal = true;
+    readOnly = true;
+    default = "${config.burrow.stateDir}/github-quota";
+    description = "Host-owned installation quota observations, outside job writable roots.";
+  };
+
   options.burrow.github.apps = mkOption {
     default = { };
     description = ''
@@ -286,6 +294,7 @@ in
       group = "gh-token";
     };
     users.groups.gh-token = { };
+    systemd.tmpfiles.rules = [ "d ${cfg.quotaDir} 0755 gh-token gh-token -" ];
 
     systemd.sockets = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}" {
       description = "Tokens of the GitHub App ${app.slug}";
@@ -327,7 +336,7 @@ in
       # switch that happens to be running to count as its own failure.
       environment = {
         GH_TOKEN_APP_NAME = name;
-        GH_TOKEN_QUOTA_DIR = "/var/lib/gh-token-quotas";
+        GH_TOKEN_QUOTA_DIR = cfg.quotaDir;
       } // lib.optionalAttrs (lib.hasAttrByPath [ "burrow" "events" "kickPort" ] config) {
         GH_TOKEN_QUOTA_KICK = "http://127.0.0.1:${toString config.burrow.events.kickPort}/kick/proj-watch";
       };
@@ -344,8 +353,7 @@ in
         User = "gh-token";
         Group = "gh-token";
         LoadCredential = [ "key:${app.keyFile}" ];
-        StateDirectory = "gh-token-quotas";
-        StateDirectoryMode = "0755";
+        ReadWritePaths = [ cfg.quotaDir ];
         # Tokens kept between answers, in memory only, for this user only.
         RuntimeDirectory = "gh-token-cache/${name}";
         RuntimeDirectoryMode = "0700";

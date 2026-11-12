@@ -63,7 +63,7 @@ pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(),
     if let (Some(app), Some(dir)) = (&cfg.host_github_app, &cfg.github_meters) {
         let mut meter = Meter::new(app, owner, now().max(0) as u64);
         meter.retry_at = Some(due);
-        meter.record(dir).map_err(|e| e.to_string())?;
+        meter.record_public(dir).map_err(|e| e.to_string())?;
         crate::job::kick(cfg, ["proj-watch".into()]);
     }
     let _ = job;

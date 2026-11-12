@@ -71,6 +71,13 @@ impl Meter {
         }
     }
     pub fn record(&self, dir: &Path) -> io::Result<()> {
+        self.record_visibility(dir, false)
+    }
+    /// Public budget facts, atomically readable by host schedulers.
+    pub fn record_public(&self, dir: &Path) -> io::Result<()> {
+        self.record_visibility(dir, true)
+    }
+    fn record_visibility(&self, dir: &Path, public: bool) -> io::Result<()> {
         burrow_process::state_reads::directory(dir)?;
         // Hex encodes the two components without aliases or path traversal.
         let key = format!("{}\0{}", self.app, self.owner)
@@ -95,7 +102,12 @@ impl Meter {
             }
             next.retry_at = hold;
         }
-        burrow_process::state_reads::write(&file, serde_json::to_vec(&next)?)
+        let bytes = serde_json::to_vec(&next)?;
+        if public {
+            burrow_process::state_reads::write_public(&file, bytes)
+        } else {
+            burrow_process::state_reads::write(&file, bytes)
+        }
     }
 }
 
@@ -281,5 +293,31 @@ mod storage_failures {
         m.retry_at = None;
         assert!(m.record(d.path()).is_err());
         assert!(file.is_dir());
+    }
+}
+
+#[cfg(test)]
+mod public_records {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn host_budget_records_are_atomically_public_on_every_replacement() {
+        let d = tempfile::tempdir().unwrap();
+        let mut m = Meter::new("app", "owner", 1000);
+        for at in [1000, 2000] {
+            m.at = at;
+            m.record_public(d.path()).unwrap();
+            let file = std::fs::read_dir(d.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|e| e.path().extension().is_some_and(|s| s == "json"))
+                .unwrap()
+                .path();
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+            assert_eq!(Meter::try_read(&file).unwrap().unwrap().at, at);
+        }
     }
 }
