@@ -49,6 +49,13 @@ pub fn kind(role: Option<&str>, inbox: bool) -> Kind {
     }
 }
 
+/// Whether work started from inside job `id` is automated: unless that job is
+/// bound as manual (or is unknown or unreadable, which fails closed).
+pub fn automated_parent(cfg: &Config, id: &str) -> bool {
+    let job = Job::new(cfg, id);
+    !job.dir.is_dir() || admission(&job).map_or(true, |a| !matches!(a.kind, Kind::Manual))
+}
+
 pub fn identify(
     cfg: &Config,
     project: &str,
@@ -332,12 +339,20 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
+        // Both can block; a policy change meanwhile ends this pass, and the
+        // next one restarts from the front of the order.
         let held = job.lock().map_err(|e| e.to_string())?;
+        if &generation(cfg)? != release_generation {
+            return Ok(());
+        }
         let crate::inbox::resumption::Resume::Ready(_capacity) =
             crate::inbox::resumption::admission(cfg, &job)?
         else {
             return Ok(());
         };
+        if &generation(cfg)? != release_generation {
+            return Ok(());
+        }
         let mut rec: Park =
             serde_json::from_slice(&fs::read(path(&job, "park")).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
@@ -528,4 +543,32 @@ pub(crate) fn wake(cfg: &Config) {
     let _ = systemd::systemctl(cfg)
         .args(["start", "--no-block", unit])
         .output();
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+
+    fn bound(cfg: &Config, id: &str, kind: Option<Kind>) {
+        let job = Job::new(cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        if let Some(kind) = kind {
+            bind(&job, Identity::Local, kind).unwrap();
+        }
+    }
+
+    #[test]
+    fn only_a_manual_parent_starts_manual_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        bound(&cfg, "manual", Some(Kind::Manual));
+        bound(&cfg, "sorting", Some(Kind::Sorting));
+        bound(&cfg, "auto", Some(Kind::Automated));
+        assert!(!automated_parent(&cfg, "manual"));
+        assert!(automated_parent(&cfg, "sorting"));
+        assert!(automated_parent(&cfg, "auto"));
+        // Unknown parents fail closed.
+        assert!(automated_parent(&cfg, "gone"));
+    }
 }

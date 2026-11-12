@@ -407,20 +407,22 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     if new.inbox_issue {
         write("inbox-issue", "true\n")?;
     }
+    let parent = std::env::var("PROJ_JOB").ok().filter(|s| !s.is_empty());
+    // A launch from inside a job inherits that job's automation: only a
+    // parent bound as manual can start manual work.
+    let automated = new.role.is_some()
+        || new.usage_kind.is_some()
+        || parent
+            .as_deref()
+            .is_some_and(|p| crate::policy::automated_parent(cfg, p));
     let identity = match &new.admission {
         Some(identity) => identity.clone(),
-        None => crate::policy::identify(
-            cfg,
-            &project,
-            new.role.is_some() || new.usage_kind.is_some(),
-            new.local_work,
-        )
+        None => crate::policy::identify(cfg, &project, automated, new.local_work)
         .map_err(|e| Fail::new(1, e))?,
     };
     if let Some(kind) = &new.usage_kind {
         write("usage-kind", kind)?;
     }
-    let parent = std::env::var("PROJ_JOB").ok().filter(|s| !s.is_empty());
     let starter = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     write(
         "starter",
@@ -502,7 +504,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     crate::policy::bind(
         &job,
         identity,
-        crate::policy::kind(new.role.as_deref(), new.usage_kind.is_some()),
+        crate::policy::kind(new.role.as_deref(), new.usage_kind.is_some() || automated),
     )
     .map_err(|e| Fail::new(1, e))?;
     start(cfg, &id, &given, new.first).map_err(|e| Fail::new(1, e))?;
