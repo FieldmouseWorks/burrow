@@ -36,6 +36,12 @@ pub struct Item {
     /// work: out of usage, that can't move it ([`Item::needs_claude`]).
     #[serde(default)]
     pub claude: bool,
+    /// Its deadline is read from local state that moves without a pass (a
+    /// run's log writes), so a deadline the source wrote before then may be
+    /// stale: after a kick it's a stall only once the source has written its
+    /// file again ([`Overdue::at`]).
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 impl Item {
@@ -54,6 +60,8 @@ pub struct Overdue {
     pub source: String,
     pub key: String,
     pub item: Item,
+    /// When its source last wrote the file it is in.
+    pub at: f64,
 }
 
 /// A watch file whole, as its source writes it.
@@ -105,6 +113,7 @@ fn item(it: &Value) -> Option<Item> {
         line: it.get("line").and_then(Value::as_bool).unwrap_or(false),
         unstick: it.get("unstick").and_then(Value::as_bool).unwrap_or(false),
         claude: it.get("claude").and_then(Value::as_bool).unwrap_or(false),
+        refresh: it.get("refresh").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -156,7 +165,9 @@ pub fn overdue(
                             line: false,
                             unstick: false,
                             claude: false,
+                            refresh: false,
                         },
+                        at,
                     },
                 );
                 continue;
@@ -186,6 +197,7 @@ pub fn overdue(
                         source: name.clone(),
                         key,
                         item: it,
+                        at,
                     },
                 );
             } else {

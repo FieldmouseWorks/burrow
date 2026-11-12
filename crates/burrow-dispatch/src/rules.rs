@@ -120,6 +120,7 @@ pub fn decide(
                 line: false,
                 unstick: false,
                 claude: false,
+                refresh: false,
             },
         );
     }
@@ -237,7 +238,6 @@ pub fn decide(
                     link,
                     true,
                     &cfg.handler,
-                    cfg.gap,
                 );
                 d.items.insert(key, it);
                 continue;
@@ -295,7 +295,6 @@ pub fn decide(
                 link,
                 false,
                 &cfg.handler,
-                cfg.gap,
             );
             d.items.insert(key, it);
         }
@@ -309,10 +308,11 @@ pub fn decide(
 /// started if it hasn't since: a run at work, however long its build, isn't
 /// stalled, and one that has gone quiet is; the watchdog kicks `refresh`
 /// (this handler) first, since a log write triggers no pass and the
-/// deadline it was given may be stale. The kick's pass can start only `gap`
-/// after the last, so the deadline allows it that on top of `run`: the
-/// refresh is then done before the watchdog's grace is, and a run still
-/// quiet after it is stalled. Otherwise on HOST-update, which
+/// deadline it was given may be stale. The item says `refresh`, so the
+/// watchdog takes it no further than that kick until a pass has written the
+/// file again, however long the kick's pass takes to start (it can start
+/// only a handler's gap after the last): a run still quiet after it is
+/// stalled. Otherwise on HOST-update, which
 /// the watchdog kicks: soon, unless
 /// its last run is `behind` its own open PR, which brings the commit in only
 /// after it lands and has a wait of its own with the steward.
@@ -329,7 +329,6 @@ fn going_live(
     link: Option<String>,
     any: bool,
     refresh: &str,
-    gap: f64,
 ) -> Item {
     match update.since {
         Some(start) if update.state == "activating" && (any || start >= since) => Item {
@@ -349,12 +348,13 @@ fn going_live(
                 ),
             },
             since: start,
-            due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run + gap,
+            due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run,
             link,
             kick: Some(refresh.to_owned()),
             line: false,
             unstick: false,
             claude: false,
+            refresh: true,
         },
         _ => Item {
             repo: None,
@@ -373,6 +373,7 @@ fn going_live(
             line: false,
             unstick: false,
             claude: false,
+            refresh: false,
         },
     }
 }
@@ -423,7 +424,6 @@ fn retained(
         was.link.clone(),
         was_run,
         &cfg.handler,
-        cfg.gap,
     )
 }
 
@@ -478,6 +478,7 @@ fn runner(
             line: false,
             unstick: false,
             claude: false,
+            refresh: false,
         },
     );
     if snap.switching || recent.len() >= RESTARTS {

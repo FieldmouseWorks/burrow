@@ -373,11 +373,7 @@ fn deploy() {
             .clone();
     assert_eq!(
         (it.since, it.due, it.kick),
-        (
-            T + 30.0,
-            T + 30.0 + 5400.0 + cfg.gap,
-            Some(cfg.handler.clone())
-        )
+        (T + 30.0, T + 30.0 + 5400.0, Some(cfg.handler.clone()))
     );
     assert_eq!(
         it.phase,
@@ -396,12 +392,9 @@ fn deploy() {
             .clone();
     assert_eq!(
         (it.since, it.due, it.kick),
-        (
-            T + 30.0,
-            T + 7200.0 + 5400.0 + cfg.gap,
-            Some(cfg.handler.clone())
-        )
+        (T + 30.0, T + 7200.0 + 5400.0, Some(cfg.handler.clone()))
     );
+    assert!(it.refresh, "a run's deadline is read between passes");
     assert_eq!(
         it.phase,
         format!(
@@ -414,7 +407,7 @@ fn deploy() {
     let it =
         decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
             .clone();
-    assert_eq!(it.due, T + 30.0 + 5400.0 + cfg.gap);
+    assert_eq!(it.due, T + 30.0 + 5400.0);
 }
 
 // The flake's own repo with what's live unknown (no record, or a switch
@@ -488,7 +481,7 @@ fn deploy_unknown() {
     let it = &d.items["deploy/sam/box"];
     assert_eq!(
         (it.since, it.due, it.kick.as_deref()),
-        (T - 300.0, T - 300.0 + 5400.0 + cfg.gap, Some("dispatch"))
+        (T - 300.0, T - 300.0 + 5400.0, Some("dispatch"))
     );
     assert_eq!(d.state.going_live["sam/box"], T - 600.0);
     // Unknown, behind its own PR: the longer wait; its unit failed since,
@@ -632,7 +625,7 @@ fn deploy_unread_progress() {
         let it = &e.items[&key];
         assert_eq!(
             (it.since, it.due, it.kick.as_deref()),
-            (T - 300.0, T + 1000.0 + 5400.0 + cfg.gap, Some("dispatch")),
+            (T - 300.0, T + 1000.0 + 5400.0, Some("dispatch")),
             "{repo}"
         );
         assert_eq!(it.what, d.items[&key].what);
@@ -641,7 +634,7 @@ fn deploy_unread_progress() {
         // Only an earlier run's write: from its start.
         s.progress = Some(T - 400.0);
         let e2 = decide(&cfg, &s, &d.state, &d.items, T + 1100.0);
-        assert_eq!(e2.items[&key].due, T - 300.0 + 5400.0 + cfg.gap);
+        assert_eq!(e2.items[&key].due, T - 300.0 + 5400.0);
         // The run it was on ended: back on HOST-update's own wait, which
         // carries on from the wait's age.
         let mut ended = s.clone();

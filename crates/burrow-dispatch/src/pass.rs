@@ -93,7 +93,9 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     let keep = state.log.len().saturating_sub(LOG);
     state.log.drain(..keep);
     save(dir, "state.json", &state)?;
-    let changed = items != was;
+    // A run's deadline is read from its logs between passes, so the watchdog
+    // waits on each pass for these (watchdog's `refresh`).
+    let changed = items != was || items.values().any(|i| i.refresh);
     save(
         dir,
         "watch.json",
