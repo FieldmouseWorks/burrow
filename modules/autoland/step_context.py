@@ -90,6 +90,7 @@ class Context:
         self.tag = f"{self.repo}#{self.n}"
         self.line = f"[{self.repo}#{self.n}]({self.pr['url']}) {self.pr['title']}"
 
+        self.refresh = {}  # refresh facts exported to the watchdog
         self.struck = {}  # the steps that failed this pass, and when each is tried again
         self.ends = {}  # how this head's job of each kind ended, as proj says (running)
         self.looked = {}  # what running said of each job this pass, by its id

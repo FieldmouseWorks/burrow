@@ -234,7 +234,7 @@ impl Pass<'_> {
                 if old.child.number.map(|v| v.to_string()).as_deref() == Some(n) {
                     return false;
                 }
-                if old.child.attempted && old.child.number.is_none() {
+                if old.child.attempted && old.child.number.is_none() && !self.observe {
                     let Some(issues) = every(
                         self.cfg,
                         &format!("repos/{repo}/issues?state=all&per_page=100"),
@@ -270,6 +270,16 @@ impl Pass<'_> {
             };
             if self.claimed(repo).contains(parent) {
                 return false;
+            }
+            // An observing pass asks GitHub nothing: the child's place rests
+            // on its plan's order alone. The drain asks about the one it
+            // picks, its parents included, before it hands it on.
+            if self.observe {
+                if list.next() != Some(index) || !self.child_admissible_at(repo, parent, depth + 1)
+                {
+                    return false;
+                }
+                continue;
             }
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{parent}")) else {
                 self.miss(repo);
@@ -635,7 +645,7 @@ impl Pass<'_> {
 
     /// Called by the repo's normal event pass. No job/session is the parent.
     pub(super) fn sequence(&mut self, repo: &str, all: &[Value]) {
-        if !self.inbox.planning {
+        if !self.inbox.planning || self.cfg.paused(repo) {
             return;
         }
         for d in self.plan_dirs(repo) {

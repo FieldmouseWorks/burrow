@@ -45,6 +45,9 @@ todo() {
     ([to_entries[] | select(.key as $k | $p | contains($k)) | .value] | first // $d) else . end' <<<"$todo"
 }
 
+if [ "$(todo early false)" = true ]; then
+  jq -cn --arg sid "$sid" '{type: "thread.started", thread_id: $sid}'
+fi
 sleep "$(todo wait 0)"
 login=$(todo refresh "")
 [ -z "$login" ] || printf '%s' "$login" >"$CODEX_HOME/auth.json"

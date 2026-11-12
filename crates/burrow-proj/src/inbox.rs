@@ -98,9 +98,12 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         wake: BTreeMap::new(),
         unreached: Vec::new(),
         looked: Vec::new(),
+        observe: false,
     };
-    p.run(only)?;
-    p.finish(only)
+    let result = p.run(only).and_then(|()| p.finish(only));
+    drop(pass);
+    crate::policy::wake(cfg);
+    result
 }
 
 /// The lock, once whoever holds it lets go, if that's within `wait`.
@@ -210,25 +213,8 @@ fn status(cfg: &Config, inbox: &Inbox) {
     }
 }
 
-/// The folders in `dir` whose names start with `prefix`, by name, but never
-/// a dot one.
-fn dirs(dir: &Path, prefix: &str) -> Vec<PathBuf> {
-    let mut all: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .filter(|e| {
-                    let name = e.file_name();
-                    let name = name.to_string_lossy();
-                    !name.starts_with('.') && name.starts_with(prefix)
-                })
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default();
-    all.sort();
-    all
-}
+mod dirs;
+use dirs::dirs;
 
 /// One project per GitHub repo, by the repo as its origin spells it: the
 /// folder itself, never a linked worktree of it (.git is a file there) or a
@@ -332,28 +318,11 @@ struct Pass<'a> {
     /// Repos GitHub couldn't be asked about this pass.
     unreached: Vec<String>,
     looked: Vec<String>,
+    /// Only observing, for the live snapshot: GitHub isn't asked (plans.rs).
+    observe: bool,
 }
 
 impl Pass<'_> {
-    /// A paused record retains its results, but only an active turn consumes
-    /// shared admission capacity. Unstarted handoffs cannot start while paused.
-    pub(super) fn record_uses_capacity(&self, dir: &Path) -> bool {
-        let name = dir.file_name().unwrap_or_default().to_string_lossy();
-        let paused = name.rsplit_once('-').is_some_and(|(repo, _)| {
-            self.cfg
-                .paused
-                .iter()
-                .any(|r| key(r).eq_ignore_ascii_case(repo))
-        });
-        !paused
-            || read(&dir.join("job")).is_some_and(|id| {
-                matches!(
-                    Job::new(self.cfg, &id).state().as_str(),
-                    "queued" | "running"
-                )
-            })
-    }
-
     fn book(&mut self, repo: &str, at: i64) {
         let e = self.wake.entry(repo.to_owned()).or_insert(at);
         *e = (*e).min(at);
@@ -412,6 +381,7 @@ impl Pass<'_> {
         let drained = self.drained(repo, &raw(&issue["number"]));
         let (role, engine) = self.routing(issue);
         let new = New {
+            admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
             inbox_issue: true,
             usage_kind: Some(usage::kind(self.cfg.steward_account.as_ref(), issue)),
             vm: self.inbox.vm,
@@ -683,8 +653,8 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             if !only.is_empty() && repo.to_lowercase() != only.to_lowercase() {
                 continue;
             }
-            if self.cfg.paused(&repo) {
-                continue;
+            if let Some(until) = self.cfg.retry_at(&repo) {
+                self.book(&repo, until);
             }
             self.looked.push(repo.clone());
             self.label(&repo);
@@ -716,8 +686,10 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 .into_iter()
                 .filter(|i| i.get("pull_request").is_none())
                 .collect();
-            self.new_issues(&repo, &open)?;
-            self.jobs(&repo, &p, &open)?;
+            if !self.cfg.paused(&repo) {
+                self.new_issues(&repo, &open)?;
+                self.jobs(&repo, &p, &open)?;
+            }
             if self.inbox.triage.is_some() {
                 let Some(all) = every(
                     self.cfg,
@@ -967,6 +939,7 @@ mod drain;
 pub(crate) use drain::job_paused;
 mod jobs;
 mod plans;
+pub(crate) mod resumption;
 mod retirement;
 mod written;
 
@@ -985,7 +958,11 @@ mod question_tests;
 mod sorting_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 mod usage;
 
-pub(crate) use drain::ready_queue;
+mod view;
+
+pub(crate) use view::view;

@@ -667,7 +667,11 @@ fn paused_ready_issues_wait_without_relabelling() {
     b.pass()
         .note_ready("sam/game", std::slice::from_ref(&active))
         .unwrap();
-    b.cfg.paused = vec!["SAM/BOX".into()];
+    b.cfg.settings = Some(burrow_settings::Config {
+        overlay: b.path("overlay.json"),
+        allowed: vec!["sam/game".into(), "sam/burrow".into()],
+        pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+    });
     on_github(&b, &active);
     b.pass().drain().unwrap();
     assert!(
@@ -677,21 +681,17 @@ fn paused_ready_issues_wait_without_relabelling() {
     );
     assert!(!b.log().contains("repos/sam/box/issues/8"), "{}", b.log());
     // The original ready list survives the pause and is eligible again.
-    b.cfg.paused.clear();
+    b.cfg
+        .settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .push("sam/box".into());
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     assert_eq!(
         b.pass().pick_ready(&t, &[paused]),
         Some(("sam/box".into(), "8".into()))
     );
-}
-
-#[test]
-fn a_paused_inbox_pass_and_triage_do_no_work() {
-    let mut b = Box::new();
-    b.cfg.paused = vec!["SAM/BOX".into()];
-    b.pass().triage("sam/box", &[issue(7, "sam", &[])]).unwrap();
-    b.pass().run("sam/box").unwrap();
-    assert!(b.log().is_empty(), "{}", b.log());
 }
 
 #[test]
@@ -703,7 +703,11 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     fs::create_dir_all(&drained).unwrap();
     fs::write(drained.join("drained"), "sam/box#8\n").unwrap();
     fs::write(drained.join("job"), "s1\n").unwrap();
-    b.cfg.paused = vec!["SAM/BOX".into()];
+    b.cfg.settings = Some(burrow_settings::Config {
+        overlay: b.path("overlay.json"),
+        allowed: vec!["sam/game".into(), "sam/burrow".into()],
+        pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+    });
     b.cfg
         .inbox
         .as_mut()
@@ -717,8 +721,14 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
     assert!(!p.record_uses_capacity(&drained));
     // A genuinely active paused turn still consumes shared capacity.
     fs::write(b.path("active"), "").unwrap();
+    fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
     assert!(p.sorting_slot(&sorting));
     assert!(p.record_uses_capacity(&drained));
+    // A queued automated worker of a paused repository is held, not counted.
+    fs::write(b.cfg.jobs.join("s1/role"), "work\n").unwrap();
+    fs::remove_file(b.cfg.jobs.join("s1/1.slot")).unwrap();
+    assert!(!p.record_uses_capacity(&drained));
+    fs::remove_file(b.cfg.jobs.join("s1/role")).unwrap();
     fs::remove_file(b.path("active")).unwrap();
     let ready = found("sam/game", 4, "sam", &["ready"], "2026-11-01T00:00:00Z");
     p.note_ready("sam/game", std::slice::from_ref(&ready))
@@ -797,9 +807,23 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         on_github(&b, i);
         assert!(!n.is_empty());
     }
+    // The snapshot's queue is the drain's order, with what put each there.
+    use crate::snapshot::Priority::{High, Low, Medium};
+    let queue: Vec<_> = p
+        .view(&t, crate::now())
+        .queue
+        .into_iter()
+        .map(|r| (format!("{}#{}", r.repo, r.number), r.priority, r.pipeline))
+        .collect();
     assert_eq!(
-        p.ready_queue(&t),
-        "drain: 0/1 used\nready 1: sam/box#4\nready 2: sam/box#3\nready 3: sam/game#2\nready 4: sam/box#1\nready 5: sam/box#5\n"
+        queue,
+        [
+            ("sam/box#4".to_owned(), High, true),
+            ("sam/box#3".to_owned(), High, true),
+            ("sam/game#2".to_owned(), High, false),
+            ("sam/box#1".to_owned(), Medium, true),
+            ("sam/box#5".to_owned(), Low, true),
+        ]
     );
     b.pass().drain().unwrap();
     assert!(
@@ -835,13 +859,25 @@ fn drain_counts_turns_instead_of_parked_jobs() {
             fs::write(dir.join("job"), &id).unwrap();
             let job = crate::job::Job::new(&b.cfg, &id);
             fs::create_dir_all(&job.dir).unwrap();
+            crate::policy::bind(
+                &job,
+                crate::policy::Identity::Repository("sam/box".into()),
+                crate::policy::Kind::Automated,
+            )
+            .unwrap();
             fs::write(job.path("turns"), "1").unwrap();
             fs::write(job.turn("1", "outcome"), state).unwrap();
             if state == "running" || state == "paused" {
                 fs::write(job.turn("1", "slot"), "1").unwrap();
             }
             if state == "paused" {
-                b.cfg.paused = vec!["SAM/BOX".into()];
+                crate::policy::mark(&job, "running", false).unwrap();
+                b.cfg
+                    .settings
+                    .as_mut()
+                    .unwrap()
+                    .allowed
+                    .retain(|r| r != "sam/box");
                 assert!(super::job_paused(&b.cfg, &id));
             } else {
                 assert!(!super::job_paused(&b.cfg, &id));
@@ -856,19 +892,31 @@ fn drain_counts_turns_instead_of_parked_jobs() {
             .unwrap();
         on_github(&b, &ready);
         let blocked = matches!(state, "queued" | "running");
-        let status = b
-            .pass()
-            .ready_queue(b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap());
-        assert!(
-            status.starts_with(if blocked {
-                "drain: 3/3 used"
-            } else {
-                "drain: 0/3 used"
-            }),
-            "{state}: {status}"
+        let view = b.pass().view(
+            b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap(),
+            crate::now(),
+        );
+        let used = view
+            .slots
+            .iter()
+            .filter(|s| {
+                s.kind == crate::snapshot::SlotKind::Drain
+                    && s.state != crate::snapshot::SlotState::Idle
+            })
+            .count();
+        assert_eq!(
+            used,
+            if blocked { 3 } else { 0 },
+            "{state}: {:?}",
+            view.slots
         );
         if blocked {
-            assert!(status.contains("sam/box#1 (drained-1:"), "{status}");
+            let holders: Vec<_> = view
+                .slots
+                .iter()
+                .filter_map(|s| s.holder.as_ref()?.job.clone())
+                .collect();
+            assert!(holders.contains(&"drained-1".to_owned()), "{holders:?}");
         }
         b.pass().drain().unwrap();
         assert_eq!(
@@ -929,3 +977,5 @@ fn full_drain_only_fetches_cached_repair_candidates() {
     assert!(log.contains("api repos/sam/game/issues/10"), "{log}");
     assert!(log.contains("issues/10/labels -f labels[]=codex"), "{log}");
 }
+
+mod admission;

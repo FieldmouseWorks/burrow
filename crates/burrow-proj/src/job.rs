@@ -7,8 +7,11 @@
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
-//! stop it while it waits), `N.slot` (the slot it took, once it has one),
-//! `N.started` (immutable first execution time, Unix seconds), `N.jsonl`
+//! stop it while it waits), `N.slot` (the slot it took, once it has one,
+//! and `N.class`, the class it took it as),
+//! `N.started` (immutable first execution time, Unix seconds), `N.engine`,
+//! `N.model` and `N.effort` (what it runs on: no model or effort file for
+//! the engine's own), `N.jsonl`
 //! (its stream, with host-written `burrow.run` boundaries), `N.result`
 //! (its answer), `N.outcome`
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
@@ -77,6 +80,23 @@ impl<'a> Job<'a> {
             Some("claude") | None => "Claude",
             _ => "Unknown",
         }
+    }
+
+    /// What turn N runs on, in its N.engine, N.model and N.effort: no model
+    /// or effort file for the engine's own.
+    pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) -> io::Result<()> {
+        crate::state_reads::write(self.turn(n, "engine"), choice.engine.name())?;
+        for (kind, said) in [("model", &choice.model), ("effort", &choice.effort)] {
+            let path = self.turn(n, kind);
+            match said {
+                Some(v) => crate::state_reads::write(path, v)?,
+                None => match crate::state_reads::remove(path) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                },
+            }
+        }
+        Ok(())
     }
 
     /// The latest turn's number, as written; None before the first.
@@ -196,6 +216,9 @@ impl<'a> Job<'a> {
     }
 
     pub fn state(&self) -> String {
+        if crate::policy::parked(self) {
+            return "parked".into();
+        }
         self.adopt();
         let n = self.turns().unwrap_or_default();
         if self.retry_pending(&n) {

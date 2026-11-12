@@ -263,7 +263,7 @@ behind work someone asked for, `triage.atOnce` at a time across every repo, and
 each one's end runs a full pass, so a quiet repo's backlog is worked through
 too. Take a label off to have an issue sorted again.
 
-With `triage.drain` set to an engine, the drain hands `ready` issues to it: each
+With `triage.drain` set to an engine, the drain hands `ready` issues from repos enabled in [the settings source](settings.md) to it: each
 pass, if that engine has an idle slot and fewer than `triage.drainJobs` handed-on
 issues have queued or running turns (or are awaiting their first job), the
 first `ready` issue in any repo's last-listed open issues, checked with GitHub

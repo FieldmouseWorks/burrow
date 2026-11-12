@@ -32,7 +32,7 @@ fn tracked() -> serde_json::Map<String, Value> {
 fn set(cfg: &mut Config, tracked: serde_json::Map<String, Value>) {
     let file = cfg.jobs.join("settings.json");
     fs::write(&file, Value::Object(tracked).to_string()).unwrap();
-    cfg.settings = Some(file);
+    cfg.tracked_settings = Some(file);
 }
 
 fn show(cfg: &Config) -> Value {
@@ -143,4 +143,35 @@ fn the_schema_is_burrow_settings_own() {
     let got: Value = serde_json::from_str(&command(&cfg, &["schema".into()]).unwrap()).unwrap();
     assert_eq!(got, burrow_settings::schema::json_schema());
     assert!(command(&cfg, &["set".into()]).is_err());
+}
+
+#[test]
+fn admission_reads_the_one_overlay_and_writes_without_a_tracked_document() {
+    let (d, mut cfg) = crate::usage::tests::rig();
+    cfg.roles = d.path().join("roles");
+    cfg.models = d.path().join("models");
+    let policy = burrow_settings::Config {
+        overlay: d.path().join("overlay.json"),
+        allowed: vec!["sam/kept".into()],
+        pipeline_repos: vec!["sam/pipeline".into()],
+    };
+    cfg.settings = Some(policy.clone());
+    cfg.tracked_settings = None;
+    command(&cfg, &["pause".into(), "sam/kept".into()]).unwrap();
+    assert!(!policy.allows("sam/kept").unwrap());
+    set(&mut cfg, tracked());
+    let until = crate::now() + 3600;
+    command(&cfg, &["pipeline".into(), until.to_string()]).unwrap();
+    let shown = show(&cfg);
+    assert_eq!(
+        shown["options"]["settings.repositoryOverrides"]["value"],
+        json!({"sam/kept": false})
+    );
+    assert_eq!(shown["options"]["settings.pipelineUntil"]["value"], until);
+    assert_eq!(
+        shown["options"]["settings.repositoryOverrides"]["file"],
+        json!(policy.overlay)
+    );
+    fs::write(&policy.overlay, "broken").unwrap();
+    assert!(command(&cfg, &["show".into()]).is_err());
 }

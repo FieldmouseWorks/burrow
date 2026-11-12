@@ -10,6 +10,12 @@ fn github_quota_excludes_only_its_installation_from_admission() {
     cfg.tools.git = git;
     let job = Job::new(&cfg, "limited");
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     fs::write(job.path("app"), "workers").unwrap();
     fs::write(job.path("project"), tmp.path().to_str().unwrap()).unwrap();
     let name = "2-100-limited";

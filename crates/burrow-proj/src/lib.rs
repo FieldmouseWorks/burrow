@@ -40,11 +40,15 @@
 //! proj reply [--first] ID "message"  continue that job's conversation
 //! proj reply --cut-off N ID "message"  so, if its turn N was cut off
 //!                             (else exit 3)
-//! proj status                 recent jobs and their state
+//! proj status [N]             recent jobs and their state, from the snapshot
 //! proj status --line          every turn in line, next first, and its wait
 //! proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 //!                             the full stream); fails when there's none
 //! proj state ID               queued, running, done, error or failed
+//! proj state --json [N]       the live snapshot ([`snapshot`]): the ready
+//!                             queue, the line, every slot and what holds it,
+//!                             the meters and holds, and the N jobs most
+//!                             recently changed (15); --schema for its schema
 //! proj lifecycle ID           its state, then what it holds open, a line each
 //!                             (Job::lifecycle): ask, owner, await TARGET
 //!                             usage ENGINE RESET, released ENGINE RELEASE
@@ -73,7 +77,7 @@
 //! proj usage [back]           whether the machine is out of Claude usage, and
 //!                             until when (JSON; nothing when it isn't);
 //!                             back: it isn't, now (the limit was raised)
-//! proj usage hold UNTIL [--reason TEXT]  pause Claude work until a Unix timestamp
+//! proj usage hold UNTIL [--only pipeline | --reason TEXT]  scope work until a deadline
 //! proj usage adopt UNTIL      import a legacy watchdog limit
 //! proj ask --default TEXT [--one-way]  from inside a job: its answer is a question for
 //!                             a person, whose reply resumes it
@@ -178,6 +182,7 @@ pub mod scratch;
 pub mod settings;
 pub mod setups;
 pub mod slot;
+pub mod snapshot;
 mod subprocess;
 pub mod systemd;
 pub mod turn;
@@ -336,3 +341,6 @@ mod tests {
 
 #[cfg(test)]
 mod regression_569;
+
+pub mod policy;
+mod policy_proofs;

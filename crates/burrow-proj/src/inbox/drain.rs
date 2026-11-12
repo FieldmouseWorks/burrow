@@ -29,6 +29,7 @@ use super::{Pass, RETRY, dirs, key, raw};
 use crate::config::Triage;
 use crate::engine::Engine;
 use crate::github::api;
+use crate::snapshot::Priority;
 use crate::{Fail, io_fail, mtime, now, slot, swap, usage};
 
 /// In the inbox's state while a ready issue waits for a slot: the repo it's
@@ -39,6 +40,21 @@ pub(crate) const WAITING: &str = ".drain-waiting";
 /// In the inbox's state: a file for each repo (its key), its ready issues
 /// as its last pass saw them.
 pub(crate) const READY_LISTS: &str = ".ready";
+
+/// A ready issue in the drain's order: its fields sort it, highest priority
+/// first, then the pipeline's repos, then the oldest.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Candidate {
+    pub(crate) priority: Priority,
+    /// Outside the pipeline's repos: they go after its own.
+    pub(crate) outside: bool,
+    /// When it was opened, as GitHub says it.
+    pub(crate) opened: String,
+    pub(crate) repo: String,
+    pub(crate) n: String,
+    /// A repair child: it takes no ordinary drain capacity.
+    pub(crate) repair: bool,
+}
 
 impl Pass<'_> {
     /// Whether the issue's record says the drain handed it on.
@@ -64,6 +80,15 @@ impl Pass<'_> {
         let Some(engine) = t.drain else {
             return Ok(());
         };
+        if let Some(until) = self
+            .cfg
+            .settings
+            .as_ref()
+            .and_then(|s| s.scope_until().ok().flatten())
+            && let Some(repo) = self.wake_repo()
+        {
+            self.book(&repo, until);
+        }
         let Some(label) = self
             .inbox
             .labels
@@ -82,11 +107,8 @@ impl Pass<'_> {
         // tell the owner, so it holds its place rather than handing on
         // another issue that would stall the same way.
         let mut going = 0;
-        for d in dirs(&self.inbox.state, "") {
+        for d in self.drain_records() {
             let mark = d.join("drained");
-            if !mark.exists() || self.drain_user(&d).is_none() {
-                continue;
-            }
             if d.join("job").exists() {
                 going += 1;
             } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
@@ -101,7 +123,7 @@ impl Pass<'_> {
             }
         }
         let ranked = self.next_ready(&t);
-        let Some((first, _, _)) = ranked.first() else {
+        let Some(Candidate { repo: first, .. }) = ranked.first() else {
             let _ = fs::remove_file(&waiting);
             return Ok(());
         };
@@ -117,7 +139,10 @@ impl Pass<'_> {
         // the rest of that repo's wait for its pass, and the next repo's go
         // on: one repo can't hold up the others. One is handed on at most.
         let mut passed: BTreeSet<String> = BTreeSet::new();
-        for (repo, n, repair) in ranked {
+        for Candidate {
+            repo, n, repair, ..
+        } in ranked
+        {
             // A full drain only refreshes cached repair candidates. Recheck the
             // live labels below before granting their capacity exemption.
             if (going >= t.drain_jobs && !repair) || passed.contains(&repo) {
@@ -174,6 +199,9 @@ impl Pass<'_> {
                 }
                 continue;
             }
+            if self.cfg.paused(&repo) {
+                continue;
+            }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
             fs::write(d.join("drained"), format!("{repo}#{n}\n"))
@@ -195,16 +223,36 @@ impl Pass<'_> {
         Ok(())
     }
 
+    /// The records that hold one of the drain's `drain_jobs`, oldest mark
+    /// first: each with its `drained` mark in an enabled repo, not a planned
+    /// parent (its children hold the slots), and either enrolling or with a
+    /// turn queued or running. The drain counts them, and the live snapshot
+    /// shows them.
+    pub(super) fn drain_records(&self) -> Vec<std::path::PathBuf> {
+        let mut held: Vec<_> = dirs(&self.inbox.state, "")
+            .into_iter()
+            .filter(|d| self.drain_user(d).is_some())
+            .collect();
+        held.sort_by_key(|d| (mtime(&d.join("drained")).unwrap_or(0), d.clone()));
+        held
+    }
+
     /// Active turns and enrollments reserve capacity only in enabled repos.
-    fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
+    pub(super) fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
         let named = crate::read(&dir.join("drained"))?;
         let (repo, n) = named.split_once('#')?;
-        if self.cfg.paused(repo) || (self.inbox.planning && self.has_task_list(Some(repo), n)) {
+        if !self.record_uses_capacity(dir)
+            || (self.inbox.planning && self.has_task_list(Some(repo), n))
+        {
             return None;
         }
         if let Some(id) = crate::read(&dir.join("job")) {
-            let state = crate::job::Job::new(self.cfg, &id).state();
-            matches!(state.as_str(), "queued" | "running")
+            let job = crate::job::Job::new(self.cfg, &id);
+            if crate::policy::path(&job, "restoring").exists() {
+                return Some(format!("{named} ({id}: restoring)"));
+            }
+            let state = job.state();
+            matches!(state.as_str(), "queued" | "running" | "parked")
                 .then(|| format!("{named} ({id}: {state})"))
         } else {
             Some(format!("{named} (enrolling)"))
@@ -272,9 +320,9 @@ impl Pass<'_> {
         swap(&f, &Value::from(ready).to_string()).map_err(|e| io_fail(&f, e))
     }
 
-    /// The ready issues to hand on, next first, as (OWNER/REPO, N, repair),
-    /// from every repo's last pass. Repair status comes from the cached labels.
-    fn next_ready(&mut self, t: &Triage) -> Vec<(String, String, bool)> {
+    /// The ready issues to hand on, next first, from every repo's last pass.
+    /// Repair status comes from the cached labels.
+    pub(super) fn next_ready(&mut self, t: &Triage) -> Vec<Candidate> {
         let dir = self.inbox.state.join(READY_LISTS);
         let items: Vec<Value> = fs::read_dir(&dir)
             .map(|d| {
@@ -290,39 +338,18 @@ impl Pass<'_> {
         self.ranked(t, &items)
     }
 
-    pub(super) fn ready_queue(&mut self, t: &Triage) -> String {
-        let users: Vec<_> = dirs(&self.inbox.state, "")
-            .iter()
-            .filter_map(|dir| self.drain_user(dir))
-            .collect();
-        let mut output = format!("drain: {}/{} used\n", users.len(), t.drain_jobs);
-        for user in users {
-            output.push_str(&format!("  {user}\n"));
-        }
-        output.push_str(
-            &self
-                .next_ready(t)
-                .into_iter()
-                .take(5)
-                .enumerate()
-                .map(|(index, (repo, n, _))| format!("ready {}: {repo}#{n}\n", index + 1))
-                .collect::<String>(),
-        );
-        output
-    }
-
     /// Of ready issues, the one to hand on ([`Pass::ranked`]'s first).
     pub(super) fn pick_ready(&mut self, t: &Triage, items: &[Value]) -> Option<(String, String)> {
         self.ranked(t, items)
             .into_iter()
             .next()
-            .map(|(repo, n, _)| (repo, n))
+            .map(|c| (c.repo, c.n))
     }
 
     /// Of ready issues, the ones to hand on, in order: a project's, opened by
     /// an author, nobody else's to work, and without a record here; the
     /// priority first, then pipeline repos, then oldest first.
-    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<(String, String, bool)> {
+    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<Candidate> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
             .keys()
@@ -372,31 +399,28 @@ impl Pass<'_> {
                     .join(format!("{}-{n}", key(&repo)))
                     .exists();
                 (labels.contains(&READY) && !theirs && !kept && !claimed[&repo].contains(&n)).then(
-                    || {
-                        (
-                            priority(i),
-                            rank(&repo),
-                            raw(&i["created_at"]),
-                            repo,
-                            n,
-                            self.lane(i),
-                        )
+                    || Candidate {
+                        priority: priority(i),
+                        outside: rank(&repo),
+                        opened: raw(&i["created_at"]),
+                        repair: self.lane(i),
+                        repo,
+                        n,
                     },
                 )
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|(_, _, _, repo, n, repair)| (repo, n, repair))
             .collect()
     }
 }
 
 /// Highest explicit priority wins; an unlabeled issue is medium.
-pub(super) fn priority(issue: &Value) -> u8 {
-    priority_label(issue).map_or(1, |l| match l {
-        "priority: high" => 0,
-        "priority: low" => 2,
-        _ => 1,
+pub(super) fn priority(issue: &Value) -> Priority {
+    priority_label(issue).map_or(Priority::Medium, |l| match l {
+        "priority: high" => Priority::High,
+        "priority: low" => Priority::Low,
+        _ => Priority::Medium,
     })
 }
 pub(super) fn priority_label(issue: &Value) -> Option<&str> {
@@ -411,46 +435,5 @@ pub(super) fn priority_label(issue: &Value) -> Option<&str> {
 
 /// Automated inbox wakeups retain their waits while the repo is paused.
 pub(crate) fn job_paused(cfg: &crate::config::Config, id: &str) -> bool {
-    if cfg.paused.is_empty() {
-        return false;
-    }
-    let Some(inbox) = &cfg.inbox else {
-        return false;
-    };
-    // Legacy sorting/planner records have only KEY-N and job, without
-    // source metadata. Both record roots use the same repository key.
-    [inbox.state.clone(), inbox.state.join(".triage")]
-        .iter()
-        .flat_map(|root| dirs(root, ""))
-        .any(|dir| {
-            crate::read(&dir.join("job")).as_deref() == Some(id)
-                && dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| name.rsplit_once('-'))
-                    .is_some_and(|(repo, _)| {
-                        cfg.paused
-                            .iter()
-                            .any(|paused| key(paused).eq_ignore_ascii_case(repo))
-                    })
-        })
-}
-
-/// The next candidates from the drain's own lists and ranking.
-pub(crate) fn ready_queue(cfg: &crate::config::Config) -> String {
-    let Some(inbox) = cfg.inbox.as_ref() else {
-        return String::new();
-    };
-    let Some(t) = inbox.triage.as_ref().filter(|t| t.drain.is_some()) else {
-        return String::new();
-    };
-    let mut pass = Pass {
-        cfg,
-        inbox,
-        project: super::projects(cfg),
-        wake: std::collections::BTreeMap::new(),
-        unreached: Vec::new(),
-        looked: Vec::new(),
-    };
-    pass.ready_queue(t)
+    crate::policy::denied(&crate::job::Job::new(cfg, id))
 }

@@ -17,6 +17,32 @@ import time
 import urllib.parse
 
 tmp = tempfile.mkdtemp()
+SETTINGS = os.path.abspath(sys.argv[9])
+
+
+def admission(allowed, pipeline=(), until=None):
+    """Use the production Rust reader, with a tracked file and live overlay."""
+    folder = tempfile.mkdtemp(dir=tmp)
+    path = f"{folder}/tracked.json"
+    overlay = f"{folder}/overlay.json"
+    with open(path, "w") as f:
+        json.dump({"overlay": overlay, "allowed": allowed, "pipelineRepos": list(pipeline)}, f)
+    if until is not None:
+        subprocess.run([SETTINGS, path, "pipeline", str(until)], check=True, capture_output=True)
+    return {"command": SETTINGS, "config": path}
+
+
+# Existing scenarios opt their fixture repos in; production has no such list.
+DEFAULT_ADMISSION = admission([
+    "sam/r", "sam/other", "sam/q", "sam/u", "sam/up", "sam/uu", "sam/p",
+    "sam/app", "sam/later", "sam/new", "sam/fresh", "sam/tool", "sam/swept",
+    "sam/old", "sam/was", "sam/took", "sam/config", "sam/.cfg", "sam/.github",
+    "sam/empty", "sam/alias", "sam/plain", "sam/notes", "sam/now", "sam/latest",
+    "sam/mirrored", "sam/lo-k", "sam/flaky", "sam/homelab", "sam/absent", "sam/bad",
+    "sam/gone", "sam/nobody", "sam/none", "sam/skip", "sam/pipe", "sam/lead",
+    "eve/app", "eve/later", "eve/p", "eve/tool", "eve/permission", "eve/.cfg",
+    "kim/busy", "kim/r", "kim/x", "kim/z", "old-org/app", "old-org/later", "old-org/swept",
+])
 
 # burrow-events' kick port: which repos' passes were kicked.
 KICKS = []
@@ -129,7 +155,7 @@ def review_service():
     """`autoland-review`: burrow-review works through the queue, as the
     module runs it, on the steward's state here."""
     with open(f"{tmp}/review.json", "w") as f:
-        json.dump({"queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
+        json.dump({"settings": json.load(open(C.CFG["settings"]["config"])), "queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
                    "sessions": f"{tmp}/state/review/sessions", "snapshots": f"{tmp}/trees",
                    "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2, "off": []}}, "timeoutMinutes": 5,
                    "agents": f"{tmp}/agents", "sandbox": f"{tmp}/bwrap",
@@ -248,6 +274,7 @@ WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for
 POLICY = sys.argv[2]
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
+        "settings": DEFAULT_ADMISSION,
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,

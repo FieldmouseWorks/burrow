@@ -75,7 +75,7 @@ fn status_snapshots_and_notices_do_not_read_outside_job_state() {
     for name in ["agent", "1.result"] {
         symlink(p.join("denied"), job.path(name)).unwrap();
     }
-    assert!(!crate::cmd::status_line(&job).contains(secret));
+    assert!(!crate::snapshot::row(&job).line().contains(secret));
     crate::ask::record(
         &job,
         &crate::ask::Recommendation {
@@ -143,4 +143,60 @@ fn configured_app_environment_may_be_a_system_symlink_without_allowing_job_symli
     );
     assert!(crate::read(&p.join("system-env")).is_none());
     assert!(cfg.app_environment("../workers").is_none());
+}
+
+#[test]
+fn recording_a_choice_never_follows_job_state_links_and_reports_failures() {
+    use crate::engine::{Choice, Engine};
+    let temp = tempfile::tempdir().unwrap();
+    let p = temp.path();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = p.join("jobs");
+    let dir = cfg.jobs.join("j");
+    fs::create_dir_all(&dir).unwrap();
+    let job = Job::new(&cfg, "j");
+    let set = Choice {
+        engine: Engine::Codex,
+        model: Some("m".into()),
+        effort: Some("e".into()),
+    };
+    let unset = Choice {
+        engine: Engine::Codex,
+        model: None,
+        effort: None,
+    };
+    for kind in ["model", "effort"] {
+        let outside = p.join(format!("outside-{kind}"));
+        fs::write(&outside, "host").unwrap();
+        symlink(&outside, dir.join(format!("1.{kind}"))).unwrap();
+        // Writing replaces the link; removing unlinks it. Neither touches the target.
+        job.record_choice("1", &set).unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "host");
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("1.{kind}"))).unwrap(),
+            if kind == "model" { "m" } else { "e" }
+        );
+        fs::remove_file(dir.join(format!("1.{kind}"))).unwrap();
+        symlink(&outside, dir.join(format!("1.{kind}"))).unwrap();
+        job.record_choice("1", &unset).unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "host");
+        assert!(!dir.join(format!("1.{kind}")).exists());
+    }
+    // A hard link to a host file is replaced, not written through.
+    let outside = p.join("outside-hard");
+    fs::write(&outside, "host").unwrap();
+    fs::hard_link(&outside, dir.join("2.model")).unwrap();
+    job.record_choice("2", &set).unwrap();
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "host");
+    // A redirected job directory is refused.
+    let real = p.join("real");
+    fs::create_dir(&real).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    symlink(&real, &dir).unwrap();
+    assert!(job.record_choice("1", &set).is_err());
+    assert!(fs::read_dir(&real).unwrap().next().is_none());
+    // A failed engine record is an error, not a silent default to Claude.
+    fs::remove_file(&dir).unwrap();
+    fs::create_dir_all(dir.join("3.engine")).unwrap();
+    assert!(job.record_choice("3", &set).is_err());
 }

@@ -41,6 +41,12 @@ fn due(job: &Job) {
 fn job(cfg: &Config) -> Job<'_> {
     let job = Job::new(cfg, "recovery");
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     job.set_turns(1).unwrap();
     job
 }
@@ -415,6 +421,12 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
     ] {
         let job = Job::new(&cfg, id);
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
         job.set_turns(1).unwrap();
         swap(job.path("link"), "sam/r#7").unwrap();
         swap(job.path("app"), app).unwrap();

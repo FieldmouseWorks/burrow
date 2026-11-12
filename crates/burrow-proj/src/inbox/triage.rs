@@ -125,7 +125,7 @@ impl Pass<'_> {
         self.inbox.triage.as_ref()
     }
 
-    fn sorting_dir(&self) -> PathBuf {
+    pub(super) fn sorting_dir(&self) -> PathBuf {
         self.inbox.state.join(".triage")
     }
 
@@ -219,12 +219,17 @@ impl Pass<'_> {
     /// carried out, then a job for each issue nobody has sorted, while there's
     /// room.
     pub(super) fn triage(&mut self, repo: &str, all: &[Value]) -> Result<(), Fail> {
-        if self.cfg.paused(repo) {
-            return Ok(());
-        }
         let Some(t) = self.sorting().cloned() else {
             return Ok(());
         };
+        if self
+            .cfg
+            .settings
+            .as_ref()
+            .is_none_or(|s| !s.decision(repo).is_ok_and(|d| !d.vacate))
+        {
+            return Ok(());
+        }
         let root = self.sorting_dir();
         fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
         let handled = self.verdicts(repo, &t, all)?;
@@ -328,6 +333,7 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| issue["user"]["type"] == "Bot");
         let new = New {
+            admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
             unstick: self.lane(issue),
             task_source: (self.inbox.planning && input.len() > crate::planning::MAX_INPUT)
                 .then(|| input.clone()),
@@ -386,6 +392,9 @@ impl Pass<'_> {
             let job = Job::new(self.cfg, &id);
             if !job.dir.is_dir() {
                 let _ = fs::remove_dir_all(&d);
+                continue;
+            }
+            if crate::policy::parked(&job) || crate::policy::denied(&job) {
                 continue;
             }
             let open = all.iter().find(|i| raw(&i["number"]) == n);

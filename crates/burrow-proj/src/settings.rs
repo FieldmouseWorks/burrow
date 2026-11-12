@@ -16,13 +16,29 @@ use crate::usage;
 /// Every option in effect, and where each came from.
 pub fn document(cfg: &Config) -> Result<Document, String> {
     let file = cfg
-        .settings
+        .tracked_settings
         .as_deref()
         .ok_or("proj's config names no settings file")?;
     let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let tracked: serde_json::Map<String, Value> =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut readings = show::flake(&tracked)?;
+    let (file, overrides, until) = if let Some(policy) = &cfg.settings {
+        let (overrides, until) = policy.readings()?;
+        (
+            policy.overlay.clone(),
+            there(&policy.overlay).then(|| json!(overrides)),
+            there(&policy.overlay).then(|| json!(until)),
+        )
+    } else {
+        (cfg.jobs.join(".settings-unconfigured"), None, None)
+    };
+    readings.push(Reading::live(
+        "settings.repositoryOverrides",
+        file.clone(),
+        overrides,
+    ));
+    readings.push(Reading::live("settings.pipelineUntil", file, until));
     let roles = crate::roles::read(&cfg.roles)?;
     readings.push(Reading::live(
         "proj.roles",
@@ -77,7 +93,11 @@ pub fn command(cfg: &Config, args: &[String]) -> Result<String, String> {
                 .expect("a schema is JSON")
                 + "\n",
         ),
-        _ => Err("usage: proj settings [show [--json] | schema]".into()),
+        _ => cfg
+            .settings
+            .as_ref()
+            .ok_or("settings are not configured")?
+            .command(args, "proj"),
     }
 }
 

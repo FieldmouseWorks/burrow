@@ -39,6 +39,12 @@ esac
         cfg.notify = Some(script);
         let job = Job::new(&cfg, "j1");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
         job.set_turns(1).unwrap();
         Self { dir, cfg }
     }
@@ -635,6 +641,12 @@ fn initial_and_completed_questions_keep_normal_declarations() {
     cfg.jobs = dir.path().to_owned();
     let job = Job::new(&cfg, "j1");
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
     let initial = Resume::prepare(&job, false).unwrap();
     assert_eq!(initial.prompt("new task"), "new task");
     initial.commit().unwrap();

@@ -8,6 +8,12 @@ pub(super) fn release_codex_pool() {
     cfg.codex_slots = 1;
     let job = Job::new(&cfg, "code");
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     fs::write(
         cfg.jobs.join(crate::usage::FILE),
         serde_json::json!({"until": crate::now()+10000,

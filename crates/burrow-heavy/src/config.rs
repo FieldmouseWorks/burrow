@@ -33,7 +33,7 @@ impl Config {
 
     /// Slot `i`'s lock file, from 1.
     pub fn slot(&self, i: u32) -> PathBuf {
-        self.dir.join(format!("slot{i}"))
+        slot_file(&self.dir, i)
     }
 
     /// The turn an `--all` run holds while it waits for every slot and
@@ -41,4 +41,10 @@ impl Config {
     pub fn all(&self) -> PathBuf {
         self.dir.join("all")
     }
+}
+
+/// Slot `i`'s lock file in the slots' `dir`, from 1: what [`Config::slot`]
+/// names, for readers with only the dir (proj's live snapshot).
+pub fn slot_file(dir: &Path, i: u32) -> PathBuf {
+    dir.join(format!("slot{i}"))
 }

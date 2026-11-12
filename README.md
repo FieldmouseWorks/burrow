@@ -129,7 +129,9 @@ Each has an entry below, and each can be imported on its own.
   else.
 - **`proj`** (`burrow.proj`): `proj run PROJECT "task"`: the operator hands
   work to a headless agent inside that project, as a systemd unit, and checks
-  on it later (`status`, `log`, `reply`, `stop`). At most `maxJobs` Claude turns run at
+  on it later (`status`, `log`, `reply`, `stop`; `proj state --json` is the
+  live snapshot those print from: the ready queue, every slot and what holds
+  it, the meters and holds, its schema in `crates/burrow-proj/state.schema.json`). At most `maxJobs` Claude turns run at
   once, `maxJobsPerProject` from one project, and the rest queue (`proj status
   --line` shows the whole line, next first, with each turn's wait; `--first`
   goes ahead, and `--pipeline` jobs, the steward's and renovate-sweep's and
@@ -147,9 +149,7 @@ Each has an entry below, and each can be imported on its own.
   default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
   GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
   comes back as a comment and a reply there continues it; `proj done` closes its issue.
-  `burrow.proj.paused = [ "OWNER/REPO" ];` pauses automated inbox, triage,
-  drain and steward jobs for those repositories, without changing labels.
-  Removing a repository resumes it; running jobs continue and settled PRs may merge.
+  Automated admission and runtime pauses use [the settings source](docs/settings.md).
   With `inbox.triage`, every other issue the
   authors open is sorted by a job of its own (`ready`, `later`, `tracker`, the
   owner's call, or closed as a duplicate or done), and `triage.drain` hands
@@ -183,7 +183,10 @@ Each has an entry below, and each can be imported on its own.
   `proj usage hold UNTIL [--reason TEXT]` starts a fresh owner pause until a
   future Unix timestamp, even after a previous release. Successful turns and
   fresh meters cannot release an owner pause; `proj usage back` can.
-  Running turns continue, and Codex work remains eligible.
+  A plain budget hold lets running turns continue and keeps Codex eligible.
+  Add `--only pipeline` to vacate and park every excluded repository across
+  both engines, reviews and proofs; [runtime settings](docs/settings.md) own
+  the allow list and independent off switch.
   `burrow.proj.inbox.planning` defaults on: a fresh Codex
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist

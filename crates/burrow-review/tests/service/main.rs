@@ -4,6 +4,7 @@
 mod look;
 mod order;
 mod out;
+mod pause;
 mod queue;
 mod rig;
 mod sessions;

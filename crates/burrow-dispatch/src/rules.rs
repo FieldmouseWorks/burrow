@@ -110,6 +110,7 @@ pub fn decide(
         d.items.insert(
             format!("github/{repo}"),
             Item {
+                repo: Some(repo.clone()),
                 what: format!("{repo}, as the pipeline dispatcher reads it from GitHub"),
                 phase: format!("its passes can't read it: {err}"),
                 since,
@@ -283,6 +284,7 @@ fn going_live(
 ) -> Item {
     match update.since {
         Some(start) if update.state == "activating" && (any || start >= since) => Item {
+            repo: None,
             what,
             phase: format!(
                 "{} has been putting it live since {}",
@@ -298,6 +300,7 @@ fn going_live(
             claude: false,
         },
         _ => Item {
+            repo: None,
             what,
             phase: match behind {
                 Some(pr) => format!(
@@ -358,6 +361,7 @@ fn runner(
     d.items.insert(
         format!("runner/{unit}"),
         Item {
+            repo: Some(seen.repo.clone()),
             what: format!("{unit}, {}'s Actions runner", seen.repo),
             phase,
             since,

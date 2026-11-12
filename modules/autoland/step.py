@@ -45,6 +45,8 @@ __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_
 def handle(repo, pr, repo_info, digest, held=None, below=None):
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
     try:
+        if C.paused(repo):
+            raise C.JobPaused(f"{repo}: repository work paused")
         p.run()
     except C.JobPaused:
         p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
@@ -92,8 +94,6 @@ class Pass(Context, Jobs, Actions):
         self.after(ts(self.pr["createdAt"]), 24 * 60)  # ends: listed for the owner
 
         self.session = bool(SESSION.search(self.pr.get("body") or ""))
-
-        self.refresh = {}  # what the watchdog's to count of a refresh of it renovate-sweep has (waits.note)
 
         # What its fix jobs left, posted once it's so (or they're stopped).
         if said := claims.look(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):

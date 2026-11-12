@@ -22,6 +22,35 @@ pub fn prepare(rec: &Record, id: &str, i: usize, log: &File) -> Result<(), Strin
     let Some(source) = &rec.tools_ref else {
         return Ok(());
     };
+    let tree = path(rec, id, i);
+    if tree.exists() {
+        // Every invocation uses a fresh trusted checkout. Keep the interrupted
+        // copy beside it until the run ends, without executing its edits.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let kept = rec.trees.join(format!("{id}-parkedtools{i}_{stamp}"));
+        let moved = Command::new(&rec.git)
+            .arg("-C")
+            .arg(&rec.checkout)
+            .args(["worktree", "move"])
+            .arg(&tree)
+            .arg(&kept)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log.try_clone().map_err(|e| e.to_string())?)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !moved.success() {
+            return Err("can't preserve the interrupted trusted-tools checkout".into());
+        }
+        let _ = writeln!(
+            &mut &*log,
+            "autoland: kept interrupted tools at {}",
+            kept.display()
+        );
+    }
     let target = reference(id);
     let status = Command::new(&rec.git)
         .arg("-C")
@@ -41,7 +70,6 @@ pub fn prepare(rec: &Record, id: &str, i: usize, log: &File) -> Result<(), Strin
     if !status.success() {
         return Err(format!("can't fetch trusted tools from {source}"));
     }
-    let tree = path(rec, id, i);
     let made = trees::add(&rec.git, &rec.checkout, &tree, &target, log).map_err(|e| e.to_string());
     // The worktree pins the commit. End also forgets this ref if a stop
     // interrupted fetch/add, and sweep handles a machine restart.

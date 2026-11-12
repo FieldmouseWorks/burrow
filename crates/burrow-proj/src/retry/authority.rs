@@ -126,11 +126,15 @@ fn lock_id(meta: &fs::Metadata) -> String {
 }
 
 /// Earlier parents have no host identity. Adopt them only while the kernel
-/// proves the trusted unit parent is blocked in the fenced legacy census.
-/// A running sandbox, or a parent completing one, cannot manufacture that
-/// host-side scheduler state by editing its job files.
+/// proves the trusted unit parent waits in the fenced legacy census: blocked
+/// on its lock, or polling it ([`polling`]). A running sandbox, or a parent
+/// completing one, cannot manufacture either host-side scheduler state by
+/// editing its job files.
 pub(super) fn legacy_waiting(cfg: &Config, pid: u32) -> io::Result<bool> {
     let want = lock_id(&fs::metadata(cfg.jobs.join(".slots/.lock"))?);
+    if polling(pid, &want) {
+        return Ok(true);
+    }
     // The handover shell waits in its flock child.
     let mut waiters = vec![pid.to_string()];
     let handover = fs::read_link(format!("/proc/{pid}/exe"))
@@ -152,6 +156,38 @@ pub(super) fn legacy_waiting(cfg: &Config, pid: u32) -> io::Result<bool> {
             && waiters.iter().any(|w| w == fields[5])
             && fields[6] == want
     }))
+}
+
+/// A nonblocking scheduler (3bdabc2's) never blocks on the census: each pass
+/// opens it, tries the lock and, refused, sleeps two seconds with the file
+/// still open. Its retries wait there with no `->` entry in /proc/locks. In
+/// every proj, only the wait for a slot opens the census from Rust, and Rust
+/// opens every file close-on-exec, so such a descriptor in the trusted
+/// parent's own table is the kernel's word that it is in that wait. The fd 9
+/// a handover's shell leaves open for the parent's whole life (`_exec` only
+/// unlocks it) has no close-on-exec flag and proves nothing; nor can a
+/// sandbox add a descriptor to its host parent's table.
+fn polling(pid: u32, want: &str) -> bool {
+    let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.filter_map(Result::ok).any(|fd| {
+        fs::metadata(fd.path()).is_ok_and(|meta| lock_id(&meta) == want)
+            && fs::read_to_string(format!(
+                "/proc/{pid}/fdinfo/{}",
+                fd.file_name().to_string_lossy()
+            ))
+            .is_ok_and(|info| close_on_exec(&info))
+    })
+}
+
+/// fdinfo's `flags:`, in octal, carries O_CLOEXEC for a close-on-exec fd.
+pub(super) fn close_on_exec(fdinfo: &str) -> bool {
+    fdinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("flags:"))
+        .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok())
+        .is_some_and(|flags| flags & rustix::fs::OFlags::CLOEXEC.bits() != 0)
 }
 
 /// An old parent's `hand_over` shell: `bash -c SCRIPT LOCK FLOCK PROJ _exec

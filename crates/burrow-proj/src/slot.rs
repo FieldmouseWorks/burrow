@@ -47,6 +47,7 @@ use crate::config::Config;
 use crate::engine::Engine;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
+use crate::snapshot::{self, Waiting};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
@@ -143,6 +144,9 @@ fn entry(job: &Job, id: &str, given: Class) -> String {
 }
 
 pub(crate) fn entry_at(job: &Job, id: &str, given: Class, arrived: i64) -> String {
+    if let Some(order) = read(&crate::policy::path(job, "order")) {
+        return order;
+    }
     let prefix = if given == Class::First { 1 } else { 2 };
     let since = read(&job.path("since"));
     let began = since.as_deref().and_then(|s| s.lines().next());
@@ -167,7 +171,10 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::out(cfg).is_some() || crate::github_quota::held(cfg, &job, Engine::Claude).is_some() {
+    if usage::out(cfg).is_some()
+        || automation_paused(cfg, &job)
+        || crate::github_quota::held(cfg, &job, Engine::Claude).is_some()
+    {
         return Ok(None);
     }
     let slot = held(slot)?;
@@ -175,17 +182,25 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
         slots.join("unstick.who"),
         format!("unstick\t{}\n", project(&job.dir)),
     )?;
-    took_slot(&job, n, "unstick")?;
+    took_slot(&job, n, "unstick", "unstick")?;
     Ok(Some(slot))
 }
 
 /// Say that this job's turn N has slot S (N.slot, which proj state reads as
-/// running), under the job's lock: proj withdraw stops a turn only while it has
-/// none, and looks under that lock, so none takes one between its look and its
-/// stop. One withdrawn while it waits here is stopped with no slot.
-fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
+/// running), and the class it took it as (N.class), under the job's lock: proj
+/// withdraw stops a turn only while it has none, and looks under that lock, so
+/// none takes one between its look and its stop. One withdrawn while it waits
+/// here is stopped with no slot.
+fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))
+    if automation_paused(job.cfg, job) {
+        crate::policy::mark(job, "queued", false).map_err(io::Error::other)?;
+        return Err(io::Error::from(io::ErrorKind::WouldBlock));
+    }
+    let _ = fs::remove_file(crate::policy::path(job, "order"));
+    crate::state_reads::write(job.turn(n, "class"), format!("{class}\n"))?;
+    crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))?;
+    crate::policy::accepted(job).map_err(io::Error::other)
 }
 
 /// Say this job's turn N may be withdrawn no more, under the job's lock, so none
@@ -331,7 +346,10 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             remove_place(&queue.join(&name))?;
             continue;
         }
-        if crate::github_quota::held(cfg, &Job::new(cfg, fid), Engine::Claude).is_some() {
+        let other = Job::new(cfg, fid);
+        if automation_paused(cfg, &other)
+            || crate::github_quota::held(cfg, &other, Engine::Claude).is_some()
+        {
             continue;
         }
         if name == me {
@@ -389,7 +407,10 @@ fn codex_slot(
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
         }
-        if crate::github_quota::held(cfg, &job, Engine::Codex).is_some() {
+        if automation_paused(cfg, &job)
+            || crate::policy::earlier_pending(&job)
+            || crate::github_quota::held(cfg, &job, Engine::Codex).is_some()
+        {
             sleep(Duration::from_secs(2));
             continue;
         }
@@ -397,12 +418,18 @@ fn codex_slot(
             let slot = File::create(slots.join(i.to_string()))?;
             if slot.try_lock().is_ok() {
                 let slot = held(slot)?;
-                took_slot(&job, n, &format!("codex-{i}"))?;
+                took_slot(&job, n, &format!("codex-{i}"), given.name())?;
                 return Ok(slot);
             }
         }
         sleep(Duration::from_secs(2));
     }
+}
+
+/// Recheck bound repository admission before taking any slot. Explicit pauses
+/// vacate every role; unlisted repos can still sort issues.
+fn automation_paused(_cfg: &Config, job: &Job) -> bool {
+    crate::policy::denied(job)
 }
 
 pub fn take_engine(
@@ -454,12 +481,13 @@ pub fn take(
         .unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
     loop {
+        let paused = automation_paused(cfg, &job);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
         // run would be refused, an --unstick turn's too.
         usage::metered(cfg);
         let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if job.path("unstick").exists() {
+        if !paused && job.path("unstick").exists() {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
             let _ = fs::remove_file(queue.join(&me));
@@ -487,6 +515,10 @@ pub fn take(
             let failed = hand_over(cfg, &to, id, given);
             drop(lk);
             return Err(failed);
+        }
+        if paused {
+            sleep(Duration::from_secs(2));
+            continue;
         }
         let lk = File::create(slots.join(".admission-lock"))?;
         // Keep checking for emergency reclassification while another census
@@ -538,6 +570,11 @@ pub fn take(
             me = new;
         }
         if !publish(cfg, &queue, &me, original)? {
+            drop(lk);
+            sleep(Duration::from_secs(2));
+            continue;
+        }
+        if crate::policy::earlier_pending(&job) {
             drop(lk);
             sleep(Duration::from_secs(2));
             continue;
@@ -601,7 +638,8 @@ pub fn take(
                 fs::write(slots.join(".next"), "")?;
                 let _ = fs::remove_file(queue.join(&me));
                 drop(lk);
-                took_slot(&job, n, &n_slot.to_string())?;
+                fs::write(job.turn(n, "queue-order"), &me)?;
+                took_slot(&job, n, &n_slot.to_string(), class.name())?;
                 return Ok(slot);
             }
         }
@@ -632,14 +670,16 @@ fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::R
         )?;
         fs::rename(&tmp, queue.join(me))?;
     }
+    crate::policy::accepted(&Job::new(cfg, job_of(me))).map_err(io::Error::other)?;
     Ok(true)
 }
 
-/// `proj status --line`: every turn in line, in the order pick takes them
-/// (lead ones, then the rest), with its job, class, how long it has waited and
-/// its project. Only reads. The wait is from when its place was made, not its
-/// name's WHEN, which for a job started --since is when its work began.
-pub fn in_line(cfg: &Config) -> String {
+/// Every turn in line, in the order pick takes them (lead ones, then the
+/// rest), with its job, class, project and how long it has waited: the live
+/// snapshot's line, which `proj status --line` prints. Only reads. The wait is
+/// from when its place was made, not its name's WHEN, which for a job started
+/// --since is when its work began.
+pub fn line(cfg: &Config) -> Vec<Waiting> {
     let queue = cfg.jobs.join(".queue");
     let pending = crate::retry::admission(cfg).unwrap_or_default();
     let mut names: Vec<String> = fs::read_dir(&queue)
@@ -652,9 +692,13 @@ pub fn in_line(cfg: &Config) -> String {
         .unwrap_or_default();
     names.sort();
     let mut classes = Classes::default();
-    let mut rows: Vec<(Class, String)> = Vec::new();
+    let at = now();
+    let mut rows: Vec<Waiting> = Vec::new();
     for name in &names {
         let fid = job_of(name);
+        if automation_paused(cfg, &Job::new(cfg, fid)) {
+            continue;
+        }
         if !waiter_alive(&queue.join(name), fid) && !pending.iter().any(|(id, _, _)| id == fid) {
             continue;
         }
@@ -663,22 +707,150 @@ pub fn in_line(cfg: &Config) -> String {
         };
         let dir = cfg.jobs.join(fid);
         let (class, _) = classes.place(cfg, name, &dir);
-        let wait = now() - made;
-        let row = format!(
-            "{fid:<40} {:<8} {:>4}m{:02}s  {}\n",
-            class.name(),
-            wait / 60,
-            wait % 60,
-            project(&dir)
-        );
-        rows.push((class, row));
+        rows.push(Waiting {
+            job: fid.to_owned(),
+            class: class.name().to_owned(),
+            project: project(&dir),
+            since: made,
+            wait: at - made,
+        });
     }
-    rows.sort_by_key(|(c, _)| *c != Class::Lead);
-    rows.into_iter().map(|(_, r)| r).collect()
+    rows.sort_by_key(|w| w.class != Class::Lead.name());
+    rows
+}
+
+/// What a look at a slot's lock file finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lock {
+    /// Locked by nobody: tried, and let go at once.
+    Free,
+    Taken,
+    /// No file: proj's own pools make theirs as they're first taken, so for
+    /// them it's free; heavy's are made at boot, so one missing is unknown.
+    Missing,
+    /// It couldn't be opened or tried (permissions, too many files, I/O):
+    /// never counted as free.
+    Unknown,
+}
+
+fn lock(path: &Path) -> Lock {
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Lock::Missing,
+        Err(_) => return Lock::Unknown,
+    };
+    match f.try_lock() {
+        Ok(()) => {
+            let _ = f.unlock();
+            Lock::Free
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Lock::Taken,
+        Err(std::fs::TryLockError::Error(_)) => Lock::Unknown,
+    }
+}
+
+mod owner;
+
+/// Every slot of the line's, Codex's pool and the machine's heavy work, for
+/// the live snapshot. A taken one's holder is the job whose `_exec` the kernel
+/// says took its lock, with matching lock evidence on that live process's
+/// file descriptor, checked again after collecting the job metadata:
+/// with what that job's latest turn says (its state, and the class it took the
+/// slot as) once that turn's N.slot names the slot, and as starting until it
+/// does. One taken by anything else (what an ended turn left running, heavy's
+/// users) is busy, with no holder or time it can vouch for.
+pub(crate) fn view(cfg: &Config, at: i64) -> Vec<snapshot::Slot> {
+    use snapshot::{Holder, SlotKind, SlotState, held, job_slot};
+    let mut slots = Vec::new();
+    // Each slot by its name in its kind, the name a turn's N.slot gives it,
+    // its lock, and what a missing lock file means.
+    let mut one = |kind: SlotKind, name: String, key: String, path: PathBuf, missing: Lock| {
+        let state = match lock(&path) {
+            Lock::Missing => missing,
+            l => l,
+        };
+        let observed_owner = (state == Lock::Taken).then(|| owner::read(&path)).flatten();
+        let slot = match state {
+            Lock::Free | Lock::Missing => held(kind, name, SlotState::Idle, None, at),
+            Lock::Unknown => held(kind, name, SlotState::Unknown, None, at),
+            Lock::Taken => match observed_owner.clone() {
+                Some(owner) => {
+                    let id = owner.job.clone();
+                    let job = Job::new(cfg, &id);
+                    let n = job.turns().unwrap_or_default();
+                    if read(&job.turn(&n, "slot")).as_deref() == Some(key.as_str()) {
+                        let mut s = job_slot(cfg, kind, name, &id, None, at);
+                        if let Some(h) = s.holder.as_mut() {
+                            h.class = read(&job.turn(&n, "class")).filter(|c| !c.is_empty());
+                        }
+                        s
+                    } else {
+                        snapshot::Slot {
+                            holder: Some(Holder {
+                                job: Some(id),
+                                ..Holder::default()
+                            }),
+                            ..held(kind, name, SlotState::Starting, None, at)
+                        }
+                    }
+                }
+                None => held(kind, name, SlotState::Busy, None, at),
+            },
+        };
+        let slot = if slot.holder.is_some()
+            && state == Lock::Taken
+            && owner::read(&path) != observed_owner
+        {
+            held(kind, slot.name.clone(), SlotState::Busy, None, at)
+        } else {
+            slot
+        };
+        slots.push(slot);
+    };
+    let dir = cfg.jobs.join(".slots");
+    for i in 1..=cfg.max_jobs {
+        one(
+            SlotKind::Claude,
+            i.to_string(),
+            i.to_string(),
+            dir.join(i.to_string()),
+            Lock::Free,
+        );
+    }
+    one(
+        SlotKind::Unstick,
+        "unstick".into(),
+        "unstick".into(),
+        dir.join("unstick"),
+        Lock::Free,
+    );
+    let codex = cfg.jobs.join(".codex-slots");
+    for i in 1..=cfg.codex_slots {
+        one(
+            SlotKind::Codex,
+            i.to_string(),
+            format!("codex-{i}"),
+            codex.join(i.to_string()),
+            Lock::Free,
+        );
+    }
+    if let Some(heavy) = &cfg.heavy_dir {
+        for i in 1..=cfg.heavy_slots {
+            // Nothing of proj's takes these: whose they are is heavy's.
+            one(
+                SlotKind::Heavy,
+                i.to_string(),
+                String::new(),
+                burrow_heavy::config::slot_file(heavy, i),
+                Lock::Unknown,
+            );
+        }
+    }
+    slots
 }
 
 /// The job a place in line is for: PREFIX-WHEN-ID.
-fn job_of(name: &str) -> &str {
+pub(crate) fn job_of(name: &str) -> &str {
     name.split_once('-')
         .and_then(|(_, r)| r.split_once('-'))
         .map_or(name, |(_, r)| r)
@@ -712,14 +884,9 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
         if fs::create_dir_all(&dir).is_err() {
             return 0;
         }
+        // Only a slot seen free is room: one that can't be looked at isn't.
         (1..=n)
-            .filter(|i| {
-                File::create(dir.join(i.to_string())).is_ok_and(|f| {
-                    let ok = f.try_lock().is_ok();
-                    let _ = f.unlock();
-                    ok
-                })
-            })
+            .filter(|i| matches!(lock(&dir.join(i.to_string())), Lock::Free | Lock::Missing))
             .count()
     };
     match engine {
@@ -727,7 +894,7 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
             usage::metered(cfg);
             usage::out(cfg).is_none()
                 && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
-                && in_line(cfg).is_empty()
+                && line(cfg).is_empty()
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
         Engine::Codex => free(".codex-slots", cfg.codex_slots) > 0,

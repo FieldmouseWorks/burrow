@@ -16,6 +16,7 @@ pkgs.runCommand "autoland-check" {
     ${self.nixosConfigurations.example.config.burrow.ledger.env.CONARY_POLICY} \
     ${self.packages.${system}.burrow-review}/bin/burrow-review ${../crates/burrow-review/tests/fakes} \
     ${self.packages.${system}.burrow-upkeep}/bin/burrow-upkeep ${../crates/burrow-upkeep/src} \
-    ${self.packages.${system}.burrow-proof}/bin/burrow-proof ${../crates/burrow-proj/src/ask.rs}
+    ${self.packages.${system}.burrow-proof}/bin/burrow-proof ${../crates/burrow-proj/src/ask.rs} \
+    ${self.packages.${system}.burrow-settings}/bin/burrow-settings
   touch $out
 ''

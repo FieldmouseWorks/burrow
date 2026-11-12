@@ -340,3 +340,30 @@ fn checks_cannot_poison_each_others_trusted_tools() {
     assert_eq!(read(&output), "main moved on\n");
     assert!(w.trees_left().is_empty());
 }
+
+#[test]
+fn resuming_keeps_interrupted_tools_and_executes_a_fresh_trusted_copy() {
+    let w = World::new();
+    let mut rec = w.record(&[("gate", "true")]);
+    rec.tools_ref = Some("refs/heads/main".into());
+    let id = "proof-paused-tools";
+    let dir = w.made(id, &rec);
+    let log = fs::File::create(dir.join("log")).unwrap();
+    burrow_proof::tools::prepare(&rec, id, 0, &log).unwrap();
+    let tree = burrow_proof::tools::path(&rec, id, 0);
+    fs::write(tree.join("preserved"), "partial state").unwrap();
+    fs::write(tree.join("f"), "changed during the interrupted check").unwrap();
+    burrow_proof::tools::prepare(&rec, id, 0, &log).unwrap();
+    assert_eq!(read(&tree.join("f")), "main moved on\n");
+    let kept = fs::read_dir(&rec.trees)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().contains("parkedtools"))
+        .unwrap()
+        .path();
+    assert_eq!(read(&kept.join("preserved")), "partial state");
+    assert_eq!(
+        read(&kept.join("f")),
+        "changed during the interrupted check"
+    );
+}

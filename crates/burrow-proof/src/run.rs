@@ -64,8 +64,15 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
     if let Err(why) = crate::tools::sweep(&rec, builds, id) {
         return short(why);
     }
-    let mut ran = Ran::default();
+    let mut ran: Ran = match fs::read(dir.join(RAN)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ran::default(),
+        Err(e) => return Err(e.to_string()),
+    };
     for (i, (check, cmd)) in rec.runs.iter().enumerate() {
+        if ran.verdicts.contains_key(check) && ran.exits.contains_key(check) {
+            continue;
+        }
         note(&format!("{check}: {cmd}"));
         let exit = match one(&rec, dir, id, i, check, cmd, fence, &log) {
             Ok(exit) => exit,
@@ -87,7 +94,9 @@ pub fn run(dir: &Path, fence: &mut dyn Fence) -> Result<(), String> {
         };
         ran.verdicts.insert(check.clone(), said);
         ran.exits.insert(check.clone(), exit);
+        save(&dir.join(RAN), &ran).map_err(|e| e.to_string())?;
     }
+    accepted(dir)?;
     if let Some(text) = comment::comment(&rec, dir, id, &ran)
         && let Err(e) = write_whole(&dir.join(COMMENT), text.as_bytes())
     {
@@ -158,15 +167,26 @@ fn one(
 ) -> Result<i32, String> {
     crate::tools::prepare(rec, id, i, log)?;
     let tree = rec.trees.join(format!("{id}-{i}"));
-    let made = trees::add(&rec.git, &rec.checkout, &tree, &rec.head, log);
+    let made = if tree.exists() {
+        Command::new(&rec.git)
+            .arg("-C")
+            .arg(&tree)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == rec.head)
+    } else {
+        trees::add(&rec.git, &rec.checkout, &tree, &rec.head, log)
+    };
     if !made.as_ref().is_ok_and(|ok| *ok) {
-        let _ = trees::remove(&rec.git, &rec.checkout, &tree);
         return Err(match made {
             Err(e) => format!("can't make its worktree at {}: {e}", tree.display()),
             Ok(_) => format!("can't make its worktree at {}", tree.display()),
         });
     }
     let ended = fenced(rec, dir, i, check, cmd, fence, log, &tree);
+    if ended.is_err() && dir.join("policy-restoring").exists() {
+        return ended;
+    }
     // Its fence first, then its worktree: nothing of it can still be in
     // there. A fence that won't clear keeps its worktree, for `end` to
     // remove once systemd has ended every process of the unit.
@@ -223,10 +243,22 @@ fn fenced(
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
-    let status = c
-        .status()
+    let mut child = c
+        .spawn()
         .map_err(|e| format!("can't start {}: {e}", rec.bash.display()))?;
+    accepted(dir)?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("can't wait for {}: {e}", rec.bash.display()))?;
     Ok(status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or_default()))
+}
+
+fn accepted(dir: &Path) -> Result<(), String> {
+    match fs::remove_file(dir.join("policy-restoring")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }

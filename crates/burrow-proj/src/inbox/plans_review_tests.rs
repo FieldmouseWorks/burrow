@@ -689,9 +689,14 @@ fn active_split_parents_stay_out_of_planning_and_drain_until_ready_revision() {
         let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&record).unwrap();
         fs::write(record.join("drained"), "sam/box#7").unwrap();
-        let status = b.pass().ready_queue(t);
-        assert!(status.starts_with("drain: 0/"), "{status}");
-        assert!(!status.contains("sam/box#7 (enrolling)"), "{status}");
+        let view = b.pass().view(t, crate::now());
+        assert!(
+            view.slots
+                .iter()
+                .all(|s| s.state == crate::snapshot::SlotState::Idle),
+            "{:?}",
+            view.slots
+        );
         let mut child = issue(8, "sam", &["ready"]);
         child["state"] = json!("open");
         child["repository_url"] = parent["repository_url"].clone();

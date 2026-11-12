@@ -50,6 +50,11 @@ impl Ended {
 /// cleared, `end.json` written, its repo kicked. What `end.json` says, or
 /// why it couldn't be written.
 pub fn end(dir: &Path, how: &Ended) -> Result<Value, String> {
+    if dir.join("policy-paused").exists() || dir.join("policy-restoring").exists() {
+        let value = json!({"state":"parked"});
+        save(&dir.join(END), &value).map_err(|e| e.to_string())?;
+        return Ok(value);
+    }
     let log = OpenOptions::new()
         .create(true)
         .append(true)

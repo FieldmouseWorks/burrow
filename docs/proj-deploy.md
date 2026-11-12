@@ -85,3 +85,10 @@ aliases. Engine prompt input is opened through the same confined reader before
 launch. A concurrent pathname replacement cannot redirect these operations to
 another host directory. Host-owned records outside guest storage retain their
 separate compatibility protocol.
+
+Repository admission also applies to retry recovery. A paused retry retains its
+checkpoint, execution identity, conversation and original queue position, but
+holds no place in the admission census. Recovery leaves parked work to the
+policy reconciler: on release it reacquires drain capacity in queue order and
+launches the saved turn with its captured execution identity. It does not make
+a new turn or consume the checkpoint while paused.

@@ -276,11 +276,23 @@ pub static SETTINGS: &[Setting] = &[
         "Whether paid extra usage is on; otherwise a usage limit means waiting for its reset.",
     ),
     flake(
-        "proj.paused",
+        "settings.allowed",
         &REPOS,
         Is("[]"),
         "proj",
-        "Repositories whose automated inbox, triage, drain and steward jobs are paused.",
+        "Tracked repositories whose automated work may move; the live repository overlay overrides these defaults.",
+    ),
+    live(
+        "settings.repositoryOverrides",
+        &Kind::Map(&Kind::Bool),
+        "{}",
+        "Runtime repository permissions overriding settings.allowed; false vacates every role immediately.",
+    ),
+    live(
+        "settings.pipelineUntil",
+        &Kind::Maybe(&Kind::Count { min: 0 }),
+        "null",
+        "Until this timestamp only pipeline repositories may move; null means no scoped hold.",
     ),
     // proj-inbox: sorting issues and handing ready ones on.
     flake(

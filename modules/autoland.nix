@@ -94,7 +94,8 @@ let
     renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
     # proj's record of its jobs, which repos.py reads for a remade repo's.
-    inherit (config.burrow.proj) jobsDir paused;
+    inherit (config.burrow.proj) jobsDir;
+    settings = { inherit (config.burrow.settings) command; config = config.burrow.settings.file; };
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
@@ -313,6 +314,7 @@ in
 
   options.burrow.autoland = {
     enable = lib.mkEnableOption "autoland, the PR steward for every repo you own";
+    configFile = lib.mkOption { type = lib.types.path; readOnly = true; internal = true; default = "/etc/burrow/autoland.json"; description = "The current steward config, read at proof restoration without a store dependency cycle."; };
 
     owners = mkOption {
       type = types.listOf types.str;
@@ -856,6 +858,7 @@ in
     # opens (repos.py publish).
     burrow.proj.inbox.authors = [ { login = "${cfg.app.slug}[bot]"; id = cfg.app.accountId; } ];
 
+    environment.etc."burrow/autoland.json".source = configFile;
     environment.systemPackages = [ steward ];
 
     # Every PR's pass comes from what happens to it (burrow.events): a push, a

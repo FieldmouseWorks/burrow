@@ -392,6 +392,12 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         let (d, cfg) = fixture();
         let job = Job::new(&cfg, "job");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
         job.set_turns(1).unwrap();
         fs::write(d.path().join("limited"), "").unwrap();
         let targets = vec!["sam/r#7".to_owned()];
@@ -442,6 +448,12 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         let (d, cfg) = fixture();
         let job = Job::new(&cfg, "job");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
         fs::write(d.path().join("denied"), "").unwrap();
         assert!(
             crate::cmd::record_wait(
@@ -473,6 +485,12 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         cfg.tools.git = git;
         let job = Job::new(&cfg, "job");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
         fs::write(job.path("project"), d.path().to_str().unwrap()).unwrap();
         assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_some());
         fs::write(job.path("app"), "other").unwrap();

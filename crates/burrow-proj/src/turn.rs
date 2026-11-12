@@ -29,12 +29,23 @@ pub(crate) const SPENT: &str = "Your last run was refused before it finished: Cl
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false)
+    start_with(cfg, id, msg, first, false, None)
 }
 
 /// An explicit operator or authorized human issue reply answers the question.
 pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, true)
+    start_with(cfg, id, msg, first, true, None)
+}
+
+/// Restoration already owns the serialized inbox admission permit.
+pub(crate) fn start_admitted(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    first: bool,
+    permit: &crate::inbox::resumption::Permit,
+) -> Result<(), String> {
+    start_with(cfg, id, msg, first, false, Some(permit))
 }
 
 /// A failed write may leave a truncated file. Never leave that prompt in
@@ -53,6 +64,7 @@ fn start_with(
     msg: &str,
     first: bool,
     answered: bool,
+    permit: Option<&crate::inbox::resumption::Permit>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
     crate::planning::admit(&job)?;
@@ -111,6 +123,17 @@ fn start_with(
         undo();
         return Err(format!("proj: {}: {e}", prompt.display()));
     }
+    let capacity = if permit.is_some() {
+        None
+    } else {
+        match crate::inbox::resumption::admission(cfg, &job) {
+            Ok(gate) => Some(gate),
+            Err(error) => {
+                undo();
+                return Err(error);
+            }
+        }
+    };
     if job.set_turns(n).is_err() {
         undo();
         return Err(couldnt());
@@ -123,7 +146,21 @@ fn start_with(
     // what kills the turn's whole cgroup (systemd-oomd does) would take an
     // ExecStopPost with it. The name is doubled up on its backslashes, which
     // systemd-run reads as escapes.
-    let started = launch(cfg, &job, first);
+    let _ = fs::write(
+        job.turn(&n.to_string(), "priority"),
+        if first { "first" } else { "normal" },
+    );
+    let started = if crate::policy::denied(&job)
+        || crate::policy::parked(&job)
+        || matches!(
+            capacity.as_ref(),
+            Some(crate::inbox::resumption::Resume::Waiting)
+        ) {
+        crate::policy::mark(&job, "queued", first)?;
+        true
+    } else {
+        launch(cfg, &job, first)
+    };
     if !started {
         undo();
         return Err(couldnt());
@@ -150,8 +187,9 @@ fn start_with(
 }
 
 pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
-    let unit = job.unit();
     let end = job.end_unit();
+    let unit = job.unit();
+    let id = job.id;
     let hook = end.replace('\\', "\\\\");
     systemd::systemd_run(cfg)
         .args(["--quiet", "--collect"])
@@ -167,7 +205,7 @@ pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
         .arg(format!("--property=OnSuccess={hook}"))
         .arg(format!("--property=OnFailure={hook}"))
         .arg(&cfg.me)
-        .args(["_exec", job.id, if first { "first" } else { "normal" }])
+        .args(["_exec", id, if first { "first" } else { "normal" }])
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -256,8 +294,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         return Err(Fail::quiet(1));
     }
     crate::retry::Identity::capture_choice(&job, &n, &choice).map_err(|e| Fail::new(1, e))?;
-    crate::state_reads::write(job.turn(&n, "engine"), choice.engine.name())
-        .map_err(|e| Fail::new(1, e.to_string()))?;
+    job.record_choice(&n, &choice)
+        .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
     // As its App, or not at all ([`github_app`]). Its env, read now, is what
     // every run of the turn starts in, so none starts as the user if the App
     // goes while the turn waits for a slot: it acts as an App that's gone,

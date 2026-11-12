@@ -401,3 +401,26 @@ fn a_queued_turn_held_by_github_quota_is_not_stalled_before_the_reset() {
         (1000 + 3 * stall) as f64
     );
 }
+
+#[test]
+fn a_policy_hold_is_not_a_queue_stall() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let f = Facts {
+        id: "j".into(),
+        turn: "1".into(),
+        state: "queued".into(),
+        queued: 1000,
+        ..Facts::default()
+    };
+    assert!(job_wait(&cfg, &f).is_some(), "an eligible wait is watched");
+    assert!(
+        job_wait(
+            &cfg,
+            &Facts {
+                state: "parked".into(),
+                ..f
+            }
+        )
+        .is_none()
+    );
+}

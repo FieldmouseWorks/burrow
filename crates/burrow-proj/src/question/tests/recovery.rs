@@ -177,9 +177,16 @@ exit 0
                     crate::ask::expire(&f.cfg, &f.job()).unwrap();
                     "j1".to_owned()
                 }
-                "initial" => {
-                    crate::cmd::start_job(&f.cfg, &crate::cmd::New::default(), "p", "task").unwrap()
-                }
+                "initial" => crate::cmd::start_job(
+                    &f.cfg,
+                    &crate::cmd::New {
+                        local_work: true,
+                        ..Default::default()
+                    },
+                    "p",
+                    "task",
+                )
+                .unwrap(),
                 _ => unreachable!(),
             };
             assert!(

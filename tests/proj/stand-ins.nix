@@ -1,6 +1,6 @@
 # The stand-ins proj's VM tests (test.nix) run proj against: Claude, and
 # GitHub as gh answers it.
-{ pkgs }:
+{ pkgs, filterLabels ? false }:
 {
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
   # "sleep N" sleeps; "eat" runs something that holds far more memory than
@@ -200,6 +200,10 @@
       printf 'HTTP/2.0 200 OK\n\n{}'; exit 0
     fi
     [ ! -e /tmp/gh/slow ] || sleep 2
+    label=""
+    ${pkgs.lib.optionalString filterLabels ''
+      case "$ep" in *labels=*) label=''${ep#*labels=}; label=''${label%%&*} ;; esac
+    ''}
     page=1; case "$ep" in *\?page=*|*\&page=*) page=''${ep##*page=} ;; esac
     ep=''${ep%%\?*}
     f="/tmp/gh/''${ep//\//_}"
@@ -211,6 +215,6 @@
       printf 'Link: <https://api.github.com/%s?per_page=100&page=%s>; rel="next"\n' "$ep" "$((page+1))"
     fi
     printf '\n'
-    ${pkgs.jq}/bin/jq -s ".[$((page-1))]" "$f"
+    ${pkgs.jq}/bin/jq -s --arg label "$label" --argjson page "$((page-1))" '.[$page] | if $label == "" then . else map(select(any(.labels[]?; .name == $label))) end' "$f"
   '';
 }

@@ -73,6 +73,7 @@ pub fn review(s: &Service, name: &str) {
     };
     let pr = format!("{}#{}", fmt(&tag(&raw, "repo")), fmt(&tag(&raw, "number")));
     let mut back = match out {
+        Err(Failed::Paused { .. }) => return,
         Ok(answer) => json!({"result": "review", "answer": scrub(&answer, &keys),
                              "description": item.as_ref().map(|i| i.description.clone())}),
         Err(Failed::Out { why, until }) => {
@@ -119,6 +120,9 @@ fn fmt(v: &Value) -> String {
 /// The look itself, in the PR's session: every look at it resumes the one
 /// before's.
 fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
+    if s.cfg.paused(&item.repo) {
+        return Err(Failed::Paused { session: None });
+    }
     let Some((who, _)) = s.cfg.reviewer(&item.reviewer) else {
         return Err(Failed::Error(format!(
             "there's no reviewer {} here",
@@ -172,9 +176,23 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
         }
     ));
     let began = now();
-    let (answer, sid) = match codex::look(s, &snap, &prompt, &session.join("home"), last_id) {
+    let (answer, sid) = match codex::look(
+        s,
+        &snap,
+        &prompt,
+        &session.join("home"),
+        last_id,
+        &item.repo,
+    ) {
         Ok(got) => got,
         Err(e) => {
+            if let Failed::Paused {
+                session: Some(ref sid),
+            } = e
+            {
+                queue::save(&session.join("look.json"), &json!({"id":sid,"head":head}))
+                    .map_err(|e| Failed::Error(format!("couldn't preserve paused session: {e}")))?;
+            }
             // A session that won't resume (lost, or broken) isn't asked
             // again: the look's next try starts the PR's next one.
             if matches!(e, Failed::Error(_)) && last_id.is_some() {
@@ -263,6 +281,7 @@ pub fn work(s: Arc<Service>) {
             busy.remove(&name);
         }
         let mut waiting: BTreeMap<String, Vec<(u8, f64, f64, String)>> = BTreeMap::new();
+        let mut parked = false;
         let names = match fs::read_dir(&s.cfg.queue) {
             Ok(d) => d
                 .flatten()
@@ -292,6 +311,10 @@ pub fn work(s: Arc<Service>) {
                 continue;
             }
             let item = queue::load(&s.cfg.queue.join(&name)).unwrap_or(Value::Null);
+            if item["repo"].as_str().is_some_and(|repo| s.cfg.paused(repo)) {
+                parked = true;
+                continue;
+            }
             let num = |k: &str| item[k].as_f64().unwrap_or(0.0);
             let rank = s.cfg.rank(item["repo"].as_str());
             waiting.entry(r.to_owned()).or_default().push((
@@ -323,6 +346,10 @@ pub fn work(s: Arc<Service>) {
             }
         }
         if busy.is_empty() {
+            if parked {
+                thread::sleep(AGAIN_EVERY);
+                continue;
+            }
             break;
         }
         // Until one ends, or the queue has had time to grow.

@@ -246,7 +246,25 @@ fn paused_inbox(kind: &str) -> Fixture {
     let cfg: Config = serde_json::from_value(example()).unwrap();
     f.cfg.inbox = cfg.inbox;
     f.cfg.inbox.as_mut().unwrap().state = f.dir.path().join("inbox");
-    f.cfg.paused = vec!["SAM/R".into()];
+    f.cfg.settings.as_mut().unwrap().overlay = f.dir.path().join("overlay.json");
+    f.cfg
+        .settings
+        .as_mut()
+        .unwrap()
+        .allowed
+        .push("sam/r".into());
+    crate::policy::bind(
+        &f.job(),
+        crate::policy::Identity::Repository("sam/r".into()),
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
+    f.cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .command(&["pause".into(), "sam/r".into()], "test")
+        .unwrap();
     let root = &f.cfg.inbox.as_ref().unwrap().state;
     let record = root.join(if matches!(kind, "sorting" | "planner") {
         ".triage/sam_r-7"
@@ -277,7 +295,7 @@ fn paused_inbox(kind: &str) -> Fixture {
 fn paused_inbox_kinds_preserve_all_automatic_waits() {
     for kind in ["ordinary", "drained", "sorting", "planner"] {
         for wait in ["github", "usage", "question"] {
-            let mut f = paused_inbox(kind);
+            let f = paused_inbox(kind);
             if wait == "question" {
                 question(&f, false, crate::now() - 10);
             } else {
@@ -300,7 +318,12 @@ fn paused_inbox_kinds_preserve_all_automatic_waits() {
             if wait == "question" {
                 assert!(crate::ask::load(&f.job()).is_some());
             }
-            f.cfg.paused.clear();
+            f.cfg
+                .settings
+                .as_ref()
+                .unwrap()
+                .command(&["allow".into(), "sam/r".into()], "test")
+                .unwrap();
             crate::watch::look(&f.cfg, "").unwrap();
             assert_eq!(f.job().turns().as_deref(), Some("2"), "{kind}: {wait}");
             assert!(f.job().path("prompt.2").exists());
@@ -363,7 +386,12 @@ fn one_way_notices_survive_timeout_and_pause_until_answered_or_stopped() {
                 f.cfg.inbox = None;
             }
             question(&f, true, crate::now() - 1);
-            f.cfg.paused.clear();
+            f.cfg
+                .settings
+                .as_ref()
+                .unwrap()
+                .command(&["allow".into(), "sam/r".into()], "test")
+                .unwrap();
             f.flag("fail-open");
             crate::watch::look(&f.cfg, "").unwrap();
             assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
@@ -374,7 +402,22 @@ fn one_way_notices_survive_timeout_and_pause_until_answered_or_stopped() {
             );
             f.clear("fail-open");
             for paused in [false, true, true, false, false] {
-                f.cfg.paused = if paused { vec!["sam/r".into()] } else { vec![] };
+                f.cfg
+                    .settings
+                    .as_ref()
+                    .unwrap()
+                    .command(
+                        &[
+                            if paused {
+                                "pause".into()
+                            } else {
+                                "allow".into()
+                            },
+                            "sam/r".into(),
+                        ],
+                        "test",
+                    )
+                    .unwrap();
                 crate::watch::look(&f.cfg, "").unwrap();
                 assert_eq!(f.job().turns().as_deref(), Some("2"));
                 assert!(

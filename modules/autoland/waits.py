@@ -72,7 +72,7 @@ def read(repo, prs):
 
 def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0, claude=False):
     # .get: what failed may be the PR's own record.
-    return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
+    return {"repo": repo, "what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
             "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace, "claude": claude}
 
 
@@ -130,7 +130,7 @@ def failed(repo, pr=None):
     if pr:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, FAILS, minutes, kick, None)
     else:
-        FAILED[repo] = {"what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
+        FAILED[repo] = {"repo": repo, "what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
                         "kick": kick, "rev": None}
 
 
@@ -170,7 +170,7 @@ def publish(seen, digest, full):
             since = old["since"] if same else C.NOW
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"
-            items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
+            items[key] = {"repo": it.get("repo"), "what": it["what"], "link": it["link"], "phase": phase, "since": since,
                           "due": since if key in FAILING else max(max(since, it.get("until") or 0) + it.get("grace", 0), it.get("usage_release") or 0) + it["minutes"] * MIN,
                           "kick": it["kick"],
                           # A step that keeps failing is the steward's, whatever job it has.

@@ -10,9 +10,22 @@ use crate::engine::{Choice, Engine};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
-    /// Repositories whose automated work is paused, without changing labels.
     #[serde(default)]
-    pub paused: Vec<String>,
+    pub settings: Option<burrow_settings::Config>,
+    #[serde(default)]
+    pub policy_unit: Option<String>,
+    #[serde(default)]
+    pub proofs_state: Option<PathBuf>,
+    #[serde(default)]
+    pub agent_tool: Option<PathBuf>,
+    #[serde(default)]
+    pub proof_run: Option<PathBuf>,
+    #[serde(default)]
+    pub proof_build_driver: Vec<String>,
+    /// The steward config the build driver reads now; a restored proof uses
+    /// it, never the one its earlier unit was started with.
+    #[serde(default)]
+    pub proof_driver_config: Option<PathBuf>,
     #[serde(default)]
     pub usage_paid: bool,
     /// Where the projects are: each folder in it is one (burrow.projectsDir).
@@ -96,7 +109,7 @@ pub struct Config {
     /// for `proj settings` ([`crate::settings`]). A path the system puts in
     /// /etc, not a store path: those values may run proj themselves.
     #[serde(default)]
-    pub settings: Option<PathBuf>,
+    pub tracked_settings: Option<PathBuf>,
     /// The engines' meters (claude.json, codex.json), written by
     /// usage-reset; absent disables overflow.
     pub meters: Option<PathBuf>,
@@ -105,6 +118,9 @@ pub struct Config {
     pub codex_hooks: PathBuf,
     /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
+    /// How many slots heavy has there (burrow.cpu.heavy.slots).
+    #[serde(default)]
+    pub heavy_slots: u32,
     /// Machine MCP servers, shared by every job engine.
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServer>,
@@ -220,7 +236,46 @@ fn sort_unlabelled() -> bool {
 
 impl Config {
     pub fn paused(&self, repo: &str) -> bool {
-        self.paused.iter().any(|r| r.eq_ignore_ascii_case(repo))
+        self.settings
+            .as_ref()
+            .is_none_or(|s| !s.allows(repo).unwrap_or(false))
+    }
+
+    pub fn retry_at(&self, repo: &str) -> Option<i64> {
+        self.settings.as_ref()?.decision(repo).ok()?.retry_at
+    }
+
+    /// The GitHub repository of each project folder.
+    pub fn project_repos(&self) -> Vec<String> {
+        std::fs::read_dir(&self.projects)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .map(|e| crate::pick::github_repo(self, &e.path().to_string_lossy()))
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    /// The projects' repositories whose automated work is paused.
+    pub fn paused_repos(&self) -> Vec<String> {
+        let mut repos: Vec<_> = self
+            .project_repos()
+            .into_iter()
+            .filter(|r| self.paused(r))
+            .collect();
+        repos.sort();
+        repos
+    }
+
+    pub fn settings_line(&self) -> String {
+        let Some(settings) = &self.settings else {
+            return "Automated work: paused (settings are not configured)\n".into();
+        };
+        let repos = self.project_repos();
+        settings
+            .show_for(&repos)
+            .unwrap_or_else(|e| format!("Automated work: paused (settings error: {e})\n"))
     }
 
     /// The config PROJ_CONFIG names.
@@ -339,6 +394,7 @@ pub(crate) mod tests {
     /// Tests that exercise publication must supply their own file and receiver.
     pub(crate) fn example() -> Value {
         json!({
+            "settings": {"overlay":"", "allowed":["sam/box","sam/burrow","sam/game","sam/web"], "pipelineRepos":[]},
             "projects": "/data/dev/src",
             "jobs": "/data/dev/jobs",
             "scratch": "/data/dev/scratch",
