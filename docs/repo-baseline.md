@@ -113,11 +113,12 @@ event: that's how a repo is heard the moment it's made, before it has a
 hook of its own. The steward sets the webhook's URL and secret itself, to
 burrow-events' (leave them to it). Give it these
 repository permissions: read and write on administration (the settings and
-ruleset above), contents (merges and deleting branches), issues (the labels
+ruleset above), actions (running a stranded or cancelled workflow run
+again), contents (merges and deleting branches), issues (the labels
 and the digest's issues), pull requests (reviews, comments and merges),
 commit statuses, webhooks, workflows (a merge that changes
 `.github/workflows`), and merge queues (taking a PR out of one someone else
-put it in); read on checks and actions. Install it on each of
+put it in); read on checks. Install it on each of
 `owners`, for all repositories, so new ones are covered too: the repos the
 steward keeps are the ones its installations reach (GitHub never reports an
 App as a repo's admin). Its private key goes in `app.keyFile`, readable by

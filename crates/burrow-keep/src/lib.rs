@@ -1,9 +1,13 @@
 //! burrow-keep: what a push to the default branch keeps of its gate's
 //! builds, for later runs of the same leg to substitute from
 //! (flake-check.yml's keep-builds). It runs at the end of a leg whose gate
-//! passed, with what the last such push kept restored to `DIR/kept`, a
-//! binary cache nix substitutes from unsigned, and leaves what this push
-//! keeps there instead, for the Actions cache to save:
+//! ran, passed or failed, with what the last such push kept restored to
+//! `DIR/kept`, a binary cache nix substitutes from unsigned, and leaves what
+//! this push keeps there instead, for the Actions cache to save. A path is
+//! the build of its derivation whichever check failed beside it, and a
+//! check that failed left no path, so it builds (and fails) again; a red
+//! default branch keeping nothing is what left every later run to build
+//! cold (#812):
 //!
 //!   - every path in the store no one signed (what this gate built, or took
 //!     from the kept builds; a public cache's are signed), but derivations,
@@ -11,7 +15,10 @@
 //!   - and what the kept builds hold that a derivation here still makes,
 //!     though this gate didn't need it: a check that hadn't changed came
 //!     whole from them, without what it was built from, which the next
-//!     change to it needs again. What no derivation here makes is dropped;
+//!     change to it needs again. What no derivation here makes is dropped,
+//!     once the gate passed: a failed one may have stopped evaluating
+//!     short of what it makes, so then all they hold is carried, and the
+//!     next push whose gate passes drops what's stale;
 //!   - but downloads, unless a path kept refers to them: a download is one
 //!     file its hash pins (a flat fixed-output path, as fetchurl makes),
 //!     which a build that needs it again fetches from where it came from in
@@ -55,6 +62,24 @@ pub struct Info {
     pub nar_size: u64,
 }
 
+/// How the gate went: whether its evaluation can say what's stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Passed,
+    Failed,
+}
+
+impl Gate {
+    /// The gate step's outcome, as Actions says it.
+    pub fn from_outcome(outcome: &str) -> Option<Gate> {
+        match outcome {
+            "success" => Some(Gate::Passed),
+            "failure" => Some(Gate::Failed),
+            _ => None,
+        }
+    }
+}
+
 /// What the keeping reads from nix and has it do.
 pub trait Nix {
     /// The local store, as it is now.
@@ -94,29 +119,35 @@ struct Entry {
 /// which move to `dir/restored`: aside rather than deleted, as nix's
 /// daemon, as root, may have written into them. Nothing moves until what's
 /// kept is ready, so a failure leaves `dir/kept` as it was.
-pub fn keep(nix: &dyn Nix, dir: &Path) -> Result<Kept, String> {
+pub fn keep(nix: &dyn Nix, dir: &Path, gate: Gate) -> Result<Kept, String> {
     let (kept, keep, restored) = (dir.join("kept"), dir.join("keep"), dir.join("restored"));
     let store = nix.store()?;
     // What could be kept: this gate's paths no one signed, but derivations,
     // and what the kept builds hold that a derivation here makes, though
-    // this gate didn't need it.
+    // this gate didn't need it; all they hold, when it failed.
     let mine: BTreeSet<&String> = store
         .paths
         .iter()
         .filter(|(p, info)| !info.signed && !p.ends_with(".drv"))
         .map(|(p, _)| p)
         .collect();
-    let drvs: Vec<String> = store
-        .paths
-        .keys()
-        .filter(|p| p.ends_with(".drv"))
-        .cloned()
-        .collect();
-    let made = nix.outputs(&drvs)?;
+    let made = match gate {
+        Gate::Passed => {
+            let drvs: Vec<String> = store
+                .paths
+                .keys()
+                .filter(|p| p.ends_with(".drv"))
+                .cloned()
+                .collect();
+            Some(nix.outputs(&drvs)?)
+        }
+        Gate::Failed => None,
+    };
     let before = entries(&kept, &store.dir)?;
     let carried: BTreeSet<&String> = before
         .keys()
-        .filter(|p| made.contains(*p) && !store.paths.contains_key(*p))
+        .filter(|p| made.as_ref().is_none_or(|m| m.contains(*p)))
+        .filter(|p| !store.paths.contains_key(*p))
         .collect();
     // Of those, a download only when the rest refers to it, near or far.
     let could: BTreeSet<&String> = mine.union(&carried).copied().collect();

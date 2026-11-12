@@ -33,6 +33,10 @@ pub struct Handler {
     /// on or coming off is no news to them.
     #[serde(default)]
     pub own_labels: Vec<String>,
+    /// The `pull_request` actions that count (`closed`); others are no news.
+    /// None: every action.
+    #[serde(default)]
+    pub pull_request_actions: Option<Vec<String>>,
     #[serde(default = "yes")]
     pub per_repo: bool,
     #[serde(default)]
@@ -88,6 +92,15 @@ impl Handler {
         if event == "status"
             && let Some(context) = payload.get("context").and_then(Value::as_str)
             && self.own_statuses.iter().any(|s| s == context)
+        {
+            return false;
+        }
+        if event == "pull_request"
+            && let Some(actions) = &self.pull_request_actions
+            && !payload
+                .get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|a| actions.iter().any(|x| x == a))
         {
             return false;
         }
@@ -491,6 +504,22 @@ mod tests {
         // Another handler that doesn't put it on still counts it.
         let inbox = handler(&["pull_request"], "proj-inbox");
         assert!(inbox.takes("pull_request", &labelled("labeled", "waiting: proof slot")));
+    }
+
+    // A handler that reads a PR only when it closes ignores every other
+    // action: a burst of relabels and pushes starts no pass.
+    #[test]
+    fn pull_request_actions() {
+        let mut h = handler(&["pull_request"], "proj-inbox");
+        h.pull_request_actions = Some(vec!["closed".into()]);
+        let act = |a: &str| payload("sam/r", json!({"action": a, "pull_request": {"number": 5}}));
+        for a in ["labeled", "unlabeled", "synchronize", "opened", "edited"] {
+            assert!(!h.takes("pull_request", &act(a)), "{a}");
+        }
+        assert!(h.takes("pull_request", &act("closed")));
+        assert!(!h.takes("pull_request", &payload("sam/r", json!({}))));
+        h.pull_request_actions = None;
+        assert!(h.takes("pull_request", &act("labeled")));
     }
 
     // One with no pass over one repo gets its full pass for a repo's event.

@@ -48,10 +48,10 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { databaseId externalId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
+            ... on CheckRun { databaseId externalId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }
@@ -169,6 +169,10 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{flow} (failed to start)")
+    for s in unstarted(suites.get("nodes", []), stale, contexts=contexts.get("nodes", []), base=pr["baseRefName"]):
+        seen += 1
+        flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
+        pending.append(f"{flow} (never started, to be run again)")
     for c in effective_checks(contexts.get("nodes", []), stale, docs_lane(pr, moved)):
         if c["__typename"] == "CheckRun":
             seen += 1
@@ -217,6 +221,118 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending)), docs
 
 
+# A run GitHub queued and never started (its incident, a lost event) has no
+# job and can't be cancelled; past this long it's dead, not slow.
+UNSTARTED_AFTER = 15 * 60
+
+
+def unstarted(suite_nodes, stale=(), now=None, contexts=(), base=None):
+    """The suites of a head whose workflow run has had no job for longer than
+    UNSTARTED_AFTER: still queued, with no check run at all. A run that has
+    started (a job exists, even a queued one waiting for a runner) isn't, and
+    one a replacement run stands in for isn't owed either: another suite of
+    the same workflow (suite_flow: the shared CI's caller and its twin for a
+    new base are one) that didn't judge another diff than the PR's (stale,
+    runs()) and either is under way with a job, or has finished with a check
+    run that did its work (ran) - and, for the shared CI, every call
+    completed its gate or its current-diff docs lane,
+    which a push's or a dispatch's run has none of. A skipped caller, an empty
+    suite, or a run of another workflow doesn't stand in for it."""
+    now = C.NOW if now is None else now
+
+    def idle(s):
+        return s.get("status") in ("QUEUED", "REQUESTED", "PENDING") and (s.get("checkRuns") or {}).get("totalCount", 1) == 0
+
+    def flow(s):
+        return suite_flow(s) or ((s.get("workflowRun") or {}).get("workflow") or {}).get("name")
+
+    def covers(o, s):
+        if o is s or o.get("id") in stale or idle(o) or flow(o) != flow(s) or flow(s) is None:
+            return False
+        if o.get("status") != "COMPLETED":
+            return (o.get("checkRuns") or {}).get("totalCount", 1) > 0
+        mine = [x for x in contexts if x["__typename"] == "CheckRun" and suite(x).get("id") == o.get("id") and ran(x)]
+        if suite_flow(o) != FLAKE[0]:
+            return bool(mine)
+        # Lane selection is not gate execution. Account for every shared
+        # call visible in this workflow, including calls skipped in this
+        # replacement, and never borrow a sibling call's gate.
+        # A stale suite (another base, an obsolete fork) creates no
+        # obligation, as it discharges none.
+        calls = {job_of(x)[0] for x in contexts if workflow(x) == FLAKE[0]
+                 and suite(x).get("id") not in stale and job_of(x)[1].startswith(LANE)}
+        laned = {job_of(x)[0] for x in mine if judged(x) == (base, None)}
+        worked = {job_of(x)[0] for x in mine
+                  if job_of(x)[1] == GATE or (judged(x) and judged(x)[1] is not None)}
+        return bool(calls) and calls <= laned & worked
+
+    out = []
+    for s in suite_nodes:
+        made = (s.get("workflowRun") or {}).get("createdAt")
+        if not idle(s) or not (s.get("workflowRun") or {}).get("databaseId") or not made or now - C.ts(made) <= UNSTARTED_AFTER:
+            continue
+        if any(covers(o, s) for o in suite_nodes):
+            continue
+        out.append(s)
+    return out
+
+
+def whole_run_fit(c, contexts, repo):
+    """Whether the cancelled check run c's whole run is one to start again:
+    its suite has finished (a cancel still being carried out is waited for),
+    and none of its jobs failed or ran out of time, since a run again would
+    replace that verdict, which is the head's, with a pass."""
+    mine = suite(c)
+    if mine.get("status") != "COMPLETED":
+        return False
+    for x in contexts:
+        if x["__typename"] != "CheckRun" or suite(x).get("id") != mine.get("id"):
+            continue
+        if x.get("status") != "COMPLETED":
+            return False
+        if cancelled(x):
+            if timed_out(repo, x):
+                return False
+        elif x.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            return False
+    return True
+
+
+def dead_runs(pr, repo=None, now=None, moved=None):
+    """The one check of whether a head has no live run, for what CI is owed
+    on it: the run ids to ask GitHub to run again, from a run that never
+    started (unstarted) and a run whose check was cancelled with nothing run
+    through since (effective_checks) and none of whose jobs failed or timed out
+    (whole_run_fit)."""
+    nodes = pr["commits"]["nodes"]
+    commit = nodes[0]["commit"] if nodes else {}
+    rollup = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
+    listed = commit.get("checkSuites") or {}
+    if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (rollup, listed)):
+        # A sibling job past the first 100 could be the failed one: no rerun
+        # is authorized from a part of the run (ci_state reads it pending).
+        return []
+    contexts, suites = rollup.get("nodes", []), listed.get("nodes", [])
+    # Only a cancelled check needs runs() (which asks GitHub about the fork).
+    stale = runs(pr, repo)[0] if any(c["__typename"] == "CheckRun" and cancelled(c) for c in contexts) or suites else set()
+    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, stale, now, contexts, pr["baseRefName"])]
+    fit = {}  # each run judged once, however many of its jobs were cancelled
+    for c in effective_checks(contexts, stale, docs_lane(pr, moved)):
+        if c["__typename"] == "CheckRun" and cancelled(c):
+            # A replacement run is already alive: wait for its verdict before
+            # asking GitHub to start this workflow yet again.
+            if workflow(c) is not None and any(
+                    workflow(x) == workflow(c) and suite(x).get("id") != suite(c).get("id")
+                    and suite(x).get("status") != "COMPLETED"
+                    for x in contexts if x["__typename"] == "CheckRun"):
+                continue
+            if (sid := suite(c).get("id")) not in fit:
+                fit[sid] = whole_run_fit(c, contexts, repo)
+            if fit[sid] and (run_id := (suite(c).get("workflowRun") or {}).get("databaseId")):
+                ids.append(run_id)
+    return list(dict.fromkeys(ids))
+
+
 # The names burrow's shared CI (flake-check.yml) gives two of its check runs
 # on a PR, after the caller's job's name: its lane job's, `lane into BASE`,
 # the base it chose the PR's gate against, and its docs lane's (docs-paths),
@@ -240,7 +356,12 @@ def workflow(c):
     """Which workflow a check run's suite ran: its id, but one for the shared
     CI's caller and its twin for a new base (FLAKE), whose runs speak for each
     other. By file, not by name: a repo's unrelated workflows can share a name."""
-    run = suite(c).get("workflowRun") or {}
+    return suite_flow(suite(c))
+
+
+def suite_flow(s):
+    """The same for a check suite (workflow)."""
+    run = s.get("workflowRun") or {}
     return FLAKE[0] if (run.get("file") or {}).get("path") in FLAKE else (run.get("workflow") or {}).get("id")
 
 
