@@ -347,6 +347,13 @@ fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
     };
     let deploy = |m: &Machine| {
         m.landed("system.nix", &format!("unrelated {}", m.main()));
+        assert_ne!(
+            fs::read_to_string(m.path("current-system/revision"))
+                .unwrap()
+                .trim(),
+            m.main(),
+            "the running stamp must not identify the main about to deploy"
+        );
         let _ = fs::remove_file(m.path("calls"));
         let mut gh = Fake::default();
         gh.on(
@@ -362,9 +369,11 @@ fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
     let calls = deploy(&m);
     assert!(calls.contains("--allow-downgrade"), "{calls}");
 
-    for rev in [m.main(), sha('f'), String::new()] {
+    for rev in [None, Some(sha('f')), Some(String::new())] {
         let (m, _) = proposed();
-        stamp(&m, &rev);
+        // Use this machine's main, not a previous fixture's later commit:
+        // identical Git timestamps can make that commit the new main here.
+        stamp(&m, &rev.unwrap_or_else(|| m.main()));
         let calls = deploy(&m);
         assert!(calls.contains("switch --toplevel"), "{calls}");
         assert!(!calls.contains("--allow-downgrade"), "{calls}");
