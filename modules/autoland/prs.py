@@ -161,16 +161,17 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
     head's to fix. Only the App's counts, as with ours. A cancelled check run
     goes by what its workflow did after it (after_cancel), and with nothing
     after it is pending, since a stopped run found nothing, unless it ran out
-    of time (timed_out), which is red. Given `rerun` (rerun_key to the newest job id of a
-    run, "done": the runs asked to be run again on this head, as of that
-    attempt; "refused": those GitHub refused for want of permission, this
-    pass only, so a repaired permission is tried again; "want" is filled
-    with the other runs whose cancelled jobs are all there is to run again),
-    a finished run's cancelled jobs are run again once together, pending
-    while that attempt stands, and one cancelled by a later attempt is red: a
-    hang is the head's to look at. A run with a failure of its own in it
-    isn't run again, as that would run the failure again too, and one still
-    going is waited for. A workflow's
+    of time (timed_out), which is red. Given `rerun` ("runs": what GitHub says of each
+    run, by rerun_key: its run_attempt, status and conclusion; "refused": the
+    runs GitHub refused to run again for want of permission, this pass only,
+    so a repaired permission is tried again; "lookup" and "due" are filled
+    with the runs to look up, and those to run again), a run whose newest
+    attempt ended cancelled is run again once, and pending while that attempt
+    runs. The allowance is GitHub's own attempt count, so every PR sharing
+    the head, every pass and a lost response agree on it: cancelled again
+    on attempt 2 or later is red, a hang being the head's to look at. A run
+    with a failure of its own in it isn't run again, as that would run the
+    failure again too, and one still going is waited for. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -221,20 +222,23 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                 # a fix job to fix. Pending until it's run again, and a stall
                 # once that's overdue.
                 key = rerun_key(c) if rerun is not None else None
-                job = c.get("databaseId")
+                info = rerun["runs"].get(key) if key else None
                 if key is None:
                     pending.append(f"{name} (cancelled, to be run again)")
                 elif key in rerun["refused"]:
                     pending.append(f"{name} (cancelled; the App may not run it again, which needs Actions write)")
-                elif key not in rerun["done"]:
-                    # The newest job seen marks the attempt to run again.
-                    cancelled_jobs.append((key, job))
+                elif info is None:
+                    rerun["lookup"].add(key)
                     pending.append(f"{name} (cancelled, to be run again)")
-                elif job <= rerun["done"][key]:
-                    # The attempt we asked to be run again, still as it was.
+                elif info["status"] != "completed" or info["conclusion"] != "cancelled":
+                    # An attempt going, or one that ended otherwise (this
+                    # check is a stale one of an earlier attempt).
                     pending.append(f"{name} (cancelled, run again)")
-                else:
+                elif info["attempt"] >= 2:
                     red.append(f"{name} (cancelled again after a rerun)")
+                else:
+                    cancelled_jobs.append(key)
+                    pending.append(f"{name} (cancelled, to be run again)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
                 broken.add(run_id(c))
@@ -257,9 +261,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
             elif c["state"] != "SUCCESS":
                 red.append(name)
     if rerun is not None:
-        for key, job in cancelled_jobs:
-            if key not in broken and key not in going:
-                rerun["want"][key] = max(job, rerun["want"].get(key, 0))
+        rerun["due"] |= {key for key in cancelled_jobs if key not in broken and key not in going}
     named = {c.get("name") or spelled.get(c["context"].lower(), c["context"]) for c in contexts.get("nodes", [])}
     for name in proofs:
         if name not in named:

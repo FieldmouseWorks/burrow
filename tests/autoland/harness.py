@@ -399,6 +399,11 @@ ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless 
 
 RERUNS = []  # the workflow runs (by id) the steward ran again
 RERUN_FAILS = {}  # a run's id to what its rerun raises: none unless set
+RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion: attempt 1, cancelled, unless set
+
+
+def run_info(key):
+    return RUN_INFO.get(key, {"run_attempt": 1, "status": "completed", "conclusion": "cancelled"})
 
 
 def gh_stub(*a, **k):
@@ -407,7 +412,10 @@ def gh_stub(*a, **k):
         if isinstance(err := RERUN_FAILS.get(a[2]), Exception):
             raise err
         RERUNS.append(a[2])
+        RUN_INFO[a[2]] = {"run_attempt": run_info(a[2])["run_attempt"] + 1, "status": "queued", "conclusion": None}
         return ""
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/actions/runs/"):
+        return run_info(a[1].rsplit("/", 1)[1])
     if a[:1] == ("api",) and a[1].startswith("repos/sam/r/rules/branches/"):
         got = RULES.get(a[1].removeprefix("repos/sam/r/rules/branches/").partition("?")[0], [])
         if isinstance(got, Exception):

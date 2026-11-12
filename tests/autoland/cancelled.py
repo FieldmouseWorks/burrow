@@ -7,7 +7,7 @@ it or someone cancelled it by hand: run again once, and red if cancelled again,
 since a hang is the head's to look at."""
 
 from docs import at, check, docs, whole
-from harness import ANNOTATIONS, JOBS, RERUN_FAILS, RERUNS, C, clean, fresh_pr_state, run as one_pass
+from harness import ANNOTATIONS, JOBS, RERUN_FAILS, RERUNS, RUN_INFO, C, clean, fresh_pr_state, run as one_pass
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
@@ -204,8 +204,9 @@ assert state(whole("next", "s0", conclusion=CANCEL), whole("main", "s1"), base="
 
 # A cancelled run nothing ran through since is run again, once, whatever its
 # annotations say (no timeout among them): its workflow run, with one request.
-# A pass that sees the same attempt again waits: no second rerun, no fix job.
-# Only a later attempt cancelled decides: red, and a fix job's.
+# The allowance is GitHub's run_attempt, so nothing is kept here: a pass that
+# sees the attempt going waits, and a later attempt cancelled is red, and a
+# fix job's.
 def hung(job, run=old, name=CHECK):
     return [{**c, "databaseId": job} if c["name"] == name else c for c in run]
 
@@ -213,28 +214,62 @@ def hung(job, run=old, name=CHECK):
 def start():
     RERUNS.clear()
     RERUN_FAILS.clear()
+    RUN_INFO.clear()
     fresh_pr_state()
+
+
+def ended(key, attempt, conclusion="cancelled"):
+    RUN_INFO[key] = {"run_attempt": attempt, "status": "completed", "conclusion": conclusion}
 
 
 start()
 status, _ = one_pass(clean(checks=hung(51)), 700)
 assert RERUNS == ["s1"] and "waiting for CI" in status and not JOBS, (RERUNS, status, JOBS)
+# The retry queued or running, the same pass seen again, or beside the original.
 status, _ = one_pass(clean(checks=hung(51)), 760)
 assert RERUNS == ["s1"] and "cancelled again" not in status and not JOBS, (RERUNS, status, JOBS)
-# The retry queued or running (beside the original, as the rollup lists both).
 status, _ = one_pass(clean(checks=hung(51) + going("s2")), 770)
 assert RERUNS == ["s1"] and "cancelled again" not in status and not JOBS, (RERUNS, status, JOBS)
+ended("s1", 2)
 status, _ = one_pass(clean(checks=hung(52)), 800)
 assert RERUNS == ["s1"] and "CI is red: check / check (cancelled again after a rerun)" in status, (RERUNS, status)
-# The rerun passing ends it; a new head starts over.
+# The rerun passing ends it.
 start()
 one_pass(clean(checks=hung(51)), 700)
+ended("s1", 2, "success")
 status, landed = one_pass(clean(checks=whole(suite="s2")), 800)
 assert RERUNS == ["s1"] and "CI is green" in status, (RERUNS, status)
+
+# The allowance is the run's, not a PR's: a second PR on the head, a restart
+# (state forgotten), and a request whose response was lost (it took, GitHub
+# says attempt 2) all find the run already run again, and never ask a second.
+start()
+one_pass(clean(checks=hung(51)), 700)
+fresh_pr_state()  # another PR's state, or this one after a restart
+status, _ = one_pass(clean(checks=hung(51)), 760)
+assert RERUNS == ["s1"] and "cancelled again" not in status, (RERUNS, status)
+ended("s1", 2)
+fresh_pr_state()
+status, _ = one_pass(clean(checks=hung(52)), 800)
+assert RERUNS == ["s1"] and "cancelled again after a rerun" in status, (RERUNS, status)
+start()
+ended("s1", 2)  # accepted before the steward's own request was lost or its pass died
+status, _ = one_pass(clean(checks=hung(51)), 700)
+assert RERUNS == [] and "cancelled again after a rerun" in status, (RERUNS, status)
+start()
+RERUN_FAILS["s1"] = RuntimeError("gh run rerun: HTTP 500: lost the answer")
+one_pass(clean(checks=hung(51)), 700)
+RERUN_FAILS.clear()
+RUN_INFO["s1"] = {"run_attempt": 2, "status": "in_progress", "conclusion": None}  # it did take
+status, _ = one_pass(clean(checks=hung(51)), 760)
+assert RERUNS == [] and "cancelled again" not in status, (RERUNS, status)
+
+# Another head's run is a run of its own, with its own allowance.
 start()
 one_pass(clean("a" * 40, checks=hung(51)), 700)
-one_pass(clean("b" * 40, checks=hung(53)), 760)
-assert RERUNS == ["s1", "s1"], RERUNS
+RUN_INFO.clear()
+one_pass(clean("b" * 40, checks=hung(53, whole(suite="s9", conclusion=CANCEL))), 760)
+assert RERUNS == ["s1", "s9"], RERUNS
 
 # Several cancelled jobs of one run, jobs sharing a display name among them
 # (twin jobs, matrix legs), are one request: GitHub starts one attempt for the
@@ -250,8 +285,7 @@ def jobs(ids, run="s1"):
 start()
 status, _ = one_pass(clean(checks=jobs([51, 52])), 700)
 assert RERUNS == ["s1"] and "waiting for CI" in status and not JOBS, (RERUNS, status, JOBS)
-status, _ = one_pass(clean(checks=jobs([51, 52])), 760)
-assert RERUNS == ["s1"] and "cancelled again" not in status, (RERUNS, status)
+ended("s1", 2)
 status, _ = one_pass(clean(checks=jobs([51]) + jobs([53])), 800)
 assert RERUNS == ["s1"] and "cancelled again after a rerun" in status, (RERUNS, status)
 
@@ -268,6 +302,8 @@ start()
 a, b = in_flow("a", 61), in_flow("b", 62)
 one_pass(clean(checks=a + b), 700)
 assert sorted(RERUNS) == ["s-a", "s-b"], RERUNS
+ended("s-b", 2)
+ended("s-a", 2, "success")
 status, _ = one_pass(clean(checks=a + in_flow("b", 63)), 760)
 assert sorted(RERUNS) == ["s-a", "s-b"] and "CI is red: check / check (cancelled again after a rerun)" in status, (RERUNS, status)
 
@@ -285,8 +321,14 @@ assert RERUNS == [] and "waiting for CI" in status, (RERUNS, status)
 status, _ = one_pass(clean(checks=hung(51, old)), 760)
 assert RERUNS == ["s1"], RERUNS
 
+# A run GitHub says is still going isn't run again, whatever the rollup shows.
+start()
+RUN_INFO["s1"] = {"run_attempt": 1, "status": "in_progress", "conclusion": None}
+status, _ = one_pass(clean(checks=hung(51)), 700)
+assert RERUNS == [] and "waiting for CI" in status, (RERUNS, status)
+
 # A rerun that fails keeps the ones before it: run A is asked once though
-# run B raises after it, and a pass that fails later still doesn't forget it.
+# run B raises after it, and a pass that fails later asks only B again.
 start()
 two = hung(71, whole(suite="a", conclusion=CANCEL)) + hung(72, whole(suite="b", conclusion=CANCEL))
 RERUN_FAILS["b"] = C.Unavailable("github down")

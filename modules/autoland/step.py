@@ -83,23 +83,33 @@ class Pass(Context, Jobs, Actions):
         )
 
     def ci_checks(self):
-        """ci_state, having run again, once, each finished workflow run with
-        a job cancelled and nothing run through since (`gh run rerun --failed`:
-        one request per run, which GitHub counts as one attempt for all its
-        jobs and their dependents). Cancelled again, ci_state calls it red: a
-        hang. Each request is saved as GitHub takes it, so a later failure in
-        the pass doesn't forget it. One refused for want of permission (the
-        App lacks Actions write) is shown, not saved, and tried again next
-        pass; so is any other refusal, as a run that is not over yet."""
-        st = self.st.get("rerun")
-        if not st or st.get("head") != self.head:
-            st = {"head": self.head, "done": {}}
-        rerun = {"done": st["done"], "refused": {}, "want": {}}
+        """ci_state, having run again, once, each finished workflow run whose
+        newest attempt ended cancelled (`gh run rerun --failed`: one request
+        per run, which GitHub counts as one attempt for all its jobs). What
+        was run already is GitHub's run_attempt, read afresh each pass, so
+        PRs sharing a head, a restart and a lost response all see the same
+        allowance, and nothing is kept here. Cancelled again, ci_state calls
+        it red: a hang. One refused for want of permission (the App lacks
+        Actions write) is shown and tried again next pass; so is any other
+        refusal, as a run that is not over yet."""
+        rerun = {"runs": {}, "refused": {}, "lookup": set(), "due": set()}
         moved = moved_from(self.repo, self.pr, self.st)
+
+        def read(keys):
+            for key in keys:
+                got = C.gh("api", f"repos/{self.repo}/actions/runs/{key}")
+                rerun["runs"][key] = {"attempt": got["run_attempt"], "status": got["status"],
+                                      "conclusion": got["conclusion"]}
+
         got = ci_state(self.pr, self.machine, moved, self.repo, rerun)
-        if not rerun["want"] or C.DRY:
+        if not rerun["lookup"]:
             return got
-        for key, job in rerun["want"].items():
+        read(sorted(rerun["lookup"]))
+        rerun["lookup"].clear()
+        got = ci_state(self.pr, self.machine, moved, self.repo, rerun)
+        if not rerun["due"] or C.DRY:
+            return got
+        for key in sorted(rerun["due"]):
             try:
                 C.gh("run", "rerun", key, "--failed", "--repo", self.repo)
             except C.Unavailable:
@@ -109,10 +119,9 @@ class Pass(Context, Jobs, Actions):
                     rerun["refused"][key] = str(e)
                 C.log(f"{self.tag}: run {key} not run again: {e}")
             else:
-                st["done"][key] = job
                 C.log(f"{self.tag}: ran {key} again, cancelled with nothing run through since")
-                self.st["rerun"] = st
-                save(self.key, self.st)
+        rerun["due"].clear()
+        read(sorted(rerun["runs"]))  # what the requests made of them, or another's
         return ci_state(self.pr, self.machine, moved, self.repo, rerun)
 
     def run(self):
