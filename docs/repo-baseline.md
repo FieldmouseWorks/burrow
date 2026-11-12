@@ -226,9 +226,9 @@ root only.
    after, told which. An undo's or a red fix's own landing goes to the job.
 9. A PR whose merge would change nothing on its base (its head merged into
    the base's tip has the tip's own tree: another PR made the same change)
-   is closed, saying so, instead of landing as an empty commit. A dependency
-   bot's is left for the bot to close, and never cleared for the bot to
-   merge.
+   is closed, saying so, instead of landing as an empty commit. Dependency
+   updates close the same way: their bot need not run again to retire work
+   already present on the base, and they are never cleared to merge.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside
