@@ -56,7 +56,11 @@ fn routes(cfg: &Config, lines: &[&str]) {
             .split_whitespace()
             .map(str::to_owned)
             .collect();
-        cfg.settings.as_ref().unwrap().command(&args, "test").unwrap();
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(&args, "test")
+            .unwrap();
     }
 }
 

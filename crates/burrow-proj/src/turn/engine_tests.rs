@@ -58,7 +58,7 @@ fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
     cfg.jobs = dir.path().join("jobs");
     cfg.scratch = dir.path().join("scratch");
     crate::config::tests::set(&mut cfg, dir.path(), &[]);
-    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
+    let overlay = cfg.settings.as_ref().unwrap().roles_file();
     let job = Job::new(&cfg, "job");
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();

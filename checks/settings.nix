@@ -37,8 +37,13 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   # through the door.
   printf 'triage codex\n' >$live/config/roles
   printf 'triage codex - low\n' >$live/config/models
+  # Unmoved, proj refuses role settings rather than run the defaults.
+  if run check-config 2>err; then echo "check-config took unmoved files"; exit 1; fi
+  grep -F "aren't moved into the settings yet" err
   run settings migrate
-  [ -e $live/config/roles.migrated ] && [ ! -e $live/config/roles ]
+  run check-config
+  # The old files stay, for a generation from before the settings.
+  [ -e $live/config/roles ]
   run settings role fix@sam/homelab codex over 80 claude
   run engines save usual
 
@@ -53,9 +58,9 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["proj.maxJobs"]' '{"value":6,"origin":"flake"}'
   want '.options["autoland.jobIdleMinutes"]' '{"value":20,"origin":"default"}'
   want '.options["settings.allowed"].value' '["sam/kept"]'
-  want '.options["proj.roles"].value' '{"*":{"engine":"claude","over":null},"planner":{"engine":"codex","over":null},"triage":{"engine":"codex","over":null},"fix@sam/homelab":{"engine":"codex","over":{"pct":80,"engine":"claude"}}}'
+  want '.options["proj.roles"].value' '{"*":{"engine":"claude","over":null},"planner":{"engine":"codex","over":null},"triage":{"engine":"codex","over":null},"fix@sam/homelab":{"engine":"codex","over":{"pct":80.0,"engine":"claude"}}}'
   want '.options["proj.models"].value' '{"* claude":{"model":null,"effort":null},"* codex":{"model":null,"effort":null},"triage codex":{"model":null,"effort":"low"}}'
-  want '.options["proj.roles"].file' "\"$live/settings/overlay.json\""
+  want '.options["proj.roles"].file' "\"$live/settings/overlay.roles.json\""
   want '.options["proj.engineSetups"].value.active' '"usual"'
   want '.options["proj.engineOffers"].origin' '"default"'
   want '.options["proj.usageHold"].origin' '"live"'

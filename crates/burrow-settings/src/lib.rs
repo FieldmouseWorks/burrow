@@ -2,13 +2,10 @@
 //! the overlay; an unreadable policy fails closed. No pipeline daemon is needed
 //! to change it. Other settings can join this document without another store.
 pub mod door;
+mod live;
 pub mod roles;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs::{self, File},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,28 +35,12 @@ struct Overlay {
     pipeline_until: Option<i64>,
     #[serde(default)]
     receipts: BTreeMap<String, String>,
-    /// Which engine, model and effort runs each role, over the schema's
-    /// defaults ([`roles`]).
-    #[serde(default)]
-    routing: roles::Roles,
-    /// What each engine offers, where it isn't the schema's default.
-    #[serde(default)]
-    offers: BTreeMap<String, roles::Offer>,
-    #[serde(default)]
-    setups: roles::Setups,
-    /// When proj's old roles and models files were moved in, once.
-    #[serde(default)]
-    migrated: Option<i64>,
 }
 
-/// proj's old roles, models and setups files, read once into the overlay
-/// ([`Config::migrate`]).
-#[derive(Debug, Default)]
-pub struct Migration {
-    pub routing: roles::Roles,
-    /// Models and efforts the old files set, which the engines offered.
-    pub offers: BTreeMap<String, roles::Offer>,
-    pub setups: roles::Setups,
+impl live::Document for Overlay {
+    fn receipts(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.receipts
+    }
 }
 
 pub fn now() -> i64 {
@@ -96,11 +77,7 @@ impl Config {
     }
 
     fn read(&self) -> Result<Overlay, String> {
-        match fs::read(&self.overlay) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Overlay::default()),
-            Err(e) => Err(e.to_string()),
-        }
+        live::read(&self.overlay)
     }
 
     /// Read again on every admission, including a long-lived reader's next job.
@@ -125,96 +102,6 @@ impl Config {
 
     pub fn scope_until(&self) -> Result<Option<i64>, String> {
         Ok(self.read()?.pipeline_until.filter(|t| *t > now()))
-    }
-
-    /// The role settings in force, checked again on every read: an overlay
-    /// a hand edit broke fails the turn rather than running a default.
-    pub fn roles(&self) -> Result<roles::InForce, String> {
-        let state = self.read()?;
-        state.routing.in_force(&state.offers)
-    }
-
-    /// Whether the role settings are set in the overlay rather than
-    /// defaulted: (routes, tunings, offers).
-    pub fn roles_set(&self) -> Result<(bool, bool, bool), String> {
-        let state = self.read()?;
-        Ok((
-            !state.routing.roles.is_empty(),
-            !state.routing.models.is_empty(),
-            !state.offers.is_empty(),
-        ))
-    }
-
-    /// The saved setups and the one in force, as `settings show` gives
-    /// them; None when none is saved.
-    pub fn setups(&self) -> Result<Option<serde_json::Value>, String> {
-        let state = self.read()?;
-        if state.setups.saved.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(serde_json::json!({
-            "active": roles::active(&state.routing, &state.setups),
-            "saved": state.setups.saved,
-        })))
-    }
-
-    /// `engines`: the setups and the routes in force, changing nothing.
-    pub fn engines(&self) -> Result<String, String> {
-        let state = self.read()?;
-        state.routing.in_force(&state.offers)?;
-        let active = roles::active(&state.routing, &state.setups);
-        Ok(roles::status(
-            active.as_deref(),
-            &state.routing,
-            &state.setups,
-        ))
-    }
-
-    /// Moves proj's old files in, once: false, changing nothing, when the
-    /// overlay already took them. Checked as the door checks a change.
-    pub fn migrate(&self, from: Migration, actor: &str) -> Result<bool, String> {
-        let mut moved = false;
-        self.write(actor, None, &["migrate".into()], |state| {
-            if state.migrated.is_some() {
-                return Ok(None);
-            }
-            let mut offers = roles::default_offers();
-            offers.extend(state.offers.clone());
-            for (engine, offer) in from.offers {
-                let have = offers.entry(engine).or_default();
-                for m in offer.models {
-                    if !have.models.contains(&m) {
-                        have.models.push(m);
-                    }
-                }
-                for e in offer.efforts {
-                    if !have.efforts.contains(&e) {
-                        have.efforts.push(e);
-                    }
-                }
-            }
-            from.routing.in_force(&offers)?;
-            for (name, setup) in &from.setups.saved {
-                if !roles::valid_setup(name) {
-                    return Err(format!("setup {name}: not a setup name"));
-                }
-                setup
-                    .check(&offers)
-                    .map_err(|e| format!("setup {name}: {e}"))?;
-            }
-            // Only what differs from the declared default is set.
-            let declared = roles::default_offers();
-            offers.retain(|engine, offer| declared.get(engine) != Some(offer));
-            state.offers = offers;
-            state.routing = from.routing;
-            state.setups = from.setups;
-            state.migrated = Some(now());
-            moved = true;
-            Ok(Some(
-                "Moved proj's roles and models into the settings.".into(),
-            ))
-        })?;
-        Ok(moved)
     }
 
     fn permits(&self, state: &Overlay, repo: &str) -> bool {
@@ -272,16 +159,6 @@ impl Config {
         self.change(args, actor, None)
     }
 
-    /// What the request with RECEIPT was answered, once its change is in
-    /// the overlay.
-    pub fn answered(&self, receipt: &std::path::Path) -> Result<Option<String>, String> {
-        Ok(self
-            .read()?
-            .receipts
-            .get(receipt.to_string_lossy().as_ref())
-            .cloned())
-    }
-
     pub fn request(
         &self,
         receipt: &std::path::Path,
@@ -303,37 +180,43 @@ impl Config {
             ["engines"] | ["engines", "list"] => return self.engines(),
             _ => {}
         }
-        let answer = self.write(actor, receipt, args, |state| {
-            match words.as_slice() {
-                [verb @ ("allow" | "pause"), repo] if burrow_github::repo_name(repo) => {
-                    state.repos.insert(repo.to_ascii_lowercase(), *verb == "allow");
-                }
-                ["pipeline", until] => {
-                    let t: i64 = until.parse().map_err(|_| "pipeline needs a Unix timestamp")?;
-                    if t <= now() {
-                        return Err("pipeline deadline must be in the future".into());
+        if let ["role" | "model" | "offer" | "engines", ..] = words.as_slice() {
+            return self.change_roles(&words, args, actor, receipt);
+        }
+        let answer = live::write(
+            &self.overlay,
+            &self.overlay.with_extension("lock"),
+            &self.overlay.with_extension("log"),
+            actor,
+            receipt,
+            args,
+            |state: &mut Overlay| {
+                match words.as_slice() {
+                    [verb @ ("allow" | "pause"), repo] if burrow_github::repo_name(repo) => {
+                        state
+                            .repos
+                            .insert(repo.to_ascii_lowercase(), *verb == "allow");
                     }
-                    state.pipeline_until = Some(t);
+                    ["pipeline", until] => {
+                        let t: i64 = until
+                            .parse()
+                            .map_err(|_| "pipeline needs a Unix timestamp")?;
+                        if t <= now() {
+                            return Err("pipeline deadline must be in the future".into());
+                        }
+                        state.pipeline_until = Some(t);
+                    }
+                    ["back"] => state.pipeline_until = None,
+                    _ => {
+                        return Err(format!(
+                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back\n{}",
+                            roles::USAGE
+                        ));
+                    }
                 }
-                ["back"] => state.pipeline_until = None,
-                ["role" | "model" | "offer" | "engines", ..] => {
-                    return roles::apply(
-                        &mut state.routing,
-                        &mut state.offers,
-                        &mut state.setups,
-                        &words,
-                    )
-                    .map(Some);
-                }
-                _ => {
-                    return Err(format!(
-                        "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back\n{}",
-                        roles::USAGE
-                    ));
-                }
-            }
-            Ok(Some(String::new()))
-        })?;
+                Ok(Some(String::new()))
+            },
+        )?;
         match answer {
             Some(said) if !said.is_empty() => Ok(said),
             _ if receipt.is_some() => {
@@ -342,82 +225,12 @@ impl Config {
             _ => self.show(),
         }
     }
-
-    /// One change, serialized and atomic. CHANGE returns None to leave the
-    /// overlay as it is, or the change's answer. A receipt already in the
-    /// overlay answers again with what it said, changing nothing. The log
-    /// line is appended and synced before the new overlay is published.
-    fn write(
-        &self,
-        actor: &str,
-        receipt: Option<&str>,
-        args: &[String],
-        change: impl FnOnce(&mut Overlay) -> Result<Option<String>, String>,
-    ) -> Result<Option<String>, String> {
-        let parent = self
-            .overlay
-            .parent()
-            .ok_or("overlay needs a parent directory")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.overlay.with_extension("lock"))
-            .map_err(|e| e.to_string())?;
-        lock.lock().map_err(|e| e.to_string())?;
-        let mut state = self.read()?;
-        if let Some(body) = receipt.and_then(|r| state.receipts.get(r)) {
-            return Ok(Some(body.clone()));
-        }
-        let Some(answer) = change(&mut state)? else {
-            return Ok(None);
-        };
-        if let Some(receipt) = receipt {
-            let said = if answer.is_empty() {
-                "Settings changed; use settings show for the current policy."
-            } else {
-                &answer
-            };
-            state.receipts.insert(receipt.into(), said.into());
-        }
-        use std::io::Write;
-        let mut log = File::options()
-            .append(true)
-            .create(true)
-            .open(self.overlay.with_extension("log"))
-            .map_err(|e| e.to_string())?;
-        writeln!(
-            log,
-            "{}",
-            serde_json::json!({"at": now(), "actor": actor, "change": args})
-        )
-        .map_err(|e| e.to_string())?;
-        log.sync_all().map_err(|e| e.to_string())?;
-        let pending = self.overlay.with_extension("pending");
-        let mut file = File::create(&pending).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        // Readers include the isolated reviewer account. This overlay holds
-        // public operational policy, regardless of the writer's umask.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o644))
-                .map_err(|e| e.to_string())?;
-        }
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(pending, &self.overlay).map_err(|e| e.to_string())?;
-        File::open(parent)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())?;
-        Ok(Some(answer))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[test]
     fn one_policy_is_opt_in_live_and_scoped() {
         let dir = tempfile::tempdir().unwrap();

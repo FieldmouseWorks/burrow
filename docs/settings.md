@@ -145,14 +145,15 @@ proj engines [save NAME [--replace] | use NAME | use back]
 A role key is `ROLE`, `ROLE@OWNER/REPO`, `*` (every role) or
 `*@OWNER/REPO`; the closest one wins: a named role over `*`, a repo's key
 over the bare one, the repo matched case-insensitively. Engines are
-`claude` and `codex`. `over PCT ENGINE` moves a turn to that engine when
-its own is short: any window on its meter (the five-hour session or the
-week) at PCT with no credits to carry on, or, for Claude, the machine
-already out of Claude's usage. It moves only when the other engine's meter
-has room: credits, or no window used up. Missing readings, or readings an
-hour old, move nothing. `burrow.usageReset` supplies both meters. Each
-engine keeps its own conversation when a role moves between them. A
-steward judge always runs on Claude.
+`claude` and `codex`. `over PCT ENGINE` (PCT any number from 0 to 100)
+moves a turn to that engine when its own is short: any window on its meter
+(the five-hour session or the week) at PCT with no credits to carry on,
+or, for Claude, the machine already out of Claude's usage. It moves only
+when the other engine's meter has room: credits, or no window used up.
+Missing readings, or readings an hour old, move nothing.
+`burrow.usageReset` supplies both meters. Each engine keeps its own
+conversation when a role moves between them. A steward judge always runs
+on Claude.
 
 Nothing is an implicit fallback: the schema declares each default and
 `proj settings show` shows it as one. Every role runs on Claude (`*`)
@@ -184,9 +185,18 @@ active until one matches again. `proj engines` lists them, with each role's
 engine, and never a model id: the [engines door](front-door.md#engines-with-no-agent)
 answers with it.
 
+They're kept beside the admission overlay, in `overlay.roles.json`, under
+the same lock and log, so a generation from before them still reads its
+overlay after a rollback. A turn reads them once: its engine, overflow,
+model and effort come from one version of them, and so does `settings show`.
+
 `proj check-config` reads the role settings as each turn does; the update's
 health check runs it as the job user after every switch. proj's old files
-(`~/.config/proj/roles`, `models`, `roles.d/`) moved into the overlay once,
-by `proj settings migrate` (the `proj-settings-migrate` unit), which renames
-them `NAME.migrated`; nothing reads them, and check-config fails while one
-is back.
+(`~/.config/proj/roles`, `models`, `roles.d/`) are moved in once by `proj
+settings migrate` (the `proj-settings-migrate` unit, ordered before the
+units that start or switch turns), which also makes and answers a switch the
+old store had journalled; values set through the door before it ran win
+over the old files'. The files stay, for a generation from before the
+settings, and nothing reads them since. While they're there unmoved, proj
+refuses role settings, and every turn and check-config with them, rather
+than run the defaults.

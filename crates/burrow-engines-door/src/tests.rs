@@ -321,3 +321,42 @@ fn rate_limits_defer_at_every_door_stage() {
         }
     }
 }
+
+#[test]
+fn a_switch_the_door_before_the_settings_made_is_answered_not_made_again() {
+    let d = tempfile::tempdir().unwrap();
+    let cfg = door(
+        d.path(),
+        &[
+            "role work claude",
+            "engines save one",
+            "role work codex",
+            "engines save two",
+        ],
+    );
+    // The old door switched to one and recorded it, then the machine moved
+    // to the settings before it answered.
+    let state = cfg.state.join("sam--box");
+    fs::create_dir_all(&state).unwrap();
+    let hash: String = Sha256::digest(b"issue-one:initial")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    fs::write(
+        state.join(format!("1-{hash}.operation")),
+        json!({"receipt": "x", "destination": "one", "before": "two", "result": "Was active: two\nActive: one\n"}).to_string(),
+    )
+    .unwrap();
+    let mut gh = github("sam", "use back", None);
+    pass(&mut gh, &cfg).unwrap();
+    assert_eq!(work(&cfg), "codex", "back wasn't made again");
+    let comment = gh
+        .asked("POST")
+        .last()
+        .unwrap()
+        .2
+        .as_ref()
+        .unwrap()
+        .to_string();
+    assert!(comment.contains("Active: one"), "{comment}");
+}

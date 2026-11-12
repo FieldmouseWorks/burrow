@@ -1,24 +1,18 @@
 //! `proj settings migrate`: moves the old roles, models and roles.d files
-//! (~/.config/proj) into the settings overlay, once, then renames them aside
-//! (NAME.migrated), so nothing can read them again by mistake. Their old
-//! line formats are read here and nowhere else.
+//! (~/.config/proj) into the settings, once. Their old line formats are read
+//! here and nowhere else. The files stay where they are, so a generation from
+//! before the settings still has them after a rollback; nothing since reads
+//! them, and proj refuses role settings while they're there unmoved.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use burrow_settings::Migration;
-use burrow_settings::roles::{self, Key, Offer, Roles, Setups, Tuning};
+use burrow_settings::roles::{self, Key, Migration, Offer, Roles, Setups, Tuning};
+use serde::{Deserialize, Serialize};
 
-/// The old files, beside each other in DIR.
-const FILES: &[&str] = &[
-    "roles",
-    "models",
-    "roles.d",
-    "roles.previous",
-    "roles.lock",
-    "roles.operation",
-];
+/// The old files that hold role settings.
+const FILES: &[&str] = &["roles", "models", "roles.d"];
 
 fn text(path: &Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
@@ -51,6 +45,21 @@ fn routes(path: &Path, text: &str) -> Result<BTreeMap<String, roles::Route>, Str
     Ok(out)
 }
 
+/// The efforts each engine's CLI took, as the old models file checked them:
+/// Claude Code's `--effort` has a fixed set; Codex's levels are its models'
+/// own, so any plain lowercase word.
+fn effort_ok(engine: &str, effort: &str) -> bool {
+    match engine {
+        "claude" => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
+        _ => {
+            !effort.is_empty()
+                && effort
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+        }
+    }
+}
+
 /// A models file: `ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]` a line.
 fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
     let mut out = BTreeMap::new();
@@ -68,17 +77,17 @@ fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
         if !roles::ENGINES.contains(&engine) {
             return Err(at(format!("unknown engine {engine}")));
         }
+        let model = (model != "-").then(|| model.to_owned());
+        if model.as_deref().is_some_and(|m| !roles::plain(m)) {
+            return Err(at("invalid model choice".into()));
+        }
+        if let Some(e) = effort.filter(|e| !effort_ok(engine, e)) {
+            return Err(at(format!("{engine} takes no effort {e}")));
+        }
         let tuning = Tuning {
-            model: (model != "-").then(|| model.to_owned()),
+            model,
             effort: effort.map(str::to_owned),
         };
-        if [&tuning.model, &tuning.effort]
-            .into_iter()
-            .flatten()
-            .any(|w| !roles::plain(w))
-        {
-            return Err(at("not a plain model or effort".into()));
-        }
         let key = format!("{} {engine}", Key::parse(key).map_err(at)?.canonical());
         if out.insert(key, tuning).is_some() {
             return Err(at("a second line for this role and engine".into()));
@@ -87,8 +96,19 @@ fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
     Ok(out)
 }
 
-/// What the old files in DIR hold, as the overlay will.
-pub(crate) fn read(dir: &Path) -> Result<Migration, String> {
+/// A switch the old engines door or CLI had journalled (`roles.operation`):
+/// its receipt, the setup it switched to and from, and its answer once done.
+#[derive(Serialize, Deserialize)]
+struct Operation {
+    receipt: PathBuf,
+    destination: String,
+    before: Option<String>,
+    result: Option<String>,
+}
+
+/// What the old files in DIR hold, as the settings will, and the switch
+/// they had in flight.
+fn read(dir: &Path) -> Result<(Migration, Option<Operation>), String> {
     let roles_path = dir.join("roles");
     let models_path = dir.join("models");
     let tuned = match text(&models_path)? {
@@ -103,7 +123,7 @@ pub(crate) fn read(dir: &Path) -> Result<Migration, String> {
         offer.models.extend(tuning.model.clone());
         offer.efforts.extend(tuning.effort.clone());
     }
-    let routing = Roles {
+    let mut routing = Roles {
         roles: match text(&roles_path)? {
             Some(t) => routes(&roles_path, &t)?,
             None => BTreeMap::new(),
@@ -140,50 +160,99 @@ pub(crate) fn read(dir: &Path) -> Result<Migration, String> {
         .ok()
         .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()))
         .filter(|n| setups.saved.get(n) == Some(&routing));
-    setups.previous =
-        text(&dir.join("roles.previous"))?.and_then(|name| setups.saved.get(name.trim()).cloned());
-    Ok(Migration {
-        routing,
-        offers,
-        setups,
-    })
+    let previous = text(&dir.join("roles.previous"))?.map(|n| n.trim().to_owned());
+    // A switch journalled but maybe not made: make it, as the old store
+    // would have before its next command.
+    let journal = dir.join("roles.operation");
+    let op = match text(&journal)? {
+        Some(t) => Some(
+            serde_json::from_str::<Operation>(&t)
+                .map_err(|e| format!("{}: {e}", journal.display()))?,
+        ),
+        None => None,
+    };
+    let previous = match &op {
+        Some(op) if op.result.is_none() => {
+            routing = setups
+                .saved
+                .get(&op.destination)
+                .cloned()
+                .ok_or_else(|| format!("{}: no setup {}", journal.display(), op.destination))?;
+            setups.active = Some(op.destination.clone());
+            op.before.clone()
+        }
+        _ => previous,
+    };
+    setups.previous = previous.and_then(|name| setups.saved.get(&name).cloned());
+    Ok((
+        Migration {
+            routing,
+            offers,
+            setups,
+        },
+        op,
+    ))
 }
 
-/// The old files still in DIR.
-pub(crate) fn left(dir: &Path) -> Vec<PathBuf> {
+/// The first of the old files still in DIR.
+pub(crate) fn left(dir: &Path) -> Option<PathBuf> {
     FILES
         .iter()
         .map(|f| dir.join(f))
-        .filter(|p| p.symlink_metadata().is_ok())
-        .collect()
+        .find(|p| p.symlink_metadata().is_ok())
 }
 
-/// Moves the old files in DIR into SETTINGS once, then renames them aside.
+/// Moves the old files in DIR into SETTINGS, once, holding the lock their
+/// old writers took so none changes them meanwhile.
 pub(crate) fn run(settings: &burrow_settings::Config, dir: &Path) -> Result<String, String> {
-    let moved = settings.migrate(read(dir)?, "proj settings migrate")?;
-    let old = left(dir);
-    if !moved && !old.is_empty() {
-        return Err(format!(
-            "the settings took the old files once already; {} came back, and nothing reads it: make its changes with proj settings, then remove it",
-            old[0].display()
-        ));
+    let _lock = match dir.is_dir() {
+        true => {
+            let path = dir.join("roles.lock");
+            let lock = File::options()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            lock.lock()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            Some(lock)
+        }
+        false => None,
+    };
+    if settings.role_view()?.migrated {
+        return Ok("The settings took the old files already.\n".into());
     }
-    for path in &old {
-        let mut aside = path.clone().into_os_string();
-        aside.push(".migrated");
-        fs::rename(path, &aside).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (from, op) = read(dir)?;
+    // The answer to a switch the old door had journalled, where that door
+    // looks for it, before the switch is made: a retried request finds it
+    // and answers again, never switches again.
+    if let Some(op) = op
+        && !op.receipt.exists()
+    {
+        let result = op.result.clone().unwrap_or_else(|| {
+            format!(
+                "Was active: {}\nActive: {}\n",
+                op.before.as_deref().unwrap_or("unsaved"),
+                op.destination
+            )
+        });
+        let done = Operation {
+            result: Some(result),
+            ..op
+        };
+        let body = serde_json::to_vec(&done).map_err(|e| e.to_string())?;
+        let tmp = done.receipt.with_extension("migrating");
+        fs::write(&tmp, body)
+            .and_then(|()| File::open(&tmp)?.sync_all())
+            .and_then(|()| fs::rename(&tmp, &done.receipt))
+            .map_err(|e| format!("{}: {e}", done.receipt.display()))?;
     }
+    let moved = settings.migrate(from, "proj settings migrate")?;
     Ok(if moved {
         format!(
-            "Moved {} into the settings; proj settings show has them.\n",
-            if old.is_empty() {
-                "nothing (no old files)".to_owned()
-            } else {
-                old.iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
+            "Moved what {} held into the settings; proj settings show has them. Nothing reads the old files now.\n",
+            dir.display()
         )
     } else {
         "The settings took the old files already.\n".into()
@@ -194,6 +263,13 @@ pub(crate) fn run(settings: &burrow_settings::Config, dir: &Path) -> Result<Stri
 mod tests {
     use super::*;
 
+    fn settings(d: &Path) -> burrow_settings::Config {
+        burrow_settings::Config {
+            overlay: d.join("settings/overlay.json"),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn the_old_files_migrate_once() {
         let d = tempfile::tempdir().unwrap();
@@ -202,7 +278,7 @@ mod tests {
         fs::write(dir.join("roles.d/cheap"), "triage codex\n").unwrap();
         fs::write(
             dir.join("roles.d/usual"),
-            "# usual\ntriage claude\nfix@Sam/Box   codex over 80 claude\n",
+            "# usual\ntriage claude\nfix@Sam/Box   codex over 80.5 claude\n",
         )
         .unwrap();
         std::os::unix::fs::symlink(dir.join("roles.d/usual"), dir.join("roles")).unwrap();
@@ -212,14 +288,22 @@ mod tests {
             "triage claude small low\nfix codex - ultra\n",
         )
         .unwrap();
-        let settings = burrow_settings::Config {
-            overlay: d.path().join("overlay.json"),
-            ..Default::default()
-        };
+        let settings = settings(d.path());
+        // proj won't read role settings until they're moved in.
+        let mut cfg: crate::config::Config =
+            serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.settings = Some(settings.clone());
+        cfg.old_config = Some(dir.clone());
+        let err = cfg.check_config().unwrap_err();
+        assert!(err.contains("aren't moved into the settings yet"), "{err}");
+
         let said = run(&settings, &dir).unwrap();
         assert!(said.starts_with("Moved "), "{said}");
+        cfg.check_config().unwrap();
         let force = settings.roles().unwrap();
-        assert_eq!(force.route("fix", Some("sam/box")).engine, "codex");
+        let fix = force.route("fix", Some("sam/box"));
+        assert_eq!(fix.engine, "codex");
+        assert_eq!(fix.over.as_ref().unwrap().pct, 80.5, "fractions kept");
         assert_eq!(force.route("triage", None).engine, "claude");
         assert_eq!(
             force.tuning("triage", None, "claude").model.as_deref(),
@@ -235,32 +319,74 @@ mod tests {
             engines.contains("Active: usual\nPrevious: cheap\n"),
             "{engines}"
         );
-        assert!(left(&dir).is_empty());
-        assert!(dir.join("roles.d.migrated/usual").is_file());
-
-        // Once: a file written again later is refused, never read.
-        fs::write(dir.join("roles"), "triage codex\n").unwrap();
-        let err = run(&settings, &dir).unwrap_err();
-        assert!(err.contains("once already"), "{err}");
-        assert_eq!(
-            settings.roles().unwrap().route("triage", None).engine,
-            "claude"
-        );
-        fs::remove_file(dir.join("roles")).unwrap();
+        // The old files stay for the generation before, unread since.
+        assert!(dir.join("roles.d/usual").is_file());
+        fs::write(dir.join("models"), "triage claude other\n").unwrap();
         assert!(run(&settings, &dir).unwrap().contains("already"));
+        assert_eq!(
+            settings
+                .roles()
+                .unwrap()
+                .tuning("triage", None, "claude")
+                .model
+                .as_deref(),
+            Some("small")
+        );
+        let log = fs::read_to_string(settings.overlay.with_extension("log")).unwrap();
+        assert_eq!(log.lines().count(), 1, "{log}");
     }
 
     #[test]
     fn a_bad_old_file_moves_nothing() {
+        for (file, text, why) in [
+            ("roles", "# old\ntriage old-model\n", "roles line 2"),
+            (
+                "models",
+                "# old\nunused claude - enormous\n",
+                "claude takes no effort enormous",
+            ),
+            (
+                "models",
+                "unused codex - Max\n",
+                "codex takes no effort Max",
+            ),
+            ("models", "unused claude a$b\n", "invalid model choice"),
+            ("roles", "work claude over 100.5 codex\n", "roles line 1"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            fs::write(d.path().join(file), text).unwrap();
+            let settings = settings(d.path());
+            let err = run(&settings, d.path()).unwrap_err();
+            assert!(err.contains(why), "{text}: {err}");
+            assert!(!settings.roles_file().exists());
+        }
+    }
+
+    #[test]
+    fn a_journalled_switch_is_made_and_answered_once() {
         let d = tempfile::tempdir().unwrap();
-        fs::write(d.path().join("roles"), "# old\ntriage old-model\n").unwrap();
-        let settings = burrow_settings::Config {
-            overlay: d.path().join("overlay.json"),
-            ..Default::default()
-        };
-        let err = run(&settings, d.path()).unwrap_err();
-        assert!(err.contains("roles line 2"), "{err}");
-        assert!(!settings.overlay.exists());
-        assert!(d.path().join("roles").is_file());
+        let dir = d.path().join("config");
+        fs::create_dir_all(dir.join("roles.d")).unwrap();
+        fs::write(dir.join("roles.d/one"), "work claude\n").unwrap();
+        fs::write(dir.join("roles.d/two"), "work codex\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("roles.d/one"), dir.join("roles")).unwrap();
+        let receipt = d.path().join("door/1-cycle.operation");
+        fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        let op = serde_json::json!({"receipt": receipt, "destination": "two", "before": "one", "result": null});
+        fs::write(dir.join("roles.operation"), op.to_string()).unwrap();
+        let settings = settings(d.path());
+        run(&settings, &dir).unwrap();
+        assert_eq!(
+            settings.roles().unwrap().route("work", None).engine,
+            "codex"
+        );
+        let engines = settings.engines().unwrap();
+        assert!(
+            engines.contains("Active: two\nPrevious: one\n"),
+            "{engines}"
+        );
+        // Where the old door looks for its answer.
+        let done: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(done["result"], "Was active: one\nActive: two\n");
     }
 }

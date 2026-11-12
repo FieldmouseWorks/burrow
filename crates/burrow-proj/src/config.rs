@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::engine::{Choice, Engine};
+use crate::engine::Engine;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -314,20 +314,51 @@ impl Config {
             .map(|text| text.trim_end_matches('\n').to_owned())
     }
 
-    /// The role settings in force: the settings overlay's over the schema's
-    /// defaults, read again for every turn. An overlay that can't be read, or
-    /// names what its engine doesn't offer, fails the turn.
-    pub fn role_settings(&self) -> Result<burrow_settings::roles::InForce, String> {
-        match &self.settings {
-            Some(settings) => settings.roles(),
-            None => burrow_settings::roles::Roles::default().in_force(&BTreeMap::new()),
+    /// The role settings, one version of them, read again for every turn.
+    /// One that can't be read, or names what its engine doesn't offer,
+    /// fails the turn; so does reading them while proj's old files are
+    /// still to be moved in, rather than running the defaults.
+    pub fn role_view(&self) -> Result<burrow_settings::roles::View, String> {
+        let Some(settings) = &self.settings else {
+            return Ok(burrow_settings::roles::View {
+                in_force: burrow_settings::roles::Roles::default().in_force(&BTreeMap::new())?,
+                set: (false, false, false),
+                setups: None,
+                migrated: false,
+                file: self.jobs.join(".settings-unconfigured"),
+            });
+        };
+        let view = settings.role_view()?;
+        if !view.migrated
+            && let Some(dir) = &self.old_config
+            && let Some(old) = crate::settings::old_files(dir)
+        {
+            return Err(format!(
+                "{}: proj's old role settings aren't moved into the settings yet (proj settings migrate)",
+                old.display()
+            ));
         }
+        Ok(view)
+    }
+
+    /// The role settings in force.
+    pub fn role_settings(&self) -> Result<burrow_settings::roles::InForce, String> {
+        Ok(self.role_view()?.in_force)
     }
 
     /// The engine a turn of ROLE in REPO runs on: the closest role key's,
     /// or the engine it moves to when that one is short by its meter.
     pub fn engine(&self, role: &str, repo: Option<&str>) -> Result<Engine, String> {
-        let settings = self.role_settings()?;
+        self.engine_in(&self.role_settings()?, role, repo)
+    }
+
+    /// The same, from settings already read.
+    pub(crate) fn engine_in(
+        &self,
+        settings: &burrow_settings::roles::InForce,
+        role: &str,
+        repo: Option<&str>,
+    ) -> Result<Engine, String> {
         crate::engine::route(
             settings.route(role, repo),
             self.meters.as_deref(),
@@ -336,31 +367,12 @@ impl Config {
         )
     }
 
-    /// What a turn of ROLE in REPO runs on ENGINE: the model and effort the
-    /// settings give that role on that engine.
-    pub fn choice(&self, role: &str, repo: Option<&str>, engine: Engine) -> Result<Choice, String> {
-        let tuning = self.role_settings()?.tuning(role, repo, engine.name());
-        Ok(Choice {
-            engine,
-            model: tuning.model,
-            effort: tuning.effort,
-        })
-    }
-
     /// Validate the turn-start configuration without starting a job: the
     /// module's JSON (Config::load) and the role settings every turn reads.
     /// Runtime state (meters, usage holds and individual jobs) is not
     /// machine configuration.
     pub fn check_config(&self) -> Result<(), String> {
-        if let Some(dir) = &self.old_config
-            && let Some(old) = crate::settings::old_files(dir).first()
-        {
-            return Err(format!(
-                "{}: nothing reads it; proj settings migrate moves it into the settings once",
-                old.display()
-            ));
-        }
-        self.role_settings().map(|_| ())
+        self.role_view().map(|_| ())
     }
 
     /// How long a turn may wait in line, in seconds.
@@ -479,7 +491,7 @@ pub(crate) mod tests {
         set(&mut cfg, dir.path(), &["role unused codex over 80 claude"]);
         crate::cmd::dispatch(&cfg, &["check-config".into()]).unwrap();
         // An overlay a hand edit broke fails it, naming why.
-        let overlay = &cfg.settings.as_ref().unwrap().overlay;
+        let overlay = &cfg.settings.as_ref().unwrap().roles_file();
         let mut edited: Value = serde_json::from_slice(&std::fs::read(overlay).unwrap()).unwrap();
         edited["routing"]["models"]["unused claude"] = json!({"model": "gone", "effort": null});
         std::fs::write(overlay, edited.to_string()).unwrap();

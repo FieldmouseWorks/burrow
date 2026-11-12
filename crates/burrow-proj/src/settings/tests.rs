@@ -44,6 +44,7 @@ fn every_option_shown_comes_from_the_schema() {
     let (d, mut cfg) = crate::usage::tests::rig();
     let overlay = d.path().join("settings/overlay.json");
     cfg.settings.as_mut().unwrap().overlay = overlay.clone();
+    let roles_file = cfg.settings.as_ref().unwrap().roles_file();
     set(&mut cfg, tracked());
 
     // Nothing live yet: every live option at its default, naming its file.
@@ -67,7 +68,7 @@ fn every_option_shown_comes_from_the_schema() {
     let unset = json!({"engine": "claude", "over": null});
     assert_eq!(options["proj.roles"]["value"]["*"], unset);
     assert_eq!(options["proj.roles"]["origin"], "default");
-    assert_eq!(options["proj.roles"]["file"], json!(overlay));
+    assert_eq!(options["proj.roles"]["file"], json!(roles_file));
     assert_eq!(
         options["proj.models"]["value"]["* claude"],
         json!({"model": null, "effort": null})
@@ -100,11 +101,11 @@ fn every_option_shown_comes_from_the_schema() {
         "*": {"engine": "claude", "over": null},
         "planner": {"engine": "codex", "over": null},
         "triage": {"engine": "claude", "over": null},
-        "fix@sam/box": {"engine": "codex", "over": {"pct": 80, "engine": "claude"}},
+        "fix@sam/box": {"engine": "codex", "over": {"pct": 80.0, "engine": "claude"}},
     });
     assert_eq!(
         options["proj.roles"],
-        json!({"value": usual_roles, "origin": "live", "file": overlay})
+        json!({"value": usual_roles, "origin": "live", "file": roles_file})
     );
     assert_eq!(
         options["proj.models"]["value"],
@@ -158,9 +159,9 @@ fn every_option_shown_comes_from_the_schema() {
     fs::remove_file(cfg.jobs.join(crate::usage::FILE)).unwrap();
     // And an overlay a turn would refuse.
     set(&mut cfg, tracked());
-    let mut edited: Value = serde_json::from_slice(&fs::read(&overlay).unwrap()).unwrap();
+    let mut edited: Value = serde_json::from_slice(&fs::read(&roles_file).unwrap()).unwrap();
     edited["routing"]["models"]["triage claude"]["effort"] = json!("enormous");
-    fs::write(&overlay, edited.to_string()).unwrap();
+    fs::write(&roles_file, edited.to_string()).unwrap();
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.contains("doesn't offer effort enormous"), "{err}");
 }

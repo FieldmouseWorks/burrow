@@ -135,10 +135,11 @@ old and new active setup and each role/scope's engine, then closes the
 issue. It never posts model choices. An unknown setup, one naming a model
 its engine no longer offers, or a different request changes nothing; text
 anyone outside the authors wrote or edited is ignored. Each open cycle is
-one request: reopening asks again even with unchanged text. The overlay
-keeps each cycle's receipt with the switch it made, published in one
-atomic write, so interruption or a failed GitHub reply cannot repeat
-`back`.
+one request: reopening asks again even with unchanged text. The settings
+keep each cycle's receipt with the switch it made, published in one atomic
+write and answered only once it's on disk, so interruption or a failed
+GitHub reply cannot repeat `back`; nor can a switch the door made before
+the settings, whose receipt it still answers from.
 
 What a setup holds and how `proj engines` switches them on the machine is
 in [settings](settings.md#engines-models-and-efforts-per-role).

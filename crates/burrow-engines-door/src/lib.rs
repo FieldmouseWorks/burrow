@@ -31,6 +31,13 @@ struct Pending {
     reason: String,
 }
 
+/// The receipt the door before the settings left for a switch it made
+/// (proj's `.operation` file): only its answer matters now.
+#[derive(Deserialize)]
+struct Legacy {
+    result: Option<String>,
+}
+
 fn stored<T>(path: &Path, result: std::io::Result<T>) -> Result<T, String> {
     result.map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -86,6 +93,17 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
             door.reply(api, issue.number, &pending.body, &pending.reason)?;
             continue;
         }
+        // A request the door before the settings completed, its answer
+        // still to post: answered again, never made again.
+        let legacy = match fs::read(&operation) {
+            Ok(bytes) => {
+                serde_json::from_slice::<Legacy>(&bytes)
+                    .map_err(|e| format!("{}: {e}", operation.display()))?
+                    .result
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", operation.display()).into()),
+        };
         let lines = asked(&text);
         let args = match lines.as_slice() {
             [line] if line == "list" => Some(vec!["engines".into(), "list".into()]),
@@ -103,31 +121,36 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
                 .map(|s| fenced(&s))
                 .unwrap_or_else(|e| diagnostic(&e))
         };
-        let (body, reason) = match args {
-            // The receipt is the overlay's: a retried delivery of this open
-            // cycle's request answers again, never switches again.
-            Some(args) => match cfg.settings.request(
-                &operation,
-                &args,
-                &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
-            ) {
-                Ok(said) => (fenced(&said), "completed"),
-                // Published, though a step after it failed: it's done.
-                Err(_) if let Some(said) = cfg.settings.answered(&operation)? => {
-                    (fenced(&said), "completed")
-                }
-                Err(e) => (
-                    format!("Nothing changed. {}\n\n{}", diagnostic(&e), current()),
+        let (body, reason) = match (legacy, args) {
+            (Some(said), _) => (fenced(&said), "completed"),
+            (None, args) => match args {
+                // The receipt is the overlay's: a retried delivery of this open
+                // cycle's request answers again, never switches again.
+                Some(args) => match cfg.settings.request(
+                    &operation,
+                    &args,
+                    &format!("github:{}#{}:{}", cfg.repo, issue.number, issue.opener),
+                ) {
+                    Ok(said) => (fenced(&said), "completed"),
+                    // Published, though a step after it failed, so maybe not on
+                    // disk: no answer yet. The next pass's retry finds its
+                    // receipt, makes it durable and answers then.
+                    Err(e) if cfg.settings.answered(&operation)?.is_some() => {
+                        return Err(e.into());
+                    }
+                    Err(e) => (
+                        format!("Nothing changed. {}\n\n{}", diagnostic(&e), current()),
+                        "not_planned",
+                    ),
+                },
+                None => (
+                    format!(
+                        "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{}",
+                        current()
+                    ),
                     "not_planned",
                 ),
             },
-            None => (
-                format!(
-                    "Nothing changed. Ask one line: `list`, `use NAME` or `use back`.\n\n{}",
-                    current()
-                ),
-                "not_planned",
-            ),
         };
         let pending = Pending {
             body,

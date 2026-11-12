@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Config, Migration};
+use crate::Config;
 use std::fs;
 
 fn rig() -> (tempfile::TempDir, Config) {
@@ -16,8 +16,9 @@ fn set(cfg: &Config, line: &str) -> Result<String, String> {
     cfg.command(&args, "test")
 }
 
+/// The role settings' document.
 fn overlay(cfg: &Config) -> serde_json::Value {
-    serde_json::from_slice(&fs::read(&cfg.overlay).unwrap()).unwrap()
+    serde_json::from_slice(&fs::read(cfg.roles_file()).unwrap()).unwrap()
 }
 
 #[test]
@@ -46,8 +47,12 @@ fn the_closest_key_wins() {
     let fix = force.route("fix", Some("SAM/box"));
     assert_eq!(
         (fix.engine.as_str(), fix.over.as_ref().map(|o| o.pct)),
-        ("claude", Some(80))
+        ("claude", Some(80.0))
     );
+    // A fraction is a threshold of its own, never rounded.
+    set(&cfg, "role half codex over 80.5 claude").unwrap();
+    let half = cfg.roles().unwrap().route("half", None).clone();
+    assert_eq!(half.over.unwrap().pct, 80.5);
     assert_eq!(force.route("fix", None).engine, "codex");
     // The repo is stored folded, so its next setting replaces it.
     set(&cfg, "role fix@sam/box codex").unwrap();
@@ -64,6 +69,9 @@ fn the_closest_key_wins() {
     for bad in [
         "role fix gemini",
         "role fix codex over 101 claude",
+        "role fix codex over 100.5 claude",
+        "role fix codex over NaN claude",
+        "role fix codex over inf claude",
         "role fix codex over 80",
         "role fix@owner codex",
         "role fix",
@@ -75,15 +83,19 @@ fn the_closest_key_wins() {
 #[test]
 fn an_unknown_model_or_effort_is_refused() {
     let (_d, cfg) = rig();
-    set(&cfg, "pause sam/box").unwrap();
-    let before = fs::read(&cfg.overlay).unwrap();
+    set(&cfg, "offer claude models small").unwrap();
+    let before = fs::read(cfg.roles_file()).unwrap();
     let err = set(&cfg, "model fix claude big-one").unwrap_err();
     assert!(err.contains("claude doesn't offer that model"), "{err}");
     let err = set(&cfg, "model fix claude - enormous").unwrap_err();
     assert!(err.contains("doesn't offer effort enormous"), "{err}");
     // Codex's efforts are its own: max is Claude's.
     assert!(set(&cfg, "model fix codex - max").is_err());
-    assert_eq!(fs::read(&cfg.overlay).unwrap(), before, "nothing changed");
+    assert_eq!(
+        fs::read(cfg.roles_file()).unwrap(),
+        before,
+        "nothing changed"
+    );
 
     set(&cfg, "offer claude models big-one small").unwrap();
     set(&cfg, "model fix claude big-one high").unwrap();
@@ -109,7 +121,7 @@ fn an_unknown_model_or_effort_is_refused() {
     let mut edited = overlay(&cfg);
     edited["routing"]["models"]["judge claude"] =
         serde_json::json!({"model": "other", "effort": null});
-    fs::write(&cfg.overlay, edited.to_string()).unwrap();
+    fs::write(cfg.roles_file(), edited.to_string()).unwrap();
     assert!(cfg.roles().is_err());
 }
 
@@ -152,6 +164,7 @@ fn engines_use_changes_exactly_the_saved_values() {
     set(&cfg, "pause sam/box").unwrap();
     set(&cfg, &format!("pipeline {}", crate::now() + 600)).unwrap();
     let before = overlay(&cfg);
+    let admission = fs::read(&cfg.overlay).unwrap();
 
     let said = set(&cfg, "engines use cheap").unwrap();
     assert!(
@@ -169,6 +182,11 @@ fn engines_use_changes_exactly_the_saved_values() {
         }
     }
     assert_eq!(after["setups"]["saved"], before["setups"]["saved"]);
+    assert_eq!(
+        fs::read(&cfg.overlay).unwrap(),
+        admission,
+        "admission unchanged"
+    );
     let force = cfg.roles().unwrap();
     assert_eq!(force.route("triage", None).engine, "codex");
     assert_eq!(
@@ -283,5 +301,51 @@ fn the_old_files_migrate_once() {
     let mut bad = migration("codex");
     bad.offers.clear();
     assert!(fresh.migrate(bad, "test").is_err());
-    assert!(!fresh.overlay.exists());
+    assert!(!fresh.roles_file().exists());
+}
+
+#[test]
+fn what_the_door_set_before_the_migration_wins_over_the_old_files() {
+    let (_d, cfg) = rig();
+    set(&cfg, "role triage claude").unwrap();
+    set(&cfg, "engines save mine").unwrap();
+    let old = Migration {
+        routing: Roles {
+            roles: [
+                ("triage".to_owned(), route(&["codex"]).unwrap()),
+                ("fix".to_owned(), route(&["codex"]).unwrap()),
+            ]
+            .into(),
+            models: BTreeMap::new(),
+        },
+        offers: BTreeMap::new(),
+        setups: Setups {
+            saved: [("old".to_owned(), Roles::default())].into(),
+            active: None,
+            previous: None,
+        },
+    };
+    assert!(cfg.migrate(old, "test").unwrap());
+    let force = cfg.roles().unwrap();
+    assert_eq!(force.route("triage", None).engine, "claude", "newer wins");
+    assert_eq!(force.route("fix", None).engine, "codex");
+    let engines = cfg.engines().unwrap();
+    assert!(
+        engines.contains("  mine\n") || engines.contains("* mine\n"),
+        "{engines}"
+    );
+    assert!(engines.contains("  old\n"), "{engines}");
+}
+
+#[test]
+fn the_admission_overlay_keeps_its_own_format() {
+    let (_d, cfg) = rig();
+    set(&cfg, "pause sam/box").unwrap();
+    set(&cfg, "role triage codex").unwrap();
+    // A generation from before role settings reads this overlay: it takes
+    // only these fields.
+    let admission: serde_json::Value =
+        serde_json::from_slice(&fs::read(&cfg.overlay).unwrap()).unwrap();
+    let keys: Vec<_> = admission.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys, ["pipelineUntil", "receipts", "repos"]);
 }

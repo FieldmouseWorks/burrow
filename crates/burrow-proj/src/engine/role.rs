@@ -34,7 +34,7 @@ pub(crate) fn route(
     Ok(match &route.over {
         Some(o) => {
             let other = Engine::parse(&o.engine)?;
-            if over(meters, held, primary, other, f64::from(o.pct), now) {
+            if over(meters, held, primary, other, o.pct, now) {
                 other
             } else {
                 primary

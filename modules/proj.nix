@@ -558,11 +558,16 @@ in
       timerConfig = { OnBootSec = "1s"; OnUnitInactiveSec = "30s"; };
     };
     systemd.services = {
-      # Once: the overlay records that it took them, and renames them aside.
+      # Once: the settings record that they took them. Until then proj
+      # refuses role settings, so the units that start or switch turns wait
+      # on it; admission's own overlay stays readable throughout.
       proj-settings-migrate = {
         description = "Move proj's old roles and models files into the settings";
         wantedBy = [ "multi-user.target" ];
-        before = [ "burrow-settings-reconcile.service" ];
+        before = [
+          "burrow-engines-door.service" "proj-inbox.service" "proj-watch.service"
+          "proj-retry-transfer.service"
+        ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;

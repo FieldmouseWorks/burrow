@@ -98,14 +98,22 @@ pub(crate) fn resolve(
     repo: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<Choice, String> {
-    let mut engine = cfg.engine(role, repo)?;
+    // One version of the settings: the engine and its tuning can't come
+    // from either side of an `engines use`.
+    let settings = cfg.role_settings()?;
+    let mut engine = cfg.engine_in(&settings, role, repo)?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
     }
     if role == "steward-judged" {
         engine = Engine::Claude;
     }
-    let choice = cfg.choice(role, repo, engine)?;
+    let tuning = settings.tuning(role, repo, engine.name());
+    let choice = Choice {
+        engine,
+        model: tuning.model,
+        effort: tuning.effort,
+    };
     if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
         return Err(
             "the planner role requires an explicit small model on Claude; its default is Codex"

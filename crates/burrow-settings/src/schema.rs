@@ -22,6 +22,8 @@ pub enum Kind {
         min: u64,
     },
     Text,
+    /// A number from 0 to 100, fractions included.
+    Percent,
     /// One of these words.
     OneOf(&'static [&'static str]),
     /// A GitHub repository, OWNER/NAME.
@@ -133,7 +135,7 @@ const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
 const OVERFLOW: Kind = Kind::Maybe(&Kind::Record(&[
     Field {
         name: "pct",
-        kind: &Kind::Count { min: 0 },
+        kind: &Kind::Percent,
     },
     Field {
         name: "engine",
@@ -527,6 +529,7 @@ impl Kind {
             Kind::Bool => json!({"type": "boolean"}),
             Kind::Count { min } => json!({"type": "integer", "minimum": min}),
             Kind::Text => json!({"type": "string"}),
+            Kind::Percent => json!({"type": "number", "minimum": 0, "maximum": 100}),
             Kind::OneOf(words) => json!({"enum": words}),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
@@ -549,6 +552,11 @@ impl Kind {
             (Kind::Bool, Value::Bool(_)) | (Kind::Text, Value::String(_)) => Ok(()),
             (Kind::Object, Value::Object(_)) => Ok(()),
             (Kind::Count { min }, Value::Number(n)) if n.as_u64().is_some_and(|n| n >= *min) => {
+                Ok(())
+            }
+            (Kind::Percent, Value::Number(n))
+                if n.as_f64().is_some_and(|n| (0.0..=100.0).contains(&n)) =>
+            {
                 Ok(())
             }
             (Kind::OneOf(words), Value::String(s)) if words.contains(&s.as_str()) => Ok(()),
@@ -580,6 +588,7 @@ impl Kind {
             Kind::Bool => "true or false".into(),
             Kind::Count { min } => format!("a whole number from {min}"),
             Kind::Text => "text".into(),
+            Kind::Percent => "a number from 0 to 100".into(),
             Kind::OneOf(words) => format!("one of {}", words.join(", ")),
             Kind::Repo => "OWNER/NAME".into(),
             Kind::Maybe(kind) => format!("null or {}", kind.describe()),

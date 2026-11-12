@@ -9,23 +9,27 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod store;
+pub use store::{Migration, View};
+
 /// The engines a role can run on.
 pub const ENGINES: &[&str] = &["claude", "codex"];
 
 /// Where a role's turns go: its engine, and the engine it moves to when its
 /// own is short by its meter (`over`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Route {
     pub engine: String,
     pub over: Option<Overflow>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Overflow {
-    /// A meter window at this percent makes the engine short.
-    pub pct: u8,
+    /// A meter window at this percent makes the engine short: any finite
+    /// number from 0 to 100.
+    pub pct: f64,
     pub engine: String,
 }
 
@@ -49,7 +53,7 @@ pub struct Offer {
 /// The role settings set over the schema's defaults: each role key's route
 /// (`ROLE[@OWNER/REPO]`, or `*` for every role), and each role key's tuning
 /// on an engine (`KEY ENGINE`). A saved engine setup is one of these.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Roles {
     #[serde(default)]
@@ -60,7 +64,7 @@ pub struct Roles {
 
 /// The saved setups, the one put in force last, and what was in force before
 /// it (`engines use back`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Setups {
     #[serde(default)]
@@ -158,7 +162,7 @@ pub fn best<'v, V: 'v>(
 
 /// The settings in force: the schema's defaults with the overlay's values
 /// set over them, and what each engine offers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InForce {
     pub roles: BTreeMap<String, Route>,
     pub models: BTreeMap<String, Tuning>,
@@ -244,7 +248,7 @@ impl Roles {
             engine(&route.engine).map_err(|e| format!("role {key}: {e}"))?;
             if let Some(over) = &route.over {
                 engine(&over.engine).map_err(|e| format!("role {key}: {e}"))?;
-                if over.pct > 100 {
+                if !(0.0..=100.0).contains(&over.pct) {
                     return Err(format!("role {key}: overflow percent must be 0 to 100"));
                 }
             }
@@ -285,11 +289,11 @@ pub fn route(words: &[&str]) -> Result<Route, String> {
     let (primary, over) = match words {
         [e] => (*e, None),
         [e, "over", pct, other] => {
-            let pct: u8 = pct
+            let pct: f64 = pct
                 .parse()
                 .ok()
-                .filter(|p| *p <= 100)
-                .ok_or("overflow percent must be a whole number from 0 to 100")?;
+                .filter(|p| (0.0..=100.0).contains(p))
+                .ok_or("overflow percent must be a number from 0 to 100")?;
             engine(other)?;
             (
                 *e,
