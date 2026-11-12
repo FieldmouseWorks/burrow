@@ -36,10 +36,12 @@ impl Run<'_> {
 
     /// Records that main alone has been deployed since the hand-over.
     pub(crate) fn handed_over(&self) {
-        if self.cfg.train.is_some() {
-            if let Err(e) = std::fs::write(self.cfg.state.join(MAIN_ONLY), "") {
-                eprintln!("{MAIN_ONLY}: {e}");
-            }
+        if self.cfg.train.is_some()
+            && let Err(e) = std::fs::write(self.cfg.state.join(MAIN_ONLY), "")
+        {
+            eprintln!("{MAIN_ONLY}: {e}");
+        }
+    }
         }
     }
 
