@@ -161,62 +161,17 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
         let new = adding(f, &mut contents, old, head)?;
         let lower = file.to_lowercase();
         let markdown = lower.ends_with(".md") || lower.ends_with(".markdown");
-        if !markdown
-            && new
-                .iter()
-                .any(|l| rules::timer(&l.text) && !rules::comment(&l.text))
-        {
+        if !markdown && new.iter().any(|l| rules::timer(l) && !rules::comment(l)) {
             diff.timers.push(file.to_owned());
         }
-        // A spender is live code, which only the whole file says (a line
-        // between unchanged block-comment delimiters is inside the comment),
-        // so the file is read only when an added line could be one.
-        if !markdown && new.iter().any(|l| rules::spender(&l.text)) {
-            if let Some(now) = contents.text(file, head)? {
-                let code = rules::code_lines(&now, rules::comments(file));
-                if new
-                    .iter()
-                    .any(|l| code.get(l.line - 1).is_some_and(|c| rules::spender(c)))
-                {
-                    diff.spenders.push(file.to_owned());
-                }
-            }
+        if !markdown && new.iter().any(|l| rules::spender(l)) {
+            diff.spenders.push(file.to_owned());
         }
-        if new.iter().any(|l| rules::model(&l.text)) {
+        if new.iter().any(|l| rules::model(l)) {
             diff.models.push(file.to_owned());
         }
     }
     Ok(diff)
-}
-
-/// A line a PR adds: its text, and its number in the head (from 1).
-pub struct Added {
-    pub line: usize,
-    pub text: String,
-}
-
-/// The lines of a patch that it adds, with their numbers in the new side.
-fn patched(patch: &str) -> Vec<Added> {
-    let (mut at, mut added) = (0usize, vec![]);
-    for l in patch.lines() {
-        if let Some(h) = l.strip_prefix("@@ ") {
-            at = h
-                .split_whitespace()
-                .find_map(|w| w.strip_prefix('+'))
-                .and_then(|w| w.split(',').next())
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(1);
-        } else if let Some(text) = l.strip_prefix('+') {
-            added.push(Added {
-                line: at.max(1),
-                text: text.to_owned(),
-            });
-            at += 1;
-        } else if l.starts_with(' ') || l.is_empty() {
-            at += 1;
-        }
-    }
-    added
 }
 
 /// The lines a file's diff adds: every line of a copy, whose patch shows
@@ -230,12 +185,16 @@ fn adding(
     contents: &mut Contents,
     was: Option<(&str, &str)>,
     head: &str,
-) -> Result<Vec<Added>, String> {
+) -> Result<Vec<String>, String> {
     let (status, file) = (text(f, "status"), text(f, "filename"));
     let additions = f["additions"].as_i64().unwrap_or_default();
     if status != "copied" {
         if let Some(patch) = f["patch"].as_str() {
-            let added = patched(patch);
+            let added: Vec<String> = patch
+                .lines()
+                .filter_map(|l| l.strip_prefix('+'))
+                .map(str::to_owned)
+                .collect();
             if i64::try_from(added.len()).unwrap_or(i64::MAX) >= additions {
                 return Ok(added);
             }
@@ -254,13 +213,10 @@ fn adding(
         }
     }
     let mut added = vec![];
-    for (i, line) in now.lines().enumerate() {
+    for line in now.lines() {
         match had.get_mut(line) {
             Some(n) if *n > 0 => *n -= 1,
-            _ => added.push(Added {
-                line: i + 1,
-                text: line.to_owned(),
-            }),
+            _ => added.push(line.to_owned()),
         }
     }
     Ok(added)
