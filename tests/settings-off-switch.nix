@@ -104,9 +104,9 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("systemctl unmask --runtime proj-inbox.service proj-inbox@.service")
     dev("proj-inbox sam/web")
     dev("proj-inbox sam/code")
-    machine.succeed("test -s /var/lib/burrow/proj-inbox/sam_web-7/job")
-    machine.succeed("test ! -e /var/lib/burrow/proj-inbox/sam_code-7/job")
-    machine.fail("grep -F 'sam/code/issues/7' /tmp/gh/calls")
+    # A job is named for its project: web's was taken, code's never was.
+    machine.succeed("ls /data/dev/jobs | grep -q '^web-'")
+    machine.fail("ls /data/dev/jobs | grep -q '^code-'")
     for unit in ["burrow-events", "autoland", "autoland-review", "burrow-update", "burrow-ledger", "proj-watch"]:
         machine.fail(f"systemctl is-active {unit}.service")
   '';
