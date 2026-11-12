@@ -318,15 +318,23 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     })
 }
 
-/// The one line a closed notice carries: why the question no longer waits.
-fn close_reason(job: &Job, finished: bool, stopped: bool, latest: &str) -> String {
+/// The one line a closed notice carries: why this question no longer
+/// waits. Judged from the question's own turn: the first prompt after it is
+/// what ended the wait, a deadline default or a human answer.
+fn close_reason(job: &Job, finished: bool, stopped: bool, turn: &str, latest: u64) -> String {
     if stopped {
         return "Closed: the job was stopped.".into();
     }
     if finished {
         return "Closed: the job ended.".into();
     }
-    if read(&job.path(&format!("prompt.{latest}"))).is_some_and(|p| p.starts_with("No answer by "))
+    let next = turn
+        .parse::<u64>()
+        .ok()
+        .and_then(|t| (t + 1..=latest).find(|n| job.path(&format!("prompt.{n}")).exists()));
+    if next
+        .and_then(|n| read(&job.path(&format!("prompt.{n}"))))
+        .is_some_and(|p| p.starts_with("No answer by "))
     {
         return "Closed: no answer came by the deadline, so the job took its reversible default."
             .into();
@@ -489,15 +497,31 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
         if (finished || active.as_deref() != Some(turn))
-            && let Err(e) = crate::state_reads::write(&closing, "close\n")
         {
-            errors.push(e.to_string());
-            continue;
+            // The cause is recorded once, with the intent, and replayed as is.
+            if !closing.exists()
+                && let Err(e) = crate::state_reads::write(
+                    &closing,
+                    format!("{}\n", close_reason(job, finished, stopped, turn, latest)),
+                )
+            {
+                errors.push(e.to_string());
+                continue;
+            }
         }
         retry = true;
         let result = if closing.exists() {
+            let said = match read_state(&closing) {
+                Ok(Some(s)) if s.starts_with("Closed: ") => s.trim_end().to_owned(),
+                // An intent from before the cause was recorded.
+                Ok(_) => "The job no longer needs this answer.".to_owned(),
+                Err(e) => {
+                    errors.push(e.to_string());
+                    continue;
+                }
+            };
             Command::new(notifier)
-                .args(["close", &key, &close_reason(job, finished, stopped, &n)])
+                .args(["close", &key, &said])
                 .status()
         } else {
             let body = match read_state(&entry.path()) {

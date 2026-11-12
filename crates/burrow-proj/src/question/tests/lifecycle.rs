@@ -528,3 +528,39 @@ fn a_one_way_question_keeps_its_notice_after_its_deadline() {
     assert!(!f.job().turn("1", "question-close").exists());
     assert_eq!(closed_with(&f), "");
 }
+
+#[test]
+fn each_question_keeps_its_own_closing_cause() {
+    let f = watched();
+    for (n, text) in [
+        ("2", "an answer"),
+        ("4", "No answer by 12:00. Take your reversible recommended answer now: x"),
+    ] {
+        fs::write(f.job().path(&format!("prompt.{n}")), text).unwrap();
+    }
+    let job = f.job();
+    // Question 1 was answered, question 3 timed out: judged apart, whichever
+    // turn is latest.
+    assert!(close_reason(&job, false, false, "1", 4).contains("answered"));
+    assert!(close_reason(&job, false, false, "3", 4).contains("deadline"));
+    assert!(close_reason(&job, false, true, "3", 4).contains("stopped"));
+    assert!(close_reason(&job, true, false, "3", 4).contains("ended"));
+}
+
+#[test]
+fn a_recorded_cause_is_replayed_unchanged_after_a_failed_delivery() {
+    let f = watched();
+    recording(&f);
+    question(&f, false, crate::now() + 3600);
+    // A later turn that would read as a timeout, and a close recorded earlier
+    // as answered.
+    fs::write(f.job().path("prompt.2"), "No answer by 12:00. Take it").unwrap();
+    f.ending(2, "done");
+    fs::write(
+        f.job().turn("1", "question-close"),
+        "Closed: the question was answered.\n",
+    )
+    .unwrap();
+    notify(&f.cfg, &f.job()).unwrap();
+    assert_eq!(closed_with(&f), "Closed: the question was answered.\n");
+}
