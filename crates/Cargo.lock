@@ -424,6 +424,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-compat"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-dashboard"
 version = "0.0.0"
 dependencies = [

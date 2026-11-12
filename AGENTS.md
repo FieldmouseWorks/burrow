@@ -11,6 +11,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,
   fixed and held.
+- [docs/compatibility.md](docs/compatibility.md): persisted formats, their
+  inventory and the `burrow-compat` harness that checks old and new readers.
 - [docs/settings.md](docs/settings.md): the pipeline's options, their one
   schema (crates/burrow-settings) and `proj settings show`.
 
