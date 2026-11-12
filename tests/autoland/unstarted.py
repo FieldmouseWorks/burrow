@@ -151,6 +151,10 @@ older = other("s8", workflow="B", path=FLAKE[1])
 pr = head([caller, twin(), older], did("s9", workflow="B", path=FLAKE[1], lane=True) + old_base)
 assert dead_runs(pr, "sam/r") == []
 assert ci_state(pr, repo="sam/r")[0] == "green"
+# ...nor does it discharge: an incomplete current-diff call stays owed.
+pr = head([caller, twin(), older], did("s9", workflow="B", path=FLAKE[1], lane=True)[:1] + old_base)
+assert dead_runs(pr, "sam/r") == [77]
+assert ci_state(pr, repo="sam/r")[0] == "pending"
 # Current-diff docs and whole-gate twins cover the work; a genuine failure
 # remains red, and an active replacement keeps CI pending.
 for conclusion in ("SUCCESS", "FAILURE"):
