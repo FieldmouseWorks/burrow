@@ -299,13 +299,15 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("a labelled issue from outside the authors starts no job, and says so once"):
       machine.succeed("install -d -o dev -g dev /data/dev/src/ox")
       machine.succeed("su - dev -c 'git -C /data/dev/src/ox init -q && git -C /data/dev/src/ox remote add origin https://github.com/o/x'")
-      outside = {"number": 1, "user": {"login": "sam-workers[bot]", "id": 8, "type": "Bot"}, "html_url": "https://github.com/o/x/issues/1",
+      # The machinery App (sam-workers, id 8) can open work too. Use an
+      # unrelated App to keep exercising rejection of unauthorized authors.
+      outside = {"number": 1, "user": {"login": "outside-app[bot]", "id": 9, "type": "Bot"}, "html_url": "https://github.com/o/x/issues/1",
                  "title": "t", "body": "from-outside", "state": "open", "labels": [{"name": "claude"}]}
       inside = {**outside, "number": 2, "user": {"login": "sam", "id": 1, "type": "User"}, "html_url": "https://github.com/o/x/issues/2", "body": "from-inside"}
       github("repos/o/x/issues", json.dumps([outside]))
       github("repos/o/x/issues/2/comments", "[]")
       def refusals():
-          return machine.succeed("cat /tmp/gh/posted").count("opened by `sam-workers[bot]`")
+          return machine.succeed("cat /tmp/gh/posted").count("opened by `outside-app[bot]`")
       assert refusals() == 0
       # GitHub won't take the comment: it's tried again, in five minutes.
       machine.succeed("touch /tmp/gh/nopost")
@@ -325,7 +327,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.succeed("su - dev -c 'proj-inbox o/x'")
       posted = machine.succeed("cat /tmp/gh/posted")
       assert refusals() == 1, posted
-      said = posted[posted.index("opened by `sam-workers[bot]`"):]
+      said = posted[posted.index("opened by `outside-app[bot]`"):]
       assert "sam, sam-steward[bot]" in said and "<!-- proj-inbox -->" in said, said
       # No job came of it, and the bar is where it was: an author's still starts one.
       jobs = dict(line.split()[0::2] for line in machine.succeed("su - dev -c 'proj-inbox status'").splitlines() if line.startswith("o/x#"))

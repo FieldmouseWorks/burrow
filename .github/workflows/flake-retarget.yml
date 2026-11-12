@@ -13,6 +13,15 @@ name: flake
 on:
   pull_request:
     types: [edited]
+# A PR's new run (a push from flake.yml, which has this name, or a
+# retarget here) cancels its last one the moment it's made, every job of it, so a
+# superseded head's legs never hold a runner its new head waits for. The shared
+# workflow's own job groups cancel a job only once its successor is queued,
+# after the new run's first job got a runner (burrow#815). The same key as
+# theirs: a push's run, and a title or body edit's, are their own.
+concurrency:
+  group: ${{ format('{0} {1}', github.workflow, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+  cancel-in-progress: true
 jobs:
   check:
     if: github.event.changes.base && (github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/conary/train/'))
@@ -28,8 +37,32 @@ jobs:
       legs: 4
       keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
+  # GitHub expression equality ignores case; git branch names do not.
+  # Route using the event's exact refs, without checking out PR code.
+  train-route:
+    if: github.event.changes.base
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      train: ${{ steps.route.outputs.train }}
+    steps:
+      - id: route
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          train=false
+          if [[ "$EVENT" == push && "$REF" == refs/heads/conary/train/* ||
+                "$EVENT" == pull_request && "$BASE" == "$DEFAULT" ]]; then
+            train=true
+          fi
+          echo "train=$train" >> "$GITHUB_OUTPUT"
   train:
-    if: github.event.changes.base && (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/conary/train/') || github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch)
+    needs: train-route
+    if: github.event.changes.base && (needs.train-route.outputs.train == 'true')
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
     permissions:
       contents: read

@@ -11,9 +11,10 @@
 use yaml_serde::Value;
 
 use crate::expr::{Ctx, V, condition, value};
-use crate::harness::{workflow, yaml};
+use crate::harness::{Scratch, script, step, workflow, yaml};
 
 const CALLER: &str = ".github/workflows/flake.yml";
+const RETARGET: &str = ".github/workflows/flake-retarget.yml";
 /// The check runs the train's configuration names (remi's modules/burrow.nix,
 /// `trainRequire` and `trainNegative`).
 const GATE: &str = "train / check";
@@ -48,13 +49,61 @@ impl Run {
 
 /// Whether the caller's job runs: no `if` runs it on every run, and YAML's
 /// own true or false says so whatever the run.
-fn runs(job: &Value, run: &Run) -> bool {
+fn runs(job: &Value, ctx: &Ctx) -> bool {
     match job.get("if") {
         None => true,
         Some(Value::Bool(b)) => *b,
-        Some(Value::String(c)) => condition(c, &run.ctx()),
+        Some(Value::String(_)) => condition(text_if(job), ctx),
         Some(other) => panic!("an if that's neither text nor a boolean: {other:?}"),
     }
+}
+
+/// Execute the caller's router with the workflow's own environment bindings,
+/// then evaluate the dependent call's condition using its actual output.
+fn routes(wf: &Value, run: &Run, from: Option<&str>) -> (bool, bool) {
+    let mut ctx = run.ctx();
+    ctx.insert(
+        "github.event.changes.base".into(),
+        from.map_or(V::Null, |base| {
+            format!("{{ref: {{from: {base}}}}}").as_str().into()
+        }),
+    );
+    let router = &wf["jobs"]["train-route"];
+    assert_eq!(router["runs-on"], "ubuntu-latest");
+    assert_eq!(router["permissions"], yaml("{}"));
+    assert_eq!(
+        router["outputs"]["train"],
+        "${{ steps.route.outputs.train }}"
+    );
+    assert_eq!(wf["jobs"]["train"]["needs"], "train-route");
+    let output = if runs(router, &ctx) {
+        let s = Scratch::default();
+        let route = step(router, "route");
+        let env: Vec<_> = route["env"]
+            .as_mapping()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.as_str().unwrap(), value(v.as_str().unwrap(), &ctx).text()))
+            .collect();
+        let env: Vec<_> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let ran = s.bash(script(route), s.path(), &env);
+        assert_eq!(ran.code, 0, "{}", ran.said());
+        ran.outputs
+            .trim()
+            .strip_prefix("train=")
+            .unwrap()
+            .to_owned()
+    } else {
+        String::new()
+    };
+    ctx.insert(
+        "needs.train-route.outputs.train".into(),
+        output.as_str().into(),
+    );
+    (
+        runs(&wf["jobs"]["check"], &ctx),
+        runs(&wf["jobs"]["train"], &ctx),
+    )
 }
 
 /// Which of the caller's two calls each run takes.
@@ -67,7 +116,6 @@ fn a_candidate_takes_the_train_gate_and_only_it() {
         yaml(r#"[main, "conary/train/**"]"#),
         "{CALLER} doesn't run on the train's candidates"
     );
-    let (check, train) = (&wf["jobs"]["check"], &wf["jobs"]["train"]);
     for (run, takes_check, takes_train) in [
         // main's own push: its gate keeps the builds later runs take.
         (
@@ -119,6 +167,25 @@ fn a_candidate_takes_the_train_gate_and_only_it() {
             true,
             false,
         ),
+        // Distinct branches even though GitHub's expression equality ignores case.
+        (
+            Run {
+                event: "pull_request",
+                git_ref: "refs/pull/9/merge",
+                base: "Main",
+            },
+            true,
+            false,
+        ),
+        (
+            Run {
+                event: "pull_request",
+                git_ref: "refs/pull/9/merge",
+                base: "MAIN",
+            },
+            true,
+            false,
+        ),
         // A branch under conary/ that isn't the train's.
         (
             Run {
@@ -131,8 +198,82 @@ fn a_candidate_takes_the_train_gate_and_only_it() {
         ),
     ] {
         let at = format!("{} {} {}", run.event, run.git_ref, run.base);
-        assert_eq!(runs(check, &run), takes_check, "check, {at}");
-        assert_eq!(runs(train, &run), takes_train, "train, {at}");
+        assert_eq!(routes(&wf, &run, None), (takes_check, takes_train), "{at}");
+    }
+}
+
+/// Retargeting in either direction uses the new base, never the old one.
+/// Edits that leave the base alone start neither gate nor router.
+#[test]
+fn retargets_and_case_variants_keep_only_their_intended_work() {
+    let (caller, retarget) = (workflow(CALLER), workflow(RETARGET));
+    let mut router = retarget["jobs"]["train-route"].clone();
+    assert_eq!(router["if"], "github.event.changes.base");
+    router.as_mapping_mut().unwrap().remove("if");
+    assert_eq!(router, caller["jobs"]["train-route"]);
+    for base in ["main", "Main", "MAIN", "release", "main2"] {
+        let run = Run {
+            event: "pull_request",
+            git_ref: "refs/pull/9/merge",
+            base,
+        };
+        let expected = (true, base == "main");
+        assert_eq!(routes(&caller, &run, None), expected, "{base}");
+        for from in ["main", "Main", "MAIN", "release"] {
+            assert_eq!(
+                routes(&retarget, &run, Some(from)),
+                expected,
+                "{from} -> {base}"
+            );
+        }
+        assert_eq!(
+            routes(&retarget, &run, None),
+            (false, false),
+            "edit, {base}"
+        );
+
+        // With the train selected, the shared workflow must give an exact
+        // default PR only negative/commit work. The check call keeps its
+        // existing gate, including on case variants and other bases.
+        let shared = workflow(".github/workflows/flake-check.yml");
+        let s = Scratch::default();
+        for name in ["check", "train"] {
+            if name == "train" && !expected.1 {
+                continue;
+            }
+            let pr_gate = caller["jobs"][name]["with"]["pr-gate"]
+                .as_bool()
+                .unwrap_or(true);
+            let ran = s.bash(
+                script(step(&shared["jobs"]["lane"], "base")),
+                s.path(),
+                &[
+                    ("BASE", base),
+                    ("DEFAULT", "main"),
+                    ("PR_GATE", if pr_gate { "true" } else { "false" }),
+                ],
+            );
+            assert_eq!(ran.code, 0, "{}", ran.said());
+            let lands = ran.outputs.trim() == "lands=true";
+            assert_eq!(lands, name == "train", "{name}, {base}");
+            let mut ctx = run.ctx();
+            ctx.extend([
+                ("cancelled()".into(), false.into()),
+                ("needs.lane.result".into(), "success".into()),
+                (
+                    "needs.lane.outputs.gate".into(),
+                    if lands { "train" } else { "full" }.into(),
+                ),
+            ]);
+            assert_eq!(
+                runs(&shared["jobs"]["check"], &ctx),
+                !lands,
+                "{name}, {base}"
+            );
+            for work in ["negative", "commits"] {
+                assert!(runs(&shared["jobs"][work], &ctx), "{name}, {base}, {work}");
+            }
+        }
     }
 }
 

@@ -23,7 +23,7 @@ use crate::harness::{Scratch, read, repo_file, script, step, steps, workflow, wr
 const FLAKE_CHECK: &str = ".github/workflows/flake-check.yml";
 /// Every caller, and what runs it again for a new base: burrow's own, and the
 /// template every project copies.
-const CALLERS: [(&str, &str); 2] = [
+pub(crate) const CALLERS: [(&str, &str); 2] = [
     (
         ".github/workflows/flake.yml",
         ".github/workflows/flake-retarget.yml",

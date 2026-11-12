@@ -91,7 +91,10 @@ Every repo with code gets a `flake.nix` from the template
   PR's own gate until the train lands burrow's PRs: the train's configuration
   names `train / check` and `train / negative`
   ([train.rs](../crates/burrow-workflows/src/train.rs) holds which run takes
-  which call). `flake-gate` runs a caller's `check` when it has several. A repo that lists its
+  which call). Both callers route the train call using exact branch names in
+  `train-route`: GitHub expression equality would also match case variants of
+  the default branch, which are distinct git branches. `flake-gate` runs a
+  caller's `check` when it has several. A repo that lists its
   documentation in `docs-paths` (files nothing its flake builds or tests
   reads; the input says how) gives a PR that changes only those the docs
   lane: only the checks named in `docs-checks`, and none of autoland's

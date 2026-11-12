@@ -96,8 +96,6 @@ in
     };
     systemd.services.${name} = {
       description = "burrow-units: failed units and crashes, for the stall watchdog";
-      # A pass a switch catches mid-run finishes; the next is the new one.
-      restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         # Its watch file is the watchdog's to read, as the user's are.

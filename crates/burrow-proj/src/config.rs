@@ -98,6 +98,10 @@ pub struct Config {
     /// The steward App's account, distinct from the App running jobs.
     #[serde(default)]
     pub steward_account: Option<burrow_github::Author>,
+    /// The machinery App's account: its issues are sorted and run like an
+    /// author's, admitted by this id alone. Its comments stay unheard.
+    #[serde(default)]
+    pub machinery_account: Option<burrow_github::Author>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// ROLE[@OWNER/REPO] ENGINE [over PCT ENGINE], outside the repos.
