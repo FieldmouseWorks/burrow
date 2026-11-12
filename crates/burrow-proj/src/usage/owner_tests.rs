@@ -228,7 +228,7 @@ fn an_expired_old_file_hold_migrates_as_ended_and_pre_deadline_extensions_do_not
     tend(&cfg);
     assert!(out(&cfg).is_none());
     assert!(!cfg.jobs.join(FILE).exists() && !cfg.jobs.join(meta).exists());
-    assert_eq!(last_release(&cfg), Some(until));
+    assert_eq!(last_release(&cfg), Ok(Some(until)));
     assert!(cutoff(&cfg).is_some());
 }
 
@@ -281,12 +281,8 @@ fn a_refusal_at_the_deadline_after_natural_expiry_is_kept_but_a_release_hides_it
         .unwrap();
     };
     expired(past);
-    // Even a door release of the expired hold keeps it a natural expiry.
-    cfg.settings
-        .as_ref()
-        .unwrap()
-        .command(&["usage-back".into()], "issue")
-        .unwrap();
+    // Reconciled on its own, it is a natural expiry.
+    tend(&cfg);
     // At the deadline's second: genuine.
     earlier(&cfg, "a", now() + 7200, Some(past)).unwrap();
     assert!(out(&cfg).is_some(), "a refusal at the deadline holds");
@@ -300,13 +296,19 @@ fn a_refusal_at_the_deadline_after_natural_expiry_is_kept_but_a_release_hides_it
 fn queued_jobs_keep_their_grace_after_an_owner_release_with_no_refusal_record() {
     let (_d, cfg) = rig();
     hold(&cfg, now() + 3600, "x").unwrap();
-    assert!(completed(&cfg).unwrap().owner && completed(&cfg).unwrap().back.is_none());
+    assert!(
+        completed(&cfg).unwrap().unwrap().owner && completed(&cfg).unwrap().unwrap().back.is_none()
+    );
     back(&cfg, None);
     assert!(kept(&cfg).is_none());
-    let grace = completed(&cfg).expect("the release is the grace");
+    let grace = completed(&cfg).unwrap().expect("the release is the grace");
     assert_eq!(grace.back, Some(grace.release()));
     assert!(grace.release() >= now() - 2);
-    assert_eq!(completed(&cfg).unwrap().release(), grace.release(), "fixed");
+    assert_eq!(
+        completed(&cfg).unwrap().unwrap().release(),
+        grace.release(),
+        "fixed"
+    );
     // An older refusal does not shadow the later owner release.
     let t = now();
     record(&cfg, "j", Some(t + 100), "refused", t - 50).unwrap();
@@ -317,6 +319,7 @@ fn the_notice_follows_a_replacement_and_an_expired_hold_closes_it_with_retries()
     let (d, cfg) = rig();
     hold(&cfg, now() + 3600, "first").unwrap();
     assert_eq!(told(&d).len(), 1);
+    fs::write(d.path().join("pending"), "").unwrap(); // HOST-notify has it open
     // A replacement by the door while the notice is open is told by the look.
     cfg.settings
         .as_ref()
@@ -342,7 +345,6 @@ fn the_notice_follows_a_replacement_and_an_expired_hold_closes_it_with_retries()
         format!(r#"{{"usageHold":{{"until":{past},"reason":"x","since":0}}}}"#),
     )
     .unwrap();
-    fs::write(d.path().join("pending"), "").unwrap();
     assert!(tend(&cfg).is_some(), "retried while unconfirmed");
     assert!(told(&d).last().unwrap().starts_with("close"));
     let n = told(&d).len();
@@ -357,4 +359,148 @@ fn the_notice_follows_a_replacement_and_an_expired_hold_closes_it_with_retries()
     hold(&cfg, now() + 3600, "again").unwrap();
     fs::write(overlay.with_extension("usage-end"), "{bad").unwrap();
     assert!(tend(&cfg).is_some());
+}
+
+#[test]
+fn a_same_deadline_replacement_with_a_new_reason_and_a_failed_open_are_told_again() {
+    let (d, cfg) = rig();
+    let until = now() + 3600;
+    hold(&cfg, until, "first").unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &[
+                "usage-hold".into(),
+                until.to_string(),
+                "other reason".into(),
+            ],
+            "issue",
+        )
+        .unwrap();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 2, "the reason alone is a transition");
+    // HOST-notify no longer has it open (the open never got through).
+    fs::remove_file(d.path().join("pending")).unwrap();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 3);
+    // The notifier failing to run leaves nothing noted, so it is retried.
+    fs::remove_file(cfg.jobs.join(NOTICED)).unwrap();
+    let notify = cfg.notify.clone().unwrap();
+    let saved = fs::read(&notify).unwrap();
+    fs::write(&notify, "#!/bin/sh\nexit 1\n").unwrap();
+    tend(&cfg);
+    assert!(noticed(&cfg).is_none());
+    fs::write(&notify, saved).unwrap();
+    burrow_test::executable(
+        &notify,
+        String::from_utf8(fs::read(&notify).unwrap()).unwrap(),
+    );
+    tend(&cfg);
+    assert!(noticed(&cfg).is_some());
+}
+
+#[test]
+fn a_close_is_chased_with_no_note_and_a_retained_refusal_takes_the_notice_back() {
+    // An older proj's pause opened a notice and the new version has no note.
+    let (d, cfg) = rig();
+    let until = now() + 3600;
+    let at = now() - 10;
+    legacy(&cfg, until, at);
+    fs::remove_file(cfg.jobs.join(FILE)).ok();
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .record_usage_end(burrow_settings::UsageEnd {
+            release: now(),
+            cutoff: 1,
+            stale: 0,
+            explicit: now(),
+        })
+        .unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    assert!(tend(&cfg).is_some());
+    assert!(
+        told(&d).last().unwrap().starts_with("close"),
+        "{:?}",
+        told(&d)
+    );
+    // An unreadable note is not an absent one.
+    fs::remove_file(cfg.jobs.join(NOTICED)).ok();
+    fs::create_dir(cfg.jobs.join(NOTICED)).unwrap();
+    assert!(noticed(&cfg).is_some());
+    fs::remove_dir(cfg.jobs.join(NOTICED)).unwrap();
+    // A refusal that is retained takes the notice back from the owner's.
+    let (d, cfg) = rig();
+    let t = now();
+    hold(&cfg, t + 3600, "owner").unwrap();
+    // Due refusal reminders don't overwrite the owner's notice.
+    let n = told(&d).len();
+    remind(&cfg);
+    assert_eq!(told(&d).len(), n);
+    let spent = Spent {
+        owner: false,
+        until: t + 7200,
+        said: "refused".into(),
+        job: "j".into(),
+        at: t,
+        back: None,
+        admission: None,
+        told: t - RETELL * 2,
+        last: Some(t),
+    };
+    keep(&cfg, &spent).unwrap();
+    remind(&cfg);
+    assert_eq!(told(&d).len(), n, "still the owner's");
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(&["usage-back".into()], "issue")
+        .unwrap();
+    tend(&cfg);
+    assert!(
+        told(&d).last().unwrap().starts_with("open")
+            && told(&d).last().unwrap().contains("out of usage"),
+        "{:?}",
+        told(&d)
+    );
+    assert!(noticed(&cfg).is_none());
+}
+
+#[test]
+fn an_unreadable_journal_is_uncertain_not_no_grace_and_recovers() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 3600, "x").unwrap();
+    back(&cfg, None);
+    let journal = cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .overlay
+        .with_extension("usage-end");
+    let good = fs::read(&journal).unwrap();
+    fs::write(&journal, "{bad").unwrap();
+    assert!(completed(&cfg).is_err());
+    assert!(last_release(&cfg).is_err());
+    fs::write(&journal, good).unwrap();
+    assert!(completed(&cfg).unwrap().is_some(), "the grace comes back");
+}
+
+#[test]
+fn migration_removes_its_reference_only_after_the_replacement_is_durable() {
+    // The replacement and the removal are written through the durable helpers
+    // (file and directory synced) before any metadata file is deleted: with
+    // the metadata gone and the reference left, migration would fail forever.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 10);
+    tend(&cfg);
+    assert!(!cfg.jobs.join(FILE).exists());
+    assert!(!cfg.jobs.join(".usage-owner-abc123").exists());
+    // An interrupted run: the reference stands, the metadata is gone.
+    legacy(&cfg, now() + 3600, now() - 5);
+    let meta = cfg.jobs.join(".usage-owner-abc123");
+    fs::remove_file(&meta).unwrap();
+    assert!(migrate(&cfg).is_err(), "reported, not taken for done");
+    assert!(cfg.jobs.join(FILE).exists(), "the reference is kept");
 }

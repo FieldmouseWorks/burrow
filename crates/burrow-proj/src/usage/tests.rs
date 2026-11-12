@@ -531,14 +531,14 @@ fn an_earlier_limit_counts_from_when_it_was_written() {
 fn lifecycle_can_read_actual_release_past_the_notice() {
     let (_dir, cfg) = rig();
     let t = now();
-    assert_eq!(last_release(&cfg), None);
+    assert_eq!(last_release(&cfg), Ok(None));
     record(&cfg, "web-1", Some(t + 7200), SAID, t - 100).unwrap();
-    assert_eq!(last_release(&cfg), None);
+    assert_eq!(last_release(&cfg), Ok(None));
     back(&cfg, Some(t - 50));
     let actual = kept(&cfg).unwrap().release();
-    assert_eq!(last_release(&cfg), Some(actual));
+    assert_eq!(last_release(&cfg), Ok(Some(actual)));
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-    assert_eq!(last_release(&cfg), Some(actual));
+    assert_eq!(last_release(&cfg), Ok(Some(actual)));
 }
 
 #[test]
@@ -807,7 +807,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
 #[test]
 fn a_reminder_waits_out_a_moments_hold_and_not_a_stalled_one() {
     let (d, cfg) = rig();
-    hold(&cfg, now() + 3600, "pause").unwrap();
+    record(&cfg, "web-1", Some(now() + 3600), SAID, now()).unwrap();
     let told_before = told(&d).len();
     let stale = |cfg: &Config| {
         let mut s = kept(cfg).unwrap();

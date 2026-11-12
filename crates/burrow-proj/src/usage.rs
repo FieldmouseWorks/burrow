@@ -235,18 +235,18 @@ fn meter_start(cfg: &Config) -> Option<i64> {
 }
 
 /// The actual release, retained after the usage notice and record are gone.
-pub fn last_release(cfg: &Config) -> Option<i64> {
+pub fn last_release(cfg: &Config) -> Result<Option<i64>, String> {
     let now = now();
-    let owner = owner_end(cfg).map_or(0, |o| o.release);
-    let refusal = if let Some(spent) = kept(cfg) {
+    let owner = owner_end(cfg)?.release;
+    let refusal = if let Some(spent) = read(cfg)? {
         (spent.release() <= now).then(|| spent.release())
     } else {
-        released(cfg).ok().filter(|at| *at > 0)
+        Some(released(cfg)?).filter(|at| *at > 0)
     };
-    refusal
+    Ok(refusal
         .into_iter()
         .chain((owner > 0).then_some(owner))
-        .max()
+        .max())
 }
 
 /// How the owner's last pauses ended: the settings door keeps it, so every
@@ -373,23 +373,21 @@ pub fn kept(cfg: &Config) -> Option<Spent> {
 /// later or the record is gone. A queued job's stall grace counts from its
 /// release, so this is what deadlines read; it is fixed once ended, so
 /// polling never extends it.
-pub fn completed(cfg: &Config) -> Option<Spent> {
+pub fn completed(cfg: &Config) -> Result<Option<Spent>, String> {
     let now = now();
-    let kept = kept(cfg);
+    let kept = read(cfg)?;
     if kept.as_ref().is_some_and(|s| s.holds(now)) {
-        return kept;
+        return Ok(kept);
     }
     // An owner deadline that passed before anyone reconciled it ended then.
-    let expired = hold_raw(cfg)
-        .ok()
-        .flatten()
+    let expired = hold_raw(cfg)?
         .filter(|h| h.until <= now)
         .map_or(0, |h| h.until);
-    let owner = owner_end(cfg).map_or(0, |o| o.release).max(expired);
+    let owner = owner_end(cfg)?.release.max(expired);
     let theirs = kept.as_ref().map_or(0, |s| s.release());
     // Past a stall's time after it, there is no grace left to give.
     if owner > 0 && owner >= theirs && now < owner + cfg.stall_queued() {
-        return Some(Spent {
+        return Ok(Some(Spent {
             owner: true,
             until: owner,
             said: "the owner pause ended".into(),
@@ -399,9 +397,9 @@ pub fn completed(cfg: &Config) -> Option<Spent> {
             admission: None,
             told: owner,
             last: Some(owner),
-        });
+        }));
     }
-    kept
+    Ok(kept)
 }
 
 /// When a hold last ended ([`RELEASED`]), 0 if none has; or why it
@@ -490,34 +488,79 @@ fn reconcile(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn noticed(cfg: &Config) -> Option<String> {
-    crate::read(&cfg.jobs.join(NOTICED))
-        .map(|t| t.trim().to_owned())
-        .filter(|t| !t.is_empty())
+/// A file written whole, synced, renamed over its place, and the directory
+/// synced: durable when it returns, so what is deleted after it can't be
+/// the only reference left.
+fn swap_durable(cfg: &Config, path: &std::path::Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let new = path.with_file_name(format!(
+        "{}.new",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let write = || -> std::io::Result<()> {
+        let mut f = File::create(&new)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&new, path)?;
+        File::open(&cfg.jobs)?.sync_all()
+    };
+    write().map_err(|e| format!("proj: {}: {e}", path.display()))
 }
 
-fn notice_key(s: &Spent) -> String {
-    format!("{} {}", s.until, s.at)
+/// A file removed and the removal made durable.
+fn remove_durable(cfg: &Config, path: &std::path::Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("proj: {}: {e}", path.display())),
+    }
+    File::open(&cfg.jobs)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("proj: {}: {e}", path.display()))
+}
+
+/// What the open notice says, as last sent: the whole payload, so any change
+/// (a reason too) is a transition. None when nothing is noted; an unreadable
+/// note is some, so it is never taken for none.
+fn noticed(cfg: &Config) -> Option<String> {
+    match fs::read_to_string(cfg.jobs.join(NOTICED)) {
+        Ok(t) => Some(t).filter(|t| !t.is_empty()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some("unreadable".into()),
+    }
+}
+
+fn payload(cfg: &Config, s: &Spent) -> String {
+    format!("{}\n{}\n", title(s), body(cfg, s))
 }
 
 /// The owner's notice opened (or updated, for a replacement hold) and noted
-/// as what's out. Under the lock.
+/// as sent only if HOST-notify ran and succeeded; otherwise the next look
+/// finds the note differing and sends it again. Under the lock.
 fn notice_open(cfg: &Config, s: &Spent) {
-    tell(cfg, &["open", NOTICE, &title(s), &body(cfg, s)]);
-    if let Err(e) = swap(&cfg.jobs.join(NOTICED), &format!("{}\n", notice_key(s))) {
-        // Told again by the next look, which finds no note of it.
-        eprintln!("proj: {NOTICED}: {e}");
+    if !tell(cfg, &["open", NOTICE, &title(s), &body(cfg, s)]) {
+        return;
+    }
+    if let Err(e) = swap_durable(cfg, &cfg.jobs.join(NOTICED), &payload(cfg, s)) {
+        eprintln!("{e}");
     }
 }
 
 /// The owner's notice closed, if it may be open: once HOST-notify's
 /// `pending` says it got through the note goes, and until then it stays so
 /// the next look sends it again. Whether it's still outstanding. Under the
-/// lock; a newer hold's notice is never closed (its open replaced it).
+/// lock. When a refusal holds, its state is published in the owner's place
+/// instead (they share the notice's key).
 fn close_if_open(cfg: &Config) -> bool {
-    let newer = read(cfg).ok().flatten().is_some_and(|s| s.holds(now()));
-    if newer {
-        let _ = fs::remove_file(cfg.jobs.join(NOTICED));
+    if let Some(newer) = read(cfg).ok().flatten().filter(|s| s.holds(now())) {
+        if noticed(cfg).is_some() {
+            if !tell(cfg, &["open", NOTICE, &title(&newer), &body(cfg, &newer)]) {
+                return true;
+            }
+            if remove_durable(cfg, &cfg.jobs.join(NOTICED)).is_err() {
+                return true;
+            }
+        }
         return false;
     }
     if noticed(cfg).is_none() && !pending(cfg) {
@@ -527,11 +570,10 @@ fn close_if_open(cfg: &Config) -> bool {
     if pending(cfg) {
         return true;
     }
-    match fs::remove_file(cfg.jobs.join(NOTICED)) {
+    match remove_durable(cfg, &cfg.jobs.join(NOTICED)) {
         Ok(()) => false,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => {
-            eprintln!("proj: {NOTICED}: {e}");
+            eprintln!("{e}");
             true
         }
     }
@@ -574,7 +616,7 @@ fn migrate(cfg: &Config) -> Result<(), String> {
         }
         mirror.job = mirror.job.replacen(&inner, "owner", 1);
         let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
-        swap(&path, &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))?;
+        swap_durable(cfg, &path, &format!("{text}\n"))?;
     } else if mirror.back.is_none() && owner.until > now {
         // Still holds: carried over unless the overlay already has a say, or
         // anything released a pause since this one was set (the door checks
@@ -593,7 +635,7 @@ fn migrate(cfg: &Config) -> Result<(), String> {
                     "proj: migrated from jobs/.usage.json",
                 )?;
         }
-        fs::remove_file(&path).map_err(|e| format!("proj: {FILE}: {e}"))?;
+        remove_durable(cfg, &path)?;
     } else {
         // Ended, by a release or its deadline: kept as an ended hold, with
         // the cutoffs a release keeps. Mirror extensions before the
@@ -616,14 +658,14 @@ fn migrate(cfg: &Config) -> Result<(), String> {
                 }
             },
         )?;
-        fs::remove_file(&path).map_err(|e| format!("proj: {FILE}: {e}"))?;
+        remove_durable(cfg, &path)?;
     }
     for e in fs::read_dir(&cfg.jobs)
         .map_err(|e| e.to_string())?
         .flatten()
     {
         if e.file_name().to_string_lossy().starts_with(OWNER) {
-            let _ = fs::remove_file(e.path());
+            remove_durable(cfg, &e.path())?;
         }
     }
     Ok(())
@@ -769,6 +811,10 @@ pub fn remind(cfg: &Config) {
         return;
     }
     let Ok(_lock) = wait_lock(cfg) else { return };
+    // The owner's pause takes precedence: its notice is not overwritten.
+    if hold_record(cfg).ok().flatten().is_some() {
+        return;
+    }
     if let Err(e) = reconcile(cfg) {
         eprintln!("{e}");
         return;
@@ -881,7 +927,7 @@ pub fn back(cfg: &Config, started: Option<i64>) {
 /// why not.
 fn mark(cfg: &Config, now: i64) -> Result<(), String> {
     let r = released(cfg)?.max(now);
-    swap(&cfg.jobs.join(RELEASED), &format!("{r}\n")).map_err(|e| format!("proj: {RELEASED}: {e}"))
+    swap_durable(cfg, &cfg.jobs.join(RELEASED), &format!("{r}\n"))
 }
 
 /// The owner's notice, with no run to ask (proj-watch's every look): while
@@ -911,18 +957,28 @@ pub fn tend(cfg: &Config) -> Option<i64> {
         match hold_record(cfg) {
             Ok(Some(h)) => {
                 let spent = read(cfg).ok().flatten().filter(|s| s.owner);
+                // Told again when the payload differs from what was sent, or
+                // HOST-notify no longer has it open (it never got through).
                 if let Some(s) = spent
-                    && noticed(cfg).as_deref() != Some(notice_key(&s).as_str())
+                    && (noticed(cfg).as_deref() != Some(payload(cfg, &s).as_str()) || !pending(cfg))
                 {
                     notice_open(cfg, &s);
                 }
                 // Its deadline is the look that closes it ([`reconcile`]).
                 return Some(h.until.max(now + 1));
             }
-            // Only an owner pause's close is chased from its note: the
-            // refusals' own is settled with their record.
+            // Only an owner pause's close is chased: from its note, or, with
+            // none (an older proj's pause, a note lost), from the journal
+            // saying one ended while HOST-notify may still have it open (or
+            // being unreadable). The refusals' own is settled with their
+            // record.
             Ok(None) => {
-                if noticed(cfg).is_some() && close_if_open(cfg) {
+                let owner_ended_before = || {
+                    owner_end(cfg).map_or(true, |o| o.release > 0 || o.stale > 0 || o.explicit > 0)
+                };
+                if (noticed(cfg).is_some() || (kept(cfg).is_none() && owner_ended_before()))
+                    && close_if_open(cfg)
+                {
                     return retry;
                 }
             }
@@ -1139,14 +1195,18 @@ pub fn when(t: i64) -> String {
 }
 
 /// HOST-notify, which never fails its caller; without it, the journal has
-/// it.
-fn tell(cfg: &Config, args: &[&str]) {
+/// it. Whether it ran and succeeded (not that GitHub took the notice).
+fn tell(cfg: &Config, args: &[&str]) -> bool {
     let Some(notify) = &cfg.notify else {
         eprintln!("proj: {}", args.join(": "));
-        return;
+        return true;
     };
-    if let Err(e) = Command::new(notify).args(args).status() {
-        eprintln!("proj: {}: {e}", notify.display());
+    match Command::new(notify).args(args).status() {
+        Ok(st) => st.success(),
+        Err(e) => {
+            eprintln!("proj: {}: {e}", notify.display());
+            false
+        }
     }
 }
 

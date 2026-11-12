@@ -331,10 +331,12 @@ impl<'a> Job<'a> {
                     .flatten()
             });
             if matches!(state.as_str(), "queued" | "running")
-                && let Some(release) = usage::last_release(self.cfg)
                 && self.engine_label(&facts.turn) == "Claude"
             {
-                held.push(format!("released Claude {release}"));
+                // Unreadable recovery state is not no history: say so.
+                if let Some(release) = usage::last_release(self.cfg)? {
+                    held.push(format!("released Claude {release}"));
+                }
             }
             if let Some(reset) = reset {
                 let engine = self.engine_label(&facts.turn);
@@ -400,6 +402,8 @@ impl<'a> Job<'a> {
         let state = self.state();
         let prompt = self.path(&format!("prompt.{n}"));
         let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
+        let claude = read(&self.turn(&n, "engine")).as_deref() != Some("codex");
+        let completed = usage::completed(self.cfg);
         Some(Facts {
             id: self.id.to_owned(),
             owned: self.path("owned").exists(),
@@ -441,9 +445,8 @@ impl<'a> Job<'a> {
                     .find(|a| a.target == USAGE_LIMIT)
                     .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
             }),
-            spent: (read(&self.turn(&n, "engine")).as_deref() != Some("codex"))
-                .then(|| usage::completed(self.cfg))
-                .flatten(),
+            usage_unreadable: claude && completed.is_err(),
+            spent: completed.ok().flatten().filter(|_| claude),
             turn: n,
             state,
         })

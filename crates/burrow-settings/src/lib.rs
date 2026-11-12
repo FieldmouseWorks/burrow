@@ -389,11 +389,13 @@ impl Config {
                     })?,
                     // Past its deadline: its natural expiry, which a release
                     // at the door must not turn into a different decision.
+                    // The completed interval and cohort stay the deadline's;
+                    // the explicit decision is recorded apart, at this time.
                     Some(h) => self.record_usage_end(UsageEnd {
                         release: h.until,
                         cutoff: h.until * 1_000_000_000,
                         stale: h.until,
-                        explicit: 0,
+                        explicit: at,
                     })?,
                     // None: still a decision, so an older pause an earlier
                     // proj kept can't be carried over after it.
@@ -681,9 +683,14 @@ mod end_tests {
         .unwrap();
         cfg.command(&["usage-back".into()], "issue").unwrap();
         let e = cfg.usage_end().unwrap();
-        assert_eq!((e.release, e.stale, e.explicit), (past, past, 0));
+        assert_eq!(
+            (e.release, e.stale),
+            (past, past),
+            "the interval stays natural"
+        );
+        assert!(e.explicit >= now() - 2, "the decision is recorded apart");
         assert_eq!(e.cutoff, past * 1_000_000_000);
-        assert_eq!(e.watermark(), past - 1, "a refusal at the deadline counts");
+        assert!(e.watermark() > past, "an older legacy pause is suppressed");
         let (_d2, cfg) = setup();
         cfg.command(&["usage-back".into()], "issue").unwrap();
         let e = cfg.usage_end().unwrap();
