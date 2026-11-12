@@ -599,5 +599,7 @@ fn holds(cfg: &Config) -> Holds {
     }
 }
 
+pub mod stream;
+
 #[cfg(test)]
 pub(crate) mod tests;
