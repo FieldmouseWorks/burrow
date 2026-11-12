@@ -747,6 +747,8 @@ in
     burrow.events.handlers.proj-inbox = {
       events = [ "issues" "issue_comment" "pull_request" ];
       unit = "proj-inbox";
+      # The inbox reads a PR only when it closes an issue a job holds.
+      pullRequestActions = [ "closed" ];
       wake = inboxWake;
     };
     systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
