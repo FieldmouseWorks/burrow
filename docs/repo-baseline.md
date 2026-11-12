@@ -38,12 +38,21 @@ the reviewers' sessions) is forgotten, so the new one gets its own clone and
 its own baseline job. A pass that fails partway, or finds a review still
 under way, does it all again on the next.
 
-Steward passes stop taking new PR steps after eight minutes and book an
-immediate continuation. `pass-progress.json` in the steward's state directory
-keeps the PRs and repos already seen, after their waits and wake-ups have
-been saved. A changed decision input makes the PR eligible again. Train
-steps, branch cleanup and coverage wait until the repo's PR traversal is
-complete; later repos retain their notices and watches in the meantime.
+Steward passes stop taking new PR steps after eight minutes once they have
+advanced durable work. Slow preparation still permits the first PR attempt;
+remote calls share an eighteen-minute deadline to leave publication time
+before systemd's hard timeout. A contending pass requeues on its own event
+line instead of spending that deadline waiting for the other pass's lock.
+
+`pass-progress.json` keeps traversal receipts after their waits and wake-ups
+have been saved. Internal `autoland-continue` passes use `continue.json` and
+retain those receipts. Ordinary `autoland` events, completion kicks and
+expired decision waits invalidate decisions, including their local inputs,
+while retaining visited ordering. A bounded full pass requeues ordinary
+requests for every repo it did not handle, so it cannot consume their events
+or deadlines. Train steps, branch cleanup and upkeep wait for the repo's
+traversal to complete, retaining previous failure-watch clocks until those
+operations are retried. Later repos retain their notices and watches.
 
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and

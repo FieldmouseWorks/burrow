@@ -1,0 +1,221 @@
+"""Continuation receipts never acknowledge new work or deferred failures."""
+from contextlib import ExitStack, contextmanager
+import copy
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
+                str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
+with tempfile.TemporaryDirectory() as tmp:
+    state = Path(tmp) / 'state'
+    cfg = Path(tmp) / 'config.json'
+    cfg.write_text(json.dumps(dict(
+        context='test', stateDir=str(state), snapDir=str(Path(tmp) / 'trees'),
+        conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
+        labels={'first': 'first', 'waiting': {}}, kick='http://events/kick/autoland',
+        continuationKick='http://events/kick/autoland-continue',
+        watch={'kick': 'watchdog', 'escalated': f'{tmp}/escalated.json'},
+        defaults={'stallAfter': 120}, repos={},
+    )))
+    os.environ['AUTOLAND_CONFIG'] = str(cfg)
+    import common as C
+    import steward as S
+    import waits as W
+
+    def pr(n):
+        return dict(number=n, title=str(n), headRefOid=f'head-{n}', headRefName=f'branch-{n}',
+                    baseRefName='main', labels={'nodes': []}, url=f'https://github.com/sam/r/pull/{n}')
+
+    @contextmanager
+    def fixture():
+        if state.exists():
+            shutil.rmtree(state)
+        state.mkdir()
+        C.WAKE.clear()
+        C.LIMITED.clear()
+        C.NOW = 1000
+        clock, handled, facts = [0], [], {'local': 'before'}
+        repos = [{'repo': 'sam/r', 'default': 'main'}]
+        prs = [pr(1), pr(2)]
+        info = {'defaultBranchRef': {'name': 'main', 'target': {'oid': 'base'}}}
+
+        def handle(repo, p, info, mine, held, under):
+            handled.append((p['number'], facts['local'], under))
+            clock[0] += 1
+
+        with ExitStack() as stack:
+            for obj, name, fn in (
+                (S.R, 'discover', lambda: repos), (C, 'follow_renames', lambda *a: None),
+                (S.R, 'restart', lambda *a: None), (S.R, 'settle_repo', lambda *a: False),
+                (S.R, 'watch_default', lambda *a: {}), (S.R, 'publish', lambda *a: None),
+                (S.R, 'hooks', lambda *a: None), (S, 'open_prs', lambda *a: (info, copy.deepcopy(prs))),
+                (S.P, 'begin', lambda *a: None), (S.P, 'place', lambda repo, n: n),
+                (S.T, 'begin', lambda repo: S.T.STOPPED.pop(repo, None)),
+                (S.T, 'on', lambda *a: True), (S.T, 'step', lambda *a: None),
+                (S.step, 'handle', handle), (S, 'branches', lambda *a, **k: None),
+                (S, 'upkeep', lambda *a: None), (S.V, 'sweep', lambda *a: None),
+                (C, 'taken', lambda *a: None), (C, 'poke', lambda *a: None),
+                (C, 'coverage', lambda rs, done: {'repos': {r['repo']: {'covered': r in done} for r in rs}}),
+            ):
+                stack.enter_context(patch.object(obj, name, fn))
+            stack.enter_context(patch('time.monotonic', side_effect=lambda: clock[0]))
+            yield clock, handled, facts, repos, prs, info
+
+    # Every preparation path may consume the soft budget. One PR attempt
+    # still reaches the persisted cursor, in both full and kicked passes.
+    stages = [(S.R, 'discover'), (C, 'follow_renames'), (S.R, 'restart'), (S.R, 'settle_repo'),
+              (S, 'open_prs'), (S.T, 'begin'), (S.R, 'watch_default')]
+    for kick in (None, ['sam/r']):
+        for obj, name in stages:
+            if kick and name == 'follow_renames':
+                continue  # rename retirement is full-pass work
+            with fixture() as (clock, handled, facts, repos, prs, info):
+                original = getattr(obj, name)
+
+                def slow(*args, **kwargs):
+                    clock[0] += 9 * 60
+                    return original(*args, **kwargs)
+
+                with patch.object(obj, name, slow):
+                    S.run_pass(kick)
+                assert handled == [(1, 'before', None)], (kick, name, handled)
+                progress = C.load('pass-progress.json', {})
+                assert '1' in progress['repos']['sam/r']['done'], (kick, name, progress)
+                assert C.load('continue.json', {}), (kick, name)
+    print('slow preparation makes durable progress: passed')
+
+    # A normal full pass consumes repository events in Line.take. Finished
+    # and unvisited repos, including expired retries, must get ordinary work
+    # requests back, separate from the internal continuation line.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arb']
+        C.save('pass-progress.json', {'full': True, 'finished': ['sam/a'], 'repos': {}})
+        C.save('wake.json', {'sam/a': C.NOW - 50, 'sam/b': C.NOW - 40, '': C.NOW - 30})
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.step, 'handle', long):
+            S.run_pass(None)
+        wakes = C.load('wake.json', {})
+        assert wakes['sam/a'] > C.NOW and wakes['sam/b'] > C.NOW, wakes
+        assert '' not in wakes, wakes
+        assert '' in C.load('continue.json', {}), C.load('continue.json', {})
+    print('full passes preserve skipped event and deadline obligations: passed')
+
+    # Local completions/availability, lifecycle/held answers and sibling PR
+    # changes all arrive on the ordinary line. Invalidate decisions on that
+    # line while keeping visited ordering; an internal continuation keeps
+    # receipts and eventually consumes the new facts without another event.
+    for source in ('review done', 'reviewer availability', 'proof done', 'proof slot',
+                   'job lifecycle', 'held answer', 'stacking relationship'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            from batch import Batch
+            batch = Batch(['sam/r'], continuing=True)
+            batch.note('sam/r', prs[0], [], True, info)
+            batch.end(False, ['sam/r'])
+            facts['local'] = source
+            if source == 'stacking relationship':
+                prs[1]['headRefName'] = 'main'
+            original = S.step.handle
+
+            def long(*args):
+                original(*args)
+                clock[0] += 9 * 60
+
+            with patch.object(S.step, 'handle', long):
+                S.run_pass(['sam/r'])
+            assert handled[0][:2] == (2, source), (source, handled)
+            S.run_pass(['sam/r'], continuing=True)
+            assert [n for n, _, _ in handled] == [2, 1], (source, handled)
+            assert handled[-1][1] == source, handled
+            if source == 'stacking relationship':
+                assert handled[-1][2] == 2, handled
+    # Expired decision deadlines also invalidate an internal receipt once,
+    # rather than perpetually carrying the expired time into the next batch.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        batch = Batch(['sam/r'], continuing=True)
+        C.WAKE['sam/r'] = C.NOW - 1
+        batch.note('sam/r', prs[0], [], True, info)
+        batch.end(False, ['sam/r'])
+        C.WAKE.clear()
+        S.run_pass(['sam/r'], continuing=True)
+        assert sorted(n for n, _, _ in handled) == [1, 2], handled
+    print('new local facts and expired waits invalidate receipts: passed')
+
+    # An old repository failure is retained while its operation is deferred;
+    # a failed retry preserves its original deadline, and success clears it.
+    for operation in ('train', 'branches', 'upkeep'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
+                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+            C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
+            original = S.step.handle
+
+            def long(*args):
+                original(*args)
+                clock[0] += 9 * 60
+
+            with patch.object(S.step, 'handle', long):
+                S.run_pass(None)
+            assert C.load('watch.json', {})['items']['sam/r'] == old, operation
+
+            def fail(*args, **kwargs):
+                if operation == 'upkeep':
+                    S.failing('sam/r', 'its upkeep failed')
+                else:
+                    raise RuntimeError('still failing')
+
+            obj, name = (S.T, 'step') if operation == 'train' else (S, operation)
+            with patch.object(obj, name, fail):
+                C.NOW += 600
+                S.run_pass(None, continuing=True)
+            current = C.load('watch.json', {})['items']['sam/r']
+            assert current['since'] == 10 and current['due'] == 7210, (operation, current)
+            C.NOW += 600
+            S.run_pass(['sam/r'])
+            assert 'sam/r' not in C.load('watch.json', {})['items'], operation
+    print('deferred operation failures keep their original watchdog clocks: passed')
+
+    with fixture() as (clock, *_):
+        seen = []
+        with C.pass_deadline(18 * 60):
+            clock[0] += 17 * 60
+            with patch.object(C.subprocess, 'run', side_effect=lambda *a, **k: seen.append(k['timeout']) or subprocess.CompletedProcess(a, 0)):
+                C.remote(['command'], timeout=300)
+            assert seen == [60], seen
+            clock[0] += 60
+            try:
+                C.remote(['must-not-start'])
+            except C.Unavailable:
+                pass
+            else:
+                raise AssertionError('external work outlived the checkpoint reserve')
+        assert C.REMOTE_DEADLINE is None
+
+    # Contending units requeue on their own line, without a blocking lock or
+    # rewriting wake files owned by the current pass.
+    with fixture():
+        kicks = []
+        for argv, endpoint in ((['steward', 'kick', 'sam/r'], '/autoland/sam/r'),
+                               (['steward', 'continue', 'sam/r'], '/autoland-continue/sam/r')):
+            with patch.object(sys, 'argv', argv), patch.object(S.fcntl, 'flock', side_effect=BlockingIOError), patch.object(C, 'poke', kicks.append):
+                S.main()
+            assert kicks[-1].endswith(endpoint), kicks
+        assert not (state / 'wake.json').exists()
+        with patch.object(sys, 'argv', ['steward', 'continue', 'sam/r']), patch.object(S.fcntl, 'flock', side_effect=BlockingIOError), patch.object(C, 'poke', return_value=False):
+            try:
+                S.main()
+            except SystemExit as error:
+                assert error.code == 75
+            else:
+                raise AssertionError('unaccepted work was acknowledged')
+    print('hard deadline reserve and nonblocking pass admission: passed')

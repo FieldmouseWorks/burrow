@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as tmp:
         handled.append((repo, pr['number']))
         clock[0] += 200  # nine normal steps take thirty minutes in total
         if repo == 'sam/b' and pr['number'] == 1:
-            C.wake(repo, C.NOW + 10)
+            C.wake(repo, C.NOW + 10000)
             S.T.stop(repo, 'a settlement could not be withdrawn')
         if repo == 'sam/a':
             mine.append(('Owner', f'[{repo}#1](url)', 'waiting on owner'))
@@ -82,7 +82,10 @@ with tempfile.TemporaryDirectory() as tmp:
         for turn in range(3):
             C.WAKE.clear()
             try:
-                S.run_pass(None)
+                if turn:
+                    S.run_pass(None, continuing=True)
+                else:
+                    S.run_pass(None)
             except C.Unavailable:
                 assert turn == 0
             if turn == 0:
@@ -91,7 +94,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
                 assert C.load('digest-repos.json', {})['sam/c'][0][2] == 'untouched'
             if turn < 2:
-                assert C.load('wake.json', {})[''] <= C.NOW + 1
+                assert C.load('continue.json', {})[''] <= C.NOW + 1
                 assert hooks == [], hooks
             C.NOW += 601
         expected = [('sam/a', 1), *[('sam/b', n) for n in range(1, 8)], ('sam/c', 1)]
@@ -102,11 +105,11 @@ with tempfile.TemporaryDirectory() as tmp:
         assert C.load('digest-repos.json', {})['sam/a'][0][0] == 'Owner'
         assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
         assert len(publications) == 3
-        assert C.load('wake.json', {})['sam/b'] == C.NOW - 601 + 1
+        assert C.load('wake.json', {})['sam/b'] == 11000
 
     # A cursor cannot carry a settlement past changed decision inputs.
     from batch import Batch
-    batch = Batch(['sam/b'])
+    batch = Batch(['sam/b'], continuing=True)
     original = pr(1)
     batch.note('sam/b', original, [], True, info)
     assert batch.pending('sam/b', [original], [], info) == []

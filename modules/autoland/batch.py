@@ -18,8 +18,10 @@ SECONDS = 8 * C.MIN  # twelve minutes remain for one step and publishing state
 
 
 class Batch:
-    def __init__(self, kick):
+    def __init__(self, kick, continuing=False):
         self.full = kick is None
+        self.continuing = continuing
+        self.advanced = False
         self.until = time.monotonic() + SECONDS
         self.state = C.load(FILE, {})
         self.state.setdefault("repos", {})
@@ -31,8 +33,15 @@ class Batch:
         self.state["finished"] = [k for k in self.state["finished"] if k in names]
         return [r for r in repos if not self.full or r["repo"] not in self.state["finished"]]
 
+    def active(self, kick):
+        if not self.continuing:
+            return True
+        return self.state.get("full", False) if kick is None else any(r.lower() in kick for r in self.state["repos"])
+
     def expired(self):
-        return time.monotonic() >= self.until
+        # Slow discovery/preparation must not prevent the first durable step.
+        # main's remote deadline still reserves time before systemd's limit.
+        return self.advanced and time.monotonic() >= self.until
 
     def digest(self, repo):
         return list(self.state["repos"].get(repo, {}).get("digest", []))
@@ -40,8 +49,16 @@ class Batch:
     def pending(self, repo, prs, mine, info):
         st = self.state["repos"].get(repo, {})
         done = st.get("done", {})
-        if st.get("wake"):
-            C.wake(repo, max(st["wake"], C.NOW + 1))  # ends: the carried PR deadline gets its next look after this traversal
+        elapsed = st.get("wake") and st["wake"] <= C.NOW
+        if not self.continuing or elapsed:
+            # New work and elapsed waits invalidate every decision, including
+            # local reviewer/proof/job inputs and sibling PR relationships.
+            # Retain visited keys so unvisited work still goes first.
+            done.update(dict.fromkeys(done))
+        if elapsed:
+            st.pop("wake", None)
+        elif st.get("wake"):
+            C.wake(repo, st["wake"])  # ends: the carried PR deadline gets its next look after this traversal
         pending = [pr for pr in prs if done.get(str(pr["number"])) != self.rev(pr, info)]
         # A closed or changed PR's old owner line mustn't suppress its new
         # watchdog wait. Repo-wide notices survive until its traversal ends.
@@ -80,13 +97,26 @@ class Batch:
         st["seen_to"] = seen_to
         st["wake"] = C.WAKE.get(repo)
         st["stopped"] = stopped
+        self.advanced = True
 
     def finish(self, repo):
+        self.advanced = True
         self.state["repos"].pop(repo, None)
-        if self.full and repo not in self.state["finished"]:
+        if (self.full or self.state.get("full")) and repo not in self.state["finished"]:
             self.state["finished"].append(repo)
 
-    def end(self, complete):
-        if self.full and complete:
-            self.state["finished"] = []
+    def end(self, complete, kick):
+        if self.full:
+            self.state["full"] = not complete
+            if complete:
+                self.state["finished"] = []
         C.save(FILE, self.state)
+        # Continuations have their own event line: they are not new-work
+        # requests and must not consume GitHub events or decision deadlines.
+        wakes = C.load("continue.json", {})
+        again = [""] if kick is None else kick
+        for key in again:
+            wakes.pop(key, None)
+            if not complete:
+                wakes[key] = C.NOW + 1
+        C.save("continue.json", wakes)

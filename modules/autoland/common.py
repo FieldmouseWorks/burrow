@@ -76,9 +76,26 @@ LIMITED = []
 # A network call must return before the unit's twenty-minute deadline so
 # the pass can report what stalled and book its normal unavailable retry.
 REMOTE_TIMEOUT = 120
+REMOTE_DEADLINE = None
+
+
+@contextlib.contextmanager
+def pass_deadline(seconds):
+    """Leave time to publish local state before systemd's hard timeout."""
+    global REMOTE_DEADLINE
+    previous = REMOTE_DEADLINE
+    REMOTE_DEADLINE = time.monotonic() + seconds
+    try:
+        yield
+    finally:
+        REMOTE_DEADLINE = previous
 
 
 def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
+    if REMOTE_DEADLINE is not None:
+        timeout = min(timeout, REMOTE_DEADLINE - time.monotonic())
+        if timeout <= 0:
+            raise Unavailable("pass remote-call deadline reached")
     try:
         return subprocess.run(command, timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired:
@@ -412,8 +429,10 @@ def poke(url):
         return
     try:
         urllib.request.urlopen(urllib.request.Request(url, data=b"", method="POST"), timeout=5).close()
+        return True
     except OSError as e:
         log(f"couldn't kick {url}: {e}")
+        return False
 
 
 def load(name, default):
