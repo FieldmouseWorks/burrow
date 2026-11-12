@@ -857,8 +857,6 @@ in
       # started: they share the clones.
       systemd.services = lib.genAttrs [ "renovate" "renovate@" ] (name: online // {
         description = if name == "renovate" then "Renovate: dependency PRs for every repo" else "Renovate: dependency PRs for %I";
-        # A switch leaves a running one be (see burrow.switch's check).
-        restartIfChanged = false;
         environment = {
           RENOVATE_CONFIG_FILE = renovateConfig;
           LOG_LEVEL = "info";

@@ -3,8 +3,6 @@
 
 use maud::{DOCTYPE, Markup, html};
 
-pub mod live;
-
 use crate::assets::Assets;
 use crate::core::{Enrolled, Live};
 use crate::enroll::CODE_TTL;
@@ -21,7 +19,7 @@ pub struct Frame<'a> {
 /// The command that prints an enrolment code.
 const ENROL_COMMAND: &str = "sudo burrow-dashboard enroll";
 
-pub(crate) fn page(f: &Frame, name: &str, heading: &str, signed_in: bool, body: Markup) -> Markup {
+fn page(f: &Frame, name: &str, heading: &str, signed_in: bool, body: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -259,11 +257,6 @@ pub fn ago(now: u64, then: u64) -> String {
         s if s < 60 => "just now".into(),
         s => format!("{} ago", span(s)),
     }
-}
-
-/// [`ago`], from a length of seconds.
-pub fn ago_secs(secs: u64) -> String {
-    ago(secs, 0)
 }
 
 pub fn until(now: u64, then: u64) -> String {

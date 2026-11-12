@@ -715,7 +715,6 @@ in
     ];
     systemd.services.burrow-engines-door = {
       description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
-      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
@@ -747,6 +746,8 @@ in
     burrow.events.handlers.proj-inbox = {
       events = [ "issues" "issue_comment" "pull_request" ];
       unit = "proj-inbox";
+      # The inbox reads a PR only when it closes an issue a job holds.
+      pullRequestActions = [ "closed" ];
       wake = inboxWake;
     };
     systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
