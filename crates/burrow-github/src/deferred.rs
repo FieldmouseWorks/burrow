@@ -52,12 +52,14 @@ pub fn run<T>(
     match pass(api) {
         Ok(done) => {
             save(wake, None)?;
+            watch(wake, now, None)?;
             Ok(Some(done))
         }
         Err(e) => {
             match e.retry_at {
                 Some(at) => {
                     save(wake, Some(at))?;
+                    watch(wake, now, Some(at))?;
                     eprintln!("GitHub rate limited this pass; pending until {at}: {e}");
                     Ok(None)
                 }
@@ -72,6 +74,42 @@ pub fn run<T>(
             }
         }
     }
+}
+
+/// How long a door may sit deferred before it is a stall for the watchdog.
+/// A limit that lifts sooner is an ordinary wait; a door that answers in
+/// seconds and has said nothing for longer than this is late.
+pub const DEFERRED_GRACE: u64 = 300;
+
+/// The watch file beside WAKE, for the stall watchdog's source of the door.
+pub fn watch_file(wake: &Path) -> std::path::PathBuf {
+    wake.with_extension("watch.json")
+}
+
+/// Record in the watch file whether the door's pass is deferred (AT: until
+/// when) or ran. A deferral is an item whose `since` is kept across passes
+/// and whose deadline is DEFERRED_GRACE after it, so a door held off past
+/// its deadline is a stall, not silence. Passes that defer again keep the
+/// first `since`.
+fn watch(wake: &Path, now: u64, deferred: Option<u64>) -> Result<(), String> {
+    let path = watch_file(wake);
+    let since = fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["items"]["deferred"]["since"].as_u64());
+    let items = match deferred {
+        None => json!({}),
+        Some(at) => {
+            let since = since.unwrap_or(now);
+            json!({"deferred": {
+                "what": "the door's pass, held off by GitHub's rate limit",
+                "phase": format!("deferred until {at}"),
+                "since": since,
+                "due": since + DEFERRED_GRACE,
+            }})
+        }
+    };
+    write(&path, &json!({"at": now, "items": items}))
 }
 
 /// Book KEY's pass (an OWNER/REPO, or "" for the full pass) for AT in the
@@ -223,6 +261,32 @@ mod tests {
         api.status = 200;
         assert_eq!(run(Some(&wake), &mut api, 2000, ask), Ok(Some(())));
         assert_eq!(fs::read_to_string(&wake).unwrap(), "{}");
+    }
+    #[test]
+    fn a_deferral_past_its_grace_is_a_watched_stall_and_a_pass_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let watched =
+            || -> Value { serde_json::from_slice(&fs::read(watch_file(&wake)).unwrap()).unwrap() };
+        let mut api = hub(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "5000"),
+            ],
+        );
+        assert_eq!(run(Some(&wake), &mut api, 1000, ask), Ok(None));
+        let item = &watched()["items"]["deferred"];
+        assert_eq!(
+            (item["since"].as_u64(), item["due"].as_u64()),
+            (Some(1000), Some(1000 + DEFERRED_GRACE))
+        );
+        // The retry at the lift is limited again: the wait keeps its start.
+        assert_eq!(run(Some(&wake), &mut api, 5000, ask), Ok(None));
+        assert_eq!(watched()["items"]["deferred"]["since"], 1000);
+        api.status = 200;
+        assert_eq!(run(Some(&wake), &mut api, 9000, ask), Ok(Some(())));
+        assert_eq!(watched()["items"], json!({}));
     }
     #[test]
     fn permission_denial_standalone_and_unrelated_failure_remain_failures() {

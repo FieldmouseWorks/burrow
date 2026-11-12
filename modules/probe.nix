@@ -54,6 +54,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
@@ -148,6 +149,15 @@ in
       repos = [ cfg.repo ];
       wake = probeWake;
       gap = 2;
+    };
+
+
+    # A pass GitHub's rate limit holds off writes this beside its wake file
+    # (burrow-github's deferred); one past its grace is a stall.
+    burrow.watchdog.sources.probe-door = {
+      file = "${lib.removeSuffix ".json" probeWake}.watch.json";
+      about = "The probe door";
+      look = "journalctl -u burrow-probe: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Questions wait meanwhile; cut the other consumers' calls on the installation.";
     };
 
     systemd.tmpfiles.rules = [
