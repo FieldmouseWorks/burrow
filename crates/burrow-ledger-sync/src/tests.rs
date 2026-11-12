@@ -239,3 +239,30 @@ fn a_repo_named_with_a_leading_hyphen_reaches_cn() {
     sync_repo(&cfg, &cn, "sam/-r", &|| 0).unwrap();
     assert_eq!(*cn.calls.borrow(), ["sync sam/-r"]);
 }
+
+#[test]
+fn leading_hyphen_retry_reaches_the_scheduler() {
+    for only in [None, Some("sam/-r")] {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path(), &["sam"]);
+        let cn = Scripted {
+            exits: HashMap::from([("sam/-r", 75)]),
+            ..Default::default()
+        };
+        pass(
+            &cfg,
+            &mut gh(vec![listing(&["sam/-r"])]),
+            &cn,
+            only,
+            &|| 1000,
+        )
+        .unwrap();
+        let line = burrow_events::line::Line::default();
+        line.wakes(booked(dir.path()).as_object().unwrap());
+        assert!(line.take(1299.0).0.is_empty());
+        assert_eq!(
+            line.take(1300.0).0,
+            vec![burrow_events::line::Pass::repo("sam/-r")]
+        );
+    }
+}
