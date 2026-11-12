@@ -40,6 +40,9 @@ pub struct Stall {
     pub item: Item,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked: Option<f64>,
+    /// When its source last wrote its file, as of the last pass.
+    #[serde(default)]
+    pub seen: f64,
     /// When a job couldn't start for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tried: Option<f64>,

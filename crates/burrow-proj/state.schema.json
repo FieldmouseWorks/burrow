@@ -67,6 +67,94 @@
         "codex"
       ]
     },
+    "EngineMeter": {
+      "description": "One engine's meter and hold.",
+      "type": "object",
+      "properties": {
+        "engine": {
+          "$ref": "#/$defs/Engine"
+        },
+        "hold": {
+          "description": "Work held back on it: Claude's usage hold.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageHold"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reading": {
+          "description": "Its latest reading, none when there's none to read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reading"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "engine"
+      ]
+    },
+    "GitHubMeter": {
+      "type": "object",
+      "properties": {
+        "age": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "held": {
+          "type": "boolean"
+        },
+        "installation": {
+          "$ref": "#/$defs/Installation"
+        },
+        "readAt": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retryAt": {
+          "description": "Primary, secondary or GraphQL deadline, independently of REST budget.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "installation",
+        "readAt",
+        "age",
+        "held"
+      ]
+    },
     "Holder": {
       "description": "What holds a slot.",
       "type": "object",
@@ -172,6 +260,22 @@
         "pipeline"
       ]
     },
+    "Installation": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "app",
+        "owner"
+      ]
+    },
     "JobRow": {
       "description": "A job, as `proj status` lists it.",
       "type": "object",
@@ -242,38 +346,14 @@
       ]
     },
     "Meter": {
-      "description": "One engine's meter and hold.",
-      "type": "object",
-      "properties": {
-        "engine": {
-          "$ref": "#/$defs/Engine"
+      "description": "Engine and installation meters share the live snapshot. Engine entries\nretain their original JSON fields; installation entries identify the App\nand owner whose token supplied the free rate-limit reading.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EngineMeter"
         },
-        "hold": {
-          "description": "Work held back on it: Claude's usage hold.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UsageHold"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "reading": {
-          "description": "Its latest reading, none when there's none to read.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Reading"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        {
+          "$ref": "#/$defs/GitHubMeter"
         }
-      },
-      "additionalProperties": false,
-      "required": [
-        "engine"
       ]
     },
     "Pipeline": {

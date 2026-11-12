@@ -56,7 +56,10 @@ pub enum Already {
 }
 
 /// HEAD's system, built: its store path, or nothing when it doesn't build.
-/// What nix says goes to logs/build.log, in place of the last build's.
+/// What nix says goes to logs/build.log, in place of the last build's, each
+/// build's own output as it comes: burrow-dispatch takes a write there for
+/// the run at work, so a long build (a patched package from source) isn't a
+/// stall while it builds.
 pub fn build(cfg: &Config) -> Option<String> {
     let log = File::create(cfg.state.join("logs/build.log"))
         .map_err(|e| eprintln!("{}: logs/build.log: {e}", cfg.update))
@@ -68,7 +71,7 @@ pub fn build(cfg: &Config) -> Option<String> {
     );
     last_line(
         nix(cfg, log)
-            .args(["build", "--no-link", "--print-out-paths", &toplevel])
+            .args(["build", "--no-link", "-L", "--print-out-paths", &toplevel])
             .output(),
     )
 }
@@ -106,6 +109,7 @@ pub fn same_as_running(cfg: &Config, run: &Running) -> bool {
             "build",
             "--impure",
             "--no-link",
+            "-L",
             "--print-out-paths",
             "--expr",
             &expr,

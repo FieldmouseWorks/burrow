@@ -175,6 +175,7 @@ fn wait(
         line: false,
         unstick: false,
         claude: false,
+        refresh: false,
     })
 }
 

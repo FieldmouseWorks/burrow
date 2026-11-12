@@ -176,6 +176,16 @@ pub fn spawn(
     c.args(&args)
         .env("PROJ_PROBE_SOCKET", crate::probe::socket(cfg, job, n))
         .env("PROJ_JOB", id)
+        .env("PROJ_GITHUB_DIR", job.path("github"))
+        .env(
+            "PROJ_GITHUB_KICK",
+            if cfg.kick.is_empty() {
+                String::new()
+            } else {
+                format!("{}/proj-watch", cfg.kick)
+            },
+        )
+        .env("PROJ_GITHUB_REFUSALS", job.turn(n, "github-refusals"))
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)
         .env("PROJ_APP_ENV", app_env);

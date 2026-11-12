@@ -127,6 +127,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         st.source = cur.source;
         st.key = cur.key;
         st.item = cur.item;
+        st.seen = cur.at;
         let kick = st.item.kick.clone().filter(|k| !k.is_empty());
         // On the stuck issue, but one it can't take now (no steward to
         // publish it, or it has turned out to be that issue's own job): off
@@ -190,6 +191,11 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             wakes.push(now + GRACE);
         } else if let Some(kicked) = st.kicked.filter(|&k| now < k + GRACE) {
             wakes.push(kicked + GRACE);
+        } else if st.item.refresh && st.kicked.is_some_and(|k| st.seen <= k) {
+            // Its source hasn't looked since the kick, and its deadline may be
+            // stale: no stall until it has. It kicks this pass when it writes
+            // again, and being stuck itself is the source's own stall.
+            println!("waiting for a refresh: {}", line(&st.item));
         } else if (st.tried.is_some() || out.is_some()) && now >= st.first + cfg.escalate_after {
             // No job could take it all that time.
             escalate(cfg, world, &s, st, now, out);
@@ -285,7 +291,13 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
 /// resets, and proj's line on it. None when it isn't, or proj can't say.
 fn out_of_usage(world: &dyn World, now: f64) -> Option<(f64, String)> {
     let (ok, out) = world.proj(&["usage"]);
-    let v: serde_json::Value = serde_json::from_str(&out).ok().filter(|_| ok)?;
+    // One JSON record a line: Claude's hold, then any `{"github": ..}` meters,
+    // which say nothing about Claude and are skipped.
+    let v: serde_json::Value = out
+        .lines()
+        .filter(|_| ok)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("until").is_some())?;
     let until = v["until"].as_f64().filter(|&t| t > now)?;
     let said = v["said"].as_str().unwrap_or_default();
     Some((
