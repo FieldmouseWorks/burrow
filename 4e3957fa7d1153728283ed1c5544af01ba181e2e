@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "0cwqz9p5zrjncbg8mb4zmgqnva",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 710,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/710",
+  "summary": "dispatch: count a deploy run's deadline from its last log write",
+  "task": "FieldmouseWorks/remi#1015",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "57b9a1a8a7a9d9e9c1d65109e292989a8d1f47f8b2cbf718c8afd7da4fbb25f4",
+    "before": "6ea37de4e97f24bdd6778683e5b10e72c15b3f50",
+    "after": "4e3957fa7d1153728283ed1c5544af01ba181e2e",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794469209252
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024194134"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024194302"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#710)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#710)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#710)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#710)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#710)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#710)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060709/job/131024193545"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131031357324"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024244763"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024244681"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024244666"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024244644"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/710"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/710#pullrequestreview-5870397499"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43171060621/job/131024194344"
+    }
+  ]
+}
