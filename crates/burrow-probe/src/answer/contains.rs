@@ -14,14 +14,21 @@ pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, St
     // that has no other source of a running revision.
     let inputs: Result<Value, String> = fs::read_to_string(m.path("/etc/burrow/inputs.json"))
         .map_err(|e| e.to_string())
-        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()));
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .and_then(|v: Value| {
+            if v.is_object() {
+                Ok(v)
+            } else {
+                Err("invalid running inputs".to_owned())
+            }
+        });
     let mut revisions: Vec<String> = Vec::new();
     match &inputs {
         Ok(inputs) => revisions.extend(
             inputs
                 .as_object()
-                .ok_or("invalid running inputs")?
-                .values()
+                .into_iter()
+                .flat_map(|o| o.values())
                 .filter(|i| {
                     i["repo"]
                         .as_str()

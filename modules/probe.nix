@@ -23,7 +23,8 @@ let
   # What crates/burrow-probe reads (its Config).
   settings = {
     inherit (cfg) repo label authors;
-    systemRepo = config.burrow.updates.repo or null;
+    # Only where the updater is on: its repo reads the required origin.
+    systemRepo = if config.burrow.updates.enable or false then config.burrow.updates.repo else null;
     machinery = if config.burrow.github.machineApp == null then null
       else { login = "${config.burrow.github.machineApp.slug}[bot]"; id = config.burrow.github.machineApp.accountId; };
     host = config.networking.hostName;
