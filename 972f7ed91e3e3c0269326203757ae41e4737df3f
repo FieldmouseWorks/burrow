@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "614t5rgq2jb1gjb7d8r69xct08",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 800,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/800",
+  "summary": "doors: show a pass held off by GitHub's rate limit as a watched stall",
+  "task": "FieldmouseWorks/remi#1075",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "1d725ca2215f91f9859abfd2c300410c33487c66a4e527edba6648941ab64674",
+    "before": "316f9646dae9c3e0b80eedf2ccc21d67f02df202",
+    "after": "972f7ed91e3e3c0269326203757ae41e4737df3f",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794518775916
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131292903775"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131292903721"
+    },
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131292902969"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540/job/131292901799"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#800)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#800)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#800)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#800)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#800)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#800)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005540"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131302770880"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131302770813"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/800#pullrequestreview-5879680312"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131302770835"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131302770814"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43250005439/job/131409295462"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/800"
+    }
+  ]
+}
