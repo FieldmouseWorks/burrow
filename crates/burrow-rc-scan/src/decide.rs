@@ -73,11 +73,17 @@ pub fn hold(status: Option<&str>, at: Option<&str>, now: i64, quiet: i64) -> Hol
     if status == "busy" {
         return fresh;
     }
+    // A time that isn't one is no evidence of a quiet session: the shell
+    // stopped on it, leaving the server be, and so is held a spell from now.
     let at = at.trim();
-    let at = at
-        .parse::<i64>()
-        .or_else(|_| at.parse::<f64>().map(|f| f as i64))
-        .unwrap_or(0);
+    let Some(at) = at.parse::<i64>().ok().or_else(|| {
+        at.parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite() && f.abs() < 9e15)
+            .map(|f| f as i64)
+    }) else {
+        return fresh;
+    };
     let until = at + quiet;
     Hold {
         held: now < until,
@@ -228,7 +234,21 @@ mod tests {
     #[test]
     fn a_session_with_no_time_is_quiet() {
         assert!(!hold(Some("idle"), Some("0"), NOW, QUIET).held);
-        assert!(!hold(Some("idle"), Some("not a time"), NOW, QUIET).held);
+        assert_eq!(
+            hold(Some("idle"), Some("1.5e12"), NOW, QUIET).until,
+            1_500_000_000_000 + QUIET
+        );
+    }
+
+    #[test]
+    fn a_time_that_is_not_one_is_not_a_quiet_session() {
+        let fresh = Hold {
+            held: true,
+            until: NOW + QUIET,
+        };
+        for bad in ["not a time", "", "NaN", "inf", "1e400"] {
+            assert_eq!(hold(Some("idle"), Some(bad), NOW, QUIET), fresh, "{bad}");
+        }
     }
 
     #[test]
