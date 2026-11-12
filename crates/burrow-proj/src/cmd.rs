@@ -147,11 +147,13 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 Ok(())
             }
             Some("back") => {
-                if let Some(settings) = &cfg.settings {
-                    settings
-                        .command(&["back".into()], "proj usage back")
-                        .map_err(|e| Fail::new(1, e))?;
-                }
+                let settings = cfg
+                    .settings
+                    .as_ref()
+                    .ok_or_else(|| Fail::new(1, "settings are not configured"))?;
+                settings
+                    .command(&["back".into()], "proj usage back")
+                    .map_err(|e| Fail::new(1, e))?;
                 usage::back(cfg, None);
                 Ok(())
             }

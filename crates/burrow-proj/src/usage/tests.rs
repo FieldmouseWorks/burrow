@@ -45,6 +45,7 @@ pub(crate) fn rig() -> (tempfile::TempDir, Config) {
     cfg["notify"] = json!(notify);
     cfg["waits"] = json!(d.path().join(".waits.json"));
     cfg["kick"] = json!(format!("http://127.0.0.1:{port}/kick"));
+    cfg["settings"]["overlay"] = json!(d.path().join("overlay.json"));
     (d, serde_json::from_value(cfg).unwrap())
 }
 

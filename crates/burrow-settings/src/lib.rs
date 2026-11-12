@@ -28,9 +28,22 @@ pub struct Decision {
     pub vacate: bool,
 }
 
+/// The owner's pause of Claude work: no Claude turn takes a slot until it
+/// ends. Codex work is not affected.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageHold {
+    pub until: i64,
+    pub reason: String,
+    /// When it was set.
+    pub since: i64,
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Overlay {
+    #[serde(default)]
+    usage_hold: Option<UsageHold>,
     #[serde(default)]
     repos: BTreeMap<String, bool>,
     #[serde(default)]
@@ -55,7 +68,7 @@ pub fn valid_command(args: &[String]) -> bool {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["show" | "back"] => true,
+        ["show" | "back" | "usage-back"] => true,
         ["allow" | "pause", repo] => burrow_github::repo_name(repo),
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
         _ => false,
@@ -98,6 +111,16 @@ impl Config {
                         .any(|r| r.eq_ignore_ascii_case(repo))),
             retry_at: state.pipeline_until.filter(|t| !allowed && *t > now()),
         })
+    }
+
+    /// The usage hold in force now: an expired one is none, with no daemon.
+    pub fn usage_hold(&self) -> Result<Option<UsageHold>, String> {
+        Ok(self.usage_hold_record()?.filter(|h| h.until > now()))
+    }
+
+    /// The hold as recorded, expired or not: whoever ends one closes its notice.
+    pub fn usage_hold_record(&self) -> Result<Option<UsageHold>, String> {
+        Ok(self.read()?.usage_hold)
     }
 
     pub fn scope_until(&self) -> Result<Option<i64>, String> {
@@ -203,7 +226,15 @@ impl Config {
                 state.pipeline_until = Some(t);
             }
             ["back"] => state.pipeline_until = None,
-            _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back".into()),
+            // Always allowed, at once: no other daemon is asked.
+            ["usage-hold", until, reason] if !reason.trim().is_empty() => {
+                let until: i64 = until.parse().map_err(|_| "usage-hold needs a Unix timestamp")?;
+                let at = now();
+                if until <= at { return Err("usage hold deadline must be in the future".into()); }
+                state.usage_hold = Some(UsageHold { until, reason: reason.to_string(), since: at });
+            }
+            ["usage-back"] => state.usage_hold = None,
+            _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back | usage-hold UNTIL REASON | usage-back".into()),
         }
         let answer = "Settings changed; use settings show for the current policy.".to_owned();
         if let Some(receipt) = receipt {
@@ -283,6 +314,43 @@ mod tests {
         assert!(
             cfg.allows("sam/box").is_err(),
             "read errors cannot enable work"
+        );
+    }
+
+    #[test]
+    fn the_usage_hold_is_set_and_released_through_the_door_and_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            overlay: dir.path().join("overlay.json"),
+            ..Default::default()
+        };
+        let until = now() + 600;
+        cfg.command(
+            &["usage-hold".into(), until.to_string(), "save usage".into()],
+            "proj usage hold",
+        )
+        .unwrap();
+        let hold = cfg.usage_hold().unwrap().unwrap();
+        assert_eq!((hold.until, hold.reason.as_str()), (until, "save usage"));
+        cfg.command(&["usage-back".into()], "proj usage back")
+            .unwrap();
+        assert_eq!(cfg.usage_hold().unwrap(), None);
+        let log = fs::read_to_string(cfg.overlay.with_extension("log")).unwrap();
+        assert!(log.contains("proj usage hold") && log.contains("save usage"));
+        assert!(log.contains("proj usage back") && log.contains("usage-back"));
+        assert!(
+            cfg.command(&["usage-hold".into(), "1".into(), "late".into()], "t")
+                .is_err()
+        );
+        fs::write(
+            &cfg.overlay,
+            r#"{"usageHold":{"until":1,"reason":"x","since":0}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.usage_hold().unwrap(),
+            None,
+            "a hold expires without a daemon"
         );
     }
 

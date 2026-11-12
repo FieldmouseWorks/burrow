@@ -65,7 +65,9 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     ));
     readings.push(Reading::live(
         "proj.usageHold",
-        cfg.jobs.join(usage::FILE),
+        cfg.settings
+            .as_ref()
+            .map_or_else(|| cfg.jobs.join(usage::FILE), |s| s.overlay.clone()),
         usage::held(cfg)?
             .map(|s| json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said})),
     ));
