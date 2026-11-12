@@ -62,6 +62,19 @@ fn lasts(name: &str) -> &'static str {
     }
 }
 
+/// The option a log entry changed: its own tag, or for entries written
+/// before options were tagged, the command it recorded.
+fn logged_option(entry: &Value) -> Option<String> {
+    if let Some(option) = entry["option"].as_str() {
+        return Some(option.to_owned());
+    }
+    match entry["change"][0].as_str()? {
+        "allow" | "pause" => Some(REPOS.to_owned()),
+        "pipeline" | "back" => Some(UNTIL.to_owned()),
+        _ => None,
+    }
+}
+
 impl Overlay {
     /// The value the overlay holds for an option it keeps, None when unset.
     fn get(&self, name: &str) -> Option<Value> {
@@ -86,7 +99,12 @@ impl Overlay {
                     .collect();
             }
             (UNTIL, None) => self.pipeline_until = None,
-            (UNTIL, Some(v)) => self.pipeline_until = v.as_i64(),
+            (UNTIL, Some(v)) => {
+                let t = v
+                    .as_i64()
+                    .ok_or(format!("{name}: not a timestamp this policy can keep"))?;
+                self.pipeline_until = Some(future(t)?);
+            }
             _ => return Err(format!("{name}: the overlay keeps no such option")),
         }
         Ok(())
@@ -114,11 +132,50 @@ pub enum Request {
     },
 }
 
+/// The reason after `because`, however the shell or issue split it: the
+/// words of all its arguments together, two at least.
 fn reason(words: &[&str]) -> Result<String, String> {
     match words {
-        ["because", why @ ..] if why.len() >= 2 => Ok(why.join(" ")),
+        ["because", why @ ..] => {
+            let text = why.join(" ");
+            let text: Vec<&str> = text.split_whitespace().collect();
+            if text.len() >= 2 {
+                return Ok(text.join(" "));
+            }
+            Err("say why: ... because REASON (two words or more)".into())
+        }
         _ => Err("say why: ... because REASON (two words or more)".into()),
     }
+}
+
+/// A set request's JSON value and the words after it. The value is one
+/// argument (shell-quoted) or several, joined, that parse as JSON before the
+/// first `because` they precede.
+fn value_and_reason<'a>(name: &str, rest: &'a [&'a str]) -> Result<(Value, &'a [&'a str]), String> {
+    let mut first_error = None;
+    for at in 1..=rest.len() {
+        if rest.get(at).is_some_and(|w| *w != "because") && at != rest.len() {
+            continue;
+        }
+        match serde_json::from_str(&rest[..at].join(" ")) {
+            Ok(v) => return Ok((v, &rest[at..])),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    Err(match first_error {
+        Some(e) => format!("{name}: value is not JSON: {e}"),
+        None => format!("{name}: needs a JSON value"),
+    })
+}
+
+/// A deadline that has passed must not replace a hold.
+fn future(t: i64) -> Result<i64, String> {
+    if t <= now() {
+        return Err("pipeline deadline must be in the future".into());
+    }
+    Ok(t)
 }
 
 /// An option the door writes, or why it won't.
@@ -148,19 +205,18 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
             let t: i64 = until
                 .parse()
                 .map_err(|_| "pipeline needs a Unix timestamp")?;
-            if t <= now() {
-                return Err("pipeline deadline must be in the future".into());
-            }
-            Ok(Request::Pipeline(t))
+            Ok(Request::Pipeline(future(t)?))
         }
-        ["set", name, value, why @ ..] => {
+        ["set", name, rest @ ..] => {
             let setting = writable(name)?;
-            let value: Value = serde_json::from_str(value)
-                .map_err(|e| format!("{name}: value is not JSON: {e}"))?;
+            let (value, why) = value_and_reason(name, rest)?;
             setting
                 .kind
                 .check(&value)
                 .map_err(|e| format!("{name}: {e}"))?;
+            if setting.name == UNTIL && value.as_i64().is_none_or(|t| t <= 0) {
+                return Err(format!("{name}: not a timestamp this policy can keep"));
+            }
             Ok(Request::Set {
                 name: setting.name.into(),
                 value,
@@ -307,7 +363,7 @@ impl Config {
         let log = fs::read_to_string(self.overlay.with_extension("log")).ok()?;
         log.lines().rev().find_map(|line| {
             let entry: Value = serde_json::from_str(line).ok()?;
-            (entry["option"] == name).then(|| {
+            (logged_option(&entry).as_deref() == Some(name)).then(|| {
                 format!(
                     "{} by {}{}",
                     entry["at"],
@@ -373,7 +429,7 @@ impl Config {
                 (REPOS.to_owned(), None, None, CHANGED.to_owned())
             }
             Request::Pipeline(t) => {
-                state.pipeline_until = Some(t);
+                state.pipeline_until = Some(future(t)?);
                 (UNTIL.to_owned(), None, None, CHANGED.to_owned())
             }
             Request::Back => {
@@ -639,5 +695,114 @@ mod tests {
             fs::metadata(&cfg.overlay).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn an_unrepresentable_or_expired_timestamp_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(&dir);
+        let until = now() + 600;
+        cfg.command(&words(&format!("pipeline {until}")), "t")
+            .unwrap();
+        let before = fs::read(&cfg.overlay).unwrap();
+        let log = fs::read(cfg.overlay.with_extension("log")).unwrap();
+        for line in [
+            "set settings.pipelineUntil 9223372036854775808 because maintenance window",
+            "set settings.pipelineUntil 0 because maintenance window",
+        ] {
+            assert!(cfg.command(&words(line), "t").is_err(), "{line}");
+        }
+        // Past the parse (a deadline that expired while waiting for the
+        // lock) the write itself refuses it.
+        let mut state = cfg.read().unwrap();
+        assert!(state.apply(UNTIL, Some(&serde_json::json!(1))).is_err());
+        assert!(
+            state
+                .apply(UNTIL, Some(&serde_json::json!(9223372036854775808u64)))
+                .is_err()
+        );
+        assert_eq!(state.pipeline_until, Some(until));
+        assert_eq!(fs::read(&cfg.overlay).unwrap(), before);
+        assert_eq!(fs::read(cfg.overlay.with_extension("log")).unwrap(), log);
+    }
+
+    #[test]
+    fn a_reason_is_judged_by_its_words_not_its_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(&dir);
+        let args = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for bad in [
+            args(&["unset", REPOS, "because", "", ""]),
+            args(&["unset", REPOS, "because", "  "]),
+            args(&["unset", REPOS, "because", "one"]),
+            args(&["set", REPOS, "{}", "because", "one "]),
+        ] {
+            assert!(cfg.command(&bad, "t").is_err(), "{bad:?}");
+        }
+        assert!(!cfg.overlay.exists());
+        cfg.command(
+            &args(&["set", REPOS, "{}", "because", "maintenance window"]),
+            "t",
+        )
+        .unwrap();
+        cfg.command(&args(&["unset", REPOS, "because", "two", "words"]), "t")
+            .unwrap();
+        let shown = cfg.show().unwrap();
+        assert!(shown.contains("by t: two words"), "{shown}");
+    }
+
+    #[test]
+    fn json_with_spaces_is_one_value_before_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(&dir);
+        cfg.command(
+            &words(r#"set settings.repositoryOverrides {"sam/code": false} because maintenance window"#),
+            "t",
+        )
+        .unwrap();
+        assert!(!cfg.allows("sam/code").unwrap());
+        let one = vec![
+            "set".to_owned(),
+            REPOS.to_owned(),
+            r#"{"sam/code": true}"#.to_owned(),
+            "because".to_owned(),
+            "back on".to_owned(),
+        ];
+        cfg.command(&one, "t").unwrap();
+        assert!(cfg.allows("sam/code").unwrap());
+    }
+
+    #[test]
+    fn show_finds_changes_logged_before_options_were_tagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(&dir);
+        fs::write(
+            cfg.overlay.with_extension("log"),
+            concat!(
+                r#"{"at":1,"actor":"old","change":["pause","sam/box"]}"#,
+                "\n",
+                r#"{"at":2,"actor":"older","change":["pipeline","99"]}"#,
+                "\n",
+                r#"{"at":3,"actor":"oldest","change":["back"]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        cfg.command(&words("allow sam/box"), "new").unwrap();
+        cfg.command(&words("pause sam/box"), "new2").unwrap();
+        let shown = cfg.show().unwrap();
+        let line = |n: &str| shown.lines().find(|l| l.starts_with(n)).unwrap().to_owned();
+        assert!(line(REPOS).contains("by new2"), "{shown}");
+        assert!(line(UNTIL).contains("3 by oldest"), "{shown}");
+        // And with no newer entry, the historical one is found.
+        let log = fs::read_to_string(cfg.overlay.with_extension("log")).unwrap();
+        let old: String = log.lines().take(3).map(|l| format!("{l}\n")).collect();
+        fs::write(cfg.overlay.with_extension("log"), old).unwrap();
+        let shown = cfg.show().unwrap();
+        assert!(line_of(&shown, REPOS).contains("1 by old"), "{shown}");
+    }
+
+    fn line_of(shown: &str, n: &str) -> String {
+        shown.lines().find(|l| l.starts_with(n)).unwrap().to_owned()
     }
 }
