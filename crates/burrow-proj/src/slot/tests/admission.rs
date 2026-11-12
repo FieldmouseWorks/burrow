@@ -630,3 +630,136 @@ fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
     assert_eq!(asked.matches("list-units").count(), 1, "{asked}");
     assert!(!asked.contains("proj-settled.service"), "{asked}");
 }
+
+#[test]
+fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let asked = tmp.path().join("asked");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        format!(
+            "#!/bin/sh\necho \"$*\" >>'{}'\ncase \"$*\" in\n*list-units*) echo 'proj-ownedqueued.service loaded active running'; echo 'proj-ownedrunning.service loaded active running'; echo 'proj-ownedlock.service loaded active running' ;;\n*is-active*proj-ownedqueued.service|*is-active*proj-ownedrunning.service|*is-active*proj-ownedlock.service) exit 0 ;;\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+            asked.display()
+        ),
+    );
+    let cases = [
+        ("ownedqueued", true),
+        ("ownedrunning", true),
+        ("ownedlock", true),
+        ("retry", true),
+        ("await-failed", true),
+        ("codex-refused", true),
+        ("owned-codex-refused", true),
+        ("quota-refused", true),
+        ("owned-quota-refused", true),
+        ("quota-no-await", true),
+        ("quota-pending", true),
+        ("quota-refusal-only", true),
+        ("owned-ended", false),
+        ("completed", false),
+        ("stopped", false),
+        ("settled-failure", false),
+    ];
+    for (id, _) in cases {
+        let job = awaiting(&cfg, id, "sam/web");
+        match id {
+            "ownedqueued" | "ownedrunning" | "ownedlock" | "retry" => {
+                fs::remove_file(job.path("await")).unwrap();
+                fs::remove_file(job.turn("1", "outcome")).unwrap();
+                if id == "retry" {
+                    fs::write(job.turn("1", "retry-migration"), "{}").unwrap();
+                } else if id != "ownedqueued" {
+                    fs::write(job.turn("1", "slot"), "1").unwrap();
+                    fs::write(job.turn("1", "deadline"), "4000000000").unwrap();
+                    if id == "ownedlock" {
+                        fs::write(job.turn("1", "wait"), "1000\theavy slot").unwrap();
+                    }
+                }
+            }
+            "codex-refused" | "owned-codex-refused" => {
+                fs::write(
+                    job.turn("1", "outcome"),
+                    "usage limit; waiting for Codex's reset",
+                )
+                .unwrap();
+                fs::write(job.path("await"), "usage-limit\t1000\t2000\n").unwrap();
+            }
+            "quota-refused" | "owned-quota-refused" | "quota-no-await" | "quota-pending" => {
+                fs::write(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();
+                if id == "quota-pending" {
+                    fs::write(
+                        job.path(crate::github_quota::PENDING),
+                        r#"{"targets":["sam/web#1"],"retry_at":2000,"turn":"1"}"#,
+                    )
+                    .unwrap();
+                } else {
+                    crate::github_quota::park(&job, 2000).unwrap();
+                }
+                if matches!(id, "quota-no-await" | "quota-pending") {
+                    fs::remove_file(job.path("await")).unwrap();
+                }
+            }
+            "quota-refusal-only" => {
+                fs::remove_file(job.path("await")).unwrap();
+                fs::write(job.turn("1", "outcome"), "failed").unwrap();
+                let mut meter = burrow_github::quota::Meter::new("workers", "sam", 1000);
+                meter.retry_at = Some(2000);
+                meter
+                    .record_public(&job.turn("1", "github-refusals"))
+                    .unwrap();
+            }
+            "await-failed" | "owned-ended" => {
+                fs::write(job.turn("1", "outcome"), "failed").unwrap();
+            }
+            "completed" => {
+                fs::write(job.turn("1", "end"), "done").unwrap();
+            }
+            "stopped" => {
+                fs::write(job.turn("1", "stopped"), "").unwrap();
+            }
+            "settled-failure" => {
+                fs::remove_file(job.path("await")).unwrap();
+                fs::write(job.turn("1", "outcome"), "failed").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        if id.starts_with("owned") {
+            fs::write(job.path("owned"), "").unwrap();
+        }
+    }
+    // No registry exists on enable, or after disabling and re-enabling.
+    for _ in 0..2 {
+        assert!(!jobs.join(".waits").exists());
+        let before = now() as f64;
+        crate::waits::rewatch_all(&cfg);
+        for (id, watched) in cases {
+            let path = jobs.join(".waits").join(id);
+            assert_eq!(path.exists(), watched, "{id}");
+            if watched {
+                let job = Job::new(&cfg, id);
+                let facts = job.facts().unwrap();
+                let expected = crate::waits::job_wait(&cfg, &facts).unwrap();
+                let published: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+                if matches!(id, "quota-pending" | "quota-refusal-only") {
+                    // No durable start marker: reset facts use observation time.
+                    let since = published["since"].as_f64().unwrap();
+                    assert!(since >= before && since <= now() as f64, "{id}");
+                } else {
+                    assert_eq!(published["since"], expected.since, "{id}");
+                }
+                assert_eq!(published["due"], expected.due, "{id}");
+                assert_eq!(published["phase"], expected.phase, "{id}");
+            }
+        }
+        fs::remove_dir_all(jobs.join(".waits")).unwrap();
+    }
+    let asked = fs::read_to_string(asked).unwrap();
+    assert_eq!(asked.matches("list-units").count(), 2, "{asked}");
+    assert!(
+        !asked.contains(&Job::new(&cfg, "settled-failure").unit()),
+        "{asked}"
+    );
+}

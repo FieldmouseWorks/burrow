@@ -348,7 +348,9 @@ pub fn rewatch_all(cfg: &Config) {
 /// watchdog must see whether or not it ever heard of the job. Only a job
 /// whose unit is up (`up`, the units that are; asked of systemd itself when
 /// that couldn't be told), whose turn waits on a retry or which awaits
-/// something has its facts looked at.
+/// something, including a reset whose await publication was interrupted,
+/// has its facts looked at. The existing watchdog contract decides which
+/// of those facts describe watchable work, including owned active turns.
 fn live(cfg: &Config, id: &str, up: Option<&std::collections::HashSet<String>>) -> bool {
     let job = Job::new(cfg, id);
     let unit = job.unit();
@@ -356,14 +358,13 @@ fn live(cfg: &Config, id: &str, up: Option<&std::collections::HashSet<String>>) 
         || crate::systemd::active(cfg, &unit),
         |up| up.contains(&unit),
     ) || crate::filled(&job.path("await"))
-        || job.turns().is_some_and(|n| job.retry_pending(&n));
+        || job.turns().is_some_and(|n| {
+            job.retry_pending(&n) || crate::github_quota::reset(&job, &n).is_some()
+        });
     maybe
-        && job.facts().is_some_and(|f| {
-            !f.stopped
-                && !f.owned
-                && (matches!(f.state.as_str(), "queued" | "running")
-                    || (f.state == "done" && f.end.as_deref() == Some("await")))
-        })
+        && job
+            .facts()
+            .is_some_and(|f| !f.stopped && job_wait(cfg, &f).is_some())
 }
 
 /// [`rewatch`] in the background, never waited for: the watchdog's lock, or
