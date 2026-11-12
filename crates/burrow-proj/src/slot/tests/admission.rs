@@ -425,7 +425,7 @@ fn a_policy_pass_rewatches_what_the_watchdog_watches_not_every_job() {
     cfg.tools.systemctl = tmp.path().join("systemctl");
     burrow_test::executable(
         &cfg.tools.systemctl,
-        "#!/bin/sh\ncase \"$*\" in\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+        "#!/bin/sh\n# As systemd answers for a unit that isn't running.\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
     );
     // Two jobs whose turn failed: one the watchdog watches, and one long
     // done whose wait it settled (on remi, every job since October).
@@ -454,4 +454,62 @@ fn a_policy_pass_rewatches_what_the_watchdog_watches_not_every_job() {
         serde_json::from_slice(&fs::read(cfg.waits.as_ref().unwrap()).unwrap()).unwrap();
     let items: Vec<&String> = published["items"].as_object().unwrap().keys().collect();
     assert_eq!(items, ["watched"]);
+}
+
+#[test]
+fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\n# As systemd answers for a unit that isn't running.\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    let settings = cfg.settings.clone().unwrap();
+    let say = |words: &[&str]| {
+        settings
+            .command(
+                &words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+                "test",
+            )
+            .unwrap()
+    };
+    say(&["allow", "sam/web"]);
+    // A failed turn the watchdog watches, with nothing that parks it (no
+    // question, await or retry), and a settled one it doesn't.
+    for id in ["failed", "settled"] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("prompt.1"), "work").unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Repository("sam/web".into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+    }
+    crate::waits::rewatch(&cfg, &["failed"]);
+    let watched = |id: &str| jobs.join(".waits").join(id).exists();
+    assert!(watched("failed"));
+    // Paused: the watchdog doesn't hear of it, but it isn't forgotten.
+    say(&["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!watched("failed"));
+    assert!(jobs.join(".waits-held/failed").exists());
+    // Allowed again: watched again, and the settled job still isn't.
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(watched("failed"));
+    assert!(!jobs.join(".waits-held/failed").exists());
+    assert!(!watched("settled") && !jobs.join(".waits-held/settled").exists());
+    // Stopped, it has no wait to keep or give back.
+    say(&["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    fs::write(Job::new(&cfg, "failed").turn("1", "stopped"), "").unwrap();
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!watched("failed") && !jobs.join(".waits-held/failed").exists());
 }

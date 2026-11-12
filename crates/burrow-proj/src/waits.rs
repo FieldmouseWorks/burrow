@@ -312,18 +312,20 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
     }
 }
 
-/// [`rewatch`] for every job it watches: the machine's usage changed
-/// ([`usage`]), which moves the deadline of every turn in line.
+/// [`rewatch`] for every job it watches, and every one whose wait the
+/// policy keeps from it for now ([`HELD`]): the machine's usage changed
+/// ([`usage`]), which moves the deadline of every turn in line, or the
+/// policy did, which lets a held one back.
 pub fn rewatch_all(cfg: &Config) {
-    let mut ids: Vec<String> = fs::read_dir(cfg.jobs.join(".waits"))
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut ids: Vec<String> = [".waits", HELD]
+        .iter()
+        .flat_map(|d| fs::read_dir(cfg.jobs.join(d)).into_iter().flatten())
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
+        .collect();
     ids.sort();
+    ids.dedup();
     rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
@@ -334,12 +336,21 @@ pub fn rewatch_later(cfg: &Config, id: &str) {
     std::thread::spawn(move || rewatch(&cfg, &[&id]));
 }
 
+/// The jobs (an empty file each) with a wait the policy keeps from the
+/// watchdog while it denies or parks them: a pause, a scope that leaves
+/// their repo out, an admission it can't read. They're watched again once
+/// it lets them be ([`rewatch_all`]), however their turn ended; a job that
+/// has no wait to keep (settled, stopped, done) has none here.
+const HELD: &str = ".waits-held";
+
 fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     let Some(file) = &cfg.waits else {
         return Ok(());
     };
     let dir = cfg.jobs.join(".waits");
     fs::create_dir_all(&dir)?;
+    let held = cfg.jobs.join(HELD);
+    fs::create_dir_all(&held)?;
     let lock = OpenOptions::new()
         .append(true)
         .create(true)
@@ -348,8 +359,8 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     for id in ids {
         let f = dir.join(id);
         let job = Job::new(cfg, id);
-        let wait = (!crate::policy::parked(&job) && !crate::policy::denied(&job))
-            .then_some(&job)
+        let kept = crate::policy::parked(&job) || crate::policy::denied(&job);
+        let wait = Some(&job)
             .filter(|job| job.dir.is_dir())
             .and_then(|job| job.facts())
             .and_then(|mut facts| {
@@ -364,7 +375,17 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
                 })
             });
 
-        match wait {
+        // Held while the policy keeps it, watched once it doesn't.
+        let mark = held.join(id);
+        if wait.is_some() && kept {
+            fs::write(&mark, "")?;
+        } else {
+            match fs::remove_file(&mark) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => (),
+            }
+        }
+        match wait.filter(|_| !kept) {
             Some(item) => swap(&f, &format!("{}\n", json!(item)))?,
             None => {
                 for gone in [f.clone(), f.with_file_name(format!("{id}.new"))] {
