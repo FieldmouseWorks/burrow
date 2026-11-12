@@ -181,7 +181,7 @@ fn heads_system_is_built_again_stamped_as_what_runs() {
         };
         assert!(!same_as_running(&m.cfg, &run));
         let asked = m.kept("nix.log");
-        assert!(asked.starts_with("build --impure --no-link --print-out-paths --expr"));
+        assert!(asked.starts_with("build --impure --no-link -L --print-out-paths --expr"));
         assert!(
             asked.contains(&format!(
                 "builtins.getFlake \"git+file://{}?rev={head}\"",

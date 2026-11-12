@@ -108,6 +108,7 @@ pub fn same_as_running(cfg: &Config, run: &Running) -> bool {
             "build",
             "--impure",
             "--no-link",
+            "-L",
             "--print-out-paths",
             "--expr",
             &expr,

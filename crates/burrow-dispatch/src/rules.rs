@@ -236,6 +236,7 @@ pub fn decide(
                     since,
                     link,
                     true,
+                    &cfg.handler,
                 );
                 d.items.insert(key, it);
                 continue;
@@ -278,6 +279,7 @@ pub fn decide(
                 b.oldest,
                 link,
                 false,
+                &cfg.handler,
             );
             d.items.insert(key, it);
         }
@@ -289,7 +291,9 @@ pub fn decide(
 /// once one under way has it (one that started since, or, with `any`, any
 /// one), due `run` after it last wrote to its logs (`progress`), or after it
 /// started if it hasn't since: a run at work, however long its build, isn't
-/// stalled, and one that has gone quiet is. Otherwise on HOST-update, which
+/// stalled, and one that has gone quiet is; the watchdog kicks `refresh`
+/// (this handler) first, since a log write triggers no pass and the
+/// deadline it was given may be stale. Otherwise on HOST-update, which
 /// the watchdog kicks: soon, unless
 /// its last run is `behind` its own open PR, which brings the commit in only
 /// after it lands and has a wait of its own with the steward.
@@ -305,6 +309,7 @@ fn going_live(
     since: f64,
     link: Option<String>,
     any: bool,
+    refresh: &str,
 ) -> Item {
     match update.since {
         Some(start) if update.state == "activating" && (any || start >= since) => Item {
@@ -326,7 +331,7 @@ fn going_live(
             since: start,
             due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run,
             link,
-            kick: None,
+            kick: Some(refresh.to_owned()),
             line: false,
             unstick: false,
             claude: false,

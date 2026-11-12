@@ -373,7 +373,7 @@ fn deploy() {
             .clone();
     assert_eq!(
         (it.since, it.due, it.kick),
-        (T + 30.0, T + 30.0 + 5400.0, None)
+        (T + 30.0, T + 30.0 + 5400.0, Some(cfg.handler.clone()))
     );
     assert_eq!(
         it.phase,
@@ -392,7 +392,7 @@ fn deploy() {
             .clone();
     assert_eq!(
         (it.since, it.due, it.kick),
-        (T + 30.0, T + 7200.0 + 5400.0, None)
+        (T + 30.0, T + 7200.0 + 5400.0, Some(cfg.handler.clone()))
     );
     assert_eq!(
         it.phase,
