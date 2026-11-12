@@ -48,7 +48,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
+            ... on CheckRun { databaseId externalId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -144,7 +144,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     status is its word on the PR, not a check of it, except its failure: CI
     failed on the head merged alone onto the default branch, which is the
     head's to fix. Only the App's counts, as with ours. A cancelled check run
-    goes by what its workflow did after it (after_cancel), and with nothing
+    goes by later work in the effective check set (effective_checks), and with nothing
     after it is pending, since a stopped run found nothing, unless it ran out
     of time (timed_out), which is red. A workflow's
     check run that passed while its run is still going is pending: a job
@@ -169,16 +169,11 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{flow} (failed to start)")
-    for c in contexts.get("nodes", []):
+    for c in effective_checks(contexts.get("nodes", []), stale, docs_lane(pr, moved)):
         if c["__typename"] == "CheckRun":
-            if suite(c).get("id") in stale or rerun(c, contexts.get("nodes", []), stale):
-                continue
-            after = after_cancel(c, contexts.get("nodes", []), stale) if cancelled(c) else None
-            if after == "finished":
-                continue
             seen += 1
             name = c["name"]
-            if c["status"] != "COMPLETED" or after == "going":
+            if c["status"] != "COMPLETED":
                 pending.append(name)
             elif cancelled(c) and timed_out(repo, c):
                 # GitHub stops a job that runs past its timeout-minutes as
@@ -297,48 +292,52 @@ def timed_out(repo, c):
                for a in (page if isinstance(page, list) else []) if isinstance(a, dict))
 
 
-def rerun(c, contexts, stale):
-    """Whether a newer run of the same check by the same workflow, for the
-    PR's diff, stands for this one on the head: a PR's body edited for the
-    house check runs it again, as does a run run again, and each run's
-    suite stays in the rollup, so the old failure would read red after the
-    new run passed. The newer run is the word on the head, whatever it says
-    (pending while it runs). Newer is GitHub's: check run ids only grow. A
-    check run with no id, or of no workflow, has no newer run to go by."""
-    mine, flow = c.get("databaseId"), workflow(c)
-    if mine is None or flow is None:
-        return False
-    return any(o is not c and o.get("__typename") == "CheckRun" and o.get("name") == c["name"]
-               and workflow(o) == flow and (o.get("databaseId") or 0) > mine
-               and suite(o).get("id") not in stale for o in contexts)
+def effective_checks(contexts, stale, docs):
+    """One ordered replacement relation for failures and cancellations alike.
+    A later check may stand for earlier work only in its own workflow and
+    PR lane. Skips did nothing; a cancelled check must wait for completed
+    work, so a known timeout remains red while its retry is running. Only
+    larger check IDs can replace predecessors: a discarded old success
+    cannot clear its replacement's cancellation.
 
+    Distinct jobs and matrix entries may share a display name. A name is
+    usable across suites only when unambiguous in both; within a suite an
+    explicit integrator job reference must identify the same job.
+    Missing IDs or ambiguous names keep all checks in the decision.
+    """
+    checks = [c for c in contexts if c.get("__typename") == "CheckRun"]
 
-def after_cancel(c, contexts, stale):
-    """What a cancelled check run's workflow did on the head in its other
-    suites: "finished" once one has done that check's work, so the cancelled
-    run is no word on the head; "going" while one is still running, whichever
-    diff it's for, since CI isn't done speaking; None with neither, as when
-    someone cancelled the run by hand, which stays not green (pending).
-    Done its work: the suite has finished for the PR's diff (stale is those
-    that didn't) with nothing of its own cancelled, so two cancelled runs
-    don't clear each other, and it ran the same work (same_work), whatever that said. A skip vouches
-    for nothing: a caller skipped on a title edit completes too. A check of a
-    shared CI call (one with a lane job) must also be matched in a call whose
-    lane ran and chose this PR's base: a push's or a dispatch's run of the same
-    job has no lane, and judged no PR. Jobs beside that call have no lane to
-    ask for. A check run of no workflow has no other runs to go by."""
-    mine, flow = suite(c).get("id"), workflow(c)
-    if mine is None or flow is None:
-        return None
-    same = [x for x in contexts if workflow(x) == flow]
-    others = [x for x in same if suite(x).get("id") != mine]
-    gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
-    done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone and ran(x)]
-    shared = any(job_of(x)[1].startswith(LANE) and job_of(x)[0] == job_of(c)[0] for x in same)
-    laned = {(suite(x).get("id"), job_of(x)[0]) for x in done if judged(x)}
-    if any(same_work(c, x) and (not shared or (suite(x).get("id"), job_of(x)[0]) in laned) for x in done):
-        return "finished"
-    return "going" if any(suite(x).get("status") != "COMPLETED" for x in others) else None
+    def unique(c):
+        peers = [x for x in checks if suite(x).get("id") == suite(c).get("id") and x["name"] == c["name"]]
+        identities = {x.get("externalId") or x.get("databaseId") or id(x) for x in peers}
+        return len(identities) == 1
+
+    def replaces(c, x):
+        mine, newer = c.get("databaseId"), x.get("databaseId")
+        flow = workflow(c)
+        if (mine is None or newer is None or newer <= mine or flow is None or workflow(x) != flow
+                or not suite(c).get("id") or not suite(x).get("id")
+                or suite(x).get("id") in stale or x.get("conclusion") == "SKIPPED"):
+            return False
+        if not unique(c) or not unique(x):
+            return False
+        if suite(c).get("id") == suite(x).get("id") and not (
+                c.get("externalId") and c["externalId"] == x.get("externalId")):
+            return False
+        if cancelled(c) and (not ran(x) or suite(x).get("status") != "COMPLETED"):
+            return False
+        # A shared call is identified even when its lane was skipped before
+        # GitHub filled in the name. A sibling call cannot vouch for it.
+        shared = any(workflow(y) == flow and job_of(y)[0] == job_of(c)[0]
+                     and job_of(y)[1].startswith(LANE) for y in checks)
+        if shared and not any(suite(y).get("id") == suite(x).get("id")
+                              and job_of(y)[0] == job_of(c)[0] and ran(y) and judged(y)
+                              and suite(y).get("id") not in stale for y in checks):
+            return False
+        return same_work(c, x, shared, docs)
+
+    return [c for c in contexts if c.get("__typename") != "CheckRun"
+            or (suite(c).get("id") not in stale and not any(replaces(c, x) for x in checks))]
 
 
 def job_of(c):
@@ -347,17 +346,21 @@ def job_of(c):
     return caller, job
 
 
-def same_work(c, x):
-    """Whether check run x does c's work: the same name, or, in one call of
-    the shared CI, its lane, whose name a run may never have filled in, or its
-    gate, which is its whole gate's job, a leg of it, however many legs, or
-    the docs lane's, and no other job."""
+def same_work(c, x, shared, docs):
+    """The same job, or explicit gate coverage in one validated shared call.
+    A docs verdict replaces only gate work, and the whole gate can cover a
+    previous docs job or leg. One leg never stands for a different leg.
+    """
     if c["name"] == x["name"]:
         return True
     (mine, a), (theirs, b) = job_of(c), job_of(x)
-    if mine != theirs:
+    if not shared or mine != theirs:
         return False
-    return (a.startswith(LANE) and b.startswith(LANE)) or (gate_job(a) and gate_job(b))
+    if a.startswith(LANE) and b.startswith(LANE):
+        return True
+    if not ran(x):
+        return False
+    return (gate_job(a) and b == GATE) or (docs and gate_job(a) and b.startswith(DOCS_LANE))
 
 
 def gate_job(job):
