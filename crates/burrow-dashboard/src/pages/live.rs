@@ -5,7 +5,7 @@
 //! reads anything else. Live updates are not this page's job.
 
 use burrow_proj::snapshot::{
-    Holder, Holds, Meter, Priority, Ready, Slot, SlotKind, SlotState, Snapshot, Waiting, Window,
+    Holder, Holds, Meter, Priority, Ready, Slot, SlotKind, SlotState, Snapshot, Window,
 };
 use maud::{Markup, html};
 
@@ -93,41 +93,55 @@ fn holder_line(h: &Holder) -> String {
     }
 }
 
-/// Where the front item stands: the head of the line, else of the queue.
+/// Where the front item stands: the head of the line, else of the queue,
+/// and what the slots are doing, state by state. It says nothing of whether
+/// the item can start: the snapshot doesn't establish that (engine routing,
+/// reservations, holds and drain capacity decide it).
 fn front(snap: &Snapshot) -> Markup {
-    // The line a waiting turn is in is the shared claude slots'.
-    let shared = || snap.slots.iter().filter(|s| s.kind == SlotKind::Claude);
-    let free = shared().filter(|s| s.state == SlotState::Idle).count();
-    let taken = shared().filter(|s| s.state != SlotState::Idle).count();
-    let stuck = shared().filter(|s| stalled(s.state)).count();
     html! {
         section.front aria-labelledby="front" {
             h2 #front { "Front of the line" }
             @if let Some(w) = snap.line.first() {
-                (front_waiting(w, free, taken, stuck))
+                p.path {
+                    strong { (w.job) }
+                    " (" (w.project) ", " (w.class) ") has waited "
+                    (span(w.wait.max(0) as u64)) " for a slot."
+                }
             } @else if let Some(r) = snap.queue.first() {
                 p.path {
                     strong { (r.repo) "#" (r.number) }
-                    " is next in the queue (" (why(r, 0)) "), "
-                    @if free > 0 { "and " (free) " slot" @if free != 1 { "s" } " can take it." }
-                    @else { "but no slot is free." }
+                    " is next in the queue (" (why(r, 0)) ")."
                 }
             } @else {
                 p.path { "Nothing is waiting." }
             }
+            p.tally { (tally(snap)) }
         }
     }
 }
 
-fn front_waiting(w: &Waiting, free: usize, taken: usize, stuck: usize) -> Markup {
+/// Slots by state, each state named, in a fixed order.
+fn tally(snap: &Snapshot) -> Markup {
+    const ORDER: [SlotState; 9] = [
+        SlotState::Running,
+        SlotState::Queued,
+        SlotState::Starting,
+        SlotState::Parked,
+        SlotState::Asking,
+        SlotState::Ended,
+        SlotState::Busy,
+        SlotState::Unknown,
+        SlotState::Idle,
+    ];
     html! {
-        p.path {
-            strong { (w.job) }
-            " (" (w.project) ", " (w.class) ") has waited " (span(w.wait.max(0) as u64)) " for a slot. "
-            @if free > 0 { (free) " free now." }
-            @else if stuck > 0 {
-                "All " (taken) " taken; " strong.warn { (stuck) " of them are parked, asking or ended" } "."
-            } @else { "All " (taken) " are running." }
+        @for st in ORDER {
+            @let n = snap.slots.iter().filter(|s| s.state == st).count();
+            @if n > 0 {
+                span.count class=(if stalled(st) { "warn" } else { "" }) {
+                    (n) " " (state_word(st))
+                }
+                " "
+            }
         }
     }
 }
@@ -157,7 +171,13 @@ fn slot_card(s: &Slot) -> Markup {
                     p.awaits { "waiting on " (h.awaits.join(", ")) }
                 }
             } @else {
-                p.holder { "Nothing holds it." }
+                p.holder {
+                    @match s.state {
+                        SlotState::Idle => { "Nothing holds it." }
+                        SlotState::Unknown => { "Its lock couldn't be looked at." }
+                        _ => { "Taken; no holder is known." }
+                    }
+                }
             }
             @if s.state != SlotState::Idle && s.age.is_some() { p.age { "for " (time(s.age).trim_end_matches(" ago")) } }
         }
@@ -345,7 +365,7 @@ mod tests {
     fn sections_come_in_order_and_parked_slots_stand_out() {
         let snap: Snapshot = serde_json::from_str(FIXTURE).unwrap();
         let fonts = crate::assets::tests::fonts();
-        let assets = Assets::load(&crate::assets::tests::shell(), fonts.path()).unwrap();
+        let assets = Assets::load(crate::assets::tests::shell(), fonts.path()).unwrap();
         let f = Frame {
             title: "box",
             host: "box.ts.net",
@@ -360,6 +380,11 @@ mod tests {
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
         assert_eq!(html.matches("slot stalled").count(), 3);
         assert!(html.contains("slot idle"));
-        assert!(html.contains("3 of them are parked"), "{html}");
+        assert!(
+            html.contains("3 parked") && html.contains("1 busy"),
+            "{html}"
+        );
+        assert!(!html.contains("Nothing holds it.</p><p class=\"age")); // busy slot isn't called empty
+        assert!(html.contains("Taken; no holder is known."));
     }
 }
