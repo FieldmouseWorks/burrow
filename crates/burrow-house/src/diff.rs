@@ -34,6 +34,9 @@ pub struct Diff {
     /// Files with a line the PR adds that sets up a timer, outside Markdown
     /// and comments. A file GitHub gives no patch for is read whole.
     pub timers: Vec<String>,
+    /// Files with a line the PR adds that turns an automated spender on,
+    /// outside Markdown and comments.
+    pub spenders: Vec<String>,
     /// Files with a line the PR adds that names a model.
     pub models: Vec<String>,
 }
@@ -160,6 +163,9 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
         let markdown = lower.ends_with(".md") || lower.ends_with(".markdown");
         if !markdown && new.iter().any(|l| rules::timer(l) && !rules::comment(l)) {
             diff.timers.push(file.to_owned());
+        }
+        if !markdown && new.iter().any(|l| rules::spender(l) && !rules::comment(l)) {
+            diff.spenders.push(file.to_owned());
         }
         if new.iter().any(|l| rules::model(l)) {
             diff.models.push(file.to_owned());

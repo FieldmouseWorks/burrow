@@ -22,18 +22,22 @@ pub enum Rule {
     /// An AGENTS.md is a map: a PR that grows one's own part past GUIDE
     /// lines says why.
     GuideSize,
+    /// Anything that spends is off until someone turns it on: a PR that
+    /// turns an automated spender on by default says why.
+    OnByDefault,
     /// Tracked files never name a model: a PR that adds a line naming one
     /// says why.
     ModelNames,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 6] = [
+    pub const ALL: [Rule; 7] = [
         Rule::Title,
         Rule::RustFirst,
         Rule::Timers,
         Rule::FileSize,
         Rule::GuideSize,
+        Rule::OnByDefault,
         Rule::ModelNames,
     ];
 
@@ -45,6 +49,7 @@ impl Rule {
             Rule::Timers => "timers",
             Rule::FileSize => "file-size",
             Rule::GuideSize => "guide-size",
+            Rule::OnByDefault => "on-by-default",
             Rule::ModelNames => "model-names",
         }
     }
@@ -57,6 +62,7 @@ impl Rule {
             Rule::Timers => Some("Why a timer"),
             Rule::FileSize => Some("Why not split"),
             Rule::GuideSize => Some("Why a longer guide"),
+            Rule::OnByDefault => Some("Why on by default"),
             Rule::ModelNames => Some("Why a model name"),
         }
     }
@@ -250,6 +256,20 @@ pub fn timer(line: &str) -> bool {
     TIMER.is_match(line)
 }
 
+/// Whether a line turns an automated spender (a model drain, paid usage,
+/// runners, spend) on: its key set true, as Nix, TOML or YAML write it. An
+/// option declared `default = true` over several lines is the review's to
+/// catch; the key on a line of its own is what this reads.
+pub fn spender(line: &str) -> bool {
+    static SPENDER: LazyLock<Regex> = LazyLock::new(|| {
+        re(concat!(
+            r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|paid[-_]?usage|fresh|spend(ing)?|runners?)\b",
+            r"[\w.-]*\s*(\.\s*enable\s*)?[=:]\s*(lib\.(mkDefault|mkForce)\s+)?true\b",
+        ))
+    });
+    SPENDER.is_match(line)
+}
+
 /// Whether a line is a comment, in any of the house's languages.
 pub fn comment(line: &str) -> bool {
     static COMMENT: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*(#|//|--|;|/\*|\*)"));
@@ -277,6 +297,30 @@ pub fn model(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spenders() {
+        for line in [
+            "burrow.proj.inbox.triage.drain.enable = true;",
+            "  drain = true",
+            "drain: true",
+            "  extraUsage = lib.mkDefault true;",
+            "fresh.enable = true;",
+            "runners.x.enable = true;",
+            "paid_usage = true",
+        ] {
+            assert!(spender(line), "{line}");
+        }
+        for line in [
+            "drain.enable = false;",
+            "drained = true;",
+            "freshness = true;",
+            "drain = null;",
+            "description = \"drain on\";",
+        ] {
+            assert!(!spender(line), "{line}");
+        }
+    }
 
     #[test]
     fn languages() {

@@ -97,6 +97,11 @@ fn judge(rule: Rule, title: &str, body: &str, diff: &Diff, event: &Event) -> Ver
             ),
             format!("The house rules keep AGENTS.md a map: what the repo is, its own rules, and where things live, with the detail in the docs that own it, linked. Move the detail out in this PR, or add a line to the PR body starting 'Why a longer guide:' with the reason. Lines inside the house blocks don't count toward the {}", rules::GUIDE),
         ),
+        Rule::OnByDefault => (
+            !diff.spenders.is_empty(),
+            format!("turns a spender on in {} file(s)", diff.spenders.len()),
+            "Anything that spends (models, runners, money) is off until someone turns it on for a repo, and reports what it spent. Leave it off, or add a line to the PR body starting 'Why on by default:' with the reason".to_owned(),
+        ),
         Rule::ModelNames => (
             !diff.models.is_empty(),
             format!("names a model in {} file(s)", diff.models.len()),
@@ -172,6 +177,9 @@ fn found(out: &mut dyn Write, diff: &Diff, event: &Event) -> Result<(), String> 
     }
     for file in &diff.timers {
         say(out, &format!("timers: {file:?}"))?;
+    }
+    for file in &diff.spenders {
+        say(out, &format!("spenders: {file:?}"))?;
     }
     for file in &diff.models {
         say(out, &format!("models: {file:?}"))?;

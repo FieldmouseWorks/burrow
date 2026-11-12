@@ -23,8 +23,8 @@ fn none() {
     assert_eq!(o.calls[1], "compare ba5e...4ead");
     // The code file it grows is read at its head, for its length.
     assert_eq!(o.calls[2], "content \"src/main.rs\"@4ead");
-    assert_eq!(o.calls[3..9], ["post 4ead"; 6]);
-    assert_eq!(o.calls[9..], ["pull 7"]);
+    assert_eq!(o.calls[3..10], ["post 4ead"; 7]);
+    assert_eq!(o.calls[10..], ["pull 7"]);
 }
 
 // The case it's for: a new Python file and no reason. It fails, and names
@@ -394,13 +394,14 @@ fn cut_short() {
         "timers",
         "file-size",
         "guide-size",
+        "on-by-default",
         "model-names",
     ];
     let o = case(many.clone()).run();
     let errors = o.errors();
     assert!(
         o.result == Ok(true)
-            && errors.len() == 5
+            && errors.len() == 6
             && errors.iter().all(|e| e.contains("the most GitHub lists")),
         "{}",
         o.out
