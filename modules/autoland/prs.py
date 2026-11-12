@@ -171,7 +171,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             red.append(f"{flow} (failed to start)")
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
-            if suite(c).get("id") in stale:
+            if suite(c).get("id") in stale or rerun(c, contexts.get("nodes", []), stale):
                 continue
             after = after_cancel(c, contexts.get("nodes", []), stale) if cancelled(c) else None
             if after == "finished":
@@ -295,6 +295,22 @@ def timed_out(repo, c):
     pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/check-runs/{run}/annotations?per_page=100")
     return any(TIMED_OUT in (a.get("message") or "") for page in (pages if isinstance(pages, list) else [])
                for a in (page if isinstance(page, list) else []) if isinstance(a, dict))
+
+
+def rerun(c, contexts, stale):
+    """Whether a newer run of the same check by the same workflow, for the
+    PR's diff, stands for this one on the head: a PR's body edited for the
+    house check runs it again, as does a run run again, and each run's
+    suite stays in the rollup, so the old failure would read red after the
+    new run passed. The newer run is the word on the head, whatever it says
+    (pending while it runs). Newer is GitHub's: check run ids only grow. A
+    check run with no id, or of no workflow, has no newer run to go by."""
+    mine, flow = c.get("databaseId"), workflow(c)
+    if mine is None or flow is None:
+        return False
+    return any(o is not c and o.get("__typename") == "CheckRun" and o.get("name") == c["name"]
+               and workflow(o) == flow and (o.get("databaseId") or 0) > mine
+               and suite(o).get("id") not in stale for o in contexts)
 
 
 def after_cancel(c, contexts, stale):
