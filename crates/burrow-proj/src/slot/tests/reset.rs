@@ -191,6 +191,10 @@ fn reset_backlog_releases_only_the_available_trickle_share() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn cohort_uses_precise_birth_times_and_survives_renames() {
     use crate::pick::Waiter;
     let tmp = TempDir::new().unwrap();
@@ -279,8 +283,11 @@ fn queue_to_unstick_and_usage_retry_escape_a_blocked_census() {
         || in_queue(&jobs) == 0,
     );
     assert_eq!(took(&jobs, "escape"), None);
-    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    // The waiter's reminder rewrites the record it read, and a durable write
+    // takes long enough for that to land after one removal: remove until it
+    // is gone for good.
     until("emergency retry starts despite blocked census", || {
+        let _ = fs::remove_file(jobs.join(crate::usage::FILE));
         took(&jobs, "escape").is_some()
     });
 }

@@ -1,4 +1,5 @@
 //! Bounded child transport and confined process-state reads.
+pub mod replace;
 pub mod state_reads;
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},

@@ -2,6 +2,7 @@
 //! and the stand-in for nix (testing.rs), whose system is made of flake.lock
 //! and system.nix and is stamped with the commit it's built from.
 
+use std::fs;
 use std::path::Path;
 
 use serde_json::json;

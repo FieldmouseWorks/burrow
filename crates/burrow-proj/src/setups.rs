@@ -188,6 +188,10 @@ impl<'a> Store<'a> {
     }
 
     /// Only a resolved setup name, never another interpretation of back.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "swapping the roles symlink into place is not a file write"
+    )]
     fn switch(&self, name: &str, before: Option<&str>) -> Result<(), String> {
         let name = name.to_owned();
         // Membership before joining: issue text cannot reach another path.
@@ -272,13 +276,8 @@ fn sync_parent(path: &Path) -> Result<(), String> {
 }
 
 fn atomic_text(path: &Path, text: &str) -> Result<(), String> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| error(parent, e))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.as_file().sync_all())
-        .map_err(|e| error(path, e))?;
-    file.persist(path).map_err(|e| error(path, e))?;
-    sync_parent(path)
+    burrow_process::replace::replace_mode(path, text, burrow_process::replace::SHARED)
+        .map_err(|e| error(path, e))
 }
 
 #[cfg(test)]

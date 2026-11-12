@@ -1,18 +1,9 @@
-use std::os::unix::fs::PermissionsExt;
-
-struct BlockWrites(std::path::PathBuf, std::fs::Permissions);
+struct BlockWrites(#[allow(dead_code, reason = "held until dropped")] burrow_test::BlockWrites);
 impl BlockWrites {
     fn new(path: &std::path::Path) -> Self {
         // Keep locking available so the failure is in receipt publication.
         crate::state_reads::append(&path.join("lock")).unwrap();
-        let before = fs::metadata(path).unwrap().permissions();
-        burrow_test::permissions(path, before.mode() & !0o222);
-        Self(path.to_owned(), before)
-    }
-}
-impl Drop for BlockWrites {
-    fn drop(&mut self) {
-        burrow_test::permissions(&self.0, self.1.mode());
+        Self(burrow_test::BlockWrites::new(path))
     }
 }
 
@@ -151,8 +142,9 @@ for dir in '{jobs}'/*; do
   test -d "$dir" || continue
   id=$(basename "$dir")
   n=$(cat "$dir/turns")
+  # The receipt cannot be published: the directory refuses new files.
   host='{host}'/"$id"
-  if test '{fault}' = receipt; then mkdir -p "$host/resume-$n.new";
+  if test '{fault}' = receipt; then install -d -m 0555 "$host";
   else mkdir -p "$host/question-text"; fi
 done
 exit 0
@@ -201,12 +193,11 @@ exit 0
             let n = job.turns().unwrap();
             assert_eq!(n, if source == "initial" { "1" } else { "2" });
             assert!(job.path(&format!("prompt.{n}")).exists());
-            let blocked = if fault == "receipt" {
-                PathBuf::from(format!("{}.new", receipt_path(&job, &n).display()))
+            if fault == "receipt" {
+                burrow_test::permissions(receipt_path(&job, &n).parent().unwrap(), 0o755);
             } else {
-                crate::ask::host_path(&job, "question-text")
-            };
-            fs::remove_dir(blocked).unwrap();
+                fs::remove_dir(crate::ask::host_path(&job, "question-text")).unwrap();
+            }
             if source != "initial" {
                 // A watcher can run before _exec records acceptance after a
                 // receipt-write error. It must not execute the old default.

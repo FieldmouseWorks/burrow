@@ -19,7 +19,6 @@
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -321,11 +320,8 @@ impl Config {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         text.extend_from_slice(format!("{now}\n").as_bytes());
-        let mut tmp = OsString::from(file.as_os_str());
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        fs::write(&tmp, text).map_err(|e| (tmp.clone(), e))?;
-        fs::rename(&tmp, &file).map_err(|e| (file, e))
+        burrow_process::replace::replace_mode(&file, text, burrow_process::replace::SHARED)
+            .map_err(|e| (file, e))
     }
 
     fn github(&self) -> burrow_github::Gh {

@@ -54,12 +54,11 @@ pub fn declare(path: &Path, args: &[String]) -> Result<(), String> {
         }
         _ => return Err("usage: proj await URL... | proj ask --default TEXT [--one-way] | proj done | proj probe QUESTION...".into()),
     }
-    let next = path.with_extension("next");
-    fs::write(
-        &next,
+    burrow_process::replace::replace_mode(
+        path,
         serde_json::to_vec(&declaration).map_err(|e| e.to_string())?,
+        burrow_process::replace::SHARED,
     )
-    .and_then(|()| fs::rename(next, path))
     .map_err(|e| e.to_string())?;
     println!("Noted. End your turn now. The host registers GitHub waits when this run ends.");
     Ok(())

@@ -222,23 +222,14 @@ impl Config {
         )
         .map_err(|e| e.to_string())?;
         log.sync_all().map_err(|e| e.to_string())?;
-        let pending = self.overlay.with_extension("pending");
-        let mut file = File::create(&pending).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
         // Readers include the isolated reviewer account. This overlay holds
         // public operational policy, regardless of the writer's umask.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o644))
-                .map_err(|e| e.to_string())?;
-        }
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(pending, &self.overlay).map_err(|e| e.to_string())?;
-        File::open(parent)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())?;
+        burrow_process::replace::replace_mode(
+            &self.overlay,
+            serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+            burrow_process::replace::SHARED,
+        )
+        .map_err(|e| e.to_string())?;
         if receipt.is_some() {
             Ok(answer)
         } else {

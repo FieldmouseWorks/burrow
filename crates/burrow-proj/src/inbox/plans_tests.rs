@@ -423,6 +423,10 @@ fn tracker_split_transactions_recover_every_durable_stage() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn planning_preserves_queued_running_and_awaiting_reference_ownership() {
     for state in ["queued", "running", "awaiting"] {
         let (b, mut parent, _) = parent_fixture();

@@ -1,0 +1,12 @@
+# Writing a state file whole is `burrow_process::replace::replace` (or
+# `replace_mode`) and nothing else: a second copy drifts from its fsync, its
+# random temporary name and its mode. The gate runs clippy with -D warnings,
+# so a rename that isn't the helper's fails CI. A rename that isn't a state
+# write (moving a directory) carries #[allow(clippy::disallowed_methods)] and
+# a reason.
+disallowed-methods = [
+  { path = "std::fs::rename", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason" },
+  { path = "tempfile::NamedTempFile::persist", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason", allow-invalid = true },
+  { path = "tempfile::NamedTempFile::persist_noclobber", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason", allow-invalid = true },
+  { path = "tokio::fs::rename", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason", allow-invalid = true },
+]

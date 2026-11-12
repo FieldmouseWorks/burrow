@@ -174,10 +174,7 @@ pub fn save(path: &Path, value: &impl Serialize) -> io::Result<()> {
 
 /// BYTES in PATH, whole or not at all.
 pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
+    burrow_process::replace::replace_mode(path, bytes, burrow_process::replace::SHARED)
 }
 
 #[cfg(test)]

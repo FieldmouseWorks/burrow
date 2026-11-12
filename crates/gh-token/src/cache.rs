@@ -4,7 +4,7 @@
 //! one only that often.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -39,17 +39,10 @@ pub fn lock(dir: &Path, key: &str) -> io::Result<File> {
 
 /// Keeps it under `key`, readable by this user only, whole or not at all.
 pub fn put(dir: &Path, key: &str, minted: &Minted) -> io::Result<()> {
-    let tmp = dir.join(format!(".{key}.{}", std::process::id()));
-    // A crash's leftover under the same pid.
-    let _ = fs::remove_file(&tmp);
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(format!("{} {}\n", minted.expires, minted.token).as_bytes())?;
-    drop(f);
-    fs::rename(&tmp, dir.join(key))
+    burrow_process::replace::replace(
+        dir.join(key),
+        format!("{} {}\n", minted.expires, minted.token),
+    )
 }
 
 #[cfg(test)]

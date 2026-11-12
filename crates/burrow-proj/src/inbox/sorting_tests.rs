@@ -857,6 +857,10 @@ fn a_barred_issue_off_the_list_stops_its_job() {
 
 // An already finished sorting verdict must not change a running lane's work.
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn a_handed_issue_url_blocks_triage_and_its_completed_verdict() {
     let b = Box::new();
     b.job("lane", "done", "finished");

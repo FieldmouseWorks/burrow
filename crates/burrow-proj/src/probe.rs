@@ -94,13 +94,12 @@ fn guest_exchange(path: &Path, words: &[String]) -> Result<String, String> {
     let id = crate::now_nanos();
     let question = words.join(" ");
     burrow_probe::query::Query::parse(&question)?;
-    let pending = path.with_extension("probe-next");
-    fs::write(
-        &pending,
+    burrow_process::replace::replace_mode(
+        &request,
         serde_json::to_vec(&Request { id, question }).map_err(|e| e.to_string())?,
+        burrow_process::replace::SHARED,
     )
     .map_err(|e| e.to_string())?;
-    fs::rename(pending, &request).map_err(|e| e.to_string())?;
     let until = Instant::now() + Duration::from_secs(180);
     loop {
         if let Ok(bytes) = fs::read(&response)

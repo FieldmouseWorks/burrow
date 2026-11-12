@@ -2,6 +2,10 @@
 use crate::{config::Config, swap, systemd};
 use serde_json::{Value, json};
 use std::{fs, process::Command};
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the proof exercises parking, a directory move"
+)]
 pub(crate) fn reconcile(cfg: &Config) -> Result<(), String> {
     let Some(root) = &cfg.proofs_state else {
         return Ok(());

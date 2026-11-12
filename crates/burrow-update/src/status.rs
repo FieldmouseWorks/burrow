@@ -52,10 +52,11 @@ pub fn note(cfg: &Config, outcome: Outcome, message: &str, behind: Option<u64>) 
         status["behind"] = pr.into();
     }
     let path = cfg.state.join("status.json");
-    let new = cfg.state.join("status.json.new");
-    if let Err(e) =
-        fs::write(&new, status.to_string() + "\n").and_then(|()| fs::rename(&new, &path))
-    {
+    if let Err(e) = burrow_process::replace::replace_mode(
+        &path,
+        status.to_string() + "\n",
+        burrow_process::replace::SHARED,
+    ) {
         eprintln!("{}: {}: {e}", cfg.update, path.display());
     }
 }

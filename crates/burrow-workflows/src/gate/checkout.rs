@@ -93,6 +93,10 @@ fn a_dirty_checkouts_submodules_are_in_the_snapshot() {
 /// A clean checkout's submodule at a relative URL, with no remote, is
 /// fetched from beside the checkout, not the snapshot.
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn a_relative_submodule_is_fetched_from_beside_the_checkout() {
     let g = Gate::new();
     let parent = g.dir();
@@ -261,6 +265,10 @@ fn the_runner_compiles_outside_the_callers_checkout() {
 /// Only Git's output terminator may be removed: trimming the caller path
 /// can silently select a different repository, for root and nested flakes.
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn checkout_path_whitespace_never_selects_a_sibling() {
     for suffix in [" ", "\t", "\r"] {
         let g = Gate::new();

@@ -450,6 +450,10 @@ pub fn take_engine(
 /// Wait in line for a slot, then hold it: the slot is this process's until
 /// the file returned is closed, or the process ends. With `may_hand_over`, a
 /// switch meanwhile hands the wait to the deployed proj ([`successor`]).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a queue ticket's name is its place, and its mtime is its arrival: a rename, not a whole-file write"
+)]
 pub fn take(
     cfg: &Config,
     id: &str,
@@ -652,6 +656,10 @@ pub fn take(
 /// line skips, then renamed), so a waiter clearing out dead places never sees
 /// it without its pid. Put back if it went anyway. False means the usage
 /// transaction is busy; retry from the emergency check without publishing.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a queue ticket's name is its place, and its mtime is its arrival: a rename, not a whole-file write"
+)]
 fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::Result<bool> {
     if read(&queue.join(me)).as_deref() != Some(process::id().to_string().as_str()) {
         // Birth and early release are ordered by the same usage lock, so a

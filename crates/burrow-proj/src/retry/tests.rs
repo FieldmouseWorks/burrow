@@ -7,15 +7,31 @@ use std::time::Instant;
 use tempfile::TempDir;
 
 #[allow(dead_code)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "frozen copy of an old release (burrow#664)"
+)]
 #[path = "fixtures/pick.rs"]
 mod legacy_pick;
 #[allow(dead_code)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "frozen copy of an old release (burrow#664)"
+)]
 #[path = "fixtures/slot.rs"]
 mod legacy_slot;
 #[allow(dead_code)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "frozen copy of an old release (burrow#664)"
+)]
 #[path = "fixtures/nonblocking/pick.rs"]
 mod nonblocking_pick;
 #[allow(dead_code)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "frozen copy of an old release (burrow#664)"
+)]
 #[path = "fixtures/nonblocking/slot.rs"]
 mod nonblocking_slot;
 

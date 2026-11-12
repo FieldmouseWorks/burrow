@@ -154,10 +154,9 @@ impl State {
     /// list as it was or as it is, never half of it.
     fn save(&self) -> Result<(), String> {
         let path = self.dir.join("pending.json");
-        let new = self.dir.join("pending.json.new");
         let text = serde_json::to_vec_pretty(&self.pending).map_err(|e| e.to_string())?;
-        fs::write(&new, text).map_err(|e| io(&new, e))?;
-        fs::rename(&new, &path).map_err(|e| io(&path, e))
+        burrow_process::replace::replace_mode(&path, text, burrow_process::replace::SHARED)
+            .map_err(|e| io(&path, e))
     }
 
     /// Adds the lines to the log.

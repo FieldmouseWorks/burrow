@@ -105,7 +105,7 @@ host pause. It polls independently so it remains reachable during a
 pipeline outage; no paid agent handles these requests.
 
 Writes are serialized, logged with actor and timestamp, synced and
-published atomically. Readers never write their own overlay. This is the
+published with `burrow_process::replace` (the one way state is written whole). Readers never write their own overlay. This is the
 first option set in `burrow-settings`; other operational settings join the
 same tracked document, loader and overlay rather than acquiring another
 store.

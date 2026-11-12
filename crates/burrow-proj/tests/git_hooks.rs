@@ -611,6 +611,10 @@ fn explicit_git_dir_does_not_check_the_current_directory_instead() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn source_environment_object_store_and_alternates_are_preserved() {
     let repo = Repo::new();
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -703,6 +707,10 @@ fn noncommit_objects_and_nested_tags_can_be_pushed_together() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn checkout_paths_preserve_arbitrary_bytes() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
     let mut repo = Repo::new();

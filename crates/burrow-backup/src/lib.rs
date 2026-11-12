@@ -38,7 +38,6 @@ pub use config::Config;
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -158,19 +157,7 @@ pub fn read(path: &Path) -> Result<Option<String>, String> {
 
 /// Writes `text` to `path` whole or not at all, mode 600.
 pub fn write(path: &Path, text: &[u8]) -> Result<(), String> {
-    let mut new = path.as_os_str().to_owned();
-    new.push(".new");
-    let new = PathBuf::from(new);
-    let io = |e: std::io::Error| format!("{}: {e}", new.display());
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&new)
-        .map_err(io)?;
-    f.write_all(text).and_then(|()| f.sync_all()).map_err(io)?;
-    fs::rename(&new, path).map_err(|e| format!("{}: {e}", path.display()))
+    burrow_process::replace::replace(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Takes `path` away, if it's there.

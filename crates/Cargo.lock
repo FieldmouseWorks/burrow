@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "advisory-watch"
 version = "0.0.0"
 dependencies = [
+ "burrow-process",
  "burrow-test",
  "jiff",
  "rustix",
@@ -384,6 +385,7 @@ dependencies = [
 name = "burrow-backup"
 version = "0.0.0"
 dependencies = [
+ "burrow-process",
  "burrow-test",
  "jiff",
  "rustix",
@@ -429,6 +431,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "burrow-process",
  "burrow-test",
  "getrandom 0.4.3",
  "maud",
@@ -473,6 +476,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-door",
  "burrow-github",
+ "burrow-process",
  "burrow-proj",
  "serde",
  "serde_json",
@@ -664,6 +668,7 @@ dependencies = [
 name = "burrow-proof"
 version = "0.0.0"
 dependencies = [
+ "burrow-process",
  "burrow-test",
  "serde",
  "serde_json",
@@ -676,6 +681,7 @@ name = "burrow-renovate"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-process",
  "burrow-test",
  "jiff",
  "md-5",
@@ -692,6 +698,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-codex",
  "burrow-events",
+ "burrow-process",
  "burrow-settings",
  "burrow-test",
  "jiff",
@@ -730,6 +737,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-door",
  "burrow-github",
+ "burrow-process",
  "burrow-test",
  "serde",
  "serde_json",
@@ -767,6 +775,7 @@ name = "burrow-units"
 version = "0.0.0"
 dependencies = [
  "burrow-events",
+ "burrow-process",
  "burrow-watchdog",
  "serde",
  "serde_json",
@@ -778,6 +787,7 @@ name = "burrow-update"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-process",
  "burrow-test",
  "jiff",
  "rustix",
@@ -810,6 +820,7 @@ dependencies = [
 name = "burrow-usage-reset"
 version = "0.0.0"
 dependencies = [
+ "burrow-process",
  "burrow-test",
  "jiff",
  "serde",
@@ -823,6 +834,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-events",
  "burrow-github",
+ "burrow-process",
  "burrow-settings",
  "burrow-test",
  "jiff",
@@ -1376,6 +1388,7 @@ name = "flaky"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "burrow-process",
  "serde_json",
 ]
 

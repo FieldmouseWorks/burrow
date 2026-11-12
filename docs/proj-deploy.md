@@ -78,7 +78,8 @@ choice it resolved and executes that same value; changing settings between
 resolution and persistence cannot change the saved identity.
 
 Recovery writes into job directories use pinned, symlink-free directory
-handles. Record replacement creates a fresh temporary file and renames it
+handles. Record replacement is `burrow_process::replace`'s core (the one way any
+program writes a state file whole, enforced by `crates/clippy.toml`), run
 relative to that handle, without opening a guest-chosen destination or staging
 link. Transcript appends and timestamp updates pin regular files and reject
 aliases. Engine prompt input is opened through the same confined reader before

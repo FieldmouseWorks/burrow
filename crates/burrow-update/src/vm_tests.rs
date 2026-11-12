@@ -207,6 +207,10 @@ fn verdict(passed: bool) -> Verdict {
     if passed { Verdict::Pass } else { Verdict::Fail }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "moving a test's output file into place is not a state write"
+)]
 fn moved(from: &Path, to: &Path) -> Result<(), Broke> {
     fs::rename(from, to).map_err(|e| Broke(format!("{} -> {}: {e}", from.display(), to.display())))
 }

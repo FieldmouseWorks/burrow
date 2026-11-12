@@ -506,9 +506,14 @@ assert prune(3700) == mine and pushed() == [], pushed()
 assert prune(3800, full=True) == [] and len(pushed()) == 1, pushed()
 # A look whose state can't be saved is the repo's failure, watched; the
 # pass goes on.
-os.makedirs(f"{C.STATE}/repo-sam_r.json.tmp")
-prune(3900)
-os.rmdir(f"{C.STATE}/repo-sam_r.json.tmp")
+# (upkeep writes it with burrow_process::replace, whose temporary name is
+# random: a state directory that takes no new file is what refuses it.)
+mode = os.stat(C.STATE).st_mode
+os.chmod(C.STATE, 0o555)
+try:
+    prune(3900)
+finally:
+    os.chmod(C.STATE, mode)
 assert any(x.startswith("sam/r: its branches: ") for x in LOGGED), LOGGED
 assert "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 3900 + 300, (waits.FAILED, C.WAKE)
 # A status run deletes nothing, and keeps state of its own.

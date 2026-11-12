@@ -115,6 +115,10 @@ impl<'a> Job<'a> {
     /// than a prompt; none may become facts when its number is reused. Keep
     /// them for diagnosis, without overwriting an earlier failed attempt.
     /// The caller holds the job lock and has waited out the previous unit.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "moving a finished attempt's directory entries is a move, not a state write"
+    )]
     pub(crate) fn quarantine_unstarted(&self, last: u64) -> io::Result<()> {
         let future = fs::read_dir(&self.dir)?
             .collect::<io::Result<Vec<_>>>()?
@@ -180,6 +184,10 @@ impl<'a> Job<'a> {
     /// update writes them there too, once it ends). They're turn N's if
     /// they're no older than its prompt; anything older is an earlier
     /// turn's, and goes.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "moving a finished attempt's directory entries is a move, not a state write"
+    )]
     pub fn adopt(&self) {
         let Some(n) = self.turns() else { return };
         let prompt = mtime_of(&self.path(&format!("prompt.{n}")));

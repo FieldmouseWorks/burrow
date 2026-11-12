@@ -134,10 +134,11 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
             body,
             reason: reason.into(),
         };
-        let tmp = receipt.with_extension("next");
         let bytes = serde_json::to_vec(&pending).map_err(|e| e.to_string())?;
-        stored(&tmp, fs::write(&tmp, bytes))?;
-        stored(&receipt, fs::rename(&tmp, &receipt))?;
+        stored(
+            &receipt,
+            burrow_process::replace::replace_mode(&receipt, bytes, burrow_process::replace::SHARED),
+        )?;
         door.reply(api, issue.number, &pending.body, reason)?;
     }
     Ok(())

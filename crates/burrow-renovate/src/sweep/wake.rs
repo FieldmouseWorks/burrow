@@ -1,6 +1,6 @@
 //! Refresh deadlines read by burrow-events, under the sweep's shared lock.
 
-use super::{Broke, Config, write};
+use super::{Broke, Config};
 use serde_json::{Map, Value};
 use std::{fs, io};
 
@@ -21,8 +21,11 @@ impl Config {
             booked.remove(&key);
         }
         // Readers see a whole map; other writers hold sweep.lock.
-        let tmp = self.state.join("wake.json.tmp");
-        write(&tmp, &Value::Object(booked).to_string())?;
-        fs::rename(&tmp, &wake).map_err(broke)
+        burrow_process::replace::replace_mode(
+            &wake,
+            Value::Object(booked).to_string(),
+            burrow_process::replace::SHARED,
+        )
+        .map_err(broke)
     }
 }

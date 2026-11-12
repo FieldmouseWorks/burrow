@@ -782,8 +782,7 @@ fn a_job_whose_ask_isnt_kept_isnt_asked_for() {
     hits(&mut hub, 7, "sam");
     dashboard(&mut hub, BODY, &[]);
     watch_at(&cfg, &mut hub, &mut jobs, 0.0);
-    let tmp = cfg.state_dir.join("dashboard-sam_r.json.tmp");
-    fs::create_dir(&tmp).unwrap();
+    let blocked = burrow_test::BlockWrites::new(&cfg.state_dir);
     let (out, r) = look(&cfg, &mut hub, &mut jobs, DAY, |p| {
         crate::watch(p);
         Ok(())
@@ -794,6 +793,6 @@ fn a_job_whose_ask_isnt_kept_isnt_asked_for() {
         out.failed.len() == 1 && out.failed[0].starts_with("its dashboard: "),
         "{out:?}"
     );
-    fs::remove_dir(&tmp).unwrap();
+    drop(blocked);
     assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY + 1.0).jobs.len(), 1);
 }

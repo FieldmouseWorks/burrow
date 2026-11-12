@@ -3,7 +3,7 @@
 //! builds of the same tree from different commits are different store
 //! paths, and the stamp alone doesn't say which commits are live.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::process::{Command, Stdio};
 
 use crate::{Config, last_line};
@@ -176,10 +176,8 @@ pub fn live_through(cfg: &Config, main: &str) -> String {
 /// leaves it saying nothing. Written whole, or not at all.
 pub fn live_at(cfg: &Config, main: &str, running: &str) -> Result<(), String> {
     let live = cfg.state.join("live.json");
-    let new = cfg.state.join("live.json.new");
     let text = serde_json::json!({"main": main, "running": running}).to_string() + "\n";
-    fs::write(&new, text)
-        .and_then(|()| fs::rename(&new, &live))
+    burrow_process::replace::replace_mode(&live, text, burrow_process::replace::SHARED)
         .map_err(|e| format!("{}: {e}", live.display()))
 }
 
