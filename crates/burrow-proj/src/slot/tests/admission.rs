@@ -204,7 +204,7 @@ fn a_paused_waiter_holds_no_place_in_the_line() {
         .unwrap()
         .allowed
         .retain(|r| r != "sam/box");
-    let got = in_line(&cfg);
+    let got = crate::snapshot::Snapshot::take(&cfg, 0).unwrap().in_line();
     let ids: Vec<&str> = got
         .lines()
         .filter_map(|l| l.split_whitespace().next())

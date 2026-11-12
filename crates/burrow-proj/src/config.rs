@@ -115,6 +115,9 @@ pub struct Config {
     pub codex_hooks: PathBuf,
     /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
+    /// How many slots heavy has there (burrow.cpu.heavy.slots).
+    #[serde(default)]
+    pub heavy_slots: u32,
     /// Machine MCP servers, shared by every job engine.
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServer>,
@@ -239,18 +242,34 @@ impl Config {
         self.settings.as_ref()?.decision(repo).ok()?.retry_at
     }
 
-    pub fn settings_line(&self) -> String {
-        let Some(settings) = &self.settings else {
-            return "Automated work: paused (settings are not configured)\n".into();
-        };
-        let repos: Vec<_> = std::fs::read_dir(&self.projects)
+    /// The GitHub repository of each project folder.
+    pub fn project_repos(&self) -> Vec<String> {
+        std::fs::read_dir(&self.projects)
             .into_iter()
             .flatten()
             .filter_map(Result::ok)
             .filter(|e| e.path().is_dir())
             .map(|e| crate::pick::github_repo(self, &e.path().to_string_lossy()))
             .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    /// The projects' repositories whose automated work is paused.
+    pub fn paused_repos(&self) -> Vec<String> {
+        let mut repos: Vec<_> = self
+            .project_repos()
+            .into_iter()
+            .filter(|r| self.paused(r))
             .collect();
+        repos.sort();
+        repos
+    }
+
+    pub fn settings_line(&self) -> String {
+        let Some(settings) = &self.settings else {
+            return "Automated work: paused (settings are not configured)\n".into();
+        };
+        let repos = self.project_repos();
         settings
             .show_for(&repos)
             .unwrap_or_else(|e| format!("Automated work: paused (settings error: {e})\n"))

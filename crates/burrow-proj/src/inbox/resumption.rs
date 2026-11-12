@@ -51,6 +51,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
         wake: BTreeMap::new(),
         unreached: Vec::new(),
         looked: Vec::new(),
+        observe: false,
     };
     let mine = |d: &Path| read(&d.join("job")).as_deref() == Some(job.id);
     let drained = dirs(&inbox.state, "");

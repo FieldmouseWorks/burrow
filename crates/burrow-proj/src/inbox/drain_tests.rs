@@ -807,9 +807,23 @@ fn priorities_precede_pipeline_and_age_and_drive_queue() {
         on_github(&b, i);
         assert!(!n.is_empty());
     }
+    // The snapshot's queue is the drain's order, with what put each there.
+    use crate::snapshot::Priority::{High, Low, Medium};
+    let queue: Vec<_> = p
+        .view(&t, crate::now())
+        .queue
+        .into_iter()
+        .map(|r| (format!("{}#{}", r.repo, r.number), r.priority, r.pipeline))
+        .collect();
     assert_eq!(
-        p.ready_queue(&t),
-        "drain: 0/1 used\nready 1: sam/box#4\nready 2: sam/box#3\nready 3: sam/game#2\nready 4: sam/box#1\nready 5: sam/box#5\n"
+        queue,
+        [
+            ("sam/box#4".to_owned(), High, true),
+            ("sam/box#3".to_owned(), High, true),
+            ("sam/game#2".to_owned(), High, false),
+            ("sam/box#1".to_owned(), Medium, true),
+            ("sam/box#5".to_owned(), Low, true),
+        ]
     );
     b.pass().drain().unwrap();
     assert!(
@@ -878,19 +892,31 @@ fn drain_counts_turns_instead_of_parked_jobs() {
             .unwrap();
         on_github(&b, &ready);
         let blocked = matches!(state, "queued" | "running");
-        let status = b
-            .pass()
-            .ready_queue(b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap());
-        assert!(
-            status.starts_with(if blocked {
-                "drain: 3/3 used"
-            } else {
-                "drain: 0/3 used"
-            }),
-            "{state}: {status}"
+        let view = b.pass().view(
+            b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap(),
+            crate::now(),
+        );
+        let used = view
+            .slots
+            .iter()
+            .filter(|s| {
+                s.kind == crate::snapshot::SlotKind::Drain
+                    && s.state != crate::snapshot::SlotState::Idle
+            })
+            .count();
+        assert_eq!(
+            used,
+            if blocked { 3 } else { 0 },
+            "{state}: {:?}",
+            view.slots
         );
         if blocked {
-            assert!(status.contains("sam/box#1 (drained-1:"), "{status}");
+            let holders: Vec<_> = view
+                .slots
+                .iter()
+                .filter_map(|s| s.holder.as_ref()?.job.clone())
+                .collect();
+            assert!(holders.contains(&"drained-1".to_owned()), "{holders:?}");
         }
         b.pass().drain().unwrap();
         assert_eq!(

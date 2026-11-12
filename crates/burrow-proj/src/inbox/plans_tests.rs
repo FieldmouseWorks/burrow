@@ -744,3 +744,41 @@ fn unlisted_repositories_sort_but_never_offer_children() {
         "sorting can still attempt a planner session"
     );
 }
+
+// The live snapshot's queue is the plan's order alone: an observing pass asks
+// GitHub nothing about a child or its parents, where the drain's own pass,
+// which hands one on, still does.
+#[test]
+fn the_snapshot_queue_asks_github_nothing() {
+    let (b, _, _) = parent_fixture();
+    let ready = |n| {
+        let mut issue = super::super::sorting_tests::issue(n, "sam", &["ready"]);
+        issue["repository_url"] = json!("https://api.github.com/repos/sam/box");
+        issue["created_at"] = json!("2026-11-01T00:00:00Z");
+        issue
+    };
+    b.pass()
+        .note_ready("sam/box", &[ready(8), ready(9)])
+        .unwrap();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let before = b.log();
+    let mut observing = b.pass();
+    observing.observe = true;
+    let queue: Vec<u64> = observing
+        .view(&t, crate::now())
+        .queue
+        .iter()
+        .map(|r| r.number)
+        .collect();
+    assert_eq!(queue, [8], "the plan's next child, and not the one after");
+    assert_eq!(b.log(), before, "the snapshot asked GitHub");
+    // The drain's pass checks the parent on GitHub before it hands one on.
+    assert_eq!(
+        b.pass().pick_ready(&t, &[ready(8)]),
+        Some(("sam/box".into(), "8".into()))
+    );
+    assert!(
+        b.log().len() > before.len(),
+        "the drain asked GitHub nothing"
+    );
+}

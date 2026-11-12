@@ -98,6 +98,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         wake: BTreeMap::new(),
         unreached: Vec::new(),
         looked: Vec::new(),
+        observe: false,
     };
     let result = p.run(only).and_then(|()| p.finish(only));
     drop(pass);
@@ -212,25 +213,8 @@ fn status(cfg: &Config, inbox: &Inbox) {
     }
 }
 
-/// The folders in `dir` whose names start with `prefix`, by name, but never
-/// a dot one.
-fn dirs(dir: &Path, prefix: &str) -> Vec<PathBuf> {
-    let mut all: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .filter(|e| {
-                    let name = e.file_name();
-                    let name = name.to_string_lossy();
-                    !name.starts_with('.') && name.starts_with(prefix)
-                })
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default();
-    all.sort();
-    all
-}
+mod dirs;
+use dirs::dirs;
 
 /// One project per GitHub repo, by the repo as its origin spells it: the
 /// folder itself, never a linked worktree of it (.git is a file there) or a
@@ -334,6 +318,8 @@ struct Pass<'a> {
     /// Repos GitHub couldn't be asked about this pass.
     unreached: Vec<String>,
     looked: Vec<String>,
+    /// Only observing, for the live snapshot: GitHub isn't asked (plans.rs).
+    observe: bool,
 }
 
 impl Pass<'_> {
@@ -972,7 +958,11 @@ mod question_tests;
 mod sorting_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 mod usage;
 
-pub(crate) use drain::ready_queue;
+mod view;
+
+pub(crate) use view::view;

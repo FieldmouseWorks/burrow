@@ -151,6 +151,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
             wake: BTreeMap::new(),
             unreached: Vec::new(),
             looked: Vec::new(),
+            observe: false,
         }
     }
 

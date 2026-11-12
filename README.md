@@ -129,7 +129,9 @@ Each has an entry below, and each can be imported on its own.
   else.
 - **`proj`** (`burrow.proj`): `proj run PROJECT "task"`: the operator hands
   work to a headless agent inside that project, as a systemd unit, and checks
-  on it later (`status`, `log`, `reply`, `stop`). At most `maxJobs` Claude turns run at
+  on it later (`status`, `log`, `reply`, `stop`; `proj state --json` is the
+  live snapshot those print from: the ready queue, every slot and what holds
+  it, the meters and holds, its schema in `crates/burrow-proj/state.schema.json`). At most `maxJobs` Claude turns run at
   once, `maxJobsPerProject` from one project, and the rest queue (`proj status
   --line` shows the whole line, next first, with each turn's wait; `--first`
   goes ahead, and `--pipeline` jobs, the steward's and renovate-sweep's and

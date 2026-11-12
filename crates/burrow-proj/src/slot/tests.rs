@@ -20,7 +20,7 @@ use rustix::process::{Pid, Signal, kill_process};
 use tempfile::TempDir;
 
 use super::{
-    LOOK_EVERY, NEXT_FRESH, entry, in_line, look, look_due, note_next, place_left, successor, take,
+    LOOK_EVERY, NEXT_FRESH, entry, line, look, look_due, note_next, place_left, successor, take,
 };
 use crate::config::Config;
 use crate::config::tests::example;
@@ -534,7 +534,7 @@ fn the_line_as_status_shows_it() {
     let mut cfg = config(&jobs, 6);
     cfg.lead_repos = vec!["sam/burrow".into()];
     let _holder = line_of_size(&tmp, &jobs, 4);
-    let got = in_line(&cfg);
+    let got = crate::snapshot::Snapshot::take(&cfg, 0).unwrap().in_line();
     let rows: Vec<Vec<&str>> = got
         .lines()
         .map(|l| l.split_whitespace().collect())
@@ -562,7 +562,7 @@ fn the_line_as_status_shows_it() {
     assert!(rows[0][3].ends_with("/burrow"));
     // Nobody in line, or no line at all, is nothing to show.
     let none = TempDir::new().unwrap();
-    assert_eq!(in_line(&config(none.path(), 6)), "");
+    assert!(line(&config(none.path(), 6)).is_empty());
 }
 
 // A turn's place: one whose job was started --since a time (the steward's, from
