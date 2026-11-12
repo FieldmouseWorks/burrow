@@ -449,8 +449,10 @@ with the command's own installation token and records only the App, owner,
 remaining REST budget, reset, reading time and any primary or secondary
 hold. `proj usage` includes these readings in a `github` array inside its
 single JSON object; an active Claude hold keeps its existing top-level
-fields for consumers such as the watchdog. The typed
-`burrow_proj::github_quota::meters` view is available to the live snapshot.
+fields for consumers such as the watchdog. The version 2 live snapshot (`proj state --json`) includes these same
+installation readings in `meters`, alongside the engine readings. Each
+installation entry identifies its App and owner and includes the reading's
+age and whether its hold is active.
 App plus owner identifies the installation across repositories and token
 renewals. Holds merge under the installation's lock independently of
 budget freshness, so delayed or concurrent observations cannot shorten them.

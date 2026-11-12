@@ -32,7 +32,7 @@ pub fn meters(cfg: &Config) -> Vec<Meter> {
                 let key = (m.app.clone(), m.owner.clone());
                 if let Some(old) = latest.get_mut(&key) {
                     let hold = old.deadline().into_iter().chain(m.deadline()).max();
-                    if old.at <= m.at {
+                    if (old.remaining.is_some(), old.at) <= (m.remaining.is_some(), m.at) {
                         m.retry_at = hold;
                         *old = m;
                     } else {
