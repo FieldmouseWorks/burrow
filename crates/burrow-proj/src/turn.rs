@@ -260,8 +260,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    for f in ["await", "await.next", "end.next", "ask.next"] {
-        if !job.turn(&n, "retry-migration").exists() {
+    if !job.turn(&n, "retry-migration").exists() {
+        crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
+        for f in ["await", "await.next"] {
             let _ = crate::state_reads::remove(job.path(f));
         }
     }
@@ -581,7 +582,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // if the turn has time left). A sandbox is stopped before retrying.
         let mut told = String::new();
         if let Some(error) = declaration_error {
-            let _ = crate::state_reads::remove(job.path("end.next"));
+            crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
             let _ = crate::state_reads::remove(job.path("await.next"));
             told.push_str(&format!("The host couldn't register your sandbox next step: {error}. Check what you await and declare the next step again. "));
         }

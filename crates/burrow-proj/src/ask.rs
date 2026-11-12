@@ -1,5 +1,6 @@
 //! Defaults and deadlines belong to the question, not to any one resume.
-use crate::{config::Config, job::Job, read, swap};
+use crate::state_reads::write as swap;
+use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
@@ -93,13 +94,20 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
 pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
     swap(&job.path("end.next"), &format!("{end}\n")).map_err(|e| e.to_string())?;
     if end != "ask" {
-        match crate::state_reads::remove(job.path("ask.next")) {
-            Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.to_string()),
-        }
+        retire_pending(job)?;
     }
     Ok(())
+}
+
+pub(crate) fn retire_pending(job: &Job) -> Result<(), String> {
+    crate::state_reads::remove_durable(job.path("ask.next")).map_err(|e| e.to_string())
+}
+
+/// Keep a superseding marker until the recommendation's absence is durable.
+/// If unlink or sync fails, recovery still sees the declaration that retired it.
+pub(crate) fn clear_declaration(job: &Job) -> Result<(), String> {
+    retire_pending(job)?;
+    crate::state_reads::remove_durable(job.path("end.next")).map_err(|e| e.to_string())
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
@@ -164,7 +172,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
     } else if end == "done" {
         clear(job);
     }
-    let _ = fs::remove_file(job.path("ask.next"));
+    retire_pending(job)?;
     Ok(())
 }
 pub(crate) fn clear(job: &Job) {
@@ -202,8 +210,8 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         // its default. Record a completed host turn for the normal issue writer.
         let n = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
         let ntext = n.to_string();
-        fs::write(
-            host_path(job, "question-needs-owner"),
+        swap(
+            &host_path(job, "question-needs-owner"),
             &q.recommendation.default,
         )
         .map_err(|e| e.to_string())?;
@@ -216,9 +224,9 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             ("end", "done\n"),
             ("outcome", "done\n"),
         ] {
-            fs::write(job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
+            swap(&job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
         }
-        fs::write(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
+        swap(&job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
         job.set_turns(n).map_err(|e| e.to_string())?;
         for path in [
             host_path(job, "question"),

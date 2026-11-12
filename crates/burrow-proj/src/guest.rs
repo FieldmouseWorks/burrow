@@ -247,13 +247,18 @@ mod tests {
     #[test]
     fn vm_superseding_declarations_retire_pending_one_way_asks() {
         for end in ["done", "await"] {
-            let (_dir, cfg) = registration_fixture(&format!(
+            let (dir, cfg) = registration_fixture(&format!(
                 "printf 'HTTP/2.0 403 Forbidden\\nx-ratelimit-remaining: 0\\nx-ratelimit-reset: {}\\n\\n{{}}'\nexit 1",
                 crate::now() + 3600,
             ));
             let job = Job::new(&cfg, "vm");
             fs::create_dir_all(&job.dir).unwrap();
             job.set_turns(1).unwrap();
+            let outside = dir.path().join("untouched");
+            fs::write(&outside, "untouched").unwrap();
+            for name in ["ask.next.new", "end.next.new"] {
+                std::os::unix::fs::symlink(&outside, job.path(name)).unwrap();
+            }
             register(&cfg, &job,
                 br#"{"end":"ask","targets":[],"recommendation":{"default":"keep it","one_way":true}}"#,
                 Instant::now() + Duration::from_secs(2)).unwrap();
@@ -270,6 +275,7 @@ mod tests {
             )
             .unwrap();
             assert!(!job.path("ask.next").exists());
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
             for _ in 0..2 {
                 crate::github_quota::finish(&job, "1").unwrap();
             }

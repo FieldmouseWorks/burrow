@@ -157,9 +157,7 @@ pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
     swap(job.turn(&n, LIMIT), format!("{}\t{due}", now())).map_err(|e| e.to_string())?;
     swap(job.path("await"), format!("{LIMIT}\t{}\t{due}\n", now())).map_err(|e| e.to_string())?;
     crate::ask::clear(job);
-    for name in ["end.next", "ask.next"] {
-        let _ = fs::remove_file(job.path(name));
-    }
+    crate::ask::clear_declaration(job)?;
     Ok(())
 }
 
@@ -613,6 +611,8 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
     }
 }
 
+#[cfg(test)]
+mod durability_tests;
 #[cfg(test)]
 mod owner_tests;
 #[cfg(test)]
