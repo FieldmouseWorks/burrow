@@ -6,6 +6,7 @@
 members = [
     "advisory-watch",
     "burrow-agent",
+    "burrow-authors-once",
     "burrow-backup",
     "burrow-boot",
     "burrow-browser-close",

@@ -1,0 +1,10 @@
+[package]
+name = "burrow-authors-once"
+description = "Check that burrow's modules declare the authorized authors once"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

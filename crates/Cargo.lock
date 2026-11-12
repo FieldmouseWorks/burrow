@@ -381,6 +381,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-authors-once"
+version = "0.0.0"
+
+[[package]]
 name = "burrow-backup"
 version = "0.0.0"
 dependencies = [
