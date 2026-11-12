@@ -81,8 +81,8 @@ Every repo with code gets a `flake.nix` from the template
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
   the default branch gets only its `commits` and `negative` (one to another branch, or
   retargeted to one, still gets the gate). A repo that lists its
-  documentation in `docs-paths` (files nothing its flake builds or tests
-  reads; the input says how) gives a PR that changes only those the docs
+  documentation in `docs-paths` (with all applicable checks declared in
+  `docs-checks`; the input says how) gives a PR that changes only those the docs
   lane: only the checks named in `docs-checks`, and none of autoland's
   proofs. Every repo runs it again for a new base, from the template's
   `flake-retarget.yml`, which takes pull_request's `edited` so `flake.yml`
@@ -92,8 +92,9 @@ Every repo with code gets a `flake.nix` from the template
   `flake.yml` would keep a ruleset from counting the required `check / check`.
   Check what the build
   reads before listing a path: burrow's
-  own `docs/` and `house/` are in its machines' config, so they aren't on
-  its list. A repo's heavier gates (VM replays, browser tiers, databases)
+  own `docs/` and `house/` are packaged in its machines' config, so its
+  [guidance checks](guidance-checks.md) retain their consumers' checks in
+  the docs lane. A repo's heavier gates (VM replays, browser tiers, databases)
   stay its own jobs, alongside it, and run their tools from `nix develop`.
 - Beside it, `.github/workflows/house.yml` from the template runs burrow's
   [house action](../.github/actions/house/action.yml) on every PR, and again

@@ -369,6 +369,9 @@ impl Repo {
                 files: &[
                     "README.md",
                     "AGENTS.md",
+                    "CLAUDE.md",
+                    "house/rules.md",
+                    "house/prs.md",
                     "docs/guide.md",
                     "docs/deep/more.md",
                     "src/main.rs",
@@ -583,6 +586,74 @@ fn the_docs_lane_takes_documentation_only() {
     assert!(!r.docs(ALL, &Change::default()));
 }
 
+/// burrow's declarations cover the guidance consumers inventoried in
+/// docs/guidance-checks.md. Run the shared classifier, with the old caller
+/// as a negative control, rather than duplicating its path logic.
+#[test]
+fn burrow_routes_guidance_through_its_declared_checks() {
+    let caller = workflow(CALLERS[0].0);
+    let patterns = caller["jobs"]["check"]["with"]["docs-paths"]
+        .as_str()
+        .unwrap();
+    let mut r = Repo::new();
+    let rules = files(&["house/rules.md"]);
+    assert!(!r.docs("README.md AGENTS.md CLAUDE.md", &rules));
+    assert!(r.docs(patterns, &rules));
+    for path in [
+        "house/prs.md",
+        "docs/guide.md",
+        "docs/deep/more.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+    ] {
+        assert!(r.docs(patterns, &files(&[path])), "{path}");
+    }
+    for change in [
+        Change {
+            gone: &["house/prs.md"],
+            ..Change::default()
+        },
+        Change {
+            moved: &[("docs/guide.md", "docs/renamed.md")],
+            ..Change::default()
+        },
+        Change {
+            moved: &[("house/rules.md", "house/renamed.md")],
+            ..Change::default()
+        },
+    ] {
+        assert!(r.docs(patterns, &change));
+    }
+    for path in [
+        "src/main.rs",
+        "Cargo.toml",
+        "docs/data.json",
+        "house/config.json",
+        "templates/project/README.md",
+        "flake.nix",
+        "flake.lock",
+        ".github/workflows/flake.yml",
+    ] {
+        assert!(
+            !r.docs(patterns, &files(&["house/rules.md", path])),
+            "{path}"
+        );
+    }
+    for (from, to) in [
+        ("src/main.rs", "docs/main.md"),
+        ("house/rules.md", "src/rules.rs"),
+    ] {
+        assert!(!r.docs(
+            patterns,
+            &Change {
+                moved: &[(from, to)],
+                ..Change::default()
+            }
+        ));
+    }
+}
+
 /// Patterns that would match everything, or that are pathspec magic, are
 /// refused: the job fails, saying why, rather than guessing.
 #[test]
@@ -651,5 +722,51 @@ fn the_docs_lane_builds_only_the_docs_checks() {
             "config show system",
             "build -L --no-link --keep-going .#checks.x86_64-linux.lychee .#checks.x86_64-linux.docs"
         ]
+    );
+}
+
+/// Execute the docs job itself with burrow's declaration: no extra checks,
+/// and no accidentally omitted consumer, on the runner's reported system.
+#[test]
+fn burrows_docs_job_runs_exactly_its_declared_checks() {
+    let caller = workflow(CALLERS[0].0);
+    let declared = caller["jobs"]["check"]["with"]["docs-checks"]
+        .as_str()
+        .unwrap();
+    let checks: Vec<_> = declared.split_whitespace().collect();
+    assert_eq!(
+        checks,
+        [
+            "guidance",
+            "guidance-links",
+            "secrets",
+            "crates-rust-test",
+            "house-sync-config"
+        ]
+    );
+    let s = Scratch::default();
+    let log = s.join("nix-log");
+    s.stub(
+        "nix",
+        &format!(
+            "echo \"$*\" >> {}\n[ \"$1 $2\" = \"config show\" ] && echo aarch64-linux\nexit 0\n",
+            log.display()
+        ),
+    );
+    let wf = workflow(FLAKE_CHECK);
+    let ran = s.bash(
+        script(step(&wf["jobs"]["docs"], "build")),
+        s.path(),
+        &[("CHECKS", declared)],
+    );
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    let targets = checks
+        .iter()
+        .map(|c| format!(".#checks.aarch64-linux.{c}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        read(&log),
+        format!("config show system\nbuild -L --no-link --keep-going {targets}\n")
     );
 }
