@@ -13,13 +13,14 @@ in pkgs.runCommand "authors-once-check" { } ''
   cp -r ${../modules} bad/modules
   cp -r ${../lib} bad/lib
   chmod -R u+w bad
-  cat >> bad/modules/probe.nix <<'NIX'
-  options.burrow.probe.authors = lib.mkOption { type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; };
+  cat > bad/modules/authors-regression.nix <<'NIX'
+  { lib, ... }: { options.burrow.probe.authors = lib.mkOption { type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; }; }
 NIX
   if ${scan} "$PWD/bad" 2>/dev/null; then
-    echo "the scan accepted a second authors option in probe.nix" >&2; exit 1
+    echo "the scan accepted a second authors option" >&2; exit 1
   fi
-  cp ${../modules/probe.nix} bad/modules/probe.nix; chmod u+w bad/modules/probe.nix
+  # Keep a valid fixture: a parser error must not stand in for a policy failure.
+  echo '{ }' > bad/modules/authors-regression.nix
   sed -i 's/inherit (config.burrow) authors;/authors = [ { login = "other"; id = 7; } ];/' bad/modules/probe.nix
   if ${scan} "$PWD/bad" 2>/dev/null; then
     echo "the scan accepted a door with its own list of authors" >&2; exit 1
