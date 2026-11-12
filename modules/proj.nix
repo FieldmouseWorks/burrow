@@ -103,7 +103,8 @@ let
     inherit (cfg) meters;
     settings = config.burrow.settings.effective;
     policyUnit = "proj-policy.service";
-    agentTool = "${agents}/bin/agent";
+    # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
+    agentTool = if config.burrow.agents.enable or false then lib.getExe config.burrow.agents.package else null;
     proofsState = "${stateDir}/autoland/builds";
     proofRun = "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof}/bin/burrow-proof";
     proofDriverConfig = config.burrow.autoland.configFile or null;
