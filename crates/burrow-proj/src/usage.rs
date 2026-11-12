@@ -593,19 +593,21 @@ fn migrate(cfg: &Config) -> Result<(), String> {
 /// interrupted after the replacement or removal was committed, and nothing
 /// else would ever delete them.
 fn sweep_orphans(cfg: &Config) -> Result<(), String> {
-    let named = fs::read_to_string(cfg.jobs.join(FILE))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Spent>(&t).ok())
-        .map(|m| {
-            let job = m
-                .job
-                .strip_prefix(ADMISSION_REF)
-                .map_or(m.job.clone(), |r| {
-                    r.split_once('-')
-                        .map_or(r.to_owned(), |(_, j)| j.to_owned())
-                });
-            job
-        });
+    // Only an absent record proves nothing is referenced; one that can't be
+    // read or parsed leaves the files, and the run fails to be retried.
+    let named = match fs::read_to_string(cfg.jobs.join(FILE)) {
+        Ok(t) => {
+            let m = serde_json::from_str::<Spent>(&t).map_err(|e| format!("proj: {FILE}: {e}"))?;
+            Some(match m.job.strip_prefix(ADMISSION_REF) {
+                Some(r) => r
+                    .split_once('-')
+                    .map_or(r.to_owned(), |(_, j)| j.to_owned()),
+                None => m.job.clone(),
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("proj: {FILE}: {e}")),
+    };
     for e in fs::read_dir(&cfg.jobs)
         .map_err(|e| e.to_string())?
         .flatten()

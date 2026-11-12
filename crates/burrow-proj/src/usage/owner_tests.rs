@@ -520,3 +520,24 @@ fn metadata_left_by_an_interrupted_migration_is_swept() {
     sweep_orphans(&cfg).unwrap();
     assert!(meta.exists());
 }
+
+#[test]
+fn metadata_survives_an_unreadable_or_malformed_record() {
+    // Reference state uncertain: nothing is proven unreferenced.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 5);
+    let meta = cfg.jobs.join(".usage-owner-abc123");
+    let record = cfg.jobs.join(FILE);
+    let good = fs::read_to_string(&record).unwrap();
+    fs::write(&record, "{not json").unwrap();
+    assert!(sweep_orphans(&cfg).is_err());
+    assert!(meta.exists());
+    fs::remove_file(&record).unwrap();
+    fs::create_dir(&record).unwrap();
+    assert!(sweep_orphans(&cfg).is_err(), "a read error is not absence");
+    assert!(meta.exists());
+    fs::remove_dir(&record).unwrap();
+    fs::write(&record, good).unwrap();
+    sweep_orphans(&cfg).unwrap();
+    assert!(meta.exists(), "recovered record still names it");
+}
