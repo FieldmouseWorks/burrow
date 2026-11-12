@@ -21,7 +21,22 @@ let
       echo "{\"sam/later\": $(( $(date +%s) + 8 ))}" >/var/lib/probe/wake.json
     fi
   '';
+  # With burrow-events off a handler's units are still there, and a switch
+  # still leaves their running passes be.
+  off = (self.inputs.nixpkgs.lib.nixosSystem {
+    modules = [ self.nixosModules.events {
+      nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+      system.stateVersion = "26.05";
+      burrow.events = {
+        enable = false;
+        handlers.probe = { events = [ "push" ]; unit = "probe"; perRepo = true; };
+      };
+      systemd.services = pkgs.lib.genAttrs [ "probe" "probe@" ] (_: { serviceConfig.ExecStart = "true"; });
+    } ];
+  }).config.systemd.services;
 in
+assert pkgs.lib.assertMsg (!off.probe.restartIfChanged && !off."probe@".restartIfChanged)
+  "a handler's units restart on a switch with burrow-events off";
 pkgs.testers.runNixOSTest {
   name = "events";
 
