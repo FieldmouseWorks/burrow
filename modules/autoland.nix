@@ -892,8 +892,6 @@ in
       description = if name == "autoland"
         then "autoland: settle and merge every PR, keep every repo at the baseline"
         else "autoland: settle and merge the PRs of %I";
-      # A switch leaves a running one be (see burrow.switch's check).
-      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = stewardTools;
