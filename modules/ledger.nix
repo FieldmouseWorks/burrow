@@ -513,6 +513,7 @@ in
         path = [ cfg.gh ];
         environment.GH_NO_UPDATE_NOTIFIER = "1";
         environment.BURROW_DOOR_WAKE = doorWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
         serviceConfig = {
           Type = "oneshot";
           # burrow.user, whose key signs the ledger's ops; cn takes the
