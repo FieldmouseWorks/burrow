@@ -584,6 +584,41 @@ fn close_if_open(cfg: &Config) -> bool {
 /// when it still holds, and its files gone. Idempotent; nothing reads the
 /// old form again.
 fn migrate(cfg: &Config) -> Result<(), String> {
+    migrate_record(cfg)?;
+    sweep_orphans(cfg)
+}
+
+/// The metadata files (`.usage-owner-*`) the record in jobs/.usage.json no
+/// longer names, removed durably: they are all that is left when a run was
+/// interrupted after the replacement or removal was committed, and nothing
+/// else would ever delete them.
+fn sweep_orphans(cfg: &Config) -> Result<(), String> {
+    let named = fs::read_to_string(cfg.jobs.join(FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Spent>(&t).ok())
+        .map(|m| {
+            let job = m
+                .job
+                .strip_prefix(ADMISSION_REF)
+                .map_or(m.job.clone(), |r| {
+                    r.split_once('-')
+                        .map_or(r.to_owned(), |(_, j)| j.to_owned())
+                });
+            job
+        });
+    for e in fs::read_dir(&cfg.jobs)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(OWNER) && named.as_deref() != Some(name.as_str()) {
+            remove_durable(cfg, &e.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_record(cfg: &Config) -> Result<(), String> {
     let path = cfg.jobs.join(FILE);
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(());
@@ -659,14 +694,6 @@ fn migrate(cfg: &Config) -> Result<(), String> {
             },
         )?;
         remove_durable(cfg, &path)?;
-    }
-    for e in fs::read_dir(&cfg.jobs)
-        .map_err(|e| e.to_string())?
-        .flatten()
-    {
-        if e.file_name().to_string_lossy().starts_with(OWNER) {
-            remove_durable(cfg, &e.path())?;
-        }
     }
     Ok(())
 }

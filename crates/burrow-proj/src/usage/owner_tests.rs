@@ -504,3 +504,19 @@ fn migration_removes_its_reference_only_after_the_replacement_is_durable() {
     assert!(migrate(&cfg).is_err(), "reported, not taken for done");
     assert!(cfg.jobs.join(FILE).exists(), "the reference is kept");
 }
+
+#[test]
+fn metadata_left_by_an_interrupted_migration_is_swept() {
+    // Interrupted after the reference was removed, before the metadata was:
+    // nothing names it, and the next look deletes it.
+    let (_d, cfg) = rig();
+    let meta = cfg.jobs.join(".usage-owner-abc123");
+    fs::write(&meta, "{}").unwrap();
+    assert!(!cfg.jobs.join(FILE).exists());
+    tend(&cfg);
+    assert!(!meta.exists());
+    // One a live record still names is never swept.
+    legacy(&cfg, now() + 3600, now() - 5);
+    sweep_orphans(&cfg).unwrap();
+    assert!(meta.exists());
+}
