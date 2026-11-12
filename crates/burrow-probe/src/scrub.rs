@@ -122,29 +122,91 @@ pub fn scrub(text: &str) -> Scrubbed {
     Scrubbed(out)
 }
 
-/// Redact decoded JSON values before serialization so text rules cannot
-/// consume its delimiters or escape sequences. Credential fields are hidden
-/// whole, including multiline strings and non-string credentials.
-pub fn json(value: &Value) -> Result<Value, String> {
-    Ok(match value {
-        Value::String(text) => Value::String(scrub(text).0),
-        Value::Array(values) => Value::Array(values.iter().map(json).collect::<Result<_, _>>()?),
-        Value::Object(fields) => {
-            let mut clean = serde_json::Map::new();
-            for (key, value) in fields {
-                let value = if SECRET_FIELD.is_match(key) {
-                    Value::String(REDACTED.into())
-                } else {
-                    json(value)?
-                };
-                if clean.insert(scrub(key).0, value).is_some() {
-                    return Err("JSON property names collide after redaction".into());
-                }
-            }
-            Value::Object(clean)
+static KEY_BEGIN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----").expect("key begin")
+});
+static KEY_END: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----").expect("key end")
+});
+/// A quoted value of a credential-named field in a decoded string: the
+/// string's newlines are its own, so the value runs to its closing quote.
+static DECODED_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"(?is)\b({SECRET_NAME})(["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?)"#
+    ))
+    .expect("decoded quoted credential")
+});
+
+/// Redacts a sequence of texts (decoded JSON strings, records, plain
+/// segments of one stream) while remembering an open private key, so a block
+/// split across values or records goes whole.
+#[derive(Default)]
+pub struct Redactor {
+    in_key: bool,
+}
+
+impl Redactor {
+    /// Plain text, whose lines are lines.
+    pub fn plain(&mut self, text: &str) -> String {
+        self.run(text, false)
+    }
+
+    fn run(&mut self, text: &str, decoded: bool) -> String {
+        if text.is_empty() {
+            return String::new();
         }
-        value => value.clone(),
-    })
+        let ends = KEY_END.is_match(text);
+        let out = if self.in_key && !ends {
+            "[redacted private key]".to_string()
+        } else if decoded {
+            let quoted = DECODED_QUOTED.replace_all(text, format!("$1$2\"{REDACTED}\""));
+            scrub(&quoted).0
+        } else {
+            scrub(text).0
+        };
+        let last_end = KEY_END.find_iter(text).last().map(|m| m.end());
+        let open = KEY_BEGIN
+            .find_iter(text)
+            .last()
+            .is_some_and(|m| last_end.is_none_or(|e| m.start() >= e));
+        self.in_key = open || (self.in_key && !ends);
+        out
+    }
+
+    /// Redact decoded JSON values before serialization so text rules cannot
+    /// consume its delimiters or escape sequences. Credential fields are
+    /// hidden whole, including multiline strings and non-string credentials.
+    pub fn json(&mut self, value: &Value) -> Result<Value, String> {
+        Ok(match value {
+            Value::String(text) => Value::String(self.run(text, true)),
+            Value::Array(values) => Value::Array(
+                values
+                    .iter()
+                    .map(|v| self.json(v))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Value::Object(fields) => {
+                let mut clean = serde_json::Map::new();
+                for (key, value) in fields {
+                    let value = if SECRET_FIELD.is_match(key) {
+                        Value::String(REDACTED.into())
+                    } else {
+                        self.json(value)?
+                    };
+                    if clean.insert(scrub(key).0, value).is_some() {
+                        return Err("JSON property names collide after redaction".into());
+                    }
+                }
+                Value::Object(clean)
+            }
+            value => value.clone(),
+        })
+    }
+}
+
+/// One decoded value, redacted on its own.
+pub fn json(value: &Value) -> Result<Value, String> {
+    Redactor::default().json(value)
 }
 
 #[cfg(test)]
@@ -183,6 +245,28 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
             value
         );
+    }
+
+    #[test]
+    fn multiline_credentials_go_whole_in_decoded_strings_and_across_values() {
+        let begin = format!("-----BEGIN RSA {} KEY-----", "PRIVATE");
+        let end = format!("-----END RSA {} KEY-----", "PRIVATE");
+        let value = super::json(&serde_json::json!({
+            "a": "password=\"first\nsecond\" public",
+            "b": [format!("x {begin}"), "MIIEbase64payload", format!("tail {end} after")],
+        }))
+        .unwrap();
+        let text = value.to_string();
+        assert!(
+            !text.contains("second") && !text.contains("base64payload"),
+            "{text}"
+        );
+        assert!(text.contains("public") && text.contains("after"), "{text}");
+        let mut r = super::Redactor::default();
+        r.plain(&format!("{begin}\nMIIE"));
+        assert!(!r.plain("morepayload\n").contains("payload"));
+        assert!(!r.plain(&format!("last\n{end}\nok")).contains("last"));
+        assert!(r.plain("ok").contains("ok"));
     }
 
     #[test]

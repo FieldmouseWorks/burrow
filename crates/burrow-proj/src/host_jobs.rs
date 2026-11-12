@@ -150,16 +150,34 @@ pub(crate) fn answer(cfg: &Config, request: &str) -> String {
                 .code()
                 .and_then(|c| c.try_into().ok())
                 .unwrap_or(1),
-            stdout: scrub_output(&String::from_utf8_lossy(&output.stdout))?,
-            stderr: scrub_output(&String::from_utf8_lossy(&output.stderr))?,
+            stdout: scrub_output(&String::from_utf8_lossy(&output.stdout), structured(&args))?,
+            stderr: scrub_output(&String::from_utf8_lossy(&output.stderr), structured(&args))?,
         })
     })();
     serde_json::to_string(&result).expect("host job response")
 }
 
-fn scrub_output(text: &str) -> Result<String, String> {
-    let encoded = |value: serde_json::Value, source: &str| -> Result<String, String> {
-        let value = burrow_probe::scrub::json(&value)?;
+/// Only `state --json|--schema` and `log --raw` print JSON; every other
+/// command prints literal names and text that must keep every non-secret byte.
+fn structured(args: &[String]) -> bool {
+    let words: Vec<_> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["state", "--schema" | "--json", ..] => true,
+        ["log", _, rest @ ..] => rest.contains(&"--raw"),
+        _ => false,
+    }
+}
+
+fn scrub_output(text: &str, structured: bool) -> Result<String, String> {
+    let mut redactor = burrow_probe::scrub::Redactor::default();
+    if !structured {
+        return Ok(redactor.plain(text));
+    }
+    let encoded = |r: &mut burrow_probe::scrub::Redactor,
+                   value: serde_json::Value,
+                   source: &str|
+     -> Result<String, String> {
+        let value = r.json(&value)?;
         let mut clean = serde_json::to_string(&value).map_err(|e| e.to_string())?;
         if source.ends_with("\r\n") {
             clean.push_str("\r\n");
@@ -169,7 +187,7 @@ fn scrub_output(text: &str) -> Result<String, String> {
         Ok(clean)
     };
     if let Ok(value) = serde_json::from_str(text) {
-        return encoded(value, text);
+        return encoded(&mut redactor, value, text);
     }
     // Raw transcripts may mix JSONL with diagnostic text or a final partial
     // record. Keep complete JSON records framed, and scrub contiguous plain
@@ -178,14 +196,14 @@ fn scrub_output(text: &str) -> Result<String, String> {
     let mut plain = String::new();
     for line in text.split_inclusive('\n') {
         if let Ok(value) = serde_json::from_str(line) {
-            clean.push_str(burrow_probe::scrub::scrub(&plain).as_str());
+            clean.push_str(&redactor.plain(&plain));
             plain.clear();
-            clean.push_str(&encoded(value, line)?);
+            clean.push_str(&encoded(&mut redactor, value, line)?);
         } else {
             plain.push_str(line);
         }
     }
-    clean.push_str(burrow_probe::scrub::scrub(&plain).as_str());
+    clean.push_str(&redactor.plain(&plain));
     Ok(clean)
 }
 
@@ -211,14 +229,14 @@ pub(crate) fn recovery_reply(cfg: &Config, args: &[String]) -> Result<String, Fa
 
 #[cfg(test)]
 mod tests {
-    use super::scrub_output;
+    use super::{scrub_output, structured};
 
     #[test]
     fn formatted_json_jsonl_and_mixed_diagnostics_keep_their_structure() {
         let record = serde_json::json!({"message":"Authorization: credential\npublic \"quotes\"",
             "password":"escaped \"credential\"\nsecond line", "count":3});
         let pretty = format!("{}\n", serde_json::to_string_pretty(&record).unwrap());
-        let output = scrub_output(&pretty).unwrap();
+        let output = scrub_output(&pretty, true).unwrap();
         let decoded: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(decoded["count"], 3);
         assert_eq!(decoded["password"], "[redacted]");
@@ -228,7 +246,7 @@ mod tests {
         );
         assert!(!output.contains("credential"));
         let lines = format!("{record}\r\n{record}\n");
-        let clean = scrub_output(&lines).unwrap();
+        let clean = scrub_output(&lines, true).unwrap();
         assert!(clean.contains("\r\n"));
         assert_eq!(
             clean
@@ -241,12 +259,30 @@ mod tests {
             "-----BEGIN RSA {} KEY-----\ncredential payload\n-----END RSA {} KEY-----\n",
             "PRIVATE", "PRIVATE"
         );
-        let mixed = scrub_output(&format!(
-            "diagnostic\n{key}{record}\npartial password=\"credential"
-        ))
+        let mixed = scrub_output(
+            &format!("diagnostic\n{key}{record}\npartial password=\"credential"),
+            true,
+        )
         .unwrap();
         assert!(!mixed.contains("credential"));
         assert!(mixed.contains("[redacted private key]"));
         assert!(mixed.contains("\"count\":3"));
+    }
+
+    #[test]
+    fn literal_names_keep_every_byte_and_only_structured_commands_parse_json() {
+        let name = "my\n 42 \napp\n{\"a\": 1}\n";
+        assert_eq!(scrub_output(name, false).unwrap(), name);
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(structured(&words(&["state", "--json"])));
+        assert!(structured(&words(&["log", "j", "--raw"])));
+        for plain in [
+            &["find", "k"][..],
+            &["list"],
+            &["reply", "j", "x"],
+            &["log", "j"],
+        ] {
+            assert!(!structured(&words(plain)));
+        }
     }
 }
