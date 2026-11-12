@@ -318,6 +318,22 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     })
 }
 
+/// The one line a closed notice carries: why the question no longer waits.
+fn close_reason(job: &Job, finished: bool, stopped: bool, latest: &str) -> String {
+    if stopped {
+        return "Closed: the job was stopped.".into();
+    }
+    if finished {
+        return "Closed: the job ended.".into();
+    }
+    if read(&job.path(&format!("prompt.{latest}"))).is_some_and(|p| p.starts_with("No answer by "))
+    {
+        return "Closed: no answer came by the deadline, so the job took its reversible default."
+            .into();
+    }
+    "Closed: the question was answered.".into()
+}
+
 /// Durable per-question outbox. An open is replayed idempotently because the
 /// notifier's zero exit is not delivery acknowledgement. A close is forgotten
 /// only when `pending` explicitly returns 1. Keys belong to turns, never reused
@@ -481,7 +497,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         retry = true;
         let result = if closing.exists() {
             Command::new(notifier)
-                .args(["close", &key, "The job no longer needs this answer."])
+                .args(["close", &key, &close_reason(job, finished, stopped, &n)])
                 .status()
         } else {
             let body = match read_state(&entry.path()) {

@@ -478,3 +478,53 @@ fn pending_owner_notice_does_not_block_an_older_close_or_its_own_open() {
     assert!(!f.job().turn("3", "question-close").exists());
     assert!(f.dir.path().join("remote-proj-question-j1-3").exists());
 }
+
+fn closed_with(f: &Fixture) -> String {
+    fs::read_to_string(f.dir.path().join("reasons")).unwrap_or_default()
+}
+
+fn recording(f: &Fixture) {
+    let script = f.dir.path().join("notify");
+    let old = fs::read_to_string(&script).unwrap();
+    burrow_test::executable(
+        &script,
+        old.replacen(
+            "case \"$1\" in",
+            &format!(
+                "test \"$1\" = close && printf '%s\\n' \"$3\" >> '{}'\ncase \"$1\" in",
+                f.dir.path().join("reasons").display()
+            ),
+            1,
+        ),
+    );
+}
+
+#[test]
+fn a_reversible_default_closes_its_notice_with_the_reason() {
+    let f = watched();
+    recording(&f);
+    question(&f, false, crate::now() - 1);
+    assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert_eq!(f.job().turns().as_deref(), Some("2"));
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(!f.dir.path().join("remote-proj-question-j1-1").exists());
+    assert!(f.job().turn("1", "question-closed").exists());
+    assert!(
+        closed_with(&f).contains("took its reversible default"),
+        "{}",
+        closed_with(&f)
+    );
+}
+
+#[test]
+fn a_one_way_question_keeps_its_notice_after_its_deadline() {
+    let f = watched();
+    recording(&f);
+    question(&f, true, crate::now() - 1);
+    crate::watch::look(&f.cfg, "").unwrap();
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+    assert!(!f.job().turn("1", "question-close").exists());
+    assert_eq!(closed_with(&f), "");
+}
