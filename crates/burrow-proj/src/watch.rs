@@ -105,10 +105,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             continue;
         }
         {
-            let Some(held) = job.try_lock().map_err(|e| io_fail(&job.path("lock"), e))? else {
-                retry.push((String::new(), now() + RETRY));
-                continue;
-            };
+            let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             match crate::github_quota::reconcile(&job) {
                 Ok(Some(due)) if due > now() => retry.push((String::new(), due)),
                 Ok(_) => {}
