@@ -14,6 +14,7 @@ pub(crate) mod claude;
 mod claude_limit;
 mod command;
 mod handoff;
+pub(crate) mod plugin;
 mod role;
 mod sandbox;
 mod stream;

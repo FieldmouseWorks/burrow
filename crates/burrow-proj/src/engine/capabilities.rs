@@ -6,7 +6,7 @@ use crate::{
     job::Job,
     read,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io,
@@ -14,7 +14,7 @@ use std::{
     process::Command,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Capability {
     Workspace,
@@ -59,6 +59,15 @@ pub struct Capabilities {
     repository: bool,
 }
 impl Capabilities {
+    /// Keep only the grants `keep` names; the rest, paths and environment
+    /// with them, are gone. The one narrowing every non-built-in engine takes.
+    pub(super) fn retain(mut self, keep: impl Fn(Capability) -> bool) -> Self {
+        self.items.retain(|g| keep(g.capability));
+        self
+    }
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.items.iter().map(|g| g.capability).collect()
+    }
     pub fn network(&self) -> bool {
         self.items
             .iter()

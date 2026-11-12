@@ -230,7 +230,10 @@ Each has an entry below, and each can be imported on its own.
   (`burrow.mcpServers`, including each server's socket and output paths), and
   the network and login/App environment. The [parity check](tests/proj-capabilities.nix) runs the same
   capability probes inside a job on each engine and removes a Codex grant to
-  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`, two)
+  prove a mismatch fails. Engine plugins run in the agent sandbox with only
+  the capabilities they declare and `burrow.proj.plugins` approves, never GitHub or
+  the login environment (`engine/plugin.rs`); removing a required capability fails
+  its conformance. Codex uses its own slot pool (`codex.slots`, two)
   and command sandbox; log it in with `autoland-codex-login job`, separately
   from `autoland-codex-login review`. A turn on a different engine receives
   the preceding turns' questions and answers.
