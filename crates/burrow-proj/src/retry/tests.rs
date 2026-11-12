@@ -927,10 +927,10 @@ fn pending_transfer_keeps_its_place_in_the_line() {
     let (_, name) = pending(&r, "p", true);
     // Its old process is gone (no such pid).
     fs::write(r.cfg.jobs.join(".queue").join(&name), "99999999\n").unwrap();
-    assert!(!slot::in_line(&r.cfg).is_empty());
+    assert!(!slot::line(&r.cfg).is_empty());
     let job = Job::new(&r.cfg, "p");
     fs::write(job.turn("1", "stopped"), "").unwrap();
-    assert!(slot::in_line(&r.cfg).is_empty());
+    assert!(slot::line(&r.cfg).is_empty());
 }
 
 #[test]

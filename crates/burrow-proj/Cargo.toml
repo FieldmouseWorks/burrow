@@ -21,8 +21,11 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 pulldown-cmark = { version = "0.13.6", default-features = false }
+schemars = "1"
+burrow-heavy = { version = "0.0.0", path = "../burrow-heavy" }
 
 [dev-dependencies]
+boon = "0.6.1"
 burrow-github = { path = "../burrow-github", features = ["fake"] }
 burrow-test = { path = "../burrow-test" }
 gh-token = { path = "../gh-token" }

@@ -620,6 +620,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("an issue whose job dir was removed is taken up afresh"):
       listed = machine.succeed("su - dev -c 'proj-inbox status'")
       gone = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
+      # Only once it has ended: a job still writing into its dir races the rm.
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {gone}' | grep -x done", timeout=120)
       machine.succeed(f"rm -rf /data/dev/jobs/{gone}")
       machine.succeed("su - dev -c proj-inbox")
       machine.succeed("su - dev -c proj-inbox")
