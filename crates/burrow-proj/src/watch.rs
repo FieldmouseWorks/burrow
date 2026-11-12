@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::github::{changes, fingerprint, target};
+use crate::github_quota::Replay;
 use crate::job::{Job, USAGE_LIMIT, awaits};
 use crate::turn::start;
 use crate::{Fail, filled, io_fail, now, read, swap, usage};
@@ -94,6 +95,37 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         if crate::planning::admit(&job).is_err() {
             continue;
         }
+        if job.path(crate::github_quota::PENDING).exists()
+            && !matches!(job.state().as_str(), "queued" | "running")
+            && let Some(turn) = job.turns()
+        {
+            // Committed intent is the schedule, whatever became of its await
+            // marker: a crash between saving it and publishing the marker, or
+            // between renewing its deadline and the marker, leaves one missing
+            // or too early.
+            let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            let due = read(&job.path(crate::github_quota::PENDING))
+                .and_then(|t| serde_json::from_str::<crate::github_quota::Pending>(&t).ok())
+                .map(|p| p.retry_at as i64)
+                .filter(|due| *due > now());
+            let marked = awaits(&read(&f).unwrap_or_default())
+                .into_iter()
+                .find(|a| a.target == crate::github_quota::LIMIT)
+                .and_then(|a| a.was.parse::<i64>().ok());
+            if let Some(due) = due
+                && marked.is_none_or(|m| m < due)
+                && job.turns().as_deref() == Some(turn.as_str())
+            {
+                match crate::github_quota::finish(&job, &turn) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("proj github quota: {e}");
+                        retry.push((String::new(), now() + RETRY));
+                    }
+                }
+            }
+            drop(held);
+        }
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;
         }
@@ -124,17 +156,31 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                     let replayed = crate::github_quota::replay(cfg, &job);
                     drop(held);
                     match replayed {
-                        Ok(due) => {
-                            if let Some(due) = due {
-                                retry.push((String::new(), due));
+                        Ok(Replay::Done) => {
+                            crate::waits::rewatch(cfg, &[&id]);
+                            // News that came while the quota held, or between
+                            // the baselines and now, is looked for at once.
+                            for a in awaits(&read(&f).unwrap_or_default()) {
+                                let repo = target(&a.target).map(|(r, _)| r).unwrap_or_default();
+                                retry.push((repo, now() + 1));
                             }
+                            continue 'jobs;
+                        }
+                        Ok(Replay::Held(due)) => {
+                            retry.push((String::new(), due));
                             crate::waits::rewatch(cfg, &[&id]);
                             continue 'jobs;
                         }
-                        Err(e) => news.push_str(&format!(
-                            "- GitHub reset, but your saved await failed: {}\n",
-                            e.say.unwrap_or_else(|| format!("exit {}", e.code))
+                        Ok(Replay::Failed(error)) => news.push_str(&format!(
+                            "- GitHub reset, but your saved await failed: {error}\n"
                         )),
+                        // Local state that could not be written: not an API
+                        // answer, so no turn is spent on it; tried again.
+                        Err(e) => {
+                            eprintln!("proj github quota: {}", e.say.unwrap_or_default());
+                            retry.push((String::new(), now() + RETRY));
+                            continue 'jobs;
+                        }
                     }
                 } else {
                     news.push_str("- GitHub quota has reset; carry on from the last turn\n");

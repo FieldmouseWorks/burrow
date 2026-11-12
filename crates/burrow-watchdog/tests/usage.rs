@@ -305,8 +305,8 @@ fn out_of_usage_the_stuck_issue_and_a_queued_job_go_to_the_owner() {
     assert!(m.escalated().is_empty());
 }
 
-/// `proj usage` appends one `{"github": ..}` record per installation after
-/// Claude's hold: the hold still suppresses with any number of them.
+/// `proj usage` is one value: Claude's hold with a `github` array of
+/// installation readings, which the hold still suppresses with any number of.
 #[test]
 fn out_of_usage_survives_github_meter_records() {
     let github = r#"{"github":{"app":"workers","owner":"sam","at":1,"remaining":0,"reset":2,"retry_at":null}}"#;
@@ -319,11 +319,13 @@ fn out_of_usage_survives_github_meter_records() {
         );
         let back = T + 2.0 * H;
         out_until(&m, back);
-        for _ in 0..meters {
-            let mut usage = m.world.usage.borrow_mut();
-            usage.push('\n');
-            usage.push_str(github);
-        }
+        let mut usage = m.world.usage.borrow_mut();
+        let mut value: serde_json::Value = serde_json::from_str(&usage).unwrap();
+        value["github"] = (0..meters)
+            .map(|_| serde_json::from_str::<serde_json::Value>(github).unwrap()["github"].clone())
+            .collect();
+        *usage = value.to_string();
+        drop(usage);
         let (wake, stalls) = m.run(T);
         assert!(stalls.is_empty(), "{meters} {stalls:?}");
         assert_eq!(wake, Some(back), "{meters}");
@@ -341,7 +343,7 @@ fn github_meters_alone_hold_nothing() {
         T,
     );
     *m.world.usage.borrow_mut() =
-        r#"{"github":{"app":"workers","owner":"sam","at":1,"until":null}}"#.to_owned();
+        r#"{"github":[{"app":"workers","owner":"sam","at":1,"until":null}]}"#.to_owned();
     let (_, stalls) = m.run(T);
     assert_eq!(stalls.len(), 1, "{stalls:?}");
 }

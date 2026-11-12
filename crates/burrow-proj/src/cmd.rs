@@ -26,6 +26,23 @@ fn put(text: &str) {
     let _ = io::stdout().lock().write_all(text.as_bytes());
 }
 
+/// `proj usage` as one JSON value: Claude's hold fields, when held, and the
+/// installations' readings as a `github` array, when any. None when neither.
+pub(crate) fn usage_value(cfg: &Config) -> Option<serde_json::Value> {
+    let mut value = usage::out(cfg)
+        .and_then(|s| serde_json::to_value(s).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let readings = crate::github_quota::meters(cfg);
+    if !readings.is_empty() {
+        value["github"] = serde_json::json!(readings);
+    }
+    value
+        .as_object()
+        .is_some_and(|o| !o.is_empty())
+        .then_some(value)
+}
+
 /// The command line's word at `i`, which must be there and not empty.
 fn arg<'a>(args: &'a [String], i: usize, usage: &str) -> Result<&'a str, Fail> {
     args.get(i)
@@ -123,14 +140,8 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 if let Err(e) = usage::adopt(cfg) {
                     eprintln!("{e}");
                 }
-                if let Some(s) = usage::out(cfg) {
-                    put(&format!(
-                        "{}\n",
-                        serde_json::to_string(&s).unwrap_or_default()
-                    ));
-                }
-                for meter in crate::github_quota::meters(cfg) {
-                    put(&format!("{}\n", serde_json::json!({"github": meter})));
+                if let Some(value) = usage_value(cfg) {
+                    put(&format!("{value}\n"));
                 }
                 Ok(())
             }
@@ -580,34 +591,41 @@ pub(crate) fn record_wait(
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     crate::github::take_limit();
     let pending = job.path(crate::github_quota::PENDING);
-    let saved: Vec<String> = read(&pending)
+    let saved = read(&pending)
         .map(|text| {
             serde_json::from_str::<crate::github_quota::Pending>(&text)
-                .map(|p| p.targets)
                 .map_err(|e| Fail::new(1, format!("saved GitHub await: {e}")))
         })
-        .transpose()?
-        .unwrap_or_default();
+        .transpose()?;
     let mut all = targets.to_vec();
     let mut found = found.to_vec();
-    for saved_target in saved {
-        if !all.contains(&saved_target) {
+    for saved_target in saved.iter().flat_map(|p| &p.targets) {
+        if !all.contains(saved_target) {
             found.push(
-                target(&saved_target).ok_or_else(|| Fail::new(1, "invalid saved GitHub target"))?,
+                target(saved_target).ok_or_else(|| Fail::new(1, "invalid saved GitHub target"))?,
             );
-            all.push(saved_target);
+            all.push(saved_target.clone());
         }
     }
     let targets = &all;
-    let result = baselines_each(cfg, &found, targets, until);
-    let text = match result {
+    let captured = saved.map(|p| p.baselines).unwrap_or_default();
+    let next = job.path("await.next");
+    let earlier = read(&next).unwrap_or_default();
+    let text = match baselines_each(cfg, &found, targets, until) {
         Ok(text) => text,
-        Err((error, limited_owner)) => {
+        Err(failed) => {
             if let Some(due) = crate::github::take_limit() {
-                crate::github_quota::note(cfg, job, &limited_owner, due)
+                crate::github_quota::note(cfg, job, &failed.owner, due)
                     .map_err(|e| Fail::new(1, e))?;
+                // Records already captured, with earlier declarations', are
+                // kept apart from the targets still to be read, so neither an
+                // ask/done declaration nor a later refusal can lose them.
                 let intent = crate::github_quota::Pending {
-                    targets: targets.clone(),
+                    targets: targets[failed.count..].to_vec(),
+                    baselines: crate::github_quota::merge(
+                        &crate::github_quota::merge(&captured, &earlier),
+                        &failed.done,
+                    ),
                     retry_at: due,
                 };
                 crate::state_reads::write(
@@ -615,6 +633,7 @@ pub(crate) fn record_wait(
                     serde_json::to_vec(&intent).expect("pending await"),
                 )
                 .map_err(|e| io_fail(&pending, e))?;
+                let _ = fs::remove_file(&next);
                 crate::state_reads::write(job.path("end.next"), "await\n")
                     .map_err(|e| io_fail(&job.path("end.next"), e))?;
                 put(
@@ -622,7 +641,7 @@ pub(crate) fn record_wait(
                 );
                 return Ok(());
             }
-            return Err(error);
+            return Err(failed.error);
         }
     };
     if until.is_some_and(|d| Instant::now() >= d) {
@@ -631,13 +650,9 @@ pub(crate) fn record_wait(
             "proj: turn deadline expired while registering waits; nothing is awaited",
         ));
     }
-    let next = job.path("await.next");
-    File::options()
-        .append(true)
-        .create(true)
-        .open(&next)
-        .and_then(|mut f| f.write_all(text.as_bytes()))
-        .map_err(|e| io_fail(&next, e))?;
+    let merged =
+        crate::github_quota::merge(&crate::github_quota::merge(&earlier, &captured), &text);
+    crate::state_reads::write(&next, merged).map_err(|e| io_fail(&next, e))?;
     crate::state_reads::write(job.path("end.next"), "await\n")
         .map_err(|e| io_fail(&job.path("end.next"), e))?;
     let _ = fs::remove_file(job.path(crate::github_quota::PENDING));
@@ -660,21 +675,37 @@ pub(crate) fn baselines_each(
     found: &[(String, String)],
     targets: &[String],
     until: Option<Instant>,
-) -> Result<String, (Fail, String)> {
+) -> Result<String, Box<Unread>> {
     let mut text = String::new();
-    for (found, target) in found.iter().zip(targets) {
+    for (count, (found, target)) in found.iter().zip(targets).enumerate() {
         let owner = found.0.split('/').next().unwrap_or_default().to_owned();
-        text.push_str(
-            &baselines(
-                cfg,
-                std::slice::from_ref(found),
-                std::slice::from_ref(target),
-                until,
-            )
-            .map_err(|e| (e, owner))?,
-        );
+        match baselines(
+            cfg,
+            std::slice::from_ref(found),
+            std::slice::from_ref(target),
+            until,
+        ) {
+            Ok(record) => text.push_str(&record),
+            Err(error) => {
+                return Err(Box::new(Unread {
+                    error,
+                    owner,
+                    done: text,
+                    count,
+                }));
+            }
+        }
     }
     Ok(text)
+}
+
+/// A target whose baseline could not be read, the owner whose installation
+/// was asked, and the records of the `count` targets read before it.
+pub(crate) struct Unread {
+    pub error: Fail,
+    pub owner: String,
+    pub done: String,
+    pub count: usize,
 }
 
 pub(crate) fn baselines(
@@ -791,8 +822,9 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     if let Some(n) = job.turns()
         && !job.turn(&n, "stopped").exists()
         && !job.path("await").exists()
+        && crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?
     {
-        crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?;
+        crate::waits::rewatch_all(cfg);
     }
     job.mark_ended();
     rewatch(cfg, &[id]);

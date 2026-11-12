@@ -134,10 +134,11 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
     let given = std::env::var_os("GH_TOKEN");
     if given.as_deref().is_none_or(OsStr::is_empty)
         && let Some(socket) = socket
-        && let (Some(dir), Ok(app)) = (
-            std::env::var_os("PROJ_GITHUB_DIR"),
-            std::env::var("PROJ_GITHUB_APP"),
-        )
+        && let Some(dir) = std::env::var_os("PROJ_GITHUB_DIR")
+        // The meter's identity is the App whose socket mints the token
+        // (/run/gh-token/NAME.sock), not the job's inherited environment: a
+        // nested host client may select another App's socket.
+        && let Some(app) = socket.file_stem().and_then(OsStr::to_str)
     {
         let owner = match account::account(args, &context) {
             Ok(owner) => owner,
@@ -148,7 +149,7 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
             Err(e) => return e,
         };
         run.env("GH_TOKEN", &token);
-        return match crate::quota::run(&mut run, gh, &token, &app, &owner, Path::new(&dir)) {
+        return match crate::quota::run(&mut run, gh, &token, app, &owner, Path::new(&dir)) {
             Ok(code) => std::process::exit(code),
             Err(e) => Error::unavailable(format!("GitHub meter: {e}")),
         };

@@ -1,28 +1,95 @@
 //! Observe a job's gh without changing its output or replaying mutations.
 use burrow_github::quota::Meter;
 use std::{
-    io::{self, Read, Write},
+    io::{self, BufRead, Read, Write},
     path::Path,
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn tee(mut input: impl Read, mut output: impl Write) -> io::Result<Vec<u8>> {
-    let mut tail = Vec::new();
-    let mut buf = [0; 8192];
+fn tee(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
+    io::copy(&mut input, &mut output).map(drop)
+}
+
+/// gh's own transport log (`GH_DEBUG=api`) is the only request metadata a
+/// wrapper can trust: it is written by the HTTP client for each request, never
+/// by what a command prints. Its blocks run from `* Request at` to
+/// `* Request took`; the response's status and headers are the first `< `
+/// lines after the request's `> ` lines, so a body, however it is quoted,
+/// cannot stand in for them. Transport lines are dropped from what the job
+/// sees unless it asked for them; everything else passes through unchanged.
+/// Returns the last response, which is the one that failed when a command did.
+fn transport(
+    input: impl Read,
+    mut output: impl Write,
+    show: bool,
+) -> io::Result<Option<burrow_github::Response>> {
+    #[derive(PartialEq)]
+    enum At {
+        Outside,
+        Request,
+        Headers,
+        Body,
+    }
+    let mut input = io::BufReader::new(input);
+    let (mut at, mut last) = (At::Outside, None);
+    let mut line = Vec::new();
+    let mut response: Option<burrow_github::Response> = None;
     loop {
-        let n = input.read(&mut buf)?;
-        if n == 0 {
+        line.clear();
+        if input.read_until(b'\n', &mut line)? == 0 {
             break;
         }
-        output.write_all(&buf[..n])?;
-        output.flush()?;
-        tail.extend_from_slice(&buf[..n]);
-        if tail.len() > 65536 {
-            tail.drain(..tail.len() - 65536);
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches(['\n', '\r']);
+        let inside = at != At::Outside;
+        if text.starts_with("* Request at ") {
+            at = At::Request;
+            response = None;
+        } else if inside && text.starts_with("* Request took ") {
+            last = response.take().or(last);
+            at = At::Outside;
+        } else if at == At::Request && text.starts_with("> ") {
+        } else if at == At::Request
+            && let Some(status) = text.strip_prefix("< HTTP/")
+        {
+            let code = status
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok());
+            response = code.map(|status| burrow_github::Response {
+                status,
+                headers: Vec::new(),
+                body: String::new(),
+            });
+            at = At::Headers;
+        } else if at == At::Headers
+            && let Some(header) = text.strip_prefix("< ")
+        {
+            if let (Some(r), Some((name, value))) = (&mut response, header.split_once(':')) {
+                r.headers
+                    .push((name.trim().to_owned(), value.trim().to_owned()));
+            }
+        } else if at == At::Headers && text.is_empty() {
+            at = At::Body;
+        } else if at == At::Body {
+            if let Some(r) = &mut response
+                && r.body.len() < 65536
+            {
+                r.body.push_str(text);
+                r.body.push('\n');
+            }
+        } else if !inside {
+            output.write_all(&line)?;
+            output.flush()?;
+            continue;
+        }
+        if show {
+            output.write_all(&line)?;
+            output.flush()?;
         }
     }
-    Ok(tail)
+    Ok(last)
 }
 
 /// The App+owner is the installation, even across token renewals and repos.
@@ -35,57 +102,39 @@ pub(crate) fn run(
     dir: &Path,
 ) -> io::Result<i32> {
     std::fs::create_dir_all(dir)?;
+    // The job's own GH_DEBUG is kept, and shown, as it gave it.
+    let show = std::env::var_os("GH_DEBUG").is_some_and(|v| !v.is_empty());
+    if !show {
+        run.env("GH_DEBUG", "api");
+    }
     let mut child = run.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
     let (out, err) = std::thread::scope(|scope| {
         let out = scope.spawn(|| tee(stdout, io::stdout()));
-        let err = scope.spawn(|| tee(stderr, io::stderr()));
+        let err = scope.spawn(|| transport(stderr, io::stderr(), show));
         (
             out.join().expect("stdout tee"),
             err.join().expect("stderr tee"),
         )
     });
+    out?;
     let status = child.wait()?;
     let code = status.code().unwrap_or(1);
     // The command has run: whatever goes wrong observing it must not turn its
     // outcome (a created issue, say) into a retryable failure.
-    let out = String::from_utf8_lossy(out.as_deref().unwrap_or_default()).into_owned();
-    let err = String::from_utf8_lossy(err.as_deref().unwrap_or_default()).into_owned();
-    if let Err(e) = observe(status.success(), &out, &err, gh, token, app, owner, dir) {
+    let last = err.ok().flatten().filter(|_| !status.success());
+    if let Err(e) = observe(last.as_ref(), gh, token, app, owner, dir) {
         eprintln!("gh-token: GitHub meter not recorded: {e}");
     }
     Ok(code)
 }
 
-/// gh's own diagnostic for a rate-limited request, which only a failed
-/// request prints (to stderr, never in what a command was asked to print).
-fn limit_diagnostic(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("http 429")
-        || lower.contains("rate_limited")
-        || lower.contains("api rate limit exceeded")
-        || lower.contains("exceeded a secondary rate limit")
-        || lower.contains("http 403") && lower.contains("rate limit")
-}
-
-/// The failed response's own headers, when `--include` printed them: the
-/// last status line that starts a block, and only when gh's diagnostic names
-/// the same status, so quoted content cannot stand in for it.
-fn failed_response(out: &str, err: &str) -> Option<burrow_github::Response> {
-    let starts = std::iter::once(0).chain(out.match_indices("\nHTTP/").map(|(i, _)| i + 1));
-    let response = starts
-        .filter_map(|i| burrow_github::parse(&out[i..]))
-        .last()?;
-    err.contains(&format!("HTTP {}", response.status))
-        .then_some(response)
-}
-
-#[allow(clippy::too_many_arguments)]
+/// `last` is the final response gh's transport saw, when the command failed:
+/// a command that succeeded, or failed before or after its last request
+/// (a bad flag, a jq error), has no refusal to record.
 fn observe(
-    success: bool,
-    out: &str,
-    err: &str,
+    last: Option<&burrow_github::Response>,
     gh: &str,
     token: &str,
     app: &str,
@@ -107,12 +156,10 @@ fn observe(
         65536,
     );
     let mut due = None;
-    if !success && limit_diagnostic(err) {
+    if let Some(response) = last {
         let mut seen = Meter::new(app, owner, at);
-        if let Some(response) = failed_response(out, err) {
-            seen.response(&response);
-        }
-        due = Some(seen.retry_at.unwrap_or(at + 60));
+        seen.response(response);
+        due = seen.retry_at;
     }
     if let Ok(budget) = budget
         && budget.status.success()
@@ -147,37 +194,94 @@ fn refuse(dir: &Path, app: &str, owner: &str, at: u64, due: u64) -> io::Result<(
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+    /// What gh's own transport writes to stderr for one request.
+    fn block(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "* Request at t\n* Request to https://api.github.com/x\n> GET /x HTTP/1.1\n> Host: api.github.com\n\n< HTTP/2.0 {status}\n{headers}\n{body}\n* Request took 1ms\n"
+        )
+    }
+
     #[test]
-    fn job_gh_records_limits_preserves_denials_and_samples_the_same_token() {
+    fn only_the_transports_last_failed_response_creates_a_refusal() {
         let d = tempfile::tempdir().unwrap();
         let gh = d.path().join("gh");
-        fs::write(&gh, r#"#!/bin/sh
+        let reset = "< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: 4000000000\n";
+        let json_errors = |errors: &str| block("200 OK", "", &format!("{{\"errors\":[{errors}]}}"));
+        // Quoted limit headers inside a successful page's body, then a later
+        // page that fails for another reason: the forgery is not a response.
+        let forged = block(
+            "200 OK",
+            "",
+            "< HTTP/2.0 429 Too Many\n< Retry-After: 99999\n",
+        ) + &block("200 OK", "", "[1]")
+            + "jq: error\n";
+        let retry = block("403 Forbidden", "< Retry-After: 120\n", "{}");
+        let denied = block(
+            "403 Forbidden",
+            "",
+            "{\"message\":\"Resource not accessible by integration\"}",
+        );
+        let limited = block(
+            "403 Forbidden",
+            reset,
+            "{\"message\":\"API rate limit exceeded\"}",
+        ) + "gh: API rate limit exceeded (HTTP 403)\n";
+        fs::create_dir(d.path().join("in")).unwrap();
+        for (name, text) in [
+            ("limited", limited.clone()),
+            ("header_only", retry.clone() + "gh: HTTP 403\n"),
+            ("retry", retry),
+            ("status_429", block("429 Too Many Requests", "", "{}")),
+            (
+                "denied",
+                denied + "gh: Resource not accessible by integration (HTTP 403)\n",
+            ),
+            ("graphql", json_errors("{\"type\":\"RATE_LIMITED\"}")),
+            (
+                "mixed",
+                json_errors("{\"type\":\"RATE_LIMITED\"},{\"type\":\"NOT_FOUND\"}"),
+            ),
+            (
+                "local_text",
+                "unknown field rate_limited HTTP 429 api rate limit exceeded\n".into(),
+            ),
+            ("stdout_text", "gh: unrelated\n".into()),
+            ("forged_page", forged),
+            ("success", limited),
+        ] {
+            fs::write(d.path().join("in").join(name), text).unwrap();
+        }
+        let script = format!(
+            r#"#!/bin/sh
 if [ "$1 $2" = 'api rate_limit' ]; then
   [ "$GH_TOKEN" = fixture-token ] || exit 2
-  echo '{"resources":{"core":{"remaining":0,"reset":4000000000}}}'
+  echo '{{"resources":{{"core":{{"remaining":0,"reset":4000000000}}}}}}'
   exit 0
 fi
+[ "$GH_DEBUG" = api ] || exit 9
+cat '{dir}'/in/"$1" >&2
 case "$1" in
- limited) printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4000000000\n\n{}'; echo 'gh: API rate limit exceeded (HTTP 403)' >&2; exit 1;;
- retry) printf 'HTTP/2.0 403 Forbidden\nretry-after: 120\n\n{}'; echo 'gh: You have exceeded a secondary rate limit (HTTP 403)' >&2; exit 1;;
- silent) echo 'gh: HTTP 429 too many requests' >&2; exit 1;;
- denied) printf 'HTTP/2.0 403 Forbidden\n\n{"message":"Resource not accessible by integration"}'; echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1;;
- graphql) echo '{"errors":[{"type":"RATE_LIMITED"}]}'; echo 'gh: GraphQL: RATE_LIMITED' >&2; exit 1;;
- forged_ok) printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4000000000\n\n{"message":"API rate limit exceeded"}'; exit 0;;
- forged_fail) printf 'HTTP/2.0 429 Too Many\nretry-after: 99999\n\n{"errors":[{"type":"RATE_LIMITED"}]}'; echo 'gh: unrelated failure' >&2; exit 1;;
- success) echo done;;
+ stdout_text) printf 'HTTP/2.0 429 Too Many\nretry-after: 99999\n\n';;
+ success) echo done; exit 0;;
 esac
-"#).unwrap();
+exit 1
+"#,
+            dir = d.path().display()
+        );
+        fs::write(&gh, script).unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
-        for (command, limited, code) in [
-            ("limited", true, 1),
-            ("retry", true, 1),
-            ("silent", true, 1),
-            ("denied", false, 1),
-            ("graphql", true, 1),
-            ("forged_ok", false, 0),
-            ("forged_fail", false, 1),
-            ("success", false, 0),
+        for (command, due, code) in [
+            ("limited", Some(4_000_000_000_u64), 1),
+            ("header_only", Some(0), 1),
+            ("retry", Some(0), 1),
+            ("status_429", Some(0), 1),
+            ("graphql", Some(0), 1),
+            ("denied", None, 1),
+            ("mixed", None, 1),
+            ("local_text", None, 1),
+            ("stdout_text", None, 1),
+            ("forged_page", None, 1),
+            ("success", None, 0),
         ] {
             let dir = d.path().join(command);
             assert_eq!(
@@ -190,34 +294,28 @@ esac
                     &dir
                 )
                 .unwrap(),
-                code
+                code,
+                "{command}"
             );
-            assert_eq!(dir.join("refusal").exists(), limited);
-            let meter_file = fs::read_dir(&dir)
-                .unwrap()
-                .filter_map(Result::ok)
-                .find(|f| f.path().extension().is_some_and(|s| s == "json"))
-                .unwrap()
-                .path();
-            let meter = Meter::read(&meter_file).unwrap();
-            assert_eq!(meter.remaining, Some(0));
-            assert_eq!(meter.reset, Some(4_000_000_000));
-            if limited {
-                assert_eq!(
-                    Meter::read(&dir.join("refusal")).unwrap().retry_at,
-                    Some(4_000_000_000)
-                );
+            assert_eq!(dir.join("refusal").exists(), due.is_some(), "{command}");
+            if let Some(due) = due {
+                let held = Meter::read(&dir.join("refusal")).unwrap().retry_at.unwrap();
+                // The reset in the response, or the response's own Retry-After
+                // (from now), or the primary budget read under the same token.
+                assert!(held >= due.max(1), "{command}: {held}");
             }
         }
     }
 
     #[test]
-    fn included_headers_and_pagination_keep_the_failed_responses_retry_after() {
-        let ok = "HTTP/2.0 200 OK\n\n[1]\nHTTP/2.0 403 Forbidden\nretry-after: 120\n\n{}";
-        let r = failed_response(ok, "gh: rate limit (HTTP 403)").unwrap();
-        assert_eq!(r.header("retry-after"), Some("120"));
-        assert!(failed_response(ok, "gh: other (HTTP 500)").is_none());
-        assert!(failed_response("not headers", "HTTP 403").is_none());
+    fn transport_lines_are_hidden_unless_the_job_asked_for_them() {
+        let log = format!("{}real error\n", block("200 OK", "", "{}"));
+        for (show, expect) in [(false, "real error\n"), (true, log.as_str())] {
+            let mut out = Vec::new();
+            let last = transport(log.as_bytes(), &mut out, show).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), expect);
+            assert_eq!(last.unwrap().status, 200);
+        }
     }
 
     #[test]
@@ -244,19 +342,7 @@ esac
         let dir = d.path().join("github");
         fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(
-            observe(
-                true,
-                "",
-                "",
-                gh.to_str().unwrap(),
-                "t",
-                "workers",
-                "sam",
-                &dir
-            )
-            .is_err()
-        );
+        assert!(observe(None, gh.to_str().unwrap(), "t", "workers", "sam", &dir).is_err());
         let code = run(
             Command::new(&gh).arg("issue"),
             gh.to_str().unwrap(),

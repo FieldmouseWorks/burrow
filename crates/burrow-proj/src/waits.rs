@@ -64,6 +64,8 @@ pub struct Facts {
     pub usage_reset: Option<(i64, i64)>,
     /// A GitHub API refusal waits independently of either engine.
     pub quota_reset: Option<(i64, i64)>,
+    /// A queued turn's installation is held by GitHub quota until this.
+    pub quota_hold: Option<i64>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -105,6 +107,17 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
                     usage::when(spent.release())
                 )
             },
+        ),
+        // Held by its installation's GitHub quota, no turn of that
+        // installation takes a slot (slot.rs): the stall clock starts at the
+        // reset, as it does after usage is back.
+        "queued" if let Some(hold) = f.quota_hold => (
+            f.queued,
+            (f.queued + stall).max(hold + stall),
+            format!(
+                "turn {turn} is waiting in line: its GitHub installation is out of quota till {}",
+                usage::when(hold)
+            ),
         ),
         "queued" => (
             f.queued,

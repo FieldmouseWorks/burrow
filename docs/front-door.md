@@ -444,10 +444,16 @@ finalization, watchdog updates, completion kicks or scratch cleanup.
 Jobs treat GitHub quota as a meter. The gh door samples `GET /rate_limit`
 with the command's own installation token and records only the App, owner,
 remaining REST budget, reset, reading time and any primary or secondary
-hold. `proj usage` includes these readings; the typed
+hold. `proj usage` prints one JSON value: Claude's hold fields, when held, and these readings as its `github` array; the typed
 `burrow_proj::github_quota::meters` view is available to the live snapshot.
 App plus owner identifies the installation across repositories and token
 renewals. A fresh reading cannot release a secondary hold before its reset.
+
+The gh door runs each command with gh's own transport log (`GH_DEBUG=api`) and
+reads the last response's status and headers from it, hiding those lines from the
+job; only a failed command whose last response is a limit (429, a 403 with
+Retry-After or an exhausted budget, or GraphQL `RATE_LIMITED` alone) refuses.
+The meter's App is the one whose socket minted the token.
 
 A turn that encounters a limit finishes its current run and parks until
 GitHub's reset. It publishes a host quota notice, without opening a question

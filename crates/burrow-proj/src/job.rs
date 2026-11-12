@@ -421,6 +421,15 @@ impl<'a> Job<'a> {
                     .find(|a| a.target == crate::github_quota::LIMIT)
                     .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
             }),
+            quota_hold: (state == "queued")
+                .then(|| {
+                    let engine = match read(&self.turn(&n, "engine")).as_deref() {
+                        Some("codex") => crate::engine::Engine::Codex,
+                        _ => crate::engine::Engine::Claude,
+                    };
+                    crate::github_quota::held(self.cfg, self, engine)
+                })
+                .flatten(),
             usage_reset: read(&self.path("await")).and_then(|text| {
                 awaits(&text)
                     .into_iter()
