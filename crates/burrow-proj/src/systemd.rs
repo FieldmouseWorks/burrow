@@ -38,6 +38,31 @@ pub fn active(cfg: &Config, unit: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// The units matching `pattern` that are up (active, activating or
+/// reloading), by name as systemd spells them, in one look: None when it
+/// can't be told.
+pub fn up(cfg: &Config, pattern: &str) -> Option<std::collections::HashSet<String>> {
+    let out = systemctl(cfg)
+        .args([
+            "list-units",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+            "--state=active,activating,reloading",
+            pattern,
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect(),
+    )
+}
+
 /// One of the unit's properties, "" when it can't be told.
 pub fn show(cfg: &Config, unit: &str, property: &str) -> String {
     systemctl(cfg)
