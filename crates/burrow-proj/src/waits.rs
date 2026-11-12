@@ -16,7 +16,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -312,10 +312,12 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
     }
 }
 
-/// [`rewatch`] for every job it watches, and every one whose wait the
-/// policy keeps from it for now ([`HELD`]): the machine's usage changed
-/// ([`usage`]), which moves the deadline of every turn in line, or the
-/// policy did, which lets a held one back.
+/// [`rewatch`] for every job it watches, every one whose wait the policy
+/// keeps from it for now ([`HELD`]), and every one still live ([`live`]):
+/// the machine's usage changed ([`usage`]), which moves the deadline of every
+/// turn in line, or the policy did, which lets a held one back, or the
+/// watchdog was just enabled, and jobs already running never published to it.
+/// Never a settled job, whose wait ended weeks ago.
 pub fn rewatch_all(cfg: &Config) {
     let mut ids: Vec<String> = [".waits", HELD]
         .iter()
@@ -324,9 +326,29 @@ pub fn rewatch_all(cfg: &Config) {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
         .collect();
+    ids.extend(
+        fs::read_dir(&cfg.jobs)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.') && live(cfg, n)),
+    );
     ids.sort();
     ids.dedup();
     rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A job with a turn queued or running, or outstanding awaits: work the
+/// watchdog must see whether or not it ever heard of the job.
+fn live(cfg: &Config, id: &str) -> bool {
+    Job::new(cfg, id).facts().is_some_and(|f| {
+        !f.stopped
+            && !f.owned
+            && (matches!(f.state.as_str(), "queued" | "running")
+                || (f.state == "done" && f.end.as_deref() == Some("await")))
+    })
 }
 
 /// [`rewatch`] in the background, never waited for: the watchdog's lock, or
@@ -375,26 +397,26 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
                 })
             });
 
-        // Held while the policy keeps it, watched once it doesn't.
+        // Held while the policy keeps it, watched once it doesn't. A parked
+        // job's own facts say nothing ([`job_wait`]), so its park record
+        // keeps it held too. The replacement is committed before the hold
+        // is dropped, so a failed write leaves the job discoverable.
         let mark = held.join(id);
-        if wait.is_some() && kept {
+        let drop_file = |p: PathBuf| match fs::remove_file(p) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        if kept && (wait.is_some() || crate::policy::parked(&job)) {
             fs::write(&mark, "")?;
+            drop_file(f.clone())?;
+            drop_file(f.with_file_name(format!("{id}.new")))?;
+        } else if let Some(item) = wait {
+            swap(&f, &format!("{}\n", json!(item)))?;
+            drop_file(mark)?;
         } else {
-            match fs::remove_file(&mark) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => (),
-            }
-        }
-        match wait.filter(|_| !kept) {
-            Some(item) => swap(&f, &format!("{}\n", json!(item)))?,
-            None => {
-                for gone in [f.clone(), f.with_file_name(format!("{id}.new"))] {
-                    match fs::remove_file(gone) {
-                        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                        _ => (),
-                    }
-                }
-            }
+            drop_file(f.clone())?;
+            drop_file(f.with_file_name(format!("{id}.new")))?;
+            drop_file(mark)?;
         }
     }
     let mut names: Vec<String> = fs::read_dir(&dir)?

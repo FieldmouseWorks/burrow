@@ -513,3 +513,94 @@ fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
     crate::policy::reconcile(&cfg).unwrap();
     assert!(!watched("failed") && !jobs.join(".waits-held/failed").exists());
 }
+
+fn watch_config(tmp: &TempDir, jobs: &std::path::Path) -> Config {
+    let mut cfg = config(jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\n# As systemd answers for a unit that isn't running.\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    cfg
+}
+
+fn awaiting<'a>(cfg: &'a Config, id: &'a str, repo: &str) -> Job<'a> {
+    let job = Job::new(cfg, id);
+    fs::create_dir_all(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("prompt.1"), "work").unwrap();
+    fs::write(job.turn("1", "outcome"), "done").unwrap();
+    fs::write(job.turn("1", "end"), "await").unwrap();
+    fs::write(job.path("await"), "sam/web#1\t1000\t\n").unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Repository(repo.into()),
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
+    job
+}
+
+#[test]
+fn a_held_watch_survives_a_failed_restore_until_it_is_committed() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let settings = cfg.settings.clone().unwrap();
+    let say = |w: &[&str]| {
+        settings
+            .command(&w.iter().map(|w| w.to_string()).collect::<Vec<_>>(), "test")
+            .unwrap()
+    };
+    say(&["allow", "sam/web"]);
+    awaiting(&cfg, "held", "sam/web");
+    crate::waits::rewatch(&cfg, &["held"]);
+    say(&["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    let mark = jobs.join(".waits-held/held");
+    assert!(mark.exists() && !jobs.join(".waits/held").exists());
+    // The restored watch can't be written: the hold stays.
+    fs::create_dir(jobs.join(".waits/held.new")).unwrap();
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(mark.exists(), "the hold went before the watch was written");
+    fs::remove_dir(jobs.join(".waits/held.new")).unwrap();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/held").exists() && !mark.exists());
+}
+
+#[test]
+fn a_parked_await_stays_held_until_its_release_is_committed() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let job = awaiting(&cfg, "parked", "sam/web");
+    fs::write(
+        crate::policy::path(&job, "park"),
+        r#"{"state":"done","turn":"1","first":false,"at":1}"#,
+    )
+    .unwrap();
+    crate::waits::rewatch(&cfg, &["parked"]);
+    assert!(
+        jobs.join(".waits-held/parked").exists(),
+        "a parked job had no hold, so a failed release would lose it"
+    );
+}
+
+#[test]
+fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    awaiting(&cfg, "live", "sam/web");
+    let settled = Job::new(&cfg, "settled");
+    fs::create_dir_all(&settled.dir).unwrap();
+    settled.set_turns(1).unwrap();
+    fs::write(settled.path("prompt.1"), "work").unwrap();
+    // Nothing was ever published for either (no watchdog then).
+    assert!(!jobs.join(".waits").exists());
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/live").exists());
+    assert!(!jobs.join(".waits/settled").exists());
+}
