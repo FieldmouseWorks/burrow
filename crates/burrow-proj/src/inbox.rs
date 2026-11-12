@@ -8,7 +8,8 @@
 //! at most. `proj-inbox [OWNER/REPO]` looks at that repo's issues, or every
 //! project's; burrow-events runs it on the repo's issue events, each time one
 //! of its jobs' turns ends (proj run --kick), and when a wait it booked in its
-//! wake file ends. `proj-inbox status` shows which issue is which job, and
+//! wake file ends; an issue's event's pass looks at that issue alone (scope.rs).
+//! `proj-inbox status` shows which issue is which job, and
 //! `proj-inbox forget OWNER/REPO` drops what it kept of a repo's. An issue
 //! that has the unstick label too (the steward's stuck issue) is about what
 //! the pipeline is stuck on, so its job never waits in proj's line (proj run
@@ -29,7 +30,7 @@
 //!
 //! Discovery uses REST; text is read with its edit history through GraphQL.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -101,6 +102,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         unreached: Vec::new(),
         looked: Vec::new(),
         observe: false,
+        scope: if only.is_empty() { None } else { told() },
     };
     let result = p.run(only).and_then(|()| p.finish(only));
     drop(pass);
@@ -217,6 +219,8 @@ fn status(cfg: &Config, inbox: &Inbox) {
 
 mod dirs;
 use dirs::dirs;
+mod scope;
+use scope::told;
 
 /// One project per GitHub repo, by the repo as its origin spells it: the
 /// folder itself, never a linked worktree of it (.git is a file there) or a
@@ -322,6 +326,11 @@ struct Pass<'a> {
     looked: Vec<String>,
     /// Only observing, for the live snapshot: GitHub isn't asked (plans.rs).
     observe: bool,
+    /// The only issues of its repo this pass looks at, each asked for by
+    /// number, when its events were about those alone ([`told`]): no list of
+    /// the repo's issues, and what it keeps of the others stays as it is.
+    /// None: every one, listed.
+    scope: Option<BTreeSet<u64>>,
 }
 
 impl Pass<'_> {
@@ -672,43 +681,37 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
             self.looked.push(repo.clone());
             self.label(&repo);
-            // None when GitHub can't be asked: the repo is skipped this
-            // round, so an outage isn't read as every issue being closed.
-            // Pull requests show up as issues here; they aren't tasks.
-            let mut issues = BTreeMap::new();
-            for label in self.inbox.labels.keys() {
-                let Some(open) = every(
-                    self.cfg,
-                    &format!(
-                        "repos/{repo}/issues?labels={}&state=open&per_page=100",
-                        uri(label)
-                    ),
-                ) else {
-                    self.miss(&repo);
-                    issues.clear();
-                    break;
-                };
-                for issue in open {
-                    issues.insert(raw(&issue["number"]), issue);
-                }
-            }
-            if self.unreached.contains(&repo) {
+            // The labelled ones, and every open one when this pass asked for
+            // its issues by number. None when GitHub can't be asked: the
+            // repo is skipped this round, so an outage isn't read as every
+            // issue being closed. Pull requests show up as issues here; they
+            // aren't tasks.
+            let listed = match self.scope.clone() {
+                None => self.labelled(&repo).map(|open| (open, None)),
+                Some(ns) => self.asked(&repo, ns).map(|all| {
+                    let open = all
+                        .iter()
+                        .filter(|i| i.get("pull_request").is_none() && self.engine(i).is_some())
+                        .cloned()
+                        .collect();
+                    (open, Some(all))
+                }),
+            };
+            let Some((open, all)) = listed else {
+                self.miss(&repo);
                 continue;
-            }
-            let open = issues.into_values();
-            let open: Vec<Value> = open
-                .into_iter()
-                .filter(|i| i.get("pull_request").is_none())
-                .collect();
+            };
             if !self.cfg.paused(&repo) {
                 self.new_issues(&repo, &open)?;
                 self.jobs(&repo, &p, &open)?;
             }
             if self.inbox.triage.is_some() {
-                let Some(all) = every(
-                    self.cfg,
-                    &format!("repos/{repo}/issues?state=open&per_page=100"),
-                ) else {
+                let Some(all) = all.or_else(|| {
+                    every(
+                        self.cfg,
+                        &format!("repos/{repo}/issues?state=open&per_page=100"),
+                    )
+                }) else {
                     self.miss(&repo);
                     continue;
                 };
@@ -846,10 +849,17 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             .into_iter()
             .filter_map(|(r, v)| {
                 let v = v.as_i64().or_else(|| v.as_f64().map(|f| f.ceil() as i64))?;
-                (v > now && !self.looked.contains(&r)).then_some((r, v))
+                // A pass that looked at some issues alone keeps the repo's
+                // wake-up for the rest (a reply on another not yet old
+                // enough to hand on).
+                let kept = self.scope.is_some() || !self.looked.contains(&r);
+                (v > now && kept).then_some((r, v))
             })
             .collect();
-        at.extend(self.wake.iter().map(|(r, v)| (r.clone(), *v)));
+        for (r, v) in &self.wake {
+            let e = at.entry(r.clone()).or_insert(*v);
+            *e = (*e).min(*v);
+        }
         let text = serde_json::to_string_pretty(&at)
             .map_err(|e| Fail::new(1, format!("proj-inbox: {e}")))?;
         swap(wake, &format!("{text}\n")).map_err(|e| io_fail(wake, e))?;
@@ -967,6 +977,8 @@ mod drain_tests;
 mod handed_tests;
 #[cfg(test)]
 mod question_tests;
+#[cfg(test)]
+mod scope_tests;
 #[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]

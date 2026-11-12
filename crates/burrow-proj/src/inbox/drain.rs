@@ -290,11 +290,23 @@ impl Pass<'_> {
     }
 
     /// A repo's ready issues, from its pass's list of every open one, kept
-    /// for the drain: what [`Pass::pick_ready`] reads of each.
+    /// for the drain: what [`Pass::pick_ready`] reads of each. A pass that
+    /// looked at some issues alone changes only theirs.
     pub(super) fn note_ready(&self, repo: &str, all: &[Value]) -> Result<(), Fail> {
         let dir = self.inbox.state.join(READY_LISTS);
         let f = dir.join(key(repo));
-        let ready: Vec<Value> = all
+        let others: Vec<Value> = if self.scope.is_some() {
+            fs::read(&f)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Vec<Value>>(&b).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|i| !self.in_scope(&raw(&i["number"])))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let fresh = all
             .iter()
             .filter(|i| i.get("pull_request").is_none())
             .filter(|i| {
@@ -310,8 +322,8 @@ impl Pass<'_> {
                     "labels": i["labels"],
                     "repository_url": i["repository_url"],
                 })
-            })
-            .collect();
+            });
+        let ready: Vec<Value> = others.into_iter().chain(fresh).collect();
         if ready.is_empty() {
             let _ = fs::remove_file(&f);
             return Ok(());

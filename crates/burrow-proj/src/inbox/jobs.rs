@@ -36,7 +36,9 @@ impl Pass<'_> {
             let Some((of, n)) = issue.rsplit_once('#') else {
                 continue;
             };
-            if of != repo {
+            // Missing from a pass's issues because it didn't ask for it, not
+            // because it closed.
+            if of != repo || !self.in_scope(n) {
                 continue;
             }
             if d.join("unannounced").exists() {

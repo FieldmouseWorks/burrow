@@ -269,7 +269,9 @@ Each has an entry below, and each can be imported on its own.
   repo: the steward's, `proj-watch`'s, `proj-inbox`'s, `HOST-update`'s,
   Renovate's and `renovate-sweep`'s. A handler can take only some repos, only
   pushes to the default branch, only the other events about some branches, and
-  only the issue events about issues with some titles. A turn ending, a review
+  only the issue events about issues with some titles; one told issues has an
+  issue's event's pass look at that issue alone (`issueNumbers`, the inbox's),
+  rather than list every one. A turn ending, a review
   coming back and the passes' own wake-ups (a settle delay, a reviewer's
   timeout) kick them locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never

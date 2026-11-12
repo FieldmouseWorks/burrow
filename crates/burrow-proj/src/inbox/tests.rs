@@ -49,6 +49,7 @@ fn pass(cfg: &Config) -> Pass<'_> {
         unreached: Vec::new(),
         looked: Vec::new(),
         observe: false,
+        scope: None,
     }
 }
 
