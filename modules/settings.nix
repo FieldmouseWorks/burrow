@@ -9,6 +9,8 @@ let
   settings = {
     overlay = "${stateDir}/settings/overlay.json";
     inherit (cfg) allowed;
+    # A release through the door is ordered with proj's queue births by it.
+    usageLock = "${lib.attrByPath [ "burrow" "proj" "jobsDir" ] "${stateDir}/jobs" config}/.usage.lock";
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);

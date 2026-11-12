@@ -442,7 +442,7 @@ impl<'a> Job<'a> {
                     .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
             }),
             spent: (read(&self.turn(&n, "engine")).as_deref() != Some("codex"))
-                .then(|| usage::kept(self.cfg))
+                .then(|| usage::completed(self.cfg))
                 .flatten(),
             turn: n,
             state,

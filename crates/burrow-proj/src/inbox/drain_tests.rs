@@ -671,6 +671,7 @@ fn paused_ready_issues_wait_without_relabelling() {
         overlay: b.path("overlay.json"),
         allowed: vec!["sam/game".into(), "sam/burrow".into()],
         pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+        usage_lock: None,
     });
     on_github(&b, &active);
     b.pass().drain().unwrap();
@@ -707,6 +708,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
         overlay: b.path("overlay.json"),
         allowed: vec!["sam/game".into(), "sam/burrow".into()],
         pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+        usage_lock: None,
     });
     b.cfg
         .inbox

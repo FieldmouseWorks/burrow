@@ -231,3 +231,130 @@ fn an_expired_old_file_hold_migrates_as_ended_and_pre_deadline_extensions_do_not
     assert_eq!(last_release(&cfg), Some(until));
     assert!(cutoff(&cfg).is_some());
 }
+
+fn legacy(cfg: &Config, until: i64, at: i64) {
+    let meta = ".usage-owner-abc123";
+    let spent = |job: &str, last: i64| {
+        json!({"until": until, "said": "old pause", "job": job, "at": at, "told": at, "last": last})
+            .to_string()
+    };
+    fs::write(cfg.jobs.join(meta), spent(meta, at)).unwrap();
+    fs::write(cfg.jobs.join(FILE), spent(meta, until - 1)).unwrap();
+}
+
+#[test]
+fn an_older_pause_is_not_carried_over_after_a_release_through_any_door() {
+    // A host or issue release with no hold on, then the old pause is found.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 10);
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(&["usage-back".into()], "issue")
+        .unwrap();
+    tend(&cfg);
+    tend(&cfg);
+    assert!(out(&cfg).is_none(), "the release stands across retries");
+    assert!(!cfg.jobs.join(FILE).exists());
+    // proj's own release, with no hold in the overlay yet.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 10);
+    back(&cfg, None);
+    tend(&cfg);
+    assert!(out(&cfg).is_none());
+    // A pause set after the release is a newer decision and is kept.
+    legacy(&cfg, now() + 3600, now() + 1);
+    tend(&cfg);
+    assert!(out(&cfg).unwrap().owner);
+}
+
+#[test]
+fn a_refusal_at_the_deadline_after_natural_expiry_is_kept_but_a_release_hides_its_second() {
+    let (_d, cfg) = rig();
+    let past = now() - 5;
+    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
+    let expired = |until: i64| {
+        fs::write(
+            &overlay,
+            format!(r#"{{"usageHold":{{"until":{until},"reason":"x","since":0}}}}"#),
+        )
+        .unwrap();
+    };
+    expired(past);
+    // Even a door release of the expired hold keeps it a natural expiry.
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(&["usage-back".into()], "issue")
+        .unwrap();
+    // At the deadline's second: genuine.
+    earlier(&cfg, "a", now() + 7200, Some(past)).unwrap();
+    assert!(out(&cfg).is_some(), "a refusal at the deadline holds");
+    back(&cfg, None);
+    // An explicit release hides its own second, expiries before it too.
+    earlier(&cfg, "b", now() + 7200, Some(now())).unwrap();
+    assert!(out(&cfg).is_none(), "a same-second release is inclusive");
+}
+
+#[test]
+fn queued_jobs_keep_their_grace_after_an_owner_release_with_no_refusal_record() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 3600, "x").unwrap();
+    assert!(completed(&cfg).unwrap().owner && completed(&cfg).unwrap().back.is_none());
+    back(&cfg, None);
+    assert!(kept(&cfg).is_none());
+    let grace = completed(&cfg).expect("the release is the grace");
+    assert_eq!(grace.back, Some(grace.release()));
+    assert!(grace.release() >= now() - 2);
+    assert_eq!(completed(&cfg).unwrap().release(), grace.release(), "fixed");
+    // An older refusal does not shadow the later owner release.
+    let t = now();
+    record(&cfg, "j", Some(t + 100), "refused", t - 50).unwrap();
+}
+
+#[test]
+fn the_notice_follows_a_replacement_and_an_expired_hold_closes_it_with_retries() {
+    let (d, cfg) = rig();
+    hold(&cfg, now() + 3600, "first").unwrap();
+    assert_eq!(told(&d).len(), 1);
+    // A replacement by the door while the notice is open is told by the look.
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &[
+                "usage-hold".into(),
+                (now() + 7200).to_string(),
+                "second".into(),
+            ],
+            "issue",
+        )
+        .unwrap();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 2, "{:?}", told(&d));
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 2, "told once per hold, not hourly");
+    // Its deadline passes with no refusal record; the close is chased.
+    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
+    let past = now() - 5;
+    fs::write(
+        &overlay,
+        format!(r#"{{"usageHold":{{"until":{past},"reason":"x","since":0}}}}"#),
+    )
+    .unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    assert!(tend(&cfg).is_some(), "retried while unconfirmed");
+    assert!(told(&d).last().unwrap().starts_with("close"));
+    let n = told(&d).len();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), n + 1, "sent again until confirmed");
+    fs::remove_file(d.path().join("pending")).unwrap();
+    tend(&cfg);
+    let n = told(&d).len();
+    assert_eq!(tend(&cfg), None);
+    assert_eq!(told(&d).len(), n, "confirmed: nothing more");
+    // An unreadable journal doesn't cancel it either.
+    hold(&cfg, now() + 3600, "again").unwrap();
+    fs::write(overlay.with_extension("usage-end"), "{bad").unwrap();
+    assert!(tend(&cfg).is_some());
+}

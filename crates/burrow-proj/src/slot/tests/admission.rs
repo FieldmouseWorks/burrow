@@ -11,6 +11,7 @@ fn queued_automation_reloads_scope_and_explicitly_vacates_sorting() {
         overlay: tmp.path().join("overlay.json"),
         allowed: vec!["sam/box".into(), "sam/web".into()],
         pipeline_repos: vec!["sam/box".into()],
+        usage_lock: None,
     };
     cfg.settings = Some(settings.clone());
     let job = Job::new(&cfg, "queued");

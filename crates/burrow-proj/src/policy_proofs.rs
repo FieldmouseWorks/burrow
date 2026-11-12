@@ -140,6 +140,7 @@ mod tests {
             overlay: dir.path().join("overlay.json"),
             allowed: vec!["o/r".into()],
             pipeline_repos: vec![],
+            usage_lock: None,
         });
         reconcile(&cfg).unwrap();
         let args = fs::read_to_string(dir.path().join("args")).unwrap();

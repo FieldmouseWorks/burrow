@@ -155,6 +155,7 @@ fn admission_reads_the_one_overlay_and_writes_without_a_tracked_document() {
         overlay: d.path().join("overlay.json"),
         allowed: vec!["sam/kept".into()],
         pipeline_repos: vec!["sam/pipeline".into()],
+        usage_lock: None,
     };
     cfg.settings = Some(policy.clone());
     cfg.tracked_settings = None;
