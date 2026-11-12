@@ -11,7 +11,7 @@ impl Pass<'_> {
 
     /// Whether a sorting record holds one of the `at_once` slots: its job's,
     /// unless its question has been left for the owner, or it has ended with
-    /// no question open. `settle` first
+    /// no outstanding holds. `settle` first
     /// recovers the question's state under the job's lock, as a pass does;
     /// the live snapshot only reads, and takes it as it stands.
     pub(super) fn holds_sorting_slot(&self, d: &Path, settle: bool) -> bool {
@@ -35,7 +35,7 @@ impl Pass<'_> {
             if holds.iter().any(|h| h == "owner") {
                 return false;
             }
-            // A job that has ended holds a slot only for its open question.
+            // A job that has ended holds a slot only for its outstanding holds.
             // Its verdict's GitHub steps are the pass's own work, so one repo
             // whose steps keep failing can't hold every repo's planners.
             // state also recognizes terminal turns without an outcome (a
