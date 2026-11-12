@@ -335,29 +335,39 @@ fn main_not_building_with_a_pr_open_never_falls_back_to_a_bump() {
 }
 
 #[test]
-fn the_first_main_deploy_may_leave_a_bump_the_old_updater_put_live() {
-    // The old updater's bump (newer nixpkgs than main) is live; main's
-    // system is a downgrade from it. Once, that is allowed; after, it isn't.
+fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
+    // The old updater's bump (a commit main doesn't have) is live, recorded
+    // as its own: main's system may be a downgrade from it, and the switch
+    // is told to allow that. A system stamped with a commit of main, even
+    // one the updater recorded, keeps the switch's check.
+    let tree = |m: &Machine, rev: &str| {
+        let live = m.running();
+        fs::write(format!("{live}/revision"), format!("{rev}\n")).unwrap();
+        fs::write(m.cfg.state.join("deployed"), format!("{live}\n")).unwrap();
+    };
+    let deploy = |m: &Machine| {
+        m.landed("system.nix", &format!("unrelated {}", m.main()));
+        let _ = fs::remove_file(m.path("calls"));
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            "repos/sam/homelab/pulls?",
+            vec![ok(200, json!([]), &[])],
+        );
+        assert_eq!(once(&m.cfg, &mut gh, false), 0);
+        m.did("calls")
+    };
     let (m, _) = proposed();
-    m.landed("system.nix", "unrelated");
-    let mut gh = Fake::default();
-    gh.on(
-        "GET",
-        "repos/sam/homelab/pulls?",
-        vec![ok(200, json!([]), &[])],
-    );
-    assert_eq!(once(&m.cfg, &mut gh, false), 0);
-    assert!(m.did("calls").contains("--allow-downgrade"));
-    assert!(m.cfg.state.join("main-only").exists());
-    m.landed("system.nix", "unrelated again");
-    fs::remove_file(m.path("calls")).unwrap();
-    let mut gh = Fake::default();
-    gh.on(
-        "GET",
-        "repos/sam/homelab/pulls?",
-        vec![ok(200, json!([]), &[])],
-    );
-    assert_eq!(once(&m.cfg, &mut gh, false), 0);
-    assert!(switched(&m));
-    assert!(!m.did("calls").contains("--allow-downgrade"));
+    tree(&m, &sha('f'));
+    let calls = deploy(&m);
+    assert!(calls.contains("--allow-downgrade"), "{calls}");
+
+    let (m, _) = proposed();
+    tree(&m, &m.main());
+    let calls = deploy(&m);
+    assert!(calls.contains("switch --toplevel"), "{calls}");
+    assert!(!calls.contains("--allow-downgrade"), "{calls}");
+    // And once main is what runs, later deploys keep the check too.
+    let calls = deploy(&m);
+    assert!(!calls.contains("--allow-downgrade"), "{calls}");
 }

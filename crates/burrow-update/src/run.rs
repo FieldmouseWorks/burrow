@@ -379,7 +379,6 @@ impl Run<'_> {
         }
         if !self.changed && !self.memo.force && running::main_runs(cfg, &self.running, &self.main) {
             running::live_at(cfg, &self.main, &self.running.current).map_err(Broke)?;
-            self.handed_over();
             return Err(self.end(
                 Outcome::Current,
                 &format!("up to date{}", self.behind_said()),
@@ -470,10 +469,9 @@ impl Run<'_> {
                 }
             }
         }
-        // None of them built: main itself, with nothing new on it.
-        if self.git(&["rev-parse", "HEAD"])? == self.main {
-            self.changed = false;
-        }
+        // What's left is whatever of the bump built; none of it is main
+        // itself, with nothing new on it.
+        self.changed = self.git(&["rev-parse", "HEAD"])? != self.main;
         match running::build(cfg) {
             Some(new) => {
                 self.new = new;
@@ -651,7 +649,6 @@ impl Run<'_> {
         } else if let Err(why) = push::push_main(cfg) {
             println!("{why}");
         }
-        self.handed_over();
         self.bring_operator_along();
         let through = running::live_through(cfg, &self.main);
         running::live_at(cfg, &through, &self.new).map_err(Broke)?;
