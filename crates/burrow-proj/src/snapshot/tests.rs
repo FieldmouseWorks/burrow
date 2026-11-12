@@ -133,6 +133,7 @@ fn full() -> Snapshot {
                 drain: Some(Engine::Codex),
                 drain_jobs: 3,
                 sorting_at_once: 2,
+                waiting: Vec::new(),
             }),
         },
         jobs: vec![JobRow {

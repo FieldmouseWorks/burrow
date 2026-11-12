@@ -240,11 +240,22 @@ impl Pass<'_> {
             .count();
         let mut room = t.at_once.saturating_sub(going);
         for issue in all {
-            if room == 0 && !self.lane(issue) {
-                continue;
-            }
             let n = raw(&issue["number"]);
             if self.sorted(repo, &t, issue, &claimed) || handled.contains(&n) {
+                self.planner_wait(repo, &n, None);
+                continue;
+            }
+            if room == 0 && !self.lane(issue) {
+                let why = if dirs(&root, "").iter().any(|d| {
+                    d.file_name()
+                        .is_some_and(|f| f.to_string_lossy() == format!("{}-{n}", key(repo)))
+                        && read(&d.join("plan")).is_some()
+                }) {
+                    "its verdict's steps are still being carried out"
+                } else {
+                    "waiting for a planner slot: all atOnce sorting slots are held"
+                };
+                self.planner_wait(repo, &n, Some(why));
                 continue;
             }
             let d = root.join(format!("{}-{n}", key(repo)));
@@ -270,6 +281,7 @@ impl Pass<'_> {
                 }
             };
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
+            self.planner_wait(repo, &n, None);
             for (f, v) in [("updated", &updated), ("job", &id)] {
                 fs::write(d.join(f), format!("{v}\n")).map_err(|e| io_fail(&d.join(f), e))?;
             }
@@ -278,6 +290,32 @@ impl Pass<'_> {
             room = room.saturating_sub(1);
         }
         Ok(())
+    }
+
+    /// Records, once per change, that issue N waits (or no longer waits) for
+    /// a sorting slot: in the journal, and in `.triage-waiting/KEY-N` for the
+    /// snapshot.
+    fn planner_wait(&self, repo: &str, n: &str, why: Option<&str>) {
+        let dir = self.inbox.state.join(".triage-waiting");
+        let f = dir.join(format!("{}-{n}", key(repo)));
+        let had = read(&f);
+        match why {
+            Some(why) => {
+                let line = format!("{repo}#{n}: {why}");
+                if had.as_deref() != Some(line.as_str()) {
+                    eprintln!("proj-inbox: {line}");
+                    if fs::create_dir_all(&dir).is_ok() {
+                        let _ = fs::write(&f, &line);
+                    }
+                }
+            }
+            None => {
+                if had.is_some() {
+                    eprintln!("proj-inbox: {repo}#{n}: no longer waiting for a sorting slot");
+                    let _ = fs::remove_file(&f);
+                }
+            }
+        }
     }
 
     /// What a sorting job reads of the issue: its text and its authors'

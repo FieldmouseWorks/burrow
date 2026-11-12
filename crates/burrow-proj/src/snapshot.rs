@@ -283,6 +283,9 @@ pub struct Triage {
     pub drain: Option<Engine>,
     pub drain_jobs: usize,
     pub sorting_at_once: usize,
+    /// Issues waiting for a sorting slot, each with why.
+    #[serde(default)]
+    pub waiting: Vec<String>,
 }
 
 /// A job, as `proj status` lists it.
@@ -368,6 +371,11 @@ impl Snapshot {
                         out += &format!("  {issue} (enrolling)\n");
                     }
                 }
+            }
+        }
+        if let Some(t) = self.holds.triage.as_ref() {
+            for w in &t.waiting {
+                out += &format!("sorting: {w}\n");
             }
         }
         for (i, r) in self.queue.iter().take(5).enumerate() {
@@ -628,6 +636,20 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
         .collect()
 }
 
+/// The issues the inbox says wait for a sorting slot.
+fn waiting(cfg: &Config) -> Vec<String> {
+    let Some(i) = cfg.inbox.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = std::fs::read_dir(i.state.join(".triage-waiting"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| crate::read(&e.ok()?.path()))
+        .collect();
+    lines.sort();
+    lines
+}
+
 fn holds(cfg: &Config) -> Holds {
     Holds {
         paused: cfg.paused_repos(),
@@ -644,6 +666,7 @@ fn holds(cfg: &Config) -> Holds {
                 drain: t.drain,
                 drain_jobs: t.drain_jobs,
                 sorting_at_once: t.at_once,
+                waiting: waiting(cfg),
             }),
     }
 }
