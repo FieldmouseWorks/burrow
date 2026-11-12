@@ -1464,6 +1464,8 @@ name = "gh-token"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "burrow-github",
+ "burrow-process",
  "ring",
  "rustls-pki-types",
  "serde",

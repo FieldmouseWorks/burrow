@@ -318,6 +318,9 @@ impl<'a> Job<'a> {
                 held.push(format!("usage {engine} {reset}"));
             }
         }
+        if let Some((_, reset)) = self.facts().and_then(|f| f.quota_reset) {
+            held.push(format!("quota GitHub {reset}"));
+        }
         Ok((state, held))
     }
 
@@ -412,6 +415,12 @@ impl<'a> Job<'a> {
             } else {
                 Vec::new()
             },
+            quota_reset: read(&self.path("await")).and_then(|text| {
+                awaits(&text)
+                    .into_iter()
+                    .find(|a| a.target == crate::github_quota::LIMIT)
+                    .and_then(|a| Some((a.since.parse().ok()?, a.was.parse().ok()?)))
+            }),
             usage_reset: read(&self.path("await")).and_then(|text| {
                 awaits(&text)
                     .into_iter()

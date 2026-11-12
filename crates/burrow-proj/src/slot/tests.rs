@@ -968,3 +968,5 @@ fn retained_queue_renames_occupy_one_logical_project_place() {
 }
 
 mod pools;
+
+mod github;

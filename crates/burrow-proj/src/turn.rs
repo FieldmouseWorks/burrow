@@ -219,7 +219,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    for f in ["await", "await.next", "end.next", "ask.next"] {
+    for f in [
+        "await",
+        "await.next",
+        "end.next",
+        "ask.next",
+        "github/refusal",
+    ] {
         if !job.turn(&n, "retry-migration").exists() {
             let _ = crate::state_reads::remove(job.path(f));
         }
@@ -416,6 +422,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             rewatch_later(cfg, id);
             told
         };
+        // A GitHub refusal takes precedence over an engine's ask/done or
+        // the missing-declaration correction. Running peers are left alone.
+        if crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))? {
+            return Ok(());
+        }
         // Refused because the plan's usage is spent: so is every other
         // turn's, until the limit resets (usage.rs). This one gives up its
         // slot and waits in line again, where none is handed out till then,

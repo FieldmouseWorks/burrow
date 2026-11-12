@@ -131,12 +131,29 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
         help: &help,
         default: std::env::var("GH_TOKEN_OWNER").ok(),
     };
-    match token_for(
-        args,
-        std::env::var_os("GH_TOKEN").as_deref(),
-        socket,
-        &context,
-    ) {
+    let given = std::env::var_os("GH_TOKEN");
+    if given.as_deref().is_none_or(OsStr::is_empty)
+        && let Some(socket) = socket
+        && let (Some(dir), Ok(app)) = (
+            std::env::var_os("PROJ_GITHUB_DIR"),
+            std::env::var("PROJ_GITHUB_APP"),
+        )
+    {
+        let owner = match account::account(args, &context) {
+            Ok(owner) => owner,
+            Err(e) => return e,
+        };
+        let token = match fetch(socket, &owner) {
+            Ok(token) => token,
+            Err(e) => return e,
+        };
+        run.env("GH_TOKEN", &token);
+        return match crate::quota::run(&mut run, gh, &token, &app, &owner, Path::new(&dir)) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => Error::unavailable(format!("GitHub meter: {e}")),
+        };
+    }
+    match token_for(args, given.as_deref(), socket, &context) {
         Ok(Some(token)) => {
             run.env("GH_TOKEN", token);
         }

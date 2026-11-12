@@ -106,6 +106,39 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             if a.target.is_empty() {
                 continue;
             }
+            if a.target == crate::github_quota::LIMIT {
+                let reset = a.was.parse::<i64>().unwrap_or(0);
+                if reset > now() {
+                    lines.push_str(&a.line());
+                    retry.push((String::new(), reset));
+                } else if job.path(crate::github_quota::PENDING).exists() {
+                    let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                    if job.turns().as_deref() != Some(turn.as_str())
+                        || read(&f).as_deref() != Some(waits.as_str())
+                    {
+                        drop(held);
+                        continue 'jobs;
+                    }
+                    let replayed = crate::github_quota::replay(cfg, &job);
+                    drop(held);
+                    match replayed {
+                        Ok(due) => {
+                            if let Some(due) = due {
+                                retry.push((String::new(), due));
+                            }
+                            crate::waits::rewatch(cfg, &[&id]);
+                            continue 'jobs;
+                        }
+                        Err(e) => news.push_str(&format!(
+                            "- GitHub reset, but your saved await failed: {}\n",
+                            e.say.unwrap_or_else(|| format!("exit {}", e.code))
+                        )),
+                    }
+                } else {
+                    news.push_str("- GitHub quota has reset; carry on from the last turn\n");
+                }
+                continue;
+            }
             if a.target == USAGE_LIMIT {
                 if read(&job.turn(&turn, "engine")).as_deref() == Some("codex") {
                     let reset = a.was.parse::<i64>().unwrap_or(0);
@@ -281,7 +314,7 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
             else {
                 continue;
             };
-            if a.target == USAGE_LIMIT {
+            if a.target == USAGE_LIMIT || a.target == crate::github_quota::LIMIT {
                 if let Ok(due) = a.was.parse::<i64>()
                     && due > now
                 {

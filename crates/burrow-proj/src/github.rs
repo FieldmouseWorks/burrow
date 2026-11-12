@@ -8,6 +8,12 @@ use std::time::Instant;
 use serde_json::{Map, Value, json};
 
 use crate::config::Config;
+thread_local! {
+    static LIMITED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) fn take_limit() -> Option<u64> {
+    LIMITED.take()
+}
 
 /// OWNER/REPO and N from a PR or issue URL, or OWNER/REPO#N.
 pub fn target(t: &str) -> Option<(String, String)> {
@@ -133,7 +139,12 @@ pub(crate) fn client(cfg: &Config) -> Gh {
 /// Retries remain quiet until the shared client has given up.
 pub(crate) fn reported<T>(result: Result<T, burrow_github::Error>) -> Option<T> {
     result
-        .map_err(|e| eprintln!("proj: GitHub request failed: {e}"))
+        .map_err(|e| {
+            if let Some(at) = e.retry_at {
+                LIMITED.set(Some(at));
+            }
+            eprintln!("proj: GitHub request failed: {e}");
+        })
         .ok()
 }
 

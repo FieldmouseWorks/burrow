@@ -438,3 +438,26 @@ deadline. Active units and unknown lifecycle states stay protected.
 Completion (native or VM) or an explicit stop also closes the notice; a later question gets its own key even if
 an older close is still pending. Notification errors do not interrupt turn
 finalization, watchdog updates, completion kicks or scratch cleanup.
+
+### GitHub's installation quota
+
+Jobs treat GitHub quota as a meter. The gh door samples `GET /rate_limit`
+with the command's own installation token and records only the App, owner,
+remaining REST budget, reset, reading time and any primary or secondary
+hold. `proj usage` includes these readings; the typed
+`burrow_proj::github_quota::meters` view is available to the live snapshot.
+App plus owner identifies the installation across repositories and token
+renewals. A fresh reading cannot release a secondary hold before its reset.
+
+A turn that encounters a limit finishes its current run and parks until
+GitHub's reset. It publishes a host quota notice, without opening a question
+or a correction turn. Other running jobs continue; queued turns on that
+installation wait for the reset before taking a slot. Permission denials
+remain errors.
+
+`proj await` retains targets when quota prevents taking their baselines.
+The watcher registers them after reset without another engine turn, then
+resumes the job on news from those targets. If registration meets another
+limit it retains the intent and books that reset. A permission error or a
+target closed meanwhile resumes the job with the failed registration's
+cause. `proj stop` cancels these saved targets along with other waits.

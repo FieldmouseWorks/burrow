@@ -167,7 +167,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::out(cfg).is_some() {
+    if usage::out(cfg).is_some() || crate::github_quota::held(cfg, &job, Engine::Claude).is_some() {
         return Ok(None);
     }
     let slot = held(slot)?;
@@ -331,6 +331,9 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             remove_place(&queue.join(&name))?;
             continue;
         }
+        if crate::github_quota::held(cfg, &Job::new(cfg, fid), Engine::Claude).is_some() {
+            continue;
+        }
         if name == me {
             line.push(Waiter {
                 name,
@@ -385,6 +388,10 @@ fn codex_slot(
             let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
+        }
+        if crate::github_quota::held(cfg, &job, Engine::Codex).is_some() {
+            sleep(Duration::from_secs(2));
+            continue;
         }
         for i in 1..=cfg.codex_slots {
             let slot = File::create(slots.join(i.to_string()))?;
@@ -455,7 +462,7 @@ pub fn take(
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
             let _ = fs::remove_file(queue.join(&me));
-            if spent {
+            if spent || crate::github_quota::held(cfg, &job, Engine::Claude).is_some() {
                 usage::remind(cfg);
                 sleep(Duration::from_secs(2));
                 continue;

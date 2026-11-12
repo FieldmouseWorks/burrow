@@ -62,6 +62,8 @@ pub struct Facts {
     pub spent: Option<usage::Spent>,
     /// A Codex refusal waits for this reset, independently of Claude's hold.
     pub usage_reset: Option<(i64, i64)>,
+    /// A GitHub API refusal waits independently of either engine.
+    pub quota_reset: Option<(i64, i64)>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -71,6 +73,13 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let turn = &f.turn;
     let mut kick = None;
     let (since, due, phase) = match f.state.as_str() {
+        _ if !matches!(f.state.as_str(), "queued" | "running")
+            && !f.stopped
+            && let Some((since, reset)) = f.quota_reset =>
+        {
+            kick = Some(crate::watch::kick_for(crate::github_quota::LIMIT));
+            (since, reset + GRACE, "waiting for GitHub quota reset; proj-watch registers saved waits and resumes work then".to_owned())
+        }
         _ if !matches!(f.state.as_str(), "queued" | "running")
             && !f.stopped
             && let Some((since, reset)) = f.usage_reset =>
