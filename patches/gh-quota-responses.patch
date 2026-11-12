@@ -124,7 +124,7 @@
 +}
 --- /dev/null
 +++ b/api/burrow_quota_test.go
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,83 @@
 +package api
 +
 +import (
@@ -158,6 +158,8 @@
 +		{403, "/repos/o/r", "{}", http.Header{"X-Ratelimit-Remaining": []string{"0"}, "X-Ratelimit-Reset": []string{"4000000000"}}},
 +		{403, "/repos/o/r", `{"message":"permission denied"}`, nil},
 +		{200, "/graphql", `{"data":{"secret":"private"},"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++		{200, "/repos/o/r/contents/graphql", `{"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++		{200, "/repos/o/r/graphql", `{"errors":[{"type":"RATE_LIMITED"}]}`, nil},
 +	} {
 +		file := filepath.Join(t.TempDir(), "responses")
 +		if err := os.WriteFile(file, nil, 0600); err != nil {
@@ -167,7 +169,11 @@
 +		transport := quotaResponses(roundTripFunc(func(req *http.Request) (*http.Response, error) {
 +			return &http.Response{StatusCode: tc.status, Header: tc.headers, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
 +		}))
-+		req, _ := http.NewRequest("GET", "https://api.github.com"+tc.path, nil)
++		method := "GET"
++		if tc.path == "/graphql" {
++			method = "POST"
++		}
++		req, _ := http.NewRequest(method, "https://api.github.com"+tc.path, nil)
 +		resp, err := transport.RoundTrip(req)
 +		if err != nil {
 +			t.Fatal(err)
@@ -184,6 +190,9 @@
 +		}
 +		if err := json.Unmarshal(raw, &record); err != nil {
 +			t.Fatal(err)
++		}
++		if tc.path != "/graphql" && strings.Contains(record.Body, "RATE_LIMITED") {
++			t.Fatalf("repository content became quota evidence: %s", raw)
 +		}
 +		if record.Status != tc.status || strings.Contains(record.Body, "private") || strings.Contains(record.Body, "forged") {
 +			t.Fatalf("untrusted evidence: %s", raw)

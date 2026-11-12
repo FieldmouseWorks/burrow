@@ -693,3 +693,23 @@ fn replay_job_maximum_never_extends_the_failing_owners_installation() {
     assert_eq!(observed[0].owner, "sam");
     assert!(observed[0].retry_at.unwrap() < long);
 }
+
+#[test]
+fn replay_records_only_its_own_reset_in_the_installation_meter() {
+    let (d, mut cfg) = fixture();
+    cfg.host_github_app = Some("host-app".into());
+    let job = job(&cfg);
+    swap(job.path("link"), "sam/r#7").unwrap();
+    fs::write(d.path().join("limited"), "").unwrap();
+    // Another owner's long refusal widens the job's deadline.
+    let wide = now() as u64 + 90_000;
+    pending(&job, wide, vec!["sam/r#7".into()]);
+    let parked = replay(&cfg, &job).unwrap().unwrap();
+    assert_eq!(parked as u64, wide);
+    let own: Vec<_> = meters(&cfg)
+        .into_iter()
+        .filter(|m| m.owner == "sam")
+        .collect();
+    assert_eq!(own.len(), 1);
+    assert!(own[0].retry_at.unwrap() < wide, "job-wide maximum leaked");
+}

@@ -289,4 +289,57 @@ esac
             );
         }
     }
+
+    #[test]
+    fn a_probe_extension_notifies_the_watcher_again() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let d = tempfile::tempdir().unwrap();
+        let gh = d.path().join("gh");
+        burrow_test::executable(
+            &gh,
+            r#"#!/bin/sh
+if [ "$1 $2" = 'api rate_limit' ]; then
+ echo '{"resources":{"core":{"remaining":5,"reset":1},"graphql":{"remaining":0,"reset":4000000000}}}'
+ exit 0
+fi
+echo '{"status":403,"at":2000000000,"headers":[["retry-after","60"]],"body":"{}"}' >> "$BURROW_GH_RESPONSES"
+exit 1
+"#,
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/kick/proj-watch", listener.local_addr().unwrap());
+        let kicks = Arc::new(AtomicUsize::new(0));
+        let seen = kicks.clone();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf);
+                seen.fetch_add(1, Ordering::SeqCst);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let dir = d.path().join("meters");
+        run(
+            &mut Command::new(&gh),
+            Context {
+                gh: gh.to_str().unwrap(),
+                token: "t",
+                app: "workers",
+                owner: "sam",
+                dir: &dir,
+                refusals: None,
+                kick: Some(&url),
+            },
+        )
+        .unwrap();
+        // The short refusal woke the watcher; the longer GraphQL reset found
+        // by the probe afterwards must wake it again.
+        assert_eq!(kicks.load(Ordering::SeqCst), 2);
+    }
 }
