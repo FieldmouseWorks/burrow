@@ -2,7 +2,8 @@
 //! REVIEW_CONFIG names the file.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -38,6 +39,18 @@ pub struct Config {
     /// burrow-events' kick for the steward's passes:
     /// `http://127.0.0.1:PORT/kick/autoland`, a repo's under it.
     pub kick: String,
+    /// The file this was read from, and what it said then: the deployed
+    /// copy, which a switch replaces under a running service (load).
+    #[serde(skip)]
+    pub source: Option<(PathBuf, String)>,
+}
+
+/// Just the admission policy of a deployed config, which may be a newer
+/// one's, with fields this one doesn't know.
+#[derive(Deserialize)]
+struct Deployed {
+    #[serde(default)]
+    settings: Option<burrow_settings::Config>,
 }
 
 /// The reviewers this machine has: Codex is the only one.
@@ -76,18 +89,45 @@ pub struct Sandboxed {
 }
 
 impl Config {
+    /// Whether the repo's looks wait: the admission policy deployed now,
+    /// with its runtime overlay, decides, not the one the service started
+    /// with. One it can't read pauses everything.
     pub fn paused(&self, repo: &str) -> bool {
-        self.settings
+        let deployed;
+        let settings = match &self.source {
+            None => self.settings.as_ref(),
+            Some((path, _)) => {
+                deployed = fs::read(path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Deployed>(&b).ok())
+                    .and_then(|d| d.settings);
+                deployed.as_ref()
+            }
+        };
+        settings.is_none_or(|s| !s.allows(repo).unwrap_or(false))
+    }
+
+    /// Whether a switch has deployed another config since this one was
+    /// read: the next run is the new one's, so this one starts no more
+    /// looks (work.rs). One it can't read now hasn't moved.
+    pub fn moved(&self) -> bool {
+        self.source
             .as_ref()
-            .is_none_or(|s| !s.allows(repo).unwrap_or(false))
+            .is_some_and(|(path, was)| fs::read_to_string(path).is_ok_and(|now| now != *was))
     }
 
     /// The config REVIEW_CONFIG names.
     pub fn load() -> Result<Config, String> {
         let path = std::env::var_os("REVIEW_CONFIG").ok_or("REVIEW_CONFIG names no config")?;
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("{}: {e}", PathBuf::from(&path).display()))?;
-        Config::parse(&text).map_err(|e| format!("{}: {e}", PathBuf::from(&path).display()))
+        Config::read(Path::new(&path))
+    }
+
+    /// The config at path, which it reads again for what's deployed since.
+    pub fn read(path: &Path) -> Result<Config, String> {
+        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut cfg = Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        cfg.source = Some((path.to_owned(), text));
+        Ok(cfg)
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {

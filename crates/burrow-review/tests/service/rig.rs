@@ -118,7 +118,23 @@ impl Rig {
 
     /// The service, as its config is now.
     pub fn service(&self) -> Arc<Service> {
-        let cfg = Config::parse(&self.cfg.to_string()).unwrap();
+        self.with(Config::parse(&self.cfg.to_string()).unwrap())
+    }
+
+    /// The config as a switch deploys it, at the one path the service
+    /// reads it from (modules/autoland/review.nix): its path.
+    pub fn deploy(&self) -> PathBuf {
+        let path = self.path("review.json");
+        fs::write(&path, self.cfg.to_string()).unwrap();
+        path
+    }
+
+    /// The service as systemd starts it: from the deployed config.
+    pub fn deployed(&self) -> Arc<Service> {
+        self.with(Config::read(&self.deploy()).unwrap())
+    }
+
+    fn with(&self, cfg: Config) -> Arc<Service> {
         let journal = self.journal.clone();
         Arc::new(Service::new(
             cfg,

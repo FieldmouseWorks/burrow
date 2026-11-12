@@ -268,7 +268,9 @@ fn remove_all(path: &Path) -> io::Result<()> {
 /// pipeline's own (`pipelineRepos`), then to the oldest PR's: by when it
 /// was opened, not when its head came, so a PR pushed again keeps its
 /// place. One look at a time in a session: a PR's next head waits for the
-/// look at its last one, and resumes it.
+/// look at its last one, and resumes it. Looks the admission policy holds
+/// back wait here for it, until a switch deploys another config: then this
+/// run ends, and the queue watcher starts the new one's.
 pub fn work(s: Arc<Service>) {
     forget(&s);
     let _watch = s.logins.watch();
@@ -324,6 +326,14 @@ pub fn work(s: Arc<Service>) {
                 name.clone(),
             ));
         }
+        // A switch deployed another config: the looks under way finish (the
+        // policy they're held to is the deployed one's), none starts, and
+        // the next run, the new config's, takes the queue as it stands.
+        let moved = s.cfg.moved();
+        let handed = moved && (parked || !waiting.is_empty());
+        if moved {
+            waiting.clear();
+        }
         let mut sessions: HashSet<String> = busy.iter().map(|n| queue::session_of(n)).collect();
         for (r, mut names) in waiting {
             let parallel = s.cfg.reviewer(&r).map_or(0, |(_, rv)| rv.parallel);
@@ -346,6 +356,12 @@ pub fn work(s: Arc<Service>) {
             }
         }
         if busy.is_empty() {
+            if moved {
+                if handed {
+                    s.say("a new config is deployed: its run takes the queue");
+                }
+                break;
+            }
             if parked {
                 thread::sleep(AGAIN_EVERY);
                 continue;
