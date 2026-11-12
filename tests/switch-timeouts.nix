@@ -11,6 +11,10 @@ let
       systemd.settings.Manager = manager;
       systemd.services = services;
       systemd.targets.gate.after = [ "long.service" ];
+      # A target is after what it wants (unless it opts out of defaults).
+      systemd.targets.pulls.wants = [ "long.service" ];
+      systemd.targets.pulling = { };
+      systemd.targets.plain = { wants = [ "long.service" ]; unitConfig.DefaultDependencies = false; };
     } ];
   };
   refused = m: lib.concatMap (d: lib.filter (a: !a.assertion) d.value)
@@ -79,12 +83,14 @@ let
   abortBoundaryDefault = v: builtins.length (refused (machine
     { DefaultTimeoutAbortSec = v; } { probe = abortService { }; })) == 1;
   # A unit ordered after a long oneshot waits out its run in the switch:
-  # renovate-sweep behind renovate. Only the one the switch would restart.
+  # renovate-sweep behind renovate. Only the one the switch would restart,
+  # however the emitted units order it.
   oneshot = timeout: { serviceConfig = { Type = "oneshot"; ExecStart = "true"; TimeoutStartSec = timeout; }; };
   oneshotUnit = { Type = "oneshot"; ExecStart = "true"; };
   ordered = refused (machine { } {
-    long = (oneshot "2h") // { restartIfChanged = false; before = [ "viaBefore.service" ]; };
-    "long@" = (oneshot "2h") // { restartIfChanged = false; };
+    long = (oneshot "2h") // { restartIfChanged = false; before = [ "viaBefore.service" "off.service" ]; };
+    "long@" = (oneshot "2h") // { restartIfChanged = false; before = [ "consumer@%i.service" ]; };
+    pulled = (oneshot "2h") // { restartIfChanged = false; wantedBy = [ "pulling.target" ]; };
     aliased = (oneshot "2h") // { restartIfChanged = false; aliases = [ "other-name.service" ]; };
     short = (oneshot "30s") // { restartIfChanged = false; };
     off = (oneshot "2h") // { enable = false; };
@@ -103,6 +109,16 @@ let
     hop = { after = [ "behind.service" ]; serviceConfig = oneshotUnit; };
     hopLeft = { after = [ "left.service" ]; restartIfChanged = false; serviceConfig = oneshotUnit; };
     viaTarget = { after = [ "gate.target" ]; serviceConfig = oneshotUnit; };
+    viaWants = { after = [ "pulls.target" ]; serviceConfig = oneshotUnit; };
+    viaWantedBy = { after = [ "pulling.target" ]; serviceConfig = oneshotUnit; };
+    viaNoDefaults = { after = [ "plain.target" ]; serviceConfig = oneshotUnit; };
+    viaTab = { unitConfig.After = "network.target\tlong.service"; serviceConfig = oneshotUnit; };
+    # The instance long@worker is before consumer@worker, declared or not.
+    "consumer@worker" = { serviceConfig = oneshotUnit; };
+    # A disabled unit connects nothing, whoever names it.
+    bridged = { after = [ "off.service" ]; serviceConfig = oneshotUnit; };
+    # What an override replaced orders nothing.
+    overridden = { after = [ "long.service" ]; unitConfig.After = lib.mkForce "short.service"; serviceConfig = oneshotUnit; };
   });
   # The same handlers, with the event daemon off: still never restarted.
   noEvents = (lib.nixosSystem {
@@ -117,7 +133,7 @@ in
 assert lib.assertMsg (noEvents.probe.restartIfChanged == false && noEvents."probe@".restartIfChanged == false)
   "handler units restart on a switch when burrow.events is disabled";
 assert lib.assertMsg (builtins.length ordered == 1
-  && lib.hasInfix "behind, daemon, dotted, hop, instance, specifier, viaAlias, viaBefore, viaNative, viaTarget. Give each"
+  && lib.hasInfix "behind, consumer@worker, daemon, dotted, hop, instance, specifier, viaAlias, viaBefore, viaNative, viaTab, viaTarget, viaWantedBy, viaWants. Give each"
     (builtins.head ordered).message)
   "switch accepted a restartable unit ordered after a long oneshot";
 assert lib.assertMsg (builtins.length mixed == 1 && lib.hasInfix

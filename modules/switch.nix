@@ -150,39 +150,71 @@ let
   # A unit ordered after a long one waits for it too: the start the switch
   # queues for it sits behind the long one's run, whether or not the switch
   # left that one be (renovate-sweep behind a 13-minute renovate reverted a
-  # switch that had nothing wrong with it). Ordering is read as systemd reads
-  # it: After= and Before= from either side, the options and unitConfig, through
-  # aliases, template instances and targets, and transitively.
-  words = v: if builtins.isList v then lib.concatMap words v
-    else lib.filter (w: w != "") (lib.splitString " " (toString v));
-  unitsOf = kind: lib.mapAttrs' (n: s: lib.nameValuePair "${n}.${kind}" s)
-    config.systemd.${kind + "s"};
-  declared = unitsOf "service" // unitsOf "target";
-  aliasOf = lib.foldl' (acc: id: acc // lib.genAttrs
-    (words [ (declared.${id}.aliases or [ ]) (declared.${id}.unitConfig.Alias or [ ]) ]) (_: id))
-    { } (lib.attrNames declared);
-  # The declared unit a name stands for: itself, its alias's, or the template
-  # an instance (foo@bar.service, foo@%i.service) is made from.
-  canon = u:
+  # switch that had nothing wrong with it). The ordering is read from the
+  # units as they're emitted (so overrides have replaced what they replace,
+  # and a disabled unit connects nothing), as systemd reads it: After= and
+  # Before= from either side; a target after what it wants or requires,
+  # unless it says DefaultDependencies=no or either orders the other way
+  # round; an alias as its unit; an instance with its template's ordering as
+  # well as its own (a specifier, such as %i, standing for any instance); and
+  # on through every unit in between, which a job of its own can hold.
+  units = config.systemd.units;
+  enabled = lib.filterAttrs (_: u: u.enable) units;
+  tokens = v: lib.filter (w: builtins.isString w && w != "") (builtins.split "[[:space:]]+" v);
+  # Each ordering directive's final list: an empty assignment resets it.
+  directives = text: lib.foldl' (acc: line:
+    let m = builtins.match "(After|Before|Wants|Requires|Requisite|BindsTo|DefaultDependencies)=(.*)" line; in
+    if m == null then acc else
+      let k = builtins.elemAt m 0; v = tokens (builtins.elemAt m 1); in
+      acc // { ${k} = if v == [ ] then [ ] else acc.${k} or [ ] ++ v; }
+  ) { } (lib.splitString "\n" text);
+  parsed = lib.mapAttrs (_: u: directives u.text) enabled;
+  aliasOf = lib.listToAttrs (lib.concatLists (lib.mapAttrsToList (id: u:
+    map (a: lib.nameValuePair a id) (u.aliases or [ ])) enabled));
+  template = n: let m = builtins.match "([^@]*@).*(\\.[^.]*)" n; in
+    if m == null then null else builtins.elemAt m 0 + builtins.elemAt m 1;
+  # The unit a name stands for: itself, its alias's, or for an instance no
+  # unit declares, its template (which every instance's ordering takes in).
+  canon = n:
+    let a = aliasOf.${n} or n; t = template a; in
+    if units ? ${a} || t == null then a else aliasOf.${t} or t;
+  # A unit nothing here declares (one of systemd's own targets) still orders.
+  live = n: !(units ? ${n}) || units.${n}.enable;
+  field = id: k: map canon (parsed.${id}.${k} or [ ]);
+  wanting = lib.groupBy (e: e.to) (lib.concatLists (lib.mapAttrsToList (id: u:
+    map (t: { to = canon t; from = id; }) (u.wantedBy ++ u.requiredBy ++ u.upheldBy or [ ])) enabled));
+  explicitEdges = lib.concatLists (lib.mapAttrsToList (id: _:
+    map (p: { from = p; to = id; }) (field id "After")
+    ++ map (n: { from = id; to = n; }) (field id "Before")) enabled);
+  targetEdges = lib.concatLists (lib.mapAttrsToList (id: _:
     let
-      n = aliasOf.${u} or u;
-      m = builtins.match "([^@]*@).*(\\.[^.]*)" n;
-      tmpl = builtins.elemAt m 0 + builtins.elemAt m 1;
-    in if declared ? ${n} || m == null then n else aliasOf.${tmpl} or tmpl;
-  orderedAfter = s: map canon (words [ (s.after or [ ]) (s.unitConfig.After or [ ]) ]);
-  orderedBefore = s: map canon (words [ (s.before or [ ]) (s.unitConfig.Before or [ ]) ]);
-  edges = lib.concatLists (lib.mapAttrsToList (id: s:
-    map (p: { to = id; from = p; }) (orderedAfter s)
-    ++ map (succ: { to = succ; from = id; }) (orderedBefore s)) declared);
-  predecessors = lib.mapAttrs (_: map (e: e.from)) (lib.groupBy (e: e.to) edges);
-  behindLong = id: lib.any (x: lib.hasSuffix ".service" x.key && declared ? ${x.key} && long declared.${x.key})
+      d = parsed.${id}.DefaultDependencies or [ ];
+      members = lib.unique (lib.concatMap (field id) [ "Wants" "Requires" "Requisite" "BindsTo" ]
+        ++ map (e: e.from) (wanting.${id} or [ ]));
+    in lib.optionals (lib.hasSuffix ".target" id
+      && !(d != [ ] && builtins.elem (lib.toLower (lib.last d)) [ "no" "false" "0" "off" "n" "f" ]))
+      (map (u: { from = u; to = id; }) (lib.filter (u: u != id
+        && !(builtins.elem u (field id "Before"))
+        && !(enabled ? ${u} && builtins.elem id (field u "After"))) members))
+  ) enabled);
+  predecessorsOf = lib.mapAttrs (_: map (e: e.from)) (lib.groupBy (e: e.to)
+    (lib.filter (e: live e.from && live e.to) (explicitEdges ++ targetEdges)));
+  predecessors = id: predecessorsOf.${id} or [ ]
+    ++ (let t = template id; in lib.optionals (t != null && t != id) (predecessorsOf.${t} or [ ]));
+  # The service a unit runs as: its own, or its template's.
+  serviceOf = id:
+    let n = lib.removeSuffix ".service" id; t = template id; in
+    config.systemd.services.${n} or (if t == null then null
+      else config.systemd.services.${lib.removeSuffix ".service" t} or null);
+  behindLong = id: lib.any (x: lib.hasSuffix ".service" x.key && live x.key
+      && (let s = serviceOf x.key; in s != null && long s))
     (builtins.genericClosure {
-      startSet = map (key: { inherit key; }) (predecessors.${id} or [ ]);
-      operator = x: map (key: { inherit key; }) (predecessors.${x.key} or [ ]);
+      startSet = map (key: { inherit key; }) (predecessors id);
+      operator = x: map (key: { inherit key; }) (predecessors x.key);
     });
-  longOneshots = lib.sort lib.lessThan (map (id: lib.removeSuffix ".service" id) (lib.attrNames (lib.filterAttrs (id: s:
-    lib.hasSuffix ".service" id && s.enable && s.restartIfChanged && (long s || behindLong id)
-  ) declared)));
+  longOneshots = lib.attrNames (lib.filterAttrs (n: s:
+    s.enable && s.restartIfChanged && (long s || behindLong "${n}.service")
+  ) config.systemd.services);
 in
 {
   imports = [
