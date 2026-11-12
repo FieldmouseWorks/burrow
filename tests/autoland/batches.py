@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory() as tmp:
         C.NOW = 1000
         C.save('watch.json', {'at': 1000, 'items': {'sam/b#7': dict(repo='sam/b', since=10, rev='head-7', phase='CI')}})
         C.save('digest-repos.json', {'sam/c': [['Owner', '[sam/c#1](url)', 'untouched']]})
-        for turn in range(3):
+        for turn in range(4):
             C.WAKE.clear()
             try:
                 if turn:
@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert trains == branches == ['sam/a'], (trains, branches)
                 assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
                 assert C.load('digest-repos.json', {})['sam/c'][0][2] == 'untouched'
-            if turn < 2:
+            if turn < 3:
                 assert C.load('continue.json', {})[''] <= C.NOW + 1
                 assert hooks == [], hooks
             C.NOW += 601
@@ -104,7 +104,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert all(x['covered'] for x in C.load('repos.json', {})['repos'].values())
         assert C.load('digest-repos.json', {})['sam/a'][0][0] == 'Owner'
         assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
-        assert len(publications) == 3
+        assert len(publications) == 4
         assert C.load('wake.json', {})['sam/b'] == 11000
 
     # A cursor cannot carry a settlement past changed decision inputs.

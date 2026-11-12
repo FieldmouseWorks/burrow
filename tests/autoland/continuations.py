@@ -84,10 +84,10 @@ with tempfile.TemporaryDirectory() as tmp:
 
                 with patch.object(obj, name, slow):
                     S.run_pass(kick)
-                assert handled == [(1, 'before', None)], (kick, name, handled)
+                assert handled == [(1, 'before', None), (2, 'before', None)], (kick, name, handled)
                 progress = C.load('pass-progress.json', {})
-                assert '1' in progress['repos']['sam/r']['done'], (kick, name, progress)
-                assert C.load('continue.json', {}), (kick, name)
+                assert progress['repos'] == {}, (kick, name, progress)
+                assert (state / 'watch.json').exists(), (kick, name)
     print('slow preparation makes durable progress: passed')
 
     # A normal full pass consumes repository events in Line.take. Finished
@@ -139,6 +139,39 @@ with tempfile.TemporaryDirectory() as tmp:
             assert handled[-1][1] == source, handled
             if source == 'stacking relationship':
                 assert handled[-1][2] == 2, handled
+    # A stream of new-work kicks must rotate old receipts too, rather than
+    # repeatedly selecting the same first PR after every invalidation.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs.append(pr(3))
+        batch = Batch(['sam/r'], continuing=True)
+        for p in prs:
+            batch.note('sam/r', p, [], True, info)
+        batch.end(False, ['sam/r'])
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.step, 'handle', long):
+            for _ in range(3):
+                S.run_pass(['sam/r'])
+        assert [n for n, _, _ in handled] == [1, 2, 3], handled
+        S.run_pass(['sam/r'], continuing=True)
+        assert C.load('pass-progress.json', {})['repos'] == {}
+    # Startup catch-up on the continuation line consumes its per-repo
+    # requests too. A partial kicked traversal must still run when there
+    # is no active fleet-wide traversal, without processing unrelated repos.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        repos.append({'repo': 'sam/q', 'default': 'main'})
+        batch = Batch(['sam/r'], continuing=True)
+        batch.note('sam/r', prs[0], [], True, info)
+        batch.end(False, ['sam/r'])
+        C.save('wake.json', {'sam/q': C.NOW - 1})
+        S.run_pass(None, continuing=True)
+        assert handled == [(2, 'before', None)], handled
+        assert C.load('pass-progress.json', {})['repos'] == {}
+        assert C.load('wake.json', {})['sam/q'] > C.NOW
     # Expired decision deadlines also invalidate an internal receipt once,
     # rather than perpetually carrying the expired time into the next batch.
     with fixture() as (clock, handled, facts, repos, prs, info):
@@ -153,7 +186,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # An old repository failure is retained while its operation is deferred;
     # a failed retry preserves its original deadline, and success clears it.
-    for operation in ('train', 'branches', 'upkeep'):
+    for operation in ('train', 'train unavailable', 'branches', 'upkeep'):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
                        phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
@@ -169,12 +202,14 @@ with tempfile.TemporaryDirectory() as tmp:
             assert C.load('watch.json', {})['items']['sam/r'] == old, operation
 
             def fail(*args, **kwargs):
+                if operation == 'train unavailable':
+                    raise C.Unavailable('temporarily unavailable')
                 if operation == 'upkeep':
                     S.failing('sam/r', 'its upkeep failed')
                 else:
                     raise RuntimeError('still failing')
 
-            obj, name = (S.T, 'step') if operation == 'train' else (S, operation)
+            obj, name = (S.T, 'step') if operation.startswith('train') else (S, operation)
             with patch.object(obj, name, fail):
                 C.NOW += 600
                 S.run_pass(None, continuing=True)
@@ -184,6 +219,24 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(['sam/r'])
             assert 'sam/r' not in C.load('watch.json', {})['items'], operation
     print('deferred operation failures keep their original watchdog clocks: passed')
+
+    # Exhausting the work slice on the final PR still defers repository
+    # operations; the continuation can run them without repeating the PR.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = prs[:1]
+        operations = []
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.T, 'step', operations.append):
+            with patch.object(S.step, 'handle', long):
+                S.run_pass(['sam/r'])
+            assert operations == [], operations
+            S.run_pass(['sam/r'], continuing=True)
+        assert operations == ['sam/r'] and len(handled) == 1, (operations, handled)
 
     with fixture() as (clock, *_):
         seen = []

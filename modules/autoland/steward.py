@@ -141,7 +141,7 @@ def main():
                     sys.exit(75)
             return
     try:
-        with C.pass_deadline(18 * MIN):
+        with C.pass_deadline(C.PASS_SECONDS):
             run_pass(kick, continuing)
     except C.Unavailable as e:
         # GitHub didn't answer where no repo's own pass catches it (finding
@@ -256,7 +256,7 @@ def run_pass(kick, continuing=False):
     started = 0
     # What waits for the owner, by repo: a kicked pass replaces its repos'.
     digest = {}
-    if kick is None and not DRY:
+    if kick is None and batch.traversal_full and not DRY:
         C.follow_renames({r["repo"].lower() for r in all_repos})
         retire_deleted(known, failed, digest)
     live = {}  # the repos whose PRs it read: their heads' snapshots
@@ -271,6 +271,7 @@ def run_pass(kick, continuing=False):
         repo = r["repo"]
         seen.add(repo)
         deferred.add(repo)
+        operations_complete = True
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
             try:
@@ -358,7 +359,7 @@ def run_pass(kick, continuing=False):
                     batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
                 # Swept only once it has every open PR's head: one whose look
                 # failed before then would have the sweep take what's theirs.
-                if partial:
+                if partial or batch.expired():
                     complete = False
                     continue
                 # A partial traversal leaves all reviewer files alone. Once
@@ -379,13 +380,13 @@ def run_pass(kick, continuing=False):
                         T.step(repo)
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
-                        waits.failed(repo)
+                        operations_complete = False
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
-                branches(repo, r["default"], in_use, mine, full=kick is None)
+                branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
@@ -393,8 +394,11 @@ def run_pass(kick, continuing=False):
             upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
-            batch.finish(repo)
-            deferred.discard(repo)
+            if operations_complete:
+                batch.finish(repo)
+                deferred.discard(repo)
+            else:
+                complete = False
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     if kick is None and not continuing:
@@ -407,16 +411,17 @@ def run_pass(kick, continuing=False):
                 C.wake(r["repo"], C.NOW + 1)  # ends: its ordinary pass re-evaluates every decision input
     inventory = {r["repo"] for r in all_repos}
     names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
+    visited.update(r.lower() for r in kick or () if r.lower() not in names)
     wakes = {k: max(v, C.NOW + 1) for k, v in load("wake.json", {}).items()
-             if k.lower() not in visited and (k == "" or k.lower() in names)
-             and (k != "" or kick is not None or continuing)}
+             if k.lower() not in visited and (k == "" or k.lower() in names or v > C.NOW)
+             and (k != "" or kick is not None or continuing or v > C.NOW)}
     save("wake.json", {**wakes, **C.WAKE})
     digest = {**{k: v for k, v in load("digest-repos.json", {}).items()
                  if k not in seen and (kick is not None or k in inventory)}, **digest}
     digest = {k: list(dict.fromkeys(tuple(x) for x in v)) for k, v in digest.items()}
     save("digest-repos.json", digest)
     waits.publish(seen, digest, False, inventory=inventory if kick is None else None, deferred=deferred)
-    if kick is None:
+    if kick is None and batch.traversal_full:
         # For renovate-sweep: it lists the ok majors of the repos this pass
         # didn't see to (one whose pass failed among them), and tells its
         # jobs how every repo's proofs run.
@@ -439,7 +444,7 @@ def run_pass(kick, continuing=False):
         # failure mustn't lose the remainder of this batch.
         log("pass yielded; continuing from its saved PR and repo cursors")
     batch.end(complete, kick)
-    if kick is None and complete:
+    if kick is None and batch.traversal_full and complete:
         R.hooks(all_repos)
     # Last: GitHub failing it leaves the pass's state saved. A line more than
     # one repo has (a reviewer out of service) is listed once. The stalls the

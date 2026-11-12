@@ -39,8 +39,8 @@ its own baseline job. A pass that fails partway, or finds a review still
 under way, does it all again on the next.
 
 Steward passes stop taking new PR steps after eight minutes once they have
-advanced durable work. Slow preparation still permits the first PR attempt;
-remote calls share an eighteen-minute deadline to leave publication time
+advanced durable work. Slow preparation gets a useful work slice rather than restarting without
+processing PRs; remote calls share an eighteen-minute deadline to leave publication time
 before systemd's hard timeout. A contending pass requeues on its own event
 line instead of spending that deadline waiting for the other pass's lock.
 

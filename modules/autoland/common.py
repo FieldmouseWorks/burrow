@@ -76,6 +76,7 @@ LIMITED = []
 # A network call must return before the unit's twenty-minute deadline so
 # the pass can report what stalled and book its normal unavailable retry.
 REMOTE_TIMEOUT = 120
+PASS_SECONDS = 18 * MIN
 REMOTE_DEADLINE = None
 
 

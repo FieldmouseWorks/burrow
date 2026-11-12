@@ -14,7 +14,7 @@ import time
 import common as C
 
 FILE = "pass-progress.json"
-SECONDS = 8 * C.MIN  # twelve minutes remain for one step and publishing state
+SECONDS = 8 * C.MIN  # soft work slice, also bounded by C.PASS_SECONDS
 
 
 class Batch:
@@ -22,26 +22,40 @@ class Batch:
         self.full = kick is None
         self.continuing = continuing
         self.advanced = False
-        self.until = time.monotonic() + SECONDS
+        start = time.monotonic()
+        self.until = start + SECONDS
+        self.hard_until = start + C.PASS_SECONDS
         self.state = C.load(FILE, {})
         self.state.setdefault("repos", {})
         self.state.setdefault("finished", [])
+        self.traversal_full = self.state.get("full", False) or (self.full and not continuing)
 
     def repos(self, repos):
         names = {r["repo"] for r in repos}
         self.state["repos"] = {k: v for k, v in self.state["repos"].items() if k in names}
         self.state["finished"] = [k for k in self.state["finished"] if k in names]
+        if self.full and self.continuing and not self.traversal_full:
+            # The event runner's startup full catch-up also consumes due
+            # per-repo continuations. Resume those cursors, not the fleet.
+            return [r for r in repos if r["repo"] in self.state["repos"]]
         return [r for r in repos if not self.full or r["repo"] not in self.state["finished"]]
 
     def active(self, kick):
         if not self.continuing:
             return True
-        return self.state.get("full", False) if kick is None else any(r.lower() in kick for r in self.state["repos"])
+        if kick is None:
+            return self.traversal_full or bool(self.state["repos"])
+        return any(r.lower() in kick for r in self.state["repos"])
 
     def expired(self):
-        # Slow discovery/preparation must not prevent the first durable step.
-        # main's remote deadline still reserves time before systemd's limit.
-        return self.advanced and time.monotonic() >= self.until
+        now = time.monotonic()
+        if not self.advanced:
+            # Slow preparation gets a useful work slice, bounded by the
+            # remote deadline; it must not cause repeated zero-work passes.
+            if now >= self.until:
+                self.until = min(now + SECONDS, self.hard_until)
+            return False
+        return now >= self.until
 
     def digest(self, repo):
         return list(self.state["repos"].get(repo, {}).get("digest", []))
@@ -82,7 +96,9 @@ class Batch:
         return hashlib.sha256(json.dumps([value, info, C.CFG], sort_keys=True).encode()).hexdigest()
 
     def visited(self, repo, pr):
-        return str(pr["number"]) in self.state["repos"].get(repo, {}).get("done", {})
+        st = self.state["repos"].get(repo, {})
+        key = str(pr["number"])
+        return st.get("visits", {}).get(key, 1) if key in st.get("done", {}) else 0
 
     def stopped(self, repo):
         return self.state["repos"].get(repo, {}).get("stopped")
@@ -92,6 +108,8 @@ class Batch:
 
     def note(self, repo, pr, mine, seen_to, info, stopped=None):
         st = self.state["repos"].setdefault(repo, {"done": {}})
+        st["sequence"] = st.get("sequence", 1) + 1
+        st.setdefault("visits", {})[str(pr["number"])] = st["sequence"]
         st["done"][str(pr["number"])] = self.rev(pr, info)
         st["digest"] = mine
         st["seen_to"] = seen_to
@@ -102,11 +120,11 @@ class Batch:
     def finish(self, repo):
         self.advanced = True
         self.state["repos"].pop(repo, None)
-        if (self.full or self.state.get("full")) and repo not in self.state["finished"]:
+        if self.traversal_full and repo not in self.state["finished"]:
             self.state["finished"].append(repo)
 
     def end(self, complete, kick):
-        if self.full:
+        if self.full and self.traversal_full:
             self.state["full"] = not complete
             if complete:
                 self.state["finished"] = []
