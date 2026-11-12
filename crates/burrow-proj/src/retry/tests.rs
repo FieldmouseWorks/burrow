@@ -12,6 +12,12 @@ mod legacy_pick;
 #[allow(dead_code)]
 #[path = "fixtures/slot.rs"]
 mod legacy_slot;
+#[allow(dead_code)]
+#[path = "fixtures/nonblocking/pick.rs"]
+mod nonblocking_pick;
+#[allow(dead_code)]
+#[path = "fixtures/nonblocking/slot.rs"]
+mod nonblocking_slot;
 
 const MODE: &str = "BURROW_RETRY_TEST_MODE";
 const ROOT: &str = "BURROW_RETRY_TEST_ROOT";
@@ -157,7 +163,7 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     fs::write(job.turn("1", "jsonl"), "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your monthly spend limit\"}\n").unwrap();
     fs::write(job.path("engine"), read(&job.turn("1", "engine")).unwrap()).unwrap();
     Identity::capture(&job, "1").unwrap();
-    let exe = if mode.starts_with("old") {
+    let exe = if mode.starts_with("old") || mode.starts_with("nb") {
         r.tmp.path().join("old/burrow-proj")
     } else {
         std::env::current_exe().unwrap()
@@ -198,7 +204,7 @@ fn child() {
         .nth(1)
         .unwrap();
     let job = Job::new(&cfg, &id);
-    if mode.starts_with("old-running") {
+    if mode.starts_with("old-running") || mode.starts_with("nb-running") {
         let (path, label) = if mode.ends_with("codex") {
             fs::create_dir_all(cfg.jobs.join(".codex-slots")).unwrap();
             (".codex-slots/1", "codex-1")
@@ -225,7 +231,15 @@ fn child() {
         fs::remove_file(job.turn("1", "slot")).unwrap();
         drop(file);
     }
-    if mode == "old-delayed" {
+    if mode == "nb-inherited" {
+        // A handover's fd 9: the census left open, not close-on-exec, for
+        // the parent's whole life, outside any wait for a slot.
+        let fd9 = File::create(cfg.jobs.join(".slots/.lock")).unwrap();
+        rustix::io::fcntl_setfd(&fd9, rustix::io::FdFlags::empty()).unwrap();
+        std::mem::forget(fd9);
+        fs::write(job.path("inherited"), "").unwrap();
+    }
+    if mode == "old-delayed" || mode == "nb-inherited" {
         while !job.path("publish").exists() {
             sleep(Duration::from_millis(10));
         }
@@ -243,6 +257,18 @@ fn child() {
             engine::Engine::Codex,
         )
         .unwrap()
+    } else if mode == "nb-codex" {
+        nonblocking_slot::take_engine(
+            &cfg,
+            &id,
+            "1",
+            nonblocking_pick::Class::Normal,
+            false,
+            engine::Engine::Codex,
+        )
+        .unwrap()
+    } else if mode.starts_with("nb") {
+        nonblocking_slot::take(&cfg, &id, "1", nonblocking_pick::Class::Normal, false).unwrap()
     } else if mode.starts_with("old") {
         legacy_slot::take(&cfg, &id, "1", legacy_pick::Class::Normal, false).unwrap()
     } else {
@@ -944,4 +970,5 @@ mod review3;
 
 mod review4;
 
+mod nonblocking;
 mod rollback;
