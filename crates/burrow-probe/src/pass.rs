@@ -106,7 +106,14 @@ fn answers(
     answer: &mut dyn FnMut(&Query) -> Result<String, String>,
     now: &str,
 ) -> Vec<String> {
-    let asked = asked(issue);
+    // Redact each complete request field before normalization, question
+    // limits, clipping or pagination can separate a key's markers from its
+    // payload. Scrubbing individual refusals cannot recover that context.
+    let request = serde_json::json!({
+        "title": scrub(issue["title"].as_str().unwrap_or("")).as_str(),
+        "body": scrub(issue["body"].as_str().unwrap_or("")).as_str(),
+    });
+    let asked = asked(&request);
     let header = scrub(&format!(
         "{MARK}\nThe probe on {}, at {now}:\n",
         clip(&cfg.host, MAX_ECHO)

@@ -938,3 +938,6 @@ fn paginated_required_usage_is_scrubbed_before_splitting_and_fenced_safely() {
     assert!(pages.join("\n").contains('é'));
     assert_eq!(gh.asked("PATCH").len(), 1);
 }
+
+#[path = "pass_secret_tests.rs"]
+mod secret_tests;
