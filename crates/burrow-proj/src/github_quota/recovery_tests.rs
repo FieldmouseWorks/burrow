@@ -9,6 +9,7 @@ fn pending(job: &Job, due: u64, targets: Vec<String>) {
             targets,
             retry_at: due,
             turn: job.turns().unwrap(),
+            baselines: String::new(),
         })
         .unwrap(),
     )
@@ -35,7 +36,7 @@ fn due(job: &Job) {
             fs::write(entry.path(), serde_json::to_vec(&m).unwrap()).unwrap();
         }
     }
-    swap(job.path("await"), format!("{LIMIT}\t100\t1\n")).unwrap();
+    park(job, 1).unwrap();
 }
 
 fn job(cfg: &Config) -> Job<'_> {
@@ -224,7 +225,7 @@ fn host_registration_and_replay_attribute_the_configured_client() {
         assert_eq!(initial[0].app, "host-app");
         // Shorten only the stored fixture evidence to prove replay renews
         // the host's installation, not the engine's selected App.
-        for e in fs::read_dir(job.path("github"))
+        for e in fs::read_dir(cfg.github_meters.as_ref().unwrap())
             .unwrap()
             .filter_map(Result::ok)
         {
@@ -266,6 +267,7 @@ fn observation_and_publication_failures_keep_the_intent_without_an_engine() {
     fs::create_dir(job.turn("1", "outcome")).unwrap_err(); // existing completed declaration
     fs::remove_file(job.turn("1", "outcome")).unwrap();
     fs::create_dir(job.turn("1", "outcome")).unwrap();
+    swap(job.turn("1", "end"), "await").unwrap();
     due(&job);
     crate::watch::look(&cfg, "").unwrap();
     assert_eq!(job.turns().as_deref(), Some("1"));
@@ -306,7 +308,7 @@ case "$*" in */comments*) if [ -e '{0}/reset' ]; then echo '[{{"body":"news"}}]'
         None,
     )
     .unwrap();
-    let original = captured(&job);
+    let original = captured(&job).unwrap();
     assert!(original.starts_with("sam/r#7\t"));
     assert!(!original.contains("sam/r#8"));
     finish(&job, "1").unwrap();
@@ -449,10 +451,10 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
     fs::create_dir_all(&observer).unwrap();
     let mut m = Meter::new("workers", "sam", now() as u64);
     m.retry_at = Some((now() + 3600) as u64);
-    m.record(&observer.join("github")).unwrap();
+    m.record(cfg.github_meters.as_ref().unwrap()).unwrap();
     for deadline in [now() + 3600, now() + 7200, now() - 1] {
         m.retry_at = Some(deadline as u64);
-        let file = fs::read_dir(observer.join("github"))
+        let file = fs::read_dir(cfg.github_meters.as_ref().unwrap())
             .unwrap()
             .filter_map(Result::ok)
             .find(|e| e.path().extension().is_some_and(|s| s == "json"))
@@ -503,7 +505,7 @@ esac
         ),
     );
     assert!(replay(&cfg, &job).unwrap().is_some());
-    valid_records(&captured(&job), &["sam/r#1"]);
+    valid_records(&captured(&job).unwrap(), &["sam/r#1"]);
     // The next attempt must retain this baseline rather than hiding news
     // that arrived between the two reset windows.
     burrow_test::executable(
@@ -525,4 +527,169 @@ esac
         read(&d.path().join("first-calls")).as_deref(),
         Some("called")
     );
+}
+
+#[test]
+fn job_files_cannot_impose_installation_holds_or_meter_readings() {
+    let (d, cfg) = fixture();
+    let job = job(&cfg);
+    swap(job.path("app"), "workers").unwrap();
+    swap(job.path("link"), "sam/r#7").unwrap();
+    for (app, owner) in [("workers", "sam"), ("other", "elsewhere")] {
+        let mut forged = Meter::new(app, owner, now() as u64);
+        forged.remaining = Some(0);
+        forged.reset = Some(9999999999);
+        forged.retry_at = Some(9999999999);
+        fs::create_dir_all(job.path("github")).unwrap();
+        forged.record(&job.path("github")).unwrap();
+        swap(
+            job.path("github").join("unrelated-filename.json"),
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+    }
+    assert!(meters(&cfg).is_empty());
+    assert!(held(&cfg, &job, Engine::Codex).is_none());
+    let json = serde_json::to_value(crate::snapshot::Snapshot::take(&cfg, 15).unwrap()).unwrap();
+    assert!(
+        json["meters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v.get("installation").is_none())
+    );
+    // Replacing a former observation and changing labels are no authority.
+    swap(job.path("app"), "other").unwrap();
+    assert!(held(&cfg, &job, Engine::Codex).is_none());
+    let _ = d;
+}
+
+#[test]
+fn initial_intent_commits_its_prefix_even_when_archive_publication_fails() {
+    let (d, cfg) = fixture();
+    let job = job(&cfg);
+    burrow_test::executable(
+        &cfg.tools.gh,
+        format!(
+            r#"#!/bin/sh
+case "$*" in
+ *issues/2*) mkdir -p '{0}/1.github-awaits'; printf 'HTTP/2.0 403 Forbidden\nretry-after: 120\n\n{{}}'; exit 1;;
+ *comments*) printf 'HTTP/2.0 200 OK\n\n[]';;
+ *) printf 'HTTP/2.0 200 OK\n\n{{"state":"open"}}';;
+esac
+"#,
+            job.dir.display()
+        ),
+    );
+    let found = [("sam/r".into(), "1".into()), ("sam/r".into(), "2".into())];
+    assert!(
+        crate::cmd::record_wait(
+            &cfg,
+            &job,
+            &found,
+            &["sam/r#1".into(), "sam/r#2".into()],
+            None
+        )
+        .is_err()
+    );
+    let saved = read(&job.path(PENDING)).unwrap();
+    let p: Pending = serde_json::from_str(&saved).unwrap();
+    valid_records(&p.baselines, &["sam/r#1"]);
+    due(&job);
+    crate::watch::look(&cfg, "").unwrap();
+    assert_eq!(job.turns().as_deref(), Some("1"));
+    assert!(job.path(PENDING).exists());
+    fs::remove_dir(job.turn("1", "github-awaits")).unwrap();
+    burrow_test::executable(
+        &cfg.tools.gh,
+        format!(
+            r#"#!/bin/sh
+case "$*" in
+ *issues/1*) touch '{0}/recaptured'; exit 1;;
+ *comments*) printf 'HTTP/2.0 200 OK\n\n[]';;
+ *) printf 'HTTP/2.0 200 OK\n\n{{"state":"open"}}';;
+esac
+"#,
+            d.path().display()
+        ),
+    );
+    crate::watch::look(&cfg, "").unwrap();
+    assert!(!d.path().join("recaptured").exists());
+    valid_records(&read(&job.path("await")).unwrap(), &["sam/r#1", "sam/r#2"]);
+}
+
+#[test]
+fn unreadable_intent_archive_and_publication_are_retried_without_recapture() {
+    for file in [PENDING, "1.github-awaits", "await", "await.next"] {
+        let (d, cfg) = fixture();
+        let job = job(&cfg);
+        pending(&job, 1, vec!["sam/r#7".into()]);
+        due(&job);
+        remember(&job, "sam/r#1\t1\t{}\n").unwrap();
+        let path = job.path(file);
+        let saved = state(&path).unwrap();
+        if saved.is_some() {
+            fs::remove_file(&path).unwrap();
+        }
+        fs::create_dir(&path).unwrap();
+        burrow_test::executable(
+            &cfg.tools.gh,
+            format!(
+                "#!/bin/sh\ntouch '{}/recaptured'\nexit 1\n",
+                d.path().display()
+            ),
+        );
+        crate::watch::look(&cfg, "").unwrap();
+        assert!(!d.path().join("recaptured").exists(), "{file}");
+        assert!(path.is_dir(), "{file}");
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        let wake: serde_json::Value = serde_json::from_str(&read(&cfg.wake).unwrap()).unwrap();
+        assert!(wake[""].as_i64().is_some(), "{file}: {wake}");
+    }
+}
+
+#[test]
+fn old_markers_and_interrupted_cancellation_cannot_revive_work() {
+    for stopped in [false, true] {
+        let (_d, cfg) = fixture();
+        let job = job(&cfg);
+        pending(&job, 1, vec!["sam/r#7".into()]);
+        due(&job);
+        remember(&job, "sam/r#1\t1\t{}\n").unwrap();
+        swap(job.path("await.next"), "old unowned baseline").unwrap();
+        if stopped {
+            swap(job.turn("1", "stopped"), "").unwrap();
+        } else {
+            job.set_turns(2).unwrap();
+            swap(job.turn("2", "outcome"), "failed").unwrap();
+        }
+        crate::watch::look(&cfg, "").unwrap();
+        if stopped {
+            assert_eq!(job.turns().as_deref(), Some("1"));
+            assert!(job.path(PENDING).exists());
+        } else {
+            assert_eq!(job.turns().as_deref(), Some("2"));
+            assert_eq!(read(&job.turn("2", "outcome")).as_deref(), Some("failed"));
+            assert!(reset(&job, "2").is_none());
+            assert!(captured(&job).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn replay_job_maximum_never_extends_the_failing_owners_installation() {
+    let (d, mut cfg) = fixture();
+    cfg.host_github_app = Some("host".into());
+    let job = job(&cfg);
+    let long = (now() + 7200) as u64;
+    let mut refusal = Meter::new("host", "other-owner", now() as u64);
+    refusal.retry_at = Some(long);
+    refusal.record(&job.turn("1", "github-refusals")).unwrap();
+    pending(&job, 1, vec!["sam/r#7".into()]);
+    fs::write(d.path().join("limited"), "").unwrap();
+    assert_eq!(replay(&cfg, &job).unwrap(), Some(long as i64));
+    let observed = meters(&cfg);
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].owner, "sam");
+    assert!(observed[0].retry_at.unwrap() < long);
 }

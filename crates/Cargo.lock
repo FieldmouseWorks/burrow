@@ -1550,6 +1550,7 @@ dependencies = [
  "burrow-events",
  "burrow-github",
  "burrow-process",
+ "burrow-test",
  "ring",
  "rustls-pki-types",
  "serde",

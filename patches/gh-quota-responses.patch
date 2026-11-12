@@ -1,11 +1,15 @@
 --- a/api/http_client.go
 +++ b/api/http_client.go
-@@ -118 +118 @@
+@@ -67 +67,2 @@
+-		Host:               "none",
++		Host:               "none",
++        Transport: quotaNetwork(http.DefaultTransport),
+@@ -118 +119 @@
 -	return client, nil
 +	return quotaClient(client), nil
 --- /dev/null
 +++ b/api/burrow_quota.go
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,112 @@
 +package api
 +
 +// BURROW_GH_RESPONSES is an opt-in private side channel for schedulers.
@@ -13,10 +17,13 @@
 +import (
 +	"bytes"
 +	"encoding/json"
++ "encoding/base64"
++ "context"
++ "fmt"
++ "net"
 +	"io"
 +	"net/http"
 +	"os"
-+	"strings"
 +	"sync"
 +	"time"
 +)
@@ -31,6 +38,12 @@
 +	io.Closer
 +}
 +
++func quotaNetwork(inner http.RoundTripper) http.RoundTripper {
++    if socket, owner := os.Getenv("GH_TOKEN_SOCKET"), os.Getenv("BURROW_GH_PROXY_OWNER"); socket != "" && owner != "" {
++        return &quotaRelay{inner: inner, socket: socket, owner: owner}
++    }
++    return inner
++}
 +func quotaClient(client *http.Client) *http.Client {
 +	client.Transport = quotaResponses(client.Transport)
 +	return client
@@ -57,7 +70,7 @@
 +			record.Headers = append(record.Headers, [2]string{key, val})
 +		}
 +	}
-+	if resp.Body != nil && (resp.StatusCode == 403 || resp.StatusCode == 429 || strings.HasSuffix(req.URL.Path, "/graphql")) {
++	if resp.Body != nil && (resp.StatusCode == 403 || resp.StatusCode == 429 || (req.URL.Scheme == "https" && req.URL.Hostname() == "api.github.com" && (req.URL.Port() == "" || req.URL.Port() == "443") && req.URL.Path == "/graphql")) {
 +		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 +		resp.Body = quotaBody{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
 +		// Retain API errors only, never a successful GraphQL data payload.
@@ -78,6 +91,36 @@
 +		_ = file.Close()
 +	}
 +	return resp, nil
++}
++
++// Each request is executed by the host token service. Response metadata and
++// installation identity are recorded there, outside job-writable state.
++type quotaRelay struct {
++    inner http.RoundTripper
++    socket, owner string
++}
++func (q *quotaRelay) RoundTrip(req *http.Request) (*http.Response,error) {
++    // Downloads redirected to a different host stay with the normal client.
++    if req.URL.Scheme != "https" || req.URL.Hostname() != "api.github.com" || (req.URL.Port() != "" && req.URL.Port() != "443") { return q.inner.RoundTrip(req) }
++    conn, err := (&net.Dialer{}).DialContext(req.Context(), "unix", q.socket)
++    if err != nil { return nil,err }
++    defer conn.Close()
++    if deadline, ok := req.Context().Deadline(); ok { _ = conn.SetDeadline(deadline) } else { _ = conn.SetDeadline(time.Now().Add(100*time.Second)) }
++    stop := context.AfterFunc(req.Context(),func(){conn.Close()}); defer stop()
++    var data []byte
++    if req.Body != nil { data,err=io.ReadAll(io.LimitReader(req.Body,64*1024*1024+1)); if err != nil {return nil,err}; if len(data)>64*1024*1024{return nil,fmt.Errorf("API request exceeds relay limit")} }
++    headers := [][2]string{}
++    for key,values := range req.Header { if key == "Authorization" {continue}; for _,value:=range values {headers=append(headers,[2]string{key,value})} }
++    _,err=io.WriteString(conn,"http\n"); if err!=nil{return nil,err}
++    wire:=struct{Owner string `json:"owner"`; Method string `json:"method"`; Path string `json:"path"`; Headers [][2]string `json:"headers"`; Body string `json:"body"`}{q.owner,req.Method,req.URL.RequestURI(),headers,base64.StdEncoding.EncodeToString(data)}
++    if err=json.NewEncoder(conn).Encode(wire);err!=nil{return nil,err}
++    if c,ok:=conn.(*net.UnixConn);ok{_ = c.CloseWrite()}
++    var reply struct{Status int; Headers [][2]string; Body string}
++    if err=json.NewDecoder(io.LimitReader(conn,96*1024*1024)).Decode(&reply);err!=nil{return nil,err}
++    data,err=base64.StdEncoding.DecodeString(reply.Body);if err!=nil{return nil,err}
++    response:= &http.Response{StatusCode:reply.Status,Status:fmt.Sprintf("%d %s",reply.Status,http.StatusText(reply.Status)),Proto:"HTTP/1.1",ProtoMajor:1,ProtoMinor:1,Header:make(http.Header),Body:io.NopCloser(bytes.NewReader(data)),ContentLength:int64(len(data)),Request:req}
++    for _,header:=range reply.Headers{response.Header.Add(header[0],header[1])}
++    return response,nil
 +}
 --- /dev/null
 +++ b/api/burrow_quota_test.go

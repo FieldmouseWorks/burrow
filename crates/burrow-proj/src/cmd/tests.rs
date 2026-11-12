@@ -141,6 +141,8 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         let d = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = d.path().join("jobs");
+        cfg.github_meters = Some(d.path().join("host-meters"));
+        fs::create_dir_all(cfg.github_meters.as_ref().unwrap()).unwrap();
         cfg.notify = None;
         fs::create_dir_all(&cfg.jobs).unwrap();
         let count: usize = kind.split('-').next().unwrap().parse().unwrap();
@@ -163,7 +165,7 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
             let job = Job::new(&cfg, &id);
             fs::create_dir_all(&job.dir).unwrap();
             burrow_github::quota::Meter::new("workers", &format!("owner{n}"), crate::now() as u64)
-                .record(&job.path("github"))
+                .record(cfg.github_meters.as_ref().unwrap())
                 .unwrap();
         }
         super::dispatch(&cfg, &["usage".into()]).unwrap();

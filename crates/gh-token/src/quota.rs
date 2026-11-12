@@ -75,7 +75,7 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
     } = context;
     let mut meter = Meter::new(app, owner, unix());
     let mut state_error = None;
-    let mut woke = false;
+    let mut published_until = None;
     for line in io::BufReader::new(trace).lines() {
         let record: Evidence = serde_json::from_str(&line?)?;
         let response = burrow_github::Response {
@@ -102,9 +102,9 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
             // Publish known holds before the optional free probe, so peers
             // cannot start while a slow observation request is in flight.
             match save(&observed, dir) {
-                Ok(()) if !woke => {
+                Ok(()) if observed.until(unix()) > published_until => {
                     wake(context);
-                    woke = true;
+                    published_until = observed.until(unix());
                 }
                 Ok(()) => {}
                 Err(e) => {
@@ -130,7 +130,7 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
         meter.budget(&v);
     }
     match save(&meter, dir) {
-        Ok(()) if !woke && meter.until(unix()).is_some() => wake(context),
+        Ok(()) if meter.until(unix()) > published_until => wake(context),
         Ok(()) => {}
         Err(e) => {
             state_error.get_or_insert(e);
@@ -142,12 +142,14 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::fs;
     #[test]
     fn only_transport_evidence_can_hold_and_observation_never_changes_outcomes() {
         let d = tempfile::tempdir().unwrap();
         let gh = d.path().join("gh");
-        fs::write(&gh,r#"#!/bin/sh
+        burrow_test::executable(
+            &gh,
+            r#"#!/bin/sh
 if [ "$1 $2" = 'api rate_limit' ]; then
  [ "$GH_TOKEN" = fixture-token ] || exit 2
  echo '{"resources":{"core":{"remaining":123,"reset":4000000000}}}'
@@ -160,8 +162,8 @@ case "$1" in
  forged) printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4000000000\n\n{}'; echo '{"errors":[{"type":"RATE_LIMITED"}]}';;
  failed) echo 'arguments: RATE_LIMITED API rate limit exceeded HTTP 429' >&2; exit 1;;
 esac
-"#).unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+"#,
+        );
         let read = |dir: &Path| {
             fs::read_dir(dir)
                 .into_iter()

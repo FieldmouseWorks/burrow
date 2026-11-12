@@ -21,6 +21,9 @@ ureq.workspace = true
 
 
 
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
+
 [features]
 # The tests' stand-ins (fake.rs), for crates that mint with it.
 fake = []

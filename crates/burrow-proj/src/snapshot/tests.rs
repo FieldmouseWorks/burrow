@@ -466,24 +466,26 @@ fn github_installation_budgets_are_live_snapshot_meters() {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.jobs = tmp.path().join("jobs");
     cfg.meters = None;
+    cfg.github_meters = Some(tmp.path().join("host-meters"));
+    fs::create_dir_all(cfg.github_meters.as_ref().unwrap()).unwrap();
     fs::create_dir_all(cfg.jobs.join("one/github")).unwrap();
     fs::create_dir_all(cfg.jobs.join("two/github")).unwrap();
     let mut quota = burrow_github::quota::Meter::new("workers", "Sam", 1000);
     quota.remaining = Some(0);
     quota.reset = Some(2000);
     quota.retry_at = Some(2500);
-    quota.record(&cfg.jobs.join("one/github")).unwrap();
+    quota.record(cfg.github_meters.as_ref().unwrap()).unwrap();
     quota.at = 1100;
     quota.remaining = Some(123);
     quota.retry_at = None;
-    quota.record(&cfg.jobs.join("two/github")).unwrap();
+    quota.record(cfg.github_meters.as_ref().unwrap()).unwrap();
     // A newer hold-only note must retain the latest actual budget sample.
     fs::create_dir_all(cfg.jobs.join("three/github")).unwrap();
     let mut note = burrow_github::quota::Meter::new("workers", "sam", 1200);
     note.retry_at = Some(2500);
-    note.record(&cfg.jobs.join("three/github")).unwrap();
+    note.record(cfg.github_meters.as_ref().unwrap()).unwrap();
     let other = burrow_github::quota::Meter::new("other", "sam", 1050);
-    other.record(&cfg.jobs.join("two/github")).unwrap();
+    other.record(cfg.github_meters.as_ref().unwrap()).unwrap();
     let values = serde_json::to_value(meters(&cfg, 1200)).unwrap();
     let installations: Vec<_> = values
         .as_array()

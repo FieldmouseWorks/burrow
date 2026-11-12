@@ -99,8 +99,14 @@ let
 
   # gh as everyone runs it: the App's token when GH_TOKEN_SOCKET asks for
   # one, the user's own login otherwise (client.rs).
+  apiGh = pkgs.gh.overrideAttrs (old: {
+    patches = (old.patches or []) ++ [ ../patches/gh-quota-responses.patch ];
+    postBuild = (old.postBuild or "") + ''
+      go test ./api -run '^TestBurrowQuotaResponses$'
+    '';
+  });
   gh = pkgs.writeShellScriptBin "gh" ''
-    exec ${package}/bin/gh-token gh ${pkgs.gh}/bin/gh "$@"
+    exec ${package}/bin/gh-token gh ${apiGh}/bin/gh "$@"
   '';
 
   # What a process acts as the App in: its socket, and git's and gh's
@@ -264,14 +270,6 @@ in
   };
 
   config = lib.mkIf (cfg.apps != { } || cfg.machinery != null) {
-    nixpkgs.overlays = [(final: prev: {
-      gh = prev.gh.overrideAttrs (old: {
-        patches = (old.patches or []) ++ [ ../patches/gh-quota-responses.patch ];
-        postBuild = (old.postBuild or "") + ''
-          go test ./api -run '^TestBurrowQuotaResponses$'
-        '';
-      });
-    })];
     assertions = [{
       assertion = cfg.machinery == null || cfg.apps ? ${cfg.machinery};
       message = "burrow.github.machinery is ${toString cfg.machinery}, which isn't one of burrow.github.apps.";
@@ -327,6 +325,12 @@ in
       # One asker's answer: a failed one (the asker hung up, or GitHub said
       # ask later, which it's told) is gone with its log kept, not left for a
       # switch that happens to be running to count as its own failure.
+      environment = {
+        GH_TOKEN_APP_NAME = name;
+        GH_TOKEN_QUOTA_DIR = "/var/lib/gh-token-quotas";
+      } // lib.optionalAttrs (lib.hasAttrByPath [ "burrow" "events" "kickPort" ] config) {
+        GH_TOKEN_QUOTA_KICK = "http://127.0.0.1:${toString config.burrow.events.kickPort}/kick/proj-watch";
+      };
       unitConfig.CollectMode = "inactive-or-failed";
       # One answer per connection, and the next is already the new system's. A
       # restart would close the socket for as long as the switch runs, and all
@@ -340,6 +344,8 @@ in
         User = "gh-token";
         Group = "gh-token";
         LoadCredential = [ "key:${app.keyFile}" ];
+        StateDirectory = "gh-token-quotas";
+        StateDirectoryMode = "0755";
         # Tokens kept between answers, in memory only, for this user only.
         RuntimeDirectory = "gh-token-cache/${name}";
         RuntimeDirectoryMode = "0700";

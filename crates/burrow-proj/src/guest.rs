@@ -186,6 +186,8 @@ mod tests {
             crate::now() + 3600
         ));
         cfg.host_github_app = Some("host".into());
+        cfg.github_meters = Some(dir.path().join("host-meters"));
+        fs::create_dir_all(cfg.github_meters.as_ref().unwrap()).unwrap();
         let job = Job::new(&cfg, "vm");
         fs::create_dir_all(&job.dir).unwrap();
         job.set_turns(1).unwrap();

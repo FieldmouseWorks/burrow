@@ -441,11 +441,16 @@ finalization, watchdog updates, completion kicks or scratch cleanup.
 
 ### GitHub's installation quota
 
-Jobs treat GitHub quota as a meter. The gh HTTP transport's
-[response side channel](../patches/gh-quota-responses.patch) supplies actual
-status, limit headers and API errors independently of CLI output, jq,
-templates or pagination. The gh door samples `GET /rate_limit`
-with the command's own installation token and records only the App, owner,
+Jobs treat GitHub quota as a meter. The patched gh HTTP transport sends API
+requests through the host token service, preserving gh's headers, cache and
+logging layers. The service executes the request with its own App's token,
+records actual status, limit headers and errors from the exact GraphQL
+endpoint, and samples the free `GET /rate_limit`. Globally authoritative
+records live in a host-owned directory, readable but unwritable by jobs.
+Job files, filenames and environment labels cannot impose installation holds.
+The command's [response side channel](../patches/gh-quota-responses.patch)
+separately lets its own turn park on a refusal without parsing CLI output.
+The host records only the App, owner,
 remaining REST budget, reset, reading time and any primary or secondary
 hold. `proj usage` includes these readings in a `github` array inside its
 single JSON object; an active Claude hold keeps its existing top-level
@@ -468,6 +473,11 @@ installation wait for the reset before taking a slot. Permission denials
 remain errors.
 
 `proj await` retains targets when quota prevents taking their baselines.
+Its intent atomically includes the producing turn, deadline and any captured
+prefix. Replay checkpoints every new baseline before requesting another;
+read failures retain recovery ownership and never select an empty fallback.
+Quota markers and baseline archives belong to their producing turn, so a
+later accepted turn or interrupted cancellation cannot revive old work.
 The watcher registers them after reset without another engine turn, then
 resumes the job on news from those targets. If registration meets another
 limit it retains the intent and books that reset. A permission error or a

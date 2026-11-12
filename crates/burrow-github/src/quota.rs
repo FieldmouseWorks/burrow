@@ -59,7 +59,16 @@ impl Meter {
         }
     }
     pub fn read(file: &Path) -> Option<Self> {
-        serde_json::from_slice(&burrow_process::state_reads::bytes(file).ok()?).ok()
+        Self::try_read(file).ok().flatten()
+    }
+    pub fn try_read(file: &Path) -> io::Result<Option<Self>> {
+        match burrow_process::state_reads::bytes(file) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
     pub fn record(&self, dir: &Path) -> io::Result<()> {
         burrow_process::state_reads::directory(dir)?;
@@ -72,7 +81,7 @@ impl Meter {
         lock.lock()?;
         let file = dir.join(format!("{key}.json"));
         let mut next = self.clone();
-        if let Some(old) = Self::read(&file) {
+        if let Some(old) = Self::try_read(&file)? {
             let hold = self
                 .retry_at
                 .into_iter()
@@ -248,5 +257,29 @@ mod delayed_sample_test {
         let m = Meter::read(&file).unwrap();
         assert_eq!((m.at, m.remaining), (1100, Some(3400)));
         assert_eq!(m.until(1200), Some(1500));
+    }
+}
+
+#[cfg(test)]
+mod storage_failures {
+    use super::*;
+    #[test]
+    fn unreadable_prior_state_is_never_replaced_as_absent() {
+        let d = tempfile::tempdir().unwrap();
+        let mut m = Meter::new("app", "owner", 1000);
+        m.retry_at = Some(4000);
+        m.record(d.path()).unwrap();
+        let file = std::fs::read_dir(d.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| e.path().extension().is_some_and(|s| s == "json"))
+            .unwrap()
+            .path();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        m.at = 2000;
+        m.retry_at = None;
+        assert!(m.record(d.path()).is_err());
+        assert!(file.is_dir());
     }
 }

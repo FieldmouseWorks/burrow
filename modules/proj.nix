@@ -94,6 +94,7 @@ let
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     machinery = if machineApp == null then null else machineApp.name;
     hostGithubApp = cfg.hostGithubApp;
+    githubMeters = "/var/lib/gh-token-quotas";
     stewardAccount = if config.burrow.autoland.enable or false then { login = "${config.burrow.autoland.app.slug}[bot]"; id = config.burrow.autoland.app.accountId; } else null;
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     inherit (config.burrow) mcpServers;

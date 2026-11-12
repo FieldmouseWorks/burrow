@@ -43,6 +43,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             continue;
         }
 
+        let stopped = job
+            .turns()
+            .is_some_and(|n| job.turn(&n, "stopped").exists());
         let paused = crate::policy::parked(&job) || crate::inbox::job_paused(cfg, &id);
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
@@ -51,7 +54,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 retry.push((String::new(), now() + RETRY));
                 continue 'jobs;
             }
-            if !paused {
+            if !paused && !stopped {
                 match crate::ask::expire(cfg, &job) {
                     Ok(Some(at)) => retry.push((String::new(), at)),
                     Ok(None) => (),
@@ -79,6 +82,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 }
             }
             drop(held);
+        }
+        if stopped {
+            continue;
         }
         // Pausing stops automatic turns, not question reconciliation or
         // durable notification delivery (including stopped/completed jobs).
@@ -128,12 +134,17 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 continue;
             }
             if a.target == crate::github_quota::LIMIT {
-                let reset = a.was.parse::<i64>().unwrap_or(0);
+                let Some((_, reset)) = crate::github_quota::reset(&job, &turn) else {
+                    continue;
+                };
                 if reset > now() {
                     lines.push_str(&a.line());
                     retry.push((String::new(), reset));
                 } else if job.path(crate::github_quota::PENDING).exists()
-                    || !crate::github_quota::captured(&job).is_empty()
+                    || match crate::github_quota::captured(&job) {
+                        Ok(text) => !text.is_empty(),
+                        Err(_) => true,
+                    }
                 {
                     let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
                     if job.turns().as_deref() != Some(turn.as_str())

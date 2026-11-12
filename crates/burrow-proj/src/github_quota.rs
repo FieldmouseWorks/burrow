@@ -11,37 +11,24 @@ pub(crate) struct Pending {
     pub targets: Vec<String>,
     pub retry_at: u64,
     pub turn: String,
+    #[serde(default)]
+    pub baselines: String,
 }
 
 pub fn meters(cfg: &Config) -> Vec<Meter> {
     let mut latest: BTreeMap<(String, String), Meter> = BTreeMap::new();
-    for job in fs::read_dir(&cfg.jobs)
+    for file in cfg
+        .github_meters
+        .as_ref()
         .into_iter()
-        .flatten()
+        .flat_map(|dir| fs::read_dir(dir).into_iter().flatten())
         .filter_map(Result::ok)
     {
-        for file in fs::read_dir(job.path().join("github"))
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-        {
-            if file.path().extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            if let Some(mut m) = Meter::read(&file.path()) {
-                let key = (m.app.clone(), m.owner.clone());
-                if let Some(old) = latest.get_mut(&key) {
-                    let hold = old.deadline().into_iter().chain(m.deadline()).max();
-                    if (old.remaining.is_some(), old.at) <= (m.remaining.is_some(), m.at) {
-                        m.retry_at = hold;
-                        *old = m;
-                    } else {
-                        old.retry_at = hold;
-                    }
-                } else {
-                    latest.insert(key, m);
-                }
-            }
+        if file.path().extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        if let Some(m) = Meter::read(&file.path()) {
+            latest.insert((m.app.clone(), m.owner.clone()), m);
         }
     }
     latest.into_values().collect()
@@ -71,14 +58,15 @@ pub(crate) fn admission_reset(
 }
 
 pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(), String> {
-    if let Some(app) = &cfg.host_github_app {
+    // Host-owned direct calls are trusted, but their writes still use a
+    // separate host root. Native jobs cannot publish global evidence here.
+    if let (Some(app), Some(dir)) = (&cfg.host_github_app, &cfg.github_meters) {
         let mut meter = Meter::new(app, owner, now().max(0) as u64);
         meter.retry_at = Some(due);
-        meter
-            .record(&job.path("github"))
-            .map_err(|e| e.to_string())?;
+        meter.record(dir).map_err(|e| e.to_string())?;
         crate::job::kick(cfg, ["proj-watch".into()]);
     }
+    let _ = job;
     Ok(())
 }
 
@@ -105,7 +93,8 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
         let _ = crate::state_reads::remove(job.path(PENDING));
         return Ok(false);
     }
-    let Some(due) = read(&job.path(PENDING))
+    let Some(due) = state(&job.path(PENDING))
+        .map_err(|e| format!("{:?}", e.say))?
         .and_then(|s| serde_json::from_str::<Pending>(&s).ok())
         .filter(|p| p.turn == n)
         .map(|p| p.retry_at as i64)
@@ -127,6 +116,10 @@ fn finish_at(job: &Job, n: &str, due: i64) -> Result<(), String> {
 }
 
 pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
+    let n = job
+        .turns()
+        .ok_or_else(|| "quota wait has no turn".to_string())?;
+    swap(job.turn(&n, LIMIT), format!("{}\t{due}", now())).map_err(|e| e.to_string())?;
     swap(job.path("await"), format!("{LIMIT}\t{}\t{due}\n", now())).map_err(|e| e.to_string())?;
     crate::ask::clear(job);
     for name in ["end.next", "ask.next"] {
@@ -152,13 +145,25 @@ pub(crate) fn reset(job: &Job, n: &str) -> Option<(i64, i64)> {
     if job.turn(n, "stopped").exists() {
         return None;
     }
-    let text = read(&job.path("await")).unwrap_or_default();
+    let text = match state(&job.path("await")) {
+        Ok(t) => t.unwrap_or_default(),
+        Err(_) => return Some((now(), now())),
+    };
     if registered(&text) {
         return None;
     }
-    let rows = crate::job::awaits(&text);
-    let marker = rows.iter().find(|a| a.target == LIMIT);
-    let pending = read(&job.path(PENDING));
+    let hold = match state(&job.turn(n, LIMIT)) {
+        Ok(t) => t,
+        Err(_) => return Some((now(), now())),
+    };
+    let hold = hold.and_then(|s| {
+        s.split_once('\t')
+            .and_then(|(a, b)| Some((a.parse::<i64>().ok()?, b.parse::<i64>().ok()?)))
+    });
+    let pending = match state(&job.path(PENDING)) {
+        Ok(t) => t,
+        Err(_) => return Some((now(), now())),
+    };
     let parsed = pending
         .as_ref()
         .and_then(|s| serde_json::from_str::<Pending>(s).ok());
@@ -167,14 +172,11 @@ pub(crate) fn reset(job: &Job, n: &str) -> Option<(i64, i64)> {
         .filter(|p| p.turn == n)
         .map(|p| p.retry_at as i64)
         .into_iter()
-        .chain(marker.and_then(|a| a.was.parse::<i64>().ok()))
+        .chain(hold.map(|h| h.1))
         .chain(refused_for(job, n))
         .max()
         .or_else(|| (pending.is_some() && parsed.is_none()).then_some(now()))?;
-    let since = marker
-        .and_then(|a| a.since.parse::<i64>().ok())
-        .or_else(|| read(&job.turn(n, "started")).and_then(|s| s.parse().ok()))
-        .unwrap_or_else(now);
+    let since = hold.map_or_else(now, |h| h.0);
     Some((since, due))
 }
 
@@ -187,7 +189,7 @@ pub(crate) fn reconcile(job: &Job) -> Result<Option<i64>, crate::Fail> {
     if job.turn(&n, "stopped").exists() || matches!(job.state().as_str(), "queued" | "running") {
         return Ok(None);
     }
-    let text = read(&job.path("await")).unwrap_or_default();
+    let text = state(&job.path("await"))?.unwrap_or_default();
     let awaits = crate::job::awaits(&text);
     let marker = awaits
         .iter()
@@ -197,7 +199,7 @@ pub(crate) fn reconcile(job: &Job) -> Result<Option<i64>, crate::Fail> {
     if registered {
         return Ok(None);
     }
-    let pending = read(&job.path(PENDING));
+    let pending = state(&job.path(PENDING))?;
     let parsed = pending
         .as_ref()
         .and_then(|s| serde_json::from_str::<Pending>(s).ok());
@@ -208,7 +210,7 @@ pub(crate) fn reconcile(job: &Job) -> Result<Option<i64>, crate::Fail> {
     }
     let due = reset(job, &n).map(|(_, due)| due);
     if let Some(due) = due
-        && (marker != Some(due) || read(&job.turn(&n, "end")).as_deref() != Some("await"))
+        && (marker != Some(due) || state(&job.turn(&n, "end"))?.as_deref() != Some("await"))
     {
         finish_at(job, &n, due).map_err(|e| crate::Fail::new(1, e))?;
     }
@@ -225,20 +227,30 @@ impl From<crate::Fail> for RecoveryError {
         Self::State(error)
     }
 }
-fn join_records(before: &str, after: &str) -> String {
+pub(crate) fn join_records(before: &str, after: &str) -> String {
+    let mut seen = std::collections::BTreeSet::new();
     before
         .lines()
         .chain(after.lines())
         .filter(|line| !line.is_empty())
+        .filter(|line| seen.insert(line.split('\t').next().unwrap_or_default().to_string()))
         .map(|line| format!("{line}\n"))
         .collect()
 }
-pub(crate) fn captured(job: &Job) -> String {
-    read(&job.turn(&job.turns().unwrap_or_default(), "github-awaits"))
-        .unwrap_or_else(|| read(&job.path("await.next")).unwrap_or_default())
+pub(crate) fn state(path: &std::path::Path) -> Result<Option<String>, crate::Fail> {
+    match crate::state_reads::bytes(path) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| crate::Fail::new(1, e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(crate::io_fail(path, e)),
+    }
+}
+pub(crate) fn captured(job: &Job) -> Result<String, crate::Fail> {
+    Ok(state(&job.turn(&job.turns().unwrap_or_default(), "github-awaits"))?.unwrap_or_default())
 }
 pub(crate) fn remember(job: &Job, waits: &str) -> Result<(), crate::Fail> {
-    let mut kept = captured(job);
+    let mut kept = captured(job)?;
     kept = join_records(&kept, waits);
     let path = job.turn(&job.turns().unwrap_or_default(), "github-awaits");
     swap(&path, kept).map_err(|e| crate::io_fail(&path, e))
@@ -246,12 +258,19 @@ pub(crate) fn remember(job: &Job, waits: &str) -> Result<(), crate::Fail> {
 /// Recover an await after the reset, without asking the engine to repeat it.
 /// The intent survives partial API failure and process/reboot boundaries.
 pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryError> {
-    let Some(text) = read(&job.path(PENDING)) else {
+    state(&job.path("await"))?;
+    state(&job.path("await.next"))?;
+    let Some(text) = state(&job.path(PENDING))? else {
         return Ok(None);
     };
     let mut pending: Pending = serde_json::from_str(&text)
         .map_err(|e| RecoveryError::Request(crate::Fail::new(1, e.to_string())))?;
-    let targets = &pending.targets;
+    if job.turns().as_deref() != Some(pending.turn.as_str())
+        || job.turn(&pending.turn, "stopped").exists()
+    {
+        return Ok(None);
+    }
+    let targets = pending.targets.clone();
     let found = targets
         .iter()
         .map(|t| {
@@ -261,7 +280,7 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
         .collect::<Result<Vec<_>, _>>()
         .map_err(RecoveryError::Request)?;
     crate::github::take_limit();
-    let captured_text = captured(job);
+    let captured_text = join_records(&captured(job)?, &pending.baselines);
     let captured_targets: Vec<_> = crate::job::awaits(&captured_text)
         .into_iter()
         .map(|a| a.target)
@@ -270,7 +289,7 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
     let mut checkpoint_error = None;
     let result = found
         .iter()
-        .zip(targets)
+        .zip(&targets)
         .try_fold(String::new(), |mut text, (found, target)| {
             if captured_targets.contains(&format!("{}#{}", found.0, found.1)) {
                 return Ok(text);
@@ -284,6 +303,16 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
                     None,
                 )
             })?;
+            pending.baselines = join_records(&pending.baselines, &baseline);
+            if let Err(e) = swap(
+                job.path(PENDING),
+                serde_json::to_vec(&pending).expect("pending await"),
+            )
+            .map_err(|e| crate::io_fail(&job.path(PENDING), e))
+            {
+                checkpoint_error = Some(e);
+                return Err(crate::Fail::new(1, "cannot checkpoint recovered intent"));
+            }
             if let Err(e) = remember(job, &baseline) {
                 checkpoint_error = Some(e);
                 return Err(crate::Fail::new(1, "cannot checkpoint recovered baseline"));
@@ -304,12 +333,13 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
                     serde_json::to_vec(&pending).expect("pending await"),
                 )
                 .map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
+                let installation_due = due;
                 let due = std::iter::once(pending.retry_at)
                     .chain(refused(job).map(|t| t as u64))
                     .max()
                     .unwrap_or(due);
                 park(job, due as i64).map_err(|e| crate::Fail::new(1, e))?;
-                if let Err(e) = note(cfg, job, &owner, due) {
+                if let Err(e) = note(cfg, job, &owner, installation_due) {
                     eprintln!("proj: quota meter unavailable: {e}");
                 }
                 return Ok(Some(due as i64));
@@ -327,9 +357,12 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
 }
 
 pub(crate) fn restore(job: &Job) -> Result<(), crate::Fail> {
-    publish(job, &captured(job))
+    publish(job, &captured(job)?)
 }
 fn publish(job: &Job, waits: &str) -> Result<(), crate::Fail> {
+    state(&job.path("await"))?;
+    state(&job.path("await.next"))?;
+    captured(job)?;
     let mut seen = std::collections::BTreeSet::new();
     let waits: String = waits
         .lines()
@@ -359,6 +392,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = d.path().join("jobs");
+        cfg.github_meters = Some(d.path().join("host-meters"));
+        fs::create_dir_all(cfg.github_meters.as_ref().unwrap()).unwrap();
         cfg.wake = d.path().join("wake");
         cfg.inbox = None;
         cfg.waits = None;
@@ -431,7 +466,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         let mut intent: Pending = serde_json::from_str(&read(&job.path(PENDING)).unwrap()).unwrap();
         intent.retry_at = (now() - 1) as u64;
         swap(job.path(PENDING), serde_json::to_vec(&intent).unwrap()).unwrap();
-        fs::write(job.path("await"), format!("{LIMIT}\t1000\t{}\n", now() - 1)).unwrap();
+        park(&job, now() - 1).unwrap();
         crate::watch::look(&cfg, "").unwrap();
         assert!(!job.path(PENDING).exists());
         assert!(read(&job.path("await")).unwrap().starts_with("sam/r#7\t"));
@@ -475,10 +510,10 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         m.budget(&json!({"resources":{"core":{"remaining":0,"reset":now()+1000}}}));
         fs::create_dir_all(cfg.jobs.join("one")).unwrap();
         fs::create_dir_all(cfg.jobs.join("two")).unwrap();
-        m.record(&cfg.jobs.join("one/github")).unwrap();
+        m.record(cfg.github_meters.as_ref().unwrap()).unwrap();
         let mut other = Meter::new("other", "sam", now() as u64);
         other.budget(&json!({"resources":{"core":{"remaining":5000,"reset":now()+2000}}}));
-        other.record(&cfg.jobs.join("two/github")).unwrap();
+        other.record(cfg.github_meters.as_ref().unwrap()).unwrap();
         let git = d.path().join("git");
         burrow_test::executable(&git, "#!/bin/sh\necho https://github.com/Sam/r.git\n");
         let mut cfg = cfg;

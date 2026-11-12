@@ -558,13 +558,23 @@ pub(crate) fn record_wait(
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     crate::github::take_limit();
     let pending = job.path(crate::github_quota::PENDING);
-    let saved: Option<crate::github_quota::Pending> = read(&pending)
+    let saved: Option<crate::github_quota::Pending> = crate::github_quota::state(&pending)?
         .map(|text| {
             serde_json::from_str::<crate::github_quota::Pending>(&text)
                 .map_err(|e| Fail::new(1, format!("saved GitHub await: {e}")))
         })
         .transpose()?;
     let prior_due = saved.as_ref().map_or(0, |p| p.retry_at);
+    let saved_baselines = saved
+        .as_ref()
+        .map(|p| p.baselines.clone())
+        .unwrap_or_default();
+    let captured =
+        crate::github_quota::join_records(&crate::github_quota::captured(job)?, &saved_baselines);
+    let known: Vec<_> = crate::job::awaits(&captured)
+        .into_iter()
+        .map(|a| a.target)
+        .collect();
     let mut all = targets.to_vec();
     let mut found = found.to_vec();
     for saved_target in saved.map(|p| p.targets).unwrap_or_default() {
@@ -579,6 +589,9 @@ pub(crate) fn record_wait(
     let mut limited_owner = String::new();
     let mut text = String::new();
     let result = found.iter().zip(targets).try_for_each(|(found, target)| {
+        if known.contains(&format!("{}#{}", found.0, found.1)) {
+            return Ok(());
+        }
         limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
         text.push_str(&crate::github::for_job(job, || {
             baselines(
@@ -598,6 +611,7 @@ pub(crate) fn record_wait(
                     targets: targets.clone(),
                     retry_at: due.max(prior_due),
                     turn: job.turns().unwrap_or_default(),
+                    baselines: crate::github_quota::join_records(&captured, &text),
                 };
                 crate::state_reads::write(
                     &pending,
@@ -625,13 +639,12 @@ pub(crate) fn record_wait(
             "proj: turn deadline expired while registering waits; nothing is awaited",
         ));
     }
-    crate::github_quota::remember(job, &text)?;
+    crate::github_quota::remember(
+        job,
+        &crate::github_quota::join_records(&saved_baselines, &text),
+    )?;
     let next = job.path("await.next");
-    File::options()
-        .append(true)
-        .create(true)
-        .open(&next)
-        .and_then(|mut f| f.write_all(text.as_bytes()))
+    crate::state_reads::write(&next, crate::github_quota::captured(job)?)
         .map_err(|e| io_fail(&next, e))?;
     crate::state_reads::write(job.path("end.next"), "await\n")
         .map_err(|e| io_fail(&job.path("end.next"), e))?;

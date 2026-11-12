@@ -145,7 +145,8 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
             Ok(token) => token,
             Err(e) => return e,
         };
-        run.env("GH_TOKEN", &token);
+        run.env("GH_TOKEN", &token)
+            .env("BURROW_GH_PROXY_OWNER", &owner);
         let refusals = std::env::var_os("PROJ_GITHUB_REFUSALS");
         let kick = std::env::var("PROJ_GITHUB_KICK").ok();
         return match crate::quota::run(
@@ -454,14 +455,18 @@ mod tests {
             .unwrap();
         }
         let gh = dir.path().join("gh");
-        std::fs::write(&gh,format!(r#"#!/bin/sh
+        burrow_test::executable(
+            &gh,
+            format!(
+                r#"#!/bin/sh
 if [ "$1" = help ]; then cat '{0}/help-'"${{2:-root}}"; exit; fi
 if [ "$2" = rate_limit ]; then touch '{0}/budget-started'; echo '{{"resources":{{"core":{{"remaining":99,"reset":4000000000}}}}}}'; exit; fi
 echo '{{"status":403,"at":2000000000,"headers":[["retry-after","120"]],"body":"{{}}"}}' >> "$BURROW_GH_RESPONSES"
 exit 7
-"#,dir.path().display())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+"#,
+                dir.path().display()
+            ),
+        );
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let kick = format!("http://{}/kick/proj-watch", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
