@@ -482,7 +482,9 @@ pub fn take(
         if !paused && job.path("unstick").exists() {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
-            let _ = fs::remove_file(queue.join(&me));
+            if fs::remove_file(queue.join(&me)).is_ok() {
+                snapshot::stream::notify(cfg);
+            }
             if spent {
                 usage::remind(cfg);
                 sleep(Duration::from_secs(2));
@@ -533,7 +535,9 @@ pub fn take(
             && now() - came >= cfg.max_wait as i64
         {
             let to = format!("1-{rest}");
-            let _ = fs::rename(queue.join(&me), queue.join(&to));
+            if fs::rename(queue.join(&me), queue.join(&to)).is_ok() {
+                snapshot::stream::notify(cfg);
+            }
             me = to;
         }
         if spent {
@@ -558,6 +562,7 @@ pub fn take(
         if new != me {
             if fs::rename(queue.join(&me), queue.join(&new)).is_ok() {
                 eprintln!("proj: it goes as {} now", class.name());
+                snapshot::stream::notify(cfg);
             }
             me = new;
         }
