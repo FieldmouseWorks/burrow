@@ -9,7 +9,10 @@ let
   settings = {
     overlay = "${stateDir}/settings/overlay.json";
     inherit (cfg) allowed;
-    legacy = "${config.users.users.${user}.home}/.config/proj";
+    # Where proj's roles, models and roles.d files were kept, read once into
+    # the engine store; none on a machine without the user (a module alone).
+    legacy = let account = config.users.users.${user} or null; in
+      if account == null then null else "${account.home}/.config/proj";
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);
