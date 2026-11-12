@@ -148,3 +148,56 @@ fn redacting_request_blocks_preserves_surrounding_questions() {
     assert!(body.contains("answer to memory") && body.contains("answer to units"));
     assert!(!body.contains("answer to deployed"));
 }
+
+const SHA: &str = "3520fa4c1b9e2d7f6a8b0c3d5e7f9a1b2c4d6e8f";
+
+#[test]
+fn valid_questions_run_as_asked_even_when_they_look_like_secrets() {
+    let questions = format!("contains sam/token {SHA}\njournal secret:worker -1h now");
+    let want = [
+        format!("contains sam/token {SHA}"),
+        "journal secret:worker.service -1h now".to_string(),
+    ];
+    // From the body, and from the title when the body has no questions.
+    let (_, ran) = posted("probe", &questions, false);
+    assert_eq!(ran, want);
+    let (_, ran) = posted(&questions, "", false);
+    assert_eq!(ran, want);
+    // A credential rule's match that would run from one line into the next
+    // leaves the next question as it was asked.
+    for (first, then) in [
+        ("memory password:", "units"),
+        ("deployed Authorization:", "queue"),
+        ("rc token", &*format!("contains sam/repo {SHA}")),
+    ] {
+        let (_, ran) = posted("probe", &format!("{first}\n{then}"), false);
+        assert_eq!(ran, [then], "after {first:?}");
+    }
+    // Around a key block, past the question limit and across pages: the
+    // block goes whole, and the questions outside it run unchanged.
+    for (begin, end) in [(true, true), (true, false), (false, true)] {
+        let block = key("RSA", begin, end, MAX_QUESTIONS + 2);
+        let body = if begin {
+            format!("usage --totals\n{questions}\n{block}")
+        } else {
+            format!("{block}{questions}\nusage --totals")
+        };
+        let (pages, ran) = posted("probe", &body, true);
+        assert!(pages.len() > 1);
+        let mut expected = want.to_vec();
+        expected.insert(if begin { 0 } else { 2 }, "usage -5h --totals".into());
+        assert_eq!(ran, expected);
+    }
+}
+
+#[test]
+fn a_refusal_hides_a_secret_the_line_before_identifies() {
+    let value = "hunter2hunter2hunter2hunter2";
+    for before in ["password:", "Authorization:", "token", "cookie ="] {
+        let (pages, ran) = posted("probe", &format!("memory\n{before}\n{value}\nunits"), false);
+        assert_eq!(ran, ["memory", "units"]);
+        let body = pages.join("\n");
+        assert!(!body.contains(value), "after {before:?}: {body}");
+        assert!(body.contains("[redacted]"));
+    }
+}

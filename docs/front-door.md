@@ -109,10 +109,11 @@ own, say), in seconds and without starting a Claude.
   command but a unit name or a time the grammar made; journals only of the
   units on the allowlist; no answer at all in a repo GitHub doesn't call
   private; and every answer through a secret scrubber first
-  (`tests/probe.nix` plants a token to prove it). Request titles and bodies
-  are scrubbed with their complete multiline context before extracting
-  questions, enforcing limits or splitting replies, so echoed refusals cannot
-  separate private-key markers from their payloads. Anyone else's issue runs
+  (`tests/probe.nix` plants a token to prove it). Private keys come out of
+  request titles and bodies, each block whole, before questions are read,
+  limited or replies split, so an echoed refusal can't separate a key's
+  markers from its payload. Every other question runs as asked, and its echo
+  is scrubbed after the line before it. Anyone else's issue runs
   nothing.
 - On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
   the machine says it.

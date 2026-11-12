@@ -9,7 +9,7 @@ use burrow_github::{Api, Error, call};
 use serde_json::Value;
 
 use crate::query::Query;
-use crate::scrub::scrub;
+use crate::scrub::{REDACTED, redact_keys, scrub};
 use crate::{Config, MARK};
 
 /// The most questions one issue gets answered.
@@ -106,12 +106,13 @@ fn answers(
     answer: &mut dyn FnMut(&Query) -> Result<String, String>,
     now: &str,
 ) -> Vec<String> {
-    // Redact each complete request field before normalization, question
-    // limits, clipping or pagination can separate a key's markers from its
-    // payload. Scrubbing individual refusals cannot recover that context.
+    // Take each complete request field's private keys out before
+    // normalization, question limits, clipping or pagination can separate a
+    // key's markers from its payload. Only keys: the questions run as asked,
+    // and what's echoed of them is scrubbed in context below.
     let request = serde_json::json!({
-        "title": scrub(issue["title"].as_str().unwrap_or("")).as_str(),
-        "body": scrub(issue["body"].as_str().unwrap_or("")).as_str(),
+        "title": redact_keys(issue["title"].as_str().unwrap_or("")),
+        "body": redact_keys(issue["body"].as_str().unwrap_or("")),
     });
     let asked = asked(&request);
     let header = scrub(&format!(
@@ -130,9 +131,22 @@ fn answers(
     // prefix gets all the space it needs, across comments when necessary.
     let share = (MAX_COMMENT - 1_000) / asked.len().min(MAX_QUESTIONS);
     let each = share.saturating_sub(4 * MAX_ECHO + 100);
-    for line in asked.iter().take(MAX_QUESTIONS) {
-        let shown = clip(line, MAX_ECHO).replace('`', "'");
+    for (i, line) in asked.iter().enumerate().take(MAX_QUESTIONS) {
+        let before = i.checked_sub(1).map(|b| asked[b].as_str());
+        let echoed = echo(before, line);
+        let shown = clip(&echoed, MAX_ECHO).replace('`', "'");
         match Query::parse(line) {
+            // A refusal's reason quotes the line, so one that looks like a
+            // secret, alone or after the line before it, gets no reason.
+            Err(_) if echoed != *line => append(
+                &mut pages,
+                &header,
+                scrub(&format!(
+                    "\n**`{shown}`**: not a question, and it looks like it holds a secret ({})\n",
+                    crate::query::VOCABULARY
+                ))
+                .as_str(),
+            ),
             Err(why) => append(
                 &mut pages,
                 &header,
@@ -147,7 +161,7 @@ fn answers(
                 // of a secret its rule needed all of to know (a key's END
                 // without its BEGIN, say). Headings and refusals are scrubbed too.
                 let text = scrub(&text).as_str().to_string();
-                let heading = clip(&q.to_string(), MAX_ECHO).replace('`', "'");
+                let heading = clip(&echo(before, &q.to_string()), MAX_ECHO).replace('`', "'");
                 let text = if matches!(q, Query::Usage { .. }) {
                     // --totals has no optional suffix. Otherwise only the
                     // meter readings and per-turn details share the budget.
@@ -180,6 +194,21 @@ fn answers(
         );
     }
     pages
+}
+
+/// `line` as it may be echoed: scrubbed after the question `before` it,
+/// since a secret's shape can start on one line and end on the next
+/// (`password:`, then its value). If a rule took the line break with it,
+/// the whole line is hidden.
+fn echo(before: Option<&str>, line: &str) -> String {
+    let Some(before) = before else {
+        return scrub(line).as_str().to_string();
+    };
+    let both = scrub(&format!("{before}\n{line}"));
+    match both.as_str().split_once('\n') {
+        Some((_, after)) if !after.contains('\n') => after.to_string(),
+        _ => REDACTED.to_string(),
+    }
 }
 
 fn append(pages: &mut Vec<String>, header: &str, fragment: &str) {
