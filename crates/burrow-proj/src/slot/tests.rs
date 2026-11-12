@@ -122,6 +122,10 @@ fn child() {
     let jobs = env::var(JOBS_ENV).unwrap();
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let mut cfg = config(Path::new(&jobs), max_jobs);
+    if what == "codex-pool-release" {
+        pools::release_codex_pool();
+        return;
+    }
     let mut held = None;
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
@@ -135,6 +139,7 @@ fn child() {
                 r#"#!/bin/sh
 case $1 in
   _handover_format) echo 1 ;;
+  _retry_format) echo 3 ;;
   _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
 esac
 "#
@@ -774,8 +779,7 @@ fn an_unstick_turn_says_so_under_its_jobs_lock_too() {
 }
 
 // A turn handed over to the deployed proj stops saying it may be withdrawn
-// first, under its job's lock: what it's handed to may take its slot without
-// that lock (a proj from before took_slot, after a switch back to it).
+// first, under its job's lock, before the compatible successor can take a slot.
 #[test]
 fn a_turn_handed_over_may_be_withdrawn_no_more() {
     let tmp = TempDir::new().unwrap();
@@ -835,7 +839,7 @@ fn out_of_usage_no_turn_takes_a_slot() {
 fn an_unstick_turn_waiting_on_its_slot_waits_out_a_refusal() {
     let tmp = TempDir::new().unwrap();
     let jobs = jobs_dir(&tmp);
-    let census = File::create(jobs.join(".slots/.lock")).unwrap();
+    let census = File::create(jobs.join(".slots/.admission-lock")).unwrap();
     census.lock().unwrap();
     let held = File::create(jobs.join(".slots/unstick")).unwrap();
     held.try_lock().unwrap();
@@ -900,32 +904,13 @@ fn a_slot_stays_with_what_its_turn_left() {
 
 #[test]
 fn codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage() {
-    use crate::engine::Engine;
-    let d = tempfile::tempdir().unwrap();
-    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-    cfg.jobs = d.path().to_owned();
-    cfg.codex_slots = 1;
-    let job = Job::new(&cfg, "code");
-    fs::create_dir_all(&job.dir).unwrap();
-    fs::write(
-        cfg.jobs.join(crate::usage::FILE),
-        serde_json::json!({"until": crate::now()+10000,
-        "said":"limit", "job":"claude", "at":crate::now()})
-        .to_string(),
-    )
-    .unwrap();
-    // A planner's unstick flag cannot escape the selected engine's cap.
-    fs::write(job.path("unstick"), "").unwrap();
-    let slot = super::take_engine(&cfg, "code", "1", Class::Normal, false, Engine::Codex).unwrap();
-    assert_eq!(
-        crate::read(&job.turn("1", "slot")).as_deref(),
-        Some("codex-1")
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut child = spawn_child("codex-pool-release", &jobs, 1, &[]);
+    assert!(
+        child.0.wait().unwrap().success(),
+        "isolated pool accounting failed"
     );
-    assert!(!cfg.jobs.join(".slots/1").exists());
-    let other = File::create(cfg.jobs.join(".codex-slots/1")).unwrap();
-    assert!(other.try_lock().is_err());
-    drop(slot);
-    assert!(other.try_lock().is_ok());
 }
 
 // A Claude turn handed over to a proj that resolves its engine to Codex has
@@ -939,7 +924,7 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
     cfg.jobs = d.path().to_owned();
     cfg.codex_slots = 1;
     fs::create_dir_all(cfg.jobs.join(".slots")).unwrap();
-    let census = File::create(cfg.jobs.join(".slots/.lock")).unwrap();
+    let census = File::create(cfg.jobs.join(".slots/.admission-lock")).unwrap();
     census.lock().unwrap();
     let job = Job::new(&cfg, "code");
     fs::create_dir_all(&job.dir).unwrap();
@@ -961,3 +946,25 @@ fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
 
 mod reset;
 mod usage;
+
+#[test]
+fn retained_queue_renames_occupy_one_logical_project_place() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = config(&jobs, 2);
+    let job = crate::job::Job::new(&cfg, "renamed");
+    fs::create_dir(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("project"), "/ordinary").unwrap();
+    crate::retry::Checkpoint::retry(&job, "1", false, crate::now_nanos(), "refused").unwrap();
+    let queue = jobs.join(".queue");
+    for name in ["0-100-renamed", "1-100-renamed", "2-100-renamed"] {
+        fs::write(queue.join(name), "dead\n").unwrap();
+    }
+    let seen = look(&cfg, "1-100-renamed", &job.dir, Class::First).unwrap();
+    assert_eq!(seen.line.len(), 1);
+    assert_eq!(seen.line[0].name, "1-100-renamed");
+    assert_eq!(fs::read_dir(queue).unwrap().count(), 1);
+}
+
+mod pools;

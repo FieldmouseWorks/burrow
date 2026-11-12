@@ -147,6 +147,41 @@ let
     export PROJ_CONFIG=${configFile} PROJ_SELF=${proj}/bin/proj
     exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj-inbox "$@"
   '';
+  retryServices = {
+    # Keep the original census locked across consumer restarts and deployments.
+    # The sleeping process owns no job slots; running turns and the separate
+    # emergency/Codex pools continue. Only the current scheduler uses the new
+    # census lock. Type=notify makes the lock, not process startup, readiness.
+    proj-retry-barrier = {
+      description = "Fence retained proj schedulers during deployment";
+      wantedBy = [ "multi-user.target" ];
+      restartIfChanged = false;
+      serviceConfig = {
+        User = user;
+        Type = "notify";
+        NotifyAccess = "all";
+        Restart = "on-failure";
+        ExecStart = pkgs.writeShellScript "proj-retry-barrier" ''
+          ${pkgs.coreutils}/bin/mkdir -p ${lib.escapeShellArg cfg.jobsDir}/.slots
+          exec ${pkgs.util-linux}/bin/flock --exclusive ${lib.escapeShellArg cfg.jobsDir}/.slots/.lock \
+            ${pkgs.runtimeShell} -c '${pkgs.systemd}/bin/systemd-notify --ready; exec ${pkgs.coreutils}/bin/sleep infinity'
+        '';
+      };
+    };
+    proj-retry-transfer = {
+      description = "Transfer retained proj retries to the deployed scheduler";
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "proj-retry-barrier.service" ];
+      after = [ "proj-retry-barrier.service" ];
+      serviceConfig = {
+        User = user;
+        ExecStart = "${proj}/bin/proj _retry-transfer";
+        Restart = "on-failure";
+        RestartSec = 2;
+      };
+    };
+  };
+
 in
 {
   imports = [
@@ -493,7 +528,12 @@ in
         exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg user} -- ${proj}/bin/proj check-config
       fi
     '';
-    burrow.updates.requiredHealth = [ "proj-config" ];
+    burrow.updates.requiredHealth = [ "proj-config" "proj-retry-transfer" ];
+    burrow.updates.health.proj-retry-transfer = ''
+      ${pkgs.systemd}/bin/systemctl is-active --quiet proj-retry-barrier.service &&
+      ${pkgs.systemd}/bin/systemctl is-active --quiet proj-retry-transfer.service
+    '';
+
     burrow.tools.proj = proj;
     # The guard is Codex's managed hook for the jobs, wherever proj runs.
     burrow.tools.codex-guard = guard.codex;
@@ -521,7 +561,7 @@ in
         User = user;
         ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
       };
-    });
+    }) // retryServices;
     # The end of each job's turn (proj _ended), which each turn's unit starts
     # as it goes: in a unit of its own, so what kills the turn's whole cgroup
     # (systemd-oomd) leaves it be. The job comes in its environment, from the

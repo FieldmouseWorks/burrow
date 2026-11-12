@@ -7,6 +7,7 @@
 //! what it answered. Its work in the repo is where those turns left it, and
 //! each turn's transcript is named, for whatever its answer leaves out.
 
+#[cfg(test)]
 use std::fs;
 use std::path::PathBuf;
 
@@ -92,10 +93,10 @@ pub fn first_prompt(job: &Job, n: &str, engine: Engine) -> std::io::Result<PathB
             transcript.display(),
         ));
     }
-    let asked = read(&prompt).unwrap_or_default();
+    let asked = String::from_utf8_lossy(&crate::state_reads::bytes(&prompt)?).into_owned();
     text.push_str(&format!("\n\n## This turn, asked\n\n{asked}\n"));
     let handoff = job.turn(n, "handoff");
-    fs::write(&handoff, text)?;
+    crate::state_reads::write(&handoff, &text)?;
     Ok(handoff)
 }
 

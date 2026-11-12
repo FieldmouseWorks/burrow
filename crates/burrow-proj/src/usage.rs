@@ -45,6 +45,7 @@ pub(crate) const FILE: &str = ".usage.json";
 /// earlier proj's limit written before it never holds again ([`earlier`]).
 const RELEASED: &str = ".usage.released";
 const OWNER: &str = ".usage-owner-";
+const ADMISSION_REF: &str = ".usage-release-";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
@@ -75,7 +76,7 @@ pub struct Spent {
     pub back: Option<i64>,
     /// Precise admission boundary, committed atomically with `back`. A cutoff
     /// from an unsuccessful release attempt must never affect an active hold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub admission: Option<i64>,
     /// When the owner's notice was last sent: its open while it holds, its
     /// close after.
@@ -179,29 +180,72 @@ pub fn last_release(cfg: &Config) -> Option<i64> {
 /// watermark used to reject stale refusal records. Serialized with usage changes.
 pub fn admission_cutoff(cfg: &Config) -> std::io::Result<Option<i64>> {
     let _lock = try_lock(cfg)?;
-    Ok(admission_cutoff_locked(cfg))
+    admission_cutoff_locked(cfg)
 }
 
-fn admission_cutoff_locked(cfg: &Config) -> Option<i64> {
-    match kept(cfg) {
-        Some(s) if s.holds(now()) => None,
-        Some(s) => Some(s.admission_cutoff()),
-        None => crate::read(&cfg.jobs.join(".usage.admission"))?
-            .split_once('\t')?
-            .1
-            .parse()
-            .ok(),
+#[derive(Deserialize, Serialize)]
+struct Admission {
+    until: i64,
+    cutoff: i64,
+    committed: bool,
+}
+
+fn admission_cutoff_locked(cfg: &Config) -> std::io::Result<Option<i64>> {
+    if let Some(s) = read(cfg).map_err(std::io::Error::other)? {
+        if s.holds(now()) {
+            return Ok(None);
+        }
+        if s.back.is_some() {
+            let raw: Spent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE))?)?;
+            if !raw.job.starts_with(ADMISSION_REF) {
+                // Adopt an old writer's release once, while holding its lock.
+                // Later legacy notice writes preserve this reference instead
+                // of moving the cohort to the notice's modification time.
+                write_admission(cfg, &s, false)
+                    .and_then(|_| keep(cfg, &s))
+                    .and_then(|_| admission_release(cfg, &s).map(|_| ()))
+                    .map_err(std::io::Error::other)?;
+            }
+        }
+        return Ok(Some(s.admission_cutoff()));
     }
+    let Some(text) = crate::read(&cfg.jobs.join(".usage.admission")) else {
+        return Ok(None);
+    };
+    let cutoff = text.split_once('\t').and_then(|(key, cutoff)| {
+        if let Ok(a) = serde_json::from_str::<Admission>(key) {
+            // An old generation may settle after a crash before the journal
+            // acknowledgement. Include the original natural cohort then.
+            Some(if a.committed {
+                a.cutoff
+            } else {
+                a.until * 1_000_000_000
+            })
+        } else {
+            cutoff.trim().parse().ok()
+        }
+    });
+    Ok(cutoff)
 }
 
-fn admission_release(cfg: &Config, s: &Spent) -> Result<i64, String> {
+fn write_admission(cfg: &Config, s: &Spent, committed: bool) -> Result<i64, String> {
     let cutoff = s.admission_cutoff();
+    let state = Admission {
+        until: s.until,
+        cutoff,
+        committed,
+    };
+    let text = serde_json::to_string(&state).map_err(|e| e.to_string())?;
     swap(
         &cfg.jobs.join(".usage.admission"),
-        &format!("{}:{}\t{cutoff}\n", s.at, s.until),
+        &format!("{text}\t{cutoff}\n"),
     )
     .map_err(|e| e.to_string())?;
     Ok(cutoff)
+}
+
+fn admission_release(cfg: &Config, s: &Spent) -> Result<i64, String> {
+    write_admission(cfg, s, true)
 }
 
 /// Its record, holding or not, while it's kept.
@@ -215,6 +259,25 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Spent>(&text)
             .map(|mut s| {
+                if s.back.is_some()
+                    && let Some((cutoff, job)) = s
+                        .job
+                        .strip_prefix(ADMISSION_REF)
+                        .and_then(|reference| reference.split_once('-'))
+                    && let Ok(cutoff) = cutoff.parse::<i64>()
+                {
+                    s.admission = Some(cutoff);
+                    s.job = job.to_owned();
+                }
+                if let Some(back) = s.back
+                    && s.admission.is_none()
+                {
+                    // An old writer supplies only a whole-second release.
+                    // Its filesystem timestamp may be coarser than new queue
+                    // timestamps. Include the whole release second so none of
+                    // its same-second waiters can bypass the cap.
+                    s.admission = Some(((back + 1) * 1_000_000_000).min(s.until * 1_000_000_000));
+                }
                 // Legacy writers preserve the metadata reference in job. Their
                 // last-refusal update distinguishes a real refusal at/after the
                 // deadline from the compatibility fence (deadline minus one).
@@ -396,6 +459,9 @@ fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
     };
     if s.owner {
         mirror.last = Some(s.until - 1);
+    }
+    if let Some(cutoff) = s.admission {
+        mirror.job = format!("{ADMISSION_REF}{cutoff}-{}", s.job);
     }
     let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
     swap(&cfg.jobs.join(FILE), &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
@@ -584,10 +650,13 @@ pub fn back(cfg: &Config, started: Option<i64>) {
             s.admission = Some(crate::now_nanos().min(s.until * 1_000_000_000));
             s.back = Some(now);
             s.told = now;
-            if let Err(e) = keep(cfg, &s) {
+            if let Err(e) = write_admission(cfg, &s, false).and_then(|_| keep(cfg, &s)) {
                 eprintln!("{e}");
                 return;
             }
+            // The compatible record is the commit point. A failed journal
+            // acknowledgement leaves it intact for settlement to retry.
+            let _ = admission_release(cfg, &s);
             eprintln!("proj: Claude has usage again (out since {})", when(s.at));
             tell(cfg, &["close", NOTICE, CLOSED]);
             changed(cfg);

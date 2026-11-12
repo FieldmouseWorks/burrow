@@ -365,7 +365,7 @@ fn sorting_reply_is_consumed_once_despite_accepted_reconciliation_errors() {
         let blocked = if fault == "receipt" {
             crate::ask::host_path(&job, "resume-2.new")
         } else {
-            job.path("question-answered-through.new")
+            job.path("question-answered-through")
         };
         let runner = b.path("runner");
         burrow_test::executable(

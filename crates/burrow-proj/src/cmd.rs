@@ -44,6 +44,13 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
+        Some("_retry_format") => {
+            put(crate::slot::RETRY_HANDOVER_FORMAT);
+            Ok(())
+        }
+        Some("_retry-transfer") => {
+            crate::retry::watch(cfg).map_err(|e| Fail::new(1, e.to_string()))
+        }
         Some("check-config") => {
             if args.len() != 1 {
                 return Err(Fail::new(2, "usage: proj check-config"));
@@ -357,6 +364,11 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
 /// again.
 fn left_be(job: &Job, n: &str, active: &str) -> Result<Option<&'static str>, Fail> {
     let id = job.id;
+    // Checkpoint consumption takes the same job lock as withdrawal. Until
+    // that commit, even an inactive transfer with stale slot files is queued.
+    if job.retry_pending(n) {
+        return Ok(None);
+    }
     match active {
         "active" | "activating" | "reloading" => {}
         "inactive" | "failed" => return Ok(Some("over")),
@@ -415,7 +427,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // Marked first, so the turn's end already finds it stopped rather than
     // failed: nobody waits on it.
     if let Some(n) = &n {
-        let _ = fs::write(job.turn(n, "stopped"), "");
+        let _ = crate::state_reads::write(job.turn(n, "stopped"), "");
     }
     // No turn of it running, so no end of one to clear its scratch: this does.
     let idle = systemd::gone(cfg, &unit);
@@ -437,6 +449,21 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             format!("proj: couldn't stop {id}"),
         ));
     }
+    if let Some(n) = &n {
+        if job.turn(n, "retry-migration").exists() {
+            crate::swap(&job.turn(n, "retry-cancelled"), "")
+                .map_err(|e| Fail::new(1, e.to_string()))?;
+        }
+        fs::remove_file(job.turn(n, "retry-migration"))
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|e| Fail::new(1, e.to_string()))?;
+    }
     crate::ask::clear(job);
     if crate::ask::host_path(job, "label").exists() {
         kick(cfg, ["proj-watch".into()]);
@@ -448,7 +475,13 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     if let Err(e) = crate::question::notify(cfg, job) {
         eprintln!("proj: {e}");
     }
-    if idle {
+    // The end hook may have deferred while the checkpoint still existed.
+    // Confirmed transfer cancellation owns finalization in either ordering.
+    if n.as_ref()
+        .is_some_and(|n| job.turn(n, "retry-cancelled").exists())
+    {
+        finish(cfg, id)?;
+    } else if idle {
         scratch::clear(cfg, id);
     }
     if withdraw {
@@ -464,7 +497,8 @@ pub fn unstick(cfg: &Config, id: &str) -> Result<(), Fail> {
     if !job.dir.is_dir() {
         return Err(Fail::new(1, format!("no job {id}")));
     }
-    fs::write(job.path("unstick"), "").map_err(|e| io_fail(&job.path("unstick"), e))?;
+    crate::state_reads::write(job.path("unstick"), "")
+        .map_err(|e| io_fail(&job.path("unstick"), e))?;
     rewatch(cfg, &[id]);
     Ok(())
 }
@@ -509,7 +543,8 @@ pub(crate) fn record_wait(
         .open(&next)
         .and_then(|mut f| f.write_all(text.as_bytes()))
         .map_err(|e| io_fail(&next, e))?;
-    fs::write(job.path("end.next"), "await\n").map_err(|e| io_fail(&job.path("end.next"), e))?;
+    crate::state_reads::write(job.path("end.next"), "await\n")
+        .map_err(|e| io_fail(&job.path("end.next"), e))?;
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
         targets.join(" ")
@@ -577,7 +612,7 @@ fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
 /// Record the declaration and return the instruction the engine receives.
 fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
     let _ = fs::remove_file(job.path("await.next"));
-    fs::write(job.path("end.next"), format!("{how}\n"))
+    crate::state_reads::write(job.path("end.next"), format!("{how}\n"))
         .map_err(|e| io_fail(&job.path("end.next"), e))?;
     if how == "done" {
         let _ = fs::remove_file(job.path("open-question"));
@@ -607,6 +642,32 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 
 pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
+    if job
+        .turns()
+        .is_some_and(|n| job.turn(&n, "retry-migration").exists())
+    {
+        // The unit is gone, but its committed transfer is still pending.
+        // Wake the filesystem consumer even when it failed after launch.
+        if let Some(n) = job.turns() {
+            crate::state_reads::write(job.turn(&n, "retry-wake"), "")
+                .map_err(|e| Fail::new(1, e.to_string()))?;
+        }
+        return Ok(());
+    }
+    let cancelled = job
+        .turns()
+        .filter(|n| job.turn(n, "retry-cancelled").exists());
+    let _finalizing = if let Some(n) = &cancelled {
+        let lock = fs::File::create(job.turn(n, "retry-finalizing"))
+            .map_err(|e| Fail::new(1, e.to_string()))?;
+        lock.lock().map_err(|e| Fail::new(1, e.to_string()))?;
+        if job.turn(n, "retry-finalized").exists() {
+            return Ok(());
+        }
+        Some(lock)
+    } else {
+        None
+    };
     job.mark_ended();
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
@@ -632,6 +693,10 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     // ended, and makes its own afresh.
     if scratch::over(&job) {
         scratch::clear(cfg, id);
+    }
+    if let Some(n) = cancelled {
+        crate::swap(&job.turn(&n, "retry-finalized"), "")
+            .map_err(|e| Fail::new(1, e.to_string()))?;
     }
     // A resume may own the lock while waiting for this oneshot to finish.
     // The watcher kick above retains reconciliation when it cannot run here.

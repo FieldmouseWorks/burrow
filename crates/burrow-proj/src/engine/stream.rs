@@ -173,14 +173,17 @@ impl<'a> Said<'a> {
                 if !self.job.path("session.engine").exists()
                     && let Some(previous) = read(&self.job.path("session"))
                 {
-                    let _ = fs::write(self.job.path("session.claude"), format!("{previous}\n"));
+                    let _ = crate::state_reads::write(
+                        self.job.path("session.claude"),
+                        format!("{previous}\n"),
+                    );
                 }
-                let _ = fs::write(
+                let _ = crate::state_reads::write(
                     self.job.path(&format!("session.{}", engine.name())),
                     format!("{id}\n"),
                 );
-                let _ = fs::write(self.job.path("session"), format!("{id}\n"));
-                let _ = fs::write(self.job.path("session.engine"), engine.name());
+                let _ = crate::state_reads::write(self.job.path("session"), format!("{id}\n"));
+                let _ = crate::state_reads::write(self.job.path("session.engine"), engine.name());
                 self.named = true;
             }
             if self.decoder.line(&line).is_some() {

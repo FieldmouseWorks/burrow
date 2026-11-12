@@ -3,7 +3,9 @@
 use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::fs::{self, File};
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
@@ -58,7 +60,7 @@ impl Engine {
 /// What one turn runs on: the engine its role gives it, and the model and
 /// effort the models file gives that role on that engine. None leaves the
 /// engine's own setting.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
     pub engine: Engine,
     pub model: Option<String>,
@@ -74,11 +76,17 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     } else {
         crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
     };
+    if let Some(n) = job.turns()
+        && let Some(identity) = crate::retry::Identity::load(job, &n)?
+    {
+        return Ok(identity.choice);
+    }
+    let pinned = read(&job.path("engine"));
     resolve(
         cfg,
         &role,
         (!repo.is_empty()).then_some(repo.as_str()),
-        read(&job.path("engine")).as_deref(),
+        pinned.as_deref(),
     )
 }
 

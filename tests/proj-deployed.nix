@@ -55,7 +55,7 @@ pkgs.testers.runNixOSTest {
     specialisation.handing.configuration.environment.systemPackages = [
       (lib.hiPrio (pkgs.runCommand "proj-handing" { } ''
         mkdir -p $out/bin
-        sed '1a if [ "''${1:-}" = _exec ]; then if ${pkgs.util-linux}/bin/flock -n /data/dev/jobs/.slots/.lock true; then touch /tmp/unlocked; else touch /tmp/locked; fi; fi' \
+        sed '1a if [ "''${1:-}" = _exec ]; then if ${pkgs.util-linux}/bin/flock -n /data/dev/jobs/.slots/.admission-lock true; then touch /tmp/unlocked; else touch /tmp/locked; fi; fi' \
           ${config.burrow.tools.proj}/bin/proj >$out/bin/proj
         chmod +x $out/bin/proj
       ''))
@@ -90,8 +90,15 @@ pkgs.testers.runNixOSTest {
 
     def deploy(name):
         machine.succeed(f"{base}/specialisation/{name}/bin/switch-to-configuration test")
+        machine.wait_for_unit("proj-retry-transfer.service")
+        assert machine.succeed("systemctl show -P MainPID proj-retry-barrier.service").strip() == barrier_pid
+        machine.fail("flock -n /data/dev/jobs/.slots/.lock true")
 
     machine.wait_for_unit("user@1001.service")
+    machine.wait_for_unit("proj-retry-barrier.service")
+    machine.wait_for_unit("proj-retry-transfer.service")
+    barrier_pid = machine.succeed("systemctl show -P MainPID proj-retry-barrier.service").strip()
+    machine.fail("flock -n /data/dev/jobs/.slots/.lock true")
     base = machine.succeed("readlink -f /run/current-system").strip()
     first = machine.succeed("readlink -f /run/current-system/sw/bin/proj").strip()
 
@@ -167,5 +174,39 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"ls /data/dev/jobs/.queue | grep -- '-{r}$'")
         proj(f"stop {q}")
         proj(f"stop {r}")
+
+    def restore_waiter(job_id, budget, retained=False):
+        machine.succeed("systemctl stop proj-retry-transfer.service")
+        proj(f"usage hold {int(time.time()) + 3600} --reason transfer-test")
+        name, pid = place(job_id)
+        unit = "proj-" + machine.succeed(f"systemd-escape '{job_id}'").strip() + ".service"
+        machine.succeed(f"systemctl --user -M dev@ stop '{unit}'")
+        now = int(time.time() * 1_000_000_000)
+        checkpoint = {"waited": now - 3600_000_000_000, "said": None,
+                      "deadline": now - 3600_000_000_000 + budget * 1_000_000_000 if retained else None,
+                      "name": "2-" + name, "first": False, "retained": retained}
+        machine.succeed(f"printf '%s' '{json.dumps(checkpoint)}' >/var/lib/burrow/proj-questions/{job_id}/1.retry-migration")
+        machine.succeed("systemctl start proj-retry-transfer.service")
+        proj("usage back")
+
+    with subtest("a transferred initial waiter starts its configured timeout"):
+        proj(f"usage hold {int(time.time()) + 3600} --reason initial-test")
+        initial = proj('run --timeout 2s web "sleep 600"')
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -- '-{initial}$'", timeout=30)
+        restore_waiter(initial, 2)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {initial}' | grep -x 'timed out after 2s'", timeout=30)
+
+    with subtest("restored paused time reaches the watchdog before a retained run starts"):
+        proj(f"usage hold {int(time.time()) + 3600} --reason watchdog-test")
+        retained = proj('run --timeout 30s web "sleep 600"')
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -- '-{retained}$'", timeout=30)
+        restore_waiter(retained, 30, retained=True)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {retained}' | grep -x running", timeout=30)
+        machine.wait_until_succeeds(f"jq -e '.items[\"{retained}\"].phase | test(\"is running\")' /data/dev/jobs/.waits.json", timeout=20)
+        deadline = int(machine.succeed(f"cat /data/dev/jobs/{retained}/1.deadline")) // 1_000_000_000
+        item = json.loads(machine.succeed(f"jq -c '.items[\"{retained}\"]' /data/dev/jobs/.waits.json"))
+        assert item["due"] >= deadline, (item, deadline)
+        assert deadline >= time.time() + 10, deadline
+        proj(f"stop {retained}")
   '';
 }

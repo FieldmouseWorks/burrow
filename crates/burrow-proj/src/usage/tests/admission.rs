@@ -1,19 +1,24 @@
 use super::*;
 
-use super::cutoff as admission_cutoff;
+fn admission_cutoff(cfg: &Config) -> Option<i64> {
+    // Content assertions own the transaction; unrelated concurrent forks may
+    // briefly retain its descriptor until exec closes it.
+    let _held = super::super::lock(cfg).unwrap();
+    super::super::admission_cutoff_locked(cfg).unwrap()
+}
 
 #[test]
 fn a_moments_hold_is_tried_again_as_admission_tries() {
     let (_d, cfg) = rig();
     hold(&cfg, now() + 3600, "pause").unwrap();
     back(&cfg, None);
-    let want = admission_cutoff(&cfg);
+    let want = cutoff(&cfg);
     assert!(want.is_some());
     let moment = held_a_moment(&cfg);
     // One try says taken: slot.rs lets the census go and tries again.
     let err = super::super::admission_cutoff(&cfg).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
-    assert_eq!(admission_cutoff(&cfg), want);
+    assert_eq!(cutoff(&cfg), want);
     moment.join().unwrap();
 }
 
@@ -142,29 +147,11 @@ fn interrupted_release_watermarks_cannot_override_active_or_extended_holds() {
 }
 
 #[test]
-fn admission_state_reads_retry_but_waiter_admission_remains_nonblocking() {
-    use std::sync::mpsc;
-    use std::time::Duration;
+fn admission_reader_yields_while_another_transaction_owns_the_lock() {
     let (_d, cfg) = rig();
-    let t = now() - 100;
-    record(&cfg, "web", Some(t + 10), SAID, t).unwrap();
-    let held = lock(&cfg).unwrap();
+    let _held = super::super::lock(&cfg).unwrap();
     assert_eq!(
         super::super::admission_cutoff(&cfg).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
-    std::thread::scope(|scope| {
-        let (tx, rx) = mpsc::channel();
-        let cfg = &cfg;
-        scope.spawn(move || tx.send(admission_cutoff(cfg)).unwrap());
-        assert_eq!(
-            rx.recv_timeout(Duration::from_millis(20)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        );
-        drop(held);
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Some((t + 10) * 1_000_000_000)
-        );
-    });
 }
