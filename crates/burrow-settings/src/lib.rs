@@ -313,7 +313,7 @@ mod tests {
         };
         let pending = cfg.overlay.with_extension("pending");
         fs::write(&pending, "interrupted").unwrap();
-        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        burrow_test::permissions(&pending, 0o600);
         cfg.command(&["pause".into(), "sam/box".into()], "test")
             .unwrap();
         assert_eq!(

@@ -367,7 +367,7 @@ fn an_unpause_mid_scan_restarts_order_before_resuming_later_work() {
         .command(&["allow".into(), "sam/web".into()], "test")
         .unwrap();
     let allowed = tmp.path().join("allowed.json");
-    fs::copy(&settings.overlay, &allowed).unwrap();
+    burrow_test::copy_file(&settings.overlay, &allowed);
     settings
         .command(&["pause".into(), "sam/web".into()], "test")
         .unwrap();

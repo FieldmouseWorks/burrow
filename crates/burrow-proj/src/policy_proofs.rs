@@ -107,15 +107,13 @@ pub(crate) fn reconcile(cfg: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn a_restored_native_build_gets_the_current_admission_config_and_its_saved_path() {
         let dir = tempfile::tempdir().unwrap();
         let tool = |name: &str, body: &str| {
             let p = dir.path().join(name);
-            fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            burrow_test::executable(&p, format!("#!/bin/sh\n{body}\n"));
             p
         };
         let (_rig, mut cfg) = crate::usage::tests::rig();
