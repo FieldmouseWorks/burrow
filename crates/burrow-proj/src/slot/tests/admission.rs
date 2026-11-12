@@ -415,3 +415,43 @@ fn an_unpause_mid_scan_restarts_order_before_resuming_later_work() {
         .expect("later worker resumes");
     assert!(first < later, "release crossed the ordered scan: {starts}");
 }
+
+#[test]
+fn a_policy_pass_rewatches_what_the_watchdog_watches_not_every_job() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    // Two jobs whose turn failed: one the watchdog watches, and one long
+    // done whose wait it settled (on remi, every job since October).
+    for id in ["watched", "settled"] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("prompt.1"), "work").unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
+    }
+    crate::waits::rewatch(&cfg, &["watched"]);
+    let waits = jobs.join(".waits");
+    assert!(waits.join("watched").exists());
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(waits.join("watched").exists());
+    assert!(
+        !waits.join("settled").exists(),
+        "a policy pass put a settled job back in the watch"
+    );
+    let published: serde_json::Value =
+        serde_json::from_slice(&fs::read(cfg.waits.as_ref().unwrap()).unwrap()).unwrap();
+    let items: Vec<&String> = published["items"].as_object().unwrap().keys().collect();
+    assert_eq!(items, ["watched"]);
+}
