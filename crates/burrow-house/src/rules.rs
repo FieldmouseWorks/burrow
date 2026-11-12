@@ -267,10 +267,10 @@ pub fn timer(line: &str) -> bool {
 /// the review's to judge: this reads one line at a time.
 pub fn spender(line: &str) -> bool {
     static SPENDER: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-        let key = r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|paid([-_]?usage)?|fresh|spend(ing)?|runners?)\b";
+        let key = r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|usage[-_.]?paid|paid([-_]?usage)?|fresh|spend(ing)?|runners?)\b";
         vec![
             re(&format!(r"{key}.*\btrue\b")),
-            re(r#"(?i)\bdrain\b.*"[^"]+""#),
+            re(r#"(?i)\bdrain\b.*["'][^"']+["']"#),
         ]
     });
     SPENDER.iter().any(|r| r.is_match(line))
@@ -320,6 +320,13 @@ mod tests {
             "fresh = { enable = true; owner = \"x\"; };",
             "fresh = { owner = \"x\"; enable = lib.mkForce true; };",
             "/* opt in */ fresh.enable = true;",
+            "usagePaid = true;",
+            "cfg.usage_paid = true;",
+            "usage_paid: true",
+            "drain = ''codex'';",
+            "drain = 'claude'",
+            "drain: 'codex' # engine",
+            "drain = lib.mkForce ''claude'';",
         ] {
             assert!(spender(line), "{line}");
         }
@@ -328,6 +335,8 @@ mod tests {
             "drained = true;",
             "freshness = true;",
             "drain = null;",
+            "usagePaid = false;",
+            "usage_paid = null",
             "usage.paid = false;",
             "fresh = { enable = false; };",
             "description = \"drain on\";",

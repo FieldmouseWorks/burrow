@@ -40,6 +40,12 @@ fn spenders() {
             "  usage.paid = /* explanation */ lib.mkForce true;",
         ),
         ("hosts/x.nix", "  drain = /* explanation */ \"codex\";"),
+        ("hosts/x.nix", "  usagePaid = true;"),
+        ("src/config.rs", "    cfg.usage_paid = true;"),
+        ("config.yml", "usage_paid: true"),
+        ("hosts/x.nix", "  drain = ''codex'';"),
+        ("config.toml", "drain = 'claude' # engine"),
+        (".github/x.yml", "drain: 'codex'"),
         (
             "hosts/x.nix",
             "  fresh.enable = false; # was fresh.enable = true;",
@@ -56,6 +62,8 @@ fn not_spenders() {
         ("hosts/x.nix", "  drain.enable = false;"),
         ("hosts/x.nix", "  drain = null;"),
         ("hosts/x.nix", "  usage.paid = false;"),
+        ("hosts/x.nix", "  usagePaid = false;"),
+        ("config.toml", "usage_paid = false"),
         (
             "hosts/x.nix",
             "  fresh = { enable = false; owner = \"o\"; };",
