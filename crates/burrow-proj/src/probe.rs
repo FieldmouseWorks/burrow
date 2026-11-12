@@ -338,6 +338,37 @@ mod tests {
         assert!(got.contains("[redacted]"));
     }
     #[test]
+    fn sandbox_gets_scrubbed_host_crash_metadata_without_core_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let journal = dir.path().join("journalctl");
+        let token = format!("ghp_{}", "x".repeat(36));
+        let entry = serde_json::json!({
+            "COREDUMP_EXE":"/bin/example", "COREDUMP_PID":"123",
+            "COREDUMP_USER_UNIT":"proj-example.service",
+            "MESSAGE":format!("Stack trace of thread 123:\n#0 abort\nAuthorization: Bearer {token}"),
+            "COREDUMP_ENVIRON":"plain private environment"
+        });
+        burrow_test::executable(
+            &journal,
+            format!("#!/bin/sh\ncat <<'ENTRY'\n{entry}\nENTRY\n"),
+        );
+        cfg.probe.as_mut().unwrap().tools.journalctl = journal;
+        let job = Job::new(&cfg, "crashes");
+        let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+        let got = exchange(
+            &socket(&cfg, &job, "1"),
+            &["crashes /bin/example -1h".into()],
+        )
+        .unwrap();
+        assert!(got.contains("COREDUMP_PID: 123"));
+        assert!(got.contains("proj-example.service"));
+        assert!(got.contains("#0 abort"));
+        assert!(got.contains("[redacted]"));
+        assert!(!got.contains(&token));
+        assert!(!got.contains("plain private environment"));
+    }
+    #[test]
     fn vm_mailbox_returns_host_deployed_result_without_config_or_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = fixture(dir.path());

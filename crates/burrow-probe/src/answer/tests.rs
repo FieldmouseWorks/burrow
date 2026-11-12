@@ -99,6 +99,117 @@ fn sizes() {
 }
 
 #[test]
+fn crash_reports_use_the_host_journal_and_only_diagnostic_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let entry = serde_json::json!({
+        "COREDUMP_EXE": "/nix/store/example-godot/libexec/godot",
+        "COREDUMP_PID": "2168633",
+        "COREDUMP_SIGNAL": "6",
+        "COREDUMP_USER_UNIT": "proj-example.service",
+        "COREDUMP_CGROUP": "/user.slice/proj-example.service",
+        "MESSAGE": "Process dumped core.\nStack trace of thread 2168633:\n#0 abort (libc.so.6)",
+        "COREDUMP_ENVIRON": "PRIVATE_ENV_VALUE",
+        "COREDUMP_CMDLINE": "PRIVATE_ARGUMENT_VALUE",
+        "COREDUMP_PROC_MAPS": "PRIVATE_MEMORY_MAP",
+        "__CURSOR": "PRIVATE_CURSOR"
+    })
+    .to_string();
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        0,
+        &entry,
+    );
+    let q = Query::parse("crashes /nix/store/example-godot/libexec/godot -1h").unwrap();
+    let got = machine(&cfg, dir.path(), &fake).answer(&q).unwrap();
+    assert!(got.contains("COREDUMP_PID: 2168633"));
+    assert!(got.contains("COREDUMP_SIGNAL: 6"));
+    assert!(got.contains("proj-example.service"));
+    assert!(got.contains("#0 abort (libc.so.6)"));
+    assert!(!got.contains("PRIVATE_"));
+    let asked = fake.asked.borrow();
+    let (_, args, user) = &asked[0];
+    assert!(!user);
+    assert!(args.contains(&"COREDUMP_EXE=/nix/store/example-godot/libexec/godot".into()));
+    assert!(args.contains(&"@1793496400".into()));
+    assert!(args.contains(&"--reverse".into()));
+    assert!(args.windows(2).any(|a| a == ["-n", "5"]));
+    assert!(!args.iter().any(|a| a.contains("COREDUMP_ENVIRON")));
+}
+
+#[test]
+fn crash_queries_reject_commands_and_report_an_empty_span() {
+    for text in [
+        "crashes",
+        "crashes godot",
+        "crashes --all",
+        "crashes /bin/*",
+        "crashes /bin/../secret",
+        "crashes /bin/godot;id",
+        "crashes /bin/godot --all",
+        "crashes /bin/godot -1h now",
+        "crashes /",
+        "crashes /bin//godot",
+    ] {
+        assert!(Query::parse(text).is_err(), "{text}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        0,
+        "",
+    );
+    let q = Query::parse("crashes /bin/godot").unwrap();
+    assert_eq!(q.to_string(), "crashes /bin/godot -1d");
+    assert!(
+        machine(&cfg, dir.path(), &fake)
+            .answer(&q)
+            .unwrap()
+            .ends_with("none\n")
+    );
+    let bad = Query::parse("crashes /bin/godot now").unwrap();
+    assert!(machine(&cfg, dir.path(), &fake).answer(&bad).is_err());
+    assert_eq!(fake.asked.borrow().len(), 1);
+}
+
+#[test]
+fn crash_reports_bound_backtraces_and_reject_bad_journal_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let q = Query::parse("crashes /bin/godot").unwrap();
+    for bad in ["not json", r#"{"COREDUMP_EXE":"/bin/other"}"#] {
+        let fake = Fake::default().on(
+            "journalctl",
+            "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+            0,
+            bad,
+        );
+        assert!(machine(&cfg, dir.path(), &fake).answer(&q).is_err());
+    }
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        1,
+        "",
+    );
+    assert!(machine(&cfg, dir.path(), &fake).answer(&q).is_err());
+    let entry =
+        serde_json::json!({"COREDUMP_EXE":"/bin/godot", "MESSAGE":"x".repeat(12001)}).to_string();
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        0,
+        &entry,
+    );
+    let got = machine(&cfg, dir.path(), &fake).answer(&q).unwrap();
+    assert!(got.contains("[field truncated]"));
+    assert!(!got.contains(&"x".repeat(12001)));
+}
+
+#[test]
 fn memory_lists_the_biggest_cgroups() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
