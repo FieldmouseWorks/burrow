@@ -89,7 +89,7 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
     if job.turn(n, "stopped").exists() {
         return Ok(false);
     }
-    if read(&job.path("await")).is_some_and(|text| registered(&text)) {
+    if read(&job.path("await")).is_some_and(|text| registered(&text)) && !owner_question(job)? {
         let _ = crate::state_reads::remove(job.path(PENDING));
         return Ok(false);
     }
@@ -108,6 +108,34 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
     Ok(true)
 }
 fn finish_at(job: &Job, n: &str, due: i64) -> Result<(), String> {
+    if owner_question(job)? {
+        // Finalize a native or collected VM declaration before replacing any
+        // answer with quota advice. Existing authority (including an expired
+        // question's owner hold) keeps its identity, text and deadline.
+        let expired = state(&crate::ask::host_path(job, "question-needs-owner"))
+            .map_err(|e| format!("{:?}", e.say))?
+            .is_some();
+        if crate::ask::load(job).is_none() && !expired {
+            let text = crate::engine::answer(&job.turn(n, "jsonl"));
+            if !text.is_empty() {
+                swap(job.turn(n, "result"), format!("{text}\n")).map_err(|e| e.to_string())?;
+            }
+            crate::ask::finish(job.cfg, job, "ask")?;
+        }
+        // The question is now the active declaration. Saved GitHub intent
+        // remains durable, but its publication must not start a reset turn.
+        for name in ["await", "await.next"] {
+            match crate::state_reads::remove(job.path(name)) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        swap(job.turn(n, "end"), if expired { "done\n" } else { "ask\n" })
+            .map_err(|e| e.to_string())?;
+        swap(job.turn(n, "outcome"), "done\n").map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     park(job, due)?;
     swap(job.turn(n, "result"), format!("GitHub quota is exhausted. This job is parked until {}; saved waits will be registered automatically.\n", crate::usage::when(due))).map_err(|e| e.to_string())?;
     swap(job.turn(n, "end"), "await\n").map_err(|e| e.to_string())?;
@@ -116,6 +144,9 @@ fn finish_at(job: &Job, n: &str, due: i64) -> Result<(), String> {
 }
 
 pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
+    if owner_question(job)? {
+        return Ok(());
+    }
     let n = job
         .turns()
         .ok_or_else(|| "quota wait has no turn".to_string())?;
@@ -126,6 +157,27 @@ pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
         let _ = fs::remove_file(job.path(name));
     }
     Ok(())
+}
+
+/// Quota recovery may discard an uncommitted reversible retry suggestion,
+/// but must not retire a committed question or a pending one-way decision.
+fn owner_question(job: &Job) -> Result<bool, String> {
+    let text = |path: &std::path::Path| state(path).map_err(|e| format!("{:?}", e.say));
+    if let Some(question) = text(&crate::ask::host_path(job, "question"))? {
+        serde_json::from_str::<crate::ask::Question>(&question).map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    if text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
+        return Ok(true);
+    }
+    text(&job.path("ask.next"))?
+        .map(|s| {
+            serde_json::from_str::<crate::ask::Recommendation>(&s)
+                .map(|r| r.one_way)
+                .map_err(|e| e.to_string())
+        })
+        .transpose()
+        .map(|r| r.unwrap_or(false))
 }
 
 pub(crate) fn registered(text: &str) -> bool {
@@ -142,6 +194,11 @@ pub(crate) fn registered(text: &str) -> bool {
 /// The same committed deadline feeds scheduling, wake booking and watchdog
 /// facts, even when publication of the await marker was interrupted.
 pub(crate) fn reset(job: &Job, n: &str) -> Option<(i64, i64)> {
+    // A reset cannot answer an owner question. Keep the durable quota
+    // evidence for diagnostics; the question's own deadline drives its wake.
+    if owner_question(job).unwrap_or(true) {
+        return None;
+    }
     if job.turn(n, "stopped").exists() {
         return None;
     }
@@ -188,6 +245,16 @@ pub(crate) fn reconcile(job: &Job) -> Result<Option<i64>, crate::Fail> {
     };
     if job.turn(&n, "stopped").exists() || matches!(job.state().as_str(), "queued" | "running") {
         return Ok(None);
+    }
+    if owner_question(job).map_err(|e| crate::Fail::new(1, e))? {
+        // Recover a crash between collecting the declaration and committing
+        // its ask, before the watcher can replay saved GitHub waits.
+        if state(&job.path(PENDING))?.is_some() || refused(job).is_some() {
+            finish_at(job, &n, 0).map_err(|e| crate::Fail::new(1, e))?;
+        }
+        // ask::expire ran before reconciliation in this pass. A recovered
+        // declaration needs its first question wake booked here.
+        return Ok(crate::ask::load(job).map(|q| q.due.max(now() + 1)));
     }
     let text = state(&job.path("await"))?.unwrap_or_default();
     let awaits = crate::job::awaits(&text);
@@ -258,6 +325,12 @@ pub(crate) fn remember(job: &Job, waits: &str) -> Result<(), crate::Fail> {
 /// Recover an await after the reset, without asking the engine to repeat it.
 /// The intent survives partial API failure and process/reboot boundaries.
 pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryError> {
+    if owner_question(job).map_err(|e| crate::Fail::new(1, e))? {
+        if let Some(n) = job.turns() {
+            finish_at(job, &n, 0).map_err(|e| crate::Fail::new(1, e))?;
+        }
+        return Ok(None);
+    }
     state(&job.path("await"))?;
     state(&job.path("await.next"))?;
     let Some(text) = state(&job.path(PENDING))? else {
@@ -357,6 +430,12 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
 }
 
 pub(crate) fn restore(job: &Job) -> Result<(), crate::Fail> {
+    if owner_question(job).map_err(|e| crate::Fail::new(1, e))? {
+        if let Some(n) = job.turns() {
+            finish_at(job, &n, 0).map_err(|e| crate::Fail::new(1, e))?;
+        }
+        return Ok(());
+    }
     publish(job, &captured(job)?)
 }
 fn publish(job: &Job, waits: &str) -> Result<(), crate::Fail> {

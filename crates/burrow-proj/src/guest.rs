@@ -180,6 +180,47 @@ mod tests {
     }
 
     #[test]
+    fn vm_quota_finalization_preserves_one_way_ask() {
+        let (_dir, cfg) = registration_fixture("exit 1");
+        let job = Job::new(&cfg, "vm");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(
+            job.turn("1", "jsonl"),
+            serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": false,
+                "result": "May I remove the archive?"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            job.path(crate::github_quota::PENDING),
+            serde_json::to_vec(&crate::github_quota::Pending {
+                targets: vec!["o/r#1".into()],
+                retry_at: 1,
+                turn: "1".into(),
+                baselines: String::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        register(
+            &cfg,
+            &job,
+            br#"{"end":"ask","targets":[],"recommendation":{"default":"keep it","one_way":true}}"#,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(crate::github_quota::finish(&job, "1").unwrap());
+        assert!(crate::ask::load(&job).unwrap().recommendation.one_way);
+        assert_eq!(
+            crate::read(&crate::ask::host_path(&job, "question-text")).as_deref(),
+            Some("May I remove the archive?")
+        );
+    }
+
+    #[test]
     fn vm_quota_registration_uses_host_client_identity() {
         let (dir, mut cfg) = registration_fixture(&format!(
             "printf 'HTTP/2.0 403 Forbidden\\nx-ratelimit-remaining: 0\\nx-ratelimit-reset: {}\\n\\n{{}}'\nexit 1",
