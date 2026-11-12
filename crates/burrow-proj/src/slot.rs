@@ -663,6 +663,7 @@ fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::R
         fs::rename(&tmp, queue.join(me))?;
     }
     crate::policy::accepted(&Job::new(cfg, job_of(me))).map_err(io::Error::other)?;
+    snapshot::stream::notify(cfg);
     Ok(true)
 }
 

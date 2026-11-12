@@ -370,6 +370,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         prompt = retry
             .resume(&job, &n, &first)
             .map_err(|e| Fail::new(1, e.to_string()))?;
+        crate::snapshot::stream::notify(cfg);
     }
     rewatch(cfg, &[id]);
     let quiet = read(&job.path("idle"))
