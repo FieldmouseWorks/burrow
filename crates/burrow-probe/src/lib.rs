@@ -51,7 +51,18 @@ pub struct Config {
     pub projects: Option<PathBuf>,
     #[serde(default)]
     pub jobs: Option<PathBuf>,
+    /// `settings show`'s command and tracked document; None where the
+    /// settings module isn't on.
+    #[serde(default)]
+    pub settings: Option<SettingsTool>,
     pub tools: Tools,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsTool {
+    pub command: PathBuf,
+    pub config: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]

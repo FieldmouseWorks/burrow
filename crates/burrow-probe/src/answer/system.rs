@@ -199,6 +199,14 @@ pub fn queue(m: &Machine) -> Result<String, String> {
         .map(|s| or_none(&s) + "\n")
 }
 
+/// `settings`: the policy in force, as `settings show` prints it.
+pub fn settings(m: &Machine) -> Result<String, String> {
+    let tool = m.cfg.settings.as_ref().ok_or("settings aren't on here")?;
+    let config = tool.config.to_string_lossy();
+    m.output(&tool.command, &[&config, "show"], false, &[])
+        .map(|s| or_none(&s) + "\n")
+}
+
 /// `deployed`: the system that runs and the one that booted, its
 /// generation, version and revision, its inputs' revisions, and what
 /// HOST-update last found live.

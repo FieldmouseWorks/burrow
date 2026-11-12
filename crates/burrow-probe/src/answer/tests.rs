@@ -55,6 +55,7 @@ fn config(state: &Path) -> Config {
     Config {
         jobs: None,
         projects: None,
+        settings: None,
         machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),
@@ -621,5 +622,23 @@ fn usage_first_start_survives_slot_recreation_and_unknown_history_is_explicit() 
         m.answer(&Query::parse("usage @0").unwrap())
             .unwrap()
             .contains("claude: 1 turns")
+    );
+}
+
+#[test]
+fn settings_prints_settings_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    let fake = Fake::default().on("burrow-settings", "/etc/tracked.json", 0, "paused: o/r\n");
+    let m = |cfg: &Config| machine(cfg, dir.path(), &fake).answer(&Query::Settings);
+    assert_eq!(m(&cfg), Err("settings aren't on here".into()));
+    cfg.settings = Some(crate::SettingsTool {
+        command: "/bin/burrow-settings".into(),
+        config: "/etc/tracked.json".into(),
+    });
+    assert_eq!(m(&cfg).unwrap(), "paused: o/r\n");
+    assert_eq!(
+        fake.asked.borrow()[0].1,
+        ["/etc/tracked.json", "show"].map(String::from)
     );
 }
