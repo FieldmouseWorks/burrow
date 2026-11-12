@@ -231,7 +231,6 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     ids.sort_by_key(|id| read(&path(&Job::new(cfg, id), "order")).unwrap_or_else(|| id.clone()));
-    let watched = ids.clone();
     let mut errors = Vec::new();
     for id in ids {
         if let Err(error) = reconcile_job(cfg, &id, release_generation) {
@@ -241,7 +240,11 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
     if let Err(error) = crate::policy_proofs::reconcile(cfg) {
         errors.push(error);
     }
-    crate::waits::rewatch(cfg, &watched.iter().map(String::as_str).collect::<Vec<_>>());
+    // What the watchdog watches, its waits as the policy leaves them: a job
+    // it denied or parked drops out, and one it released rewatched itself.
+    // Never every job there is, which would put back long-finished ones
+    // whose waits were settled weeks ago.
+    crate::waits::rewatch_all(cfg);
     if let Some(until) = cfg
         .settings
         .as_ref()

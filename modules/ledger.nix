@@ -479,10 +479,8 @@ in
       description = if name == "burrow-ledger"
         then "ledger: record every repo's PRs in Conary's ledger"
         else "ledger: record %I's PRs in Conary's ledger";
-      # A switch leaves a running one be (see burrow.switch's check). One
-      # that fails while a switch runs fails the switch too, so GitHub being
-      # unavailable isn't a failure: it books the repo's next pass (sync_repo).
-      restartIfChanged = false;
+      # GitHub being unavailable isn't a failure: it books the repo's next
+      # pass (sync_repo).
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
@@ -496,9 +494,6 @@ in
     }) // {
       burrow-ledger-door = lib.mkIf cfg.door.enable {
         description = "ledger: answer the undo issues in ${cfg.door.repo}";
-        # A switch leaves a running pass be (see burrow.switch's check); the
-        # next one is the new system's.
-        restartIfChanged = false;
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
         path = [ cfg.gh ];

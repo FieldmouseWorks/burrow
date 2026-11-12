@@ -1,6 +1,7 @@
 //! Admission and wait records across terminal turns, holds and issue discovery.
 use super::{Box, issue};
 use crate::{inbox, job::Job};
+use serde_json::json;
 use std::{fs, path::PathBuf};
 
 fn single_slot() -> Box {
@@ -269,4 +270,49 @@ fn forgetting_waits_is_case_insensitive_and_preserves_other_repositories() {
     inbox::forget(&b.cfg.inbox.as_ref().unwrap().state, "sam/box").unwrap();
     assert!(!gone.exists());
     assert!(kept.exists());
+}
+
+// One repo's verdict that can't be carried out holds no sorting slot once its
+// job has ended: another repo's issue is still sorted (a job tried, which
+// can't start here and books a retry). A slot held by a live job leaves the
+// issue waiting, said once in the journal's record and in the snapshot.
+#[test]
+fn an_unfinished_verdict_does_not_hold_other_repos_slots() {
+    let mut b = Box::new();
+    b.cfg
+        .inbox
+        .as_mut()
+        .unwrap()
+        .triage
+        .as_mut()
+        .unwrap()
+        .at_once = 1;
+    b.job("s1", "done", "Hmm.");
+    let state = b.cfg.inbox.as_ref().unwrap().state.clone();
+    let game = state.join(".triage/sam_game-3");
+    fs::create_dir_all(&game).unwrap();
+    fs::write(game.join("job"), "s1\n").unwrap();
+    fs::write(game.join("plan"), "[]").unwrap();
+    let mut p = b.pass();
+    p.triage("sam/box", &[issue(9, "sam", &[])]).unwrap();
+    assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
+    assert!(!state.join(".triage-waiting/sam_box-9").exists());
+
+    // The same record with a running job does hold it.
+    fs::write(b.path("active"), "").unwrap();
+    fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
+    fs::remove_file(b.cfg.jobs.join("s1/1.outcome")).unwrap();
+    let mut p = b.pass();
+    p.triage("sam/box", &[issue(9, "sam", &[])]).unwrap();
+    assert!(p.wake.is_empty(), "{:?}", p.wake);
+    let said = fs::read_to_string(state.join(".triage-waiting/sam_box-9")).unwrap();
+    assert!(
+        said.contains("sam/box#9") && said.contains("planner slot"),
+        "{said}"
+    );
+    let snap = crate::snapshot::Snapshot::take(&b.cfg, 15).unwrap();
+    assert_eq!(
+        serde_json::to_value(snap).unwrap()["holds"]["triage"]["waiting"],
+        json!([said])
+    );
 }

@@ -940,49 +940,47 @@ fn triage_assigns_priority_but_preserves_existing_labels() {
     }
 }
 
-// One repo's verdict that can't be carried out holds no sorting slot once its
-// job has ended: another repo's issue is still sorted (a job tried, which
-// can't start here and books a retry). A slot held by a live job leaves the
-// issue waiting, said once in the journal's record and in the snapshot.
+// Issues the machinery App opens are sorted and ranked like an author's,
+// admitted by account id alone.
 #[test]
-fn an_unfinished_verdict_does_not_hold_other_repos_slots() {
+fn the_machinery_apps_issues_are_sorted_and_ranked() {
     let mut b = Box::new();
-    b.cfg
-        .inbox
-        .as_mut()
-        .unwrap()
-        .triage
-        .as_mut()
-        .unwrap()
-        .at_once = 1;
-    b.job("s1", "done", "Hmm.");
-    let state = b.cfg.inbox.as_ref().unwrap().state.clone();
-    let game = state.join(".triage/sam_game-3");
-    fs::create_dir_all(&game).unwrap();
-    fs::write(game.join("job"), "s1\n").unwrap();
-    fs::write(game.join("plan"), "[]").unwrap();
+    b.cfg.machinery_account = Some(burrow_github::fake::author("workers[bot]"));
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
     let mut p = b.pass();
-    p.triage("sam/box", &[issue(9, "sam", &[])]).unwrap();
-    assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
-    assert!(!state.join(".triage-waiting/sam_box-9").exists());
-
-    // The same record with a running job does hold it.
-    fs::write(b.path("active"), "").unwrap();
-    fs::write(b.cfg.jobs.join("s1/1.slot"), "1").unwrap();
-    fs::remove_file(b.cfg.jobs.join("s1/1.outcome")).unwrap();
-    let mut p = b.pass();
-    p.triage("sam/box", &[issue(9, "sam", &[])]).unwrap();
-    assert!(p.wake.is_empty(), "{:?}", p.wake);
-    let said = fs::read_to_string(state.join(".triage-waiting/sam_box-9")).unwrap();
-    assert!(
-        said.contains("sam/box#9") && said.contains("planner slot"),
-        "{said}"
-    );
-    let snap = crate::snapshot::Snapshot::take(&b.cfg, 15).unwrap();
-    assert_eq!(
-        serde_json::to_value(snap).unwrap()["holds"]["triage"]["waiting"],
-        json!([said])
-    );
+    assert!(!p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers[bot]", &[]),
+        &Default::default()
+    ));
+    assert!(p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers[bot]", &["ready"]),
+        &Default::default()
+    ));
+    assert!(p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers[bot]", &["outside text"]),
+        &Default::default()
+    ));
+    // The same name without the App's id is a stranger.
+    assert!(p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers", &[]),
+        &Default::default()
+    ));
+    let mut ready = issue(2, "workers[bot]", &["ready"]);
+    ready["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    ready["created_at"] = json!("2026-11-01T00:00:00Z");
+    let ranked = p.pick_ready(&t, &[ready]);
+    assert_eq!(ranked, Some(("sam/box".into(), "2".into())));
+    let mut stranger = issue(3, "workers", &["ready"]);
+    stranger["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    assert_eq!(p.pick_ready(&t, &[stranger]), None);
 }
 
 #[path = "sorting_slot_tests.rs"]
