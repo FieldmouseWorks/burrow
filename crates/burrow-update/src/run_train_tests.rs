@@ -311,3 +311,53 @@ fn a_fresh_bump_short_of_an_input_leaves_its_red_pr_alone() {
         red_head
     );
 }
+
+#[test]
+fn main_not_building_with_a_pr_open_never_falls_back_to_a_bump() {
+    // A newer burrow would build, but it isn't on main: main's own failure
+    // is main's to fix, and nothing unmerged goes live or is recorded as main.
+    let (m, head) = proposed();
+    let live = m.running();
+    m.landed("system.nix", "unrelated");
+    m.upstream("burrow", &sha('e'));
+    fs::write(m.home("build-breaks"), sha('b')).unwrap();
+    let mut gh = open_at(&head, &[false]);
+    assert_eq!(once(&m.cfg, &mut gh, false), 1);
+    assert_eq!(
+        said(&m),
+        ("failed".into(), "main itself doesn't build".into())
+    );
+    assert_eq!(m.running(), live);
+    assert!(!switched(&m));
+    assert_eq!(m.recorded("deployed-main"), None);
+    assert!(jobs(&m).contains("doesn't build; the log is "));
+    assert!(gh.asked("PATCH").is_empty());
+}
+
+#[test]
+fn the_first_main_deploy_may_leave_a_bump_the_old_updater_put_live() {
+    // The old updater's bump (newer nixpkgs than main) is live; main's
+    // system is a downgrade from it. Once, that is allowed; after, it isn't.
+    let (m, _) = proposed();
+    m.landed("system.nix", "unrelated");
+    let mut gh = Fake::default();
+    gh.on(
+        "GET",
+        "repos/sam/homelab/pulls?",
+        vec![ok(200, json!([]), &[])],
+    );
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    assert!(m.did("calls").contains("--allow-downgrade"));
+    assert!(m.cfg.state.join("main-only").exists());
+    m.landed("system.nix", "unrelated again");
+    fs::remove_file(m.path("calls")).unwrap();
+    let mut gh = Fake::default();
+    gh.on(
+        "GET",
+        "repos/sam/homelab/pulls?",
+        vec![ok(200, json!([]), &[])],
+    );
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    assert!(switched(&m));
+    assert!(!m.did("calls").contains("--allow-downgrade"));
+}

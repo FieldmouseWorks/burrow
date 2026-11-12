@@ -15,11 +15,34 @@ use crate::status::Outcome;
 /// in seconds.
 const SETTLE: &str = "180";
 
+/// The state file that says main alone has been deployed since the updater
+/// stopped riding PRs.
+const MAIN_ONLY: &str = "main-only";
+
 /// What the switch exits with when it refuses a system as built from an
 /// older nixpkgs than the running one, before anything went live.
 const DOWNGRADE: i32 = 3;
 
 impl Run<'_> {
+    /// Whether this is the first main deploy since the updater stopped
+    /// riding PRs (`MAIN_ONLY` not written yet). The one before it may have
+    /// left a bump of its own live that main doesn't have, with a newer
+    /// nixpkgs: going back to main is a downgrade the switch would refuse
+    /// for ever. Once, that is allowed; every later run is held to the
+    /// switch's check.
+    fn handing_over(&self) -> bool {
+        self.cfg.train.is_some() && !self.cfg.state.join(MAIN_ONLY).exists()
+    }
+
+    /// Records that main alone has been deployed since the hand-over.
+    pub(crate) fn handed_over(&self) {
+        if self.cfg.train.is_some() {
+            if let Err(e) = std::fs::write(self.cfg.state.join(MAIN_ONLY), "") {
+                eprintln!("{MAIN_ONLY}: {e}");
+            }
+        }
+    }
+
     pub(crate) fn go_live(&mut self) -> Step {
         // A bump in a train repo isn't switched to: it goes live after it
         // lands, as main.
@@ -40,9 +63,14 @@ impl Run<'_> {
         }
         let claude_before = self.claude_version();
         let (out, err) = to(&log, false)?;
-        let switched = Command::new(&tools.switch)
+        let mut switch_cmd = Command::new(&tools.switch);
+        switch_cmd
             .env("BURROW_CONFIRM_WITHIN", &cfg.within)
-            .args(["--toplevel", &self.new])
+            .args(["--toplevel", &self.new]);
+        if self.handing_over() {
+            switch_cmd.arg("--allow-downgrade");
+        }
+        let switched = switch_cmd
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)

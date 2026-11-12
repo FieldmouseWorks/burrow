@@ -70,6 +70,9 @@ pub struct Run<'a> {
     /// Its open PR's number, while it brings in nothing newer for that to
     /// land (main still deploys).
     pub(crate) behind: Option<u64>,
+    /// Whether this run brings in anything new: not while main isn't live
+    /// yet or an open PR of its own waits for the train.
+    pub(crate) bumping: bool,
     /// HEAD is a commit of this run's: a bump.
     pub(crate) changed: bool,
     /// What it couldn't fetch, and what didn't build.
@@ -143,6 +146,7 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
         inputs: Vec::new(),
         replacing: None,
         behind: None,
+        bumping: false,
         changed: false,
         unfetched: Vec::new(),
         failed: Vec::new(),
@@ -364,7 +368,8 @@ impl Run<'_> {
         let train = cfg.train.is_some();
         let main_first =
             train && self.behind.is_none() && !running::main_runs(cfg, &self.running, &self.main);
-        if self.behind.is_none() && !main_first {
+        self.bumping = self.behind.is_none() && !main_first;
+        if self.bumping {
             for i in self.inputs.iter().map(String::as_str).chain([CLAUDE]) {
                 if !bump::update_one(cfg, i) {
                     self.unfetched.push(i.to_string());
@@ -374,6 +379,7 @@ impl Run<'_> {
         }
         if !self.changed && !self.memo.force && running::main_runs(cfg, &self.running, &self.main) {
             running::live_at(cfg, &self.main, &self.running.current).map_err(Broke)?;
+            self.handed_over();
             return Err(self.end(
                 Outcome::Current,
                 &format!("up to date{}", self.behind_said()),
@@ -396,7 +402,9 @@ impl Run<'_> {
         );
         match self.built() {
             Some(new) => self.new = new,
-            None => self.input_by_input()?,
+            None if self.bumping => self.input_by_input()?,
+            // Main alone: nothing to fall back to.
+            None => return Err(self.main_broke()),
         }
         if self.failed.is_empty() {
             settled(cfg, "build-inputs", "Cleared by a later run.");
@@ -471,31 +479,41 @@ impl Run<'_> {
                 self.new = new;
                 Ok(())
             }
-            None => {
-                let e = self.end(Outcome::Failed, "main itself doesn't build");
-                self.dispatch(
-                    "build-main",
-                    &format!(
-                        "{}: {} main ({}) doesn't build; the log is {}. Fix it. {}",
-                        cfg.update,
-                        cfg.origin,
-                        self.main,
-                        logs.join("build.log").display(),
-                        self.rules
-                    ),
-                );
-                open(
-                    cfg,
-                    "build-main",
-                    "main doesn't build",
-                    &format!(
-                        "{} can't build {} main ({}). A Claude job is on it; this closes when main builds again.",
-                        cfg.update, cfg.origin, self.main
-                    ),
-                );
-                Err(e)
-            }
+            None => Err(self.main_broke()),
         }
+    }
+
+    /// Main itself doesn't build: said, handed to a Claude job, and an
+    /// issue until it builds again.
+    fn main_broke(&mut self) -> End {
+        let cfg = self.cfg;
+        let logs = cfg.state.join("logs");
+        if !self.memo.failed_before("build") {
+            // Best effort: a failure to remember only means a rebuild.
+            let _ = self.memo.failed("build");
+        }
+        let e = self.end(Outcome::Failed, "main itself doesn't build");
+        self.dispatch(
+            "build-main",
+            &format!(
+                "{}: {} main ({}) doesn't build; the log is {}. Fix it. {}",
+                cfg.update,
+                cfg.origin,
+                self.main,
+                logs.join("build.log").display(),
+                self.rules
+            ),
+        );
+        open(
+            cfg,
+            "build-main",
+            "main doesn't build",
+            &format!(
+                "{} can't build {} main ({}). A Claude job is on it; this closes when main builds again.",
+                cfg.update, cfg.origin, self.main
+            ),
+        );
+        e
     }
 
     /// Its stuck PR's head stays, unless a whole fresh bump other than it
@@ -633,6 +651,7 @@ impl Run<'_> {
         } else if let Err(why) = push::push_main(cfg) {
             println!("{why}");
         }
+        self.handed_over();
         self.bring_operator_along();
         let through = running::live_through(cfg, &self.main);
         running::live_at(cfg, &through, &self.new).map_err(Broke)?;
