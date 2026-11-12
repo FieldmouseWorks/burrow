@@ -222,7 +222,14 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [{
+  config = lib.mkMerge [
+  # A switch never restarts a handler's pass itself, whether or not the event
+  # daemon runs: the handlers' units are defined by their modules either way.
+  {
+    systemd.services = lib.listToAttrs (lib.concatMap (h: map (unit: lib.nameValuePair unit { restartIfChanged = false; })
+      ([ h.unit ] ++ lib.optional h.perRepo "${h.unit}@")) (lib.attrValues cfg.handlers));
+  }
+  (lib.mkIf cfg.enable (lib.mkMerge [{
     assertions = [{
       assertion = (cfg.host == null) == (cfg.secretFile == null);
       message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
@@ -336,8 +343,6 @@ in
     # have the switch wait out a pass of minutes, or one ordered after another
     # pass (renovate-sweep after renovate), past its deadline, and revert.
     systemd.services = lib.mkMerge [
-      (lib.listToAttrs (lib.concatMap (h: map (unit: lib.nameValuePair unit { restartIfChanged = false; })
-        ([ h.unit ] ++ lib.optional h.perRepo "${h.unit}@")) (lib.attrValues cfg.handlers)))
       (lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
       description = "burrow-events: a full pass of ${name} when a switch changes it";
       wantedBy = [ "multi-user.target" ];
@@ -355,5 +360,6 @@ in
       };
     }) cfg.handlers)
     ];
-  }]);
+  }]))
+  ];
 }

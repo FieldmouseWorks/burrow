@@ -10,6 +10,7 @@ let
       system.stateVersion = "26.05";
       systemd.settings.Manager = manager;
       systemd.services = services;
+      systemd.targets.gate.after = [ "long.service" ];
     } ];
   };
   refused = m: lib.concatMap (d: lib.filter (a: !a.assertion) d.value)
@@ -80,17 +81,42 @@ let
   # A unit ordered after a long oneshot waits out its run in the switch:
   # renovate-sweep behind renovate. Only the one the switch would restart.
   oneshot = timeout: { serviceConfig = { Type = "oneshot"; ExecStart = "true"; TimeoutStartSec = timeout; }; };
+  oneshotUnit = { Type = "oneshot"; ExecStart = "true"; };
   ordered = refused (machine { } {
-    long = (oneshot "2h") // { restartIfChanged = false; };
+    long = (oneshot "2h") // { restartIfChanged = false; before = [ "viaBefore.service" ]; };
+    "long@" = (oneshot "2h") // { restartIfChanged = false; };
+    aliased = (oneshot "2h") // { restartIfChanged = false; aliases = [ "other-name.service" ]; };
     short = (oneshot "30s") // { restartIfChanged = false; };
-    behind = { after = [ "long.service" ]; serviceConfig = { Type = "oneshot"; ExecStart = "true"; }; };
+    off = (oneshot "2h") // { enable = false; };
+    behind = { after = [ "long.service" ]; serviceConfig = oneshotUnit; };
     daemon = { after = [ "long.service" ]; serviceConfig.ExecStart = "sleep infinity"; };
     left = { after = [ "long.service" ]; restartIfChanged = false; serviceConfig.ExecStart = "true"; };
-    quick = { after = [ "short.service" ]; serviceConfig = { Type = "oneshot"; ExecStart = "true"; }; };
+    quick = { after = [ "short.service" ]; serviceConfig = oneshotUnit; };
+    instance = { after = [ "long@worker.service" ]; serviceConfig = oneshotUnit; };
+    specifier = { after = [ "long@%i.service" ]; serviceConfig = oneshotUnit; };
+    viaBefore = { serviceConfig = oneshotUnit; };
+    viaNative = { unitConfig.After = "long.service"; serviceConfig = oneshotUnit; };
+    viaAlias = { after = [ "other-name.service" ]; serviceConfig = oneshotUnit; };
+    viaDisabled = { after = [ "off.service" ]; serviceConfig = oneshotUnit; };
+    hop = { after = [ "behind.service" ]; serviceConfig = oneshotUnit; };
+    hopLeft = { after = [ "left.service" ]; restartIfChanged = false; serviceConfig = oneshotUnit; };
+    viaTarget = { after = [ "gate.target" ]; serviceConfig = oneshotUnit; };
   });
+  # The same handlers, with the event daemon off: still never restarted.
+  noEvents = (lib.nixosSystem {
+    modules = [ self.nixosModules.events {
+      nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+      system.stateVersion = "26.05";
+      burrow.events.enable = false;
+      burrow.events.handlers.probe = { events = [ "push" ]; unit = "probe"; perRepo = true; };
+    } ];
+  }).config.systemd.services;
 in
+assert lib.assertMsg (noEvents.probe.restartIfChanged == false && noEvents."probe@".restartIfChanged == false)
+  "handler units restart on a switch when burrow.events is disabled";
 assert lib.assertMsg (builtins.length ordered == 1
-  && lib.hasInfix "out:\nbehind, daemon. Give each" (builtins.head ordered).message)
+  && lib.hasInfix "behind, daemon, hop, instance, specifier, viaAlias, viaBefore, viaNative, viaTarget. Give each"
+    (builtins.head ordered).message)
   "switch accepted a restartable unit ordered after a long oneshot";
 assert lib.assertMsg (builtins.length mixed == 1 && lib.hasInfix
   ("Unbounded or unrecognised service timeouts: " + lib.concatStringsSep ", " (lib.attrNames badServices) + ".")

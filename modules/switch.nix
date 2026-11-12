@@ -150,14 +150,39 @@ let
   # A unit ordered after a long one waits for it too: the start the switch
   # queues for it sits behind the long one's run, whether or not the switch
   # left that one be (renovate-sweep behind a 13-minute renovate reverted a
-  # switch that had nothing wrong with it).
-  behindLong = s: lib.any (u:
-    let name = lib.removeSuffix ".service" u; in
-    lib.hasSuffix ".service" u && config.systemd.services ? ${name} && long config.systemd.services.${name}
-  ) s.after;
-  longOneshots = lib.attrNames (lib.filterAttrs (_: s:
-    s.enable && s.restartIfChanged && (long s || behindLong s)
-  ) config.systemd.services);
+  # switch that had nothing wrong with it). Ordering is read as systemd reads
+  # it: After= and Before= from either side, the options and unitConfig, through
+  # aliases, template instances and targets, and transitively.
+  words = v: if builtins.isList v then lib.concatMap words v
+    else lib.filter (w: w != "") (lib.splitString " " (toString v));
+  unitsOf = kind: lib.mapAttrs' (n: s: lib.nameValuePair "${n}.${kind}" s)
+    config.systemd.${kind + "s"};
+  declared = unitsOf "service" // unitsOf "target";
+  aliasOf = lib.foldl' (acc: id: acc // lib.genAttrs
+    (words [ (declared.${id}.aliases or [ ]) (declared.${id}.unitConfig.Alias or [ ]) ]) (_: id))
+    { } (lib.attrNames declared);
+  # The declared unit a name stands for: itself, its alias's, or the template
+  # an instance (foo@bar.service, foo@%i.service) is made from.
+  canon = u:
+    let
+      n = aliasOf.${u} or u;
+      m = builtins.match "([^@]*@)[^.]*(\\..*)" n;
+      tmpl = builtins.elemAt m 0 + builtins.elemAt m 1;
+    in if declared ? ${n} || m == null then n else aliasOf.${tmpl} or tmpl;
+  orderedAfter = s: map canon (words [ (s.after or [ ]) (s.unitConfig.After or [ ]) ]);
+  orderedBefore = s: map canon (words [ (s.before or [ ]) (s.unitConfig.Before or [ ]) ]);
+  edges = lib.concatLists (lib.mapAttrsToList (id: s:
+    map (p: { to = id; from = p; }) (orderedAfter s)
+    ++ map (succ: { to = succ; from = id; }) (orderedBefore s)) declared);
+  predecessors = lib.mapAttrs (_: map (e: e.from)) (lib.groupBy (e: e.to) edges);
+  behindLong = id: lib.any (x: lib.hasSuffix ".service" x.key && declared ? ${x.key} && long declared.${x.key})
+    (builtins.genericClosure {
+      startSet = map (key: { inherit key; }) (predecessors.${id} or [ ]);
+      operator = x: map (key: { inherit key; }) (predecessors.${x.key} or [ ]);
+    });
+  longOneshots = lib.sort lib.lessThan (map (id: lib.removeSuffix ".service" id) (lib.attrNames (lib.filterAttrs (id: s:
+    lib.hasSuffix ".service" id && s.enable && s.restartIfChanged && (long s || behindLong id)
+  ) declared)));
 in
 {
   imports = [
