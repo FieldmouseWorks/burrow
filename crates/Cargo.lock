@@ -938,6 +938,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "conary-flow-check"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
