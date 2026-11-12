@@ -69,17 +69,27 @@ impl Meter {
         let lock = burrow_process::state_reads::append(&dir.join(format!("{key}.lock")))?;
         lock.lock()?;
         let file = dir.join(format!("{key}.json"));
+        // The newer sample's budget stands whichever writer arrives first,
+        // but no live deadline of either may shrink: a primary reading cannot
+        // release a secondary limit early, nor a late sample an earlier one.
         let mut next = self.clone();
         if let Some(old) = Self::read(&file) {
-            if old.at > self.at {
-                return Ok(());
+            let (mut newer, older) = if old.at > self.at {
+                (old, self.clone())
+            } else {
+                (self.clone(), old)
+            };
+            let hold = newer
+                .until(newer.at)
+                .into_iter()
+                .chain(older.until(newer.at))
+                .max();
+            if newer.remaining.is_none() {
+                newer.remaining = older.remaining;
+                newer.reset = older.reset;
             }
-            if next.remaining.is_none() {
-                next.remaining = old.remaining;
-                next.reset = old.reset;
-            }
-            // A primary reading cannot release a secondary limit early.
-            next.retry_at = next.retry_at.into_iter().chain(old.until(self.at)).max();
+            newer.retry_at = hold;
+            next = newer;
         }
         burrow_process::state_reads::write(&file, serde_json::to_vec(&next)?)
     }
@@ -173,5 +183,24 @@ mod tests {
         assert_eq!(m.owner, "sam");
         assert_eq!(m.until(1200), Some(1300));
         assert_eq!(m.until(1300), None);
+    }
+    #[test]
+    fn a_late_older_sample_cannot_shrink_a_live_hold() {
+        let d = tempfile::tempdir().unwrap();
+        let mut newer = Meter::new("workers", "sam", 1100);
+        newer.budget(&json!({"resources":{"core":{"remaining":3400,"reset":5000}}}));
+        newer.record(d.path()).unwrap();
+        let mut older = Meter::new("workers", "sam", 1000);
+        older.retry_at = Some(1500);
+        older.record(d.path()).unwrap();
+        let file = std::fs::read_dir(d.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|f| f.path().extension().is_some_and(|s| s == "json"))
+            .unwrap()
+            .path();
+        let m = Meter::read(&file).unwrap();
+        assert_eq!((m.at, m.remaining), (1100, Some(3400)));
+        assert_eq!(m.until(1200), Some(1500));
     }
 }

@@ -225,6 +225,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         "end.next",
         "ask.next",
         "github/refusal",
+        crate::github_quota::PENDING,
     ] {
         if !job.turn(&n, "retry-migration").exists() {
             let _ = crate::state_reads::remove(job.path(f));

@@ -66,13 +66,13 @@ pub(crate) fn held(cfg: &Config, job: &Job, engine: crate::engine::Engine) -> Op
         .map(|t| t as i64)
 }
 
+/// The host's own client (`tools.gh`) authenticates as the machinery App, not
+/// as the job's: a refusal it meets holds that installation, so the queue
+/// keeps admitting jobs of Apps it did not touch. No machinery App means the
+/// host's gh is the owner's own login, which has no installation to hold.
 pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(), String> {
-    let engine = read(&job.turn(&job.turns().unwrap_or_default(), "engine"))
-        .as_deref()
-        .and_then(|s| crate::engine::Engine::parse(s).ok())
-        .unwrap_or(crate::engine::Engine::Claude);
-    if let Ok(Some(app)) = crate::turn::github_app(cfg, read(&job.path("app")), engine) {
-        let mut meter = Meter::new(&app, owner, now().max(0) as u64);
+    if let Some(app) = cfg.machinery.as_deref().filter(|a| !a.is_empty()) {
+        let mut meter = Meter::new(app, owner, now().max(0) as u64);
         meter.retry_at = Some(due);
         meter
             .record(&job.path("github"))
@@ -95,7 +95,9 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
     let Some(due) = read(&job.path(PENDING))
         .and_then(|s| serde_json::from_str::<Pending>(&s).ok())
         .map(|p| p.retry_at as i64)
-        .or_else(|| refused(job))
+        .into_iter()
+        .chain(refused(job))
+        .max()
     else {
         return Ok(false);
     };
@@ -118,38 +120,48 @@ pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
 /// Recover an await after the reset, without asking the engine to repeat it.
 /// The intent survives partial API failure and process/reboot boundaries.
 pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, crate::Fail> {
-    let Some(text) = read(&job.path(PENDING)) else {
-        return Ok(None);
-    };
-    let mut pending: Pending =
-        serde_json::from_str(&text).map_err(|e| crate::Fail::new(1, e.to_string()))?;
-    let targets = &pending.targets;
-    let found = targets
-        .iter()
-        .map(|t| {
-            crate::github::target(t)
-                .ok_or_else(|| crate::Fail::new(1, "invalid saved GitHub target"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    crate::github::take_limit();
-    let waits = match crate::cmd::baselines(cfg, &found, targets, None) {
-        Ok(waits) => waits,
-        Err(error) => {
-            if let Some(due) = crate::github::take_limit() {
-                pending.retry_at = due;
-                swap(
-                    job.path(PENDING),
-                    serde_json::to_vec(&pending).expect("pending await"),
-                )
-                .map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
-                park(job, due as i64).map_err(|e| crate::Fail::new(1, e))?;
-                return Ok(Some(due as i64));
+    let mut pending: Option<Pending> = read(&job.path(PENDING))
+        .map(|text| serde_json::from_str(&text).map_err(|e| crate::Fail::new(1, e.to_string())))
+        .transpose()
+        .inspect_err(|_| retire(job))?;
+    let mut waits = String::new();
+    if let Some(p) = &mut pending {
+        let targets = &p.targets;
+        let found = targets
+            .iter()
+            .map(|t| crate::github::target(t).ok_or("invalid saved GitHub target"))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                retire(job);
+                crate::Fail::new(1, e)
+            })?;
+        crate::github::take_limit();
+        waits = match crate::cmd::baselines_each(cfg, &found, targets, None) {
+            Ok(waits) => waits,
+            Err((error, owner)) => {
+                if let Some(due) = crate::github::take_limit() {
+                    // The installation the host client used, and the intent
+                    // and wait with it, so every refusal renews the hold.
+                    note(cfg, job, &owner, due).map_err(|e| crate::Fail::new(1, e))?;
+                    p.retry_at = due;
+                    swap(
+                        job.path(PENDING),
+                        serde_json::to_vec(p).expect("pending await"),
+                    )
+                    .map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
+                    park(job, due as i64).map_err(|e| crate::Fail::new(1, e))?;
+                    return Ok(Some(due as i64));
+                }
+                // The recovery prompt takes this intent over: the engine is
+                // told, and registers what it still wants itself.
+                retire(job);
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
+    }
     // Publish the complete wait before removing intent. Repeating after a
-    // crash is safe: these are reads, never GitHub mutations.
+    // crash is safe: these are reads, never GitHub mutations. Baselines taken
+    // before the refusal (await.next) are restored as they were.
     let mut kept = read(&job.path("await.next")).unwrap_or_default();
     kept.push_str(&waits);
     swap(job.path("await"), &kept).map_err(|e| crate::io_fail(&job.path("await"), e))?;
@@ -159,8 +171,15 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, crate::Fail
         swap(job.turn(&n, "outcome"), "done\n")
             .map_err(|e| crate::io_fail(&job.turn(&n, "outcome"), e))?;
     }
-    fs::remove_file(job.path(PENDING)).map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
+    let _ = fs::remove_file(job.path("await.next"));
+    retire(job);
     Ok(None)
+}
+
+/// Saved intent is consumed once recovery or a new turn owns it, so it cannot
+/// park a later turn again.
+pub(crate) fn retire(job: &Job) {
+    let _ = fs::remove_file(job.path(PENDING));
 }
 
 #[cfg(test)]
@@ -264,6 +283,95 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         );
         assert!(!job.path(PENDING).exists());
         assert!(!finish(&job, "1").unwrap());
+    }
+    #[test]
+    fn an_ordinary_replay_error_retires_the_intent() {
+        let (d, cfg) = fixture();
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(d.path().join("denied"), "").unwrap();
+        for bad in [
+            r#"{"targets":["sam/r#7"],"retry_at":1}"#,
+            r#"{"targets":["junk"],"retry_at":1}"#,
+        ] {
+            fs::write(job.path(PENDING), bad).unwrap();
+            assert!(replay(&cfg, &job).is_err());
+            assert!(!job.path(PENDING).exists(), "{bad}");
+            assert!(!finish(&job, "1").unwrap());
+        }
+    }
+    #[test]
+    fn replay_refusal_renews_the_machinery_installation_and_keeps_peers_eligible() {
+        let (d, cfg) = fixture();
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(d.path().join("limited"), "").unwrap();
+        fs::write(job.path(PENDING), r#"{"targets":["Sam/r#7"],"retry_at":1}"#).unwrap();
+        let due = replay(&cfg, &job).unwrap().unwrap();
+        assert!(job.path(PENDING).exists(), "intent stays through a refusal");
+        let meters = meters(&cfg);
+        assert_eq!(meters.len(), 1);
+        assert_eq!(
+            (meters[0].app.as_str(), meters[0].owner.as_str()),
+            ("workers", "sam")
+        );
+        assert_eq!(meters[0].until(now() as u64), Some(due as u64));
+    }
+    #[test]
+    fn baselines_taken_before_a_later_refusal_are_restored_without_a_turn() {
+        let (d, cfg) = fixture();
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("await.next"), "sam/a#1\t1\t{}\n").unwrap();
+        fs::create_dir_all(job.path("github")).unwrap();
+        let mut refusal = Meter::new("workers", "sam", now() as u64);
+        refusal.retry_at = Some(now() as u64 + 3600);
+        refusal.record(&job.path("github")).unwrap();
+        fs::write(
+            job.path("github/refusal"),
+            serde_json::to_vec(&refusal).unwrap(),
+        )
+        .unwrap();
+        assert!(finish(&job, "1").unwrap());
+        assert!(read(&job.path("await")).unwrap().starts_with(LIMIT));
+        fs::write(job.path("await"), format!("{LIMIT}\t1000\t{}\n", now() - 1)).unwrap();
+        crate::watch::look(&cfg, "").unwrap();
+        assert_eq!(read(&job.path("await")).unwrap(), "sam/a#1\t1\t{}");
+        assert_eq!(job.turns().as_deref(), Some("1"), "no engine turn");
+        assert!(!job.path("await.next").exists());
+        let _ = d;
+    }
+    #[test]
+    fn the_longest_live_deadline_parks_the_job() {
+        let (_d, cfg) = fixture();
+        let job = Job::new(&cfg, "job");
+        fs::create_dir_all(job.path("github")).unwrap();
+        job.set_turns(1).unwrap();
+        let mut refusal = Meter::new("workers", "sam", now() as u64);
+        refusal.retry_at = Some(now() as u64 + 7200);
+        fs::write(
+            job.path("github/refusal"),
+            serde_json::to_vec(&refusal).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            job.path(PENDING),
+            format!(r#"{{"targets":[],"retry_at":{}}}"#, now() + 60),
+        )
+        .unwrap();
+        assert!(finish(&job, "1").unwrap());
+        let due: i64 = read(&job.path("await"))
+            .unwrap()
+            .trim()
+            .rsplit('\t')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(due, now() + 7200);
     }
     #[test]
     fn meters_keep_installations_separate_and_hold_secondary_limits() {

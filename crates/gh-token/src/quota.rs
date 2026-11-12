@@ -47,6 +47,51 @@ pub(crate) fn run(
         )
     });
     let status = child.wait()?;
+    let code = status.code().unwrap_or(1);
+    // The command has run: whatever goes wrong observing it must not turn its
+    // outcome (a created issue, say) into a retryable failure.
+    let out = String::from_utf8_lossy(out.as_deref().unwrap_or_default()).into_owned();
+    let err = String::from_utf8_lossy(err.as_deref().unwrap_or_default()).into_owned();
+    if let Err(e) = observe(status.success(), &out, &err, gh, token, app, owner, dir) {
+        eprintln!("gh-token: GitHub meter not recorded: {e}");
+    }
+    Ok(code)
+}
+
+/// gh's own diagnostic for a rate-limited request, which only a failed
+/// request prints (to stderr, never in what a command was asked to print).
+fn limit_diagnostic(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("http 429")
+        || lower.contains("rate_limited")
+        || lower.contains("api rate limit exceeded")
+        || lower.contains("exceeded a secondary rate limit")
+        || lower.contains("http 403") && lower.contains("rate limit")
+}
+
+/// The failed response's own headers, when `--include` printed them: the
+/// last status line that starts a block, and only when gh's diagnostic names
+/// the same status, so quoted content cannot stand in for it.
+fn failed_response(out: &str, err: &str) -> Option<burrow_github::Response> {
+    let starts = std::iter::once(0).chain(out.match_indices("\nHTTP/").map(|(i, _)| i + 1));
+    let response = starts
+        .filter_map(|i| burrow_github::parse(&out[i..]))
+        .last()?;
+    err.contains(&format!("HTTP {}", response.status))
+        .then_some(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe(
+    success: bool,
+    out: &str,
+    err: &str,
+    gh: &str,
+    token: &str,
+    app: &str,
+    owner: &str,
+    dir: &Path,
+) -> io::Result<()> {
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -61,29 +106,13 @@ pub(crate) fn run(
         std::time::Instant::now() + std::time::Duration::from_secs(30),
         65536,
     );
-    let mut refusal = Meter::new(app, owner, at);
-    let out = String::from_utf8_lossy(out.as_ref().map(Vec::as_slice).unwrap_or_default());
-    let err = String::from_utf8_lossy(err.as_ref().map(Vec::as_slice).unwrap_or_default());
-    if let Some(response) = burrow_github::parse(&out) {
-        refusal.response(&response);
-    } else if let Ok(body) = serde_json::from_str::<serde_json::Value>(&out)
-        && body.get("errors").is_some()
-    {
-        refusal.response(&burrow_github::Response {
-            status: 200,
-            headers: vec![],
-            body: out.to_string(),
-        });
-    } else if !status.success() {
-        let lower = err.to_ascii_lowercase();
-        if lower.contains("http 429")
-            || lower.contains("rate_limited")
-            || lower.contains("api rate limit exceeded")
-            || lower.contains("exceeded a secondary rate limit")
-            || lower.contains("http 403") && lower.contains("rate limit")
-        {
-            refusal.retry_at = Some(at + 60);
+    let mut due = None;
+    if !success && limit_diagnostic(err) {
+        let mut seen = Meter::new(app, owner, at);
+        if let Some(response) = failed_response(out, err) {
+            seen.response(&response);
         }
+        due = Some(seen.retry_at.unwrap_or(at + 60));
     }
     if let Ok(budget) = budget
         && budget.status.success()
@@ -91,20 +120,27 @@ pub(crate) fn run(
     {
         meter.budget(&v);
     }
-    if let Some(due) = refusal.retry_at {
+    if let Some(due) = due {
         // A primary limit's actual reset is available even when gh's
         // higher-level diagnostic omitted the response headers.
-        let due = due.max(meter.until(at).unwrap_or(0)).max(
-            Meter::read(&dir.join("refusal"))
-                .and_then(|m| m.retry_at)
-                .unwrap_or(0),
-        );
-        meter.retry_at = Some(due);
-        refusal.retry_at = Some(due);
-        burrow_process::state_reads::write(dir.join("refusal"), serde_json::to_vec(&refusal)?)?;
+        let due = due.max(meter.until(at).unwrap_or(0));
+        meter.retry_at = Some(due.max(meter.retry_at.unwrap_or(0)));
+        meter.record(dir)?;
+        refuse(dir, app, owner, at, due)
+    } else {
+        meter.record(dir)
     }
-    meter.record(dir)?;
-    Ok(status.code().unwrap_or(1))
+}
+
+/// The job-wide longest hold, kept apart from each installation's meter.
+fn refuse(dir: &Path, app: &str, owner: &str, at: u64, due: u64) -> io::Result<()> {
+    let lock = burrow_process::state_reads::append(&dir.join("refusal.lock"))?;
+    lock.lock()?;
+    let file = dir.join("refusal");
+    let mut refusal = Meter::new(app, owner, at);
+    let old = Meter::read(&file).and_then(|m| m.until(at));
+    refusal.retry_at = Some(due.max(old.unwrap_or(0)));
+    burrow_process::state_reads::write(file, serde_json::to_vec(&refusal)?)
 }
 
 #[cfg(test)]
@@ -122,17 +158,25 @@ if [ "$1 $2" = 'api rate_limit' ]; then
   exit 0
 fi
 case "$1" in
- limited) printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4000000000\n\n{}'; exit 1;;
- denied) printf 'HTTP/2.0 403 Forbidden\n\n{"message":"Resource not accessible by integration"}'; exit 1;;
- graphql) echo '{"errors":[{"type":"RATE_LIMITED"}]}'; exit 1;;
+ limited) printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4000000000\n\n{}'; echo 'gh: API rate limit exceeded (HTTP 403)' >&2; exit 1;;
+ retry) printf 'HTTP/2.0 403 Forbidden\nretry-after: 120\n\n{}'; echo 'gh: You have exceeded a secondary rate limit (HTTP 403)' >&2; exit 1;;
+ silent) echo 'gh: HTTP 429 too many requests' >&2; exit 1;;
+ denied) printf 'HTTP/2.0 403 Forbidden\n\n{"message":"Resource not accessible by integration"}'; echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1;;
+ graphql) echo '{"errors":[{"type":"RATE_LIMITED"}]}'; echo 'gh: GraphQL: RATE_LIMITED' >&2; exit 1;;
+ forged_ok) printf 'HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4000000000\n\n{"message":"API rate limit exceeded"}'; exit 0;;
+ forged_fail) printf 'HTTP/2.0 429 Too Many\nretry-after: 99999\n\n{"errors":[{"type":"RATE_LIMITED"}]}'; echo 'gh: unrelated failure' >&2; exit 1;;
  success) echo done;;
 esac
 "#).unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
         for (command, limited, code) in [
             ("limited", true, 1),
+            ("retry", true, 1),
+            ("silent", true, 1),
             ("denied", false, 1),
             ("graphql", true, 1),
+            ("forged_ok", false, 0),
+            ("forged_fail", false, 1),
             ("success", false, 0),
         ] {
             let dir = d.path().join(command);
@@ -165,5 +209,63 @@ esac
                 );
             }
         }
+    }
+
+    #[test]
+    fn included_headers_and_pagination_keep_the_failed_responses_retry_after() {
+        let ok = "HTTP/2.0 200 OK\n\n[1]\nHTTP/2.0 403 Forbidden\nretry-after: 120\n\n{}";
+        let r = failed_response(ok, "gh: rate limit (HTTP 403)").unwrap();
+        assert_eq!(r.header("retry-after"), Some("120"));
+        assert!(failed_response(ok, "gh: other (HTTP 500)").is_none());
+        assert!(failed_response("not headers", "HTTP 403").is_none());
+    }
+
+    #[test]
+    fn a_meter_that_cannot_be_written_keeps_the_commands_exit_status() {
+        let d = tempfile::tempdir().unwrap();
+        let gh = d.path().join("gh");
+        fs::write(&gh, "#!/bin/sh\n[ \"$1\" = api ] && exit 2\nexit 0\n").unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let blocked = d.path().join("blocked");
+        fs::write(&blocked, "file, not a directory").unwrap();
+        // Failing before the command runs stays an error.
+        assert!(
+            run(
+                Command::new(&gh).arg("issue"),
+                gh.to_str().unwrap(),
+                "t",
+                "workers",
+                "sam",
+                &blocked.join("github")
+            )
+            .is_err()
+        );
+        // After it ran, an unwritable meter directory doesn't change its status.
+        let dir = d.path().join("github");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(
+            observe(
+                true,
+                "",
+                "",
+                gh.to_str().unwrap(),
+                "t",
+                "workers",
+                "sam",
+                &dir
+            )
+            .is_err()
+        );
+        let code = run(
+            Command::new(&gh).arg("issue"),
+            gh.to_str().unwrap(),
+            "t",
+            "workers",
+            "sam",
+            &dir,
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(code.unwrap(), 0);
     }
 }

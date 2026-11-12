@@ -304,3 +304,44 @@ fn out_of_usage_the_stuck_issue_and_a_queued_job_go_to_the_owner() {
     assert_eq!(opened(&m).len(), 1);
     assert!(m.escalated().is_empty());
 }
+
+/// `proj usage` appends one `{"github": ..}` record per installation after
+/// Claude's hold: the hold still suppresses with any number of them.
+#[test]
+fn out_of_usage_survives_github_meter_records() {
+    let github = r#"{"github":{"app":"workers","owner":"sam","at":1,"remaining":0,"reset":2,"retry_at":null}}"#;
+    for meters in [0, 1, 3] {
+        let m = Machine::new();
+        m.write(
+            &m.steward,
+            json!({"pr-sam_r-7": on_claude(T - 3.0 * H, T - H)}),
+            T,
+        );
+        let back = T + 2.0 * H;
+        out_until(&m, back);
+        for _ in 0..meters {
+            let mut usage = m.world.usage.borrow_mut();
+            usage.push('\n');
+            usage.push_str(github);
+        }
+        let (wake, stalls) = m.run(T);
+        assert!(stalls.is_empty(), "{meters} {stalls:?}");
+        assert_eq!(wake, Some(back), "{meters}");
+        assert!(m.kicks().is_empty() && m.runs().is_empty(), "{meters}");
+    }
+}
+
+/// Meters alone are no Claude hold: the stall is handled as when usage is spare.
+#[test]
+fn github_meters_alone_hold_nothing() {
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"pr-sam_r-7": on_claude(T - 3.0 * H, T - H)}),
+        T,
+    );
+    *m.world.usage.borrow_mut() =
+        r#"{"github":{"app":"workers","owner":"sam","at":1,"until":null}}"#.to_owned();
+    let (_, stalls) = m.run(T);
+    assert_eq!(stalls.len(), 1, "{stalls:?}");
+}

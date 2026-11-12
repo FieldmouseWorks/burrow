@@ -599,23 +599,10 @@ pub(crate) fn record_wait(
         }
     }
     let targets = &all;
-    let mut limited_owner = String::new();
-    let result = found
-        .iter()
-        .zip(targets)
-        .try_fold(String::new(), |mut text, (found, target)| {
-            limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
-            text.push_str(&baselines(
-                cfg,
-                std::slice::from_ref(found),
-                std::slice::from_ref(target),
-                until,
-            )?);
-            Ok(text)
-        });
+    let result = baselines_each(cfg, &found, targets, until);
     let text = match result {
         Ok(text) => text,
-        Err(error) => {
+        Err((error, limited_owner)) => {
             if let Some(due) = crate::github::take_limit() {
                 crate::github_quota::note(cfg, job, &limited_owner, due)
                     .map_err(|e| Fail::new(1, e))?;
@@ -666,6 +653,30 @@ pub(crate) fn record_wait(
 /// words, rather than leaving the job waiting on something proj never read.
 /// So does one that's already merged or closed ([`over`]): the job checked it
 /// before it merged, as a rule, and goes on to what comes after.
+/// [`baselines`] one target at a time, so a refusal names the owner whose
+/// installation it came from.
+pub(crate) fn baselines_each(
+    cfg: &Config,
+    found: &[(String, String)],
+    targets: &[String],
+    until: Option<Instant>,
+) -> Result<String, (Fail, String)> {
+    let mut text = String::new();
+    for (found, target) in found.iter().zip(targets) {
+        let owner = found.0.split('/').next().unwrap_or_default().to_owned();
+        text.push_str(
+            &baselines(
+                cfg,
+                std::slice::from_ref(found),
+                std::slice::from_ref(target),
+                until,
+            )
+            .map_err(|e| (e, owner))?,
+        );
+    }
+    Ok(text)
+}
+
 pub(crate) fn baselines(
     cfg: &Config,
     found: &[(String, String)],

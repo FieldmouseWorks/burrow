@@ -111,7 +111,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 if reset > now() {
                     lines.push_str(&a.line());
                     retry.push((String::new(), reset));
-                } else if job.path(crate::github_quota::PENDING).exists() {
+                } else if job.path(crate::github_quota::PENDING).exists()
+                    || read(&job.path("await.next")).is_some_and(|w| !w.is_empty())
+                {
                     let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
                     if job.turns().as_deref() != Some(turn.as_str())
                         || read(&f).as_deref() != Some(waits.as_str())

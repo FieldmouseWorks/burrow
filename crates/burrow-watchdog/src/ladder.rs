@@ -285,7 +285,13 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
 /// resets, and proj's line on it. None when it isn't, or proj can't say.
 fn out_of_usage(world: &dyn World, now: f64) -> Option<(f64, String)> {
     let (ok, out) = world.proj(&["usage"]);
-    let v: serde_json::Value = serde_json::from_str(&out).ok().filter(|_| ok)?;
+    // One JSON record a line: Claude's hold, then any `{"github": ..}` meters,
+    // which say nothing about Claude and are skipped.
+    let v: serde_json::Value = out
+        .lines()
+        .filter(|_| ok)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("until").is_some())?;
     let until = v["until"].as_f64().filter(|&t| t > now)?;
     let said = v["said"].as_str().unwrap_or_default();
     Some((
