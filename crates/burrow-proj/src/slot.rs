@@ -645,7 +645,8 @@ pub fn take(
 /// it without its pid. Put back if it went anyway. False means the usage
 /// transaction is busy; retry from the emergency check without publishing.
 fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::Result<bool> {
-    if read(&queue.join(me)).as_deref() != Some(process::id().to_string().as_str()) {
+    let created = read(&queue.join(me)).as_deref() != Some(process::id().to_string().as_str());
+    if created {
         // Birth and early release are ordered by the same usage lock, so a
         // queue entry cannot appear between capturing the cutoff and committing
         // the release. The independent pools never publish here.
@@ -663,7 +664,10 @@ fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::R
         fs::rename(&tmp, queue.join(me))?;
     }
     crate::policy::accepted(&Job::new(cfg, job_of(me))).map_err(io::Error::other)?;
-    snapshot::stream::notify(cfg);
+    // Only a new place is news: a poll that finds it there changes nothing.
+    if created {
+        snapshot::stream::notify(cfg);
+    }
     Ok(true)
 }
 
