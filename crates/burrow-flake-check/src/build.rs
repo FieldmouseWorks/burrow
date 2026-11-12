@@ -102,25 +102,21 @@ fn announce_cold(targets: &[String]) {
     let mut msg = format!(
         "cold build: {} derivations no cache has will be built here, not restored: {}",
         names.len(),
-        names.iter().take(40).cloned().collect::<Vec<_>>().join(", ")
+        names
+            .iter()
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if names.len() > 40 {
         msg.push_str(&format!(", and {} more", names.len() - 40));
     }
     println!("{msg}");
-    if let Some(path) = env::var_os("GITHUB_STEP_SUMMARY") {
-        if let Ok(mut f) = fs::OpenOptions::new().append(true).create(true).open(path) {
-            let _ = writeln!(f, "{msg}");
-        }
-    }
-}
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn names_only_what_will_be_built() {
-        let out = "this derivation will be built:\n  /nix/store/aaa-codex-1.0.drv\nthese 2 derivations will be built:\n  /nix/store/bbb-x.drv\n  /nix/store/ccc-y.drv\nthese 3 paths will be fetched (1 MiB download):\n  /nix/store/ddd-z\n";
-        assert_eq!(super::cold_names(out), ["codex-1.0", "x", "y"]);
-        assert!(super::cold_names("this path will be fetched:\n  /nix/store/d-z\n").is_empty());
+    if let Some(path) = env::var_os("GITHUB_STEP_SUMMARY")
+        && let Ok(mut f) = fs::OpenOptions::new().append(true).create(true).open(path)
+    {
+        let _ = writeln!(f, "{msg}");
     }
 }
 pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
@@ -187,4 +183,13 @@ pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<b
         ok = in_slot(&args(&vms, true))? && ok;
     }
     Ok(ok)
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn names_only_what_will_be_built() {
+        let out = "this derivation will be built:\n  /nix/store/aaa-codex-1.0.drv\nthese 2 derivations will be built:\n  /nix/store/bbb-x.drv\n  /nix/store/ccc-y.drv\nthese 3 paths will be fetched (1 MiB download):\n  /nix/store/ddd-z\n";
+        assert_eq!(super::cold_names(out), ["codex-1.0", "x", "y"]);
+        assert!(super::cold_names("this path will be fetched:\n  /nix/store/d-z\n").is_empty());
+    }
 }
