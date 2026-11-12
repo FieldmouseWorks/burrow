@@ -5,23 +5,35 @@ use serde_json::Value;
 use std::fs;
 
 pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, String> {
-    let inputs: Value = serde_json::from_str(
-        &fs::read_to_string(m.path("/etc/burrow/inputs.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let mut revisions: Vec<String> = inputs
-        .as_object()
-        .ok_or("invalid running inputs")?
-        .values()
-        .filter(|i| {
-            i["repo"]
-                .as_str()
-                .is_some_and(|r| r.eq_ignore_ascii_case(repo))
-        })
-        .filter_map(|i| i["rev"].as_str().map(str::to_owned))
-        .collect();
+    let is_system = m
+        .cfg
+        .system_repo
+        .as_deref()
+        .is_some_and(|r| r.eq_ignore_ascii_case(repo));
+    // The inputs manifest is optional; a missing one only matters to a repo
+    // that has no other source of a running revision.
+    let inputs: Result<Value, String> = fs::read_to_string(m.path("/etc/burrow/inputs.json"))
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()));
+    let mut revisions: Vec<String> = Vec::new();
+    match &inputs {
+        Ok(inputs) => revisions.extend(
+            inputs
+                .as_object()
+                .ok_or("invalid running inputs")?
+                .values()
+                .filter(|i| {
+                    i["repo"]
+                        .as_str()
+                        .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+                })
+                .filter_map(|i| i["rev"].as_str().map(str::to_owned)),
+        ),
+        Err(e) if !is_system => return Err(e.clone()),
+        Err(_) => {}
+    }
     // The machine's own repo is the configuration, not an input.
-    if repo.eq_ignore_ascii_case(&m.cfg.repo) {
+    if is_system {
         revisions.push(super::system::configuration_revision(m)?);
     }
     if revisions.is_empty() {
@@ -327,7 +339,6 @@ mod tests {
         git(&["commit", "--allow-empty", "-qm", "second"]);
         let second = git(&["rev-parse", "HEAD"]);
         fs::create_dir_all(root.join("etc/burrow")).unwrap();
-        fs::write(root.join("etc/burrow/inputs.json"), "{}").unwrap();
         let bin = root.join("run/current-system/sw/bin");
         fs::create_dir_all(&bin).unwrap();
         let script = bin.join("nixos-version");
@@ -338,7 +349,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let cfg: Config = serde_json::from_value(serde_json::json!({"repo":"sam/host","label":"probe","authors":[],"host":"host","user":"dev","stateDir":root,"projects":root.join("projects"),"proj":null,"journal":{"units":[],"userUnits":[]},"tools":{"journalctl":"false","systemctl":"false"}})).unwrap();
+        let cfg: Config = serde_json::from_value(serde_json::json!({"repo":"sam/issues","systemRepo":"sam/host","label":"probe","authors":[],"host":"host","user":"dev","stateDir":root,"projects":root.join("projects"),"proj":null,"journal":{"units":[],"userUnits":[]},"tools":{"journalctl":"false","systemctl":"false"}})).unwrap();
         let commands = crate::answer::Commands;
         let machine = Machine {
             cfg: &cfg,
