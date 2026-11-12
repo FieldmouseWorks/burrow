@@ -225,7 +225,18 @@ pub fn decide(
                 d.state.going_live.insert(repo.clone(), since);
                 let what = format!("{repo} going live");
                 let link = Some(format!("https://github.com/{repo}"));
-                let it = going_live(dep, update, said, behind, what, why, since, link, true);
+                let it = going_live(
+                    dep,
+                    update,
+                    said,
+                    snap.progress,
+                    behind,
+                    what,
+                    why,
+                    since,
+                    link,
+                    true,
+                );
                 d.items.insert(key, it);
                 continue;
             }
@@ -257,7 +268,16 @@ pub fn decide(
                 short(&b.newest),
             );
             let it = going_live(
-                dep, update, said, behind, what, &waiting, b.oldest, link, false,
+                dep,
+                update,
+                said,
+                snap.progress,
+                behind,
+                what,
+                &waiting,
+                b.oldest,
+                link,
+                false,
             );
             d.items.insert(key, it);
         }
@@ -267,7 +287,10 @@ pub fn decide(
 
 /// A repo's wait to go live, `waiting` since `since`: on HOST-update's run
 /// once one under way has it (one that started since, or, with `any`, any
-/// one), and otherwise on HOST-update, which the watchdog kicks: soon, unless
+/// one), due `run` after it last wrote to its logs (`progress`), or after it
+/// started if it hasn't since: a run at work, however long its build, isn't
+/// stalled, and one that has gone quiet is. Otherwise on HOST-update, which
+/// the watchdog kicks: soon, unless
 /// its last run is `behind` its own open PR, which brings the commit in only
 /// after it lands and has a wait of its own with the steward.
 #[allow(clippy::too_many_arguments)]
@@ -275,6 +298,7 @@ fn going_live(
     dep: &Deploy,
     update: &Unit,
     said: &str,
+    progress: Option<f64>,
     behind: Option<u64>,
     what: String,
     waiting: &str,
@@ -286,13 +310,21 @@ fn going_live(
         Some(start) if update.state == "activating" && (any || start >= since) => Item {
             repo: None,
             what,
-            phase: format!(
-                "{} has been putting it live since {}",
-                dep.unit,
-                clock(start)
-            ),
+            phase: match progress.filter(|p| *p > start) {
+                Some(p) => format!(
+                    "{} has been putting it live since {}, its last output at {}",
+                    dep.unit,
+                    clock(start),
+                    clock(p)
+                ),
+                None => format!(
+                    "{} has been putting it live since {}",
+                    dep.unit,
+                    clock(start)
+                ),
+            },
             since: start,
-            due: start + dep.run,
+            due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run,
             link,
             kick: None,
             line: false,

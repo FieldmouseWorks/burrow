@@ -42,7 +42,8 @@
 //!   - deploy/OWNER/REPO: commits on a watched repo's default branch that
 //!     the running system wasn't built from, from the oldest, due
 //!     `deploy.after` later, kicking HOST-update; while a run that started
-//!     after that commit is at work, from its start, due `deploy.run` later.
+//!     after that commit is at work, from its start, due `deploy.run` after
+//!     it last wrote to its logs (or started, if it hasn't since).
 //!   - github/OWNER/REPO: a repo its passes can't read from GitHub.
 //!
 //! burrow-events starts a pass on a runner repo's workflow_job events, a

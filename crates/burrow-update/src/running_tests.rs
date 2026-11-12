@@ -134,7 +134,7 @@ fn a_build_is_heads_system_with_what_nix_said_in_its_log() {
     assert_eq!(
         m.kept("nix.log"),
         format!(
-            "build --no-link --print-out-paths {}#nixosConfigurations.box.config.system.build.toplevel\n",
+            "build --no-link -L --print-out-paths {}#nixosConfigurations.box.config.system.build.toplevel\n",
             m.cfg.work.display()
         )
     );

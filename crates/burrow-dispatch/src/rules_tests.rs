@@ -382,6 +382,31 @@ fn deploy() {
             clock(T + 30.0)
         )
     );
+    // A run that has written to its logs since it started is at work: due
+    // `run` after its last write, however long it has been going (a build
+    // from source well past `run`). A write from before it started is an
+    // earlier run's, and moves nothing.
+    s.progress = Some(T + 7200.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 7260.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(
+        (it.since, it.due, it.kick),
+        (T + 30.0, T + 7200.0 + 5400.0, None)
+    );
+    assert_eq!(
+        it.phase,
+        format!(
+            "box-update has been putting it live since {}, its last output at {}",
+            clock(T + 30.0),
+            clock(T + 7200.0)
+        )
+    );
+    s.progress = Some(T);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T + 30.0 + 5400.0);
 }
 
 // The flake's own repo with what's live unknown (no record, or a switch
