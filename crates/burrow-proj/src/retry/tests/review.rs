@@ -3,6 +3,12 @@ use super::*;
 pub(super) fn saved(r: &Rig, id: &str) -> Checkpoint {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     job.set_turns(1).unwrap();
     fs::write(job.path("project"), "/ordinary\n").unwrap();
     fs::write(job.path("prompt.1"), "original\n").unwrap();

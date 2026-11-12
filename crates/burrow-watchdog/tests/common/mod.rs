@@ -142,6 +142,11 @@ impl Machine {
             dir.path().join("line.json"),
         );
         let cfg = Config {
+            settings: Some(burrow_settings::Config {
+                overlay: dir.path().join("overlay.json"),
+                allowed: vec!["sam/r".into(), "sam/q".into()],
+                pipeline_repos: vec!["sam/r".into()],
+            }),
             state_dir: state,
             sources: BTreeMap::from([
                 (

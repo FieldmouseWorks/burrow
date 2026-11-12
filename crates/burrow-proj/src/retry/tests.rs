@@ -139,6 +139,12 @@ fn until(mut f: impl FnMut() -> bool) {
 fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     fs::write(job.path("project"), format!("{project}\n")).unwrap();
     fs::write(job.path("turns"), "1\n").unwrap();
     fs::write(job.path("prompt.1"), "the original prompt\n").unwrap();
@@ -885,6 +891,12 @@ mod review;
 fn pending(r: &Rig, id: &str, retained: bool) -> (Checkpoint, String) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     job.set_turns(1).unwrap();
     fs::write(job.path("prompt.1"), "the prompt\n").unwrap();
     let name = format!("2-100-{id}");
@@ -972,3 +984,5 @@ mod review4;
 
 mod nonblocking;
 mod rollback;
+
+mod policy;

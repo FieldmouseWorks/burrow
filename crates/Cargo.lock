@@ -692,6 +692,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-codex",
  "burrow-events",
+ "burrow-settings",
  "burrow-test",
  "jiff",
  "rustix",
@@ -727,8 +728,13 @@ dependencies = [
 name = "burrow-settings"
 version = "0.0.0"
 dependencies = [
+ "burrow-door",
+ "burrow-github",
+ "burrow-test",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -817,6 +823,7 @@ version = "0.0.0"
 dependencies = [
  "burrow-events",
  "burrow-github",
+ "burrow-settings",
  "burrow-test",
  "jiff",
  "serde",

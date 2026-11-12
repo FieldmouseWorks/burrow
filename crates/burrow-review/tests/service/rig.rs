@@ -87,6 +87,7 @@ impl Rig {
         let port = kick_port(kicks.clone());
         let p = |x: &str| t.join(x).to_string_lossy().into_owned();
         let cfg = json!({
+            "settings": {"overlay":p("overlay.json"),"allowed":["sam/r","sam/q","sam/pipe","sam/lead"],"pipelineRepos":["sam/pipe"]},
             "queue": p("queue"), "done": p("done"), "sessions": p("sessions"), "snapshots": p("trees"),
             "reviewers": {"codex": {"enable": true, "effort": "high", "parallel": 2, "off": []}},
             "timeoutMinutes": 30, "agents": p("agents"),

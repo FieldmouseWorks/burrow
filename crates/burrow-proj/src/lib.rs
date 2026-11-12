@@ -77,7 +77,7 @@
 //! proj usage [back]           whether the machine is out of Claude usage, and
 //!                             until when (JSON; nothing when it isn't);
 //!                             back: it isn't, now (the limit was raised)
-//! proj usage hold UNTIL [--reason TEXT]  pause Claude work until a Unix timestamp
+//! proj usage hold UNTIL [--only pipeline | --reason TEXT]  scope work until a deadline
 //! proj usage adopt UNTIL      import a legacy watchdog limit
 //! proj ask --default TEXT [--one-way]  from inside a job: its answer is a question for
 //!                             a person, whose reply resumes it
@@ -340,3 +340,6 @@ mod tests {
 
 #[cfg(test)]
 mod regression_569;
+
+pub mod policy;
+mod policy_proofs;

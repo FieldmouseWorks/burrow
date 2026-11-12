@@ -278,6 +278,12 @@ mod tests {
     fn asking(cfg: &Config, one_way: bool) -> Job<'_> {
         let job = Job::new(cfg, "j1");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
         ensure(&job).unwrap();
         job.set_turns(1).unwrap();
         fs::write(job.path("session"), "s1\n").unwrap();

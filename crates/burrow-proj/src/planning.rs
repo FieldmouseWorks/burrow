@@ -189,6 +189,7 @@ mod tests {
             let new = crate::cmd::New {
                 task_source: Some(source.clone()),
                 engine: Some(crate::engine::Engine::Codex),
+                local_work: true,
                 ..Default::default()
             };
             let id = crate::cmd::start_job(&cfg, &new, "project", &given).unwrap();

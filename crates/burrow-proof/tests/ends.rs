@@ -195,3 +195,22 @@ fn the_sweep_takes_only_what_no_process_can_still_be_in() {
         w.worktrees()
     );
 }
+
+#[test]
+fn a_restore_that_cannot_prepare_keeps_its_work_for_another_attempt() {
+    let w = World::new();
+    let mut rec = w.record(&[("gate", "true")]);
+    rec.checkout = w.path().join("missing-checkout");
+    let id = "proof-restoring";
+    let dir = w.made(id, &rec);
+    let tree = w.trees.join(format!("{id}-0"));
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("preserved"), "interrupted work").unwrap();
+    fs::write(dir.join("policy-restoring"), "restoring").unwrap();
+    assert!(run(&dir, &mut Plain::default()).is_err());
+    assert_eq!(
+        end(&dir, &ended("exit-code", "exited", "1")).unwrap()["state"],
+        "parked"
+    );
+    assert_eq!(read(&tree.join("preserved")), "interrupted work");
+}

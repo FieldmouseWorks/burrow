@@ -67,6 +67,8 @@ def cn(*args):
     """What cn answered, as JSON. GitHub unavailable (cn's exit 75): C.Unavailable."""
     me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steward.py")
     env = {**os.environ, **CONARY["env"], "CONARY_TOKEN_COMMAND": f"{sys.executable} -E -s {me} token"}
+    if len(args) >= 3 and args[0] == "train" and args[1] in ("join", "step") and C.paused(args[2]):
+        raise C.JobPaused(f"{args[2]}: repository work paused before train write")
     p = C.remote([CONARY["cn"], *args], timeout=300, env=env, capture_output=True, text=True)
     what = f"cn {' '.join(args[:3])}"
     if p.returncode == 75:
@@ -192,6 +194,8 @@ def ride(repo, pr, st, desc, settle, strike, said, reviewed):
     (step.py); said is what GitHub said when it refused its merge, as the
     train's status on the head has it; reviewed, whether its reviewers had
     a round on it (join)."""
+    if C.paused(repo):
+        raise C.JobPaused(f"{repo}: repository work paused before train admission")
     n, head = pr["number"], pr["headRefOid"]
     if C.queued(pr) and not C.unland(repo, pr):
         strike("status")
@@ -256,6 +260,8 @@ def step(repo):
     GitHub says it is. What it did shows on the PRs'
     heads (the train's status), and each change it makes on GitHub is an
     event that starts the repo's next pass."""
+    if C.paused(repo):
+        return
     t = TRAINS.get(repo)
     if t is None or idle(t):
         return

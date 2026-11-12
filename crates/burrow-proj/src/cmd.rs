@@ -72,6 +72,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
+            put(&cfg.settings_line());
             put(&Snapshot::take(cfg, 0)?.in_line());
             Ok(())
         }
@@ -146,11 +147,29 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 Ok(())
             }
             Some("back") => {
+                if let Some(settings) = &cfg.settings {
+                    settings
+                        .command(&["back".into()], "proj usage back")
+                        .map_err(|e| Fail::new(1, e))?;
+                }
                 usage::back(cfg, None);
                 Ok(())
             }
             Some("hold") => {
-                let help = "usage: proj usage hold UNTIL [--reason TEXT]";
+                let help = "usage: proj usage hold UNTIL [--only pipeline | --reason TEXT]";
+                if args.get(3).is_some_and(|s| s == "--only") {
+                    if args.len() != 5 || args[4] != "pipeline" {
+                        return Err(Fail::new(2, help));
+                    }
+                    let settings = cfg
+                        .settings
+                        .as_ref()
+                        .ok_or_else(|| Fail::new(1, "settings are not configured"))?;
+                    put(&settings
+                        .command(&["pipeline".into(), args[2].clone()], "proj usage hold")
+                        .map_err(|e| Fail::new(1, e))?);
+                    return Ok(());
+                }
                 let until = arg(args, 2, help)?
                     .parse::<i64>()
                     .map_err(|_| Fail::new(2, help))?;
@@ -215,6 +234,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("_policy") => crate::policy::reconcile(cfg).map_err(|e| Fail::new(1, e)),
         Some("_questions") => {
             put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
             Ok(())
@@ -254,6 +274,7 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
             .parse()
             .map_err(|_| Fail::new(1, format!("proj status: {n} isn't a number")))?,
     };
+    put(&cfg.settings_line());
     put(&Snapshot::take(cfg, limit)?.status());
     Ok(())
 }
@@ -449,6 +470,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             format!("proj: couldn't stop {id}"),
         ));
     }
+    crate::policy::cancel(job).map_err(|e| Fail::new(1, e))?;
     if let Some(n) = &n {
         if job.turn(n, "retry-migration").exists() {
             crate::swap(&job.turn(n, "retry-cancelled"), "")
@@ -669,6 +691,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         None
     };
     job.mark_ended();
+    crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
     if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {

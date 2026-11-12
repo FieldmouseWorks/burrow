@@ -370,3 +370,26 @@ fn a_codex_refusal_waits_for_its_reset_even_for_an_owned_job() {
     assert!(wait.phase.contains("Codex"));
     assert!(job_wait(&cfg, &Facts { stopped: true, ..f }).is_none());
 }
+
+#[test]
+fn a_policy_hold_is_not_a_queue_stall() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let f = Facts {
+        id: "j".into(),
+        turn: "1".into(),
+        state: "queued".into(),
+        queued: 1000,
+        ..Facts::default()
+    };
+    assert!(job_wait(&cfg, &f).is_some(), "an eligible wait is watched");
+    assert!(
+        job_wait(
+            &cfg,
+            &Facts {
+                state: "parked".into(),
+                ..f
+            }
+        )
+        .is_none()
+    );
+}

@@ -56,6 +56,7 @@ fn command() {
     fs::write(
         &config,
         json!({
+            "settings": {"overlay":d.join("overlay.json"),"allowed":["sam/r","sam/q"],"pipelineRepos":[]},
             "stateDir": state, "proj": d.join("proj"), "project": "homelab", "jobTimeout": 60, "jobIdle": 20,
             "sources": {"autoland": {"file": watch, "about": "the PR steward", "look": "journalctl -u autoland.",
                                      "kick": "autoland", "stale": null}},

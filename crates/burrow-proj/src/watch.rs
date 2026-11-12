@@ -42,7 +42,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             continue;
         }
 
-        let paused = crate::inbox::job_paused(cfg, &id);
+        let paused = crate::policy::parked(&job) || crate::inbox::job_paused(cfg, &id);
         {
             let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
             if let Err(e) = crate::question::recover(&job) {
@@ -274,7 +274,11 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     }
     let hours = cfg.await_hours as i64;
     for id in job_ids(cfg) {
-        for a in awaits(&read(&Job::new(cfg, &id).path("await")).unwrap_or_default()) {
+        let job = Job::new(cfg, &id);
+        if crate::policy::parked(&job) || crate::policy::denied(&job) {
+            continue;
+        }
+        for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
             let Some(since) = (!a.since.is_empty() && a.since.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| a.since.parse::<i64>().ok())
                 .flatten()
@@ -345,6 +349,12 @@ mod codex_tests {
         cfg.tools.systemd_run = "true".into();
         let job = Job::new(&cfg, "code");
         fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
         job.set_turns(1).unwrap();
         fs::write(
             job.turn("1", "outcome"),
@@ -375,7 +385,19 @@ mod codex_tests {
         fs::create_dir_all(&record).unwrap();
         fs::write(record.join("job"), "code").unwrap();
         fs::write(record.join("drained"), "sam/r#7").unwrap();
-        cfg.paused = vec!["SAM/R".into()];
+        cfg.settings.as_mut().unwrap().overlay = d.path().join("overlay.json");
+        cfg.settings.as_mut().unwrap().allowed.push("sam/r".into());
+        crate::policy::bind(
+            &Job::new(&cfg, "code"),
+            crate::policy::Identity::Repository("sam/r".into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(&["pause".into(), "sam/r".into()], "test")
+            .unwrap();
         let job = Job::new(&cfg, "code");
         let parked = fs::read_to_string(job.path("await")).unwrap();
         look(&cfg, "").unwrap();
@@ -384,7 +406,11 @@ mod codex_tests {
         let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();
         assert!(wake[""].as_i64().unwrap() > now());
         drop(job);
-        cfg.paused.clear();
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(&["allow".into(), "sam/r".into()], "test")
+            .unwrap();
         let job = Job::new(&cfg, "code");
         look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));

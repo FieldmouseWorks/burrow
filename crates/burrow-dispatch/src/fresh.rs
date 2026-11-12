@@ -165,6 +165,7 @@ fn wait(
     }
     let since = st.fresh.unwrap_or(now);
     Some(Item {
+        repo: None,
         what: format!("{}'s runners started fresh for one job each", f.owner),
         phase: format!("{queue}, {} of {} up", up.len(), f.most),
         since,

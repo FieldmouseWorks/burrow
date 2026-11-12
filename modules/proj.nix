@@ -100,13 +100,20 @@ let
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
-    inherit (cfg) meters paused;
+    inherit (cfg) meters;
+    settings = config.burrow.settings.effective;
+    policyUnit = "proj-policy.service";
+    agentTool = "${agents}/bin/agent";
+    proofsState = "${stateDir}/autoland/builds";
+    proofRun = "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof}/bin/burrow-proof";
+    proofDriverConfig = config.burrow.autoland.configFile or null;
+    proofBuildDriver = [ "${pkgs.python3}/bin/python3" "-E" "-s" "${./autoland}/steward.py" ];
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
     inherit roles models;
     # A path, not the file: the flake's values include ones that run proj
     # (a repo's proofRuns), so proj's config can't hold them.
-    settings = "/etc/${settingsFile}";
+    trackedSettings = "/etc/${settingsFile}";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
@@ -119,7 +126,7 @@ let
       } else null;
     } else null;
     tools = {
-      codex = "${agents}/bin/codex";
+      codex = "${cfg.codex.package}/bin/codex";
       bwrap = "${pkgs.bubblewrap}/bin/bwrap";
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
@@ -187,6 +194,8 @@ in
   imports = [
     ./updates/health-options.nix
     (import ./common.nix inputs)
+    { key = "burrow/settings"; imports = [ (import ./settings.nix inputs) ]; }
+    (lib.mkRemovedOptionModule [ "burrow" "proj" "paused" ] "Use burrow.settings.allowed and settings pause OWNER/REPO; runtime pauses need no deploy.")
     { key = "burrow/codex-login"; imports = [ (import ./codex-login.nix inputs) ]; }
     { key = "burrow/claude"; imports = [ (import ./claude.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
@@ -196,18 +205,12 @@ in
   ];
 
   options.burrow.proj = {
-    paused = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      example = [ "OWNER/REPO" ];
-      description = ''
-        Repositories whose automated inbox, triage, drain and steward jobs
-        are paused (case insensitive). Labels and queued issues are kept;
-        removing a repository resumes them. Running jobs are not stopped,
-        and settled PRs may still merge.
-      '';
-    };
     enable = lib.mkEnableOption "proj, background agent jobs in each project";
+    codex.package = lib.mkOption {
+      type = lib.types.package;
+      default = agents;
+      internal = true;
+    };
     codex.slots = lib.mkOption {
       type = lib.types.ints.positive;
       default = 2;
@@ -482,7 +485,7 @@ in
         skip = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ "probe" "undo" "flaky" ];
-          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label);
+          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label ++ lib.optional config.burrow.settings.door.enable config.burrow.settings.door.label);
           description = "Labels whose issues other machinery owns: never sorted or handed on. The engines door's configured label always joins them while the door is on.";
         };
         atOnce = lib.mkOption {
@@ -535,6 +538,37 @@ in
     '';
 
     burrow.tools.proj = proj;
+    systemd.paths.burrow-settings-reconcile = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig.PathChanged = [ config.burrow.settings.effective.overlay "/run/current-system" ];
+    };
+    systemd.timers.burrow-settings-reconcile = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = { OnBootSec = "1s"; OnUnitInactiveSec = "30s"; };
+    };
+    systemd.services = {
+      burrow-settings-reconcile = {
+        description = "Vacate and restore repository work from live settings";
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          User = user;
+          ExecStart = "${proj}/bin/proj _policy";
+          TimeoutStartSec = "2min";
+          Restart = "on-failure";
+          RestartSec = "2s";
+        };
+      };
+    } // lib.genAttrs [ "proj-watch" "proj-watch@" ] (name: {
+      description = "Resume proj jobs whose awaited PRs and issues changed${lib.optionalString (name == "proj-watch@") " in %I"}";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = user;
+        ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
+      };
+    }) // retryServices;
     # The guard is Codex's managed hook for the jobs, wherever proj runs.
     burrow.tools.codex-guard = guard.codex;
     environment.etc."codex/requirements.toml".source = guard.codexRequirements;
@@ -552,21 +586,17 @@ in
       unit = "proj-watch";
       wake = watchWake;
     };
-    systemd.services = lib.genAttrs [ "proj-watch" "proj-watch@" ] (name: {
-      description = "Resume proj jobs whose awaited PRs and issues changed${lib.optionalString (name == "proj-watch@") " in %I"}";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        User = user;
-        ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
-      };
-    }) // retryServices;
     # The end of each job's turn (proj _ended), which each turn's unit starts
     # as it goes: in a unit of its own, so what kills the turn's whole cgroup
     # (systemd-oomd) leaves it be. The job comes in its environment, from the
     # instance name: a job's id is its project's folder name, spaces, `%` and
     # all.
+    systemd.user.services.proj-policy = {
+      description = "Reconcile repository work when admission capacity changes";
+      restartIfChanged = false;
+      unitConfig.ConditionUser = user;
+      serviceConfig = { Type = "oneshot"; ExecStart = "${proj}/bin/proj _policy"; TimeoutStartSec = "2min"; };
+    };
     systemd.user.services."proj-ended@" = {
       description = "The end of a turn of proj job %I";
       unitConfig.ConditionUser = user;

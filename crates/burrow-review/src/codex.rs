@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::symlink;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -141,12 +142,23 @@ pub fn sandboxed(
 
 /// What a command printed, and how it exited; None if it was still at it
 /// when its time ran out, and was stopped.
+enum Ran {
+    Ended(i32, String, String),
+    TimedOut,
+    Paused(String),
+}
+
 fn run(
     mut cmd: Command,
     input: &str,
     timeout: Duration,
-) -> io::Result<Option<(i32, String, String)>> {
+    paused: impl Fn() -> bool,
+) -> io::Result<Ran> {
+    if paused() {
+        return Ok(Ran::Paused(String::new()));
+    }
     let mut child = cmd
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -169,22 +181,38 @@ fn run(
         b
     });
     let until = Instant::now() + timeout;
+    let text = |t: thread::JoinHandle<Vec<u8>>| {
+        String::from_utf8_lossy(&t.join().unwrap_or_default()).into_owned()
+    };
+    let stop = |child: &mut std::process::Child| {
+        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break st;
         }
+        if paused() {
+            stop(&mut child);
+            let output = text(out);
+            let _ = text(err);
+            return Ok(Ran::Paused(output));
+        }
         if Instant::now() >= until {
             // Whatever it started may hold its output open: that's left be.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
+            stop(&mut child);
+            return Ok(Ran::TimedOut);
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let text = |t: thread::JoinHandle<Vec<u8>>| {
-        String::from_utf8_lossy(&t.join().unwrap_or_default()).into_owned()
-    };
-    Ok(Some((status.code().unwrap_or(-1), text(out), text(err))))
+    Ok(Ran::Ended(
+        status.code().unwrap_or(-1),
+        text(out),
+        text(err),
+    ))
 }
 
 /// The JSON events an agent printed, one a line (--json).
@@ -225,6 +253,7 @@ pub fn look(
     prompt: &str,
     home: &Path,
     sid: Option<&str>,
+    repo: &str,
 ) -> Result<(Value, String), Failed> {
     let err = |e: io::Error| Failed::Error(e.to_string());
     let login = s.home.join(".codex");
@@ -306,17 +335,29 @@ pub fn look(
         cmd,
         prompt,
         Duration::from_secs_f64(s.cfg.timeout_minutes * 60.0),
+        || s.cfg.paused(repo),
     );
     drop(gate);
     lent.give_back()
         .map_err(|e| Failed::Error(format!("couldn't keep its login: {e}")))?;
     // Every key it can have seen, with any it refreshed.
     let keys = s.keys();
-    let Some((code, out, stderr)) = ran.map_err(err)? else {
-        return Err(Failed::Error(format!(
-            "codex was still at it after {} minutes",
-            s.cfg.timeout_minutes
-        )));
+    let (code, out, stderr) = match ran.map_err(err)? {
+        Ran::Ended(code, out, stderr) => (code, out, stderr),
+        Ran::Paused(out) => {
+            let session = events(&out)
+                .into_iter()
+                .find(|e| e["type"] == "thread.started")
+                .and_then(|e| e["thread_id"].as_str().map(str::to_owned))
+                .or_else(|| sid.map(str::to_owned));
+            return Err(Failed::Paused { session });
+        }
+        Ran::TimedOut => {
+            return Err(Failed::Error(format!(
+                "codex was still at it after {} minutes",
+                s.cfg.timeout_minutes
+            )));
+        }
     };
     // What went wrong, in its own words: stderr and the error events. Its
     // other events hold what it read (the PR's files among them), which can

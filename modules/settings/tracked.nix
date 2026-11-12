@@ -26,7 +26,7 @@ lib.genAttrs [
   "proj.codex.slots"
   "proj.usageTrickle"
   "proj.usage.paid"
-  "proj.paused"
+  "settings.allowed"
   "proj.inbox.triage.drain"
   "proj.inbox.triage.drainJobs"
   "proj.inbox.triage.atOnce"

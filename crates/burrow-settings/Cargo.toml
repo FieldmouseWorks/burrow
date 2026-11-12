@@ -1,14 +1,22 @@
 [package]
 name = "burrow-settings"
-description = "The pipeline's options, each declared once in a typed schema, and the document that shows each one's value and where it came from"
+description = "Typed pipeline settings and live repository admission through an independent write door"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+burrow-door = { path = "../burrow-door" }
+burrow-github = { path = "../burrow-github" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

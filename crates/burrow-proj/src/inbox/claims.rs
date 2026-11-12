@@ -31,7 +31,7 @@ impl Pass<'_> {
             // A finished turn parked on GitHub still owns its brief. Only
             // the live await counts, as in the watcher; await.next is a
             // declaration that has not been published by the turn's end.
-            if !matches!(state.as_str(), "queued" | "running")
+            if !matches!(state.as_str(), "queued" | "running" | "parked")
                 && !(state == "done" && filled(&job.path("await")))
             {
                 continue;

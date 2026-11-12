@@ -53,6 +53,9 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
+            if crate::policy::parked(&job) {
+                continue;
+            }
             {
                 let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
                 if let Err(e) = crate::question::recover(&job) {

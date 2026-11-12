@@ -105,7 +105,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj-slots" ''
       # The whole line, next first: --first ahead of plain.
       # A run returns before its turn has its place: wait for both.
       machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -c -e '-{c}$' -e '-{q}$' | grep -x 2", timeout=120)
-      line = proj("status --line").splitlines()
+      status = proj("status --line").splitlines()
+      assert status[0].startswith("Automated work: allow list"), status
+      line = status[1:]
       assert [(l.split()[0], l.split()[1]) for l in line] == [(c, "first"), (q, "normal")], line
       proj(f"stop {q}")
       p = proj('run --pipeline web "sleep 1"')
@@ -219,7 +221,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj-slots" ''
       assert f"[{demoted}]" in listed, listed
       # A line a job, whatever columns it has: each starts with its id.
       jobs = machine.succeed("ls -1 /data/dev/jobs").splitlines()
-      assert all(any(line.startswith(j + " ") for j in jobs) for line in listed.splitlines()), listed
+      rows = listed.splitlines()
+      assert rows[0].startswith("Automated work: allow list"), listed
+      assert all(any(line.startswith(j + " ") for j in jobs) for line in rows[1:]), listed
       machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
       machine.wait_until_succeeds(f"journalctl -q '_SYSTEMD_USER_UNIT={unit(q)}' | grep -qF \"proj: {demoted}\"", timeout=30)
 ''

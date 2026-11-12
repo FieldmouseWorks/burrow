@@ -286,7 +286,7 @@ pkgs.testers.runNixOSTest {
     jobs.fail("test -e /tmp/tmux-1001")
     dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
     jobs.succeed("echo ordinary-confidential-probe-text >/var/lib/burrow/proj-questions/probe-private")
-    j = dev('proj run --role coder --app workers web "go"')
+    j = dev('proj run --local-work --role coder --app workers web "go"')
     # Once a command is running, the user starts two more: in tmux's default
     # dir, which must still take a server, and the custom one.
     # Or it ended without getting there, and the marks below say why.
@@ -368,7 +368,7 @@ pkgs.testers.runNixOSTest {
     dev("echo 'export GH_TOKEN=gho_person-profile' >>~/.bash_profile")
     assert dev("echo $GH_TOKEN") == "gho_person-profile"
     jobs.succeed("cp ${personJobCalls} /tmp/calls.json")
-    p = dev('proj run --first --role coder --link https://github.com/sam/web/issues/1 web "go"')
+    p = dev('proj run --first --local-work --role coder --link https://github.com/sam/web/issues/1 web "go"')
     jobs.fail(f"test -e /data/dev/jobs/{p}/app")
     jobs.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -Evx 'queued|running'", timeout=300)
     marks = dev(f"ls /data/dev/jobs/{p}").split()

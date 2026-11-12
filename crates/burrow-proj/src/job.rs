@@ -216,6 +216,9 @@ impl<'a> Job<'a> {
     }
 
     pub fn state(&self) -> String {
+        if crate::policy::parked(self) {
+            return "parked".into();
+        }
         self.adopt();
         let n = self.turns().unwrap_or_default();
         if self.retry_pending(&n) {

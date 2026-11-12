@@ -727,6 +727,24 @@ fn a_ready_verdict_retains_trailing_task_whitespace_exactly() {
     assert!(b.pass().planned(Some("sam/box"), &parent));
 }
 
+#[test]
+fn unlisted_repositories_sort_but_never_offer_children() {
+    let (mut b, parent, _) = parent_fixture();
+    b.cfg.settings = Some(burrow_settings::Config {
+        overlay: b.path("settings-overlay.json"),
+        ..Default::default()
+    });
+    let before = b.log();
+    b.pass().sequence("sam/box", &[parent]);
+    assert_eq!(b.log(), before, "no child handoff in an unlisted repo");
+    let mut pass = b.pass();
+    pass.triage("sam/box", &[issue(99, "sam", &[])]).unwrap();
+    assert!(
+        pass.wake.contains_key("sam/box"),
+        "sorting can still attempt a planner session"
+    );
+}
+
 // The live snapshot's queue is the plan's order alone: an observing pass asks
 // GitHub nothing about a child or its parents, where the drain's own pass,
 // which hands one on, still does.

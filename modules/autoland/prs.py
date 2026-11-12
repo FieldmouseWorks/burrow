@@ -568,6 +568,8 @@ def land(repo, pr, repo_info):
     # the house style: left to GitHub, a one-commit PR's squash would take that
     # commit's subject instead, which nothing checked.
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
+    if C.paused(repo):
+        raise C.JobPaused(f"{repo}: repository work paused before merge")
     try:
         C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
                 "-f", f"merge_method={method}", *title, "-f", f"sha={pr['headRefOid']}")

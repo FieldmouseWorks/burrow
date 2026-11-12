@@ -25,7 +25,7 @@ pub(crate) struct Checkpoint {
     pub said: Option<String>,
     pub deadline: Option<i64>,
     name: String,
-    first: bool,
+    pub(crate) first: bool,
     /// An initial waiter differs from a turn which already ran, including an
     /// unlimited retry whose refusal format the reader cannot recognize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,7 +195,12 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
         }
         let job = Job::new(cfg, &id);
         let Some(n) = job.turns() else { continue };
-        if !job.retry_pending(&n) || job.path("unstick").exists() || is_codex(&job, &n)? {
+        if crate::policy::denied(&job)
+            || crate::policy::parked(&job)
+            || !job.retry_pending(&n)
+            || job.path("unstick").exists()
+            || is_codex(&job, &n)?
+        {
             continue;
         }
         if let Some(state) = Checkpoint::load(&job, &n)? {
@@ -396,9 +401,23 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         let Some(state) = Checkpoint::load(&job, &n)? else {
             continue;
         };
+        if crate::policy::denied(&job) {
+            crate::policy::mark(&job, "queued", state.first).map_err(io::Error::other)?;
+            continue;
+        }
+        // The ordered policy reconciler owns restoration of parked work.
+        if crate::policy::parked(&job) || crate::policy::path(&job, "restoring").exists() {
+            continue;
+        }
         if systemd::active(cfg, &job.unit()) {
             continue;
         }
+        let crate::inbox::resumption::Resume::Ready(_capacity) =
+            crate::inbox::resumption::admission(cfg, &job).map_err(io::Error::other)?
+        else {
+            crate::policy::mark(&job, "queued", state.first).map_err(io::Error::other)?;
+            continue;
+        };
         systemd::reset_failed(cfg, &job.unit());
         // A unit still ending is deferred, without holding up other pools.
         if systemd::show(cfg, &job.unit(), "LoadState") == "loaded" || job.end_pending() {

@@ -188,7 +188,7 @@ assert sorted(run(1100)) == ["sam/q#2", "sam/r#5"]
 # One PR the pass fails on: that PR is, the rest as ever.
 OPEN["sam/r"] = [pr("sam/r", 5), {"number": 9, "headRefName": "x", "baseRefName": "main", "headRefOid": "b" * 40}]
 items = run(1200)
-assert items["sam/r#9"] == {"what": "sam/r#9", "link": None, "phase": waits.FAILS, "since": T + 1200,
+assert items["sam/r#9"] == {"repo":"sam/r", "what": "sam/r#9", "link": None, "phase": waits.FAILS, "since": T + 1200,
                             "due": T + 1200 + 120 * MIN, "kick": "autoland/sam/r", "claude": False, "rev": None}, items
 assert items["sam/r#5"]["since"] == T + 1100, items
 

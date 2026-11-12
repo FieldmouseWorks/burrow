@@ -13,7 +13,7 @@ let
       # flake's values, or this is a cycle.
       burrow.autoland.repos."sam/kept".proofRuns.check = "${config.burrow.tools.proj}/bin/proj check-config";
       burrow.proj.maxJobs = 6;
-      burrow.proj.paused = [ "sam/kept" ];
+      burrow.settings.allowed = [ "sam/kept" ];
     }) ];
   };
   proj = fixture.config.burrow.tools.proj;
@@ -24,9 +24,9 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   config=$(grep -o '/nix/store/[^ ]*-proj\.json' ${proj}/bin/proj | head -n1)
   live=$TMPDIR/live
   mkdir -p $live/jobs $live/config/roles.d
-  [ "$(jq -r .settings "$config")" = /etc/burrow/settings.json ]
+  [ "$(jq -r .trackedSettings "$config")" = /etc/burrow/settings.json ]
   jq --arg live "$live" --arg pwd "$PWD" \
-    '.jobs = "\($live)/jobs" | .roles = "\($live)/config/roles" | .models = "\($live)/config/models" | .settings = "\($pwd)/settings.json"' \
+    '.jobs = "\($live)/jobs" | .roles = "\($live)/config/roles" | .models = "\($live)/config/models" | .trackedSettings = "\($pwd)/settings.json"' \
     "$config" >proj.json
   jq . ${tracked} >settings.json
   printf 'triage codex\nfix@sam/homelab codex over 80 claude\n' >$live/config/roles.d/usual
@@ -47,7 +47,7 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["autoland.rounds"]' '{"value":3,"origin":"flake"}'
   want '.options["proj.maxJobs"]' '{"value":6,"origin":"flake"}'
   want '.options["autoland.jobIdleMinutes"]' '{"value":20,"origin":"default"}'
-  want '.options["proj.paused"].value' '["sam/kept"]'
+  want '.options["settings.allowed"].value' '["sam/kept"]'
   want '.options["proj.roles"].value' '{"triage":"codex","fix@sam/homelab":"codex over 80 claude"}'
   want '.options["proj.models"].value' '{"triage codex":{"model":null,"effort":"low"}}'
   want '.options["proj.engineSetups"].value.active' '"usual"'

@@ -36,6 +36,7 @@ fn config(jobs: &Path, max_jobs: usize) -> Config {
     let mut v = example();
     v["jobs"] = jobs.to_str().unwrap().into();
     v["meters"] = serde_json::json!(jobs.join("meters"));
+    v["settings"]["overlay"] = serde_json::json!(jobs.join("settings.json"));
     if jobs.join("notify").exists() {
         v["notify"] = serde_json::json!(jobs.join("notify"));
     }
@@ -92,6 +93,7 @@ impl Drop for Kid {
 }
 
 fn spawn_child(what: &str, jobs: &Path, max_jobs: usize, args: &[String]) -> Kid {
+    admission::bind_fixture(jobs, max_jobs);
     let child = Command::new(env::current_exe().unwrap())
         .args([
             "--exact",
@@ -130,7 +132,10 @@ fn child() {
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
     // child holds it open for writing as it's run.
-    if what == "hand-over" || what == "stay" {
+    if matches!(
+        what.as_str(),
+        "hand-over" | "stay" | "paused-hand-over" | "paused-codex-hand-over"
+    ) {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
         burrow_test::executable(
@@ -148,7 +153,16 @@ esac
         cfg.deployed = stub;
         cfg.tools.bash = "sh".into();
         cfg.tools.flock = "true".into();
-        if what == "hand-over" {
+        if what.starts_with("paused-") {
+            cfg.settings.as_mut().unwrap().allowed.clear();
+            fs::write(cfg.jobs.join(&id).join("role"), "work").unwrap();
+            let engine = if what == "paused-codex-hand-over" {
+                crate::engine::Engine::Codex
+            } else {
+                crate::engine::Engine::Claude
+            };
+            super::take_engine(&cfg, &id, "1", Class::Normal, true, engine).unwrap_err();
+        } else if what == "hand-over" {
             take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
         } else {
             held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
@@ -223,6 +237,12 @@ fn line_of_size(tmp: &TempDir, jobs: &Path, n: usize) -> Kid {
         args.extend(["_exec".to_owned(), j.clone(), "1".into(), "normal".into()]);
         fs::create_dir_all(jobs.join(&j)).unwrap();
         let p = ["burrow", "box", "web"][i % 3];
+        crate::policy::bind(
+            &Job::new(&config(jobs, 1), &j),
+            crate::policy::Identity::Repository(format!("sam/{p}")),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
         let project = tmp.path().join(p);
         fs::write(
             jobs.join(&j).join("project"),
@@ -420,6 +440,12 @@ fn waiter_to(what: &str, jobs: &Path, tmp: &TempDir, id: &str, max_jobs: usize) 
     fs::write(
         jobs.join(id).join("project"),
         format!("{}\n", tmp.path().join("web").display()),
+    )
+    .unwrap();
+    crate::policy::bind(
+        &Job::new(&config(jobs, max_jobs), id),
+        crate::policy::Identity::Repository("sam/web".into()),
+        crate::policy::Kind::Automated,
     )
     .unwrap();
     spawn_child(
@@ -692,6 +718,7 @@ fn an_unstick_turn_takes_its_own_slot() {
     fs::create_dir_all(jobs.join("u")).unwrap();
     fs::write(jobs.join("u/project"), "/src/web\n").unwrap();
     fs::write(jobs.join("u/unstick"), "").unwrap();
+    admission::bind_fixture(&jobs, 1);
     let slot = take(&cfg, "u", "1", Class::Normal, true).unwrap();
     assert_eq!(
         fs::read_to_string(jobs.join("u/1.slot")).unwrap(),
@@ -902,69 +929,12 @@ fn a_slot_stays_with_what_its_turn_left() {
     }
 }
 
-#[test]
-fn codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage() {
-    let tmp = TempDir::new().unwrap();
-    let jobs = jobs_dir(&tmp);
-    let mut child = spawn_child("codex-pool-release", &jobs, 1, &[]);
-    assert!(
-        child.0.wait().unwrap().success(),
-        "isolated pool accounting failed"
-    );
-}
-
-// A Claude turn handed over to a proj that resolves its engine to Codex has
-// no place in Claude's line any more: the one it left is gone before it waits
-// for Codex's pool, where it would otherwise count as a live Claude waiter.
-#[test]
-fn a_codex_turn_leaves_the_place_a_hand_over_brought() {
-    use crate::engine::Engine;
-    let d = tempfile::tempdir().unwrap();
-    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-    cfg.jobs = d.path().to_owned();
-    cfg.codex_slots = 1;
-    fs::create_dir_all(cfg.jobs.join(".slots")).unwrap();
-    let census = File::create(cfg.jobs.join(".slots/.admission-lock")).unwrap();
-    census.lock().unwrap();
-    let job = Job::new(&cfg, "code");
-    fs::create_dir_all(&job.dir).unwrap();
-    let queue = cfg.jobs.join(".queue");
-    fs::create_dir_all(&queue).unwrap();
-    let mine = format!("{}\n", std::process::id());
-    fs::write(queue.join("2-5000000000-code"), &mine).unwrap();
-    // Another job's place, and the same job's under another pid, stay.
-    fs::write(queue.join("2-6000000000-other"), &mine).unwrap();
-    fs::write(queue.join("2-7000000000-code-2"), "1\n").unwrap();
-    // A planner's unstick flag cannot escape the selected engine's cap.
-    fs::write(job.path("unstick"), "").unwrap();
-    let slot = super::take_engine(&cfg, "code", "1", Class::Normal, false, Engine::Codex).unwrap();
-    assert!(!queue.join("2-5000000000-code").exists());
-    assert!(queue.join("2-6000000000-other").exists());
-    assert!(queue.join("2-7000000000-code-2").exists());
-    drop(slot);
-}
-
 mod reset;
 mod usage;
 
-#[test]
-fn retained_queue_renames_occupy_one_logical_project_place() {
-    let tmp = TempDir::new().unwrap();
-    let jobs = jobs_dir(&tmp);
-    let cfg = config(&jobs, 2);
-    let job = crate::job::Job::new(&cfg, "renamed");
-    fs::create_dir(&job.dir).unwrap();
-    job.set_turns(1).unwrap();
-    fs::write(job.path("project"), "/ordinary").unwrap();
-    crate::retry::Checkpoint::retry(&job, "1", false, crate::now_nanos(), "refused").unwrap();
-    let queue = jobs.join(".queue");
-    for name in ["0-100-renamed", "1-100-renamed", "2-100-renamed"] {
-        fs::write(queue.join(name), "dead\n").unwrap();
-    }
-    let seen = look(&cfg, "1-100-renamed", &job.dir, Class::First).unwrap();
-    assert_eq!(seen.line.len(), 1);
-    assert_eq!(seen.line[0].name, "1-100-renamed");
-    assert_eq!(fs::read_dir(queue).unwrap().count(), 1);
-}
+mod admission;
+
+mod codex;
 
 mod pools;
+mod retained;

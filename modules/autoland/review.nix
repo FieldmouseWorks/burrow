@@ -40,6 +40,7 @@ let
   # passes fill and what it leaves for them, its reviewers, and what a
   # look's sandbox shows.
   reviewConfig = pkgs.writeText "burrow-review.json" (builtins.toJSON {
+    settings = config.burrow.settings.effective;
     queue = "${reviewDir}/queue";
     done = "${reviewDir}/done";
     sessions = "${reviewDir}/sessions";

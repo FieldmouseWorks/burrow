@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 burrow-github = { path = "../burrow-github" }
 burrow-events = { path = "../burrow-events" }
+burrow-settings = { path = "../burrow-settings" }
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true

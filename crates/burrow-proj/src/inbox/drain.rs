@@ -80,6 +80,15 @@ impl Pass<'_> {
         let Some(engine) = t.drain else {
             return Ok(());
         };
+        if let Some(until) = self
+            .cfg
+            .settings
+            .as_ref()
+            .and_then(|s| s.scope_until().ok().flatten())
+            && let Some(repo) = self.wake_repo()
+        {
+            self.book(&repo, until);
+        }
         let Some(label) = self
             .inbox
             .labels
@@ -190,6 +199,9 @@ impl Pass<'_> {
                 }
                 continue;
             }
+            if self.cfg.paused(&repo) {
+                continue;
+            }
             let d = self.inbox.state.join(format!("{}-{n}", key(&repo)));
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
             fs::write(d.join("drained"), format!("{repo}#{n}\n"))
@@ -226,15 +238,21 @@ impl Pass<'_> {
     }
 
     /// Active turns and enrollments reserve capacity only in enabled repos.
-    fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
+    pub(super) fn drain_user(&self, dir: &std::path::Path) -> Option<String> {
         let named = crate::read(&dir.join("drained"))?;
         let (repo, n) = named.split_once('#')?;
-        if self.cfg.paused(repo) || (self.inbox.planning && self.has_task_list(Some(repo), n)) {
+        if !self.record_uses_capacity(dir)
+            || (self.inbox.planning && self.has_task_list(Some(repo), n))
+        {
             return None;
         }
         if let Some(id) = crate::read(&dir.join("job")) {
-            let state = crate::job::Job::new(self.cfg, &id).state();
-            matches!(state.as_str(), "queued" | "running")
+            let job = crate::job::Job::new(self.cfg, &id);
+            if crate::policy::path(&job, "restoring").exists() {
+                return Some(format!("{named} ({id}: restoring)"));
+            }
+            let state = job.state();
+            matches!(state.as_str(), "queued" | "running" | "parked")
                 .then(|| format!("{named} ({id}: {state})"))
         } else {
             Some(format!("{named} (enrolling)"))
@@ -417,27 +435,5 @@ pub(super) fn priority_label(issue: &Value) -> Option<&str> {
 
 /// Automated inbox wakeups retain their waits while the repo is paused.
 pub(crate) fn job_paused(cfg: &crate::config::Config, id: &str) -> bool {
-    if cfg.paused.is_empty() {
-        return false;
-    }
-    let Some(inbox) = &cfg.inbox else {
-        return false;
-    };
-    // Legacy sorting/planner records have only KEY-N and job, without
-    // source metadata. Both record roots use the same repository key.
-    [inbox.state.clone(), inbox.state.join(".triage")]
-        .iter()
-        .flat_map(|root| dirs(root, ""))
-        .any(|dir| {
-            crate::read(&dir.join("job")).as_deref() == Some(id)
-                && dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| name.rsplit_once('-'))
-                    .is_some_and(|(repo, _)| {
-                        cfg.paused
-                            .iter()
-                            .any(|paused| key(paused).eq_ignore_ascii_case(repo))
-                    })
-        })
+    crate::policy::denied(&crate::job::Job::new(cfg, id))
 }

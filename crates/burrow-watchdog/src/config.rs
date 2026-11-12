@@ -9,6 +9,8 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub settings: Option<burrow_settings::Config>,
     /// Its state: state.json, escalated.json, wake.json and the pass's lock.
     pub state_dir: PathBuf,
     pub sources: BTreeMap<String, Source>,

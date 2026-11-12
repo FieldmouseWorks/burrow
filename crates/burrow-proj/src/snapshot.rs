@@ -581,7 +581,7 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
 
 fn holds(cfg: &Config) -> Holds {
     Holds {
-        paused: cfg.paused.clone(),
+        paused: cfg.paused_repos(),
         pipeline: Pipeline {
             repos: cfg.pipeline_repos.clone(),
             lead: cfg.lead_repos.clone(),

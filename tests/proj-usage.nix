@@ -23,7 +23,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       assert out["job"] == a and out["said"] == "Claude reached its weekly allowance", out
       assert out["until"] > out["at"] + 20, out
       status = proj("status")
-      assert status.startswith("Claude is out of usage until "), status
+      assert any(l.startswith("Claude is out of usage until ") for l in status.splitlines()), status
       notices = machine.succeed("cat /tmp/notices").splitlines()
       assert len(notices) == 1 and notices[0].startswith("open proj-usage Claude is out of usage until "), notices
       # The refused turn gave up its slot, and one started now takes none.
@@ -49,7 +49,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       assert "--resume spent" in machine.succeed("cat /tmp/spent-args"), machine.succeed("cat /tmp/spent-args")
       # Back: nothing held, said so, and the notice closed.
       assert proj("usage") == "", proj("usage")
-      assert not proj("status").startswith("Claude is out of usage"), proj("status")
+      assert not any(l.startswith("Claude is out of usage") for l in proj("status").splitlines()), proj("status")
       notices = machine.succeed("cat /tmp/notices").splitlines()
       assert notices[-1].startswith("close proj-usage "), notices
       assert sum(n.startswith("open proj-usage") for n in notices) == 1, notices

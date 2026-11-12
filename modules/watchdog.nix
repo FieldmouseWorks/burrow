@@ -18,6 +18,7 @@ let
   autoland = config.burrow.autoland.enable or false;
 
   configFile = pkgs.writeText "burrow-watchdog.json" (builtins.toJSON {
+    settings = config.burrow.settings.effective;
     stateDir = dir;
     sources = lib.mapAttrs (_: s: {
       inherit (s) file about look kick;

@@ -20,6 +20,12 @@ fn fixture() -> (tempfile::TempDir, Config) {
 fn asking(cfg: &Config, one_way: bool, due: i64) -> Job<'_> {
     let job = Job::new(cfg, "j1");
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
     job.set_turns(1).unwrap();
     fs::create_dir_all(cfg.jobs.join(".question-control").join(job.id)).unwrap();
     fs::write(job.path("session"), "s1\n").unwrap();

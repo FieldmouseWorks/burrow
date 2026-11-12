@@ -36,6 +36,12 @@ fn parked(b: &Box, id: &str, n: u64, awaited: u64, ago: i64) {
     ] {
         fs::write(d.join(f), format!("{v}\n")).unwrap();
     }
+    crate::policy::bind(
+        &crate::job::Job::new(&b.cfg, id),
+        crate::policy::Identity::Repository("sam/game".into()),
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     let r = b
         .cfg
         .inbox
@@ -193,6 +199,12 @@ fn status_shows_every_drain_handoff_beyond_the_job_limit() {
                 fs::create_dir_all(&job).unwrap();
                 fs::write(job.join("prompt.1"), "task").unwrap();
                 fs::write(job.join("turns"), "1").unwrap();
+                crate::policy::bind(
+                    &crate::job::Job::new(&b.cfg, "old-job"),
+                    crate::policy::Identity::Repository("sam/game".into()),
+                    crate::policy::Kind::Automated,
+                )
+                .unwrap();
                 fs::write(r.join("job"), "old-job").unwrap();
             }
         }

@@ -3,6 +3,12 @@ use super::*;
 fn pending(r: &Rig, id: &str) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     job.set_turns(1).unwrap();
     fs::write(job.path("project"), "/ordinary").unwrap();
     Checkpoint::retry(&job, "1", false, now_nanos(), "refused").unwrap();

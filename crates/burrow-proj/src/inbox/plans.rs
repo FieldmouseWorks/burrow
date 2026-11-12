@@ -645,7 +645,7 @@ impl Pass<'_> {
 
     /// Called by the repo's normal event pass. No job/session is the parent.
     pub(super) fn sequence(&mut self, repo: &str, all: &[Value]) {
-        if !self.inbox.planning {
+        if !self.inbox.planning || self.cfg.paused(repo) {
             return;
         }
         for d in self.plan_dirs(repo) {
