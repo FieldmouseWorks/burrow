@@ -10,8 +10,19 @@ use burrow_house::github::Real;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    if let [command, root] = args.as_slice()
+        && command == "guidance"
+    {
+        return match burrow_house::guidance::check(std::path::Path::new(root)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args != ["check"] {
-        eprintln!("usage: burrow-house check");
+        eprintln!("usage: burrow-house check | guidance ROOT");
         return ExitCode::FAILURE;
     }
     let ran = event().and_then(|event| {

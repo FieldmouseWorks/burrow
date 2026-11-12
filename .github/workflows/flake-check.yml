@@ -111,8 +111,9 @@ on:
         default: true
       docs-paths:
         description: >-
-          The repo's documentation: files nothing its flake builds or tests
-          reads, as glob patterns relative to the repo's root ("README.md",
+          The repo's documentation, whose applicable checks must all be
+          declared in docs-checks, as glob patterns relative to the repo's
+          root ("README.md",
           "docs/**", "**/*.md"; `*` stays within a directory, `**` crosses
           them), space-separated, a leading `!` leaving a path out
           ("!archive/**"). A PR that changes only these, renames and
@@ -129,9 +130,11 @@ on:
         default: ''
       docs-checks:
         description: >-
-          The flake's checks that read the documentation (a link checker,
-          say), by name, space-separated: what the docs lane builds. Empty,
-          it builds nothing.
+          All flake checks needed for the declared documentation and its
+          consumers (links, text, fixtures, packaged guidance), by name,
+          space-separated: what the docs lane builds. Inventory consumers
+          before widening docs-paths. Empty is sufficient only when no
+          check applies; then it builds nothing.
         type: string
         default: ''
       negative-runner:
@@ -644,8 +647,7 @@ jobs:
       - *log
       - *token
       - *bundle
-  # The docs lane: nothing the PR changes is anything the flake builds or
-  # tests reads, so only the checks that read the documentation are built,
+  # The docs lane: build the caller's declared guidance and consumer checks
   # by name, on the head merged with its base as the whole gate checks it,
   # and nothing else is evaluated. It attests nothing: it ran no gate on the
   # tree. Its check run's name is how autoland knows the head took it, for

@@ -38,8 +38,8 @@ jobs:
       # every later run to take (flake-check.yml says what's kept and why
       # that's safe).
       keep-builds: true
-      # The docs lane, for a PR that changes only these: nothing burrow
-      # builds or tests reads them. docs/, house/ and templates/ aren't on
-      # it: the steward's config carries them (modules/autoland.nix,
-      # baselineDocs), so every machine's build reads them.
-      docs-paths: README.md AGENTS.md CLAUDE.md
+      # Packaged guidance takes the docs lane with all its consumer checks.
+      # docs/guidance-checks.md inventories them; templates and non-Markdown
+      # inputs still take the full gate, as does any mixed code change.
+      docs-paths: README.md AGENTS.md CLAUDE.md docs/**/*.md house/*.md
+      docs-checks: guidance guidance-links secrets crates-rust-test house-sync-config

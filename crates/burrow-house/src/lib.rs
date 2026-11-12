@@ -31,4 +31,5 @@
 pub mod check;
 pub mod diff;
 pub mod github;
+pub mod guidance;
 pub mod rules;

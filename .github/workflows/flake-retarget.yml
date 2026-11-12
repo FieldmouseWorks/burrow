@@ -26,4 +26,5 @@ jobs:
       eval-apart: true
       legs: 4
       keep-builds: true
-      docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-paths: README.md AGENTS.md CLAUDE.md docs/**/*.md house/*.md
+      docs-checks: guidance guidance-links secrets crates-rust-test house-sync-config
