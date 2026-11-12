@@ -57,7 +57,9 @@ impl App {
         // next goes out, which fails a mint: a POST, never sent twice.
         let agent = burrow_github::outbound::agent_with(
             Duration::from_secs(30),
-            0,
+            // ureq's own default: the App's calls have always followed
+            // GitHub's redirects.
+            10,
             burrow_github::outbound::Options {
                 proxy: proxy.into(),
                 user_agent: Some("gh-token".to_owned()),
