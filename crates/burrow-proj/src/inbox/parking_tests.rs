@@ -143,7 +143,9 @@ fn relabelling_starts_a_fresh_job_and_never_resumes_the_stopped_one() {
     let b = fixture();
     let parked = issue(7, "sam", &["claude", "later"]);
     on_github(&b, &parked);
-    b.pass().jobs("sam/box", "box", &[parked.clone()]).unwrap();
+    b.pass()
+        .jobs("sam/box", "box", std::slice::from_ref(&parked))
+        .unwrap();
     b.pass().new_issues("sam/box", &[parked]).unwrap();
     let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
     assert!(

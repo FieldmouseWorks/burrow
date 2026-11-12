@@ -52,6 +52,12 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
       def github(endpoint, answer):
           machine.succeed(f"mkdir -p /tmp/gh && echo '{answer}' >/tmp/gh/{endpoint.replace('/', '_')}")
+          # An issue snapshot is available through both REST endpoints. Keep
+          # one source in the test when a resume rechecks its live labels.
+          if re.fullmatch(r"repos/[^/]+/[^/]+/issues", endpoint):
+              for page in answer.splitlines():
+                  for issue_snapshot in json.loads(page):
+                      github(f"{endpoint}/{issue_snapshot['number']}", json.dumps(issue_snapshot))
       github("repos/o/r/issues/5", '{"pull_request": {}, "state": "open", "comments": 0}')
       github("repos/o/r/pulls/5", '{"state": "open", "merged": false, "head": {"sha": "abc"}, "comments": 0, "review_comments": 0}')
       github("repos/o/r/pulls/5/reviews", '[]')

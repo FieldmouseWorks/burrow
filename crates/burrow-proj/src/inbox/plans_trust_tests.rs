@@ -112,7 +112,9 @@ fn lost_creation_response_recovers_the_exact_child_and_its_approval() {
     let input = b.pass().issue_text("sam/box", &child, &[]);
     assert!(b.pass().approved_input("sam/box", "8", &input));
     assert!(b.pass().child_admissible("sam/box", "8"));
-    b.pass().new_issues("sam/box", &[child.clone()]).unwrap();
+    b.pass()
+        .new_issues("sam/box", std::slice::from_ref(&child))
+        .unwrap();
     assert!(
         !b.cfg
             .inbox
