@@ -341,7 +341,10 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
         assert!(job.join("open-question").exists());
         assert_eq!(fs::read_to_string(d.join("seen")).unwrap(), "0\n");
         let blocked = if fault == "receipt" {
-            crate::ask::host_path(&crate::job::Job::new(&b.cfg, "j1"), "resume-2.new")
+            crate::ask::host_path(&crate::job::Job::new(&b.cfg, "j1"), "resume-2")
+                .parent()
+                .unwrap()
+                .to_owned()
         } else {
             job.join("question-answered-through")
         };
@@ -351,7 +354,10 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
             if fault == "none" {
                 "#!/bin/sh\nexit 0\n".to_owned()
             } else {
-                format!("#!/bin/sh\nmkdir -p '{}'\nexit 0\n", blocked.display())
+                format!(
+                    "#!/bin/sh\nif test -d '{0}'; then install -d -m 0555 '{0}'; else mkdir -p '{0}'; fi\nexit 0\n",
+                    blocked.display()
+                )
             },
         );
         b.cfg.tools.systemd_run = runner;
@@ -366,7 +372,11 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
                 .contains("Do not repeat")
         );
         if fault != "none" {
-            fs::remove_dir(blocked).unwrap();
+            if fault == "receipt" {
+                burrow_test::permissions(&blocked, 0o755);
+            } else {
+                fs::remove_dir(&blocked).unwrap();
+            }
             let j = crate::job::Job::new(&b.cfg, "j1");
             crate::question::accept(&j, "2").unwrap();
             b.pass()

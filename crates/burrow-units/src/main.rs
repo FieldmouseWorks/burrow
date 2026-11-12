@@ -335,9 +335,7 @@ fn output(program: &Path, args: &[&str]) -> Result<String, String> {
 
 /// FILE, whole: the watchdog never reads half of one.
 fn write(file: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = file.with_extension("tmp");
-    fs::write(&tmp, bytes)
-        .and_then(|()| fs::rename(&tmp, file))
+    burrow_process::replace::replace_mode(file, bytes, burrow_process::replace::SHARED)
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 

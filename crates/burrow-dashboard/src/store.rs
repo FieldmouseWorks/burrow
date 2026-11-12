@@ -1,9 +1,8 @@
-//! The state directory's files: JSON, each written whole (a new file
-//! renamed over the old), readable by the service's user alone.
+//! The state directory's files: JSON, each written whole
+//! ([`burrow_process::replace`]), readable by the service's user alone.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io;
 use std::path::Path;
 
 use serde::Serialize;
@@ -23,26 +22,12 @@ pub fn load<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     }
 }
 
-/// Write the value in place of the file, all of it or none. The new file is
-/// made fresh beside it: whatever was at its name (a symlink, say) is
-/// removed, not followed, and if something takes the name meanwhile the
-/// save fails rather than write through it.
+/// Write the value in place of the file, all of it or none, readable by the
+/// service's user alone: [`burrow_process::replace::replace`].
 pub fn save<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    remove(&tmp)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    fs::rename(&tmp, path)?;
-    if let Some(dir) = path.parent() {
-        File::open(dir)?.sync_all()?;
-    }
-    Ok(())
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    burrow_process::replace::replace(path, bytes)
 }
 
 /// Remove the file; one that's already gone is fine.

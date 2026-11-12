@@ -218,30 +218,23 @@ impl Dir {
         self.replace_visibility(name, bytes, true)
     }
     fn replace_visibility(&self, name: &Path, bytes: &[u8], public: bool) -> io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
         child_name(name)?;
         if name.components().count() != 1 {
             return Err(io::Error::other("replacement requires a single filename"));
         }
-        let directory = format!("/proc/self/fd/{}", self.0.as_raw_fd());
-        let mut temporary = tempfile::Builder::new()
-            .prefix(".state-")
-            .tempfile_in(&directory)?;
-        if public {
-            temporary
-                .as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o644))?;
-        }
-        temporary.write_all(bytes)?;
-        temporary.as_file().sync_all()?;
         // Both rename endpoints stay beneath this same pinned directory even
         // if the guest concurrently renames or symlinks its original pathname.
-        temporary
-            .persist(Path::new(&directory).join(name))
-            .map_err(|e| e.error)?;
-        File::open(&directory)?.sync_all()?;
-        Ok(())
+        let directory = format!("/proc/self/fd/{}", self.0.as_raw_fd());
+        crate::replace::publish(
+            Path::new(&directory),
+            name,
+            bytes,
+            if public {
+                crate::replace::SHARED
+            } else {
+                crate::replace::PRIVATE
+            },
+        )
     }
 }
 

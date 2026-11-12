@@ -4,6 +4,10 @@ use super::*;
 use crate::read;
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn every_plan_scan_uses_the_complete_repository_identity() {
     for foreign in ["sam_box-extra-7", "sam_box-extra-more-7", "sam_box-foo-7"] {
         let (b, parent, _) = parent_fixture();

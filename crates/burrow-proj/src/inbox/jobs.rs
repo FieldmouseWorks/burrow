@@ -15,6 +15,10 @@ use crate::{Fail, filled, io_fail, now, read};
 
 impl Pass<'_> {
     /// Jobs already running for this repo's issues.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "retiring a job directory is a move, not a state write"
+    )]
     pub(super) fn jobs(&mut self, repo: &str, p: &str, open: &[Value]) -> Result<(), Fail> {
         // A job carries on only while an agent may still read its issue: one
         // since labelled outside text, or whose opener is no longer one of

@@ -262,12 +262,12 @@ fn read(f: &Path) -> Option<Value> {
 /// Best effort: a cache that can't be written costs the next list a full
 /// request, nothing more.
 fn write(f: &Path, v: &Value) {
-    let tmp = PathBuf::from(format!("{}.{}.tmp", f.display(), std::process::id()));
-    let ok = f.parent().is_some_and(|d| fs::create_dir_all(d).is_ok())
-        && fs::write(&tmp, v.to_string()).is_ok()
-        && fs::rename(&tmp, f).is_ok();
-    if !ok {
-        let _ = fs::remove_file(&tmp);
+    if f.parent().is_some_and(|d| fs::create_dir_all(d).is_ok()) {
+        let _ = burrow_process::replace::replace_mode(
+            f,
+            v.to_string(),
+            burrow_process::replace::SHARED,
+        );
     }
 }
 

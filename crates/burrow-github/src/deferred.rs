@@ -136,20 +136,13 @@ fn save(path: &Path, at: Option<u64>) -> Result<(), String> {
 
 fn write(path: &Path, booked: &Value) -> Result<(), String> {
     let write = || -> std::io::Result<()> {
-        use std::io::Write;
-        let temp = path.with_extension("new");
-        let mut file = fs::File::create(&temp)?;
-        file.write_all(booked.to_string().as_bytes())?;
         // The scheduler is a different account, even if a caller has a
         // private umask. This file contains only the public retry deadline.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o644))?;
-        }
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        fs::File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()
+        burrow_process::replace::replace_mode(
+            path,
+            booked.to_string(),
+            burrow_process::replace::SHARED,
+        )
     };
     write().map_err(|e| format!("{}: {e}", path.display()))
 }

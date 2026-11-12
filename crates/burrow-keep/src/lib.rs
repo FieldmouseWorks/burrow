@@ -94,6 +94,10 @@ struct Entry {
 /// which move to `dir/restored`: aside rather than deleted, as nix's
 /// daemon, as root, may have written into them. Nothing moves until what's
 /// kept is ready, so a failure leaves `dir/kept` as it was.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "keeping a directory is a move, not a state write"
+)]
 pub fn keep(nix: &dyn Nix, dir: &Path) -> Result<Kept, String> {
     let (kept, keep, restored) = (dir.join("kept"), dir.join("keep"), dir.join("restored"));
     let store = nix.store()?;

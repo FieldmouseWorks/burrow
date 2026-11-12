@@ -82,10 +82,9 @@ pub fn load<T: DeserializeOwned + Default>(dir: &Path, name: &str) -> T {
 /// the new one.
 pub fn save<T: Serialize>(dir: &Path, name: &str, value: &T) -> Result<(), String> {
     let path = dir.join(name);
-    let tmp = dir.join(format!("{name}.tmp"));
     let text = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
+    burrow_process::replace::replace_mode(&path, text, burrow_process::replace::SHARED)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// What the stuck issue carries: every stall escalated to it, the ones the

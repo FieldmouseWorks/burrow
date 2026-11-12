@@ -411,6 +411,10 @@ fn the_rules_are_the_bases_nearest_each_changed_file() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn a_snapshot_is_taken_once_a_head_unless_its_meta_or_checkout_is_lost() {
     let r = rig();
     let l = look(&r.head);

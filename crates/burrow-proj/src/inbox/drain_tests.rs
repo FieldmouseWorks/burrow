@@ -352,6 +352,10 @@ fn a_stalled_hand_on_holds_its_place() {
 
 // A lane's handed brief owns its references until its job ends.
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn running_handed_references_are_not_drained() {
     let b = Box::new();
     b.job("lane", "done", "finished");
@@ -621,6 +625,10 @@ fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
 
 // A finished turn parked on GitHub still owns its brief until its live wait goes.
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn awaiting_handed_references_are_not_drained() {
     let b = Box::new();
     b.job("lane", "done", "waiting for review");

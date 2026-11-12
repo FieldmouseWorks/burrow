@@ -299,6 +299,10 @@ fn commits(
 /// finished one, which the meta kept from before may vouch for. Nothing
 /// from the steward's own git config (an LFS filter, say) runs on what the
 /// PR put there.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "publishing a fetched checkout directory is a move, not a state write"
+)]
 fn checkout(m: &Path, name: &str, tip: &str, dst: &Path) -> Result<(), String> {
     let snap = format!("refs/snap/{name}");
     git_in(m).args(["update-ref", &snap, tip]).run()?;

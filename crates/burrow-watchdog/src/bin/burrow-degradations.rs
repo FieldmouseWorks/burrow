@@ -184,10 +184,12 @@ fn pass() -> Result<(), String> {
     burrow_events::kick::kick(&cfg.kick, Duration::from_secs(10))
 }
 fn write(path: &std::path::Path, value: &impl serde::Serialize) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec(value).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+    burrow_process::replace::replace_mode(
+        path,
+        serde_json::to_vec(value).map_err(|e| e.to_string())?,
+        burrow_process::replace::SHARED,
+    )
+    .map_err(|e| e.to_string())
 }
 fn main() {
     if let Err(e) = pass() {

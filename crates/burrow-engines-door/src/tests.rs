@@ -226,7 +226,15 @@ fn reply_receipt_write_failure_and_an_intervening_cli_do_not_repeat_back() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let blocked = state.join(format!("1-{hash}.next"));
+    let blocked = state.join(format!("1-{hash}.json"));
+    // The switch ran and its operation was recorded, but the door's receipt
+    // can't be stored: the name is taken by a directory.
+    Store::new(&cfg.roles)
+        .request(
+            &blocked.with_extension("operation"),
+            &["use".into(), "back".into()],
+        )
+        .unwrap();
     fs::create_dir(&blocked).unwrap();
     let mut gh = github("sam", "use back", None);
     assert!(pass(&mut gh, &cfg).is_err());

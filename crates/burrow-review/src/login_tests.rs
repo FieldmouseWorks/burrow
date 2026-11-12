@@ -59,6 +59,10 @@ impl Box {
 }
 
 /// A login saved the way a save leaves one whole.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn saved_over(at: &Path, what: &str) {
     let tmp = at.with_extension("new");
     fs::write(&tmp, what).unwrap();

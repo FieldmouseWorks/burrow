@@ -232,15 +232,14 @@ fn owner_generations_commit_only_when_the_shared_record_commits() {
         let prepared = owner_generation(&cfg, &replacement).unwrap();
         assert_eq!(out(&cfg), Some(original.clone()));
         assert_ne!(prepared.job, original.job);
-        let blocked = cfg.jobs.join(format!("{FILE}.new"));
-        fs::create_dir(&blocked).unwrap();
+        let blocked = burrow_test::BlockWrites::new(&cfg.jobs);
         assert!(keep(&cfg, &replacement).is_err());
         assert_eq!(out(&cfg), Some(original.clone()));
         assert_eq!(
             fs::read(cfg.jobs.join(&original.job)).unwrap(),
             old_metadata
         );
-        fs::remove_dir(&blocked).unwrap();
+        drop(blocked);
         keep(&cfg, &replacement).unwrap();
         let committed = out(&cfg).unwrap();
         assert_eq!(committed.said, "replacement");
@@ -253,12 +252,12 @@ fn owner_generations_commit_only_when_the_shared_record_commits() {
         );
         let mut reminder = committed.clone();
         reminder.told += 1;
-        fs::create_dir(&blocked).unwrap();
+        let blocked = burrow_test::BlockWrites::new(&cfg.jobs);
         assert!(keep(&cfg, &reminder).is_err());
         assert_eq!(out(&cfg), Some(committed.clone()));
         back(&cfg, None); // Failed release cannot downgrade the active owner.
         assert_eq!(out(&cfg), Some(committed.clone()));
-        fs::remove_dir(&blocked).unwrap();
+        drop(blocked);
         keep(&cfg, &reminder).unwrap();
         assert_eq!(out(&cfg).unwrap().job, committed.job);
         back(&cfg, None);
@@ -269,21 +268,20 @@ fn owner_generations_commit_only_when_the_shared_record_commits() {
 #[test]
 fn failed_creation_and_expiry_do_not_publish_partial_owner_state() {
     let (d, cfg) = rig();
-    let blocked = cfg.jobs.join(format!("{FILE}.new"));
-    fs::create_dir(&blocked).unwrap();
+    let blocked = burrow_test::BlockWrites::new(&cfg.jobs);
     assert!(hold(&cfg, now() + 3600, "not committed").is_err());
     assert!(kept(&cfg).is_none());
-    fs::remove_dir(&blocked).unwrap();
+    drop(blocked);
     hold(&cfg, now() + 60, "expires").unwrap();
     let mut expired = kept(&cfg).unwrap();
     expired.until = now() - 1;
     keep(&cfg, &expired).unwrap();
     let before = kept(&cfg).unwrap();
-    fs::create_dir(&blocked).unwrap();
+    let blocked = burrow_test::BlockWrites::new(&cfg.jobs);
     tend(&cfg);
     assert_eq!(kept(&cfg), Some(before));
     assert!(!told(&d).iter().any(|s| s.starts_with("close ")));
-    fs::remove_dir(&blocked).unwrap();
+    drop(blocked);
     tend(&cfg);
     assert!(kept(&cfg).unwrap().back.is_some());
     assert!(told(&d).iter().any(|s| s.starts_with("close ")));
@@ -502,7 +500,7 @@ fn released_records_and_owner_metadata_remain_readable_by_the_previous_schema() 
 #[test]
 fn failed_release_journal_or_record_never_poison_old_writers() {
     for owner in [false, true] {
-        for boundary in [".usage.admission.new", ".usage.json.new"] {
+        {
             let (_d, cfg) = rig();
             let t = now();
             if owner {
@@ -510,7 +508,7 @@ fn failed_release_journal_or_record_never_poison_old_writers() {
             } else {
                 record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
             }
-            fs::create_dir(cfg.jobs.join(boundary)).unwrap();
+            let blocked = burrow_test::BlockWrites::new(&cfg.jobs);
             back(&cfg, None);
             let mut old: LegacySpent =
                 serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
@@ -520,7 +518,7 @@ fn failed_release_journal_or_record_never_poison_old_writers() {
             old.last = Some(old.last.unwrap_or(old.at).max(t));
             fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
             assert_eq!(admission_cutoff(&cfg).unwrap(), None);
-            fs::remove_dir(cfg.jobs.join(boundary)).unwrap();
+            drop(blocked);
             back(&cfg, None);
             let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
             let _: LegacySpent =

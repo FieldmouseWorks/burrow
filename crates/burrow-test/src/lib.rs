@@ -59,6 +59,28 @@ pub fn copy_file(from: impl AsRef<Path>, to: impl AsRef<Path>) {
     fs::copy(from, to).unwrap();
 }
 
+/// A directory that refuses new files until dropped, so a whole-file state
+/// write into it fails and changes nothing else. Needs a non-root user, which
+/// it checks.
+pub struct BlockWrites(std::path::PathBuf, u32);
+impl BlockWrites {
+    pub fn new(dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref();
+        let before = fs::metadata(dir).unwrap().permissions().mode();
+        permissions(dir, before & !0o222);
+        assert!(
+            fs::File::create(dir.join(".block-writes-probe")).is_err(),
+            "BlockWrites needs a user the mode applies to, not root"
+        );
+        Self(dir.to_owned(), before)
+    }
+}
+impl Drop for BlockWrites {
+    fn drop(&mut self) {
+        permissions(&self.0, self.1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

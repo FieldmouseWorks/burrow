@@ -1,6 +1,10 @@
 use super::*;
 use std::{fs, os::unix::fs::symlink};
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn pinned_directories_reject_escape_paths_links_and_special_files() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -58,6 +62,10 @@ fn pinned_regular_files_survive_replacement_and_first_observations_are_immutable
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn replacement_is_confined_after_directory_rename_and_staging_link_attacks() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

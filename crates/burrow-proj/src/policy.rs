@@ -290,6 +290,10 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "parking and restoring a job directory is a move, not a state write"
+)]
 fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Result<(), String> {
     let job = Job::new(cfg, id);
     if path(&job, "restoring").exists() && !parked(&job) && systemd::gone(cfg, &job.unit()) {

@@ -43,6 +43,10 @@ enum Part {
 /// entries' names, and the sessions it couldn't mark gone. Fails, partway,
 /// with why, when one of the dirs can't be read or something in them can't
 /// be deleted.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "retiring a directory under a gone name is a move, not a state write"
+)]
 pub fn sweep(
     state: &Path,
     trees: &Path,

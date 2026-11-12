@@ -476,6 +476,10 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn usage_cannot_read_symlinked_metadata_transcripts_or_job_directories() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

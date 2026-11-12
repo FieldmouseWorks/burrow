@@ -240,15 +240,10 @@ pub fn filled(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
 
-/// Swap host-owned state through PATH.new. Guest-writable job state uses
-/// `state_reads::write`, whose directory and replacement are confined.
+/// Host-owned state, written whole (guest-writable job state uses
+/// `state_reads::write`, whose directory and replacement are confined).
 pub fn swap(path: &Path, text: &str) -> io::Result<()> {
-    let new = path.with_file_name(format!(
-        "{}.new",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    fs::write(&new, text)?;
-    fs::rename(&new, path)
+    burrow_process::replace::replace_mode(path, text, burrow_process::replace::SHARED)
 }
 
 /// When a file last changed, in nanoseconds since the epoch.

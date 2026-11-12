@@ -58,12 +58,11 @@ fn early_admission_cutoff_has_subsecond_order_and_never_expands() {
 
 #[test]
 fn failed_release_writes_leave_the_natural_cohort_intact_and_retry_precisely() {
-    for boundary in [".usage.released.new", ".usage.json.new"] {
+    {
         let (_d, cfg) = rig();
         let t = now();
         record(&cfg, "web", Some(t + 3600), SAID, t - 100).unwrap();
-        let block = cfg.jobs.join(boundary);
-        fs::create_dir(&block).unwrap();
+        let block = burrow_test::BlockWrites::new(&cfg.jobs);
         back(&cfg, None);
         let s = kept(&cfg).unwrap();
         assert!(s.back.is_none());
@@ -71,11 +70,11 @@ fn failed_release_writes_leave_the_natural_cohort_intact_and_retry_precisely() {
         // When this unchanged hold expires, all arrivals through its actual
         // reset must be included, not just those preceding the failed attempt.
         assert!(!s.holds(s.until));
+        drop(block);
         assert_eq!(
             admission_release(&cfg, &s).unwrap(),
             s.until * 1_000_000_000
         );
-        fs::remove_dir(block).unwrap();
         let before = crate::now_nanos();
         back(&cfg, None);
         let cutoff = admission_cutoff(&cfg).unwrap();
@@ -106,7 +105,7 @@ fn interrupted_release_watermarks_cannot_override_active_or_extended_holds() {
             staged.back = Some(t);
             staged.admission = Some(crate::now_nanos());
             fs::write(
-                cfg.jobs.join(format!("{FILE}.new")),
+                cfg.jobs.join(".state-crashed"),
                 serde_json::to_string(&staged).unwrap(),
             )
             .unwrap();
@@ -128,12 +127,11 @@ fn interrupted_release_watermarks_cannot_override_active_or_extended_holds() {
     let cutoff = admission_cutoff(&cfg).unwrap();
     let old = kept(&cfg).unwrap();
     // A failed settlement cannot remove the only committed precise boundary.
-    let block = cfg.jobs.join(".usage.admission.new");
-    fs::create_dir(&block).unwrap();
+    let block = burrow_test::BlockWrites::new(&cfg.jobs);
     settle(&cfg, old.clone(), old.release() + cfg.stall_queued() + 1);
     assert_eq!(kept(&cfg), Some(old.clone()));
     assert_eq!(admission_cutoff(&cfg), Some(cutoff));
-    fs::remove_dir(block).unwrap();
+    drop(block);
     settle(&cfg, old.clone(), old.release() + cfg.stall_queued() + 1);
     assert!(kept(&cfg).is_none());
     assert_eq!(admission_cutoff(&cfg), Some(cutoff));

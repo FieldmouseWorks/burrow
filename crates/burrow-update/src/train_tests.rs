@@ -135,6 +135,10 @@ fn its_pr_says_what_the_commit_passed_and_that_its_live() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test moving its own fixture, not writing state"
+)]
 fn proposing_puts_head_up_as_a_new_pr() {
     let m = Machine::new();
     // An old PR's head, never landed: HEAD goes over it.

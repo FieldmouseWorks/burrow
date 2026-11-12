@@ -55,6 +55,10 @@ pub fn over(job: &Job) -> bool {
 /// end and `proj stop`, both) finds nothing to do. Only once no turn of the job
 /// runs: whatever still worked in it would lose its files. An id that isn't
 /// one name, which no job has, is left alone: it would name someone else's.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "retiring a scratch directory is a move, not a state write"
+)]
 pub fn clear(cfg: &Config, id: &str) {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') {
         return;

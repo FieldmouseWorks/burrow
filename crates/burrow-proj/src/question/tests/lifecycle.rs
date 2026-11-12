@@ -64,10 +64,9 @@ fn publish(f: &Fixture, human: bool, failed_accept: bool) {
     f.job().set_turns(2).unwrap();
     std::mem::forget(resume);
     if failed_accept {
-        let blocked = PathBuf::from(format!("{}.new", receipt_path(&f.job(), "2").display()));
-        fs::create_dir(&blocked).unwrap();
+        let blocked = burrow_test::BlockWrites::new(receipt_path(&f.job(), "2").parent().unwrap());
         assert!(accept(&f.job(), "2").is_err());
-        fs::remove_dir(blocked).unwrap();
+        drop(blocked);
     }
 }
 

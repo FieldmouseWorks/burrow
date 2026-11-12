@@ -110,10 +110,11 @@ pub fn load(path: &Path) -> Option<Value> {
 
 /// value, written whole: a reader sees the old file or the new one.
 pub fn save(path: &Path, value: &Value) -> io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
-    std::fs::rename(&tmp, path)
+    burrow_process::replace::replace_mode(
+        path,
+        serde_json::to_vec_pretty(value)?,
+        burrow_process::replace::SHARED,
+    )
 }
 
 #[cfg(test)]
