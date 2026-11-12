@@ -30,6 +30,9 @@ struct Receipt {
     through: u64,
     answered: bool,
     clear: bool,
+    /// The answer is the deadline's reversible default, not a person's.
+    #[serde(default)]
+    deadline: bool,
     accepted: bool,
     // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
     applied: bool,
@@ -187,6 +190,10 @@ pub(crate) struct Resume {
 
 impl Resume {
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
+        Self::prepare_as(job, answered, false)
+    }
+
+    pub(crate) fn prepare_as(job: &Job, answered: bool, deadline: bool) -> Result<Self, String> {
         recover(job)?;
         if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
@@ -218,6 +225,7 @@ impl Resume {
                 through,
                 answered,
                 clear: !asking,
+                deadline: answered && deadline,
                 accepted: false,
                 applied: false,
             },
@@ -318,49 +326,37 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     })
 }
 
-/// Called by the deadline once its default's turn is started: the cause of
-/// this question's end, by the turn that took it. It counts only while that
-/// turn's receipt is accepted and answering, so an abandoned start can't claim it.
-pub(crate) fn record_default(job: &Job, resumed: u64) -> Result<(), String> {
-    let asked = read(&job.path("open-question"))
-        .or_else(|| job.turns())
-        .ok_or("no question turn")?;
-    crate::state_reads::write(
-        job.turn(asked.trim(), "question-cause"),
-        format!("default {resumed}\n"),
-    )
-    .map_err(|e| e.to_string())
-}
-
-fn took_default(job: &Job, turn: &str) -> bool {
-    let Some(text) = read(&job.turn(turn, "question-cause")) else {
-        return false;
-    };
-    let Some(n) = text.trim().strip_prefix("default ") else {
-        return false;
-    };
-    read_state(&receipt_path(job, n))
-        .ok()
-        .flatten()
-        .and_then(|t| serde_json::from_str::<Receipt>(&t).ok())
-        .is_some_and(|r| r.accepted && r.answered)
-}
-
 /// The one line a closed notice carries: why this question no longer
-/// waits. A deadline default is the recorded event, never read off prompt
-/// text; otherwise the job's stop or end, else a person's answer.
+/// waits. The accepted launch that first answered it (a receipt is written per
+/// launch attempt and only counts once accepted) says whether that was the
+/// deadline's default or a person; with no such launch, the job's stop or end.
 fn close_reason(job: &Job, finished: bool, stopped: bool, turn: &str) -> String {
-    if took_default(job, turn) {
-        return "Closed: no answer came by the deadline, so the job took its reversible default."
-            .into();
+    let asked = turn.parse::<u64>().unwrap_or(0);
+    let answer = crate::ask::host_path(job, "")
+        .read_dir()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix("resume-")?
+                .parse::<u64>()
+                .ok()?;
+            let r: Receipt = serde_json::from_str(&read_state(&e.path()).ok()??).ok()?;
+            (r.accepted && r.answered && r.through >= asked).then_some((n, r))
+        })
+        .min_by_key(|(n, _)| *n);
+    match answer {
+        Some((_, r)) if r.deadline => {
+            "Closed: no answer came by the deadline, so the job took its reversible default.".into()
+        }
+        Some(_) => "Closed: the question was answered.".into(),
+        None if stopped => "Closed: the job was stopped.".into(),
+        None if finished => "Closed: the job ended.".into(),
+        None => "Closed: the question was answered.".into(),
     }
-    if stopped {
-        return "Closed: the job was stopped.".into();
-    }
-    if finished {
-        return "Closed: the job ended.".into();
-    }
-    "Closed: the question was answered.".into()
 }
 
 /// Durable per-question outbox. An open is replayed idempotently because the

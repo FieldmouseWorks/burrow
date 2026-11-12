@@ -29,12 +29,18 @@ pub(crate) const SPENT: &str = "Your last run was refused before it finished: Cl
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false, None)
+    start_with(cfg, id, msg, first, false, false, None)
 }
 
 /// An explicit operator or authorized human issue reply answers the question.
 pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, true, None)
+    start_with(cfg, id, msg, first, true, false, None)
+}
+
+/// The deadline's reversible default answers the question: the launch's
+/// receipt carries that as the question's cause.
+pub(crate) fn start_default(cfg: &Config, id: &str, msg: &str) -> Result<(), String> {
+    start_with(cfg, id, msg, false, true, true, None)
 }
 
 /// Restoration already owns the serialized inbox admission permit.
@@ -45,7 +51,7 @@ pub(crate) fn start_admitted(
     first: bool,
     permit: &crate::inbox::resumption::Permit,
 ) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false, Some(permit))
+    start_with(cfg, id, msg, first, false, false, Some(permit))
 }
 
 /// A failed write may leave a truncated file. Never leave that prompt in
@@ -64,6 +70,7 @@ fn start_with(
     msg: &str,
     first: bool,
     answered: bool,
+    deadline: bool,
     permit: Option<&crate::inbox::resumption::Permit>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
@@ -103,7 +110,7 @@ fn start_with(
     };
     job.quarantine_unstarted(last)
         .map_err(|e| format!("proj: quarantine unstarted turns: {e}"))?;
-    let question = crate::question::Resume::prepare(&job, answered)?;
+    let question = crate::question::Resume::prepare_as(&job, answered, deadline)?;
     let msg = question.prompt(msg);
     let n = last + 1;
     // The last turn's waits are the new turn's to clear (exec), so a turn
