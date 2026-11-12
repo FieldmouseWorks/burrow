@@ -1,6 +1,10 @@
 use burrow_github::fake::{Fake, ok};
 use serde_json::{Value, json};
 
+use std::fs;
+
+use burrow_door::MAX_COMMENT;
+
 use super::{Done, MAX_QUESTIONS, pass};
 use crate::query::Query;
 use crate::{Config, Journal, Tools};
@@ -719,5 +723,86 @@ fn a_permission_failure_mixed_with_a_rate_limit_remains_a_failure() {
     assert!(
         error.why.contains("#1") && error.why.contains("#2"),
         "{error}"
+    );
+}
+
+/// A usage answer far past what a comment holds still posts every role's
+/// total: the table leads, and only per-turn detail is cut, saying how much.
+#[test]
+fn a_usage_answer_too_big_for_a_comment_keeps_every_total() {
+    let tmp = tempfile::tempdir().unwrap();
+    let jobs = tmp.path().join("jobs");
+    let roles: Vec<String> = (0..25).map(|r| format!("role-{r:02}")).collect();
+    let mut turns = 0;
+    for (r, role) in roles.iter().enumerate() {
+        for j in 0..4 {
+            let job = jobs.join(format!("job-{r:02}-{j}"));
+            fs::create_dir_all(&job).unwrap();
+            fs::write(job.join("role"), role).unwrap();
+            fs::write(job.join("project"), format!("/src/project-{j}")).unwrap();
+            for n in 1..=12 {
+                let usage = json!({"type":"result","session_id":format!("s{r}-{j}"),
+                    "usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4},
+                    "total_cost_usd":n as f64 * 0.25});
+                fs::write(job.join(format!("{n}.jsonl")), usage.to_string()).unwrap();
+                fs::write(job.join(format!("{n}.started")), (100 + n).to_string()).unwrap();
+                turns += 1;
+            }
+        }
+    }
+    let mut cfg = config();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.jobs = Some(jobs);
+    let m = crate::answer::Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 1000,
+        uid: 1,
+        run: &crate::answer::Commands,
+    };
+    let whole = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
+    assert!(
+        whole.len() > MAX_COMMENT,
+        "{} bytes fit already",
+        whole.len()
+    );
+    let mut gh = github(true, json!([issue(9, "sam", "x", json!("usage @0"))]));
+    pass(&mut gh, &cfg, &mut |q| m.answer(q), "now").unwrap();
+    let body = &bodies(&gh)[0];
+    assert!(body.len() <= MAX_COMMENT, "{}", body.len());
+    let rows: Vec<String> = body
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let row = |r: &str| rows.iter().any(|l| l == r);
+    assert!(
+        row(&format!(
+            "claude all all {turns} {turns} {} {} {} $300.00 0",
+            2 * turns,
+            3 * turns,
+            4 * turns
+        )),
+        "{body}"
+    );
+    for role in &roles {
+        assert!(
+            row(&format!("claude {role} all 48 48 96 144 192 $12.00 0")),
+            "{role}: {body}"
+        );
+        for j in 0..4 {
+            assert!(
+                row(&format!("claude {role} project-{j} 12 12 24 36 48 $3.00 0")),
+                "{role}: {body}"
+            );
+        }
+    }
+    assert!(
+        body.contains("Cost: $300.00 over 1200 turns, every turn's cost known."),
+        "{body}"
+    );
+    assert!(body.contains("Each turn:"), "{body}");
+    assert!(
+        body.contains("more lines cut, past what a comment holds)"),
+        "{body}"
     );
 }

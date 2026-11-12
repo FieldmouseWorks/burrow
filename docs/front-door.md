@@ -68,9 +68,15 @@ own, say), in seconds and without starting a Claude.
   - `contains REPO COMMIT`: whether a commit is an ancestor of the running
     input revision, using its repository identity and local history; unavailable
     or ambiguous history is reported as unknown
-  - `usage [SINCE]`: engine turns by role, inbox label and opener category,
-    or starter; defaults to `-5h`. Claude turns include stream token counts
-    and cost. Result tokens are per invocation; only session cost totals are
+  - `usage [SINCE] [--totals]`: engine turns, tokens and cost; defaults to
+    `-5h`. It leads with a table of totals by engine, by engine and role, by
+    engine and project (the job's checkout) and by all three, after one line
+    giving the known cost and how many turns it couldn't price (`known-cost`
+    turns, and engines whose streams it doesn't price); `--totals` gives only
+    that. Meter readings follow, then each turn by role, inbox label and
+    opener category, or starter, last, so a comment cut to fit loses only
+    per-turn detail and says how many lines. Claude turns include stream
+    token counts and cost. Result tokens are per invocation; only session cost totals are
     subtracted across resumes. Every appended invocation is accounted for,
     including unfinished runs and zeroed crash results. Partial input/cache
     tokens exclude duplicate message IDs; output counts completed runs only.

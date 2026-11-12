@@ -6,8 +6,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 mod accounting;
+mod totals;
 use accounting::{Session, decode};
 use burrow_process::state_reads::Dir;
+use totals::Totals;
 fn read(dir: &Dir, name: &str) -> String {
     dir.text(name).unwrap_or_default().trim().into()
 }
@@ -19,7 +21,24 @@ fn records(file: Option<File>) -> impl Iterator<Item = Value> {
 fn turn_time(dir: &Dir, n: u64) -> Option<i64> {
     read(dir, &format!("{n}.started")).parse().ok()
 }
-pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
+/// The job's project: its checkout's folder name, which is its repo's.
+fn project(dir: &Dir) -> String {
+    let path = read(dir, "project");
+    Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| {
+            n.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                && n.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        })
+        .unwrap_or("(unknown)")
+        .into()
+}
+/// `totals` keeps the table alone; otherwise meter readings and each turn
+/// follow it, the turns last, so a cut answer loses only per-turn detail.
+pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<String, String> {
+    let mut table = Totals::default();
     let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
@@ -49,6 +68,12 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
             if inbox.is_empty() && !reference.is_empty() {
                 inbox = "inbox labels=unknown opener=unknown (not recorded)".into();
             }
+            let role_key = match (role.is_empty(), inbox.is_empty()) {
+                (false, _) => role.clone(),
+                (true, false) => "(inbox)".into(),
+                (true, true) => "(none)".into(),
+            };
+            let project = project(&dir);
             let mut kind = if role.is_empty() {
                 String::new()
             } else {
@@ -119,6 +144,7 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
                     continue;
                 }
                 *counts.entry(engine.into()).or_default() += 1;
+                table.add(engine, &role_key, &project, report.as_ref());
                 let detail = report.map(|r| r.show()).unwrap_or_default();
                 groups
                     .entry((engine.into(), kind.clone()))
@@ -149,11 +175,9 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
             "{engine}: {n} turns without recorded execution (empty stream; excluded from span totals)\n"
         );
     }
-    for ((engine, kind), turns) in groups {
-        out += &format!("{engine} / {kind}: {} turns\n", turns.len());
-        for turn in turns {
-            out += &turn;
-        }
+    out += &table.show();
+    if only_totals {
+        return Ok(out);
     }
     out += "Meter readings:\n";
     let log = m.path(
@@ -191,6 +215,13 @@ pub(super) fn answer(m: &Machine, since: i64) -> Result<String, String> {
                     );
                 }
             }
+        }
+    }
+    out += "Each turn:\n";
+    for ((engine, kind), turns) in groups {
+        out += &format!("{engine} / {kind}: {} turns\n", turns.len());
+        for turn in turns {
+            out += &turn;
         }
     }
     Ok(out)

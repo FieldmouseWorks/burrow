@@ -402,6 +402,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     fs::create_dir_all(&job).unwrap();
     fs::write(job.join("role"), "repair").unwrap();
     fs::write(job.join("usage-kind"), "inbox labels=codex opener=owner").unwrap();
+    fs::write(job.join("project"), "/data/src/web\n").unwrap();
     let put = |n: u64, engine: &str, at: u64, text: &str| {
         fs::write(job.join(format!("{n}.engine")), engine).unwrap();
         fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
@@ -460,16 +461,51 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     assert!(answer.contains("codex / no role; starter=operator-session: 1 turns"));
     assert!(!answer.contains("99%"));
     assert!(!answer.contains("SECRET"));
+    // Totals come first, the turns after the meters.
+    let at = |s: &str| answer.find(s).unwrap_or_else(|| panic!("{s}: {answer}"));
+    assert!(at("By engine:") < at("Meter readings:"));
+    assert!(at("Meter readings:") < at("Each turn:"));
+    let table: Vec<String> = answer
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    for row in [
+        "engine role project turns input output cache-read cache-write cost unpriced",
+        "claude all all 2 17 20 30 40 $0.00 1",
+        "codex all all 2 - - - - - 2",
+        "claude repair all 2 17 20 30 40 $0.00 1",
+        "codex (none) all 1 - - - - - 1",
+        "codex all web 1 - - - - - 1",
+        "codex all (unknown) 1 - - - - - 1",
+        "claude repair web 2 17 20 30 40 $0.00 1",
+        "Cost: $0.00 known over 4 turns; 3 of them unpriced (1 with part of their cost unavailable, the known-cost turns; 2 whose engine's stream isn't priced here), so the true total is higher.",
+    ] {
+        assert!(table.iter().any(|l| l == row), "{row}: {answer}");
+    }
+    let totals = m
+        .answer(&Query::parse("usage @150 --totals").unwrap())
+        .unwrap();
+    assert!(totals.contains("By engine, role and project:"), "{totals}");
+    assert!(
+        !totals.contains("Meter readings") && !totals.contains("Each turn"),
+        "{totals}"
+    );
+    assert!(answer.starts_with(&totals), "{totals}");
     let full = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
     assert!(
         full.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$1.500000"),
+        "{full}"
+    );
+    assert!(
+        full.contains("Cost: $1.50 known over 5 turns; 3 of them unpriced"),
         "{full}"
     );
     assert!(fake.asked.borrow().is_empty());
     assert_eq!(
         Query::parse("usage").unwrap(),
         Query::Usage {
-            since: crate::query::When::Ago(18000)
+            since: crate::query::When::Ago(18000),
+            totals: false,
         }
     );
     assert!(Query::parse("usage -1h extra").is_err());
