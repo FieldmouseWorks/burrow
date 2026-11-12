@@ -39,6 +39,18 @@ pub struct UsageHold {
     pub since: i64,
 }
 
+/// How the owner's last pauses ended, kept by the door beside the overlay so
+/// every way of clearing a hold leaves it: when, the admission cutoff its
+/// queue is cut at (nanoseconds), and for a deadline that passed, the
+/// deadline before which a refusal is a stale run's. Each only grows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageEnd {
+    pub release: i64,
+    pub cutoff: i64,
+    pub stale: i64,
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Overlay {
@@ -50,6 +62,13 @@ struct Overlay {
     pipeline_until: Option<i64>,
     #[serde(default)]
     receipts: BTreeMap<String, String>,
+}
+
+fn nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
 }
 
 pub fn now() -> i64 {
@@ -124,6 +143,45 @@ impl Config {
     /// The hold as recorded, expired or not: whoever ends one closes its notice.
     pub fn usage_hold_record(&self) -> Result<Option<UsageHold>, String> {
         Ok(self.read()?.usage_hold)
+    }
+
+    fn end_path(&self) -> PathBuf {
+        self.overlay.with_extension("usage-end")
+    }
+
+    /// The journal of ended pauses: absent is none, anything unreadable is an
+    /// error, so no caller takes damage for no history.
+    pub fn usage_end(&self) -> Result<UsageEnd, String> {
+        match fs::read(self.end_path()) {
+            Ok(b) => serde_json::from_slice(&b)
+                .map_err(|e| format!("{}: {e}", self.end_path().display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UsageEnd::default()),
+            Err(e) => Err(format!("{}: {e}", self.end_path().display())),
+        }
+    }
+
+    /// Records an end (each field only grows), durably, before the overlay
+    /// changes. Callers other than the door hold no lock: it is idempotent.
+    pub fn record_usage_end(&self, end: UsageEnd) -> Result<(), String> {
+        use std::io::Write;
+        let old = self.usage_end()?;
+        let new = UsageEnd {
+            release: old.release.max(end.release),
+            cutoff: old.cutoff.max(end.cutoff),
+            stale: old.stale.max(end.stale),
+        };
+        let pending = self.end_path().with_extension("usage-end-pending");
+        let mut f = File::create(&pending).map_err(|e| e.to_string())?;
+        f.write_all(&serde_json::to_vec(&new).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(0o644))
+                .map_err(|e| e.to_string())?;
+        }
+        f.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(pending, self.end_path()).map_err(|e| e.to_string())
     }
 
     pub fn scope_until(&self) -> Result<Option<i64>, String> {
@@ -237,12 +295,29 @@ impl Config {
                 if until <= at { return Err("usage hold deadline must be in the future".into()); }
                 state.usage_hold = Some(UsageHold { until, reason: reason.join(" "), since: at });
             }
-            ["usage-back"] => state.usage_hold = None,
+            ["usage-back"] => {
+                if let Some(h) = state.usage_hold.as_ref().filter(|h| h.until > now()) {
+                    self.record_usage_end(UsageEnd {
+                        release: now(),
+                        cutoff: nanos().min(h.until * 1_000_000_000),
+                        stale: 0,
+                    })?;
+                }
+                state.usage_hold = None;
+            }
             // Cleanups that retire only the hold they examined, decided here
             // under the write lock: a newer hold or release stands.
             ["usage-expire", until] if state.usage_hold.as_ref().is_some_and(|h| {
                 until.parse() == Ok(h.until) && h.until <= now()
-            }) => state.usage_hold = None,
+            }) => {
+                let until = state.usage_hold.as_ref().map_or(0, |h| h.until);
+                self.record_usage_end(UsageEnd {
+                    release: until,
+                    cutoff: until * 1_000_000_000,
+                    stale: until,
+                })?;
+                state.usage_hold = None;
+            }
             ["usage-expire", _] => {}
             ["usage-migrate", until, reason @ ..]
                 if state.usage_hold.is_none() && !reason.is_empty() =>
@@ -412,3 +487,24 @@ mod tests {
 
 pub mod schema;
 pub mod show;
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+    #[test]
+    fn every_way_of_clearing_a_hold_leaves_its_release_and_a_bad_journal_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            overlay: dir.path().join("overlay.json"),
+            ..Default::default()
+        };
+        let until = now() + 600;
+        cfg.command(&["usage-hold".into(), until.to_string(), "x".into()], "t")
+            .unwrap();
+        cfg.command(&["usage-back".into()], "issue").unwrap();
+        let end = cfg.usage_end().unwrap();
+        assert!(end.release > 0 && end.cutoff > 0 && end.cutoff <= until * 1_000_000_000);
+        fs::write(cfg.overlay.with_extension("usage-end"), "{trunc").unwrap();
+        assert!(cfg.usage_end().is_err(), "unreadable is not no history");
+    }
+}
