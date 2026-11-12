@@ -21,9 +21,6 @@ pub struct File {
     pub text: String,
 }
 
-/// Where `burrow.authors` and its type are declared; scanned by no one.
-const HOME: [&str; 2] = ["modules/common.nix", "lib/github-author.nix"];
-
 /// What reads `config.burrow.authors`, in any module.
 const SHARED: [&str; 3] = [
     "inherit (config.burrow) authors",
@@ -31,14 +28,24 @@ const SHARED: [&str; 3] = [
     "config.burrow.authors",
 ];
 
-/// The forms only these modules may use: the steward's own PR authors.
-const OWN: [(&str, &[&str]); 3] = [
+/// The forms only these modules may use: where the list is declared, and the
+/// steward's own PR authors. A declaration carries the path it sits under, so
+/// the same words under another option are refused.
+const OWN: [(&str, &[&str]); 4] = [
+    // Where `burrow.authors` and its type are declared, and nothing else.
+    (
+        "modules/common.nix",
+        &[
+            "options.burrow.authors = mkOption { type = types.listOf ( import ../lib/github-author.nix { inherit lib; } )*",
+            "../lib/github-author.nix",
+        ],
+    ),
     (
         "modules/autoland.nix",
         &[
             "inherit (cfg) authors",
             "inherit (settings) stateDir owner proj projectsDir authors bots app jobTimeout renovate",
-            "authors = mkOption { type = types.listOf types.str*",
+            "options.burrow.autoland.authors = mkOption { type = types.listOf types.str*",
             "burrow.authors = [ { login = \"${cfg.app.slug}[bot]\"; id = cfg.app.accountId; } ]",
             "cfg.authors",
         ],
@@ -56,7 +63,7 @@ const OWN: [(&str, &[&str]); 3] = [
         "modules/watchdog/degradations.nix",
         &[
             "inherit (cfg) repos prThreshold authors",
-            "authors = mkOption { type = types.listOf types.str*",
+            "options.burrow.watchdog.degradations.authors = mkOption { type = types.listOf types.str*",
             "config.burrow.autoland.authors",
             "cfg.authors",
         ],
@@ -91,7 +98,7 @@ fn mentions(name: &str) -> bool {
 /// What is wrong with these modules, one line each; empty when the rule holds.
 pub fn scan(files: &[File]) -> Vec<String> {
     let mut found = Vec::new();
-    for file in files.iter().filter(|f| !HOME.contains(&f.path.as_str())) {
+    for file in files {
         let own = OWN
             .iter()
             .find(|(p, _)| *p == file.path)
@@ -121,7 +128,7 @@ fn forms(toks: &[Tok]) -> Vec<(&'static str, String)> {
         } else if w.contains('/') || !mentions(w) {
             continue;
         } else if is_bind(toks.get(i + 1)) {
-            out.push(("declares or sets authors", statement(toks, i)));
+            out.push(("declares or sets authors", binding(toks, i)));
         } else if inherited(toks, i) {
             out.push(("inherits authors", statement(toks, inherit_start(toks, i))));
         } else {
@@ -129,6 +136,47 @@ fn forms(toks: &[Tok]) -> Vec<(&'static str, String)> {
         }
     }
     out
+}
+
+/// A binding's statement; a declaration (`mkOption`) is named by every
+/// attribute it sits under (`options.burrow.x.authors`), so where it is
+/// declared is part of what is allowed.
+fn binding(toks: &[Tok], i: usize) -> String {
+    let text = statement(toks, i);
+    let declares = matches!(toks.get(i + 2), Some(Tok::Word(w)) if w.ends_with("mkOption"));
+    if !declares {
+        return text;
+    }
+    let mut stack: Vec<String> = Vec::new();
+    for n in 0..i {
+        match &toks[n] {
+            Tok::Punct('{' | '[' | '(') => {
+                let name = match (
+                    n.checked_sub(2).and_then(|k| toks.get(k)),
+                    n.checked_sub(1).and_then(|k| toks.get(k)),
+                ) {
+                    (Some(Tok::Word(w)), Some(Tok::Punct('='))) if toks[n] == Tok::Punct('{') => {
+                        w.clone()
+                    }
+                    _ => String::new(),
+                };
+                stack.push(name);
+            }
+            Tok::Punct('}' | ']' | ')') => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let Tok::Word(w) = &toks[i] else { return text };
+    let path: Vec<&str> = stack
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !p.is_empty())
+        .chain([w.as_str()])
+        .collect();
+    let rest = text.strip_prefix(w.as_str()).unwrap_or(&text);
+    format!("{}{rest}", path.join("."))
 }
 
 fn is_bind(tok: Option<&Tok>) -> bool {

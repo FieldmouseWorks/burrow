@@ -89,7 +89,7 @@ fn a_door_taking_authors_from_elsewhere_is_refused() {
 
 #[test]
 fn the_steward_own_authors_are_exempt_and_only_those() {
-    let own = "{ options = { authors = mkOption { type = types.listOf types.str; }; }; x = { inherit (cfg) authors; }; y = cfg.authors; }";
+    let own = "{ options.burrow.autoland = { authors = mkOption { type = types.listOf types.str; }; }; x = { inherit (cfg) authors; }; y = cfg.authors; }";
     accepted("modules/autoland.nix", own);
     refused("modules/probe.nix", own);
     // A door payload in the exempt file is not the steward's.
@@ -112,9 +112,42 @@ fn the_steward_own_authors_are_exempt_and_only_those() {
 }
 
 #[test]
-fn where_it_is_declared_is_not_scanned() {
-    accepted(
+fn where_it_is_declared_is_scanned_too() {
+    let decl = "options.burrow = { authors = mkOption { type = types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; }; };";
+    accepted("modules/common.nix", &format!("{{ {decl} }}"));
+    // The removed option, declared in the home file or under an exempt path.
+    refused(
         "modules/common.nix",
-        "{ options.burrow.authors = mkOption { type = import ../lib/github-author.nix { }; }; }",
+        &format!(
+            "{{ {decl} options.burrow.probe.authors = mkOption {{ type = types.listOf types.attrs; }}; }}"
+        ),
+    );
+    refused(
+        "modules/common.nix",
+        &format!("{{ {decl} options.burrow.probe = {{ authors = mkOption {{ }}; }}; }}"),
+    );
+    refused(
+        "modules/autoland.nix",
+        "{ options.burrow.probe = { authors = mkOption { type = types.listOf types.str; }; }; }",
+    );
+    refused(
+        "modules/watchdog/degradations.nix",
+        "{ options.burrow.autoland = { authors = mkOption { type = types.listOf types.str; }; }; }",
+    );
+}
+
+#[test]
+fn interpolated_code_is_scanned() {
+    for text in [
+        "{ x = \"${builtins.toJSON { authors = [ { login = \"o\"; id = 7; } ]; }}\"; }",
+        "{ x = ''${builtins.toJSON { authors = [ ]; }}''; }",
+        "{ x = \"a ${\"b ${cfg.authors}\"} c\"; }",
+        "{ x = import \"${./y}/github-author.nix\"; }",
+    ] {
+        refused("modules/probe.nix", text);
+    }
+    accepted(
+        "modules/probe.nix",
+        "{ x = \"authors ${toString 1} data\"; }",
     );
 }
