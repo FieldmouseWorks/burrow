@@ -137,39 +137,113 @@ static DECODED_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
     .expect("decoded quoted credential")
 });
 
+/// How much raw text is kept to see a delimiter split across two pieces.
+const TAIL: usize = 64;
+
 /// Redacts a sequence of texts (decoded JSON strings, records, plain
-/// segments of one stream) while remembering an open private key, so a block
-/// split across values or records goes whole.
+/// segments of one stream) while remembering what is still open at the end
+/// of each: a private key, a delimiter cut in two, a quoted credential. The
+/// next piece finishes them, so a secret split across values, records or
+/// segments goes whole.
 #[derive(Default)]
 pub struct Redactor {
     in_key: bool,
+    /// An unclosed credential quote: its character, and whether the piece
+    /// ended on the backslash that escapes the next character.
+    quote: Option<(char, bool)>,
+    /// The last raw characters seen, for a delimiter cut between pieces.
+    tail: String,
+}
+
+/// Where the quote `q` closes in `text`, past `after` (the byte it starts
+/// at); `Err` says whether the text ended on a pending escape.
+fn close_of(text: &str, after: usize, q: char, mut escaped: bool) -> Result<usize, bool> {
+    for (i, c) in text[after..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == q {
+            return Ok(after + i + c.len_utf8());
+        }
+    }
+    Err(escaped)
 }
 
 impl Redactor {
     /// Plain text, whose lines are lines.
     pub fn plain(&mut self, text: &str) -> String {
-        self.run(text, false)
+        self.run(text)
     }
 
-    fn run(&mut self, text: &str, decoded: bool) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
-        let ends = KEY_END.is_match(text);
-        let out = if self.in_key && !ends {
-            "[redacted private key]".to_string()
-        } else if decoded {
-            let quoted = DECODED_QUOTED.replace_all(text, format!("$1$2\"{REDACTED}\""));
-            scrub(&quoted).0
-        } else {
-            scrub(text).0
+    fn remember(&mut self, text: &str) {
+        self.tail.push_str(text);
+        let keep = self
+            .tail
+            .char_indices()
+            .rev()
+            .nth(TAIL - 1)
+            .map_or(0, |(i, _)| i);
+        self.tail.drain(..keep);
+    }
+
+    fn run(&mut self, text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        let seen = self.tail.len();
+        let joined = format!("{}{text}", self.tail);
+        let cut = |re: &Regex| {
+            re.find_iter(&joined)
+                .find(|m| m.start() < seen && m.end() > seen)
+                .map(|m| m.end() - seen)
         };
-        let last_end = KEY_END.find_iter(text).last().map(|m| m.end());
+        // A delimiter cut between this piece and the last one.
+        if self.in_key {
+            if let Some(n) = cut(&KEY_END) {
+                self.in_key = false;
+                out.push_str("[redacted private key]");
+                rest = &text[n..];
+            }
+        } else if let Some(n) = cut(&KEY_BEGIN) {
+            self.in_key = true;
+            out.push_str("[redacted private key]");
+            rest = &text[n..];
+        }
+        self.remember(text);
+        // A credential quote the last piece left open.
+        if let Some((q, escaped)) = self.quote.take() {
+            match close_of(rest, 0, q, escaped) {
+                Ok(n) => rest = &rest[n..],
+                Err(escaped) => {
+                    self.quote = Some((q, escaped));
+                    return out;
+                }
+            }
+        }
+        if rest.is_empty() {
+            return out;
+        }
+        let ends = KEY_END.is_match(rest);
+        if self.in_key && !ends {
+            out.push_str("[redacted private key]");
+            return out;
+        }
+        let quoted = DECODED_QUOTED.replace_all(rest, format!("$1$2\"{REDACTED}\""));
+        out.push_str(&scrub(&quoted).0);
+        let last_end = KEY_END.find_iter(rest).last().map(|m| m.end());
         let open = KEY_BEGIN
-            .find_iter(text)
+            .find_iter(rest)
             .last()
             .is_some_and(|m| last_end.is_none_or(|e| m.start() >= e));
         self.in_key = open || (self.in_key && !ends);
+        for caps in DECODED_QUOTED.captures_iter(rest) {
+            let after = caps.get(2).map_or(0, |m| m.end());
+            if let Some(q) = rest[after..].chars().next()
+                && let Err(escaped) = close_of(rest, after + q.len_utf8(), q, false)
+            {
+                self.quote = Some((q, escaped));
+            }
+        }
         out
     }
 
@@ -178,7 +252,7 @@ impl Redactor {
     /// hidden whole, including multiline strings and non-string credentials.
     pub fn json(&mut self, value: &Value) -> Result<Value, String> {
         Ok(match value {
-            Value::String(text) => Value::String(self.run(text, true)),
+            Value::String(text) => Value::String(self.run(text)),
             Value::Array(values) => Value::Array(
                 values
                     .iter()
@@ -435,5 +509,38 @@ mod tests {
         ] {
             assert_eq!(scrub(line).as_str(), line);
         }
+    }
+
+    #[test]
+    fn plain_text_and_fragments_hide_multiline_and_split_secrets() {
+        let mut r = super::Redactor::default();
+        let out = r.plain("password=\"first\nsecond\" public");
+        assert!(!out.contains("second") && out.contains("public"));
+        // A BEGIN delimiter cut in two, then a payload.
+        let mut r = super::Redactor::default();
+        let v = r.json(&serde_json::json!([
+            "x -----BEGIN RSA PRIVATE ",
+            "KEY-----\nPAYLOAD",
+            "MORE",
+            "-----END RSA PRIVATE ",
+            "KEY----- tail"
+        ]));
+        let out = v.unwrap().to_string();
+        assert!(!out.contains("PAYLOAD") && !out.contains("MORE"), "{out}");
+        assert!(out.contains("tail"), "{out}");
+        // A quoted credential split across values.
+        let mut r = super::Redactor::default();
+        let out = r
+            .json(&serde_json::json!([
+                "token=\"abc",
+                "def\\\"ghi",
+                "jkl\" after"
+            ]))
+            .unwrap()
+            .to_string();
+        for leak in ["abc", "def", "ghi", "jkl"] {
+            assert!(!out.contains(leak), "{out}");
+        }
+        assert!(out.contains("after"), "{out}");
     }
 }
