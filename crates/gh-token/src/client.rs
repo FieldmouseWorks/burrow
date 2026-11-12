@@ -136,7 +136,7 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
         && let Some(socket) = socket
         && let (Some(dir), Ok(app)) = (
             std::env::var_os("PROJ_GITHUB_DIR"),
-            std::env::var("PROJ_GITHUB_APP"),
+            std::env::var("GH_TOKEN_APP"),
         )
     {
         let owner = match account::account(args, &context) {
@@ -148,7 +148,17 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
             Err(e) => return e,
         };
         run.env("GH_TOKEN", &token);
-        return match crate::quota::run(&mut run, gh, &token, &app, &owner, Path::new(&dir)) {
+        return match crate::quota::run(
+            &mut run,
+            gh,
+            &token,
+            &app,
+            &owner,
+            Path::new(&dir),
+            std::env::var_os("PROJ_GITHUB_REFUSALS")
+                .as_deref()
+                .map(Path::new),
+        ) {
             Ok(code) => std::process::exit(code),
             Err(e) => Error::unavailable(format!("GitHub meter: {e}")),
         };
@@ -421,6 +431,69 @@ mod tests {
         // No account to be had: refused, the socket never asked.
         let nothing: Vec<String> = ["api", "user"].map(String::from).into();
         assert!(token_for(&nothing, None, socket, &context).is_err());
+    }
+
+    #[test]
+    fn quota_uses_the_token_apps_identity_and_preserves_failed_exit() {
+        if let Some(gh) = std::env::var_os("PROJ_TEST_QUOTA_GH") {
+            let socket = std::env::var_os("GH_TOKEN_SOCKET").unwrap();
+            let error = super::gh(
+                gh.to_str().unwrap(),
+                &["api".into(), "repos/sam/r".into()],
+                Some(Path::new(&socket)),
+            );
+            panic!("gh failed before executing: {error}");
+        }
+        let (dir, socket, server) = serve(vec!["token fixture-token\n"]);
+        for (name, path) in [("root", vec![]), ("api", vec!["api".to_owned()])] {
+            std::fs::write(
+                dir.path().join(format!("help-{name}")),
+                crate::command::fake::help(&path).unwrap(),
+            )
+            .unwrap();
+        }
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh,format!(r#"#!/bin/sh
+if [ "$1" = help ]; then cat '{0}/help-'"${{2:-root}}"; exit; fi
+if [ "$2" = rate_limit ]; then echo '{{"resources":{{"core":{{"remaining":99,"reset":4000000000}}}}}}'; exit; fi
+echo '{{"status":403,"at":2000000000,"headers":[["retry-after","120"]],"body":"{{}}"}}' >> "$BURROW_GH_RESPONSES"
+exit 7
+"#,dir.path().display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let meters = dir.path().join("meters");
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "client::tests::quota_uses_the_token_apps_identity_and_preserves_failed_exit",
+                "--nocapture",
+            ])
+            .env("PROJ_TEST_QUOTA_GH", &gh)
+            .env("GH_TOKEN_SOCKET", socket)
+            .env("GH_TOKEN", "")
+            .env_remove("GH_HOST")
+            .env("GH_TOKEN_APP", "actual-host-app")
+            .env("PROJ_GITHUB_APP", "engine-app")
+            .env("PROJ_GITHUB_DIR", &meters)
+            .env("PROJ_GITHUB_REFUSALS", dir.path().join("refusals"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(7),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(server.join().unwrap(), ["sam\n"]);
+        let file = std::fs::read_dir(meters)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| e.path().extension().is_some_and(|s| s == "json"))
+            .unwrap()
+            .path();
+        let meter = burrow_github::quota::Meter::read(&file).unwrap();
+        assert_eq!(meter.app, "actual-host-app");
+        assert_eq!(meter.owner, "sam");
     }
 
     #[test]

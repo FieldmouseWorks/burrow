@@ -177,13 +177,7 @@ pub fn spawn(
         .env("PROJ_PROBE_SOCKET", crate::probe::socket(cfg, job, n))
         .env("PROJ_JOB", id)
         .env("PROJ_GITHUB_DIR", job.path("github"))
-        .env(
-            "PROJ_GITHUB_APP",
-            crate::turn::github_app(cfg, crate::read(&job.path("app")), choice.engine)
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-        )
+        .env("PROJ_GITHUB_REFUSALS", job.turn(n, "github-refusals"))
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)
         .env("PROJ_APP_ENV", app_env);

@@ -123,14 +123,15 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 if let Err(e) = usage::adopt(cfg) {
                     eprintln!("{e}");
                 }
-                if let Some(s) = usage::out(cfg) {
-                    put(&format!(
-                        "{}\n",
-                        serde_json::to_string(&s).unwrap_or_default()
-                    ));
+                let mut value = usage::out(cfg)
+                    .and_then(|s| serde_json::to_value(s).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let meters = crate::github_quota::meters(cfg);
+                if !meters.is_empty() {
+                    value["github"] = serde_json::json!(meters);
                 }
-                for meter in crate::github_quota::meters(cfg) {
-                    put(&format!("{}\n", serde_json::json!({"github": meter})));
+                if value.as_object().is_some_and(|v| !v.is_empty()) {
+                    put(&format!("{value}\n"));
                 }
                 Ok(())
             }
@@ -484,7 +485,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // the turn is known to be over: one that ended on its own between the
     // look and the stop is stopped all the same, and one systemd can't be
     // asked about may still be running.
-    for f in ["await", "await.next", "github-await", "github/refusal"] {
+    for f in ["await", "await.next", "github-await"] {
         let _ = fs::remove_file(job.path(f));
     }
     if rc != 0 && !systemd::gone(cfg, &unit) {
@@ -580,17 +581,16 @@ pub(crate) fn record_wait(
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     crate::github::take_limit();
     let pending = job.path(crate::github_quota::PENDING);
-    let saved: Vec<String> = read(&pending)
+    let saved: Option<crate::github_quota::Pending> = read(&pending)
         .map(|text| {
             serde_json::from_str::<crate::github_quota::Pending>(&text)
-                .map(|p| p.targets)
                 .map_err(|e| Fail::new(1, format!("saved GitHub await: {e}")))
         })
-        .transpose()?
-        .unwrap_or_default();
+        .transpose()?;
+    let prior_due = saved.as_ref().map_or(0, |p| p.retry_at);
     let mut all = targets.to_vec();
     let mut found = found.to_vec();
-    for saved_target in saved {
+    for saved_target in saved.map(|p| p.targets).unwrap_or_default() {
         if !all.contains(&saved_target) {
             found.push(
                 target(&saved_target).ok_or_else(|| Fail::new(1, "invalid saved GitHub target"))?,
@@ -600,36 +600,39 @@ pub(crate) fn record_wait(
     }
     let targets = &all;
     let mut limited_owner = String::new();
-    let result = found
-        .iter()
-        .zip(targets)
-        .try_fold(String::new(), |mut text, (found, target)| {
-            limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
-            text.push_str(&baselines(
+    let mut text = String::new();
+    let result = found.iter().zip(targets).try_for_each(|(found, target)| {
+        limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
+        text.push_str(&crate::github::for_job(job, || {
+            baselines(
                 cfg,
                 std::slice::from_ref(found),
                 std::slice::from_ref(target),
                 until,
-            )?);
-            Ok(text)
-        });
-    let text = match result {
-        Ok(text) => text,
+            )
+        })?);
+        Ok(())
+    });
+    match result {
+        Ok(()) => {}
         Err(error) => {
             if let Some(due) = crate::github::take_limit() {
-                crate::github_quota::note(cfg, job, &limited_owner, due)
-                    .map_err(|e| Fail::new(1, e))?;
                 let intent = crate::github_quota::Pending {
                     targets: targets.clone(),
-                    retry_at: due,
+                    retry_at: due.max(prior_due),
+                    turn: job.turns().unwrap_or_default(),
                 };
                 crate::state_reads::write(
                     &pending,
                     serde_json::to_vec(&intent).expect("pending await"),
                 )
                 .map_err(|e| io_fail(&pending, e))?;
+                crate::github_quota::remember(job, &text)?;
                 crate::state_reads::write(job.path("end.next"), "await\n")
                     .map_err(|e| io_fail(&job.path("end.next"), e))?;
+                if let Err(e) = crate::github_quota::note(cfg, job, &limited_owner, due) {
+                    eprintln!("proj: quota meter unavailable: {e}");
+                }
                 put(
                     "Noted durably. GitHub quota is exhausted; proj will register the wait after its reset. End your turn now.\n",
                 );
@@ -644,6 +647,7 @@ pub(crate) fn record_wait(
             "proj: turn deadline expired while registering waits; nothing is awaited",
         ));
     }
+    crate::github_quota::remember(job, &text)?;
     let next = job.path("await.next");
     File::options()
         .append(true)

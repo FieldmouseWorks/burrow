@@ -128,6 +128,9 @@ fn start_with(
         undo();
         return Err(couldnt());
     }
+    // Accepted resumption owns the previous intent, including an error
+    // recovery. A failed launch above leaves it durable for another attempt.
+    let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
     // systemd has accepted this turn. Reconciliation errors cannot turn it
     // into a failed start: callers must consume its input exactly once.
     let reconcile_pending = if let Err(e) = question.commit() {
@@ -219,16 +222,15 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    for f in [
-        "await",
-        "await.next",
-        "end.next",
-        "ask.next",
-        "github/refusal",
-    ] {
+    for f in ["await", "await.next", "end.next", "ask.next"] {
         if !job.turn(&n, "retry-migration").exists() {
             let _ = crate::state_reads::remove(job.path(f));
         }
+    }
+    if read(&job.path(crate::github_quota::PENDING)).is_some_and(|text| {
+        serde_json::from_str::<crate::github_quota::Pending>(&text).map_or(true, |p| p.turn != n)
+    }) {
+        let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
     }
     let retry =
         crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;

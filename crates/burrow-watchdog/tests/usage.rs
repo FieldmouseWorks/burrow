@@ -304,3 +304,20 @@ fn out_of_usage_the_stuck_issue_and_a_queued_job_go_to_the_owner() {
     assert_eq!(opened(&m).len(), 1);
     assert!(m.escalated().is_empty());
 }
+
+#[test]
+fn github_readings_do_not_disable_claude_usage_holds() {
+    for count in 0..=2 {
+        let m = Machine::new();
+        let mut line = named("proj job web-1", "waiting for a slot", T - 3.0 * H, T - H);
+        line["line"] = true.into();
+        m.write(&m.line, json!({"web-1":line}), T);
+        *m.world.usage.borrow_mut()=json!({"until":T+H,"said":"held","github":vec![json!({"app":"workers","remaining":0,"reset":T+H});count]}).to_string();
+        let (_, stalls) = m.run(T);
+        assert!(stalls.is_empty());
+        assert!(m.kicks().is_empty());
+        *m.world.usage.borrow_mut() = json!({"github":[]}).to_string();
+        let (_, stalls) = m.run(T);
+        assert!(!stalls.is_empty());
+    }
+}

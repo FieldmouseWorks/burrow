@@ -111,7 +111,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 if reset > now() {
                     lines.push_str(&a.line());
                     retry.push((String::new(), reset));
-                } else if job.path(crate::github_quota::PENDING).exists() {
+                } else if job.path(crate::github_quota::PENDING).exists()
+                    || !crate::github_quota::captured(&job).is_empty()
+                {
                     let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
                     if job.turns().as_deref() != Some(turn.as_str())
                         || read(&f).as_deref() != Some(waits.as_str())
@@ -119,20 +121,31 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                         drop(held);
                         continue 'jobs;
                     }
-                    let replayed = crate::github_quota::replay(cfg, &job);
+                    let replayed = if job.path(crate::github_quota::PENDING).exists() {
+                        crate::github_quota::replay(cfg, &job)
+                    } else {
+                        crate::github_quota::restore(&job)
+                            .map(|()| None)
+                            .map_err(crate::github_quota::RecoveryError::State)
+                    };
                     drop(held);
                     match replayed {
                         Ok(due) => {
-                            if let Some(due) = due {
-                                retry.push((String::new(), due));
-                            }
+                            retry.push((String::new(), due.unwrap_or_else(|| now() + 1)));
                             crate::waits::rewatch(cfg, &[&id]);
                             continue 'jobs;
                         }
-                        Err(e) => news.push_str(&format!(
-                            "- GitHub reset, but your saved await failed: {}\n",
-                            e.say.unwrap_or_else(|| format!("exit {}", e.code))
-                        )),
+                        Err(crate::github_quota::RecoveryError::Request(e)) => {
+                            news.push_str(&format!(
+                                "- GitHub reset, but your saved await failed: {}\n",
+                                e.say.unwrap_or_else(|| format!("exit {}", e.code))
+                            ))
+                        }
+                        Err(crate::github_quota::RecoveryError::State(e)) => {
+                            eprintln!("proj: quota recovery state unavailable: {:?}", e.say);
+                            retry.push((String::new(), now() + RETRY));
+                            continue 'jobs;
+                        }
                     }
                 } else {
                     news.push_str("- GitHub quota has reset; carry on from the last turn\n");

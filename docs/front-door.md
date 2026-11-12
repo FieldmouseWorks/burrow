@@ -441,13 +441,23 @@ finalization, watchdog updates, completion kicks or scratch cleanup.
 
 ### GitHub's installation quota
 
-Jobs treat GitHub quota as a meter. The gh door samples `GET /rate_limit`
+Jobs treat GitHub quota as a meter. The gh HTTP transport's
+[response side channel](../patches/gh-quota-responses.patch) supplies actual
+status, limit headers and API errors independently of CLI output, jq,
+templates or pagination. The gh door samples `GET /rate_limit`
 with the command's own installation token and records only the App, owner,
 remaining REST budget, reset, reading time and any primary or secondary
-hold. `proj usage` includes these readings; the typed
+hold. `proj usage` includes these readings in a `github` array inside its
+single JSON object; an active Claude hold keeps its existing top-level
+fields for consumers such as the watchdog. The typed
 `burrow_proj::github_quota::meters` view is available to the live snapshot.
 App plus owner identifies the installation across repositories and token
-renewals. A fresh reading cannot release a secondary hold before its reset.
+renewals. Holds merge under the installation's lock independently of
+budget freshness, so delayed or concurrent observations cannot shorten them.
+Refusals are separate records per installation and turn; their job-wide
+maximum never propagates into another installation's meter. Sampling or
+persistence failure after gh executes preserves the completed command's exit
+status, including successful mutations.
 
 A turn that encounters a limit finishes its current run and parks until
 GitHub's reset. It publishes a host quota notice, without opening a question
@@ -460,4 +470,14 @@ The watcher registers them after reset without another engine turn, then
 resumes the job on news from those targets. If registration meets another
 limit it retains the intent and books that reset. A permission error or a
 target closed meanwhile resumes the job with the failed registration's
-cause. `proj stop` cancels these saved targets along with other waits.
+cause. Failed starts retain intent; accepted resumption consumes it, with
+turn ownership preventing old intent from parking a later turn after a
+crash. Baselines captured before a later quota refusal are restored without
+retaking them. `proj stop` cancels these saved targets along with other waits.
+
+The actual token door exports its App identity, independent of the engine's
+selected App. Host await registration and replay use `burrow.proj.gh`; its
+`hostGithubApp` identity defaults to machinery for the default client.
+Wrapped overrides export their own identity; plain overrides can declare
+`hostGithubApp` explicitly. Both native and VM declarations route their
+observations to the job while retaining the configured client's identity.

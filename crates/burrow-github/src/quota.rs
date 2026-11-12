@@ -71,15 +71,18 @@ impl Meter {
         let file = dir.join(format!("{key}.json"));
         let mut next = self.clone();
         if let Some(old) = Self::read(&file) {
-            if old.at > self.at {
-                return Ok(());
+            let hold = self
+                .retry_at
+                .into_iter()
+                .chain(old.retry_at)
+                .chain(self.until(self.at))
+                .chain(old.until(self.at))
+                .max();
+            // Hold-only observations do not refresh the budget's age.
+            if (old.remaining.is_some(), old.at) > (self.remaining.is_some(), self.at) {
+                next = old;
             }
-            if next.remaining.is_none() {
-                next.remaining = old.remaining;
-                next.reset = old.reset;
-            }
-            // A primary reading cannot release a secondary limit early.
-            next.retry_at = next.retry_at.into_iter().chain(old.until(self.at)).max();
+            next.retry_at = hold;
         }
         burrow_process::state_reads::write(&file, serde_json::to_vec(&next)?)
     }
@@ -173,5 +176,50 @@ mod tests {
         assert_eq!(m.owner, "sam");
         assert_eq!(m.until(1200), Some(1300));
         assert_eq!(m.until(1300), None);
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    #[test]
+    fn delayed_refusals_and_concurrent_writers_cannot_shrink_holds() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        let mut fresh = Meter::new("app", "Sam", 1100);
+        fresh.remaining = Some(3500);
+        fresh.reset = Some(5000);
+        fresh.record(dir).unwrap();
+        let mut delayed = Meter::new("app", "sam", 1000);
+        delayed.retry_at = Some(3000);
+        delayed.record(dir).unwrap();
+        let file = || {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|f| f.path().extension().is_some_and(|s| s == "json"))
+                .unwrap()
+                .path()
+        };
+        let m = Meter::read(&file()).unwrap();
+        assert_eq!(
+            (m.at, m.remaining, m.retry_at),
+            (1100, Some(3500), Some(3000))
+        );
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                scope.spawn(move || {
+                    let mut m = Meter::new("app", "SAM", 1200 + i);
+                    m.remaining = Some(100 + i);
+                    m.retry_at = Some(4000 + i);
+                    m.record(dir).unwrap();
+                });
+            }
+        });
+        let m = Meter::read(&file()).unwrap();
+        assert_eq!(
+            (m.at, m.remaining, m.retry_at),
+            (1215, Some(115), Some(4015))
+        );
     }
 }

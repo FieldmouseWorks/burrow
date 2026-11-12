@@ -11,6 +11,25 @@ use crate::config::Config;
 thread_local! {
     static LIMITED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
+thread_local! {
+    static EVIDENCE: std::cell::RefCell<Option<(std::path::PathBuf, std::path::PathBuf)>> = const { std::cell::RefCell::new(None) };
+}
+/// Route observations from host registration/replay to this job, while the
+/// configured gh wrapper itself supplies the actual authentication identity.
+pub(crate) fn for_job<T>(job: &crate::job::Job, op: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(std::path::PathBuf, std::path::PathBuf)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EVIDENCE.replace(self.0.take());
+        }
+    }
+    let paths = (
+        job.path("github"),
+        job.turn(&job.turns().unwrap_or_default(), "github-refusals"),
+    );
+    let _restore = Restore(EVIDENCE.replace(Some(paths)));
+    op()
+}
 pub(crate) fn take_limit() -> Option<u64> {
     LIMITED.take()
 }
@@ -129,10 +148,21 @@ pub fn over(fp: &Value) -> Option<&'static str> {
 
 /// The configured GitHub client, with the caller's authentication routing.
 pub(crate) fn client(cfg: &Config) -> Gh {
-    Gh {
+    let mut gh = Gh {
         program: Some(cfg.tools.gh.clone().into_os_string()),
         ..Default::default()
-    }
+    };
+    EVIDENCE.with(|paths| {
+        if let Some((meters, refusals)) = paths.borrow().as_ref() {
+            gh.env
+                .push(("PROJ_GITHUB_DIR".into(), meters.clone().into_os_string()));
+            gh.env.push((
+                "PROJ_GITHUB_REFUSALS".into(),
+                refusals.clone().into_os_string(),
+            ));
+        }
+    });
+    gh
 }
 
 /// Keep the final diagnostic when a caller represents failure as None.

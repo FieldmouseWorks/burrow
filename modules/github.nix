@@ -105,7 +105,8 @@ let
 
   # What a process acts as the App in: its socket, and git's and gh's
   # settings for it.
-  appEnv = socket: {
+  appEnv = name: socket: {
+    GH_TOKEN_APP = name;
     GH_TOKEN_SOCKET = socket;
     # A token the process already has, from a login's profile, say, is the
     # user's, and the wrapper would run with it as given (client.rs), so it
@@ -205,7 +206,7 @@ in
         env = mkOption {
           type = types.attrsOf types.str;
           readOnly = true;
-          default = appEnv socket;
+          default = appEnv name socket;
           defaultText = lib.literalMD "GH_TOKEN_SOCKET, and git's and gh's settings for it";
           description = "The environment a process acts as the App in.";
         };
@@ -218,7 +219,7 @@ in
         gh = mkOption {
           type = types.package;
           readOnly = true;
-          default = appGh (appEnv socket);
+          default = appGh (appEnv name socket);
           defaultText = lib.literalMD "gh in `env`";
           description = "gh as the App, whoever runs it, with whatever token they have.";
         };
@@ -264,6 +265,14 @@ in
   };
 
   config = lib.mkIf (cfg.apps != { } || cfg.machinery != null) {
+    nixpkgs.overlays = [(final: prev: {
+      gh = prev.gh.overrideAttrs (old: {
+        patches = (old.patches or []) ++ [ ../patches/gh-quota-responses.patch ];
+        postBuild = (old.postBuild or "") + ''
+          go test ./api -run '^TestBurrowQuotaResponses$'
+        '';
+      });
+    })];
     assertions = [{
       assertion = cfg.machinery == null || cfg.apps ? ${cfg.machinery};
       message = "burrow.github.machinery is ${toString cfg.machinery}, which isn't one of burrow.github.apps.";

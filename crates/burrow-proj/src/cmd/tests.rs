@@ -134,3 +134,69 @@ esac
     let (_, say) = await_on(&["8", "5"]).unwrap_err();
     assert!(say.contains("o/r#5 is merged already"), "{say}");
 }
+
+#[test]
+fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
+    if let Ok(kind) = env::var("PROJ_TEST_USAGE_JSON") {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = d.path().join("jobs");
+        cfg.notify = None;
+        fs::create_dir_all(&cfg.jobs).unwrap();
+        let count: usize = kind.split('-').next().unwrap().parse().unwrap();
+        if !kind.ends_with("none") {
+            let now = crate::now();
+            let until = if kind.ends_with("expired") {
+                now - 1
+            } else {
+                now + 3600
+            };
+            fs::write(
+                cfg.jobs.join(".usage.json"),
+                serde_json::json!({"until":until,"said":"held","job":"fixture","at":now-10})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        for n in 0..count {
+            let id = format!("j{n}");
+            let job = Job::new(&cfg, &id);
+            fs::create_dir_all(&job.dir).unwrap();
+            burrow_github::quota::Meter::new("workers", &format!("owner{n}"), crate::now() as u64)
+                .record(&job.path("github"))
+                .unwrap();
+        }
+        super::dispatch(&cfg, &["usage".into()]).unwrap();
+        return;
+    }
+    for kind in ["0-held", "1-held", "2-held", "2-none", "2-expired"] {
+        let out = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cmd::tests::usage_is_one_json_value_with_zero_one_or_multiple_github_readings",
+                "--nocapture",
+            ])
+            .env("PROJ_TEST_USAGE_JSON", kind)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The libtest harness surrounds the command's stdout; the JSON
+        // line itself must be a single value, not an appended JSON stream.
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let lines: Vec<_> = stdout.lines().filter(|s| s.starts_with('{')).collect();
+        assert_eq!(lines.len(), 1, "{stdout}");
+        let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let active = kind.ends_with("held");
+        assert_eq!(
+            value["until"].as_i64().is_some_and(|t| t > crate::now()),
+            active,
+            "{stdout}"
+        );
+        let count = kind[..1].parse::<usize>().unwrap();
+        assert_eq!(value["github"].as_array().map_or(0, Vec::len), count);
+    }
+}

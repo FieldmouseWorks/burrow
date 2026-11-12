@@ -10,6 +10,7 @@ pub(crate) const PENDING: &str = "github-await";
 pub(crate) struct Pending {
     pub targets: Vec<String>,
     pub retry_at: u64,
+    pub turn: String,
 }
 
 pub fn meters(cfg: &Config) -> Vec<Meter> {
@@ -67,12 +68,8 @@ pub(crate) fn held(cfg: &Config, job: &Job, engine: crate::engine::Engine) -> Op
 }
 
 pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(), String> {
-    let engine = read(&job.turn(&job.turns().unwrap_or_default(), "engine"))
-        .as_deref()
-        .and_then(|s| crate::engine::Engine::parse(s).ok())
-        .unwrap_or(crate::engine::Engine::Claude);
-    if let Ok(Some(app)) = crate::turn::github_app(cfg, read(&job.path("app")), engine) {
-        let mut meter = Meter::new(&app, owner, now().max(0) as u64);
+    if let Some(app) = &cfg.host_github_app {
+        let mut meter = Meter::new(app, owner, now().max(0) as u64);
         meter.retry_at = Some(due);
         meter
             .record(&job.path("github"))
@@ -83,8 +80,13 @@ pub(crate) fn note(cfg: &Config, job: &Job, owner: &str, due: u64) -> Result<(),
 
 /// Only actual failed API calls write refusal, never quoted tool results.
 pub(crate) fn refused(job: &Job) -> Option<i64> {
-    Meter::read(&job.path("github/refusal"))?
-        .retry_at
+    let n = job.turns()?;
+    fs::read_dir(job.turn(&n, "github-refusals"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|s| s == "json"))
+        .filter_map(|e| Meter::read(&e.path()).and_then(|m| m.retry_at))
+        .max()
         .map(|t| t as i64)
 }
 
@@ -92,10 +94,19 @@ pub(crate) fn finish(job: &Job, n: &str) -> Result<bool, String> {
     if job.turn(n, "stopped").exists() {
         return Ok(false);
     }
+    if read(&job.path("await"))
+        .is_some_and(|text| !crate::job::awaits(&text).iter().any(|a| a.target == LIMIT))
+    {
+        let _ = crate::state_reads::remove(job.path(PENDING));
+        return Ok(false);
+    }
     let Some(due) = read(&job.path(PENDING))
         .and_then(|s| serde_json::from_str::<Pending>(&s).ok())
+        .filter(|p| p.turn == n)
         .map(|p| p.retry_at as i64)
-        .or_else(|| refused(job))
+        .into_iter()
+        .chain(refused(job))
+        .max()
     else {
         return Ok(false);
     };
@@ -115,14 +126,34 @@ pub(crate) fn park(job: &Job, due: i64) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) enum RecoveryError {
+    Request(crate::Fail),
+    State(crate::Fail),
+}
+impl From<crate::Fail> for RecoveryError {
+    fn from(error: crate::Fail) -> Self {
+        Self::State(error)
+    }
+}
+pub(crate) fn captured(job: &Job) -> String {
+    read(&job.turn(&job.turns().unwrap_or_default(), "github-awaits"))
+        .unwrap_or_else(|| read(&job.path("await.next")).unwrap_or_default())
+}
+pub(crate) fn remember(job: &Job, waits: &str) -> Result<(), crate::Fail> {
+    let mut kept = captured(job);
+    kept.push_str(waits);
+    let path = job.turn(&job.turns().unwrap_or_default(), "github-awaits");
+    swap(&path, kept).map_err(|e| crate::io_fail(&path, e))
+}
 /// Recover an await after the reset, without asking the engine to repeat it.
 /// The intent survives partial API failure and process/reboot boundaries.
-pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, crate::Fail> {
+pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryError> {
     let Some(text) = read(&job.path(PENDING)) else {
         return Ok(None);
     };
-    let mut pending: Pending =
-        serde_json::from_str(&text).map_err(|e| crate::Fail::new(1, e.to_string()))?;
+    let mut pending: Pending = serde_json::from_str(&text)
+        .map_err(|e| RecoveryError::Request(crate::Fail::new(1, e.to_string())))?;
     let targets = &pending.targets;
     let found = targets
         .iter()
@@ -130,44 +161,95 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, crate::Fail
             crate::github::target(t)
                 .ok_or_else(|| crate::Fail::new(1, "invalid saved GitHub target"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(RecoveryError::Request)?;
     crate::github::take_limit();
-    let waits = match crate::cmd::baselines(cfg, &found, targets, None) {
+    let captured_text = captured(job);
+    let captured_targets: Vec<_> = crate::job::awaits(&captured_text)
+        .into_iter()
+        .map(|a| a.target)
+        .collect();
+    let mut owner = String::new();
+    let result = found
+        .iter()
+        .zip(targets)
+        .try_fold(String::new(), |mut text, (found, target)| {
+            if captured_targets.contains(&format!("{}#{}", found.0, found.1)) {
+                return Ok(text);
+            }
+            owner = found.0.split('/').next().unwrap_or_default().to_owned();
+            text.push_str(&crate::github::for_job(job, || {
+                crate::cmd::baselines(
+                    cfg,
+                    std::slice::from_ref(found),
+                    std::slice::from_ref(target),
+                    None,
+                )
+            })?);
+            Ok(text)
+        });
+    let waits = match result {
         Ok(waits) => waits,
         Err(error) => {
             if let Some(due) = crate::github::take_limit() {
-                pending.retry_at = due;
+                pending.retry_at = pending.retry_at.max(due);
                 swap(
                     job.path(PENDING),
                     serde_json::to_vec(&pending).expect("pending await"),
                 )
                 .map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
+                let due = std::iter::once(pending.retry_at)
+                    .chain(refused(job).map(|t| t as u64))
+                    .max()
+                    .unwrap_or(due);
                 park(job, due as i64).map_err(|e| crate::Fail::new(1, e))?;
+                if let Err(e) = note(cfg, job, &owner, due) {
+                    eprintln!("proj: quota meter unavailable: {e}");
+                }
                 return Ok(Some(due as i64));
             }
-            return Err(error);
+            return Err(RecoveryError::Request(error));
         }
     };
     // Publish the complete wait before removing intent. Repeating after a
     // crash is safe: these are reads, never GitHub mutations.
-    let mut kept = read(&job.path("await.next")).unwrap_or_default();
+    let mut kept = captured_text;
     kept.push_str(&waits);
-    swap(job.path("await"), &kept).map_err(|e| crate::io_fail(&job.path("await"), e))?;
+    publish(job, &kept)?;
+    fs::remove_file(job.path(PENDING)).map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
+    Ok(None)
+}
+
+pub(crate) fn restore(job: &Job) -> Result<(), crate::Fail> {
+    publish(job, &captured(job))
+}
+fn publish(job: &Job, waits: &str) -> Result<(), crate::Fail> {
+    let mut seen = std::collections::BTreeSet::new();
+    let waits: String = waits
+        .lines()
+        .filter(|line| seen.insert(line.split('\t').next().unwrap_or_default()))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let archive = job.turn(&job.turns().unwrap_or_default(), "github-awaits");
+    swap(&archive, &waits).map_err(|e| crate::io_fail(&archive, e))?;
+    // Checkpoint complete baselines before publication. The await file is
+    // the commit point: failures before it leave the quota wait recoverable.
+    swap(job.path("await.next"), &waits).map_err(|e| crate::io_fail(&job.path("await.next"), e))?;
     if let Some(n) = job.turns() {
         swap(job.turn(&n, "end"), "await\n")
             .map_err(|e| crate::io_fail(&job.turn(&n, "end"), e))?;
         swap(job.turn(&n, "outcome"), "done\n")
             .map_err(|e| crate::io_fail(&job.turn(&n, "outcome"), e))?;
     }
-    fs::remove_file(job.path(PENDING)).map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
-    Ok(None)
+    swap(job.path("await"), &waits).map_err(|e| crate::io_fail(&job.path("await"), e))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    fn fixture() -> (tempfile::TempDir, Config) {
+    pub(super) fn fixture() -> (tempfile::TempDir, Config) {
         let d = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = d.path().join("jobs");
@@ -289,3 +371,6 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         assert_eq!(meters(&cfg).len(), 2);
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;

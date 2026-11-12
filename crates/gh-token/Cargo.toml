@@ -14,11 +14,11 @@ ring = "0.17.14"
 rustls-pki-types = "1.15.1"
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 time = { version = "0.3.55", features = ["parsing"] }
 ureq.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+
 
 [features]
 # The tests' stand-ins (fake.rs), for crates that mint with it.
