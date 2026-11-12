@@ -22,7 +22,10 @@
 # its inputs and the PR (or the run), and a leg's its leg too, so calls in one
 # workflow with inputs of their own (a matrix's legs, say) never cancel each
 # other, nor do the gate's own legs; two calls alike would be the same check
-# twice.
+# twice. A job's group cancels its last only once it's queued itself, after
+# the new run's first job got a runner, so a caller (the template's, and
+# burrow's own) has a group of its own on the same key too, which cancels the
+# PR's last run whole as the new one is made (burrow#815).
 name: flake-check
 on:
   workflow_call:
