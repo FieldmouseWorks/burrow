@@ -42,8 +42,6 @@ impl Run<'_> {
             eprintln!("{MAIN_ONLY}: {e}");
         }
     }
-        }
-    }
 
     pub(crate) fn go_live(&mut self) -> Step {
         // A bump in a train repo isn't switched to: it goes live after it
