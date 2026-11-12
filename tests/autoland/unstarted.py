@@ -159,7 +159,7 @@ assert ci_state(pr, repo="sam/r")[0] == "pending"
 # Train eligibility does not let a lane-only run pretend to execute a gate.
 # The train's admission rules remain responsible for waiving PR gate work.
 from harness import S
-prior = S.CFG["repos"]["sam/r"]
+prior = S.CFG["repos"].get("sam/r", {})
 S.CFG["repos"]["sam/r"] = {**prior, "train": True}
 assert dead_runs(head([caller, twin()], did("s9", workflow="B", path=FLAKE[1], lane=True)[:1]), "sam/r") == [77]
 S.CFG["repos"]["sam/r"] = prior
