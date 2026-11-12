@@ -162,6 +162,25 @@ mod tests {
         deliver(port, &body, &sign("hook-secret", &body), event)
     }
 
+    #[test]
+    fn leading_hyphen_repos_reach_webhooks_and_kicks() {
+        let (_h, lines, hooks, kicks) = setup();
+        assert_eq!(
+            signed_delivery(hooks, json!({"repository":{"full_name":"sam/-r"}}), "push"),
+            202
+        );
+        assert_eq!(due(&lines, "autoland"), repos(&["sam/-r"]));
+        assert_eq!(post(kicks, "/kick/inbox/sam/-r", b"", &[]), 202);
+        assert_eq!(due(&lines, "inbox"), repos(&["sam/-r"]));
+        for repo in ["--help/x", "sam/..", "sam/r/x"] {
+            assert_eq!(
+                signed_delivery(hooks, json!({"repository":{"full_name":repo}}), "push"),
+                204
+            );
+            assert_eq!(post(kicks, &format!("/kick/inbox/{repo}"), b"", &[]), 404);
+        }
+    }
+
     // Deliveries go to the handlers that take their event; forged ones, and
     // ones about no repo, to none.
     #[test]

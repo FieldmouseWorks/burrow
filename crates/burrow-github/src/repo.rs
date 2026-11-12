@@ -7,12 +7,12 @@
 pub fn repo_name(r: &str) -> bool {
     let ok = |s: &str, extra: &str| {
         !s.is_empty()
-            && !s.starts_with('-')
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || extra.contains(c))
     };
-    r.split_once('/')
-        .is_some_and(|(o, n)| ok(o, "") && ok(n, "_.") && n != "." && n != "..")
+    r.split_once('/').is_some_and(|(o, n)| {
+        !o.starts_with('-') && ok(o, "") && ok(n, "_.") && n != "." && n != ".."
+    })
 }
 
 #[cfg(test)]
@@ -26,14 +26,16 @@ mod tests {
             "Sam-2/my.repo_x",
             "a/.github",
             "a/_b-c",
+            "sam/-r",
+            "sam/--help",
             "FieldmouseWorks/.github",
             "o-1/r",
         ] {
             assert!(repo_name(r), "{r}");
         }
         for r in [
-            "--help", "--help/x", "sam", "sam/", "/r", "sam/r/x", "sam/-r", "-sam/r", "sa_m/r",
-            "sam/r\n", "sam /r", "", "o/.", "o/..", ".o/r", "o/r#1",
+            "--help", "--help/x", "sam", "sam/", "/r", "sam/r/x", "-sam/r", "sa_m/r", "sam/r\n",
+            "sam /r", "", "o/.", "o/..", ".o/r", "o/r#1",
         ] {
             assert!(!repo_name(r), "{r:?}");
         }

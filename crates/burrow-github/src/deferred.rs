@@ -108,14 +108,27 @@ pub fn ran(wake: &Path, key: &str, now: u64) -> Result<(), String> {
 /// Change the wake file's bookings with CHANGE, holding the lock beside it
 /// from the read to the write. A missing file is no bookings.
 fn keyed(wake: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Result<(), String> {
-    let lock = wake.with_extension("lock");
-    let held = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock)
-        .and_then(|f| f.lock().map(|()| f))
-        .map_err(|e| format!("{}: {e}", lock.display()))?;
+    // Hold both protocols across upgrades and rollbacks: old Rust writers
+    // use wake.lock; surviving shell units use wake.json.lock.
+    // For some names (`wake`, `.wake`) the two paths are one file, which
+    // is locked once: a second lock on it would wait on this call itself.
+    let mut locks = vec![wake.with_extension("lock")];
+    let shell = std::path::PathBuf::from(format!("{}.lock", wake.display()));
+    if !locks.contains(&shell) {
+        locks.push(shell);
+    }
+    let mut held = Vec::new();
+    for lock in locks {
+        held.push(
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock)
+                .and_then(|f| f.lock().map(|()| f))
+                .map_err(|e| format!("{}: {e}", lock.display()))?,
+        );
+    }
     let mut booked = match fs::read(wake) {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(Value::Object(booked)) => booked,
@@ -429,6 +442,54 @@ mod tests {
         assert!(book(&wake, "sam/r", 2000).is_err());
         assert_eq!(fs::read_to_string(&wake).unwrap(), "[]");
         assert!(book(&dir.path().join("absent/wake.json"), "", 2000).is_err());
+    }
+
+    #[test]
+    fn bookings_wait_for_old_protocols_and_preserve_their_writes() {
+        for extension in ["lock", "json.lock"] {
+            for key in ["", "sam/r"] {
+                let dir = tempfile::tempdir().unwrap();
+                let wake = dir.path().join("wake.json");
+                let lock = fs::File::create(wake.with_extension(extension)).unwrap();
+                lock.lock().unwrap();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let path = wake.clone();
+                let worker = std::thread::spawn(move || {
+                    book(&path, key, 2000).unwrap();
+                    tx.send(()).unwrap();
+                });
+                assert!(
+                    rx.recv_timeout(std::time::Duration::from_millis(100))
+                        .is_err()
+                );
+                fs::write(&wake, r#"{"sam/old":1500}"#).unwrap();
+                lock.unlock().unwrap();
+                worker.join().unwrap();
+                let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+                assert_eq!(booked["sam/old"], 1500);
+                assert_eq!(booked[key], 2000);
+            }
+        }
+    }
+
+    #[test]
+    fn bookings_finish_for_names_whose_two_lock_paths_are_one() {
+        for name in ["wake", ".wake", "wake.lock.json", "wake.tar.gz"] {
+            let dir = tempfile::tempdir().unwrap();
+            let wake = dir.path().join(name);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = wake.clone();
+            std::thread::spawn(move || {
+                book(&path, "sam/r", 2000).unwrap();
+                ran(&path, "sam/r", 2000).unwrap();
+                tx.send(()).unwrap();
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+                "{name} hung on its own lock"
+            );
+            assert_eq!(fs::read_to_string(&wake).unwrap(), "{}");
+        }
     }
 
     #[test]
