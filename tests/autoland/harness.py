@@ -397,16 +397,16 @@ PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless set, or what GitHub raises
 
 
-RERUNS = []  # the jobs (by check run id) the steward ran again
-RERUN_FAILS = {}  # a job's id to what its rerun raises: none unless set
+RERUNS = []  # the workflow runs (by id) the steward ran again
+RERUN_FAILS = {}  # a run's id to what its rerun raises: none unless set
 
 
 def gh_stub(*a, **k):
     acting()
-    if a[:3] == ("run", "rerun", "--job"):
-        if isinstance(err := RERUN_FAILS.get(int(a[3])), Exception):
+    if a[:2] == ("run", "rerun") and a[3] == "--failed":
+        if isinstance(err := RERUN_FAILS.get(a[2]), Exception):
             raise err
-        RERUNS.append(int(a[3]))
+        RERUNS.append(a[2])
         return ""
     if a[:1] == ("api",) and a[1].startswith("repos/sam/r/rules/branches/"):
         got = RULES.get(a[1].removeprefix("repos/sam/r/rules/branches/").partition("?")[0], [])

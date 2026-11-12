@@ -26,7 +26,7 @@ def check(name, conclusion="SUCCESS", status="COMPLETED", app="github-actions", 
           done="COMPLETED"):
     return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
             "checkSuite": {"id": suite, "status": done, "app": {"slug": app},
-                           "workflowRun": {"file": {"path": f".github/workflows/{workflow}.yml"},
+                           "workflowRun": {"databaseId": suite, "file": {"path": f".github/workflows/{workflow}.yml"},
                                            "workflow": {"id": workflow, "name": workflow}}}}
 
 

@@ -48,7 +48,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
+            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -125,14 +125,19 @@ def has_ci(pr, proofs=()):
         for c in contexts)
 
 
+def run_id(c):
+    """The id of the workflow run a check run belongs to, as text, or None."""
+    run = (suite(c).get("workflowRun") or {}).get("databaseId")
+    return str(run) if run else None
+
+
 def rerun_key(c):
-    """Which job a cancelled check run is, for running it again once: its
-    workflow's id and its name, so jobs of different workflows (or matrix
-    legs) that share a name keep a run each. None for a check that isn't a
-    GitHub Actions job (another App's, say), which `gh run rerun` can't run."""
-    run = suite(c).get("workflowRun") or {}
-    flow = (run.get("workflow") or {}).get("id")
-    return f"{flow}/{c['name']}" if flow and c.get("databaseId") else None
+    """Which workflow run a cancelled check run belongs to, for running it
+    again once: the run's id, the same for every attempt of it, and for every
+    job in it (jobs sharing a name included, as matrix legs and twin jobs do).
+    None for a check that isn't a GitHub Actions job (another App's, say),
+    which `gh run rerun` can't run."""
+    return run_id(c) if c.get("databaseId") else None
 
 
 def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
@@ -156,12 +161,16 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
     head's to fix. Only the App's counts, as with ours. A cancelled check run
     goes by what its workflow did after it (after_cancel), and with nothing
     after it is pending, since a stopped run found nothing, unless it ran out
-    of time (timed_out), which is red. Given `rerun` (rerun_key to job id: "done"
-    the Actions jobs asked to be run again on this head, as of that attempt,
-    "refused" those GitHub wouldn't run; "want" is filled with the others),
-    a cancelled Actions job is run again once, pending while that attempt
-    stands, and one cancelled again by a later attempt is red: a hang is
-    the head's to look at. A workflow's
+    of time (timed_out), which is red. Given `rerun` (rerun_key to the newest job id of a
+    run, "done": the runs asked to be run again on this head, as of that
+    attempt; "refused": those GitHub refused for want of permission, this
+    pass only, so a repaired permission is tried again; "want" is filled
+    with the other runs whose cancelled jobs are all there is to run again),
+    a finished run's cancelled jobs are run again once together, pending
+    while that attempt stands, and one cancelled by a later attempt is red: a
+    hang is the head's to look at. A run with a failure of its own in it
+    isn't run again, as that would run the failure again too, and one still
+    going is waited for. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -178,6 +187,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
         proofs = ()
     spelled = {p.lower(): p for p in proofs}
     red, pending, seen = [], [], len(unrun)
+    cancelled_jobs = []
+    broken, going = set(), set()  # the runs with a failure of their own in them, and those not over
     pending += [f"{w} for {pr['baseRefName']}" for w in unrun]
     for s in suites.get("nodes", []):
         if s["conclusion"] == "STARTUP_FAILURE":
@@ -193,6 +204,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                 continue
             seen += 1
             name = c["name"]
+            if c["status"] != "COMPLETED" or suite(c).get("status") != "COMPLETED":
+                going.add(run_id(c))
             if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
             elif cancelled(c) and timed_out(repo, c):
@@ -200,6 +213,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                 # cancelled: the head's tests hang, or take too long, which
                 # is the head's to fix.
                 red.append(f"{name} (timed out)")
+                broken.add(run_id(c))
             elif cancelled(c):
                 # Nothing ran it through since: the run was stopped (a runner
                 # shut down under it, a newer run's concurrency, or someone
@@ -210,11 +224,11 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                 job = c.get("databaseId")
                 if key is None:
                     pending.append(f"{name} (cancelled, to be run again)")
-                elif job <= rerun["refused"].get(key, 0):
+                elif key in rerun["refused"]:
                     pending.append(f"{name} (cancelled; the App may not run it again, which needs Actions write)")
                 elif key not in rerun["done"]:
-                    # The newest attempt seen is the one to run again.
-                    rerun["want"][key] = (max(job, rerun["want"].get(key, (0,))[0]), name)
+                    # The newest job seen marks the attempt to run again.
+                    cancelled_jobs.append((key, job))
                     pending.append(f"{name} (cancelled, to be run again)")
                 elif job <= rerun["done"][key]:
                     # The attempt we asked to be run again, still as it was.
@@ -223,6 +237,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                     red.append(f"{name} (cancelled again after a rerun)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
+                broken.add(run_id(c))
             elif workflow(c) is not None and suite(c).get("status") != "COMPLETED":
                 # Its run isn't over: a job that waits on this one has yet to
                 # start, as the gate's check job waits on its legs.
@@ -241,6 +256,10 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                 pending.append(name)
             elif c["state"] != "SUCCESS":
                 red.append(name)
+    if rerun is not None:
+        for key, job in cancelled_jobs:
+            if key not in broken and key not in going:
+                rerun["want"][key] = max(job, rerun["want"].get(key, 0))
     named = {c.get("name") or spelled.get(c["context"].lower(), c["context"]) for c in contexts.get("nodes", [])}
     for name in proofs:
         if name not in named:

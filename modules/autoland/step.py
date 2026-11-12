@@ -83,33 +83,36 @@ class Pass(Context, Jobs, Actions):
         )
 
     def ci_checks(self):
-        """ci_state, having run again, once, each Actions job cancelled with
-        nothing run through since (cancelled again, ci_state calls it red: a
-        hang). Each request is saved as GitHub takes it, so a later failure
-        in the pass doesn't forget it; one GitHub refuses (the App lacks
-        Actions write, say) is saved as refused, not as run, and not tried
-        again for that attempt."""
+        """ci_state, having run again, once, each finished workflow run with
+        a job cancelled and nothing run through since (`gh run rerun --failed`:
+        one request per run, which GitHub counts as one attempt for all its
+        jobs and their dependents). Cancelled again, ci_state calls it red: a
+        hang. Each request is saved as GitHub takes it, so a later failure in
+        the pass doesn't forget it. One refused for want of permission (the
+        App lacks Actions write) is shown, not saved, and tried again next
+        pass; so is any other refusal, as a run that is not over yet."""
         st = self.st.get("rerun")
         if not st or st.get("head") != self.head:
-            st = {"head": self.head, "done": {}, "refused": {}}
-        rerun = {"done": st["done"], "refused": st["refused"], "want": {}}
+            st = {"head": self.head, "done": {}}
+        rerun = {"done": st["done"], "refused": {}, "want": {}}
         moved = moved_from(self.repo, self.pr, self.st)
         got = ci_state(self.pr, self.machine, moved, self.repo, rerun)
         if not rerun["want"] or C.DRY:
             return got
-        for key, (job, name) in rerun["want"].items():
+        for key, job in rerun["want"].items():
             try:
-                C.gh("run", "rerun", "--job", str(job), "--repo", self.repo)
+                C.gh("run", "rerun", key, "--failed", "--repo", self.repo)
             except C.Unavailable:
                 raise
             except RuntimeError as e:
-                st["refused"][key] = job
-                C.log(f"{self.tag}: {name} not run again: {e}")
+                if "403" in str(e) or "not accessible" in str(e):
+                    rerun["refused"][key] = str(e)
+                C.log(f"{self.tag}: run {key} not run again: {e}")
             else:
                 st["done"][key] = job
-                C.log(f"{self.tag}: ran {name} again, cancelled with nothing run through since")
-            self.st["rerun"] = st
-            save(self.key, self.st)
+                C.log(f"{self.tag}: ran {key} again, cancelled with nothing run through since")
+                self.st["rerun"] = st
+                save(self.key, self.st)
         return ci_state(self.pr, self.machine, moved, self.repo, rerun)
 
     def run(self):
