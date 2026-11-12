@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "at": 1794398400,
+  "queue": [
+    {"repo": "FieldmouseWorks/burrow", "number": 684, "priority": "high", "pipeline": true, "repair": false, "opened": "2026-11-11T09:12:00Z", "age": 10800},
+    {"repo": "FieldmouseWorks/burrow", "number": 685, "priority": "high", "pipeline": true, "repair": true, "opened": "2026-11-11T09:40:00Z", "age": 9120},
+    {"repo": "FieldmouseWorks/career", "number": 41, "priority": "medium", "pipeline": false, "repair": false, "opened": "2026-11-10T20:00:00Z", "age": 58800},
+    {"repo": "FieldmouseWorks/lok", "number": 212, "priority": "low", "pipeline": false, "repair": false, "opened": "2026-11-09T08:00:00Z", "age": 188000}
+  ],
+  "line": [
+    {"job": "burrow-20261111-232038-kSWD", "class": "pipeline", "project": "burrow", "since": 1794391200, "wait": 7200},
+    {"job": "lok-20261111-101500-aB3d", "class": "normal", "project": "lok", "since": 1794394800, "wait": 3600}
+  ],
+  "slots": [
+    {"kind": "claude", "name": "1", "state": "parked", "since": 1794370000, "age": 28400,
+     "holder": {"job": "burrow-20261110-181200-QwEr", "project": "burrow", "issue": "FieldmouseWorks/burrow#671", "role": "worker", "class": "pipeline", "engine": "claude", "model": "model-a", "effort": "high", "awaits": ["https://github.com/FieldmouseWorks/burrow/pull/690"]}},
+    {"kind": "claude", "name": "2", "state": "parked", "since": 1794375000, "age": 23400,
+     "holder": {"job": "lok-20261110-203000-ZxCv", "project": "lok", "issue": "FieldmouseWorks/lok#208", "role": "worker", "class": "normal", "engine": "claude", "model": null, "effort": null, "awaits": ["https://github.com/FieldmouseWorks/lok/pull/209"]}},
+    {"kind": "claude", "name": "3", "state": "parked", "since": 1794380000, "age": 18400,
+     "holder": {"job": "career-20261110-224500-AsDf", "project": "career", "issue": "FieldmouseWorks/career#39", "role": "worker", "class": "normal", "engine": "claude", "model": "model-b", "effort": "xhigh", "awaits": ["https://github.com/FieldmouseWorks/career/pull/40", "https://github.com/FieldmouseWorks/career/issues/38"]}},
+    {"kind": "unstick", "name": "unstick", "state": "idle", "since": null, "age": null, "holder": null},
+    {"kind": "codex", "name": "1", "state": "running", "since": 1794397000, "age": 1400,
+     "holder": {"job": "burrow-20261111-221000-Codx", "project": "burrow", "issue": "FieldmouseWorks/burrow#680", "role": "reviewer", "class": null, "engine": "codex", "model": null, "effort": "medium", "awaits": []}},
+    {"kind": "codex", "name": "2", "state": "idle", "since": null, "age": null, "holder": null},
+    {"kind": "drain", "name": "1", "state": "starting", "since": 1794398300, "age": 100,
+     "holder": {"job": null, "project": "burrow", "issue": "FieldmouseWorks/burrow#684", "role": null, "class": null, "engine": "claude", "model": null, "effort": null, "awaits": []}},
+    {"kind": "heavy", "name": "1", "state": "busy", "since": null, "age": null, "holder": null}
+  ],
+  "meters": [
+    {"engine": "claude", "reading": {"fiveHour": {"used": 41.5, "resetsAt": 1794409200}, "weekly": {"used": 87.0, "resetsAt": 1794700000}, "credits": false, "readAt": 1794398100, "age": 300, "fresh": true}, "hold": null},
+    {"engine": "codex", "reading": {"fiveHour": {"used": 12.0, "resetsAt": 1794412800}, "weekly": null, "credits": true, "readAt": 1794390000, "age": 8400, "fresh": false}, "hold": null}
+  ],
+  "holds": {
+    "paused": ["FieldmouseWorks/miracraft"],
+    "pipeline": {"repos": ["FieldmouseWorks/burrow", "FieldmouseWorks/remi"], "lead": ["FieldmouseWorks/burrow"], "slots": 1},
+    "triage": {"drain": "claude", "drainJobs": 2, "sortingAtOnce": 1}
+  },
+  "jobs": [
+    {"id": "burrow-20261110-181200-QwEr", "state": "parked", "vm": [], "apps": [], "demoted": null, "waitingInLine": [], "awaits": ["https://github.com/FieldmouseWorks/burrow/pull/690"], "ends": ["await"], "answer": "Opened the PR; waiting for the steward."},
+    {"id": "lok-20261110-203000-ZxCv", "state": "parked", "vm": [], "apps": ["fieldmouseworks-workers"], "demoted": "its repo left the pipeline", "waitingInLine": [], "awaits": ["https://github.com/FieldmouseWorks/lok/pull/209"], "ends": ["await"], "answer": "CI is red on the merge train."}
+  ]
+}

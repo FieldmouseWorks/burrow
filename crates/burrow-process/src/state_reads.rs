@@ -211,7 +211,15 @@ pub fn append(path: &Path) -> io::Result<File> {
 
 impl Dir {
     pub fn replace(&self, name: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.replace_visibility(name, bytes, false)
+    }
+    /// Public non-secret records are readable at the atomic publication point.
+    pub fn replace_public(&self, name: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.replace_visibility(name, bytes, true)
+    }
+    fn replace_visibility(&self, name: &Path, bytes: &[u8], public: bool) -> io::Result<()> {
         use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
         child_name(name)?;
         if name.components().count() != 1 {
             return Err(io::Error::other("replacement requires a single filename"));
@@ -220,6 +228,11 @@ impl Dir {
         let mut temporary = tempfile::Builder::new()
             .prefix(".state-")
             .tempfile_in(&directory)?;
+        if public {
+            temporary
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        }
         temporary.write_all(bytes)?;
         temporary.as_file().sync_all()?;
         // Both rename endpoints stay beneath this same pinned directory even
@@ -234,6 +247,22 @@ impl Dir {
 
 pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> io::Result<()> {
     replace(path.as_ref(), bytes.as_ref())
+}
+
+/// Atomically publish a deliberately public record, with mode 0644 before
+/// its rename. Use write for private state; this never exposes a private record.
+pub fn write_public(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = path.as_ref();
+    let parent = Dir::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("state has no parent"))?,
+    )?;
+    parent.replace_public(
+        path.file_name()
+            .ok_or_else(|| io::Error::other("state has no name"))?
+            .as_ref(),
+        bytes.as_ref(),
+    )
 }
 
 pub fn remove(path: impl AsRef<Path>) -> io::Result<()> {

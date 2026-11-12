@@ -224,7 +224,10 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
 
   with subtest("an await on a PR that's merged already fails, and awaits nothing"):
       # Its baseline would say merged until the deadline: the job would sit
-      # there for nothing.
+      # there for nothing. A fresh job: the one above holds #5 already for
+      # this turn, which an await keeps without asking GitHub again.
+      e = proj('run web "sleep 1"')
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
       machine.succeed("cp /tmp/gh/repos_o_r_pulls_5 /tmp/gh/pulls-5.kept")
       github("repos/o/r/pulls/5", '{"state": "closed", "merged": true, "head": {"sha": "abc"}, "comments": 0, "review_comments": 0}')
       status, out = machine.execute(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5' 2>&1")

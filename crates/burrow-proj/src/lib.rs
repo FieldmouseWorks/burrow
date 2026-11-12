@@ -167,6 +167,7 @@ pub mod cmd;
 pub mod config;
 pub mod engine;
 pub mod github;
+pub mod github_quota;
 pub mod guest;
 pub mod inbox;
 pub mod job;
