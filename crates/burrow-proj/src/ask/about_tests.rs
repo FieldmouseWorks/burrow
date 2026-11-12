@@ -79,7 +79,10 @@ fn two_jobs_asking_about_one_key_post_one_notice_and_one_reply_resumes_both() {
     let seen = calls(&dir);
     assert_eq!(seen.matches("ensure|").count(), 2 - 1, "{seen}");
     assert!(seen.contains("proj-question-j1-1"), "{seen}");
-    assert!(!seen.contains("proj-question-j2"), "{seen}");
+    assert!(
+        !seen.contains("proj-question-j2"),
+        "never posted, so nothing to close: {seen}"
+    );
     assert!(
         seen.contains("waiting on this answer for 1 other job: j2"),
         "{seen}"
@@ -190,5 +193,137 @@ fn keys_are_short_single_lines() {
         .about
         .as_deref(),
         Some("a b")
+    );
+}
+
+fn notified(cfg: &Config, ids: &[&str]) {
+    for id in ids {
+        let job = Job::new(cfg, id);
+        let _held = job.lock().unwrap();
+        crate::question::notify(cfg, &job).unwrap();
+    }
+}
+
+#[test]
+fn a_join_after_a_one_way_leader_timed_out_keeps_its_policy_and_deadline() {
+    let (_dir, cfg) = fixture();
+    asks(&cfg, "j1", Some("profile"), true);
+    let due = load(&Job::new(&cfg, "j1")).unwrap().due;
+    let mut q = load_raw(&Job::new(&cfg, "j1")).unwrap();
+    q.due = crate::now() - 1;
+    fs::write(
+        host_path(&Job::new(&cfg, "j1"), "question"),
+        serde_json::to_string(&q).unwrap(),
+    )
+    .unwrap();
+    // Group policy is the registry's, so the stale file's deadline is not it.
+    assert_eq!(load(&Job::new(&cfg, "j1")).unwrap().due, due);
+    let j1 = Job::new(&cfg, "j1");
+    let _held = j1.lock().unwrap();
+    expire(&cfg, &j1).unwrap();
+    drop(_held);
+    assert!(host_path(&j1, "question-needs-owner").exists() || load(&j1).is_some());
+    // Force the timed-out state the group would be in.
+    fs::remove_file(host_path(&j1, "question")).unwrap();
+    fs::write(host_path(&j1, "question-needs-owner"), "leave it").unwrap();
+    asks(&cfg, "j2", Some("profile"), false);
+    let q2 = load(&Job::new(&cfg, "j2")).unwrap();
+    assert!(q2.recommendation.one_way);
+    assert_eq!(q2.due, due);
+}
+
+#[test]
+fn a_shared_answer_reaches_each_waiting_job_once_and_skips_changed_questions() {
+    let (_dir, cfg) = fixture();
+    for id in ["j1", "j2", "j3", "j4"] {
+        asks(&cfg, id, Some("profile"), false);
+    }
+    // j4 asks something new after the cohort is fixed: it must not get the answer.
+    let cohort = cohort(&Job::new(&cfg, "j1"));
+    assert_eq!(cohort.len(), 3);
+    fs::write(host_path(&Job::new(&cfg, "j4"), "question-id"), "another").unwrap();
+    crate::cmd::reply_answer(&cfg, "j1", "go ahead", false).unwrap();
+    for id in ["j1", "j2", "j3"] {
+        assert_eq!(Job::new(&cfg, id).turns().as_deref(), Some("2"), "{id}");
+    }
+    // j4 was open when the answer was given, so it was resumed too.
+    assert_eq!(Job::new(&cfg, "j4").turns().as_deref(), Some("2"));
+    // A cohort entry whose question changed or is gone is skipped.
+    let (_dir, cfg) = fixture();
+    for id in ["j1", "j2"] {
+        asks(&cfg, id, Some("profile"), false);
+    }
+    assert!(!still_waiting(&Job::new(&cfg, "j2"), "profile", "stale"));
+    assert!(still_waiting(
+        &Job::new(&cfg, "j2"),
+        "profile",
+        &about::question_id(&Job::new(&cfg, "j2"))
+    ));
+}
+
+#[test]
+fn redeclaring_an_open_keyed_question_keeps_the_notice_where_it_is() {
+    let (dir, cfg) = fixture();
+    asks(&cfg, "j1", Some("profile"), false);
+    asks(&cfg, "j2", Some("profile"), false);
+    // j1 says the same thing again after a machinery update.
+    let job = Job::new(&cfg, "j1");
+    record(
+        &job,
+        &Recommendation {
+            default: "leave it".into(),
+            one_way: false,
+            about: Some("profile".into()),
+        },
+    )
+    .unwrap();
+    finish(&cfg, &job, "ask").unwrap();
+    assert!(follows(&Job::new(&cfg, "j2")).is_some());
+    assert!(follows(&job).is_none());
+    notified(&cfg, &["j1", "j2"]);
+    assert!(!calls(&dir).contains("close|proj-question-j1"));
+}
+
+#[test]
+fn merging_into_an_occupied_subject_keeps_its_members() {
+    let (_dir, cfg) = fixture();
+    asks(&cfg, "j1", Some("profile"), false);
+    asks(&cfg, "j2", Some("profile"), false);
+    asks(&cfg, "j3", None, false);
+    merge(&cfg, "profile", &["j3".to_owned()]).unwrap();
+    let lead = Job::new(&cfg, "j3");
+    let mut waiting: Vec<String> = cohort(&lead).into_iter().map(|c| c.0).collect();
+    waiting.sort();
+    assert_eq!(waiting, ["j1", "j2"]);
+    crate::cmd::reply_answer(&cfg, "j3", "yes", false).unwrap();
+    for id in ["j1", "j2", "j3"] {
+        assert_eq!(Job::new(&cfg, id).turns().as_deref(), Some("2"), "{id}");
+    }
+}
+
+#[test]
+fn a_hidden_notice_comes_back_when_its_job_takes_the_lead() {
+    let (dir, cfg) = fixture();
+    for id in ["j1", "j2"] {
+        asks(&cfg, id, None, false);
+    }
+    notified(&cfg, &["j1", "j2"]);
+    assert_eq!(calls(&dir).matches("ensure|").count(), 2);
+    merge(&cfg, "profile", &["j1".to_owned(), "j2".to_owned()]).unwrap();
+    notified(&cfg, &["j1", "j2"]);
+    let hidden = if follows(&Job::new(&cfg, "j1")).is_some() {
+        "j1"
+    } else {
+        "j2"
+    };
+    let lead = if hidden == "j1" { "j2" } else { "j1" };
+    assert!(calls(&dir).contains(&format!("close|proj-question-{hidden}-1")));
+    crate::cmd::stop(&cfg, lead, false).unwrap();
+    let before = calls(&dir).matches("ensure|").count();
+    notified(&cfg, &[hidden]);
+    assert!(
+        calls(&dir).matches("ensure|").count() > before,
+        "{}",
+        calls(&dir)
     );
 }

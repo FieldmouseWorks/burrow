@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 mod about;
-pub(crate) use about::{FILE as ABOUT_FILE, followers, follows, footer, merge};
+pub(crate) use about::{FILE as ABOUT_FILE, cohort, follows, footer, key_of, merge, still_waiting};
 mod host;
 pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
 mod visibility;
@@ -69,8 +69,15 @@ impl Question {
         )
     }
 }
-pub(crate) fn load(job: &Job) -> Option<Question> {
+/// The question as the job wrote it. Use [`load`] for what it is bound by.
+pub(crate) fn load_raw(job: &Job) -> Option<Question> {
     serde_json::from_str(&read(&host_path(job, "question"))?).ok()
+}
+/// The open question, under its group's deadline and one-way requirement.
+pub(crate) fn load(job: &Job) -> Option<Question> {
+    let mut q = load_raw(job)?;
+    about::apply(job, &mut q);
+    Some(q)
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
@@ -91,18 +98,13 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
         if load(job).is_some_and(|q| q.recommendation.one_way) {
             recommendation.one_way = true;
         }
-        let mut due = load(job)
+        // Asking again without the key stays under the one it has.
+        if recommendation.about.is_none() {
+            recommendation.about = about::key_of(job);
+        }
+        let due = load_raw(job)
             .map(|q| q.due)
             .unwrap_or_else(|| crate::now().saturating_add(cfg.ask_timeout as i64));
-        // Joining a subject already asked: wait on that question's deadline
-        // and requirement, and add no notice (see `about`).
-        if let Some(key) = &recommendation.about {
-            about::join(job, key)?;
-        }
-        if let Some(leader) = about::leader_question(job) {
-            due = leader.due;
-            recommendation.one_way |= leader.recommendation.one_way;
-        }
         let q = Question {
             recommendation,
             due,
@@ -134,11 +136,19 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
         }
-        swap(
-            &host_path(job, "question"),
-            &serde_json::to_string(&q).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let write = |q: &Question| {
+            swap(
+                &host_path(job, "question"),
+                &serde_json::to_string(q).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        };
+        // A question joined to a subject takes its group's deadline and
+        // requirement, and posts no notice of its own (see `about`).
+        match q.recommendation.about.clone() {
+            Some(key) => about::publish(job, &key, q, write)?,
+            None => write(&q)?,
+        }
     } else if end == "done" {
         clear(job);
     }
@@ -263,9 +273,11 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
                     summary(&read(&host_path(&job, "question-needs-owner")).unwrap_or_default())
                 )
             });
-        let description = match followers(&job) {
-            others if others.is_empty() => description,
-            others => format!("{description}; also waiting on it: {}", others.join(", ")),
+        let others: Vec<String> = cohort(&job).into_iter().map(|(id, _)| id).collect();
+        let description = if others.is_empty() {
+            description
+        } else {
+            format!("{description}; also waiting on it: {}", others.join(", "))
         };
         let line = link.map(|url| format!("[{id}]({url})")).unwrap_or(id);
         lines.push(("Jobs waiting for the owner".into(), line, description));

@@ -537,6 +537,59 @@ fn resume(
     cutoff: Option<&str>,
     answered: bool,
 ) -> Result<(), Fail> {
+    let sharing = resume_one(cfg, id, msg, first, cutoff, answered)?;
+    // The jobs that were waiting on this answer's notice, each given it once,
+    // after the first job's lock is let go: each is checked and started under
+    // its own, and none passes the answer on again.
+    for (other, question) in sharing.jobs {
+        let note = format!(
+            "The owner answered a question you share with job {id}. Their answer:\n\n{msg}"
+        );
+        if let Err(e) = deliver(cfg, &other, &sharing.key, &question, &note, first) {
+            // Still waiting, it leads its own notice next.
+            eprintln!(
+                "proj: couldn't pass the answer on to {other}: {}",
+                e.say.unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}
+
+struct Sharing {
+    key: String,
+    jobs: Vec<(String, String)>,
+}
+
+fn deliver(
+    cfg: &Config,
+    id: &str,
+    key: &str,
+    question: &str,
+    msg: &str,
+    first: bool,
+) -> Result<(), Fail> {
+    let job = Job::new(cfg, id);
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    if !crate::ask::still_waiting(&job, key, question) {
+        return Ok(());
+    }
+    let st = job.state();
+    crate::planning::admit(&job).map_err(|e| Fail::new(1, e))?;
+    if st == "queued" || st == "running" {
+        return Err(Fail::new(1, format!("{id} is still {st}")));
+    }
+    crate::turn::start_answer(cfg, id, msg, first).map_err(|e| Fail::new(1, e))
+}
+
+fn resume_one(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    first: bool,
+    cutoff: Option<&str>,
+    answered: bool,
+) -> Result<Sharing, Fail> {
     let job = Job::new(cfg, id);
     let no = if cutoff.is_some() { 3 } else { 1 };
     if !filled(&job.path("session")) {
@@ -558,12 +611,13 @@ fn resume(
     {
         return Err(Fail::new(3, format!("{id}'s turn {n} wasn't cut off")));
     }
-    // The jobs waiting on this answer's notice (see ask::about), read before
-    // starting clears the question.
-    let sharing = if answered {
-        crate::ask::followers(&job)
-    } else {
-        vec![]
+    let sharing = Sharing {
+        key: crate::ask::key_of(&job).unwrap_or_default(),
+        jobs: if answered {
+            crate::ask::cohort(&job)
+        } else {
+            vec![]
+        },
     };
     if answered {
         crate::turn::start_answer(cfg, id, msg, first)
@@ -571,19 +625,7 @@ fn resume(
         start(cfg, id, msg, first)
     }
     .map_err(|e| Fail::new(1, e))?;
-    for other in sharing {
-        let note = format!(
-            "The owner answered a question you share with job {id}. Their answer:\n\n{msg}"
-        );
-        if let Err(e) = resume(cfg, &other, &note, first, None, true) {
-            // Still waiting, it leads its own notice next.
-            eprintln!(
-                "proj: couldn't pass the answer on to {other}: {}",
-                e.say.unwrap_or_default()
-            );
-        }
-    }
-    Ok(())
+    Ok(sharing)
 }
 
 /// A new job's dir, named for its project and when it started, unique even

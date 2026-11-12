@@ -341,11 +341,11 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
     // A one-way timeout publishes a synthetic done turn to release the job,
     // while its original question still needs the owner's decision.
-    // A question another job's notice already carries is closed here, never
-    // posted: the leader's names this job and its answer resumes it too.
+    let finished = stopped || (end.as_deref() == Some("done") && !pending_owner);
+    // A question another job's notice already carries is hidden here, never
+    // posted: the leader's names this job and its answer resumes it too. Hiding
+    // is not closing, so the notice comes back if this job takes the lead.
     let leader = crate::ask::follows(job);
-    let finished =
-        stopped || (end.as_deref() == Some("done") && !pending_owner) || leader.is_some();
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
@@ -461,12 +461,6 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
             .map_err(|e| e.to_string())?;
     }
-    let close_note = match &leader {
-        Some(leader) => format!(
-            "The same question is asked in job {leader}'s notice, which one reply answers for all."
-        ),
-        None => "The job no longer needs this answer.".to_owned(),
-    };
     let footer = crate::ask::footer(job);
     let mut retry = false;
     let mut errors = Vec::new();
@@ -481,6 +475,46 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             continue;
         }
         let key = format!("proj-question-{}-{turn}", job.id);
+        let hidden = job.turn(turn, "question-hidden");
+        let outstanding = !finished && active.as_deref() == Some(turn);
+        if outstanding && let Some(leader) = &leader {
+            if hidden.exists() {
+                continue;
+            }
+            let sent_marker = job.turn(turn, "question-sent");
+            if !sent_marker.exists() {
+                // Never posted: nothing to close.
+                if let Err(e) = crate::state_reads::write(&hidden, "hidden\n") {
+                    errors.push(e.to_string());
+                }
+                continue;
+            }
+            retry = true;
+            let note = format!(
+                "The same question is asked in job {leader}'s notice, which one reply answers for all."
+            );
+            let sent = Command::new(notifier).args(["close", &key, &note]).status();
+            if !sent.as_ref().is_ok_and(|s| s.success()) {
+                errors.push(format!("question notification: {sent:?}"));
+                continue;
+            }
+            if Command::new(notifier)
+                .args(["pending", &key])
+                .stdout(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.code() == Some(1))
+                && let Err(e) = crate::state_reads::write(&hidden, "hidden\n")
+            {
+                errors.push(e.to_string());
+            }
+            continue;
+        }
+        if hidden.exists()
+            && let Err(e) = crate::state_reads::remove(&hidden)
+        {
+            errors.push(e.to_string());
+            continue;
+        }
         // Only an accepted human resume clears the marker. Preparatory
         // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
@@ -493,7 +527,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         retry = true;
         let result = if closing.exists() {
             Command::new(notifier)
-                .args(["close", &key, &close_note])
+                .args(["close", &key, "The job no longer needs this answer."])
                 .status()
         } else {
             let body = match read_state(&entry.path()) {
@@ -514,7 +548,14 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 .status()
         };
         match result {
-            Ok(s) if s.success() => (),
+            Ok(s) if s.success() => {
+                if !closing.exists()
+                    && let Err(e) =
+                        crate::state_reads::write(job.turn(turn, "question-sent"), "sent\n")
+                {
+                    errors.push(e.to_string());
+                }
+            }
             other => {
                 errors.push(format!("question notification: {other:?}"));
                 continue;
