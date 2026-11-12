@@ -14,13 +14,33 @@ pub fn configured<T>(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
-    run(wake.as_deref(), &mut crate::Gh::default(), now, pass).map_err(Into::into)
+    let kick = std::env::var("BURROW_DOOR_WATCHDOG_KICK").ok();
+    run_kicking(
+        wake.as_deref(),
+        kick.as_deref(),
+        &mut crate::Gh::default(),
+        now,
+        pass,
+    )
+    .map_err(Into::into)
 }
 
 /// Run a pass, preserving a deferred full pass in burrow-events' wake file.
 /// Without a wake file, errors retain their usual meaning.
 pub fn run<T>(
     wake: Option<&Path>,
+    api: &mut dyn Api,
+    now: u64,
+    pass: impl FnOnce(&mut dyn Api) -> Result<T, Error>,
+) -> Result<Option<T>, Error> {
+    run_kicking(wake, None, api, now, pass)
+}
+
+/// [`run`], kicking the watchdog at KICK (a loopback http URL) when the
+/// door's deferral starts or ends.
+pub fn run_kicking<T>(
+    wake: Option<&Path>,
+    kick: Option<&str>,
     api: &mut dyn Api,
     now: u64,
     pass: impl FnOnce(&mut dyn Api) -> Result<T, Error>,
@@ -52,12 +72,14 @@ pub fn run<T>(
     match pass(api) {
         Ok(done) => {
             save(wake, None)?;
+            watch(wake, kick, now, None)?;
             Ok(Some(done))
         }
         Err(e) => {
             match e.retry_at {
                 Some(at) => {
                     save(wake, Some(at))?;
+                    watch(wake, kick, now, Some(at))?;
                     eprintln!("GitHub rate limited this pass; pending until {at}: {e}");
                     Ok(None)
                 }
@@ -67,10 +89,96 @@ pub fn run<T>(
                     if booked.is_some() {
                         save(wake, None)?;
                     }
+                    // Not a rate limit now: an earlier deferral is over.
+                    if let Err(w) = watch(wake, kick, now, None) {
+                        eprintln!("{w}");
+                    }
                     Err(e)
                 }
             }
         }
+    }
+}
+
+/// How long a door may sit deferred before it is a stall for the watchdog.
+/// A limit that lifts sooner is an ordinary wait; a door that answers in
+/// seconds and has said nothing for longer than this is late.
+pub const DEFERRED_GRACE: u64 = 300;
+
+/// The watch file beside WAKE, for the stall watchdog's source of the door.
+pub fn watch_file(wake: &Path) -> std::path::PathBuf {
+    wake.with_extension("watch.json")
+}
+
+/// Record in the watch file whether the door's pass is deferred (AT: until
+/// when) or ran. A deferral is an item whose `since` is kept across passes
+/// and whose deadline is DEFERRED_GRACE after it, so a door held off past
+/// its deadline is a stall, not silence. Passes that defer again keep the
+/// first `since`.
+fn watch(wake: &Path, kick: Option<&str>, now: u64, deferred: Option<u64>) -> Result<(), String> {
+    let path = watch_file(wake);
+    let since = fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["items"]["deferred"]["since"].as_u64());
+    // The watchdog takes no GitHub events: it learns of a new deferral (to
+    // schedule its deadline) or a cleared one only when kicked.
+    let changed = since.is_some() != deferred.is_some();
+    let items = match deferred {
+        None => json!({}),
+        Some(at) => {
+            let since = since.unwrap_or(now);
+            json!({"deferred": {
+                "what": "the door's pass, held off by GitHub's rate limit",
+                "phase": format!("deferred until {at}"),
+                "since": since,
+                "due": since + DEFERRED_GRACE,
+            }})
+        }
+    };
+    write(&path, &json!({"at": now, "items": items}))?;
+    if let (true, Some(url)) = (changed, kick) {
+        kick_watchdog(url);
+    }
+    Ok(())
+}
+
+/// POST to the watchdog's kick URL (BURROW_DOOR_WATCHDOG_KICK, a loopback
+/// http URL burrow-events serves), set when the machine has a watchdog. A failed
+/// kick is logged: the watchdog's own catch-up still reads the file.
+fn kick_watchdog(url: &str) {
+    use std::io::{Read, Write};
+    let sent = || -> std::io::Result<()> {
+        let rest = url
+            .strip_prefix("http://")
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let timeout = std::time::Duration::from_secs(10);
+        let addr = std::net::ToSocketAddrs::to_socket_addrs(host)?
+            .next()
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let mut tcp = std::net::TcpStream::connect_timeout(&addr, timeout)?;
+        tcp.set_read_timeout(Some(timeout))?;
+        tcp.write_all(
+            format!("POST /{path} HTTP/1.0\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
+        )?;
+        let mut reply = String::new();
+        tcp.read_to_string(&mut reply)?;
+        if reply
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|s| s.starts_with('2'))
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                reply.lines().next().unwrap_or("").to_owned(),
+            ))
+        }
+    };
+    if let Err(e) = sent() {
+        eprintln!("couldn't kick the watchdog at {url}: {e}");
     }
 }
 
@@ -233,6 +341,103 @@ mod tests {
         api.status = 200;
         assert_eq!(run(Some(&wake), &mut api, 2000, ask), Ok(Some(())));
         assert_eq!(fs::read_to_string(&wake).unwrap(), "{}");
+    }
+    #[test]
+    fn a_deferral_past_its_grace_is_a_watched_stall_and_a_pass_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let watched =
+            || -> Value { serde_json::from_slice(&fs::read(watch_file(&wake)).unwrap()).unwrap() };
+        let mut api = hub(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "5000"),
+            ],
+        );
+        assert_eq!(run(Some(&wake), &mut api, 1000, ask), Ok(None));
+        let item = &watched()["items"]["deferred"];
+        assert_eq!(
+            (item["since"].as_u64(), item["due"].as_u64()),
+            (Some(1000), Some(1000 + DEFERRED_GRACE))
+        );
+        // The retry at the lift is limited again: the wait keeps its start.
+        assert_eq!(run(Some(&wake), &mut api, 5000, ask), Ok(None));
+        assert_eq!(watched()["items"]["deferred"]["since"], 1000);
+        api.status = 200;
+        assert_eq!(run(Some(&wake), &mut api, 9000, ask), Ok(Some(())));
+        assert_eq!(watched()["items"], json!({}));
+    }
+    #[test]
+    fn a_retry_failing_otherwise_clears_the_deferral_and_keeps_its_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let mut limited = hub(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "2000"),
+            ],
+        );
+        assert_eq!(run(Some(&wake), &mut limited, 1000, ask), Ok(None));
+        let failed: Result<Option<()>, Error> = run(Some(&wake), &mut limited, 2000, |_| {
+            Err("disk failure".into())
+        });
+        assert_eq!(failed, Err("disk failure".into()));
+        let watched: Value = serde_json::from_slice(&fs::read(watch_file(&wake)).unwrap()).unwrap();
+        assert_eq!(watched["items"], json!({}));
+        assert_eq!(run(Some(&wake), &mut limited, 3000, ask), Ok(None));
+        let watched: Value = serde_json::from_slice(&fs::read(watch_file(&wake)).unwrap()).unwrap();
+        assert_eq!(watched["items"]["deferred"]["since"], 3000);
+    }
+    #[test]
+    fn a_new_and_a_cleared_deferral_kick_the_watchdog_once_each() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/kick/watchdog", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let (mut c, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 512];
+                let n = c.read(&mut buf).unwrap();
+                paths.push(
+                    String::from_utf8_lossy(&buf[..n])
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                );
+                c.write_all(b"HTTP/1.0 200 OK\r\n\r\n").unwrap();
+            }
+            paths
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let mut api = hub(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "2000"),
+            ],
+        );
+        assert_eq!(
+            run_kicking(Some(&wake), Some(&url), &mut api, 1000, ask),
+            Ok(None)
+        );
+        assert_eq!(
+            run_kicking(Some(&wake), Some(&url), &mut api, 2000, ask),
+            Ok(None)
+        );
+        api.status = 200;
+        assert_eq!(
+            run_kicking(Some(&wake), Some(&url), &mut api, 3000, ask),
+            Ok(Some(()))
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["POST /kick/watchdog HTTP/1.0"; 2]
+        );
     }
     #[test]
     fn permission_denial_standalone_and_unrelated_failure_remain_failures() {

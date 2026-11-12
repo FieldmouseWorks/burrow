@@ -717,6 +717,14 @@ in
       wake = enginesWake;
       gap = 2;
     };
+
+    # Written beside the wake file by a pass GitHub's rate limit holds off
+    # (burrow-github's deferred); one deferred past its grace is a stall.
+    burrow.watchdog.sources.engines-door = {
+      file = "${lib.removeSuffix ".json" enginesWake}.watch.json";
+      about = "The engines door";
+      look = "journalctl -u burrow-engines-door: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Requests wait meanwhile; cut the other consumers' calls on the installation.";
+    };
     systemd.tmpfiles.rules = [
       "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/engines-door 0755 ${user} ${config.users.users.${user}.group} -"
@@ -728,6 +736,7 @@ in
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = enginesWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
         User = user;

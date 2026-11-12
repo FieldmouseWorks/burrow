@@ -56,6 +56,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
@@ -152,6 +153,15 @@ in
       gap = 2;
     };
 
+
+    # A pass GitHub's rate limit holds off writes this beside its wake file
+    # (burrow-github's deferred); one past its grace is a stall.
+    burrow.watchdog.sources.probe-door = {
+      file = "${lib.removeSuffix ".json" probeWake}.watch.json";
+      about = "The probe door";
+      look = "journalctl -u burrow-probe: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Questions wait meanwhile; cut the other consumers' calls on the installation.";
+    };
+
     systemd.tmpfiles.rules = [
       "d ${config.burrow.stateDir}/probe-door 0755 ${user} ${config.users.users.${user}.group} -"
     ];
@@ -163,6 +173,7 @@ in
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = probeWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
         # The user, for its user manager (`units`, `rc`) and proj (`queue`);
