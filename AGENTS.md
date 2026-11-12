@@ -62,6 +62,10 @@ they're more specific.
   it a reusable module any machine could import and move the glue to Rust
   where Rust fits. Only code a change already touches; never a refactor-only
   issue, never a fork of Nix or nixpkgs.
+- A settings change (a pipeline option, the role and model map, a saved
+  engine setup, a pause or hold) goes live through the settings door, never
+  as an inbox job, PR or lane: don't tie up lanes, CI or wall-clock time
+  with work that doesn't need them.
 - Keep going on work you were asked to do: don't ask again for what's
   already been asked for.
 - Never commit what the repo keeps private: secrets, tokens, personal data,
