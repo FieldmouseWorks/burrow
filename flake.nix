@@ -109,7 +109,6 @@
             ".github/flake-check"
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
-            "modules/autoland/prs.py"
             "modules/autoland/lock_wait.py"
             "house"
           ];

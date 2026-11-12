@@ -3,7 +3,6 @@ about one: how its CI stands, its `review-settled` status, its stage
 label, the merge."""
 
 import json
-import re
 import subprocess
 import urllib.parse
 

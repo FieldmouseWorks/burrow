@@ -837,6 +837,7 @@ name = "burrow-workflows"
 version = "0.0.0"
 dependencies = [
  "burrow-test",
+ "burrow-upkeep",
  "proc-macro2",
  "regex",
  "serde_json",

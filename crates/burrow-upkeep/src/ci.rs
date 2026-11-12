@@ -9,8 +9,13 @@ use burrow_github::{Error, call, pages};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ci_runs::{self, After, cancelled, suite, workflow, workflow_name};
+use crate::ci_runs::{self, After, cancelled, suite, workflow_name};
 use crate::pass::Pass;
+
+// The shared workflows' contract tests use the CI owner's names and
+// recognition functions, so a language or representation change cannot
+// silently leave their assertions reading a replaced implementation.
+pub use crate::ci_runs::{DOCS, LANE, gate as gate_job, workflow};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -9,14 +9,18 @@ use serde_json::Value;
 use crate::ci::{Ask, array, text};
 use crate::pass::Pass;
 
-const LANE: &str = "lane into ";
-const DOCS: &str = "docs only into ";
+/// Prefix of the check naming the base a workflow judged.
+pub const LANE: &str = "lane into ";
+/// Prefix of a documentation-only gate, followed by its base and fork.
+pub const DOCS: &str = "docs only into ";
 const FLAKE: &str = ".github/workflows/flake.yml";
 
 pub fn suite(c: &Value) -> &Value {
     &c["checkSuite"]
 }
 
+/// A check's logical workflow, with the shared gate's retarget workflow
+/// folded into its caller so either can replace the other's cancelled run.
 pub fn workflow(c: &Value) -> Option<&str> {
     let run = &suite(c)["workflowRun"];
     match text(&run["file"]["path"]) {
@@ -38,7 +42,8 @@ fn job(c: &Value) -> (&str, &str) {
     name.rsplit_once(" / ").unwrap_or(("", name))
 }
 
-fn gate(job: &str) -> bool {
+/// Whether a job name denotes a whole gate, docs gate, or matrix leg.
+pub fn gate(job: &str) -> bool {
     let leg = job.as_bytes();
     job == "check"
         || job.starts_with(DOCS)
