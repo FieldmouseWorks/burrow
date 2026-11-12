@@ -41,6 +41,7 @@ const METADATA: &[&str] = &[
     "question-text",
     "question-since",
     "question-id",
+    crate::ask::ABOUT_FILE,
 ];
 
 fn receipt_path(job: &Job, n: &str) -> PathBuf {
@@ -340,7 +341,11 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
     // A one-way timeout publishes a synthetic done turn to release the job,
     // while its original question still needs the owner's decision.
-    let finished = stopped || (end.as_deref() == Some("done") && !pending_owner);
+    // A question another job's notice already carries is closed here, never
+    // posted: the leader's names this job and its answer resumes it too.
+    let leader = crate::ask::follows(job);
+    let finished =
+        stopped || (end.as_deref() == Some("done") && !pending_owner) || leader.is_some();
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
@@ -456,6 +461,13 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
             .map_err(|e| e.to_string())?;
     }
+    let close_note = match &leader {
+        Some(leader) => format!(
+            "The same question is asked in job {leader}'s notice, which one reply answers for all."
+        ),
+        None => "The job no longer needs this answer.".to_owned(),
+    };
+    let footer = crate::ask::footer(job);
     let mut retry = false;
     let mut errors = Vec::new();
     for entry in committed_entries(job, latest)? {
@@ -481,7 +493,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         retry = true;
         let result = if closing.exists() {
             Command::new(notifier)
-                .args(["close", &key, "The job no longer needs this answer."])
+                .args(["close", &key, &close_note])
                 .status()
         } else {
             let body = match read_state(&entry.path()) {
@@ -491,6 +503,11 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                     errors.push(e.to_string());
                     continue;
                 }
+            };
+            let body = if active.as_deref() == Some(turn) {
+                format!("{body}{footer}")
+            } else {
+                body
             };
             Command::new(notifier)
                 .args(["ensure", &key, "A project job needs an answer", &body])

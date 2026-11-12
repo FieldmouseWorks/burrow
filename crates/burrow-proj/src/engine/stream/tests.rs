@@ -173,6 +173,7 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
         &crate::ask::Recommendation {
             default: "keep it".into(),
             one_way: false,
+            about: None,
         },
     )
     .unwrap();

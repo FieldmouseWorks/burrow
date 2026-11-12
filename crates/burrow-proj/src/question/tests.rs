@@ -695,6 +695,7 @@ fn machine_question_notifications_include_the_default_deadline_and_policy_once()
         let recommendation = crate::ask::Recommendation {
             default: "keep the old release".into(),
             one_way,
+            about: None,
         };
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&f.cfg, &job, "ask").unwrap();

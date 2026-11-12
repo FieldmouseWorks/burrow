@@ -265,6 +265,7 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
         let recommendation = crate::ask::Recommendation {
             default: "keep it".into(),
             one_way: resolution == "one-way-timeout",
+            about: None,
         };
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&b.cfg, &job, "ask").unwrap();

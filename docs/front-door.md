@@ -106,7 +106,14 @@ own, say), in seconds and without starting a Claude.
   it to the job, including jobs inside sandboxes. Jobs never open probe issues.
 
 A job's question uses `proj ask --default "TEXT" [--one-way]`; a bare ask is
-refused. `burrow.proj.askTimeout` is its deadline in seconds (6h by default),
+refused. `--about KEY` names the subject: a job asking about a key that
+already has an open question joins it, waits on the same answer and the same
+deadline, and posts no notice of its own. The leader's notice lists every job
+waiting, and one `proj reply` to it resumes all of them. If the leader is
+stopped or answered, the next waiting job's notice takes over.
+`proj merge-questions KEY JOB...` is the one-time pass for duplicates asked
+before keys: the newest keeps its notice and the others close, pointing to it.
+`burrow.proj.askTimeout` is its deadline in seconds (6h by default),
 kept across unrelated updates. A reply resumes it normally. Without one, a
 reversible default resumes the job with “no answer by TIME” and instructions
 to take that recommendation and report it on the issue. A one-way default

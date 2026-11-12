@@ -3,21 +3,27 @@ use crate::{config::Config, job::Job, read, swap};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+mod about;
+pub(crate) use about::{FILE as ABOUT_FILE, followers, follows, footer, merge};
 mod host;
-pub(crate) use host::{control_root, ensure, host_path, initialize};
+pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
 mod visibility;
 pub(crate) use visibility::tend as visibility;
 
-pub const USAGE: &str = "usage: proj ask --default TEXT [--one-way]";
+pub const USAGE: &str = "usage: proj ask --default TEXT [--one-way] [--about KEY]";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Recommendation {
     pub default: String,
     pub one_way: bool,
+    /// The subject: jobs asking about the same key share one notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
 }
 impl Recommendation {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let mut default = None;
         let mut one_way = false;
+        let mut about = None;
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
@@ -31,12 +37,16 @@ impl Recommendation {
                     }
                 }
                 "--one-way" if !one_way => one_way = true,
+                "--about" if about.is_none() => {
+                    about = Some(about::normalize(words.next().ok_or(USAGE)?)?);
+                }
                 _ => return Err(USAGE.into()),
             }
         }
         Ok(Self {
             default: default.ok_or(USAGE)?,
             one_way,
+            about,
         })
     }
 }
@@ -81,9 +91,18 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
         if load(job).is_some_and(|q| q.recommendation.one_way) {
             recommendation.one_way = true;
         }
-        let due = load(job)
+        let mut due = load(job)
             .map(|q| q.due)
             .unwrap_or_else(|| crate::now().saturating_add(cfg.ask_timeout as i64));
+        // Joining a subject already asked: wait on that question's deadline
+        // and requirement, and add no notice (see `about`).
+        if let Some(key) = &recommendation.about {
+            about::join(job, key)?;
+        }
+        if let Some(leader) = about::leader_question(job) {
+            due = leader.due;
+            recommendation.one_way |= leader.recommendation.one_way;
+        }
         let q = Question {
             recommendation,
             due,
@@ -133,6 +152,7 @@ pub(crate) fn clear(job: &Job) {
         "question-text",
         "question-since",
         "question-id",
+        ABOUT_FILE,
     ] {
         let _ = fs::remove_file(host_path(job, name));
     }
@@ -218,6 +238,9 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
         }
         let job = Job::new(cfg, &id);
         let pending = host_path(&job, "question-needs-owner").exists();
+        if about::follows(&job).is_some() {
+            continue;
+        }
         if !pending && (host_path(&job, "question-reader").exists() || load(&job).is_none()) {
             continue;
         }
@@ -240,6 +263,10 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
                     summary(&read(&host_path(&job, "question-needs-owner")).unwrap_or_default())
                 )
             });
+        let description = match followers(&job) {
+            others if others.is_empty() => description,
+            others => format!("{description}; also waiting on it: {}", others.join(", ")),
+        };
         let line = link.map(|url| format!("[{id}]({url})")).unwrap_or(id);
         lines.push(("Jobs waiting for the owner".into(), line, description));
     }
@@ -258,6 +285,8 @@ fn summary(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
+mod about_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +322,7 @@ mod tests {
             recommendation: Recommendation {
                 default: "keep the change".into(),
                 one_way,
+                about: None,
             },
             due: crate::now() - 1,
         };
@@ -482,6 +512,7 @@ mod tests {
             &Recommendation {
                 default: "keep it".into(),
                 one_way: false,
+                about: None,
             },
         )
         .unwrap();
@@ -515,6 +546,7 @@ mod tests {
                 &Recommendation {
                     default: "keep it".into(),
                     one_way: false,
+                    about: None,
                 },
             )
             .unwrap();
@@ -537,6 +569,7 @@ mod tests {
         let recommendation = Recommendation {
             default: "keep it".into(),
             one_way: true,
+            about: None,
         };
         record(&job, &recommendation).unwrap();
         finish(&cfg, &job, "ask").unwrap();

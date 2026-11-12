@@ -97,6 +97,7 @@ fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
         let recommendation = crate::ask::Recommendation {
             default: "A real owner decision".into(),
             one_way: false,
+            about: None,
         };
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&cfg, &job, "ask").unwrap();

@@ -558,12 +558,32 @@ fn resume(
     {
         return Err(Fail::new(3, format!("{id}'s turn {n} wasn't cut off")));
     }
+    // The jobs waiting on this answer's notice (see ask::about), read before
+    // starting clears the question.
+    let sharing = if answered {
+        crate::ask::followers(&job)
+    } else {
+        vec![]
+    };
     if answered {
         crate::turn::start_answer(cfg, id, msg, first)
     } else {
         start(cfg, id, msg, first)
     }
-    .map_err(|e| Fail::new(1, e))
+    .map_err(|e| Fail::new(1, e))?;
+    for other in sharing {
+        let note = format!(
+            "The owner answered a question you share with job {id}. Their answer:\n\n{msg}"
+        );
+        if let Err(e) = resume(cfg, &other, &note, first, None, true) {
+            // Still waiting, it leads its own notice next.
+            eprintln!(
+                "proj: couldn't pass the answer on to {other}: {}",
+                e.say.unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A new job's dir, named for its project and when it started, unique even

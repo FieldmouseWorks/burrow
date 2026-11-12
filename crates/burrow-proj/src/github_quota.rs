@@ -447,6 +447,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
             &crate::ask::Recommendation {
                 default: "Retry after quota reset?".into(),
                 one_way: false,
+                about: None,
             },
         )
         .unwrap();

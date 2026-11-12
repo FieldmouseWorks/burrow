@@ -238,6 +238,15 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("merge-questions") => {
+            let key = arg(args, 1, MERGE_USAGE)?;
+            if args.len() < 3 {
+                return Err(Fail::new(2, MERGE_USAGE));
+            }
+            let leader = crate::ask::merge(cfg, key, &args[2..]).map_err(|e| Fail::new(1, e))?;
+            put(&format!("merged under {leader}'s notice\n"));
+            Ok(())
+        }
         Some("_policy") => crate::policy::reconcile(cfg).map_err(|e| Fail::new(1, e)),
         Some("_questions") => {
             put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
@@ -264,7 +273,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|merge-questions",
         )),
     }
 }
@@ -684,6 +693,8 @@ pub(crate) fn baselines(
     }
     Ok(text)
 }
+
+const MERGE_USAGE: &str = "usage: proj merge-questions KEY JOB... (open questions about one subject: the newest keeps its notice)";
 
 /// `proj ask` and `proj done`, from inside a job: how its turn ends, said
 /// before it does. The last of proj await, ask and done stands; neither of
