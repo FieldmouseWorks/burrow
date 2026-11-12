@@ -88,7 +88,7 @@ fn run(h: &mut Hub, a: &Ask, dry: bool) -> Result<Verdict, Error> {
     let mut p = Pass {
         cfg: &cfg,
         repo: "sam/r",
-        now: 1.0,
+        now: 2000.0,
         dry,
         searched: 0,
         api: h,
@@ -207,4 +207,75 @@ fn separate_runs_keep_their_own_allowance() {
     ]);
     run(&mut h, &a, false).unwrap();
     assert_eq!(posts(&h), 2);
+}
+
+fn unstarted() -> Ask {
+    let mut a = ask(vec![]);
+    a.pr["commits"]["nodes"][0]["commit"]["checkSuites"] = json!({"nodes": [{
+        "id": "s7", "status": "QUEUED", "checkRuns": {"totalCount": 0},
+        "workflowRun": {"databaseId": 7, "createdAt": "1970-01-01T00:00:00Z",
+            "workflow": {"id": "w7", "name": "CI"}}
+    }]});
+    a
+}
+
+#[test]
+fn unstarted_runs_recover_whole_workflow_once_across_observers() {
+    let mut h = Hub {
+        attempt: 1,
+        ..Hub::default()
+    };
+    let a = unstarted();
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "pending");
+    assert_eq!(got.names, ["CI (never started, to be run again)"]);
+    assert_eq!(posts(&h), 1);
+    assert!(
+        h.asked
+            .iter()
+            .any(|(m, p)| m == "POST" && p.ends_with("/7/rerun"))
+    );
+    run(&mut h, &a, false).unwrap();
+    assert_eq!(posts(&h), 1);
+}
+
+#[test]
+fn unstarted_runs_preserve_dry_mode_and_uncertain_submission() {
+    let mut h = Hub {
+        attempt: 1,
+        ..Hub::default()
+    };
+    let a = unstarted();
+    run(&mut h, &a, true).unwrap();
+    assert_eq!(posts(&h), 0);
+    h.lost = true;
+    assert!(run(&mut h, &a, false).unwrap_err().unanswered);
+    assert_eq!(posts(&h), 1);
+    h.lost = false;
+    h.going = false;
+    run(&mut h, &a, false).unwrap();
+    assert_eq!(posts(&h), 1);
+}
+
+#[test]
+fn only_old_complete_snapshots_without_jobs_authorize_unstarted_recovery() {
+    for (field, value) in [
+        ("status", json!("IN_PROGRESS")),
+        ("checkRuns", json!({"totalCount": 1})),
+        (
+            "workflowRun",
+            json!({"databaseId": 7, "createdAt": "1970-01-01T00:30:00Z"}),
+        ),
+    ] {
+        let mut h = Hub::default();
+        let mut a = unstarted();
+        a.pr["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0][field] = value;
+        run(&mut h, &a, false).unwrap();
+        assert_eq!(posts(&h), 0, "{field}");
+    }
+    let mut h = Hub::default();
+    let mut a = unstarted();
+    a.pr["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] = json!({"hasNextPage": true});
+    assert_eq!(run(&mut h, &a, false).unwrap().state, "pending");
+    assert_eq!(posts(&h), 0);
 }

@@ -406,6 +406,7 @@ RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion: attempt
 
 
 # The CI owner runs as compiled Rust, against an HTTP transport fixture.
+CI_ASKED = []  # requests made by the compiled CI owner
 CI_FIXTURE = f"{tmp}/ci.json"
 os.makedirs(f"{tmp}/ci-bin")
 with open(f"{tmp}/ci-bin/gh", "w") as f:
@@ -437,6 +438,7 @@ def ci_upkeep(*args, **kw):
         C.CFG["upkeep"] = old
         with open(CI_FIXTURE) as f:
             got = json.load(f)
+        CI_ASKED[:] = got["asked"]
         RUN_INFO.update(got["runs"])
         RERUNS.extend(got["reruns"])
         FORKS[:] = got["forks"]

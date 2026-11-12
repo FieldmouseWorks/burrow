@@ -78,6 +78,7 @@ let
     projects = projectsDir;
     jobs = cfg.jobsDir;
     hostState = "${stateDir}/proj-questions";
+    stream = "${stateDir}/proj-stream";
     scratch = config.burrow.scratchDir;
     slice = "claude-jobs.slice";
     inherit (cfg) maxJobs pipelineSlots maxJobsPerProject minFreeMemory jobMemoryMax timeout maxWait stallAfterMinutes awaitHours;
@@ -96,6 +97,7 @@ let
     hostGithubApp = cfg.hostGithubApp;
     githubMeters = config.burrow.github.quotaDir;
     stewardAccount = if config.burrow.autoland.enable or false then { login = "${config.burrow.autoland.app.slug}[bot]"; id = config.burrow.autoland.app.accountId; } else null;
+    machineryAccount = if machineApp == null then null else { login = "${machineApp.slug}[bot]"; id = machineApp.accountId; };
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     inherit (config.burrow) mcpServers;
     codexSlots = cfg.codex.slots;
@@ -150,6 +152,13 @@ let
     export PROJ_CONFIG=${configFile} PROJ_SELF=$0
     exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj "$@"
   '';
+
+  # Reconciliation can wait for another reader or a large retained queue.
+  # Activation waits only for exec, never for that background work to drain.
+  policyService = {
+    Type = "exec";
+    ExecStart = "${proj}/bin/proj _policy";
+  };
 
   # proj-inbox, with the same config, whose inbox part is its own. The turns
   # it starts are proj's (PROJ_SELF), as if a job's Claude had run proj.
@@ -560,11 +569,8 @@ in
       burrow-settings-reconcile = {
         description = "Vacate and restore repository work from live settings";
         restartIfChanged = false;
-        serviceConfig = {
-          Type = "oneshot";
+        serviceConfig = policyService // {
           User = user;
-          ExecStart = "${proj}/bin/proj _policy";
-          TimeoutStartSec = "2min";
           Restart = "on-failure";
           RestartSec = "2s";
         };
@@ -605,7 +611,7 @@ in
       description = "Reconcile repository work when admission capacity changes";
       restartIfChanged = false;
       unitConfig.ConditionUser = user;
-      serviceConfig = { Type = "oneshot"; ExecStart = "${proj}/bin/proj _policy"; TimeoutStartSec = "2min"; };
+      serviceConfig = policyService;
     };
     systemd.user.services."proj-ended@" = {
       description = "The end of a turn of proj job %I";
@@ -624,6 +630,8 @@ in
       "L+ ${codexHome}/rules/burrow.rules - - - - ${rulesFile}"
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-questions 0700 ${user} ${config.users.users.${user}.group} -"
+      # The change stream's subscriber sockets: the user's own readers bind here.
+      "d ${stateDir}/proj-stream 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
       # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
       # job is over: no age here.
@@ -709,18 +717,26 @@ in
       wake = enginesWake;
       gap = 2;
     };
+
+    # Written beside the wake file by a pass GitHub's rate limit holds off
+    # (burrow-github's deferred); one deferred past its grace is a stall.
+    burrow.watchdog.sources.engines-door = {
+      file = "${lib.removeSuffix ".json" enginesWake}.watch.json";
+      about = "The engines door";
+      look = "journalctl -u burrow-engines-door: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Requests wait meanwhile; cut the other consumers' calls on the installation.";
+    };
     systemd.tmpfiles.rules = [
       "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/engines-door 0755 ${user} ${config.users.users.${user}.group} -"
     ];
     systemd.services.burrow-engines-door = {
       description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
-      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = enginesWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
         User = user;
@@ -747,6 +763,8 @@ in
     burrow.events.handlers.proj-inbox = {
       events = [ "issues" "issue_comment" "pull_request" ];
       unit = "proj-inbox";
+      # The inbox reads a PR only when it closes an issue a job holds.
+      pullRequestActions = [ "closed" ];
       wake = inboxWake;
     };
     systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {

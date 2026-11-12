@@ -17,7 +17,7 @@ stand_in()
 origin, work = f"{tmp}/landed-origin", f"{tmp}/landed-work"
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 remote = f"{origin}/sam/r.git"
-sh("git", "init", "-q", "--bare", remote)
+sh("git", "init", "-q", "--bare", "-b", "main", remote)
 sh("git", "init", "-q", "-b", "main", work)
 
 

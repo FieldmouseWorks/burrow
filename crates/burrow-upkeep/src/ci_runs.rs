@@ -13,7 +13,7 @@ use crate::pass::Pass;
 pub const LANE: &str = "lane into ";
 /// Prefix of a documentation-only gate, followed by its base and fork.
 pub const DOCS: &str = "docs only into ";
-const FLAKE: &str = ".github/workflows/flake.yml";
+pub(crate) const FLAKE: &str = ".github/workflows/flake.yml";
 
 pub fn suite(c: &Value) -> &Value {
     &c["checkSuite"]
@@ -22,7 +22,11 @@ pub fn suite(c: &Value) -> &Value {
 /// A check's logical workflow, with the shared gate's retarget workflow
 /// folded into its caller so either can replace the other's cancelled run.
 pub fn workflow(c: &Value) -> Option<&str> {
-    let run = &suite(c)["workflowRun"];
+    suite_flow(suite(c))
+}
+
+pub(crate) fn suite_flow(s: &Value) -> Option<&str> {
+    let run = &s["workflowRun"];
     match text(&run["file"]["path"]) {
         Some(FLAKE | ".github/workflows/flake-retarget.yml") => Some(FLAKE),
         _ => text(&run["workflow"]["id"]),
@@ -37,7 +41,7 @@ pub fn cancelled(c: &Value) -> bool {
     c["status"] == "COMPLETED" && c["conclusion"] == "CANCELLED"
 }
 
-fn job(c: &Value) -> (&str, &str) {
+pub(crate) fn job(c: &Value) -> (&str, &str) {
     let name = text(&c["name"]).unwrap_or("");
     name.rsplit_once(" / ").unwrap_or(("", name))
 }
@@ -69,7 +73,7 @@ fn sha(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn judged(c: &Value) -> Option<(&str, Option<&str>)> {
+pub(crate) fn judged(c: &Value) -> Option<(&str, Option<&str>)> {
     if c["__typename"] != "CheckRun" || suite(c)["app"]["slug"] != "github-actions" {
         return None;
     }

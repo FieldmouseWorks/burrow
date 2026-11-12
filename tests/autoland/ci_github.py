@@ -34,7 +34,7 @@ elif "/actions/runs/" in path:
         if got:
             status, body = got["status"], {"message": got["error"]}
         else:
-            assert path.endswith("/rerun-failed-jobs"), path
+            assert path.endswith(("/rerun-failed-jobs", "/rerun")), path
             data["reruns"].append(key)
             data["runs"][key] = {"run_attempt": info["run_attempt"] + 1, "status": "queued", "conclusion": None}
             status, body = 201, {}

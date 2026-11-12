@@ -45,7 +45,11 @@ pub(crate) fn array(v: &Value) -> &[Value] {
 }
 
 fn run_id(c: &Value) -> Option<String> {
-    let id = &suite(c)["workflowRun"]["databaseId"];
+    suite_run_id(suite(c))
+}
+
+pub(crate) fn suite_run_id(s: &Value) -> Option<String> {
+    let id = &s["workflowRun"]["databaseId"];
     text(id)
         .map(String::from)
         .or_else(|| id.as_u64().filter(|i| *i > 0).map(|i| i.to_string()))
@@ -63,7 +67,9 @@ struct Recovery {
     runs: BTreeMap<String, Run>,
     refused: BTreeSet<String>,
     lookup: BTreeSet<String>,
-    due: BTreeSet<String>,
+    // A never-started run needs the whole workflow; cancellations need
+    // only failed jobs, preserving successful independent jobs.
+    due: BTreeMap<String, &'static str>,
 }
 
 #[derive(Deserialize)]
@@ -138,11 +144,11 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     if p.dry || recovery.due.is_empty() {
         return Ok(got);
     }
-    for key in &recovery.due {
-        let path = format!("repos/{}/actions/runs/{key}/rerun-failed-jobs", p.repo);
+    for (key, action) in &recovery.due {
+        let path = format!("repos/{}/actions/runs/{key}/{action}", p.repo);
         match call(p.api, "POST", &path, None, None).map_err(|e| p.noted(e)) {
             Ok(_) => eprintln!(
-                "{}: ran {key} again, cancelled with nothing run through since",
+                "{}: asked to run {key} again ({action}), with no live job",
                 p.repo
             ),
             Err(e) if e.unanswered => return Err(e),
@@ -210,6 +216,24 @@ fn classify(
                 "{} (failed to start)",
                 text(&s["workflowRun"]["workflow"]["name"]).unwrap_or("a workflow")
             ));
+        }
+    }
+    for s in crate::ci_unstarted::suites(suites, &runs.stale, contexts, base, p.now) {
+        seen += 1;
+        let name = text(&s["workflowRun"]["workflow"]["name"]).unwrap_or("a workflow");
+        pending.push(format!("{name} (never started, to be run again)"));
+        if ask.recover
+            && let Some(key) = suite_run_id(s)
+        {
+            match recovery.runs.get(&key) {
+                None => {
+                    recovery.lookup.insert(key);
+                }
+                Some(r) if r.run_attempt == 1 => {
+                    recovery.due.insert(key, "rerun");
+                }
+                Some(_) => {} // Another observer, restart or lost response already consumed the allowance.
+            }
         }
     }
     for c in contexts {
@@ -291,7 +315,7 @@ fn classify(
             .difference(&broken)
             .filter(|k| !going.contains(*k))
             .flatten()
-            .cloned(),
+            .map(|key| (key.clone(), "rerun-failed-jobs")),
     );
     let named: BTreeSet<_> = contexts
         .iter()

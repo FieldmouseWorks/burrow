@@ -14,7 +14,7 @@ from harness import SKIP, C, V, agent, agent_runs, review_service, sh, tmp, upke
 
 # GitHub, as a bare repo: main, and PR 5's head on refs/pull/5/head.
 origin, work = f"{tmp}/origin/sam/r.git", f"{tmp}/work"
-sh("git", "init", "-q", "--bare", origin)
+sh("git", "init", "-q", "--bare", "-b", "main", origin)
 sh("git", "init", "-q", "-b", "main", work)
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 

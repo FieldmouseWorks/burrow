@@ -415,3 +415,351 @@ fn an_unpause_mid_scan_restarts_order_before_resuming_later_work() {
         .expect("later worker resumes");
     assert!(first < later, "release crossed the ordered scan: {starts}");
 }
+
+#[test]
+fn a_policy_pass_rewatches_what_the_watchdog_watches_not_every_job() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\n# As systemd answers for a unit that isn't running.\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    // Two jobs whose turn failed: one the watchdog watches, and one long
+    // done whose wait it settled (on remi, every job since October).
+    for id in ["watched", "settled"] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("prompt.1"), "work").unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
+    }
+    crate::waits::rewatch(&cfg, &["watched"]);
+    let waits = jobs.join(".waits");
+    assert!(waits.join("watched").exists());
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(waits.join("watched").exists());
+    assert!(
+        !waits.join("settled").exists(),
+        "a policy pass put a settled job back in the watch"
+    );
+    let published: serde_json::Value =
+        serde_json::from_slice(&fs::read(cfg.waits.as_ref().unwrap()).unwrap()).unwrap();
+    let items: Vec<&String> = published["items"].as_object().unwrap().keys().collect();
+    assert_eq!(items, ["watched"]);
+}
+
+#[test]
+fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\n# As systemd answers for a unit that isn't running.\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    let settings = cfg.settings.clone().unwrap();
+    let say = |words: &[&str]| {
+        settings
+            .command(
+                &words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+                "test",
+            )
+            .unwrap()
+    };
+    say(&["allow", "sam/web"]);
+    // A failed turn the watchdog watches, with nothing that parks it (no
+    // question, await or retry), and a settled one it doesn't.
+    for id in ["failed", "settled"] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("prompt.1"), "work").unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Repository("sam/web".into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+    }
+    crate::waits::rewatch(&cfg, &["failed"]);
+    let watched = |id: &str| jobs.join(".waits").join(id).exists();
+    assert!(watched("failed"));
+    // Paused: the watchdog doesn't hear of it, but it isn't forgotten.
+    say(&["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!watched("failed"));
+    assert!(jobs.join(".waits-held/failed").exists());
+    // Allowed again: watched again, and the settled job still isn't.
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(watched("failed"));
+    assert!(!jobs.join(".waits-held/failed").exists());
+    assert!(!watched("settled") && !jobs.join(".waits-held/settled").exists());
+    // Stopped, it has no wait to keep or give back.
+    say(&["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    fs::write(Job::new(&cfg, "failed").turn("1", "stopped"), "").unwrap();
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!watched("failed") && !jobs.join(".waits-held/failed").exists());
+}
+
+fn watch_config(tmp: &TempDir, jobs: &std::path::Path) -> Config {
+    let mut cfg = config(jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\n# As systemd answers for a unit that isn't running.\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    cfg
+}
+
+fn awaiting<'a>(cfg: &'a Config, id: &'a str, repo: &str) -> Job<'a> {
+    let job = Job::new(cfg, id);
+    fs::create_dir_all(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("prompt.1"), "work").unwrap();
+    fs::write(job.turn("1", "outcome"), "done").unwrap();
+    fs::write(job.turn("1", "end"), "await").unwrap();
+    fs::write(job.path("await"), "sam/web#1\t1000\t\n").unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Repository(repo.into()),
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
+    job
+}
+
+#[test]
+fn a_held_watch_survives_a_failed_restore_until_it_is_committed() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let settings = cfg.settings.clone().unwrap();
+    let say = |w: &[&str]| {
+        settings
+            .command(&w.iter().map(|w| w.to_string()).collect::<Vec<_>>(), "test")
+            .unwrap()
+    };
+    say(&["allow", "sam/web"]);
+    awaiting(&cfg, "held", "sam/web");
+    crate::waits::rewatch(&cfg, &["held"]);
+    say(&["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    let mark = jobs.join(".waits-held/held");
+    assert!(mark.exists() && !jobs.join(".waits/held").exists());
+    // The restored watch can't be written: the hold stays.
+    fs::create_dir(jobs.join(".waits/held.new")).unwrap();
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(mark.exists(), "the hold went before the watch was written");
+    fs::remove_dir(jobs.join(".waits/held.new")).unwrap();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/held").exists() && !mark.exists());
+}
+
+#[test]
+fn a_parked_await_stays_held_until_its_release_is_committed() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let job = awaiting(&cfg, "parked", "sam/web");
+    fs::write(
+        crate::policy::path(&job, "park"),
+        r#"{"state":"done","turn":"1","first":false,"at":1}"#,
+    )
+    .unwrap();
+    crate::waits::rewatch(&cfg, &["parked"]);
+    assert!(
+        jobs.join(".waits-held/parked").exists(),
+        "a parked job had no hold, so a failed release would lose it"
+    );
+}
+
+#[test]
+fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    // systemd, noting what it was asked: one job's unit is up.
+    let asked = tmp.path().join("asked");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        format!(
+            "#!/bin/sh\necho \"$*\" >>'{}'\ncase \"$*\" in\n*list-units*) echo 'proj-running.service loaded active running proj job' ;;\n*is-active*proj-running.service) exit 0 ;;\n*is-active*) exit 3 ;;\n*ActiveState*proj-running.service) echo active ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+            asked.display()
+        ),
+    );
+    awaiting(&cfg, "live", "sam/web");
+    let running = Job::new(&cfg, "running");
+    fs::create_dir_all(&running.dir).unwrap();
+    running.set_turns(1).unwrap();
+    fs::write(running.path("prompt.1"), "work").unwrap();
+    fs::write(running.turn("1", "slot"), "1").unwrap();
+    fs::write(running.turn("1", "deadline"), "4000000000").unwrap();
+    crate::policy::bind(
+        &running,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
+    let settled = Job::new(&cfg, "settled");
+    fs::create_dir_all(&settled.dir).unwrap();
+    settled.set_turns(1).unwrap();
+    fs::write(settled.path("prompt.1"), "work").unwrap();
+    // Nothing was ever published for any (no watchdog then).
+    assert!(!jobs.join(".waits").exists());
+    crate::waits::rewatch_all(&cfg);
+    assert!(jobs.join(".waits/live").exists());
+    assert!(jobs.join(".waits/running").exists());
+    assert!(!jobs.join(".waits/settled").exists());
+    // The units that are up are asked once; a settled job's own never is.
+    let asked = fs::read_to_string(&asked).unwrap();
+    assert_eq!(asked.matches("list-units").count(), 1, "{asked}");
+    assert!(!asked.contains("proj-settled.service"), "{asked}");
+}
+
+#[test]
+fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let asked = tmp.path().join("asked");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        format!(
+            "#!/bin/sh\necho \"$*\" >>'{}'\ncase \"$*\" in\n*list-units*) echo 'proj-ownedqueued.service loaded active running'; echo 'proj-ownedrunning.service loaded active running'; echo 'proj-ownedlock.service loaded active running' ;;\n*is-active*proj-ownedqueued.service|*is-active*proj-ownedrunning.service|*is-active*proj-ownedlock.service) exit 0 ;;\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+            asked.display()
+        ),
+    );
+    let cases = [
+        ("ownedqueued", true),
+        ("ownedrunning", true),
+        ("ownedlock", true),
+        ("retry", true),
+        ("await-failed", true),
+        ("codex-refused", true),
+        ("owned-codex-refused", true),
+        ("quota-refused", true),
+        ("owned-quota-refused", true),
+        ("quota-no-await", true),
+        ("quota-pending", true),
+        ("quota-refusal-only", true),
+        ("owned-ended", false),
+        ("completed", false),
+        ("stopped", false),
+        ("settled-failure", false),
+    ];
+    for (id, _) in cases {
+        let job = awaiting(&cfg, id, "sam/web");
+        match id {
+            "ownedqueued" | "ownedrunning" | "ownedlock" | "retry" => {
+                fs::remove_file(job.path("await")).unwrap();
+                fs::remove_file(job.turn("1", "outcome")).unwrap();
+                if id == "retry" {
+                    fs::write(job.turn("1", "retry-migration"), "{}").unwrap();
+                } else if id != "ownedqueued" {
+                    fs::write(job.turn("1", "slot"), "1").unwrap();
+                    fs::write(job.turn("1", "deadline"), "4000000000").unwrap();
+                    if id == "ownedlock" {
+                        fs::write(job.turn("1", "wait"), "1000\theavy slot").unwrap();
+                    }
+                }
+            }
+            "codex-refused" | "owned-codex-refused" => {
+                fs::write(
+                    job.turn("1", "outcome"),
+                    "usage limit; waiting for Codex's reset",
+                )
+                .unwrap();
+                fs::write(job.path("await"), "usage-limit\t1000\t2000\n").unwrap();
+            }
+            "quota-refused" | "owned-quota-refused" | "quota-no-await" | "quota-pending" => {
+                fs::write(job.turn("1", "outcome"), "GitHub quota; waiting for reset").unwrap();
+                if id == "quota-pending" {
+                    fs::write(
+                        job.path(crate::github_quota::PENDING),
+                        r#"{"targets":["sam/web#1"],"retry_at":2000,"turn":"1"}"#,
+                    )
+                    .unwrap();
+                } else {
+                    crate::github_quota::park(&job, 2000).unwrap();
+                }
+                if matches!(id, "quota-no-await" | "quota-pending") {
+                    fs::remove_file(job.path("await")).unwrap();
+                }
+            }
+            "quota-refusal-only" => {
+                fs::remove_file(job.path("await")).unwrap();
+                fs::write(job.turn("1", "outcome"), "failed").unwrap();
+                let mut meter = burrow_github::quota::Meter::new("workers", "sam", 1000);
+                meter.retry_at = Some(2000);
+                meter
+                    .record_public(&job.turn("1", "github-refusals"))
+                    .unwrap();
+            }
+            "await-failed" | "owned-ended" => {
+                fs::write(job.turn("1", "outcome"), "failed").unwrap();
+            }
+            "completed" => {
+                fs::write(job.turn("1", "end"), "done").unwrap();
+            }
+            "stopped" => {
+                fs::write(job.turn("1", "stopped"), "").unwrap();
+            }
+            "settled-failure" => {
+                fs::remove_file(job.path("await")).unwrap();
+                fs::write(job.turn("1", "outcome"), "failed").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        if id.starts_with("owned") {
+            fs::write(job.path("owned"), "").unwrap();
+        }
+    }
+    // No registry exists on enable, or after disabling and re-enabling.
+    for _ in 0..2 {
+        assert!(!jobs.join(".waits").exists());
+        let before = now() as f64;
+        crate::waits::rewatch_all(&cfg);
+        for (id, watched) in cases {
+            let path = jobs.join(".waits").join(id);
+            assert_eq!(path.exists(), watched, "{id}");
+            if watched {
+                let job = Job::new(&cfg, id);
+                let facts = job.facts().unwrap();
+                let expected = crate::waits::job_wait(&cfg, &facts).unwrap();
+                let published: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+                if matches!(id, "quota-pending" | "quota-refusal-only") {
+                    // No durable start marker: reset facts use observation time.
+                    let since = published["since"].as_f64().unwrap();
+                    assert!(since >= before && since <= now() as f64, "{id}");
+                } else {
+                    assert_eq!(published["since"], expected.since, "{id}");
+                }
+                assert_eq!(published["due"], expected.due, "{id}");
+                assert_eq!(published["phase"], expected.phase, "{id}");
+            }
+        }
+        fs::remove_dir_all(jobs.join(".waits")).unwrap();
+    }
+    let asked = fs::read_to_string(asked).unwrap();
+    assert_eq!(asked.matches("list-units").count(), 2, "{asked}");
+    assert!(
+        !asked.contains(&Job::new(&cfg, "settled-failure").unit()),
+        "{asked}"
+    );
+}

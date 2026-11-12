@@ -51,7 +51,7 @@ query($owner: String!, $name: String!, $cursor: String) {
             ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }

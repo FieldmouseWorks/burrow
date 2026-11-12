@@ -30,6 +30,9 @@ struct Receipt {
     through: u64,
     answered: bool,
     clear: bool,
+    /// The answer is the deadline's reversible default, not a person's.
+    #[serde(default)]
+    deadline: bool,
     accepted: bool,
     // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
     applied: bool,
@@ -186,7 +189,12 @@ pub(crate) struct Resume {
 }
 
 impl Resume {
+    #[cfg(test)]
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
+        Self::prepare_as(job, answered, false)
+    }
+
+    pub(crate) fn prepare_as(job: &Job, answered: bool, deadline: bool) -> Result<Self, String> {
         recover(job)?;
         if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
@@ -218,6 +226,7 @@ impl Resume {
                 through,
                 answered,
                 clear: !asking,
+                deadline: answered && deadline,
                 accepted: false,
                 applied: false,
             },
@@ -318,6 +327,92 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     })
 }
 
+/// A question with no host record (asked before records existed) has no
+/// deadline and no default, so nothing would ever settle it: once its turn is
+/// older than the ask timeout, the job is over and its question with it.
+/// Recorded on the turn, so the notice closes and stays closed instead of
+/// being filed again for a question nobody can answer.
+fn lapse(
+    cfg: &crate::config::Config,
+    job: &Job,
+    n: &str,
+    stopped: bool,
+    end: Option<&str>,
+    pending_owner: bool,
+) -> Result<bool, String> {
+    let marker = job.turn(n, "question-lapsed");
+    if marker.exists() {
+        return Ok(true);
+    }
+    if stopped || pending_owner || end != Some("ask") || crate::ask::load(job).is_some() {
+        return Ok(false);
+    }
+    let old = fs::metadata(job.turn(n, "end"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() >= cfg.ask_timeout);
+    if !old {
+        return Ok(false);
+    }
+    crate::state_reads::write(&marker, "lapsed\n").map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// The one line a closed notice carries: why this question no longer
+/// waits. The accepted launch that first answered it (a receipt is written per
+/// launch attempt and only counts once accepted) says whether that was the
+/// deadline's default or a person; with no such launch, the job's stop or end.
+fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
+    let asked = turn.parse::<u64>().unwrap_or(0);
+    // The question's lifetime ends at the first turn that stopped or
+    // completed the job. A one-way timeout's synthetic completion carries
+    // its own `timeout` mark, so it is no end however the owner state has
+    // moved since. Everything here is recorded history, never the job's
+    // current flags, so a deferred notice names the same cause as a prompt
+    // one. Later replies belong to a new conversation.
+    let ended = (asked..=latest).find(|t| {
+        let t = t.to_string();
+        job.turn(&t, "stopped").exists()
+            || job.turn(&t, "question-lapsed").exists()
+            || (read(&job.turn(&t, "end")).as_deref() == Some("done")
+                && !job.turn(&t, "timeout").exists())
+    });
+    let last = ended.unwrap_or(u64::MAX);
+    let answer = crate::ask::host_path(job, "")
+        .read_dir()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix("resume-")?
+                .parse::<u64>()
+                .ok()?;
+            let r: Receipt = serde_json::from_str(&read_state(&e.path()).ok()??).ok()?;
+            (r.accepted && r.answered && r.through >= asked && n <= last).then_some((n, r))
+        })
+        .min_by_key(|(n, _)| *n);
+    match answer {
+        Some((_, r)) if r.deadline => {
+            "Closed: no answer came by the deadline, so the job took its reversible default.".into()
+        }
+        Some(_) => "Closed: the question was answered.".into(),
+        None => match ended {
+            Some(t) if job.turn(&t.to_string(), "stopped").exists() => {
+                "Closed: the job was stopped.".into()
+            }
+            Some(t) if job.turn(&t.to_string(), "question-lapsed").exists() => {
+                "Closed: the question went unanswered past its timeout and the job is over.".into()
+            }
+            Some(_) => "Closed: the job ended.".into(),
+            None => "Closed: the question was answered.".into(),
+        },
+    }
+}
+
 /// Durable per-question outbox. An open is replayed idempotently because the
 /// notifier's zero exit is not delivery acknowledgement. A close is forgotten
 /// only when `pending` explicitly returns 1. Keys belong to turns, never reused
@@ -340,7 +435,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
     // A one-way timeout publishes a synthetic done turn to release the job,
     // while its original question still needs the owner's decision.
-    let finished = stopped || (end.as_deref() == Some("done") && !pending_owner);
+    let lapsed = lapse(cfg, job, &n, stopped, end.as_deref(), pending_owner)?;
+    let finished = stopped || lapsed || (end.as_deref() == Some("done") && !pending_owner);
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
@@ -472,17 +568,30 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // Only an accepted human resume clears the marker. Preparatory
         // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
-        if (finished || active.as_deref() != Some(turn))
-            && let Err(e) = crate::state_reads::write(&closing, "close\n")
-        {
-            errors.push(e.to_string());
-            continue;
+        if finished || active.as_deref() != Some(turn) {
+            // The cause is recorded once, with the intent, and replayed as is.
+            if !closing.exists()
+                && let Err(e) = crate::state_reads::write(
+                    &closing,
+                    format!("{}\n", close_reason(job, turn, latest)),
+                )
+            {
+                errors.push(e.to_string());
+                continue;
+            }
         }
         retry = true;
         let result = if closing.exists() {
-            Command::new(notifier)
-                .args(["close", &key, "The job no longer needs this answer."])
-                .status()
+            let said = match read_state(&closing) {
+                Ok(Some(s)) if s.starts_with("Closed: ") => s.trim_end().to_owned(),
+                // An intent from before the cause was recorded.
+                Ok(_) => "The job no longer needs this answer.".to_owned(),
+                Err(e) => {
+                    errors.push(e.to_string());
+                    continue;
+                }
+            };
+            Command::new(notifier).args(["close", &key, &said]).status()
         } else {
             let body = match read_state(&entry.path()) {
                 Ok(Some(body)) => body,

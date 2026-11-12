@@ -22,6 +22,10 @@ pub struct Config {
     pub exclude: Vec<Exclude>,
     /// HOST-notify: `NOTIFY open|close KEY TITLE [BODY]`.
     pub notify: PathBuf,
+    /// The house handler's wake file (burrow-events), {repo: epoch} with ""
+    /// for the full pass: a pass GitHub's rate limit held off is booked
+    /// there for when it lifts.
+    pub wake: PathBuf,
     /// Only say what a pass would do, as `status` does.
     pub dry_run: bool,
 }
@@ -43,7 +47,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let mut config = serde_json::json!({
             "house": "/h", "current": "/c", "lock": "/l", "owners": ["sam"],
-            "exclude": ["sam/*"], "notify": "/n", "dryRun": false,
+            "exclude": ["sam/*"], "notify": "/n", "wake": "/w", "dryRun": false,
         });
         std::fs::write(&path, config.to_string()).unwrap();
         let read = Config::read(&path).unwrap();

@@ -22,7 +22,10 @@
 # its inputs and the PR (or the run), and a leg's its leg too, so calls in one
 # workflow with inputs of their own (a matrix's legs, say) never cancel each
 # other, nor do the gate's own legs; two calls alike would be the same check
-# twice.
+# twice. A job's group cancels its last only once it's queued itself, after
+# the new run's first job got a runner, so a caller (the template's, and
+# burrow's own) has a group of its own on the same key too, which cancels the
+# PR's last run whole as the new one is made (burrow#815).
 name: flake-check
 on:
   workflow_call:
@@ -40,7 +43,9 @@ on:
           Keep what each push to the default branch's gate needed that no
           public cache has (what it built, a patched package or the flake's
           own checks, what it took from these kept builds, and what they
-          hold that its checks were built from) in the Actions cache, and
+          hold that its checks were built from), whether or not the gate
+          passed (a check that failed leaves nothing to keep), in the
+          Actions cache, and
           let every later run's gate substitute from them, a leg from the
           same leg's, and a PR's negative run from every leg's: a hosted
           runner starts with an empty store, and builds all of that again
@@ -502,10 +507,17 @@ jobs:
         if: ${{ always() && steps.kept-lookup.outputs.cache-hit != '' && steps.kept-restore.outputs.cache-hit == '' }}
         shell: bash
         run: echo 'degraded/kept-restore' >> "$GITHUB_STEP_SUMMARY"
-      # keep-builds, on a push to the default branch whose gate passed: what
-      # crates/burrow-keep says, in place of the kept builds it restored and
-      # under the path it restored them to (the cache keeps what it saves for
-      # a restore of the same path only). The tool comes from this workflow's
+      # keep-builds, on a push to the default branch whose gate ran, passed
+      # or failed: a build is no less reusable for a different check having
+      # failed, and a red default branch that kept nothing left every later
+      # leg to build cold (#812). A failed check leaves no output, so the
+      # gate stays red. A leg that starts while a push is still building
+      # takes what the push before it kept rather than wait for it: waiting
+      # would hold a runner doing nothing, when runners are what ran out.
+      # What crates/burrow-keep says, told how the gate went, in place of
+      # the kept builds it restored and under the path it restored them to
+      # (the cache keeps what it saves for a restore of the same path only).
+      # The tool comes from this workflow's
       # own commit, which job.workflow_sha names whoever calls it, built on
       # the runner's cargo in the crates' directory as the house action
       # builds its check: rustup reads the toolchain
@@ -514,7 +526,7 @@ jobs:
       # result as it is.
       - id: keep-tool
         name: soft/keep-tool
-        if: ${{ inputs.keep-builds && inputs.install-nix && steps.gate.outcome == 'success' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        if: ${{ !cancelled() && inputs.keep-builds && inputs.install-nix && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -525,18 +537,19 @@ jobs:
           sparse-checkout: crates
       - id: keep
         name: soft/keep-builds
-        if: steps.keep-tool.outcome == 'success'
+        if: ${{ !cancelled() && steps.keep-tool.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         working-directory: .flake-check-keep/crates
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          GATE: ${{ steps.gate.outcome }}
         run: |
           cargo build --release --locked --quiet -p burrow-keep
-          "$CARGO_TARGET_DIR/release/burrow-keep" "$RUNNER_TEMP"
+          "$CARGO_TARGET_DIR/release/burrow-keep" --gate "$GATE" "$RUNNER_TEMP"
       - id: keep-save
         name: soft/keep-save
-        if: steps.keep.outcome == 'success'
+        if: ${{ !cancelled() && steps.keep.outcome == 'success' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

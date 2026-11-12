@@ -130,11 +130,11 @@ impl Case {
         )
     }
 
-    /// A push's keep step: burrow-keep on `store`, with `run/kept` holding
-    /// what was restored.
-    fn keep(&self, store: &str, run: &str) -> String {
+    /// A push's keep step: burrow-keep on `store`, after a gate whose step
+    /// came out as `gate`, with `run/kept` holding what was restored.
+    fn keep(&self, store: &str, run: &str, gate: &str) -> String {
         let mut cmd = self.on(store, env!("CARGO_BIN_EXE_burrow-keep"), &[]);
-        cmd.arg(self.path(run));
+        cmd.args(["--gate", gate]).arg(self.path(run));
         self.run(cmd)
     }
 
@@ -234,7 +234,7 @@ fn what_a_push_keeps_the_next_substitutes_with_what_a_public_cache_serves() {
     let public = format!("file://{}", c.path("public").display());
     c.nix("s1", &["copy", "--to", &public, lib], &[]);
     fs::create_dir_all(c.path("run1/kept")).unwrap();
-    let said = c.keep("s1", "run1");
+    let said = c.keep("s1", "run1", "success");
     assert!(
         said.starts_with("kept 5 paths from this gate and 0 from the kept builds")
             && said.ends_with("left out 1 downloads, 1 MiB"),
@@ -269,7 +269,7 @@ fn what_a_push_keeps_the_next_substitutes_with_what_a_public_cache_serves() {
     c.nix_store("s3", &["--realise", &check], &["run1/kept", "public"]);
     assert!(!c.valid("s3", &dep));
     copy_dir(&c.path("run1/kept"), &c.path("run2/kept"));
-    let said = c.keep("s3", "run2");
+    let said = c.keep("s3", "run2", "success");
     assert!(
         said.starts_with("kept 1 paths from this gate and 1 from the kept builds"),
         "{said}"
@@ -282,4 +282,47 @@ fn what_a_push_keeps_the_next_substitutes_with_what_a_public_cache_serves() {
     // of building it.
     c.nix_store("s4", &["--realise", &dep], &["run2/kept", "public"]);
     assert!(c.valid("s4", &dep));
+}
+
+/// #812: a push to the default branch builds the patched package (dep,
+/// here) and a different check fails. What it built is kept all the same,
+/// with what an earlier push kept, and a fresh runner on the same inputs
+/// substitutes it rather than build it (its builder makes no output, so
+/// only a substitute makes it valid); the failed check left nothing to
+/// keep, so it's still to build, and its gate still red.
+#[test]
+fn a_push_whose_gate_failed_keeps_what_it_built() {
+    let c = Case::new();
+    let old = &format!("/nix/store/{}-old-check", "2".repeat(32));
+    fs::create_dir_all(c.path("run0/kept")).unwrap();
+    c.register("s0", old, "old", &[]);
+    c.keep("s0", "run0", "success");
+    assert_eq!(c.cached("run0/kept"), vec![old.clone()]);
+
+    let (check, dep) = c.drvs("s1");
+    c.register("s1", &dep, "the patched package", &[]);
+    assert!(!c.valid("s1", &check));
+    copy_dir(&c.path("run0/kept"), &c.path("run1/kept"));
+    let said = c.keep("s1", "run1", "failure");
+    assert!(
+        said.starts_with("kept 1 paths from this gate and 1 from the kept builds"),
+        "{said}"
+    );
+    let mut kept = vec![dep.clone(), old.clone()];
+    kept.sort();
+    assert_eq!(c.cached("run1/kept"), kept);
+
+    c.drvs("s2");
+    c.nix_store("s2", &["--realise", &dep], &["run1/kept"]);
+    assert!(c.valid("s2", &dep));
+    let mut failed = c.on("s2", "nix-store", &["run1/kept"]);
+    failed.args(["--realise", &check]);
+    assert!(!failed.output().unwrap().status.success());
+    assert!(!c.valid("s2", &check));
+
+    // An outcome that isn't the gate's passing or failing keeps nothing.
+    let mut cmd = c.on("s1", env!("CARGO_BIN_EXE_burrow-keep"), &[]);
+    cmd.args(["--gate", "skipped"]).arg(c.path("run1"));
+    assert!(!cmd.output().unwrap().status.success());
+    assert_eq!(c.cached("run1/kept"), kept);
 }
