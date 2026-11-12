@@ -71,6 +71,7 @@ impl Machine {
             "owners": owners,
             "exclude": [],
             "notify": stand_ins().join("notify"),
+            "wake": dir.path().join("wake.json"),
             "dryRun": dry_run,
         });
         fs::write(dir.path().join("config.json"), config.to_string()).unwrap();

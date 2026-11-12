@@ -22,20 +22,37 @@ impl Pass<'_> {
     fn writer(&self, actor: &Value) -> bool {
         self.allowed(actor["databaseId"].as_u64())
     }
-    fn writers(&self, list: &Value, field: &str) -> bool {
+    /// A writer of the issue's own text: an author, or the machinery App
+    /// that may open issues. Comments keep `writer`.
+    fn issue_writer(&self, actor: &Value) -> bool {
+        let id = actor["databaseId"].as_u64();
+        self.allowed(id)
+            || self
+                .cfg
+                .machinery_account
+                .as_ref()
+                .is_some_and(|a| a.matches(id))
+    }
+    fn writers(&self, list: &Value, field: &str, issue: bool) -> bool {
+        let ok = |a: &Value| {
+            if issue {
+                self.issue_writer(a)
+            } else {
+                self.writer(a)
+            }
+        };
         list["nodes"].as_array().is_some_and(|nodes| {
             // GitHub prunes intermediate body edits once 100 are retained.
             // Equality at that limit no longer proves that every editor is known.
             nodes.len() < 100
                 && list["totalCount"].as_u64() == Some(nodes.len() as u64)
-                && nodes.iter().all(|e| {
-                    self.writer(&e[field])
-                        && (e["deletedBy"].is_null() || self.writer(&e["deletedBy"]))
-                })
+                && nodes
+                    .iter()
+                    .all(|e| ok(&e[field]) && (e["deletedBy"].is_null() || ok(&e["deletedBy"])))
         })
     }
     fn authored(&self, text: &Value) -> bool {
-        self.writer(&text["author"]) && self.writers(&text["userContentEdits"], "editor")
+        self.writer(&text["author"]) && self.writers(&text["userContentEdits"], "editor", false)
     }
     pub(super) fn written(&self, repo: &str, rest: &Value) -> Option<Written> {
         let (owner, name) = repo.split_once('/')?;
@@ -71,9 +88,12 @@ impl Pass<'_> {
             return None;
         }
         let mut safe = rest.clone();
-        if (self.writer(&issue["author"]) || self.generated_child(repo, rest))
-            && self.writers(&issue["userContentEdits"], "editor")
-            && self.writers(&issue["timelineItems"], "actor")
+        // The machinery's extra authority covers only issues it opened itself.
+        let by_machine = !self.allowed(issue["author"]["databaseId"].as_u64())
+            && self.issue_writer(&issue["author"]);
+        if (self.issue_writer(&issue["author"]) || self.generated_child(repo, rest))
+            && self.writers(&issue["userContentEdits"], "editor", by_machine)
+            && self.writers(&issue["timelineItems"], "actor", by_machine)
         {
             safe["title"] = issue["title"].clone();
             safe["body"] = issue["body"].clone();
@@ -161,6 +181,56 @@ mod tests {
             exposed.iter().all(|(_, unsafe_text)| !unsafe_text),
             "{exposed:?}"
         );
+    }
+    #[test]
+    fn machinery_issue_text_is_verified_but_its_comments_are_not_heard() {
+        let mut b = Box::new();
+        b.cfg.machinery_account = Some(burrow_github::fake::author("workers[bot]"));
+        let id = burrow_github::fake::author("workers[bot]").id;
+        let app = json!({"login":"workers","__typename":"Bot","databaseId":id});
+        let rest = issue(7, "workers[bot]", &[]);
+        let mut t = text();
+        t["author"] = app.clone();
+        let read = |t: &Value| b.pass().checked("sam/box", &rest, t).unwrap();
+        assert_eq!(read(&t).issue["title"], "trusted title");
+        // Its edits, title changes and deletions of edits are its own.
+        let mut e = t.clone();
+        e["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":app,"deletedBy":app}]});
+        e["timelineItems"] = json!({"totalCount":1,"nodes":[{"actor":app}]});
+        assert_eq!(read(&e).issue["title"], "trusted title");
+        // A stranger with the same login, or in the history, withholds it.
+        let spoof = json!({"login":"workers","__typename":"Bot","databaseId":999});
+        let mut s = t.clone();
+        s["author"] = spoof.clone();
+        assert_eq!(read(&s).issue["title"], "Issue text withheld");
+        for (field, key) in [("userContentEdits", "editor"), ("timelineItems", "actor")] {
+            let mut s = t.clone();
+            s[field] = json!({"totalCount":1,"nodes":[{key:spoof}]});
+            assert_eq!(read(&s).issue["title"], "Issue text withheld", "{field}");
+        }
+        let mut s = t.clone();
+        s["userContentEdits"] = json!({"totalCount":1,"nodes":[{"editor":app,"deletedBy":spoof}]});
+        assert_eq!(read(&s).issue["title"], "Issue text withheld");
+        // Incomplete history still fails closed.
+        let mut s = t.clone();
+        s["userContentEdits"] = json!({"totalCount":101,"nodes":[]});
+        assert_eq!(read(&s).issue["title"], "Issue text withheld");
+        // Comments stay author-only, even from the App.
+        let mut c = t.clone();
+        c["comments"]["nodes"][0]["author"] = app.clone();
+        assert!(read(&c).comments.is_empty());
+        // On a human's issue, the App's edit is not trusted.
+        let mut h = text();
+        h["userContentEdits"] =
+            json!({"totalCount":1,"nodes":[{"editor":app.clone(),"deletedBy":null}]});
+        let human = issue(7, "sam", &[]);
+        assert_eq!(
+            b.pass().checked("sam/box", &human, &h).unwrap().issue["title"],
+            "Issue text withheld"
+        );
+        // An outside-labelled machinery issue is still not eligible.
+        let outside = issue(7, "workers[bot]", &["outside text"]);
+        assert!(!b.pass().eligible("sam/box", &outside));
     }
     #[test]
     fn an_account_keeps_its_authority_after_a_login_change() {
