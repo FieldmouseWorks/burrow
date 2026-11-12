@@ -637,3 +637,45 @@ fn a_delayed_notice_names_the_cause_recorded_in_history() {
     fs::write(job.turn("2", "end"), "done\n").unwrap();
     assert!(close_reason(&job, "1", 3).contains("ended"));
 }
+
+#[test]
+fn a_dead_jobs_notice_stays_closed_once_closed() {
+    let mut f = watched();
+    f.cfg.ask_timeout = 60;
+    recording(&f);
+    question(&f, false, crate::now() + 3600);
+    // Asked before host records existed: nothing can ever answer it itself.
+    fs::remove_file(crate::ask::host_path(&f.job(), "question")).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(f.job().turn("1", "end"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    // Someone closes the notice by hand.
+    fs::remove_file(f.dir.path().join("remote-proj-question-j1-1")).unwrap();
+    fs::remove_file(f.dir.path().join("pending-proj-question-j1-1")).unwrap();
+    let before = f.deliveries();
+    crate::watch::look(&f.cfg, "").unwrap();
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert_eq!(f.deliveries(), before, "no fresh notice was filed");
+    assert!(!f.dir.path().join("remote-proj-question-j1-1").exists());
+    assert!(f.job().turn("1", "question-closed").exists());
+    assert!(
+        closed_with(&f).contains("past its timeout"),
+        "{}",
+        closed_with(&f)
+    );
+}
+
+#[test]
+fn a_young_legacy_question_keeps_its_notice() {
+    let mut f = watched();
+    f.cfg.ask_timeout = 3600;
+    question(&f, false, crate::now() + 3600);
+    fs::remove_file(crate::ask::host_path(&f.job(), "question")).unwrap();
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+    assert!(!f.job().turn("1", "question-lapsed").exists());
+}

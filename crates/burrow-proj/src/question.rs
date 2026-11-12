@@ -327,6 +327,38 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     })
 }
 
+/// A question with no host record (asked before records existed) has no
+/// deadline and no default, so nothing would ever settle it: once its turn is
+/// older than the ask timeout, the job is over and its question with it.
+/// Recorded on the turn, so the notice closes and stays closed instead of
+/// being filed again for a question nobody can answer.
+fn lapse(
+    cfg: &crate::config::Config,
+    job: &Job,
+    n: &str,
+    stopped: bool,
+    end: Option<&str>,
+    pending_owner: bool,
+) -> Result<bool, String> {
+    let marker = job.turn(n, "question-lapsed");
+    if marker.exists() {
+        return Ok(true);
+    }
+    if stopped || pending_owner || end != Some("ask") || crate::ask::load(job).is_some() {
+        return Ok(false);
+    }
+    let old = fs::metadata(job.turn(n, "end"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() >= cfg.ask_timeout);
+    if !old {
+        return Ok(false);
+    }
+    crate::state_reads::write(&marker, "lapsed\n").map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// The one line a closed notice carries: why this question no longer
 /// waits. The accepted launch that first answered it (a receipt is written per
 /// launch attempt and only counts once accepted) says whether that was the
@@ -342,6 +374,7 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
     let ended = (asked..=latest).find(|t| {
         let t = t.to_string();
         job.turn(&t, "stopped").exists()
+            || job.turn(&t, "question-lapsed").exists()
             || (read(&job.turn(&t, "end")).as_deref() == Some("done")
                 && !job.turn(&t, "timeout").exists())
     });
@@ -371,6 +404,9 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
             Some(t) if job.turn(&t.to_string(), "stopped").exists() => {
                 "Closed: the job was stopped.".into()
             }
+            Some(t) if job.turn(&t.to_string(), "question-lapsed").exists() => {
+                "Closed: the question went unanswered past its timeout and the job is over.".into()
+            }
             Some(_) => "Closed: the job ended.".into(),
             None => "Closed: the question was answered.".into(),
         },
@@ -399,7 +435,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     let pending_owner = crate::ask::host_path(job, "question-needs-owner").exists();
     // A one-way timeout publishes a synthetic done turn to release the job,
     // while its original question still needs the owner's decision.
-    let finished = stopped || (end.as_deref() == Some("done") && !pending_owner);
+    let lapsed = lapse(cfg, job, &n, stopped, end.as_deref(), pending_owner)?;
+    let finished = stopped || lapsed || (end.as_deref() == Some("done") && !pending_owner);
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
