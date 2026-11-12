@@ -177,7 +177,7 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
                        stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
                        timeout=UPKEEP_TIMEOUT if bounded else None)
     if p.returncode:
-        raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
+        raise (Unavailable if p.returncode == 75 else RuntimeError)(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
     if out["limited"] is not None and not LIMITED:
         LIMITED.append(out["limited"])

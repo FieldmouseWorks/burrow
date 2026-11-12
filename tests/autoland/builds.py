@@ -25,7 +25,7 @@ from prs import ci_state
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
 origin, work = f"{tmp}/builds-origin", f"{tmp}/builds-work"
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
-sh("git", "init", "-q", "--bare", f"{origin}/sam/r.git")
+sh("git", "init", "-q", "--bare", "-b", "main", f"{origin}/sam/r.git")
 sh("git", "init", "-q", "-b", "main", work)
 heads = {}
 for n in range(1, 7):
@@ -34,7 +34,10 @@ for n in range(1, 7):
     sh(*GIT, "add", "f", cwd=work)
     sh(*GIT, "commit", "-qm", f"pr {n}", cwd=work)
     heads[n] = sh("git", "rev-parse", "HEAD", cwd=work).strip()
-    sh("git", "push", "-q", f"{origin}/sam/r.git", f"HEAD:refs/pull/{n}/head", cwd=work)
+    # A real default branch lets guarded job shells distinguish the test
+    # refs rewritten below from the default branch they must never force.
+    sh("git", "push", "-q", f"{origin}/sam/r.git", f"HEAD:refs/pull/{n}/head",
+       *(["HEAD:refs/heads/main"] if n == 1 else []), cwd=work)
 # The steward's mirror fetches from it (burrow-upkeep's `fetch`).
 kept_upkeep, C.CFG["upkeep"] = C.CFG["upkeep"], upkeep_config(f"{tmp}/upkeep-builds.json", git=origin)
 

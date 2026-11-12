@@ -258,7 +258,12 @@ status, _ = one_pass(clean(checks=hung(51)), 700)
 assert RERUNS == [] and "cancelled again after a rerun" in status, (RERUNS, status)
 start()
 RERUN_FAILS["s1"] = RuntimeError("gh run rerun: HTTP 500: lost the answer")
-one_pass(clean(checks=hung(51)), 700)
+try:
+    one_pass(clean(checks=hung(51)), 700)
+except C.Unavailable:
+    pass
+else:
+    raise AssertionError("an unanswered rerun must fail the pass for retry")
 RERUN_FAILS.clear()
 RUN_INFO["s1"] = {"run_attempt": 2, "status": "in_progress", "conclusion": None}  # it did take
 status, _ = one_pass(clean(checks=hung(51)), 760)
@@ -367,5 +372,20 @@ start()
 other = [{**check("some-app", CANCEL), "databaseId": 81, "checkSuite": {"id": "x", "status": "COMPLETED", "app": {"slug": "some-app"}}}]
 status, _ = one_pass(clean(checks=other), 700)
 assert RERUNS == [] and "waiting for CI" in status and not JOBS, (RERUNS, status, JOBS)
+
+# The real Rust command inherits the App token (the transport asserts it),
+# and receives --dry from the same bridge: it may read, but never rerun.
+start()
+was_dry = C.DRY
+try:
+    C.DRY = True
+    with C.acting_for("sam/r"):
+        got = ci_state(clean(checks=hung(51)), repo="sam/r", recover=True)
+    assert got[0] == "pending" and RERUNS == [], (got, RERUNS)
+finally:
+    C.DRY = was_dry
+with C.acting_for("sam/r"):
+    got = ci_state(clean(checks=hung(51)), repo="sam/r", recover=True)
+assert got[0] == "pending" and RERUNS == ["s1"], (got, RERUNS)
 
 print("cancelled runs: ok")
