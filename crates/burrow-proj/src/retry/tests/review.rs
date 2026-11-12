@@ -36,9 +36,15 @@ fn cancelled_recovery_uses_the_latest_locked_turn_and_cannot_replay() {
     saved(&r, "cancelled");
     let job = Job::new(&r.cfg, "cancelled");
     let lock = job.lock().unwrap();
+    // Another test's fork can retain this open description until exec. Keep
+    // a copy alive to prove recovery doesn't depend on that child closing it.
+    let _cancelled_copy = lock.try_clone().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     fs::write(job.turn("1", "stopped"), "").unwrap();
     fs::remove_file(job.turn("1", "retry-migration")).unwrap();
+    // Closing alone leaves the shared description locked until every copy
+    // closes. Explicit unlock models the end of this test's contention.
+    lock.unlock().unwrap();
     drop(lock);
     pass(&r.cfg).unwrap();
     assert!(!job.path("pid").exists());
@@ -51,8 +57,10 @@ fn cancelled_recovery_uses_the_latest_locked_turn_and_cannot_replay() {
     fs::remove_file(job.turn("1", "stopped")).unwrap();
     let state = saved(&r, "cancelled");
     let lock = job.lock().unwrap();
+    let _successor_copy = lock.try_clone().unwrap();
     assert!(pass(&r.cfg).is_err());
     job.set_turns(2).unwrap();
+    lock.unlock().unwrap();
     drop(lock);
     pass(&r.cfg).unwrap();
     assert!(!job.path("pid").exists());
@@ -132,8 +140,10 @@ fn recovery_skipped_for_a_busy_lock_is_explicitly_retried() {
     saved(&r, "pending");
     let job = Job::new(&r.cfg, "pending");
     let lock = job.lock().unwrap();
+    let _inherited_copy = lock.try_clone().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     assert!(!job.path("pid").exists());
+    lock.unlock().unwrap();
     drop(lock);
     pass(&r.cfg).unwrap();
     until(|| job.path("took").exists());
@@ -154,7 +164,9 @@ fn old_parent_skipped_for_a_busy_lock_is_explicitly_retried() {
     until(|| r.cfg.jobs.join("retry/1.withdrawable").exists());
     let job = Job::new(&r.cfg, "retry");
     let lock = job.lock().unwrap();
+    let _inherited_copy = lock.try_clone().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    lock.unlock().unwrap();
     drop(lock);
     native_waits(&r);
     pass(&r.cfg).unwrap();

@@ -385,6 +385,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         prompt = retry
             .resume(&job, &n, &first)
             .map_err(|e| Fail::new(1, e.to_string()))?;
+        crate::snapshot::stream::notify(cfg);
     }
     rewatch(cfg, &[id]);
     let quiet = read(&job.path("idle"))
@@ -543,6 +544,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     let waited = now_nanos();
                     crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, &said)
                         .map_err(|e| Fail::new(1, e.to_string()))?;
+                    crate::snapshot::stream::notify(cfg);
                     let _ = held.insert(take(true)?);
                     kick(cfg, lines(&job.path("kick")));
                     let state = crate::retry::Checkpoint::load(&job, &n)
@@ -551,6 +553,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     prompt = state
                         .resume(&job, &n, &first)
                         .map_err(|e| Fail::new(1, e.to_string()))?;
+                    crate::snapshot::stream::notify(cfg);
                     rewatch_later(cfg, id);
                     continue;
                 }

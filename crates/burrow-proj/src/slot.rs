@@ -200,7 +200,9 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     let _ = fs::remove_file(crate::policy::path(job, "order"));
     crate::state_reads::write(job.turn(n, "class"), format!("{class}\n"))?;
     crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))?;
-    crate::policy::accepted(job).map_err(io::Error::other)
+    crate::policy::accepted(job).map_err(io::Error::other)?;
+    snapshot::stream::notify(job.cfg);
+    Ok(())
 }
 
 /// Say this job's turn N may be withdrawn no more, under the job's lock, so none
@@ -396,6 +398,7 @@ fn codex_slot(
     // this escape pool independent of a stalled Claude admission lock.
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
+        snapshot::stream::notify(cfg);
     }
     loop {
         if may_hand_over
@@ -480,6 +483,9 @@ pub fn take(
         })
         .unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
+    // The class the snapshot last showed for this place: lead and pipeline
+    // share a filename prefix, so only this sees one become the other.
+    let mut shown: Option<Class> = None;
     loop {
         let paused = automation_paused(cfg, &job);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
@@ -490,7 +496,9 @@ pub fn take(
         if !paused && job.path("unstick").exists() {
             // Leaving the line needs no census lock: stale looks retain the
             // cap conservatively, and the emergency path must never wait on it.
-            let _ = fs::remove_file(queue.join(&me));
+            if fs::remove_file(queue.join(&me)).is_ok() {
+                snapshot::stream::notify(cfg);
+            }
             if spent || crate::github_quota::held(cfg, &job, Engine::Claude).is_some() {
                 usage::remind(cfg);
                 sleep(Duration::from_secs(2));
@@ -541,7 +549,9 @@ pub fn take(
             && now() - came >= cfg.max_wait as i64
         {
             let to = format!("1-{rest}");
-            let _ = fs::rename(queue.join(&me), queue.join(&to));
+            if fs::rename(queue.join(&me), queue.join(&to)).is_ok() {
+                snapshot::stream::notify(cfg);
+            }
             me = to;
         }
         if spent {
@@ -566,8 +576,12 @@ pub fn take(
         if new != me {
             if fs::rename(queue.join(&me), queue.join(&new)).is_ok() {
                 eprintln!("proj: it goes as {} now", class.name());
+                snapshot::stream::notify(cfg);
             }
             me = new;
+        }
+        if class_is_news(&mut shown, class) {
+            snapshot::stream::notify(cfg);
         }
         if !publish(cfg, &queue, &me, original)? {
             drop(lk);
@@ -648,12 +662,20 @@ pub fn take(
     }
 }
 
+/// Whether a place's class changed since the snapshot last showed it. Lead and
+/// pipeline share a filename prefix, so a rename never tells of one becoming
+/// the other. The first look is no news: the place's creation was.
+pub(crate) fn class_is_news(shown: &mut Option<Class>, class: Class) -> bool {
+    shown.replace(class).is_some_and(|before| before != class)
+}
+
 /// This waiter's place in line, `me`, published whole (a dot file, which the
 /// line skips, then renamed), so a waiter clearing out dead places never sees
 /// it without its pid. Put back if it went anyway. False means the usage
 /// transaction is busy; retry from the emergency check without publishing.
 fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::Result<bool> {
-    if read(&queue.join(me)).as_deref() != Some(process::id().to_string().as_str()) {
+    let created = read(&queue.join(me)).as_deref() != Some(process::id().to_string().as_str());
+    if created {
         // Birth and early release are ordered by the same usage lock, so a
         // queue entry cannot appear between capturing the cutoff and committing
         // the release. The independent pools never publish here.
@@ -671,6 +693,10 @@ fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::R
         fs::rename(&tmp, queue.join(me))?;
     }
     crate::policy::accepted(&Job::new(cfg, job_of(me))).map_err(io::Error::other)?;
+    // Only a new place is news: a poll that finds it there changes nothing.
+    if created {
+        snapshot::stream::notify(cfg);
+    }
     Ok(true)
 }
 
