@@ -1,0 +1,27 @@
+[package]
+name = "burrow-dashboard"
+description = "The machine's dashboard: a tailnet-only web app its owner signs in to with a passkey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "form"] }
+base64.workspace = true
+getrandom = "0.4.3"
+maud = "0.27.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { version = "1.54.1", features = ["rt", "net", "macros"] }
+webauthn-rs = "0.6.2"
+
+[dev-dependencies]
+burrow-test = { path = "../burrow-test" }
+tempfile.workspace = true
+tower = { version = "0.5.3", features = ["util"] }
+webauthn-authenticator-rs = { version = "0.6.2", features = ["softpasskey"] }
+
+[lints]
+workspace = true
