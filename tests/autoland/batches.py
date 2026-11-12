@@ -122,6 +122,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert batch.pending('sam/b', [original], [], {'defaultBranchRef': {'target': {'oid': 'new'}}}) == [original]
     with patch.dict(C.CFG, {'changedPolicy': True}):
         assert batch.pending('sam/b', [original], [], info) == [original]
+    # Missing fields are left for the existing per-PR error boundary.
+    malformed = {k: v for k, v in original.items() if k != 'labels'}
+    assert batch.pending('sam/b', [malformed], [], info) == [malformed]
     # Only our own status is ignored. A new external red check is an input.
     with_status = {**original, 'commits': {'nodes': [{'commit': {'statusCheckRollup': {
         'contexts': {'nodes': [{'context': C.CONTEXT, 'description': 'old'}]}}}}]}}

@@ -57,7 +57,8 @@ class Batch:
         value = copy.deepcopy(pr)
         value.pop("updatedAt", None)
         waiting = {v["name"] for v in C.CFG["labels"]["waiting"].values()}
-        value["labels"]["nodes"] = [x for x in value["labels"]["nodes"] if x["name"] not in waiting]
+        if labels := value.get("labels"):
+            labels["nodes"] = [x for x in labels.get("nodes", []) if x.get("name") not in waiting]
         for node in value.get("commits", {}).get("nodes", []):
             contexts = ((node["commit"].get("statusCheckRollup") or {}).get("contexts") or {})
             contexts["nodes"] = [x for x in contexts.get("nodes", []) if x.get("context") != C.CONTEXT]
