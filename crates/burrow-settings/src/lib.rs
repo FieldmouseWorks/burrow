@@ -99,6 +99,7 @@ impl Overlay {
                     .collect();
             }
             (UNTIL, None) => self.pipeline_until = None,
+            (UNTIL, Some(Value::Null)) => self.pipeline_until = None,
             (UNTIL, Some(v)) => {
                 let t = v
                     .as_i64()
@@ -171,6 +172,32 @@ fn value_and_reason<'a>(name: &str, rest: &'a [&'a str]) -> Result<(Value, &'a [
 }
 
 /// A deadline that has passed must not replace a hold.
+/// Why a change didn't happen: the request was refused (nothing touched, and
+/// it is answered), or the machine failed to keep it.
+enum Error {
+    Refused(String),
+    Failed(String),
+}
+
+impl From<String> for Error {
+    fn from(e: String) -> Self {
+        Error::Failed(e)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(e: &str) -> Self {
+        Error::Failed(e.into())
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Error::Refused(e) | Error::Failed(e)) = self;
+        f.write_str(e)
+    }
+}
+
 fn future(t: i64) -> Result<i64, String> {
     if t <= now() {
         return Err("pipeline deadline must be in the future".into());
@@ -214,7 +241,7 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
                 .kind
                 .check(&value)
                 .map_err(|e| format!("{name}: {e}"))?;
-            if setting.name == UNTIL && value.as_i64().is_none_or(|t| t <= 0) {
+            if setting.name == UNTIL && !value.is_null() && value.as_i64().is_none_or(|t| t <= 0) {
                 return Err(format!("{name}: not a timestamp this policy can keep"));
             }
             Ok(Request::Set {
@@ -379,7 +406,7 @@ impl Config {
     /// All mutations are absolute (safe to repeat), serialized and atomic.
     /// The audit is appended and synced before the new overlay is published.
     pub fn command(&self, args: &[String], actor: &str) -> Result<String, String> {
-        self.change(args, actor, None)
+        self.change(args, actor, None).map_err(|e| e.to_string())
     }
 
     pub fn request(
@@ -388,19 +415,19 @@ impl Config {
         args: &[String],
         actor: &str,
     ) -> Result<String, String> {
-        self.change(args, actor, Some(receipt.to_string_lossy().as_ref()))
+        match self.change(args, actor, Some(receipt.to_string_lossy().as_ref())) {
+            // A refusal is an answer, not a failure: nothing was changed, and
+            // it must not stop the requests behind it.
+            Err(Error::Refused(why)) => Ok(format!("Nothing changed. {why}")),
+            other => other.map_err(|e| e.to_string()),
+        }
     }
 
-    fn change(
-        &self,
-        args: &[String],
-        actor: &str,
-        receipt: Option<&str>,
-    ) -> Result<String, String> {
+    fn change(&self, args: &[String], actor: &str, receipt: Option<&str>) -> Result<String, Error> {
         // Refused before anything is touched: no lock, log or overlay.
-        let request = parse(args)?;
+        let request = parse(args).map_err(Error::Refused)?;
         if request == Request::Show {
-            return self.show();
+            return Ok(self.show()?);
         }
         let parent = self
             .overlay
@@ -429,7 +456,7 @@ impl Config {
                 (REPOS.to_owned(), None, None, CHANGED.to_owned())
             }
             Request::Pipeline(t) => {
-                state.pipeline_until = Some(future(t)?);
+                state.pipeline_until = Some(future(t).map_err(Error::Refused)?);
                 (UNTIL.to_owned(), None, None, CHANGED.to_owned())
             }
             Request::Back => {
@@ -442,12 +469,12 @@ impl Config {
                 reason,
             } => {
                 let answer = format!("{name} set to {value}; it lasts {}.", lasts(&name));
-                state.apply(&name, Some(&value))?;
+                state.apply(&name, Some(&value)).map_err(Error::Refused)?;
                 (name.clone(), Some(value), Some(reason), answer)
             }
             Request::Unset { name, reason } => {
                 let answer = format!("{name} unset; it is back to its default.");
-                state.apply(&name, None)?;
+                state.apply(&name, None).map_err(Error::Refused)?;
                 (name.clone(), None, Some(reason), answer)
             }
         };
@@ -625,6 +652,41 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("proj's own file"), "{err}");
         assert!(!cfg.overlay.exists());
+    }
+
+    #[test]
+    fn null_clears_the_scope_and_a_refused_request_is_an_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(&dir);
+        let until = now() + 600;
+        cfg.command(
+            &words(&format!(
+                "set settings.pipelineUntil {until} because a short scope"
+            )),
+            "t",
+        )
+        .unwrap();
+        assert!(cfg.scope_until().unwrap().is_some());
+        cfg.command(
+            &words("set settings.pipelineUntil null because scope is over"),
+            "t",
+        )
+        .unwrap();
+        assert!(cfg.scope_until().unwrap().is_none());
+        let before = fs::read(&cfg.overlay).unwrap();
+        let receipt = dir.path().join("r");
+        // Refused requests answer Ok and leave overlay and receipts alone;
+        // an expired deadline (as when it lapses before the lock) is one.
+        for line in [
+            "set settings.pipelineUntil 1 because maintenance window",
+            "pipeline 1",
+        ] {
+            let said = cfg.request(&receipt, &words(line), "gh").unwrap();
+            assert!(said.starts_with("Nothing changed."), "{said}");
+        }
+        assert_eq!(fs::read(&cfg.overlay).unwrap(), before);
+        let mut state = Overlay::default();
+        assert!(state.apply(UNTIL, Some(&serde_json::json!(1))).is_err());
     }
 
     #[test]
