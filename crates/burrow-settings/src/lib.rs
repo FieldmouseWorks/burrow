@@ -91,15 +91,32 @@ impl Config {
             overlay.engines = match fs::read(self.engines_path()) {
                 Ok(bytes) => serde_json::from_slice(&bytes)
                     .map_err(|e| format!("{}: {e}", self.engines_path().display()))?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && self.engines_path().symlink_metadata().is_err() =>
+                {
+                    Default::default()
+                }
                 Err(e) => return Err(format!("{}: {e}", self.engines_path().display())),
             };
             Ok(overlay)
         })
     }
 
-    fn engines_path(&self) -> PathBuf {
+    /// The file the engine settings live in.
+    pub fn engines_path(&self) -> PathBuf {
         self.overlay.with_file_name("engines.json")
+    }
+
+    /// Flush the engine store and its directory, for a result that must
+    /// outlast a crash before anyone is told of it.
+    pub fn sync_engines(&self) -> Result<(), String> {
+        let path = self.engines_path();
+        File::open(&path)
+            .and_then(|f| f.sync_all())
+            .and_then(|()| File::open(path.parent().unwrap_or(std::path::Path::new("."))))
+            .and_then(|d| d.sync_all())
+            .map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// The stored answer to an engines request's receipt, if it completed.
@@ -213,18 +230,8 @@ impl Config {
         {
             return Ok(self.read()?.engines.status(None));
         }
-        let parent = self
-            .overlay
-            .parent()
-            .ok_or("overlay needs a parent directory")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.overlay.with_extension("lock"))
-            .map_err(|e| e.to_string())?;
-        lock.lock().map_err(|e| e.to_string())?;
+        let _lock = self.lock()?;
+        self.migrate_locked()?;
         let mut state = self.read()?;
         let mut engines_answer = None;
         if let Some(body) = receipt.and_then(|r| {
@@ -327,25 +334,19 @@ impl Config {
 
     /// The engines, models and saved sets in force, read fresh.
     pub fn engines(&self) -> Result<engines::Engines, String> {
-        Ok(self.read()?.engines)
+        let engines = self.read()?.engines;
+        engines
+            .validate()
+            .map_err(|e| format!("{}: {e}", self.engines_path().display()))?;
+        Ok(engines)
     }
 
     /// Replace the roles and models with those the old file formats say
     /// (`ROLE ENGINE [over PCT ENGINE]` and `ROLE ENGINE MODEL|- [EFFORT]`
     /// lines), logged. Models they name become offered. Saved sets stay.
     pub fn import(&self, roles: &str, models: &str, actor: &str) -> Result<(), String> {
-        let parent = self
-            .overlay
-            .parent()
-            .ok_or("overlay needs a parent directory")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.overlay.with_extension("lock"))
-            .map_err(|e| e.to_string())?;
-        lock.lock().map_err(|e| e.to_string())?;
+        let _lock = self.lock()?;
+        self.migrate_locked()?;
         let new = engines::import(roles, models, &[], None)?;
         let mut state = self.read()?;
         state.engines.roles = new.roles;
@@ -362,18 +363,14 @@ impl Config {
     /// A file that doesn't parse, or a link to nowhere, stops it with
     /// nothing written.
     pub fn migrate(&self) -> Result<bool, String> {
-        let Some(dir) = &self.legacy else {
-            return Ok(false);
-        };
-        let names = ["roles", "models", "roles.d", "roles.previous"];
-        // Once engines.json exists the overlay owns these values. The old
-        // files are left where they are, so a rollback to the generation that
-        // reads them still works (with the values they had).
-        if self.engines_path().exists()
-            || !names.iter().any(|n| dir.join(n).symlink_metadata().is_ok())
-        {
+        if self.legacy.is_none() {
             return Ok(false);
         }
+        let _lock = self.lock()?;
+        self.migrate_locked()
+    }
+
+    fn lock(&self) -> Result<File, String> {
         let parent = self
             .overlay
             .parent()
@@ -386,6 +383,46 @@ impl Config {
             .open(self.overlay.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.lock().map_err(|e| e.to_string())?;
+        Ok(lock)
+    }
+
+    /// Whether PATH is there: a link to nowhere is, and so is one that can't
+    /// be looked at, which fails instead of passing for absent.
+    fn present(path: &std::path::Path) -> Result<bool, String> {
+        match path.symlink_metadata() {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// [`Config::migrate`], for a caller that holds the lock, so it runs
+    /// before any first write of the engine store and never beside one.
+    fn migrate_locked(&self) -> Result<bool, String> {
+        let Some(dir) = &self.legacy else {
+            return Ok(false);
+        };
+        let names = ["roles", "models", "roles.d", "roles.previous"];
+        // Once engines.json exists the overlay owns these values. The old
+        // files are left where they are, so a rollback to the generation that
+        // reads them still works (with the values they had).
+        if Self::present(&self.engines_path())? {
+            return Ok(false);
+        }
+        let mut any = false;
+        for n in names {
+            any |= Self::present(&dir.join(n))?;
+        }
+        if !any {
+            return Ok(false);
+        }
+        // A switch the old door left half done can't be adopted here.
+        if Self::present(&dir.join("roles.operation"))? {
+            return Err(format!(
+                "{}: an unfinished engine switch; finish it with the previous proj, or remove the file",
+                dir.join("roles.operation").display()
+            ));
+        }
         let text = |name: &str| match fs::read_to_string(dir.join(name)) {
             Ok(t) => Ok(t),
             // Absent means unset; a link to nowhere is a broken setting.

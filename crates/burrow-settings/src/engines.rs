@@ -273,25 +273,39 @@ impl Engines {
         Ok(self.status(before.as_deref()))
     }
 
-    /// A saved set held to what the door holds a live one to, so a hand edit
-    /// cannot put an invalid value in force.
+    /// A set held to what the door holds a live one to: keys already in
+    /// their folded form (so none repeats), engines, overflow, offered
+    /// models of valid syntax and efforts.
     fn check(&self, set: &Saved) -> Result<(), String> {
         for (k, v) in &set.roles {
-            key(k)?;
+            if key(k)? != *k {
+                return Err(format!("role key {k} isn't in its folded form"));
+            }
             spec(&v.split_whitespace().collect::<Vec<_>>())?;
         }
         for (k, t) in &set.models {
             let (role, on) = k.split_once(' ').ok_or("bad models key")?;
-            key(role)?;
+            if key(role)? != role {
+                return Err(format!("models key {k} isn't in its folded form"));
+            }
             let on = engine(on)?;
             if let Some(m) = &t.model
-                && !self.offered.get(on).is_some_and(|o| o.contains(m))
+                && !(model_ok(m) && self.offered.get(on).is_some_and(|o| o.contains(m)))
             {
                 return Err(format!("{on} offers no model {m}"));
             }
             if let Some(e) = t.effort.as_deref().filter(|e| !effort_ok(on, e)) {
                 return Err(format!("{on} takes no effort {e}"));
             }
+        }
+        Ok(())
+    }
+
+    /// The live state and every saved set, checked as the door checks.
+    pub fn validate(&self) -> Result<(), String> {
+        self.check(&self.current())?;
+        for (name, set) in &self.saved {
+            self.check(set).map_err(|e| format!("setup {name}: {e}"))?;
         }
         Ok(())
     }

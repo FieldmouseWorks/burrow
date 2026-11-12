@@ -64,7 +64,7 @@ fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
     fs::write(job.path("role"), "work").unwrap();
     fs::write(job.path("agent"), "sandbox").unwrap();
     for (line, expected) in [
-        ("work unknown", "line 1: work unknown"),
+        ("work unknown", "unknown engine unknown"),
         ("work codex", "codex cannot run a --vm job"),
     ] {
         let (role, bad) = line.split_once(' ').unwrap();

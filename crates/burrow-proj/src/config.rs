@@ -341,7 +341,7 @@ impl Config {
     fn overlay_name(&self) -> PathBuf {
         self.settings
             .as_ref()
-            .map_or_else(|| PathBuf::from("(no settings)"), |s| s.overlay.clone())
+            .map_or_else(|| PathBuf::from("(no settings)"), |s| s.engines_path())
     }
 
     pub(crate) fn engine_in(

@@ -66,7 +66,7 @@ fn every_option_shown_comes_from_the_schema() {
     );
     assert_eq!(
         options["proj.roles"],
-        json!({"value": {}, "origin": "default", "file": overlay})
+        json!({"value": {}, "origin": "default", "file": overlay.with_file_name("engines.json")})
     );
     assert_eq!(options["proj.usageHold"]["value"], Value::Null);
 
@@ -95,7 +95,7 @@ fn every_option_shown_comes_from_the_schema() {
                         "fix codex": {"model": null, "effort": "high"}});
     assert_eq!(
         options["proj.roles"],
-        json!({"value": usual_roles, "origin": "live", "file": overlay})
+        json!({"value": usual_roles, "origin": "live", "file": overlay.with_file_name("engines.json")})
     );
     assert_eq!(options["proj.models"]["value"], models);
     assert_eq!(

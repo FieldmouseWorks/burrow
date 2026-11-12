@@ -99,39 +99,37 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
                 let actor = format!("github:{}#{}", cfg.repo, issue.number);
                 // A completed request of the file-based door kept its result in
                 // this path; the open cycle it belongs to has been answered.
-                let earlier = legacy_result(&operation);
-                match if let Some(said) = earlier {
+                let earlier = legacy_result(&operation)?;
+                let done = if let Some(said) = earlier {
                     Ok(said)
                 } else if args[0] == "use" {
                     cfg.settings.request(&operation, &change, &actor)
                 } else {
                     cfg.settings.command(&change, &actor)
-                } {
+                };
+                match done {
                     Ok(said) => (fenced(&said), "completed"),
-                    // Publishing can fail after the rename, with the result
-                    // already stored: that is a completed request.
-                    Err(_) if matches!(cfg.settings.receipt(&operation), Ok(Some(_))) => (
-                        fenced(
-                            &cfg.settings
-                                .receipt(&operation)
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default(),
-                        ),
-                        "completed",
-                    ),
-                    // The overlay publishes atomically, so an error changed
-                    // nothing. Name the class of it, never a model choice.
                     Err(e) => {
-                        let current = cfg
-                            .settings
-                            .command(&["engines".into(), "list".into()], &actor)
-                            .map(|s| fenced(&s))
-                            .unwrap_or_else(|e| diagnostic(&e));
-                        (
-                            format!("Nothing changed. {}\n\n{current}", diagnostic(&e)),
-                            "not_planned",
-                        )
+                        // Publishing can fail after the rename, with the result
+                        // already stored. An unreadable receipt leaves the
+                        // request open; a stored one is flushed before anyone
+                        // is told, and a flush that fails leaves it open too.
+                        if let Some(said) = cfg.settings.receipt(&operation)? {
+                            cfg.settings.sync_engines()?;
+                            (fenced(&said), "completed")
+                        } else {
+                            // Nothing was published: name the class of the
+                            // error, never a model choice.
+                            let current = cfg
+                                .settings
+                                .command(&["engines".into(), "list".into()], &actor)
+                                .map(|s| fenced(&s))
+                                .unwrap_or_else(|e| diagnostic(&e));
+                            (
+                                format!("Nothing changed. {}\n\n{current}", diagnostic(&e)),
+                                "not_planned",
+                            )
+                        }
                     }
                 }
             }
@@ -164,14 +162,18 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
 
 /// The result a completed request of the earlier, file-based door left at
 /// `path`, if there is one.
-fn legacy_result(path: &Path) -> Option<String> {
+fn legacy_result(path: &Path) -> Result<Option<String>, String> {
     #[derive(Deserialize)]
     struct Old {
         result: Option<String>,
     }
-    serde_json::from_slice::<Old>(&fs::read(path).ok()?)
-        .ok()?
-        .result
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice::<Old>(&bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .result),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// The class of an error, with no raw overlay content or model choice.

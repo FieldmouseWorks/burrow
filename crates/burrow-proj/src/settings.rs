@@ -44,6 +44,10 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         .map(|s| s.engines())
         .transpose()?
         .unwrap_or_default();
+    let owner = cfg.settings.as_ref().map_or_else(
+        || cfg.jobs.join(".settings-unconfigured"),
+        |s| s.engines_path(),
+    );
     let set = !engines.is_empty();
     let tuning =
         |t: &burrow_settings::engines::Tuning| json!({"model": t.model, "effort": t.effort});
@@ -67,22 +71,22 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     let when = |v: Value, on: bool| on.then_some(v);
     readings.push(Reading::live(
         "proj.roles",
-        file.clone(),
+        owner.clone(),
         when(json!(engines.roles), set),
     ));
     readings.push(Reading::live(
         "proj.models",
-        file.clone(),
+        owner.clone(),
         when(Value::Object(models), set),
     ));
     readings.push(Reading::live(
         "proj.offeredModels",
-        file.clone(),
+        owner.clone(),
         when(json!(engines.offered), set),
     ));
     readings.push(Reading::live(
         "proj.engineSetups",
-        file,
+        owner,
         when(
             json!({"active": engines.active(), "previous": engines.previous, "saved": saved}),
             set,
