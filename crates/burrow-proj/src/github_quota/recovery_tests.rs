@@ -471,3 +471,46 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
         );
     }
 }
+
+#[test]
+fn replay_checkpoints_each_baseline_before_a_later_target_is_limited() {
+    let (d, cfg) = fixture();
+    let job = job(&cfg);
+    pending(&job, 1, vec!["sam/r#1".into(), "sam/r#2".into()]);
+    burrow_test::executable(
+        &cfg.tools.gh,
+        format!(
+            r#"#!/bin/sh
+case "$*" in
+ *issues/2*) printf 'HTTP/2.0 429 Too Many Requests\nretry-after: 3600\n\n{{}}'; exit 1;;
+ *issues/1/comments*) echo called >> '{}/first-calls'; printf 'HTTP/2.0 200 OK\n\n[]';;
+ *) printf 'HTTP/2.0 200 OK\n\n{{"state":"open"}}';;
+esac
+"#,
+            d.path().display()
+        ),
+    );
+    assert!(replay(&cfg, &job).unwrap().is_some());
+    valid_records(&captured(&job), &["sam/r#1"]);
+    // The next attempt must retain this baseline rather than hiding news
+    // that arrived between the two reset windows.
+    burrow_test::executable(
+        &cfg.tools.gh,
+        format!(
+            r#"#!/bin/sh
+case "$*" in
+ *issues/1*) echo recaptured >> '{}/first-calls'; exit 1;;
+ *comments*) printf 'HTTP/2.0 200 OK\n\n[]';;
+ *) printf 'HTTP/2.0 200 OK\n\n{{"state":"open"}}';;
+esac
+"#,
+            d.path().display()
+        ),
+    );
+    assert_eq!(replay(&cfg, &job).unwrap(), None);
+    valid_records(&read(&job.path("await")).unwrap(), &["sam/r#1", "sam/r#2"]);
+    assert_eq!(
+        read(&d.path().join("first-calls")).as_deref(),
+        Some("called")
+    );
+}

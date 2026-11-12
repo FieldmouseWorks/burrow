@@ -267,6 +267,7 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
         .map(|a| a.target)
         .collect();
     let mut owner = String::new();
+    let mut checkpoint_error = None;
     let result = found
         .iter()
         .zip(targets)
@@ -275,16 +276,24 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
                 return Ok(text);
             }
             owner = found.0.split('/').next().unwrap_or_default().to_owned();
-            text.push_str(&crate::github::for_job(job, || {
+            let baseline = crate::github::for_job(job, || {
                 crate::cmd::baselines(
                     cfg,
                     std::slice::from_ref(found),
                     std::slice::from_ref(target),
                     None,
                 )
-            })?);
+            })?;
+            if let Err(e) = remember(job, &baseline) {
+                checkpoint_error = Some(e);
+                return Err(crate::Fail::new(1, "cannot checkpoint recovered baseline"));
+            }
+            text.push_str(&baseline);
             Ok(text)
         });
+    if let Some(error) = checkpoint_error {
+        return Err(RecoveryError::State(error));
+    }
     let waits = match result {
         Ok(waits) => waits,
         Err(error) => {
