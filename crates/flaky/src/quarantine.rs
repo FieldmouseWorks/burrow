@@ -166,12 +166,12 @@ fn all(
         return Ok((tag.map(String::from), kept["items"].clone()));
     }
     let mut items = page(&first)?;
-    let mut next = first.next(path);
+    let mut next = first.next();
     let one = next.is_none();
     while let Some(p) = next {
         let r = call(api, "GET", &p, None, None)?;
         items.extend(page(&r)?);
-        next = r.next(&p);
+        next = r.next();
     }
     let etag = first.header("etag").filter(|_| one).map(String::from);
     Ok((etag, Value::Array(items.iter().map(pick).collect())))
@@ -746,10 +746,9 @@ mod tests {
         let mut gh = Fake::default();
         let link =
             "<https://api.github.com/repositories/1/issues?labels=flaky&page=2>; rel=\"next\"";
-        // GitHub links the next page by the repo's id; it's asked by name.
         gh.on(
             "GET",
-            "repos/sam/game/issues?labels=flaky&page=2",
+            "repositories/1/issues",
             vec![ok(200, json!([issue(2, "flaky: z", ACTIONS)]), &[])],
         );
         gh.on(

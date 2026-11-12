@@ -33,42 +33,16 @@ impl Response {
             .map_err(|e| Error::said(format!("GitHub's answer isn't JSON: {e}")))
     }
 
-    /// The next page's path, from the Link header, for the answer to
-    /// `asked`. GitHub links a repo's later pages by the repo's id
-    /// (`repositories/ID/...`), which names no account, so gh-token can't
-    /// tell whose token the call takes; the page is asked for by the
-    /// `repos/OWNER/NAME` that `asked` names instead, the same list.
-    pub fn next(&self, asked: &str) -> Option<String> {
+    /// The next page's path, from the Link header.
+    pub fn next(&self) -> Option<String> {
         let link = self.header("link")?;
         let part = link.split(',').find(|p| p.contains("rel=\"next\""))?;
         let url = part.split('<').nth(1)?.split('>').next()?;
-        let url = url.strip_prefix("https://api.github.com/").unwrap_or(url);
-        Some(by_name(asked, url))
-    }
-}
-
-/// `next` with a leading `repositories/ID` given as the `repos/OWNER/NAME`
-/// that `asked` starts with; as it is when either isn't one.
-fn by_name(asked: &str, next: &str) -> String {
-    let Some(rest) = next.strip_prefix("repositories/") else {
-        return next.to_owned();
-    };
-    let (id, tail) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
-    let asked = asked.trim_start_matches('/');
-    let asked = asked
-        .strip_prefix("https://api.github.com/")
-        .unwrap_or(asked);
-    let mut part = asked.split(['/', '?']);
-    match (part.next(), part.next(), part.next()) {
-        (Some("repos"), Some(owner), Some(name))
-            if !id.is_empty()
-                && id.bytes().all(|b| b.is_ascii_digit())
-                && !owner.is_empty()
-                && !name.is_empty() =>
-        {
-            format!("repos/{owner}/{name}{tail}")
-        }
-        _ => next.to_owned(),
+        Some(
+            url.strip_prefix("https://api.github.com/")
+                .unwrap_or(url)
+                .to_string(),
+        )
     }
 }
 
@@ -239,7 +213,7 @@ pub fn pages_with_limit(
                 ))
             })?;
         pages.push(response.json()?);
-        match response.next(&path) {
+        match response.next() {
             Some(next) => path = next,
             None => return Ok(pages),
         }

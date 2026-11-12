@@ -273,7 +273,7 @@ impl Pass<'_> {
                     )));
                 }
             }
-            next = r.next(&at);
+            next = r.next();
         }
         Ok(all)
     }

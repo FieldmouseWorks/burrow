@@ -79,7 +79,7 @@ pub fn read(p: &mut Pass, ask: &Ask) -> Result<Read, String> {
     while let Some(at) = next {
         let r = call(p.api, "GET", &at, None, None).map_err(|e| p.github(e))?;
         pages.push(r.json().map_err(|e| p.github(e))?);
-        next = r.next(&at);
+        next = r.next();
     }
     match whole(&pages, &ask.head)? {
         Whole::Short(why) => Ok(Read::Short(why)),

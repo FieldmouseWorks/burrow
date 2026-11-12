@@ -72,7 +72,7 @@ impl Door<'_> {
         ));
         while let Some(path) = page {
             let r = call(api, "GET", &path, None, None)?;
-            page = r.next(&path);
+            page = r.next();
             match r.json()? {
                 Value::Array(more) => items.extend(more),
                 _ => return Err(format!("GitHub's list of {repo}'s issues isn't a list").into()),

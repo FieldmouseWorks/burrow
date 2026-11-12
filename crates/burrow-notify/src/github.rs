@@ -44,7 +44,7 @@ pub fn open_issues(
                 });
             }
         }
-        path = r.next(&p);
+        path = r.next();
     }
     Ok(found)
 }

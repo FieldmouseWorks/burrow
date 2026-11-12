@@ -160,7 +160,7 @@ pub fn open_prs(api: &mut dyn Api, repo: &str) -> Result<Vec<Pr>, Error> {
                     .is_some_and(|h| h.eq_ignore_ascii_case(repo)),
             });
         }
-        path = r.next(&p);
+        path = r.next();
     }
     Ok(prs)
 }
