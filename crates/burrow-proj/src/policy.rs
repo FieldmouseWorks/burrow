@@ -178,9 +178,9 @@ pub fn reconcile(cfg: &Config) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
     loop {
-        let before = (generation(cfg)?, read(&cfg.jobs.join(".policy-wake")));
-        reconcile_pass(cfg, &before.0)?;
-        if before == (generation(cfg)?, read(&cfg.jobs.join(".policy-wake"))) {
+        let before = generation(cfg)?;
+        reconcile_pass(cfg, &before)?;
+        if before == generation(cfg)? {
             return Ok(());
         }
     }
@@ -197,7 +197,7 @@ fn overlay(cfg: &Config) -> Result<Vec<u8>, String> {
     }
 }
 
-type Generation = (Vec<u8>, Option<i64>);
+type Generation = (Vec<u8>, Option<i64>, Option<String>);
 
 fn generation(cfg: &Config) -> Result<Generation, String> {
     Ok((
@@ -207,6 +207,7 @@ fn generation(cfg: &Config) -> Result<Generation, String> {
         cfg.settings
             .as_ref()
             .and_then(|s| s.scope_until().ok().flatten()),
+        read(&cfg.jobs.join(".policy-wake")),
     ))
 }
 
