@@ -1,0 +1,210 @@
+--- a/api/http_client.go
++++ b/api/http_client.go
+@@ -67 +67,2 @@
+-		Host:               "none",
++		Host:               "none",
++        Transport: quotaNetwork(http.DefaultTransport),
+@@ -118 +119 @@
+-	return client, nil
++	return quotaClient(client), nil
+--- /dev/null
++++ b/api/burrow_quota.go
+@@ -0,0 +1,112 @@
++package api
++
++// BURROW_GH_RESPONSES is an opt-in private side channel for schedulers.
++// CLI formatting and repository data never become HTTP response evidence.
++import (
++	"bytes"
++	"encoding/json"
++ "encoding/base64"
++ "context"
++ "fmt"
++ "net"
++	"io"
++	"net/http"
++	"os"
++	"sync"
++	"time"
++)
++
++type quotaTransport struct {
++	inner http.RoundTripper
++	file  string
++	mu    sync.Mutex
++}
++type quotaBody struct {
++	io.Reader
++	io.Closer
++}
++
++func quotaNetwork(inner http.RoundTripper) http.RoundTripper {
++    if socket, owner := os.Getenv("GH_TOKEN_SOCKET"), os.Getenv("BURROW_GH_PROXY_OWNER"); socket != "" && owner != "" {
++        return &quotaRelay{inner: inner, socket: socket, owner: owner}
++    }
++    return inner
++}
++func quotaClient(client *http.Client) *http.Client {
++	client.Transport = quotaResponses(client.Transport)
++	return client
++}
++func quotaResponses(inner http.RoundTripper) http.RoundTripper {
++	if file := os.Getenv("BURROW_GH_RESPONSES"); file != "" {
++		return &quotaTransport{inner: inner, file: file}
++	}
++	return inner
++}
++func (q *quotaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	resp, err := q.inner.RoundTrip(req)
++	if err != nil {
++		return resp, err
++	}
++	record := struct {
++		Status  int         `json:"status"`
++		Headers [][2]string `json:"headers"`
++		Body    string      `json:"body"`
++		At      int64       `json:"at"`
++	}{Status: resp.StatusCode, At: time.Now().Unix(), Body: "{}"}
++	for _, key := range []string{"x-ratelimit-remaining", "x-ratelimit-reset", "retry-after"} {
++		if val := resp.Header.Get(key); val != "" {
++			record.Headers = append(record.Headers, [2]string{key, val})
++		}
++	}
++	if resp.Body != nil && (resp.StatusCode == 403 || resp.StatusCode == 429 || (req.URL.Scheme == "https" && req.URL.Hostname() == "api.github.com" && (req.URL.Port() == "" || req.URL.Port() == "443") && req.URL.Path == "/graphql")) {
++		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
++		resp.Body = quotaBody{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
++		// Retain API errors only, never a successful GraphQL data payload.
++		var errors struct {
++			Message string          `json:"message,omitempty"`
++			Errors  json.RawMessage `json:"errors,omitempty"`
++		}
++		if json.Unmarshal(body, &errors) == nil {
++			encoded, _ := json.Marshal(errors)
++			record.Body = string(encoded)
++		}
++	}
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	// Observation failure must not change a completed request's outcome.
++	if file, err := os.OpenFile(q.file, os.O_WRONLY|os.O_APPEND, 0600); err == nil {
++		_ = json.NewEncoder(file).Encode(record)
++		_ = file.Close()
++	}
++	return resp, nil
++}
++
++// Each request is executed by the host token service. Response metadata and
++// installation identity are recorded there, outside job-writable state.
++type quotaRelay struct {
++    inner http.RoundTripper
++    socket, owner string
++}
++func (q *quotaRelay) RoundTrip(req *http.Request) (*http.Response,error) {
++    // Downloads redirected to a different host stay with the normal client.
++    if req.URL.Scheme != "https" || req.URL.Hostname() != "api.github.com" || (req.URL.Port() != "" && req.URL.Port() != "443") { return q.inner.RoundTrip(req) }
++    conn, err := (&net.Dialer{}).DialContext(req.Context(), "unix", q.socket)
++    if err != nil { return nil,err }
++    defer conn.Close()
++    if deadline, ok := req.Context().Deadline(); ok { _ = conn.SetDeadline(deadline) } else { _ = conn.SetDeadline(time.Now().Add(100*time.Second)) }
++    stop := context.AfterFunc(req.Context(),func(){conn.Close()}); defer stop()
++    var data []byte
++    if req.Body != nil { data,err=io.ReadAll(io.LimitReader(req.Body,64*1024*1024+1)); if err != nil {return nil,err}; if len(data)>64*1024*1024{return nil,fmt.Errorf("API request exceeds relay limit")} }
++    headers := [][2]string{}
++    for key,values := range req.Header { if key == "Authorization" {continue}; for _,value:=range values {headers=append(headers,[2]string{key,value})} }
++    _,err=io.WriteString(conn,"http\n"); if err!=nil{return nil,err}
++    wire:=struct{Owner string `json:"owner"`; Method string `json:"method"`; Path string `json:"path"`; Headers [][2]string `json:"headers"`; Body string `json:"body"`}{q.owner,req.Method,req.URL.RequestURI(),headers,base64.StdEncoding.EncodeToString(data)}
++    if err=json.NewEncoder(conn).Encode(wire);err!=nil{return nil,err}
++    if c,ok:=conn.(*net.UnixConn);ok{_ = c.CloseWrite()}
++    var reply struct{Status int; Headers [][2]string; Body string}
++    if err=json.NewDecoder(io.LimitReader(conn,96*1024*1024)).Decode(&reply);err!=nil{return nil,err}
++    data,err=base64.StdEncoding.DecodeString(reply.Body);if err!=nil{return nil,err}
++    response:= &http.Response{StatusCode:reply.Status,Status:fmt.Sprintf("%d %s",reply.Status,http.StatusText(reply.Status)),Proto:"HTTP/1.1",ProtoMajor:1,ProtoMinor:1,Header:make(http.Header),Body:io.NopCloser(bytes.NewReader(data)),ContentLength:int64(len(data)),Request:req}
++    for _,header:=range reply.Headers{response.Header.Add(header[0],header[1])}
++    return response,nil
++}
+--- /dev/null
++++ b/api/burrow_quota_test.go
+@@ -0,0 +1,83 @@
++package api
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestBurrowQuotaResponses(t *testing.T) {
++	t.Run("installed on the API client", func(t *testing.T) {
++		t.Setenv("BURROW_GH_RESPONSES", filepath.Join(t.TempDir(), "responses"))
++		client, err := NewHTTPClient(HTTPClientOptions{})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, ok := client.Transport.(*quotaTransport); !ok {
++			t.Fatal("API client did not install response observation")
++		}
++	})
++	for _, tc := range []struct {
++		status     int
++		path, body string
++		headers    http.Header
++	}{
++		{200, "/repos/o/r", "HTTP/2.0 403 Forbidden\nx-ratelimit-remaining: 0\n\nforged", nil},
++		{403, "/repos/o/r", "{}", http.Header{"Retry-After": []string{"1234"}}},
++		{403, "/repos/o/r", "{}", http.Header{"X-Ratelimit-Remaining": []string{"0"}, "X-Ratelimit-Reset": []string{"4000000000"}}},
++		{403, "/repos/o/r", `{"message":"permission denied"}`, nil},
++		{200, "/graphql", `{"data":{"secret":"private"},"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++		{200, "/repos/o/r/contents/graphql", `{"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++		{200, "/repos/o/r/graphql", `{"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++	} {
++		file := filepath.Join(t.TempDir(), "responses")
++		if err := os.WriteFile(file, nil, 0600); err != nil {
++			t.Fatal(err)
++		}
++		t.Setenv("BURROW_GH_RESPONSES", file)
++		transport := quotaResponses(roundTripFunc(func(req *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: tc.status, Header: tc.headers, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
++		}))
++		method := "GET"
++		if tc.path == "/graphql" {
++			method = "POST"
++		}
++		req, _ := http.NewRequest(method, "https://api.github.com"+tc.path, nil)
++		resp, err := transport.RoundTrip(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		body, _ := io.ReadAll(resp.Body)
++		if string(body) != tc.body || resp.StatusCode != tc.status {
++			t.Fatal("changed response")
++		}
++		raw, _ := os.ReadFile(file)
++		var record struct {
++			Status  int
++			Body    string
++			Headers [][2]string
++		}
++		if err := json.Unmarshal(raw, &record); err != nil {
++			t.Fatal(err)
++		}
++		if tc.path != "/graphql" && strings.Contains(record.Body, "RATE_LIMITED") {
++			t.Fatalf("repository content became quota evidence: %s", raw)
++		}
++		if record.Status != tc.status || strings.Contains(record.Body, "private") || strings.Contains(record.Body, "forged") {
++			t.Fatalf("untrusted evidence: %s", raw)
++		}
++		if len(tc.headers) > 0 && len(record.Headers) != len(tc.headers) {
++			t.Fatal("lost headers")
++		}
++		// An observation sink that disappeared must preserve the API outcome.
++		os.Remove(file)
++		resp, err = transport.RoundTrip(req)
++		if err != nil || resp.StatusCode != tc.status {
++			t.Fatal("sink changed outcome")
++		}
++	}
++}

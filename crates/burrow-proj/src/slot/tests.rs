@@ -937,4 +937,7 @@ mod admission;
 mod codex;
 
 mod pools;
+
+mod github;
+
 mod retained;
