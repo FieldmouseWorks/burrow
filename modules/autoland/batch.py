@@ -41,7 +41,7 @@ class Batch:
         st = self.state["repos"].get(repo, {})
         done = st.get("done", {})
         if st.get("wake"):
-            C.wake(repo, max(st["wake"], C.NOW + 1))
+            C.wake(repo, max(st["wake"], C.NOW + 1))  # ends: the carried PR deadline gets its next look after this traversal
         pending = [pr for pr in prs if done.get(str(pr["number"])) != self.rev(pr, info)]
         # A closed or changed PR's old owner line mustn't suppress its new
         # watchdog wait. Repo-wide notices survive until its traversal ends.
