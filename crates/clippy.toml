@@ -1,0 +1,7 @@
+# The one outbound HTTP agent is burrow_github::outbound::agent; nobody else
+# builds a ureq agent, so the policy (trust, redirects, proxy) lands once.
+disallowed-methods = [
+    { path = "ureq::Agent::config_builder", reason = "build the agent with burrow_github::outbound::agent" },
+    { path = "ureq::Agent::new_with_defaults", reason = "build the agent with burrow_github::outbound::agent" },
+    { path = "ureq::Agent::new_with_config", reason = "build the agent with burrow_github::outbound::agent" },
+]

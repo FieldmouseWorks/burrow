@@ -6,7 +6,7 @@ use burrow_watchdog::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -181,7 +181,7 @@ fn pass() -> Result<(), String> {
     cache.retain(|_, r| r.at >= now - 86400.0);
     write(&cache_file, &cache)?;
     write(&cfg.file, &file)?;
-    burrow_events::kick::kick(&cfg.kick, Duration::from_secs(10))
+    burrow_events::kick::kick(&cfg.kick, burrow_events::kick::KICK_TIMEOUT)
 }
 fn write(path: &std::path::Path, value: &impl serde::Serialize) -> Result<(), String> {
     let tmp = path.with_extension("tmp");

@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::error::Error;
 use crate::target::Target;
@@ -53,25 +52,21 @@ impl App {
             _ => return Err(Error::refused("the App's key isn't an RSA key")),
         }
         .map_err(|e| Error::refused(format!("the App's key: {e}")))?;
-        let config = ureq::Agent::config_builder()
-            .proxy(proxy)
-            .tls_config(
-                TlsConfig::builder()
-                    .root_certs(RootCerts::PlatformVerifier)
-                    .build(),
-            )
-            .user_agent("gh-token")
-            .timeout_global(Some(Duration::from_secs(30)))
-            // A connection of its own for each request. They're a few an
-            // hour, and on one kept open the server can close it as the
-            // next goes out, which fails a mint: a POST, never sent twice.
-            .max_idle_connections(0)
-            // Every status is read here: which errors are GitHub's limits is
-            // told from the answer.
-            .http_status_as_error(false)
-            .build();
+        // A connection of its own for each request. They're a few an
+        // hour, and on one kept open the server can close it as the
+        // next goes out, which fails a mint: a POST, never sent twice.
+        let agent = burrow_github::outbound::agent_with(
+            Duration::from_secs(30),
+            0,
+            burrow_github::outbound::Options {
+                proxy: proxy.into(),
+                user_agent: Some("gh-token".to_owned()),
+                fresh_connections: true,
+                ..Default::default()
+            },
+        );
         Ok(Self {
-            agent: ureq::Agent::new_with_config(config),
+            agent,
             api: api.trim_end_matches('/').to_owned(),
             id,
             key,

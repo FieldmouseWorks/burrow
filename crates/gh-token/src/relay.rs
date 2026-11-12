@@ -34,18 +34,14 @@ fn io_error(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 fn agent(config: &answer::Config) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .proxy(config.proxy.clone())
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .build()
-        .into()
+    burrow_github::outbound::agent_with(
+        Duration::from_secs(30),
+        0,
+        burrow_github::outbound::Options {
+            proxy: config.proxy.clone().into(),
+            ..Default::default()
+        },
+    )
 }
 fn fetch(
     agent: &ureq::Agent,

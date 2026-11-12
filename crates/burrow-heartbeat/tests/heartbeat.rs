@@ -283,13 +283,14 @@ fn health_is_its_whole_report_or_how_it_failed() {
 
 /// An agent like the beat's, with no proxy and a short try.
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .proxy(None)
-        .timeout_global(Some(Duration::from_millis(500)))
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into()
+    burrow_github::outbound::agent_with(
+        Duration::from_millis(500),
+        0,
+        burrow_github::outbound::Options {
+            proxy: burrow_github::outbound::Proxy::Direct,
+            ..Default::default()
+        },
+    )
 }
 
 /// Sends `p` to the stand-in; returns what `send` said and its pauses.

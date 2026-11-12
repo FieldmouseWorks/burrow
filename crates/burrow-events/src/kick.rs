@@ -4,6 +4,9 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+/// How long a kick may take, connecting, writing and reading each.
+pub const KICK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// POST to URL (`http://HOST:PORT/kick/HANDLER[/OWNER/REPO]`, the kick
 /// port's), with nothing in the body: the handler's pass over that repo, or
 /// its full pass. Ok once burrow-events took it; otherwise why not.
@@ -49,12 +52,10 @@ pub fn kick(url: &str, timeout: Duration) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{KICK_TIMEOUT, kick};
+    use crate::http::listen;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use super::kick;
-    use crate::http::listen;
 
     // A kick the port takes is Ok; one it turns away, or no port at all,
     // says why.
@@ -70,7 +71,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let t = Duration::from_secs(5);
+        let t = KICK_TIMEOUT;
         assert_eq!(
             kick(&format!("http://127.0.0.1:{port}/kick/autoland/sam/r"), t),
             Ok(())

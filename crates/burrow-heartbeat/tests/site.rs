@@ -340,13 +340,14 @@ fn holding_the_key(pid: u32) -> Vec<String> {
 
 #[test]
 fn answers_is_2xx_and_its_whole_body() {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .proxy(None)
-        .timeout_global(Some(Duration::from_millis(500)))
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into();
+    let agent = burrow_github::outbound::agent_with(
+        Duration::from_millis(500),
+        0,
+        burrow_github::outbound::Options {
+            proxy: burrow_github::outbound::Proxy::Direct,
+            ..Default::default()
+        },
+    );
     let (_s, ok) = site(200, None);
     assert_eq!(answers(&agent, &ok), Ok(200));
     let (_s, moved) = site(302, Some(&ok));
