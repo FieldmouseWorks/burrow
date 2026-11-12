@@ -13,6 +13,9 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   fixed and held.
 - [docs/settings.md](docs/settings.md): the pipeline's options, their one
   schema (crates/burrow-settings) and `proj settings show`.
+- [docs/settings-reference.md](docs/settings-reference.md): every option's
+  type, default and where it's kept, written from the schema; the one place
+  the guidance states them (crates/burrow-guidance holds the rest to that).
 
 <!-- house:rules v1 begin. Copied from FieldmouseWorks/burrow house/rules.md, verbatim. Change it there, not here: burrow's house sync rewrites everything between these markers. -->
 ## House rules
@@ -30,6 +33,10 @@ they're more specific.
   When you replace something, delete the old path in the same change.
 - One fact, one home. Each rule or fact lives in one place; link to it
   instead of restating it.
+- Pipeline options live in the settings source: change them through its
+  door, read them with `settings show`, and link the
+  [settings reference](https://github.com/FieldmouseWorks/burrow/blob/main/docs/settings-reference.md)
+  rather than restate a value or where one is kept.
 - Before you edit, say what done looks like and how it will be checked.
 - Report only the checks you ran and what they said. Skipped, unavailable
   or "should pass" is never a pass. Keep local and CI results apart.

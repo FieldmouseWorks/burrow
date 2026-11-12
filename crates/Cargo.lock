@@ -532,6 +532,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-guidance"
+version = "0.0.0"
+dependencies = [
+ "burrow-settings",
+ "regex",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-health"
 version = "0.0.0"
 dependencies = [

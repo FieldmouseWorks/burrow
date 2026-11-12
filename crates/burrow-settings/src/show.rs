@@ -179,7 +179,7 @@ impl Document {
                 };
                 let change = match s.change {
                     schema::Change::Deploy => ", deploy to change",
-                    schema::Change::Live => "",
+                    schema::Change::Live { .. } => "",
                 };
                 format!("{:width$}  {}  ({from}{change})\n", s.name, r.value)
             })

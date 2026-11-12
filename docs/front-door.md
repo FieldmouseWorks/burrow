@@ -141,12 +141,12 @@ to that cycle, so interruption or a failed GitHub reply cannot repeat `back`.
 
 On the machine, `proj engines` lists saved setups, marks the active one and
 names the previous one. `proj engines save NAME` checks the current roles
-file and saves it under `roles.d/NAME`, beside that file in the user's
-untracked config. Names use lowercase letters, digits and hyphens; `back`
+file and saves it as the setup NAME (`proj.engineSetups`, kept where the
+[settings reference](settings-reference.md) says). Names use lowercase letters, digits and hyphens; `back`
 is reserved. Replacing a saved setup needs `--replace`.
 `proj engines use NAME` checks it with the turn's parser, then atomically
 replaces the roles path with a link to it. An unmatched plain roles file is
-kept as `roles.d/unsaved-<UTC time>` first. `proj engines use back` returns
+saved first as the setup `unsaved-<UTC time>`. `proj engines use back` returns
 to the setup replaced by the last switch. Existing plain roles files keep
 working without creating setups.
 
@@ -292,7 +292,8 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
-Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE`, with
+Roles on the box are the roles file (`proj.roles`, kept where the
+[settings reference](settings-reference.md) says): `ROLE ENGINE`, with
 `ENGINE` either `claude` or `codex`. Scope a key to one repo with
 `ROLE@OWNER/REPO`:
 
@@ -320,8 +321,8 @@ windows are spent. Missing readings, or readings an hour old, move nothing.
 Each engine keeps its own conversation when a role moves between them.
 
 The roles file picks only the engine, so a saved engine setup swaps it
-whole. What each role runs at on each engine lives beside it, in
-`~/.config/proj/models`, and stays put when setups switch:
+whole. What each role runs at on each engine is the models file beside it
+(`proj.models`), which stays put when setups switch:
 `ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]`.
 
 ```
@@ -349,7 +350,7 @@ Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
 an independent login: `autoland-codex-login job` logs the job user in,
 `autoland-codex-login review` logs the reviewer in. Each is a device-code
 login; don't copy tokens between them. Codex jobs have their own small
-pool (`burrow.proj.codex.slots`, two by default), leaving the reviewer first
+pool (`burrow.proj.codex.slots`), leaving the reviewer first
 claim on the plan. Usage refusals wait for the reset and resume themselves.
 The job user's `.codex/config.toml` picks the default model. Machine
 instructions and one-way command rules are generated alongside Claude's.
