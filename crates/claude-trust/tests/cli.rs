@@ -171,3 +171,33 @@ fn a_lock_a_crash_left_behind_is_taken_over() {
     );
     assert!(!case.lock().exists(), "left the lock it took over");
 }
+
+#[test]
+fn an_empty_argument_fails_before_anything_is_written() {
+    let case = Case::new();
+    fs::write(case.cfg(), "{}").unwrap();
+    let out = case.run(&[case.path("real/project"), PathBuf::from("")]);
+    assert!(!out.status.success());
+    assert_eq!(fs::read_to_string(case.cfg()).unwrap(), "{}");
+}
+
+#[test]
+fn dangling_links_are_followed_to_where_the_target_will_be() {
+    let case = Case::new();
+    fs::write(case.cfg(), "{}").unwrap();
+    // absolute dangling, relative chained onto it, then ".." past it
+    symlink(case.path("future"), case.path("abs")).unwrap();
+    symlink("abs", case.path("rel")).unwrap();
+    symlink("../gone/x", case.path("up")).unwrap();
+    let out = case.run(&[
+        case.path("rel/project"),
+        case.path("up/../y"),
+        case.path("abs/a/../b"),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let root = fs::canonicalize(case.path("")).unwrap();
+    assert!(case.trusted(&root.join("future/project")));
+    assert!(case.trusted(&case.path("rel/project")));
+    assert!(case.trusted(&root.parent().unwrap().join("gone/y")));
+    assert!(case.trusted(&root.join("future/b")));
+}

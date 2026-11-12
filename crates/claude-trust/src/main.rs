@@ -5,7 +5,8 @@
 //! (modules/remote-control/serve.sh) and the usage watcher's Claude Code
 //! (modules/usage-reset.nix). Claude keys trust by the folder's real path;
 //! the spelling given is seeded too. A folder that isn't there yet is
-//! trusted at the path it will have.
+//! trusted at the path it will have. Every argument is resolved before the
+//! config is touched; one that can't be fails the run.
 
 use std::ffi::OsString;
 use std::fs;
@@ -22,6 +23,8 @@ use serde_json::{Map, Value};
 const TRIES: u32 = 100;
 const RETRY: Duration = Duration::from_millis(100);
 /// Claude Code's own lock goes stale after 10 seconds; a crash's leftover gets 30.
+/// Symlinks followed in one path before giving up, as the kernel does.
+const MAX_LINKS: u32 = 40;
 const STALE: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
@@ -45,7 +48,7 @@ fn run(dirs: &[PathBuf]) -> Result<(), String> {
 
     let mut paths: Vec<String> = Vec::new();
     for dir in dirs {
-        for path in [dir.clone(), real_path(dir)] {
+        for path in [dir.clone(), real_path(dir)?] {
             let path = path.to_string_lossy().into_owned();
             if !paths.contains(&path) {
                 paths.push(path);
@@ -161,26 +164,54 @@ fn is_stale(path: &Path) -> bool {
         .is_some_and(|age| age > STALE)
 }
 
-/// `realpath -m`: symlinks resolved as far as the path exists, the rest
-/// taken as written, `.` and `..` folded.
-fn real_path(dir: &Path) -> PathBuf {
-    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+/// `realpath -m`: every symlink followed (absolute, relative, chained,
+/// dangling), `.` and `..` folded, the missing rest taken as written.
+fn real_path(dir: &Path) -> Result<PathBuf, String> {
+    if dir.as_os_str().is_empty() {
+        return Err("empty path".into());
+    }
+    let absolute =
+        std::path::absolute(dir).map_err(|e| format!("{}: cannot resolve: {e}", dir.display()))?;
+    let mut todo: Vec<OsString> = absolute
+        .components()
+        .rev()
+        .filter_map(component_name)
+        .collect();
     let mut out = PathBuf::from("/");
-    for part in absolute.components() {
-        match part {
-            Component::Normal(name) => {
-                out.push(name);
-                if fs::symlink_metadata(&out).is_ok()
-                    && let Ok(resolved) = fs::canonicalize(&out)
-                {
-                    out = resolved;
+    let mut links = 0;
+    while let Some(name) = todo.pop() {
+        if name == ".." {
+            out.pop();
+            continue;
+        }
+        if name == "." {
+            continue;
+        }
+        let next = out.join(&name);
+        match fs::read_link(&next) {
+            Ok(target) => {
+                links += 1;
+                if links > MAX_LINKS {
+                    return Err(format!(
+                        "{}: too many levels of symbolic links",
+                        dir.display()
+                    ));
                 }
+                if target.is_absolute() {
+                    out = PathBuf::from("/");
+                }
+                todo.extend(target.components().rev().filter_map(component_name));
             }
-            Component::ParentDir => {
-                out.pop();
-            }
-            _ => {}
+            Err(_) => out = next,
         }
     }
-    out
+    Ok(out)
+}
+
+fn component_name(part: Component) -> Option<OsString> {
+    match part {
+        Component::Normal(name) => Some(name.to_owned()),
+        Component::ParentDir => Some("..".into()),
+        _ => None,
+    }
 }
