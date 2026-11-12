@@ -38,9 +38,9 @@ pub fn active(cfg: &Config, unit: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// The units matching `pattern` that are up (active, activating or
-/// reloading), by name as systemd spells them, in one look: None when it
-/// can't be told.
+/// The units matching `pattern` that are up, by name as systemd spells
+/// them, in one look: every state but inactive and failed, so a unit not
+/// listed is one [`gone`] would say is. None when it can't be told.
 pub fn up(cfg: &Config, pattern: &str) -> Option<std::collections::HashSet<String>> {
     let out = systemctl(cfg)
         .args([
@@ -48,7 +48,7 @@ pub fn up(cfg: &Config, pattern: &str) -> Option<std::collections::HashSet<Strin
             "--plain",
             "--no-legend",
             "--no-pager",
-            "--state=active,activating,reloading",
+            "--state=active,activating,deactivating,reloading,refreshing,maintenance",
             pattern,
         ])
         .stderr(Stdio::null())
