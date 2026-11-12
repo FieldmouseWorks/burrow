@@ -28,7 +28,8 @@
   ],
   "meters": [
     {"engine": "claude", "reading": {"fiveHour": {"used": 41.5, "resetsAt": 1794409200}, "weekly": {"used": 87.0, "resetsAt": 1794700000}, "credits": false, "readAt": 1794398100, "age": 300, "fresh": true}, "hold": null},
-    {"engine": "codex", "reading": {"fiveHour": {"used": 12.0, "resetsAt": 1794412800}, "weekly": null, "credits": true, "readAt": 1794390000, "age": 8400, "fresh": false}, "hold": null}
+    {"engine": "codex", "reading": {"fiveHour": {"used": 12.0, "resetsAt": 1794412800}, "weekly": null, "credits": true, "readAt": 1794390000, "age": 8400, "fresh": false}, "hold": null},
+    {"installation": {"app": "fieldmouseworks-workers", "owner": "FieldmouseWorks"}, "remaining": 42, "reset": 1794401000, "retryAt": 1794401500, "readAt": 1794398200, "age": 200, "held": true}
   ],
   "holds": {
     "paused": ["FieldmouseWorks/miracraft"],

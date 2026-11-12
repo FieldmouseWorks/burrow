@@ -42,6 +42,8 @@ fn sections_come_in_order_and_what_is_unknown_isnt_claimed() {
         html.find(&format!("id=\"{id}\""))
             .unwrap_or_else(|| panic!("{id}"))
     };
+    assert!(html.contains("GitHub fieldmouseworks-workers"));
+    assert!(html.contains("42 requests left"));
     let order = ["front", "slots", "queue", "deploy", "meters", "holds"].map(at);
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
     assert_eq!(html.matches("slot stalled").count(), 3);

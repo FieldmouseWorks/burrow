@@ -5,7 +5,8 @@
 //! reads anything else. Live updates are not this page's job.
 
 use burrow_proj::snapshot::{
-    Holder, Holds, Meter, Priority, Ready, Slot, SlotKind, SlotState, Snapshot, Window,
+    EngineMeter, GitHubMeter, Holder, Holds, Meter, Priority, Ready, Slot, SlotKind, SlotState,
+    Snapshot, Window,
 };
 use maud::{Markup, html};
 
@@ -258,6 +259,33 @@ fn window(name: &str, w: &Option<Window>, at: i64) -> Markup {
 }
 
 fn meter(m: &Meter, at: i64) -> Markup {
+    match m {
+        Meter::Engine(m) => engine_meter(m, at),
+        Meter::GitHub(m) => github_meter(m, at),
+    }
+}
+
+fn github_meter(m: &GitHubMeter, at: i64) -> Markup {
+    let until = |t: u64| span((t as i64).saturating_sub(at).max(0) as u64);
+    html! {
+        div.meter {
+            h3 { "GitHub " (m.installation.app) " · " (m.installation.owner) }
+            p.note {
+                @if let Some(r) = m.remaining { (r) " requests left" } @else { "No reading." }
+                @if let Some(t) = m.reset { " · resets in " (until(t)) }
+                " · read " (ago_secs(m.age))
+            }
+            @if m.held {
+                p.hold {
+                    strong.warn { "Held" }
+                    @if let Some(t) = m.retry_at { " for " (until(t)) " more" }
+                }
+            }
+        }
+    }
+}
+
+fn engine_meter(m: &EngineMeter, at: i64) -> Markup {
     html! {
         div.meter {
             h3 { (m.engine.name()) }
