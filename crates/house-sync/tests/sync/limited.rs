@@ -84,6 +84,9 @@ fn a_full_pass_leaves_only_the_owners_the_rate_limit_holds_off() {
         repo("ann/z", Some(&stale())),
         failing("ann/broken", Fails::Below),
     ];
+    // An earlier pass booked the full pass for later than this one finds
+    // the first limit lifts; another repo's booking is its own.
+    fs::write(&s.wake, json!({"": LATER + 600, "kim/q": 7}).to_string()).unwrap();
     let ran = sync_with(&repos, None, &s);
     assert_eq!(ran.ok, Ok(true));
     assert_eq!(ran.listed, ["Sam", "Sam", "Eve", "Ann"]);
@@ -94,7 +97,7 @@ fn a_full_pass_leaves_only_the_owners_the_rate_limit_holds_off() {
         ran.asked
     );
     // Again when the first limit lifts.
-    assert_eq!(booked(&s.wake), json!({"": SOON}));
+    assert_eq!(booked(&s.wake), json!({"": SOON, "kim/q": 7}));
     assert!(
         ran.out
             .contains(&format!("house-sync: every repo: booked again for {SOON}")),

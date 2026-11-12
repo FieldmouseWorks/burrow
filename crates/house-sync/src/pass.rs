@@ -127,10 +127,11 @@ pub fn run(
         return Ok(true);
     }
     match pass.held.values().min() {
-        // Again once the first limit lifts: an owner still held off then is
+        // Again once the first limit lifts, in place of what an earlier
+        // pass booked: this one knows when. An owner still held off then is
         // booked again.
         Some(&at) => {
-            deferred::book(&cfg.wake, key, at)?;
+            deferred::rebook(&cfg.wake, key, at)?;
             let what = if key.is_empty() { "every repo" } else { key };
             pass.say(&format!(
                 "{what}: booked again for {at}, when GitHub's rate limit lifts"

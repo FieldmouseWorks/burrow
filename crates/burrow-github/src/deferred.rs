@@ -91,6 +91,16 @@ pub fn book(wake: &Path, key: &str, at: u64) -> Result<(), String> {
     })
 }
 
+/// Book KEY's pass for AT in place of any booking for it, keeping every
+/// other key's: for a pass that has just found out when its own wait ends,
+/// so neither a later booking from an earlier pass nor a due one stands in
+/// its way.
+pub fn rebook(wake: &Path, key: &str, at: u64) -> Result<(), String> {
+    keyed(wake, |booked| {
+        booked.insert(key.to_lowercase(), at.into());
+    })
+}
+
 /// KEY's pass ran, as of NOW: a booking for it that had come due is used up,
 /// and one still to come stands.
 pub fn ran(wake: &Path, key: &str, now: u64) -> Result<(), String> {
@@ -429,6 +439,23 @@ mod tests {
         assert!(book(&wake, "sam/r", 2000).is_err());
         assert_eq!(fs::read_to_string(&wake).unwrap(), "[]");
         assert!(book(&dir.path().join("absent/wake.json"), "", 2000).is_err());
+    }
+
+    #[test]
+    fn a_rebooking_replaces_its_own_keys_time_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        book(&wake, "", 3000).unwrap();
+        book(&wake, "sam/r", 1000).unwrap();
+        // Sooner than a later booking, and later than a due one.
+        rebook(&wake, "", 2000).unwrap();
+        rebook(&wake, "Sam/R", 4000).unwrap();
+        let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked, json!({"": 2000, "sam/r": 4000}));
+        // Missing, it's added beside the rest.
+        rebook(&wake, "kim/q", 5).unwrap();
+        let booked: Value = serde_json::from_slice(&fs::read(&wake).unwrap()).unwrap();
+        assert_eq!(booked, json!({"": 2000, "sam/r": 4000, "kim/q": 5}));
     }
 
     #[test]
