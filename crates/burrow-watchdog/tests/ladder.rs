@@ -117,6 +117,52 @@ fn machinery_app() {
     assert_eq!(job[..4], ["run", "--pipeline", "--app", "workers"]);
 }
 
+// An item that reads its deadline from state that moves between passes
+// (`refresh`) is kicked, and no stall yet however long the kick takes: only a
+// file its source wrote since the kick, with the item still past its
+// deadline, takes it a step further (a job). One written since with the
+// item moved on is no stall; an ordinary item goes on after GRACE alone.
+#[test]
+fn refresh_before_a_job() {
+    let refreshing = |due: f64| {
+        let mut it = item(T - 3.0 * H, due, Some("dispatch"));
+        it["refresh"] = json!(true);
+        json!({"sam/r#7": it})
+    };
+    let m = Machine::new();
+    m.write(&m.steward, refreshing(T - MIN), T);
+    m.pass(T, false);
+    assert_eq!(m.kicks(), ["dispatch"]);
+    // The kicked pass has not run, however long: no job, no new kick.
+    for late in [GRACE, 3.0 * GRACE, 2.0 * H] {
+        m.write(&m.steward, refreshing(T - MIN), T);
+        m.pass(T + late, false);
+        assert!(m.runs().is_empty(), "{late}");
+        assert_eq!(m.kicks(), ["dispatch"], "{late}");
+    }
+    // It has, and the run is still quiet: a stall.
+    m.write(&m.steward, refreshing(T - MIN), T + 2.0 * H);
+    m.pass(T + 2.0 * H, false);
+    assert_eq!(m.runs().len(), 1);
+    // It has, and output resumed: nothing to do.
+    let m = Machine::new();
+    m.write(&m.steward, refreshing(T - MIN), T);
+    m.pass(T, false);
+    m.write(&m.steward, refreshing(T + 90.0 * MIN), T + GRACE + 1.0);
+    m.pass(T + GRACE + 1.0, false);
+    assert!(m.runs().is_empty());
+    // Without the flag, GRACE alone is enough.
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, Some("dispatch"))}),
+        T,
+    );
+    m.run(T);
+    m.run(T + GRACE);
+    assert_eq!(m.runs().len(), 1);
+}
+
 // The job at work has escalateAfter; one still queued START, since what it's
 // about may be the slot it waits for: then the stuck issue, through the
 // steward's next pass, which is kicked to publish it. Nothing more is booked

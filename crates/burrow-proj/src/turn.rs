@@ -172,6 +172,9 @@ fn start_with(
         undo();
         return Err(couldnt());
     }
+    // Accepted resumption owns the previous intent, including an error
+    // recovery. A failed launch above leaves it durable for another attempt.
+    let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
     // systemd has accepted this turn. Reconciliation errors cannot turn it
     // into a failed start: callers must consume its input exactly once.
     let reconcile_pending = if let Err(e) = question.commit() {
@@ -268,6 +271,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         if !job.turn(&n, "retry-migration").exists() {
             let _ = crate::state_reads::remove(job.path(f));
         }
+    }
+    if read(&job.path(crate::github_quota::PENDING)).is_some_and(|text| {
+        serde_json::from_str::<crate::github_quota::Pending>(&text).map_or(true, |p| p.turn != n)
+    }) {
+        let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
     }
     let retry =
         crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;
@@ -461,6 +469,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             rewatch_later(cfg, id);
             told
         };
+        // A GitHub refusal takes precedence over an engine's ask/done or
+        // the missing-declaration correction. Running peers are left alone.
+        if crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))? {
+            // The refusal (recorded by the gh door) now holds its
+            // installation's queue: the watchdog's deadlines follow it.
+            crate::waits::rewatch_all(cfg);
+            return Ok(());
+        }
         // Refused because the plan's usage is spent: so is every other
         // turn's, until the limit resets (usage.rs). This one gives up its
         // slot and waits in line again, where none is handed out till then,

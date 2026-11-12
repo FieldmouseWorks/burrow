@@ -155,6 +155,7 @@ in
           unit = update;
           handler = "update";
           status = "${config.burrow.stateDir}/status.json";
+          logs = "${config.burrow.stateDir}/logs";
           inherit own;
           live = "${config.burrow.stateDir}/live.json";
           running = lib.genAttrs pinned runningOf;
@@ -199,7 +200,11 @@ in
       runMinutes = mkOption {
         type = types.ints.positive;
         default = 90;
-        description = "How long a run of HOST-update that has the commit may take before that's a stall.";
+        description = ''
+          How long a run of HOST-update that has the commit may go without
+          writing to its logs (a build's or a VM test's output) before that's
+          a stall: a long build is a run at work, one gone quiet isn't.
+        '';
       };
       rideMinutes = mkOption {
         type = types.ints.positive;

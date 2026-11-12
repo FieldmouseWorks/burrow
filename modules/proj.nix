@@ -93,6 +93,8 @@ let
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     machinery = if machineApp == null then null else machineApp.name;
+    hostGithubApp = cfg.hostGithubApp;
+    githubMeters = config.burrow.github.quotaDir;
     stewardAccount = if config.burrow.autoland.enable or false then { login = "${config.burrow.autoland.app.slug}[bot]"; id = config.burrow.autoland.app.accountId; } else null;
     machineryAccount = if machineApp == null then null else { login = "${machineApp.slug}[bot]"; id = machineApp.accountId; };
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
@@ -362,6 +364,13 @@ in
         How long a job waits on a PR or issue (`proj await`) that doesn't
         change before it's resumed anyway, told so.
       '';
+    };
+    hostGithubApp = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = if cfg.gh == config.burrow.github.machineGh && machineApp != null then machineApp.name else null;
+      defaultText = lib.literalMD "machinery for the default gh; null for an override";
+      internal = true;
+      description = "The installation App cfg.gh authenticates as; overrides may declare their identity here.";
     };
     gh = lib.mkOption {
       type = lib.types.package;

@@ -46,7 +46,19 @@ fn run(args: &[String]) -> Result<(), Error> {
     match args.first().map(String::as_str) {
         Some("answer") => {
             let config = answer_config(&args[1..])?;
-            answer::answer(&config, io::stdin().lock(), io::stdout().lock(), now()).map_err(io)
+            let quota = std::env::var_os("GH_TOKEN_QUOTA_DIR").map(|dir| gh_token::relay::Config {
+                app: std::env::var("GH_TOKEN_APP_NAME").unwrap_or_default(),
+                meters: dir.into(),
+                kick: std::env::var("GH_TOKEN_QUOTA_KICK").ok(),
+            });
+            answer::answer_with_quota(
+                &config,
+                quota.as_ref(),
+                io::stdin().lock(),
+                io::stdout().lock(),
+                now(),
+            )
+            .map_err(io)
         }
         Some("get") if args.len() == 2 => {
             let socket = socket.ok_or_else(|| Error::refused("GH_TOKEN_SOCKET isn't set"))?;

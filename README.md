@@ -358,7 +358,8 @@ Each has an entry below, and each can be imported on its own.
   system's stamp can lag, since `HOST-update` doesn't switch to a system that
   differs only in the commit it's stamped with). Both are stall watchdog
   sources, so a runner still idle after that, a commit not live after
-  `deploy.afterMinutes`, or a run of `HOST-update` past `deploy.runMinutes`,
+  `deploy.afterMinutes`, or a run of `HOST-update` quiet in its logs past
+  `deploy.runMinutes`,
   goes up the watchdog's ladder like any other stall. Its passes start on the
   runner repos' job events, the watched repos' pushes, `HOST-update` starting
   and ending, and its own wake-ups, at most one every two minutes. It never

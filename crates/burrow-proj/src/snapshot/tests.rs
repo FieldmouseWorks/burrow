@@ -105,7 +105,7 @@ fn full() -> Snapshot {
                 })
             })
             .collect(),
-        meters: vec![Meter {
+        meters: vec![Meter::Engine(EngineMeter {
             engine: Engine::Claude,
             reading: Some(Reading {
                 five_hour: Some(window.clone()),
@@ -121,7 +121,7 @@ fn full() -> Snapshot {
                 until: 1_800_003_600,
                 reason: "paused".into(),
             }),
-        }],
+        })],
         holds: Holds {
             paused: vec!["sam/game".into()],
             pipeline: Pipeline {
@@ -229,8 +229,14 @@ fn an_idle_machine() {
     // the lock file's.
     let busy = &snap.slots[8];
     assert_eq!((busy.since, busy.age), (None, None), "{busy:?}");
-    assert_eq!(snap.meters[0].reading, None, "no Claude reading");
-    let codex = snap.meters[1].reading.as_ref().unwrap();
+    let Meter::Engine(claude) = &snap.meters[0] else {
+        panic!("missing Claude meter")
+    };
+    assert_eq!(claude.reading, None, "no Claude reading");
+    let Meter::Engine(codex) = &snap.meters[1] else {
+        panic!("missing Codex meter")
+    };
+    let codex = codex.reading.as_ref().unwrap();
     assert_eq!(
         (
             codex.five_hour.as_ref().unwrap().used,
@@ -452,4 +458,65 @@ fn all_physical_pools_require_a_live_acquirer_with_the_lock() {
             "{kind:?}"
         );
     }
+}
+
+#[test]
+fn github_installation_budgets_are_live_snapshot_meters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = tmp.path().join("jobs");
+    cfg.meters = None;
+    cfg.github_meters = Some(tmp.path().join("host-meters"));
+    fs::create_dir_all(cfg.github_meters.as_ref().unwrap()).unwrap();
+    fs::create_dir_all(cfg.jobs.join("one/github")).unwrap();
+    fs::create_dir_all(cfg.jobs.join("two/github")).unwrap();
+    let mut quota = burrow_github::quota::Meter::new("workers", "Sam", 1000);
+    quota.remaining = Some(0);
+    quota.reset = Some(2000);
+    quota.retry_at = Some(2500);
+    quota.record(cfg.github_meters.as_ref().unwrap()).unwrap();
+    quota.at = 1100;
+    quota.remaining = Some(123);
+    quota.retry_at = None;
+    quota.record(cfg.github_meters.as_ref().unwrap()).unwrap();
+    // A newer hold-only note must retain the latest actual budget sample.
+    fs::create_dir_all(cfg.jobs.join("three/github")).unwrap();
+    let mut note = burrow_github::quota::Meter::new("workers", "sam", 1200);
+    note.retry_at = Some(2500);
+    note.record(cfg.github_meters.as_ref().unwrap()).unwrap();
+    let other = burrow_github::quota::Meter::new("other", "sam", 1050);
+    other.record(cfg.github_meters.as_ref().unwrap()).unwrap();
+    let values = serde_json::to_value(meters(&cfg, 1200)).unwrap();
+    let installations: Vec<_> = values
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v.get("installation").is_some())
+        .collect();
+    assert_eq!(installations.len(), 2, "{values}");
+    let workers = installations
+        .iter()
+        .find(|v| v["installation"]["app"] == "workers")
+        .unwrap();
+    assert_eq!(workers["installation"]["owner"], "sam");
+    assert_eq!(workers["remaining"], 123);
+    assert_eq!(workers["reset"], 2000);
+    assert_eq!(workers["retryAt"], 2500);
+    assert_eq!(workers["readAt"], 1100);
+    assert_eq!(workers["age"], 100);
+    assert_eq!(workers["held"], true);
+    let expired = serde_json::to_value(meters(&cfg, 2600)).unwrap();
+    assert!(
+        expired
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v.get("installation").is_some())
+            .all(|v| v["held"] == false)
+    );
+    let mut snapshot = full();
+    snapshot.meters = serde_json::from_value(values).unwrap();
+    let json = serde_json::to_value(&snapshot).unwrap();
+    validates(&json).unwrap();
+    assert_eq!(serde_json::from_value::<Snapshot>(json).unwrap(), snapshot);
 }

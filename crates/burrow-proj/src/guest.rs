@@ -180,6 +180,33 @@ mod tests {
     }
 
     #[test]
+    fn vm_quota_registration_uses_host_client_identity() {
+        let (dir, mut cfg) = registration_fixture(&format!(
+            "printf 'HTTP/2.0 403 Forbidden\\nx-ratelimit-remaining: 0\\nx-ratelimit-reset: {}\\n\\n{{}}'\nexit 1",
+            crate::now() + 3600
+        ));
+        cfg.host_github_app = Some("host".into());
+        cfg.github_meters = Some(dir.path().join("host-meters"));
+        fs::create_dir_all(cfg.github_meters.as_ref().unwrap()).unwrap();
+        let job = Job::new(&cfg, "vm");
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("app"), "engine").unwrap();
+        register(
+            &cfg,
+            &job,
+            br#"{"end":"await","targets":["o/r#1"]}"#,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(job.path(crate::github_quota::PENDING).exists());
+        let meters = crate::github_quota::meters(&cfg);
+        assert_eq!(meters.len(), 1);
+        assert_eq!(meters[0].app, "host");
+        assert!(dir.path().join("calls").exists());
+    }
+
+    #[test]
     fn review_pagination_keeps_one_aggregate_limit_without_publishing() {
         for kind in ["comments", "reviews", "check-runs"] {
             let script = format!(
