@@ -4,6 +4,7 @@
 use burrow_settings::reference::PATH;
 use burrow_settings::schema::{Change, Kind, SETTINGS, Setting};
 use regex::{Regex, escape};
+use serde_json::Value;
 
 use crate::{Fact, Near};
 
@@ -89,9 +90,58 @@ fn values(s: &Setting) -> Regex {
     let collection = s
         .default_value()
         .filter(|value| value.is_array() || value.is_object())
-        .map(|value| format!("|{}", escape(&value.to_string())))
+        .map(|value| format!(r"|(?:^|[^\]]){}", collection(&value)))
         .unwrap_or_default();
     Regex::new(&format!("{VALUE}{own}{collection}")).expect("values are a regex")
+}
+
+/// A JSON collection as Markdown may spell it: any whitespace between its
+/// tokens (`[ ]`, `{ }`, one item a line), and any punctuation escaped
+/// with a backslash, as a table cell escapes `|`. Not right after a `]`:
+/// `[name][]` is a collapsed reference link, not an empty list.
+fn collection(value: &Value) -> String {
+    let join = |items: Vec<String>| items.join(&format!(r"\s*{}\s*", markdown(",")));
+    match value {
+        Value::Array(items) => format!(
+            r"{}\s*{}\s*{}",
+            markdown("["),
+            join(items.iter().map(collection).collect()),
+            markdown("]")
+        ),
+        Value::Object(map) => format!(
+            r"{}\s*{}\s*{}",
+            markdown("{"),
+            join(
+                map.iter()
+                    .map(|(k, v)| {
+                        format!(
+                            r"{}\s*{}\s*{}",
+                            markdown(&Value::String(k.clone()).to_string()),
+                            markdown(":"),
+                            collection(v)
+                        )
+                    })
+                    .collect()
+            ),
+            markdown("}")
+        ),
+        scalar => markdown(&scalar.to_string()),
+    }
+}
+
+/// `text` literally, each ASCII punctuation mark in it with or without the
+/// backslash that escapes it in Markdown.
+fn markdown(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let literal = escape(&c.to_string());
+            if c.is_ascii_punctuation() {
+                format!(r"\\?{literal}")
+            } else {
+                literal
+            }
+        })
+        .collect()
 }
 
 fn words(kind: &Kind) -> &'static [&'static str] {

@@ -536,7 +536,9 @@ name = "burrow-guidance"
 version = "0.0.0"
 dependencies = [
  "burrow-settings",
+ "house-sync",
  "regex",
+ "serde_json",
  "tempfile",
 ]
 

@@ -6,13 +6,16 @@
 //! The table is [`facts`]: today the settings, from burrow-settings' schema
 //! (an option named together with a value, or the file a live one is kept
 //! in, belongs to the generated reference). Another owned fact is one more
-//! source chained there.
+//! source chained there. A tree that owns the house blocks (burrow's
+//! house/) is held to them too ([`house`]): its AGENTS.md carries each as
+//! house/ has it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+pub mod house;
 pub mod settings;
 
 /// One owned fact.
@@ -58,16 +61,33 @@ pub struct Finding {
     pub file: String,
     pub line: usize,
     pub what: String,
-    pub owner: &'static str,
+    pub owner: String,
+    pub fix: Fix,
+}
+
+/// What a finding's text does about its owner.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Fix {
+    /// Says it again: link the owner instead.
+    Link,
+    /// Carries a copy of it: copy it from the owner, verbatim.
+    Copy,
 }
 
 impl std::fmt::Display for Finding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}: states {}; link {} instead",
-            self.file, self.line, self.what, self.owner
-        )
+        match self.fix {
+            Fix::Link => write!(
+                f,
+                "{}:{}: states {}; link {} instead",
+                self.file, self.line, self.what, self.owner
+            ),
+            Fix::Copy => write!(
+                f,
+                "{}:{}: carries {}; copy it from {} verbatim",
+                self.file, self.line, self.what, self.owner
+            ),
+        }
     }
 }
 
@@ -81,7 +101,8 @@ pub fn check_text(file: &str, text: &str, facts: &[Fact]) -> Vec<Finding> {
                     file: file.to_owned(),
                     line,
                     what: fact.what.clone(),
-                    owner: fact.owner,
+                    owner: fact.owner.to_owned(),
+                    fix: Fix::Link,
                 });
             }
         }
@@ -89,7 +110,8 @@ pub fn check_text(file: &str, text: &str, facts: &[Fact]) -> Vec<Finding> {
     found
 }
 
-/// The findings in every Markdown file under `root`.
+/// The findings in every Markdown file under `root`, and its house
+/// blocks' copy.
 pub fn check(root: &Path, facts: &[Fact]) -> Result<Vec<Finding>, String> {
     let mut files = Vec::new();
     markdown(root, &mut files)?;
@@ -100,6 +122,7 @@ pub fn check(root: &Path, facts: &[Fact]) -> Result<Vec<Finding>, String> {
         let file = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
         found.extend(check_text(&file, &text, facts));
     }
+    found.extend(house::check(root)?);
     Ok(found)
 }
 

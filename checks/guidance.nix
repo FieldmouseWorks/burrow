@@ -1,6 +1,7 @@
 # burrow's Markdown names a fact only where it's owned (crates/burrow-guidance):
 # an option given with a value, or the file a live one is kept in, anywhere
-# but the generated settings reference fails. Only the Markdown is its input,
+# but the generated settings reference fails, and so does an AGENTS.md whose
+# house blocks aren't house/'s. Only the Markdown is its input,
 # so a code change doesn't run it again.
 { self, pkgs, system, ... }:
 let

@@ -99,7 +99,8 @@
       # check its wait against what the steward reads (lock_wait.py), and
       # house-sync's read burrow's own house blocks, burrow-settings' the
       # settings reference it writes and its house guidance, and attestation's ask a
-      # token server of their own with curl.
+      # token server of their own with curl. No test reads README.md,
+      # AGENTS.md or CLAUDE.md: they're the docs lane's (.github/workflows/flake.yml).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -113,7 +114,6 @@
             "modules/autoland/prs.py"
             "modules/autoland/lock_wait.py"
             "house"
-            "AGENTS.md"
             "docs/settings-reference.md"
           ];
           testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl ];

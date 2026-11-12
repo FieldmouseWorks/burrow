@@ -295,6 +295,34 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
     );
 }
 
+/// burrow's docs lane, a retargeted PR's too, builds the guidance check: a
+/// PR that changes only README.md, AGENTS.md or CLAUDE.md is still held to
+/// what the guidance may say, and AGENTS.md to the house blocks.
+#[test]
+fn burrows_docs_lane_runs_the_guidance_check() {
+    let (flake, retarget) = CALLERS[0];
+    for caller in [flake, retarget] {
+        let wf = workflow(caller);
+        let jobs = wf["jobs"].as_mapping().unwrap();
+        assert!(!jobs.is_empty(), "{caller}");
+        for (name, job) in jobs {
+            let docs = job["with"]["docs-paths"].as_str().unwrap_or("");
+            if docs.is_empty() {
+                continue;
+            }
+            let checks: Vec<_> = job["with"]["docs-checks"]
+                .as_str()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            assert!(
+                checks.contains(&"guidance"),
+                "{caller}: {name:?}'s docs lane ({docs}) doesn't run the guidance check"
+            );
+        }
+    }
+}
+
 /// The base step's word on a PR to `base`, in a repo whose default branch is
 /// `default`.
 fn lands(s: &Scratch, base: &str, default: &str, pr_gate: &str) -> String {

@@ -1,6 +1,7 @@
 //! `burrow-guidance [ROOT]`: every Markdown file under ROOT (the current
 //! directory when there's none) held to the owned facts; each finding is a
-//! line, and any fails it.
+//! line, and any fails it. A tree with house/ has its AGENTS.md held to it
+//! too (`house`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,7 +23,7 @@ fn main() -> ExitCode {
                 println!("{f}");
             }
             eprintln!(
-                "burrow-guidance: {} fact(s) stated outside their owner",
+                "burrow-guidance: {} fact(s) stated outside their owner, or copied other than it has them",
                 found.len()
             );
             ExitCode::FAILURE

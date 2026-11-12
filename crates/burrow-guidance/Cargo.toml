@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 burrow-settings = { path = "../burrow-settings" }
+house-sync = { path = "../house-sync" }
+serde_json.workspace = true
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 
 [dev-dependencies]

@@ -31,9 +31,6 @@ fn the_reference_command_documents_every_option_and_its_read_door() {
     let house = std::fs::read_to_string(root.join("house/rules.md")).unwrap();
     assert!(house.contains("read them with `proj settings show`"));
     assert!(!house.contains("read them with `settings show`"));
-    let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    assert!(
-        agents.contains(&house),
-        "AGENTS.md must carry the same house guidance"
-    );
+    // burrow's own AGENTS.md carrying it verbatim is the guidance check's
+    // (crates/burrow-guidance's house), which the docs lane runs too.
 }

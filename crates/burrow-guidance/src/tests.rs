@@ -258,3 +258,177 @@ fn a_tree_is_every_markdown_file_but_build_output() {
         ]
     );
 }
+
+/// A tree with house/ holds its AGENTS.md to each block as house/ has it:
+/// what the settings integration test checked before, here so the docs
+/// lane (which builds this check) runs it on an AGENTS.md-only change.
+#[test]
+fn the_house_blocks_copy_is_house_s() {
+    let block = "<!-- house:rules v1 begin -->\nread them with `proj settings show`\n<!-- house:rules end -->\n";
+    let got = |agents: Option<&str>, house: bool| -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if house {
+            fs::create_dir_all(root.join("house")).unwrap();
+            fs::write(root.join("house/rules.md"), block).unwrap();
+        }
+        if let Some(agents) = agents {
+            fs::write(root.join("AGENTS.md"), agents).unwrap();
+        }
+        check(root, &[])
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    let current = format!("# repo\n\n{block}\nIts own part.\n");
+    assert!(got(Some(&current), true).is_empty());
+    assert_eq!(
+        got(
+            Some(&current.replace("proj settings show", "settings show")),
+            true
+        ),
+        [
+            "AGENTS.md:3: carries the house block `rules` changed; copy it from house/rules.md verbatim"
+        ]
+    );
+    for agents in [Some("# repo\n"), None] {
+        assert_eq!(
+            got(agents, true),
+            [
+                "AGENTS.md:1: carries the house block `rules` nowhere; copy it from house/rules.md verbatim"
+            ]
+        );
+    }
+    // A repo that doesn't own the blocks: its copy is house-sync's.
+    assert!(got(Some("# repo\n"), false).is_empty());
+}
+
+/// `value` as JSON with a space between each of its tokens: `[ ]`, `{ }`,
+/// `{ "a" : 1 }`, as Nix and hand-written Markdown spell them.
+fn spaced(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) if items.is_empty() => "[ ]".to_owned(),
+        Value::Object(map) if map.is_empty() => "{ }".to_owned(),
+        Value::Array(items) => format!(
+            "[ {} ]",
+            items.iter().map(spaced).collect::<Vec<_>>().join(" , ")
+        ),
+        Value::Object(map) => format!(
+            "{{ {} }}",
+            map.iter()
+                .map(|(k, v)| format!("{} : {}", Value::String(k.clone()), spaced(v)))
+                .collect::<Vec<_>>()
+                .join(" , ")
+        ),
+        scalar => scalar.to_string(),
+    }
+}
+
+/// Every collection default, as JSON whitespace and Markdown escaping may
+/// spell it, is that option's value for every name it goes by; so is
+/// skipPaths' row copied out of the reference, its pipes escaped.
+#[test]
+fn collection_defaults_are_found_however_spelled() {
+    let facts = facts();
+    let reference = burrow_settings::reference::markdown();
+    let mut collections = 0;
+    for setting in SETTINGS {
+        let Some(value) = setting
+            .default_value()
+            .filter(|v| v.is_array() || v.is_object())
+        else {
+            continue;
+        };
+        collections += 1;
+        let spellings = [
+            value.to_string(),
+            spaced(&value),
+            serde_json::to_string_pretty(&value).unwrap(),
+        ];
+        for name in aliases(setting.name) {
+            let mut texts = Vec::new();
+            for json in &spellings {
+                let cell = json.replace('|', "\\|").replace('\n', " ");
+                texts.extend([
+                    format!("`{name}` defaults to `{json}`."),
+                    format!("`{name}` defaults to\n{json}"),
+                    format!("| `{name}` | `{cell}` |"),
+                    format!("| {name} | {cell} |"),
+                    format!("`{name}` defaults to {}.", markdown_escaped(json)),
+                ]);
+            }
+            for text in texts {
+                let hits = check_text("a.md", &text, &facts);
+                assert!(
+                    hits.iter()
+                        .any(|f| f.what == format!("`{}` with a value", setting.name)),
+                    "{text}: {hits:?}"
+                );
+            }
+        }
+    }
+    // settings.allowed, settings.repositoryOverrides, autoland.repos,
+    // autoland.reviewers.skipPaths, proj.roles, proj.models,
+    // proj.engineSetups at least.
+    assert!(collections >= 7, "{collections}");
+    // The reference's own row, its pipes escaped, copied out of it.
+    let row = reference
+        .lines()
+        .find(|l| l.starts_with("| `autoland.reviewers.skipPaths` |"))
+        .expect("skipPaths has a reference row");
+    assert!(row.contains("\\|"), "{row}");
+    for name in aliases("autoland.reviewers.skipPaths") {
+        let text = row.replacen("autoland.reviewers.skipPaths", &name, 1);
+        assert!(
+            check_text("a.md", &text, &facts)
+                .iter()
+                .any(|f| f.what == "`autoland.reviewers.skipPaths` with a value"),
+            "{text}"
+        );
+    }
+}
+
+/// `text` with every ASCII punctuation mark backslash-escaped, as Markdown
+/// prose may write a literal.
+fn markdown_escaped(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_ascii_punctuation() {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// A link to an option's reference names no value, whatever kind of link
+/// it is: inline, full reference or collapsed reference (`[name][]`,
+/// whose `[]` isn't an empty list), its name in code or not.
+#[test]
+fn links_to_an_option_state_no_value() {
+    let facts = facts();
+    for setting in SETTINGS {
+        for name in aliases(setting.name) {
+            for label in [name.clone(), format!("`{name}`")] {
+                for link in [
+                    format!("[{label}](settings-reference.md)"),
+                    format!("[{label}](settings-reference.md#settings)"),
+                    format!("[{label}][reference]"),
+                    format!("[{label}][]"),
+                    format!("[{label}]"),
+                ] {
+                    for text in [
+                        format!("See the default for {link}."),
+                        format!("{link} has a default."),
+                        format!("- {link}: see its default"),
+                    ] {
+                        assert!(check_text("a.md", &text, &facts).is_empty(), "{text}");
+                    }
+                }
+            }
+        }
+    }
+}
