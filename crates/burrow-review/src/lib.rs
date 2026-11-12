@@ -29,7 +29,6 @@ pub mod queue;
 pub mod scrub;
 mod work;
 
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,8 +48,6 @@ pub struct Service {
     pub exe: PathBuf,
     /// The reviewers' user's home: its agents' logins and its git config.
     pub home: PathBuf,
-    /// The PATH its agents run with.
-    pub path: OsString,
     /// How the gate reaches an API's host.
     pub dial: Dial,
     pub log: Log,
@@ -59,20 +56,12 @@ pub struct Service {
 }
 
 impl Service {
-    pub fn new(
-        cfg: Config,
-        exe: PathBuf,
-        home: PathBuf,
-        path: OsString,
-        dial: Dial,
-        log: Log,
-    ) -> Service {
+    pub fn new(cfg: Config, exe: PathBuf, home: PathBuf, dial: Dial, log: Log) -> Service {
         Service {
             logins: Logins::new(&home, log.clone()),
             cfg,
             exe,
             home,
-            path,
             dial,
             log,
         }

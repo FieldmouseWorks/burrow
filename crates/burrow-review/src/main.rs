@@ -58,12 +58,10 @@ fn command(args: &[OsString]) -> Result<u8, String> {
             let deployed = cfg.deployed.clone();
             let exe = std::env::current_exe().map_err(|e| format!("can't find itself: {e}"))?;
             let home = std::env::var_os("HOME").ok_or("HOME isn't set")?;
-            let path = std::env::var_os("PATH").unwrap_or_default();
             let s = Service::new(
                 cfg,
                 exe,
                 PathBuf::from(home),
-                path,
                 Arc::new(egress::dial),
                 Arc::new(|line| println!("{line}")),
             );

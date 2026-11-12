@@ -91,6 +91,7 @@ impl Rig {
             "queue": p("queue"), "done": p("done"), "sessions": p("sessions"), "snapshots": p("trees"),
             "reviewers": {"codex": {"enable": true, "effort": "high", "parallel": 2, "off": []}},
             "timeoutMinutes": 30, "agents": p("agents"),
+            "path": std::env::var("PATH").unwrap(),
             "sandbox": fakes().join("bwrap"),
             "box": {"store": p("store-paths"), "caBundle": p("ca.crt"),
                     "links": {"/bin/sh": "/nix/store/dddd-bash/bin/sh", "/usr/bin/env": "/nix/store/eeee-coreutils/bin/env"}},
@@ -151,7 +152,6 @@ impl Rig {
             cfg,
             PathBuf::from(env!("CARGO_BIN_EXE_burrow-review")),
             self.home(),
-            std::env::var_os("PATH").unwrap_or_default(),
             upstream(self.upstream.clone()),
             Arc::new(move |line: &str| journal.lock().unwrap().push(line.to_owned())),
         ))

@@ -28,6 +28,10 @@ pub struct Config {
     pub timeout_minutes: f64,
     /// Where the agents' commands are.
     pub agents: PathBuf,
+    /// The PATH the agents run with: this generation's tools, which its
+    /// sandbox's store holds (`box.store`), whatever environment the
+    /// service was started in.
+    pub path: String,
     /// bubblewrap, which each look runs in.
     pub sandbox: PathBuf,
     #[serde(rename = "box")]

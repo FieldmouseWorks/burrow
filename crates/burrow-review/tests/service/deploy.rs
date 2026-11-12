@@ -136,3 +136,25 @@ fn the_service_hands_over_to_the_deployed_program() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(fs::read_to_string(&said).unwrap(), "none work\n");
 }
+
+/// The generation that takes the queue runs its agents with its own tools,
+/// the ones its sandbox's store holds, not the PATH the old unit started
+/// the run with.
+#[test]
+fn the_new_generation_runs_its_agents_with_its_own_tools() {
+    let mut rig = Rig::new();
+    let snap = rig.snapshot(5, HEAD);
+    let name = rig.queue(&snap, 5, HEAD, json!({}));
+    let old = rig.cfg.clone();
+    let tools = format!(
+        "{}:/nix/store/ffff-new-tools/bin",
+        old["path"].as_str().unwrap()
+    );
+    rig.cfg["path"] = json!(tools);
+    assert_eq!(burrow_review::work(rig.started(&old)), Ended::Moved);
+    assert_eq!(burrow_review::work(rig.deployed()), Ended::Done);
+    let runs = rig.runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["env"]["PATH"], tools.as_str());
+    assert_eq!(rig.back(&name)["result"], "review");
+}

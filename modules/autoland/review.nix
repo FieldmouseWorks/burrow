@@ -13,9 +13,9 @@ let
   service = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review;
   # The review agents (codex).
   agents = import ./agents/package.nix { inherit pkgs; inherit (inputs) nixpkgs-unstable; };
-  # What the reviewers' service runs commands with, and so what an agent
-  # reads the snapshot with, and runs the repo's own checks with (python3:
-  # the scripts a repo checks itself with).
+  # What an agent reads the snapshot with, and runs the repo's own checks
+  # with (python3: the scripts a repo checks itself with), and bubblewrap
+  # for codex's own sandbox inside theirs.
   reviewTools = with pkgs; [ bash config.programs.git.package bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
   # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
   # sandbox shows them; a machine without /bin/sh or /usr/bin/env gives the
@@ -51,6 +51,9 @@ let
     };
     inherit (rv) timeoutMinutes;
     agents = "${agents}/bin";
+    # What the agents run commands with: this generation's, which its
+    # sandbox's store holds, not the unit's PATH a run inherits.
+    path = lib.makeBinPath reviewTools;
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     box = {
       store = "${reviewStore}/store-paths";
@@ -97,13 +100,8 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # What the agents read the snapshot with, and bubblewrap for codex's
-      # own sandbox inside theirs.
-      path = reviewTools;
       environment.HOME = reviewerHome;
       environment.REVIEW_DEPLOYED = "/etc/${deployedDir}";
-      # The gate's TLS to the agents' APIs (crates/burrow-review, egress.rs).
-      environment.SSL_CERT_FILE = config.security.pki.caBundle;
       serviceConfig = {
         Type = "oneshot";
         User = reviewer;
