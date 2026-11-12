@@ -332,8 +332,8 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
             .and_then(|job| job.facts())
             .and_then(|mut facts| {
                 // Uncertain, not overdue: the deadline already published
-                // stands until the state can be read again.
-                uncertain = facts.usage_unreadable && facts.state == "queued" && f.exists();
+                // stands (or none is made) until the state can be read again.
+                uncertain = facts.usage_unreadable && facts.state == "queued";
                 if let Some(released) =
                     read(&crate::policy::path(&job, "released")).and_then(|s| s.parse::<i64>().ok())
                 {
