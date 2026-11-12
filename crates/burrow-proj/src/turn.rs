@@ -427,6 +427,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // A GitHub refusal takes precedence over an engine's ask/done or
         // the missing-declaration correction. Running peers are left alone.
         if crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))? {
+            // The refusal (recorded by the gh door) now holds its
+            // installation's queue: the watchdog's deadlines follow it.
+            crate::waits::rewatch_all(cfg);
             return Ok(());
         }
         // Refused because the plan's usage is spent: so is every other
