@@ -12,9 +12,12 @@ use crate::{Fact, Near};
 const NEAR: usize = 24;
 
 /// Words that state a value: a number standing alone, a number word, a
-/// JSON constant, or a default named as one. `one` is left out: "one
+/// JSON constant, or an allowed word. `one` is left out: "one
 /// project" is how the guidance counts things, not a setting's value.
-const VALUE: &str = r"(?i)(?:^|[\s(,])\d+(?:$|[\s),.;:])|\b(?:two|three|four|five|six|seven|eight|nine|ten|twelve|true|false|null|defaults?)\b";
+/// Word boundaries include Markdown delimiters and compact assignments,
+/// while excluding digits embedded in unrelated words such as `worker4`.
+const VALUE: &str =
+    r"(?i)\b(?:\d+|two|three|four|five|six|seven|eight|nine|ten|twelve|true|false|null)\b";
 
 /// Every option's facts: named with a value, and a live one's file.
 pub fn facts() -> Vec<Fact> {
@@ -74,7 +77,8 @@ fn names(s: &Setting) -> Regex {
     .expect("an option's names are a regex")
 }
 
-/// What states its value: any of [`VALUE`], or a word its kind allows.
+/// What states its value: any of [`VALUE`], a word its kind allows, or
+/// its schema's JSON collection default (which may contain no value words).
 fn values(s: &Setting) -> Regex {
     let words: Vec<_> = words(s.kind).iter().map(|w| escape(w)).collect();
     let own = if words.is_empty() {
@@ -82,7 +86,12 @@ fn values(s: &Setting) -> Regex {
     } else {
         format!(r"|\b(?:{})\b", words.join("|"))
     };
-    Regex::new(&format!("{VALUE}{own}")).expect("values are a regex")
+    let collection = s
+        .default_value()
+        .filter(|value| value.is_array() || value.is_object())
+        .map(|value| format!("|{}", escape(&value.to_string())))
+        .unwrap_or_default();
+    Regex::new(&format!("{VALUE}{own}{collection}")).expect("values are a regex")
 }
 
 fn words(kind: &Kind) -> &'static [&'static str] {

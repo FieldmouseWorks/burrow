@@ -98,7 +98,7 @@
       # to read their origins, gh-token's make keys with openssl, lock-age's
       # check its wait against what the steward reads (lock_wait.py), and
       # house-sync's read burrow's own house blocks, burrow-settings' the
-      # settings reference it writes, and attestation's ask a
+      # settings reference it writes and its house guidance, and attestation's ask a
       # token server of their own with curl.
       crates = self.lib.project {
         inherit self;
@@ -113,6 +113,7 @@
             "modules/autoland/prs.py"
             "modules/autoland/lock_wait.py"
             "house"
+            "AGENTS.md"
             "docs/settings-reference.md"
           ];
           testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl ];

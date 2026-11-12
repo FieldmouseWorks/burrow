@@ -20,7 +20,7 @@ pub fn markdown() -> String {
          Every pipeline option, declared once in burrow-settings' schema\n\
          ([crates/burrow-settings/src/schema.rs](../crates/burrow-settings/src/schema.rs)).\n\
          This is the one place the guidance gives an option's value or where it's\n\
-         kept: anything else links here. `settings show` prints the value in force\n\
+         kept: anything else links here. `proj settings show` prints the value in force\n\
          on the machine and where it came from; [settings.md](settings.md) says how\n\
          they're read and changed.\n\
          \n\

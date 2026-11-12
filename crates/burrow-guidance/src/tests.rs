@@ -92,6 +92,126 @@ fn every_option_is_known_by_its_names() {
     }
 }
 
+fn aliases(name: &str) -> Vec<String> {
+    let parts: Vec<_> = name.split('.').collect();
+    let mut names: Vec<_> = (0..parts.len() - 1).map(|i| parts[i..].join(".")).collect();
+    let last = parts.last().unwrap();
+    if last.chars().any(|c| c.is_ascii_uppercase()) {
+        names.push((*last).to_owned());
+    }
+    let prefixed: Vec<_> = names.iter().map(|n| format!("burrow.{n}")).collect();
+    names.extend(prefixed);
+    names
+}
+
+#[test]
+fn numeric_values_are_found_in_markdown_for_every_alias() {
+    let facts = facts();
+    for setting in SETTINGS {
+        for name in aliases(setting.name) {
+            for text in [
+                format!("`{name}` is 4."),
+                format!("`{name}` is `4`."),
+                format!("| `{name}` | `4` |"),
+                format!("| {name} | 4 |"),
+                format!("`{name}=4`"),
+                format!("{name}=4"),
+                format!("`{name} = 4;`"),
+            ] {
+                let hits = check_text("a.md", &text, &facts);
+                assert!(
+                    hits.iter()
+                        .any(|f| f.what == format!("`{}` with a value", setting.name)),
+                    "{text}: {hits:?}"
+                );
+            }
+            for text in [
+                format!(
+                    "`{name}` is described elsewhere with enough intervening words before `4`."
+                ),
+                format!("`{name}` is documented. `4` workers are available."),
+                format!("`{name}` is documented; 4 workers are available."),
+                format!("`{name}` is documented? 4 workers are available."),
+                format!("`{name}` is documented! 4 workers are available."),
+                format!("`{name}` is used by worker4 and 4workers."),
+            ] {
+                assert!(check_text("a.md", &text, &facts).is_empty(), "{text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn colon_pairs_keep_values_with_every_alias_and_wrapped_list_item() {
+    let facts = facts();
+    for setting in SETTINGS {
+        for name in aliases(setting.name) {
+            for value in ["4", "`4`", "false", "`false`"] {
+                for text in [
+                    format!("`{name}`: {value}"),
+                    format!("The option `{name}`: {value}."),
+                    format!("- `{name}`: {value}"),
+                    format!("- `{name}`:\n  {value}"),
+                    format!("1. `{name}`:\n   {value}"),
+                    format!("The option `{name}`:\n{value}."),
+                ] {
+                    let hits = check_text("a.md", &text, &facts);
+                    assert!(
+                        hits.iter()
+                            .any(|f| f.what == format!("`{}` with a value", setting.name)),
+                        "{text}: {hits:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        found("- `proj.maxJobs`:\n  `4`\n- `proj.usage.paid`:\n  false"),
+        [
+            "1: `proj.maxJobs` with a value",
+            "3: `proj.usage.paid` with a value",
+        ]
+    );
+    assert!(found("`proj.maxJobs`:\n\n4 workers are available.").is_empty());
+    assert!(found("- `proj.maxJobs`:\n- 4 workers are available.").is_empty());
+}
+
+#[test]
+fn defaults_need_an_actual_value() {
+    let facts = facts();
+    for setting in SETTINGS {
+        for name in aliases(setting.name) {
+            for text in [
+                format!("See the [reference](settings-reference.md) for `{name}` defaults."),
+                format!("See `{name}` defaults."),
+                format!("See the default for `{name}`."),
+                format!("See the [reference](settings-reference.md) for the default of `{name}`."),
+            ] {
+                assert!(check_text("a.md", &text, &facts).is_empty(), "{text}");
+            }
+            if let Some(value) = setting.default_value() {
+                let text = format!("`{name}` defaults to `{value}`.");
+                let hits = check_text("a.md", &text, &facts);
+                assert!(
+                    hits.iter()
+                        .any(|f| f.what == format!("`{}` with a value", setting.name)),
+                    "{text}: {hits:?}"
+                );
+            }
+        }
+    }
+    for text in [
+        "`proj.maxJobs` defaults to `4`.",
+        "The default for `proj.maxJobs` is 4.",
+        "`proj.usage.paid` defaults to false.",
+        "The default for `proj.usage.paid` is `false`.",
+        "`proj.roles` defaults to null.",
+        "`triage.drain` defaults to claude.",
+    ] {
+        assert!(!found(text).is_empty(), "{text}");
+    }
+}
+
 #[test]
 fn sentences_keep_their_lines() {
     let text = "# Title `proj.maxJobs`\n\nOne line. Then\nanother: and\n\n- an item\n  wrapped\n\n```\ncode 1\n```\n| a | b |\n";
@@ -101,8 +221,7 @@ fn sentences_keep_their_lines() {
         [
             (1, "# Title `proj.maxJobs`".to_owned()),
             (3, "One line.".to_owned()),
-            (3, "Then another:".to_owned()),
-            (4, "and".to_owned()),
+            (3, "Then another: and".to_owned()),
             (6, "- an item wrapped".to_owned()),
             (10, "code 1".to_owned()),
             (12, "| a | b |".to_owned()),

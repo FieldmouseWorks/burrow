@@ -6,7 +6,7 @@ crates/burrow-settings/src/schema.rs: change the schema, not this file. -->
 Every pipeline option, declared once in burrow-settings' schema
 ([crates/burrow-settings/src/schema.rs](../crates/burrow-settings/src/schema.rs)).
 This is the one place the guidance gives an option's value or where it's
-kept: anything else links here. `settings show` prints the value in force
+kept: anything else links here. `proj settings show` prints the value in force
 on the machine and where it came from; [settings.md](settings.md) says how
 they're read and changed.
 

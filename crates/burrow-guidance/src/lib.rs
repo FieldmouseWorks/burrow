@@ -126,8 +126,9 @@ fn markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 }
 
 /// The text's sentences, each with the line it starts on: a paragraph is
-/// split after `.`, `;`, `:`, `?` or `!` and a space; a list item, a table
+/// split after `.`, `;`, `?` or `!` and a space; a list item, a table
 /// row, a heading and each line of a code block stand alone.
+/// A colon keeps an option and its value in the same statement.
 fn sentences(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut open = Paragraph::default();
@@ -192,7 +193,7 @@ impl Paragraph {
         let bytes = text.as_bytes();
         let mut start = 0;
         for (i, b) in bytes.iter().enumerate() {
-            if matches!(b, b'.' | b';' | b':' | b'?' | b'!') && bytes.get(i + 1) == Some(&b' ') {
+            if matches!(b, b'.' | b';' | b'?' | b'!') && bytes.get(i + 1) == Some(&b' ') {
                 out.push((self.line(start), text[start..=i].to_owned()));
                 start = i + 2;
             }
