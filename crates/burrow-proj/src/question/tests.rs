@@ -824,6 +824,7 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
                 clear: true,
                 accepted: true,
                 applied: false,
+                question: None,
             },
         )
         .unwrap();

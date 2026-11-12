@@ -54,7 +54,17 @@ impl Pass<'_> {
             }
         }
         let pending = ask::host_path(job, "question-needs-owner").exists();
-        if ask::load(job).is_none() && !pending {
+        // Unreadable authority holds the question: retry, never fall through
+        // to the verdict and retire it.
+        let asked: Option<ask::Question> = match ask::load(job) {
+            Ok(question) => question,
+            Err(e) => {
+                eprintln!("proj sorting question: {e}");
+                self.retry(repo);
+                return Ok(true);
+            }
+        };
+        if asked.is_none() && !pending {
             return Ok(false);
         }
         if let Err(e) = ask::visibility(self.cfg, job) {
@@ -76,7 +86,10 @@ impl Pass<'_> {
             } else {
                 format!(
                     "{question}{}",
-                    ask::load(job).map(|q| q.notice()).unwrap_or_default()
+                    asked
+                        .as_ref()
+                        .map(ask::Question::notice)
+                        .unwrap_or_default()
                 )
             };
             if self.post(repo, n, &body) {

@@ -15,7 +15,7 @@ fn accepted_unreconciled_parked_answers_are_recovered_before_identity_validation
             asks(&cfg, id, Some("subject"), false);
         }
         let z = Job::new(&cfg, "z");
-        let question = ask::cohort(&Job::new(&cfg, "a"))[0].1.clone();
+        let question = ask::cohort(&Job::new(&cfg, "a")).unwrap()[0].1.clone();
         // The launcher accepted a parked answer, but died before cleaning up.
         z.set_turns(2).unwrap();
         fs::write(z.path("prompt.2"), "first accepted answer").unwrap();
@@ -37,7 +37,7 @@ fn accepted_unreconciled_parked_answers_are_recovered_before_identity_validation
             read(&z.path("prompt.2")).as_deref(),
             Some("first accepted answer")
         );
-        assert!(ask::load(&z).is_none());
+        assert!(ask::load(&z).unwrap().is_none());
         assert!(!z.path("prompt.3").exists());
     }
 }
@@ -49,7 +49,7 @@ fn a_fixed_cohort_receives_one_answer_even_when_every_follower_is_parked() {
         asks(&cfg, id, Some("subject"), false);
         crate::policy::mark(&Job::new(&cfg, id), "done", false).unwrap();
     }
-    let cohort = ask::cohort(&Job::new(&cfg, "a"));
+    let cohort = ask::cohort(&Job::new(&cfg, "a")).unwrap();
     reply_answer(&cfg, "a", "yes", false).unwrap();
     for (id, question) in cohort {
         deliver(&cfg, &id, "subject", &question, "duplicate", false).unwrap();
@@ -68,7 +68,7 @@ fn stale_cohort_entries_skip_stopped_answered_rekeyed_and_replaced_questions() {
             asks(&cfg, id, Some("subject"), false);
         }
         let z = Job::new(&cfg, "z");
-        let question = ask::cohort(&Job::new(&cfg, "a"))[0].1.clone();
+        let question = ask::cohort(&Job::new(&cfg, "a")).unwrap()[0].1.clone();
         match change {
             "stopped" => crate::cmd::stop(&cfg, "z", false).unwrap(),
             "answered" => reply_answer(&cfg, "z", "other answer", false).unwrap(),
@@ -94,7 +94,7 @@ fn a_live_unaccepted_resume_is_not_superseded_by_a_shared_answer() {
         asks(&cfg, id, Some("subject"), false);
     }
     let z = Job::new(&cfg, "z");
-    let question = ask::cohort(&Job::new(&cfg, "a"))[0].1.clone();
+    let question = ask::cohort(&Job::new(&cfg, "a")).unwrap()[0].1.clone();
     z.set_turns(2).unwrap();
     fs::write(z.path("prompt.2"), "in-flight answer").unwrap();
     fs::write(

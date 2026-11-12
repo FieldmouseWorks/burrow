@@ -93,8 +93,8 @@ fn two_jobs_asking_about_one_key_post_one_notice_and_one_reply_resumes_both() {
     assert!(lines[0].2.contains("also waiting on it: j2"), "{lines:?}");
     // The follower waits on the leader's deadline.
     assert_eq!(
-        load(&Job::new(&cfg, "j1")).unwrap().due,
-        load(&Job::new(&cfg, "j2")).unwrap().due
+        load(&Job::new(&cfg, "j1")).unwrap().unwrap().due,
+        load(&Job::new(&cfg, "j2")).unwrap().unwrap().due
     );
     crate::cmd::reply_answer(&cfg, "j1", "yes, edit it", false).unwrap();
     for id in ["j1", "j2"] {
@@ -105,7 +105,7 @@ fn two_jobs_asking_about_one_key_post_one_notice_and_one_reply_resumes_both() {
                 .unwrap()
                 .contains("yes, edit it")
         );
-        assert!(load(&job).is_none(), "{id}");
+        assert!(load(&job).unwrap().is_none(), "{id}");
     }
 }
 
@@ -141,7 +141,13 @@ fn one_way_leader_makes_the_follower_one_way() {
     let (_dir, cfg) = fixture();
     asks(&cfg, "j1", Some("profile"), true);
     asks(&cfg, "j2", Some("profile"), false);
-    assert!(load(&Job::new(&cfg, "j2")).unwrap().recommendation.one_way);
+    assert!(
+        load(&Job::new(&cfg, "j2"))
+            .unwrap()
+            .unwrap()
+            .recommendation
+            .one_way
+    );
 }
 
 #[test]
@@ -225,16 +231,16 @@ fn a_join_after_a_one_way_leader_timed_out_keeps_its_policy_and_deadline() {
         serde_json::to_string(&q).unwrap(),
     )
     .unwrap();
-    assert_eq!(load(&j1).unwrap().due, due);
+    assert_eq!(load(&j1).unwrap().unwrap().due, due);
     {
         let _held = j1.lock().unwrap();
         expire(&cfg, &j1).unwrap();
     }
     assert!(host_path(&j1, "question-needs-owner").exists());
-    assert!(load(&j1).is_none());
+    assert!(load(&j1).unwrap().is_none());
     assert_eq!(j1.turns().as_deref(), Some("2"));
     asks(&cfg, "j2", Some("profile"), false);
-    let q2 = load(&Job::new(&cfg, "j2")).unwrap();
+    let q2 = load(&Job::new(&cfg, "j2")).unwrap().unwrap();
     assert!(q2.recommendation.one_way);
     assert_eq!(q2.due, due);
 }
@@ -246,7 +252,7 @@ fn a_shared_answer_reaches_each_waiting_job_once_and_skips_changed_questions() {
         asks(&cfg, id, Some("profile"), false);
     }
     // j4 asks something new after the cohort is fixed: it must not get the answer.
-    let cohort = cohort(&Job::new(&cfg, "j1"));
+    let cohort = cohort(&Job::new(&cfg, "j1")).unwrap();
     assert_eq!(cohort.len(), 3);
     fs::write(host_path(&Job::new(&cfg, "j4"), "question-id"), "another").unwrap();
     crate::cmd::reply_answer(&cfg, "j1", "go ahead", false).unwrap();
@@ -260,12 +266,15 @@ fn a_shared_answer_reaches_each_waiting_job_once_and_skips_changed_questions() {
     for id in ["j1", "j2"] {
         asks(&cfg, id, Some("profile"), false);
     }
-    assert!(!still_waiting(&Job::new(&cfg, "j2"), "profile", "stale"));
-    assert!(still_waiting(
-        &Job::new(&cfg, "j2"),
-        "profile",
-        &about::question_id(&Job::new(&cfg, "j2"))
-    ));
+    assert!(!still_waiting(&Job::new(&cfg, "j2"), "profile", "stale").unwrap());
+    assert!(
+        still_waiting(
+            &Job::new(&cfg, "j2"),
+            "profile",
+            &about::question_id(&Job::new(&cfg, "j2"))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -285,8 +294,8 @@ fn redeclaring_an_open_keyed_question_keeps_the_notice_where_it_is() {
     )
     .unwrap();
     finish(&cfg, &job, "ask").unwrap();
-    assert!(follows(&Job::new(&cfg, "j2")).is_some());
-    assert!(follows(&job).is_none());
+    assert!(follows(&Job::new(&cfg, "j2")).unwrap().is_some());
+    assert!(follows(&job).unwrap().is_none());
     notified(&cfg, &["j1", "j2"]);
     assert!(!calls(&dir).contains("close|proj-question-j1"));
 }
@@ -299,7 +308,7 @@ fn merging_into_an_occupied_subject_keeps_its_members() {
     asks(&cfg, "j3", None, false);
     merge(&cfg, "profile", &["j3".to_owned()]).unwrap();
     let lead = Job::new(&cfg, "j3");
-    let mut waiting: Vec<String> = cohort(&lead).into_iter().map(|c| c.0).collect();
+    let mut waiting: Vec<String> = cohort(&lead).unwrap().into_iter().map(|c| c.0).collect();
     waiting.sort();
     assert_eq!(waiting, ["j1", "j2"]);
     crate::cmd::reply_answer(&cfg, "j3", "yes", false).unwrap();
@@ -318,7 +327,7 @@ fn a_hidden_notice_comes_back_when_its_job_takes_the_lead() {
     assert_eq!(calls(&dir).matches("ensure|").count(), 2);
     merge(&cfg, "profile", &["j1".to_owned(), "j2".to_owned()]).unwrap();
     notified(&cfg, &["j1", "j2"]);
-    let hidden = if follows(&Job::new(&cfg, "j1")).is_some() {
+    let hidden = if follows(&Job::new(&cfg, "j1")).unwrap().is_some() {
         "j1"
     } else {
         "j2"
@@ -340,3 +349,6 @@ mod migration;
 
 #[path = "notices.rs"]
 mod notices;
+
+#[path = "authority.rs"]
+mod authority;

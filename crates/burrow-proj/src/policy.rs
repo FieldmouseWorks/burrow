@@ -115,12 +115,16 @@ pub(crate) fn repository(job: &Job) -> Option<String> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Park {
     pub state: String,
     pub turn: String,
     pub first: bool,
     pub at: i64,
+    /// The question's effective deadline when the job was parked, carried
+    /// forward by each restoration: what its paused time extends, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due: Option<i64>,
 }
 
 pub fn parked(job: &Job) -> bool {
@@ -145,6 +149,9 @@ pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
         turn: turn.clone(),
         first,
         at: now(),
+        // Unreadable authority parks with none; restoration then takes the
+        // deadline it reads first, once (see reconcile_job).
+        due: crate::ask::load(job).ok().flatten().map(|q| q.due),
     };
     let mut order = None;
     if let Ok(entries) = fs::read_dir(job.cfg.jobs.join(".queue")) {
@@ -362,8 +369,7 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
         if !systemd::gone(cfg, &job.unit()) {
             return Ok(());
         }
-        shift_waits(&job, now().saturating_sub(rec.at))?;
-        rec.at = now();
+        shift_waits(&job, &mut rec)?;
         swap(
             &path(&job, "park"),
             &serde_json::to_string(&rec).map_err(|e| e.to_string())?,
@@ -441,14 +447,27 @@ pub(crate) fn kill(cfg: &Config, unit: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn shift_waits(job: &Job, elapsed: i64) -> Result<(), String> {
-    if let Some(mut question) = crate::ask::load(job) {
-        question.due = question.due.saturating_add(elapsed);
-        swap(
-            &crate::ask::host_path(job, "question"),
-            &serde_json::to_string(&question).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+/// Give back the time a job was parked: its question's deadline becomes the
+/// parked one plus all of that time, which the shared authority takes when
+/// it's later than what it has. So a repeated restoration, or members paused
+/// together, extend it once, and the record carries the new one forward.
+pub(crate) fn shift_waits(job: &Job, rec: &mut Park) -> Result<(), String> {
+    if rec.due.is_none() {
+        // Parked without its deadline: take the one it has now, durably, so
+        // a repeated restoration extends the same one.
+        rec.due = crate::ask::load(job)?.map(|q| q.due);
+        if rec.due.is_some() {
+            swap(
+                &path(job, "park"),
+                &serde_json::to_string(&rec).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    let at = now();
+    let elapsed = at.saturating_sub(rec.at);
+    if let Some(due) = rec.due {
+        crate::ask::extend(job, due.saturating_add(elapsed))?;
     }
     if let Some(text) = read(&job.path("await")) {
         let shifted: String = crate::job::awaits(&text)
@@ -462,6 +481,8 @@ fn shift_waits(job: &Job, elapsed: i64) -> Result<(), String> {
             .collect();
         swap(&job.path("await"), &shifted).map_err(|e| e.to_string())?;
     }
+    rec.due = rec.due.map(|due| due.saturating_add(elapsed));
+    rec.at = at;
     Ok(())
 }
 

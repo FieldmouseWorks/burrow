@@ -575,7 +575,7 @@ fn deliver(
     if crate::question::acceptance_pending(&job).map_err(|e| Fail::new(1, e))? {
         return Ok(());
     }
-    if !crate::ask::still_waiting(&job, key, question) {
+    if !crate::ask::still_waiting(&job, key, question).map_err(|e| Fail::new(1, e))? {
         return Ok(());
     }
     let st = job.state();
@@ -616,10 +616,14 @@ fn resume_one(
     {
         return Err(Fail::new(3, format!("{id}'s turn {n} wasn't cut off")));
     }
+    // A registry that can't name the cohort refuses the reply: resuming the
+    // leader alone would leave the others waiting on an answer already given.
     let sharing = Sharing {
-        key: crate::ask::key_of(&job).unwrap_or_default(),
+        key: crate::ask::key_of(&job)
+            .map_err(|e| Fail::new(no, e))?
+            .unwrap_or_default(),
         jobs: if answered {
-            crate::ask::cohort(&job)
+            crate::ask::cohort(&job).map_err(|e| Fail::new(no, e))?
         } else {
             vec![]
         },

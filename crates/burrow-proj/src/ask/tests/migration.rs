@@ -28,7 +28,7 @@ fn grouped(cfg: &Config) -> i64 {
 }
 
 fn policy(cfg: &Config, id: &str, due: i64) {
-    let q = load(&Job::new(cfg, id)).unwrap();
+    let q = load(&Job::new(cfg, id)).unwrap().unwrap();
     assert!(
         q.recommendation.one_way,
         "{id} lost inherited one-way policy"
@@ -94,13 +94,14 @@ fn retired_groups_impose_neither_a_stale_deadline_nor_a_one_way_requirement() {
     let due = crate::now() + 9876;
     deadline(&cfg, "new", due);
     merge(&cfg, "source", &["new".into()]).unwrap();
-    let q = load(&Job::new(&cfg, "new")).unwrap();
+    let q = load(&Job::new(&cfg, "new")).unwrap().unwrap();
     assert!(!q.recommendation.one_way);
     assert_eq!(q.due, due);
     crate::cmd::stop(&cfg, "new", false).unwrap();
     asks(&cfg, "fresh", Some("source"), false);
     assert!(
         !load(&Job::new(&cfg, "fresh"))
+            .unwrap()
             .unwrap()
             .recommendation
             .one_way
@@ -112,7 +113,7 @@ fn failed_registry_writes_leave_every_source_and_destination_bound_to_old_policy
     let (dir, cfg) = fixture();
     let due = grouped(&cfg);
     asks(&cfg, "other", Some("occupied"), false);
-    let other_due = load(&Job::new(&cfg, "other")).unwrap().due;
+    let other_due = load(&Job::new(&cfg, "other")).unwrap().unwrap().due;
     let state = control_root(&cfg).join(".about/state.json");
     let before = fs::read(&state).unwrap();
     let blocked = state.with_file_name("state.json.new");
@@ -121,14 +122,26 @@ fn failed_registry_writes_leave_every_source_and_destination_bound_to_old_policy
     assert_eq!(fs::read(&state).unwrap(), before);
     policy(&cfg, "a", due);
     policy(&cfg, "z", due);
-    assert_eq!(key_of(&Job::new(&cfg, "a")).as_deref(), Some("source"));
-    assert_eq!(load(&Job::new(&cfg, "other")).unwrap().due, other_due);
+    assert_eq!(
+        key_of(&Job::new(&cfg, "a")).unwrap().as_deref(),
+        Some("source")
+    );
+    assert_eq!(
+        load(&Job::new(&cfg, "other")).unwrap().unwrap().due,
+        other_due
+    );
     fs::remove_dir(blocked).unwrap();
     // A truncated, interrupted preparation is not authority either.
     fs::write(state.with_file_name("state.json.new"), "{partial").unwrap();
     merge(&cfg, "occupied", &["a".into()]).unwrap();
-    assert!(load(&Job::new(&cfg, "a")).unwrap().recommendation.one_way);
-    assert_eq!(load(&Job::new(&cfg, "a")).unwrap().due, other_due);
+    assert!(
+        load(&Job::new(&cfg, "a"))
+            .unwrap()
+            .unwrap()
+            .recommendation
+            .one_way
+    );
+    assert_eq!(load(&Job::new(&cfg, "a")).unwrap().unwrap().due, other_due);
     assert!(dir.path().exists());
 }
 
@@ -138,8 +151,9 @@ fn damaged_authority_cannot_execute_or_redeclare_a_weaker_default() {
     grouped(&cfg);
     fs::write(control_root(&cfg).join(".about/state.json"), "{damaged").unwrap();
     let job = Job::new(&cfg, "a");
-    assert!(load(&job).is_none());
-    assert!(expire(&cfg, &job).unwrap().is_none());
+    // Damaged authority is an error the watcher retries, never no question.
+    assert!(load(&job).is_err());
+    assert!(expire(&cfg, &job).is_err());
     assert_eq!(job.turns().as_deref(), Some("1"));
     record(
         &job,
@@ -233,7 +247,7 @@ fn migration_accepts_live_released_and_legacy_owner_questions_and_promotes_them(
             let _held = released.lock().unwrap();
             expire(&cfg, &released).unwrap();
         }
-        assert!(load(&released).is_none());
+        assert!(load(&released).unwrap().is_none());
         assert!(host_path(&released, "question-needs-owner").exists());
         if legacy {
             fs::remove_file(host_path(&released, "question-released")).unwrap();
@@ -249,6 +263,7 @@ fn migration_accepts_live_released_and_legacy_owner_questions_and_promotes_them(
         assert!(
             load(&Job::new(&cfg, "live"))
                 .unwrap()
+                .unwrap()
                 .recommendation
                 .one_way
         );
@@ -258,7 +273,7 @@ fn migration_accepts_live_released_and_legacy_owner_questions_and_promotes_them(
         merge(&cfg, "next", &["released".into()]).unwrap();
         notified(&cfg, &["released"]);
         assert!(calls(&dir).contains("ensure|proj-question-released-1"));
-        assert!(follows(&released).is_none());
+        assert!(follows(&released).unwrap().is_none());
         assert!(expire(&cfg, &released).unwrap().is_none());
         assert_eq!(
             released.turns().as_deref(),
@@ -279,18 +294,18 @@ fn partially_published_replacement_ids_cannot_join_an_old_answer_cohort() {
     asks(&cfg, "z", Some("subject"), false);
     let leader = Job::new(&cfg, "a");
     let follower = Job::new(&cfg, "z");
-    let original = cohort(&leader)[0].1.clone();
+    let original = cohort(&leader).unwrap()[0].1.clone();
     // A replacement ID has been allocated, but its question is not published.
     fs::write(host_path(&follower, "question-id"), "replacement").unwrap();
-    assert_eq!(cohort(&leader)[0].1, original);
+    assert_eq!(cohort(&leader).unwrap()[0].1, original);
     // A replacement question published before its binding commits must not
     // be mistaken for the registered question either.
     let mut raw: serde_json::Value =
         serde_json::from_str(&read(&host_path(&follower, "question")).unwrap()).unwrap();
     raw["id"] = serde_json::json!("replacement");
     fs::write(host_path(&follower, "question"), raw.to_string()).unwrap();
-    assert!(cohort(&leader).is_empty());
-    assert!(!still_waiting(&follower, "subject", &original));
+    assert!(cohort(&leader).unwrap().is_empty());
+    assert!(!still_waiting(&follower, "subject", &original).unwrap());
 }
 
 #[test]
@@ -338,19 +353,19 @@ fn upgrading_legacy_registry_members_captures_the_publication_not_a_preallocated
     )
     .unwrap();
     let leader = Job::new(&cfg, "a");
-    let original = cohort(&leader)[0].1.clone();
+    let original = cohort(&leader).unwrap()[0].1.clone();
     fs::write(
         host_path(&Job::new(&cfg, "z"), "question-id"),
         "unpublished replacement",
     )
     .unwrap();
-    assert_eq!(cohort(&leader)[0].1, original);
+    assert_eq!(cohort(&leader).unwrap()[0].1, original);
     merge(&cfg, "next", &["z".into()]).unwrap();
     policy(&cfg, "z", due);
     // Upgrade a legacy publication in place, preserving order and deadline.
     redeclare(&cfg, "a", None);
     policy(&cfg, "a", due);
-    assert!(follows(&leader).is_none());
+    assert!(follows(&leader).unwrap().is_none());
 }
 
 #[test]
@@ -358,7 +373,7 @@ fn interrupted_rekey_publication_keeps_binding_and_policy_together() {
     let (_dir, cfg) = fixture();
     let due = grouped(&cfg);
     let job = Job::new(&cfg, "a");
-    let mut q = load(&job).unwrap();
+    let mut q = load(&job).unwrap().unwrap();
     q.recommendation.about = Some("new subject".into());
     assert!(
         about::publish(&job, "new subject", q, |_| Err(
@@ -366,12 +381,12 @@ fn interrupted_rekey_publication_keeps_binding_and_policy_together() {
         ))
         .is_err()
     );
-    assert_eq!(key_of(&job).as_deref(), Some("new subject"));
+    assert_eq!(key_of(&job).unwrap().as_deref(), Some("new subject"));
     policy(&cfg, "a", due);
     policy(&cfg, "z", due);
     redeclare(&cfg, "a", None);
     policy(&cfg, "a", due);
-    assert_eq!(key_of(&job).as_deref(), Some("new subject"));
+    assert_eq!(key_of(&job).unwrap().as_deref(), Some("new subject"));
 }
 
 #[test]
@@ -381,6 +396,6 @@ fn writable_stop_markers_do_not_remove_host_owned_shared_question_authority() {
     let job = Job::new(&cfg, "a");
     fs::write(job.turn("1", "stopped"), "guest marker").unwrap();
     policy(&cfg, "a", due);
-    assert_eq!(key_of(&job).as_deref(), Some("source"));
-    assert!(follows(&job).is_some());
+    assert_eq!(key_of(&job).unwrap().as_deref(), Some("source"));
+    assert!(follows(&job).unwrap().is_some());
 }

@@ -162,7 +162,7 @@ fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
     assert!(d.exists(), "a question is not a verdict");
     assert!(b.posted().contains("Without an answer by"));
     assert!(b.posted().contains("reversible default"));
-    assert!(crate::ask::load(&job).is_some());
+    assert!(crate::ask::load(&job).unwrap().is_some());
     assert!(!crate::scratch::over(&job), "owned questions keep scratch");
     crate::question::Resume::prepare(&job, true)
         .unwrap()
@@ -297,7 +297,7 @@ fn successive_sorting_questions_each_get_a_notice_and_timeout_transition_once() 
                 .unwrap(),
             "explicit" => crate::ask::finish(&b.cfg, &job, "done").unwrap(),
             _ => {
-                let mut q = crate::ask::load(&job).unwrap();
+                let mut q = crate::ask::load(&job).unwrap().unwrap();
                 q.due = crate::now() - 1;
                 fs::write(
                     crate::ask::host_path(&job, "question"),

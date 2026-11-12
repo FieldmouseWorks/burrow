@@ -101,7 +101,7 @@ fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
         };
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&cfg, &job, "ask").unwrap();
-        assert!(crate::ask::load(&job).is_some());
+        assert!(crate::ask::load(&job).unwrap().is_some());
     }
 }
 

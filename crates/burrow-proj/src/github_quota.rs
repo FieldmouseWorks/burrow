@@ -453,7 +453,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         .unwrap();
         fs::write(job.path("end.next"), "ask\n").unwrap();
         assert!(finish(&job, "1").unwrap());
-        assert!(crate::ask::load(&job).is_none());
+        assert!(crate::ask::load(&job).unwrap().is_none());
         assert!(!job.path("ask.next").exists());
         assert!(!job.turn("1", "cut").exists());
         let parked = read(&job.path("await")).unwrap();
@@ -473,7 +473,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         assert!(read(&job.path("await")).unwrap().starts_with("sam/r#7\t"));
         assert_eq!(read(&job.turn("1", "end")).as_deref(), Some("await"));
         assert_eq!(job.turns().as_deref(), Some("1"));
-        assert!(crate::ask::load(&job).is_none());
+        assert!(crate::ask::load(&job).unwrap().is_none());
         fs::write(d.path().join("changed"), "").unwrap();
         crate::watch::look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));

@@ -29,7 +29,10 @@ fn dir(cfg: &Config) -> std::path::PathBuf {
     super::control_root(cfg).join(".about")
 }
 
-fn locked(cfg: &Config) -> Result<fs::File, String> {
+/// The registry's lock. Job locks precede it; held by every operation that
+/// reads policy and commits on it (publication, merging, deadline shifts and
+/// a reversible default's acceptance), so none acts on a stale snapshot.
+pub(crate) fn locked(cfg: &Config) -> Result<fs::File, String> {
     use std::os::unix::fs::DirBuilderExt;
     super::ensure_root(cfg)?;
     fs::DirBuilder::new()
@@ -71,13 +74,9 @@ fn legacy_due(job: &Job) -> i64 {
             && let Some(time) = result
                 .strip_prefix("No answer by ")
                 .and_then(|s| s.split_once(". The recommended answer was:").map(|p| p.0))
+            && let Some(epoch) = super::parse_utc(time)
         {
-            if let Some(epoch) = time.strip_prefix('@').and_then(|s| s.parse().ok()) {
-                return epoch;
-            }
-            if let Ok(at) = time.replacen(' ', "T", 1).parse::<jiff::Timestamp>() {
-                return at.as_second();
-            }
+            return epoch;
         }
     }
     read(&host_path(job, "question-since"))
@@ -108,25 +107,55 @@ fn open_raw(job: &Job) -> Option<Question> {
     })
 }
 
-fn identity(job: &Job) -> Option<String> {
-    open_raw(job)?.id.filter(|s| !s.is_empty())
+/// The one liveness rule: a question waits until an accepted answer (a
+/// person's or the deadline's default) retires it, even while that answer's
+/// cleanup is still pending. Membership, leadership and policy all read it.
+pub(crate) fn identity(job: &Job) -> Option<String> {
+    open_raw(job)?
+        .id
+        .filter(|s| !s.is_empty() && !crate::question::retiring(job, s))
 }
 
-pub(crate) fn key_of(job: &Job) -> Option<String> {
-    let state = State::load(job.cfg).ok()?;
-    state.standing(job).map(|(key, _)| key.to_owned())
+/// The registry's view of a job's live question. A job with none needs no
+/// registry, so only questions are held by its errors.
+fn registry(job: &Job) -> Result<Option<State>, String> {
+    if identity(job).is_none() {
+        if open_raw(job).is_none()
+            && (host_path(job, "question").exists()
+                || host_path(job, "question-needs-owner").exists())
+        {
+            return Err(format!("{} has unreadable question authority", job.id));
+        }
+        return Ok(None);
+    }
+    State::load(job.cfg).map(Some)
 }
 
-pub(crate) fn follows(job: &Job) -> Option<String> {
-    let state = State::load(job.cfg).ok()?;
-    let (_, group) = state.standing(job)?;
-    state
+pub(crate) fn key_of(job: &Job) -> Result<Option<String>, String> {
+    let Some(state) = registry(job)? else {
+        return Ok(None);
+    };
+    Ok(state.standing(job).map(|(key, _)| key.to_owned()))
+}
+
+/// The leader whose notice carries this job's question. Err when the registry
+/// can't say: never read as "this job leads".
+pub(crate) fn follows(job: &Job) -> Result<Option<String>, String> {
+    let Some(state) = registry(job)? else {
+        return Ok(None);
+    };
+    let Some((_, group)) = state.standing(job) else {
+        return Ok(None);
+    };
+    Ok(state
         .live(job.cfg, group)
         .first()
         .map(|m| m.id.clone())
-        .filter(|id| id != job.id)
+        .filter(|id| id != job.id))
 }
 
+/// Either form of the open question, a released one included, under its
+/// effective policy. Err when its authority is there but can't be read.
 pub(crate) fn open(job: &Job) -> Result<Option<Question>, String> {
     let Some(mut q) = open_raw(job) else {
         if host_path(job, "question").exists() || host_path(job, "question-needs-owner").exists() {
@@ -134,7 +163,32 @@ pub(crate) fn open(job: &Job) -> Result<Option<Question>, String> {
         }
         return Ok(None);
     };
+    if q.id
+        .as_deref()
+        .is_some_and(|id| crate::question::retiring(job, id))
+    {
+        return Ok(None);
+    }
     apply(job, &mut q)?;
+    Ok(Some(q))
+}
+
+/// The unanswered, unreleased question under its effective policy. Err when
+/// its authority is there but can't be read: never "no question".
+pub(crate) fn load(job: &Job) -> Result<Option<Question>, String> {
+    let Some(mut q) = publication(job, "question") else {
+        if host_path(job, "question").exists() {
+            return Err(format!("{} has unreadable question authority", job.id));
+        }
+        return Ok(None);
+    };
+    if q.id
+        .as_deref()
+        .is_some_and(|id| crate::question::retiring(job, id))
+    {
+        return Ok(None);
+    }
+    State::load(job.cfg)?.apply(job, &mut q)?;
     Ok(Some(q))
 }
 
@@ -145,21 +199,24 @@ pub(crate) fn apply(job: &Job, q: &mut Question) -> Result<(), String> {
     State::load(job.cfg)?.apply(job, q)
 }
 
-pub(crate) fn cohort(job: &Job) -> Vec<(String, String)> {
-    let Ok(state) = State::load(job.cfg) else {
-        return vec![];
+/// The other jobs one reply to this leader resumes. Err when the registry
+/// can't say, so a reply is refused rather than resuming the leader alone.
+pub(crate) fn cohort(job: &Job) -> Result<Vec<(String, String)>, String> {
+    let Some(state) = registry(job)? else {
+        return Ok(vec![]);
     };
     let Some((_, group)) = state.standing(job) else {
-        return vec![];
+        return Ok(vec![]);
     };
     let live = state.live(job.cfg, group);
     if live.first().map(|m| m.id.as_str()) != Some(job.id) {
-        return vec![];
+        return Ok(vec![]);
     }
-    live.into_iter()
+    Ok(live
+        .into_iter()
         .skip(1)
         .map(|m| (m.id, m.question))
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -167,8 +224,8 @@ pub(crate) fn question_id(job: &Job) -> String {
     identity(job).unwrap_or_default()
 }
 
-pub(crate) fn still_waiting(job: &Job, key: &str, question: &str) -> bool {
-    identity(job).as_deref() == Some(question) && key_of(job).as_deref() == Some(key)
+pub(crate) fn still_waiting(job: &Job, key: &str, question: &str) -> Result<bool, String> {
+    Ok(identity(job).as_deref() == Some(question) && key_of(job)?.as_deref() == Some(key))
 }
 
 pub(crate) fn publish(
@@ -180,6 +237,15 @@ pub(crate) fn publish(
     let _lock = locked(job.cfg)?;
     super::ensure(job)?;
     let mut state = State::load(job.cfg)?;
+    // The caller read this job's policy before the lock. Whatever joined,
+    // merged or shifted its group since binds the question it moves.
+    if let Some((_, group)) = state.standing(job)
+        && q.id.is_some()
+        && q.id == identity(job)
+    {
+        q.due = group.due;
+        q.recommendation.one_way |= group.one_way;
+    }
     let before = state.0.get(key);
     let live = before.map(|g| state.live(job.cfg, g)).unwrap_or_default();
     let existing = live
@@ -214,18 +280,56 @@ pub(crate) fn publish(
     write(&q)
 }
 
-pub(crate) fn footer(job: &Job) -> String {
-    let others: Vec<String> = cohort(job).into_iter().map(|(id, _)| id).collect();
-    if others.is_empty() {
-        return String::new();
+/// Move the question's effective deadline out to `due`, never in: its
+/// group's when it has one (every member waits on it), else its own.
+pub(crate) fn extend(job: &Job, due: i64) -> Result<(), String> {
+    let _lock = locked(job.cfg)?;
+    if load(job)?.is_none() {
+        return Ok(());
     }
-    format!(
+    let mut state = State::load(job.cfg)?;
+    if let Some(key) = state.standing(job).map(|(key, _)| key.to_owned()) {
+        let group = state.0.get_mut(&key).expect("standing names a group");
+        if due > group.due {
+            group.due = due;
+            state.save(job.cfg)?;
+        }
+        return Ok(());
+    }
+    let path = host_path(job, "question");
+    let Some(text) = read(&path) else {
+        if path.exists() {
+            return Err(format!("{} has unreadable question authority", job.id));
+        }
+        return Ok(());
+    };
+    let mut q: Question = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if q.recommendation.about.is_some() || host_path(job, FILE).exists() {
+        return Err(format!("{} has an unbound shared question", job.id));
+    }
+    if due > q.due {
+        q.due = due;
+        swap(
+            &path,
+            &serde_json::to_string(&q).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn footer(job: &Job) -> Result<String, String> {
+    let others: Vec<String> = cohort(job)?.into_iter().map(|(id, _)| id).collect();
+    if others.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!(
         "\n\nThe same question is waiting on this answer for {} other job{}: {}. One reply here (proj reply {}) resumes all of them.",
         others.len(),
         if others.len() == 1 { "" } else { "s" },
         others.join(", "),
         job.id
-    )
+    ))
 }
 
 pub(crate) fn merge(cfg: &Config, key: &str, ids: &[String]) -> Result<String, String> {

@@ -351,10 +351,14 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     let stream = job.turn(n, "jsonl");
     let last = last_result(&stream, 0);
     let mut said = answer(&stream);
-    if read(&job.turn(n, "end")).as_deref() == Some("ask")
-        && let Some(q) = crate::ask::load(&job)
-    {
-        said.push_str(&q.notice());
+    if read(&job.turn(n, "end")).as_deref() == Some("ask") {
+        match crate::ask::load(&job) {
+            Ok(Some(q)) => said.push_str(&q.notice()),
+            Ok(None) => (),
+            Err(e) => said.push_str(&format!(
+                "\n\nThis question's deadline and default can't be read now: {e}"
+            )),
+        }
     }
     let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
@@ -797,7 +801,8 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
-    if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {
+    if !matches!(crate::ask::load(&job), Ok(None)) || crate::ask::host_path(&job, "label").exists()
+    {
         names.extend(["proj-watch".into(), "autoland".into()]);
     }
     if crate::question::needs_watch(&job) {

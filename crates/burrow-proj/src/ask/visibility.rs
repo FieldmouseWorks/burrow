@@ -34,9 +34,11 @@ pub(crate) fn tend(cfg: &Config, job: &Job) -> Result<(), String> {
     let _held = job.lock().map_err(|e| e.to_string())?;
     crate::question::recover(job)?;
     let needs_owner = super::host_path(job, "question-needs-owner").exists();
-    let active = super::follows(job).is_none()
+    // An unreadable registry or question keeps the label as it is: the error
+    // is the watcher's retry, never a reason to take the owner's label off.
+    let active = super::follows(job)?.is_none()
         && (needs_owner
-            || (load(job).is_some() && !super::host_path(job, "question-reader").exists()));
+            || (load(job)?.is_some() && !super::host_path(job, "question-reader").exists()));
     let desired = if active {
         issue(cfg, job).map(|(repo, number)| Label {
             repo,

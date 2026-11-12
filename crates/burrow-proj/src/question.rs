@@ -36,6 +36,10 @@ struct Receipt {
     accepted: bool,
     // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
     applied: bool,
+    /// The question this resume answers: once accepted it is retired, even
+    /// before its cleanup is applied. Receipts from before this name none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    question: Option<String>,
 }
 
 const METADATA: &[&str] = &[
@@ -90,6 +94,28 @@ fn apply_receipt(path: &Path, job_dir: &Path) -> Result<(), String> {
     }
     r.applied = true;
     save_receipt(path, &r)
+}
+
+/// Whether an accepted answer, a person's or the deadline's default, has
+/// retired `question` though its cleanup hasn't been applied yet. A receipt
+/// that can't be read retires nothing: the question stays held.
+pub(crate) fn retiring(job: &Job, question: &str) -> bool {
+    let Ok(entries) = fs::read_dir(crate::ask::host_path(job, "")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name().to_string_lossy().starts_with("resume-")
+            && read_state(&e.path())
+                .ok()
+                .flatten()
+                .and_then(|text| serde_json::from_str::<Receipt>(&text).ok())
+                .is_some_and(|r| {
+                    r.accepted
+                        && r.clear
+                        && !r.applied
+                        && r.question.as_deref().is_none_or(|q| q == question)
+                })
+    })
 }
 
 /// Caller holds the job lock. Only accepted receipts can retire a question.
@@ -205,7 +231,7 @@ impl Resume {
         let before = read_state(&path)?;
         let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
         let asking = !answered
-            && (crate::ask::load(job).is_some()
+            && (crate::ask::load(job)?.is_some()
                 || (end.as_deref() != Some("done")
                     && (before.is_some() || end.as_deref() == Some("ask"))));
         // Validate existing authority before publishing any intent. Leave it
@@ -231,6 +257,7 @@ impl Resume {
                 deadline: answered && deadline,
                 accepted: false,
                 applied: false,
+                question: (!asking).then(|| crate::ask::identity(job)).flatten(),
             },
         )?;
         let state = Self {
@@ -448,7 +475,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     // A question another job's notice already carries is hidden here, never
     // posted: the leader's names this job and its answer resumes it too. Hiding
     // is not closing, so the notice comes back if this job takes the lead.
-    let leader = crate::ask::follows(job);
+    let leader = crate::ask::follows(job)?;
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
@@ -549,9 +576,8 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 body.truncate(at);
                 body.push_str("\n[Full answer: proj log]");
             }
-            if let Some(question) = crate::ask::load(job) {
-                body.push_str(&question.notice());
-            }
+            // The policy paragraph is not kept: each send renders the
+            // effective one (below), which joins, merges and shifts change.
             crate::state_reads::write(
                 &path,
                 format!(
@@ -564,7 +590,12 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
             .map_err(|e| e.to_string())?;
     }
-    let footer = crate::ask::footer(job);
+    // The open question's current policy (a released one's included) and
+    // who else waits on it, rendered fresh for every send of its notice.
+    let policy = crate::ask::open(job)?
+        .map(|q| q.notice())
+        .unwrap_or_default();
+    let footer = crate::ask::footer(job)?;
     let mut retry = false;
     let mut errors = Vec::new();
     for entry in committed_entries(job, latest)? {
@@ -647,7 +678,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 }
             };
             let body = if active.as_deref() == Some(turn) {
-                format!("{body}{footer}")
+                format!("{}{policy}{footer}", crate::ask::without_policy(&body))
             } else {
                 body
             };

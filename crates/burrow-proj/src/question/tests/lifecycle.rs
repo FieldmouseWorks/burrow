@@ -113,7 +113,7 @@ fn abandoned_preparations_restore_questions_and_their_original_deadlines() {
                 fs::write(crate::ask::host_path(&f.job(), "question"), expired).unwrap();
                 crate::watch::look(&f.cfg, "").unwrap();
                 assert_eq!(f.job().turns().as_deref(), Some("3"));
-                assert!(crate::ask::load(&f.job()).is_none());
+                assert!(crate::ask::load(&f.job()).unwrap().is_none());
                 if one_way {
                     assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
                     assert_eq!(read(&f.job().turn("3", "end")).as_deref(), Some("done"));
@@ -227,14 +227,14 @@ fn queued_starts_and_unknown_jobs_preserve_replies_until_exec() {
                 crate::watch::look(&f.cfg, "").unwrap();
                 assert_eq!(f.job().turns().as_deref(), Some("2"), "{state} {pending:?}");
                 assert!(acceptance_pending(&f.job()).unwrap());
-                assert!(crate::ask::load(&f.job()).is_some());
+                assert!(crate::ask::load(&f.job()).unwrap().is_some());
                 assert!(!crate::ask::host_path(&f.job(), "question-needs-owner").exists());
                 assert!(!f.job().turn("1", "question-closed").exists());
                 // The queued unit eventually enters _exec on this same receipt.
                 accept(&f.job(), "2").unwrap();
                 crate::watch::look(&f.cfg, "").unwrap();
                 assert_eq!(f.job().turns().as_deref(), Some("2"));
-                assert!(crate::ask::load(&f.job()).is_none());
+                assert!(crate::ask::load(&f.job()).unwrap().is_none());
                 assert!(f.job().turn("1", "question-closed").exists());
             }
         }
@@ -316,7 +316,7 @@ fn paused_inbox_kinds_preserve_all_automatic_waits() {
             assert_eq!(f.job().turns().as_deref(), Some("1"), "{kind}: {wait}");
             assert_eq!(read(&f.job().path("await")), before, "{kind}: {wait}");
             if wait == "question" {
-                assert!(crate::ask::load(&f.job()).is_some());
+                assert!(crate::ask::load(&f.job()).unwrap().is_some());
             }
             f.cfg
                 .settings
@@ -346,7 +346,7 @@ fn paused_question_maintenance_retries_open_close_and_recovery() {
         // A failed human resume is recovered even while automatic turns pause.
         publish(&f, true, false);
         crate::watch::look(&f.cfg, "").unwrap();
-        assert!(crate::ask::load(&f.job()).is_some());
+        assert!(crate::ask::load(&f.job()).unwrap().is_some());
         assert_eq!(read(&f.job().path("open-question")).as_deref(), Some("1"));
 
         // Cleanup survives stop and failed durable notification delivery.
@@ -541,6 +541,7 @@ fn each_question_keeps_its_own_closing_cause() {
         deadline,
         accepted,
         applied: false,
+        question: None,
     };
     // A person answered question 1 in turn 2; question 3's default ran in 4.
     save_receipt(&receipt_path(&job, "2"), &receipt(1, true, false)).unwrap();
@@ -570,7 +571,7 @@ fn a_default_after_an_automatic_update_keeps_its_cause() {
     f.ending(2, "done");
     fs::write(f.job().turn("2", "end"), "ask\n").unwrap();
     // Its deadline default is the next accepted answer.
-    let ask = crate::ask::load(&f.job());
+    let ask = crate::ask::load(&f.job()).unwrap();
     assert!(ask.is_some());
     let resume = Resume::prepare_as(&f.job(), true, true).unwrap();
     crate::turn::write_prompt(
@@ -600,6 +601,7 @@ fn a_reply_after_the_question_ended_does_not_answer_it() {
         deadline,
         accepted: true,
         applied: true,
+        question: None,
     };
     // Question 1 survived automatic turn 2, which completed the job; a
     // later human resume (receipt 3) is a new conversation, however its own
@@ -698,7 +700,7 @@ fn unreadable_shared_authority_does_not_make_a_recorded_question_legacy() {
     let registry = crate::ask::control_root(&f.cfg).join(".about");
     fs::create_dir_all(&registry).unwrap();
     fs::write(registry.join("state.json"), "{damaged").unwrap();
-    assert!(crate::ask::load(&f.job()).is_none());
+    assert!(crate::ask::load(&f.job()).is_err());
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     fs::File::options()
         .write(true)
@@ -706,7 +708,8 @@ fn unreadable_shared_authority_does_not_make_a_recorded_question_legacy() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    notify(&f.cfg, &f.job()).unwrap();
+    // The error is the watcher's retry: the notice stays open meanwhile.
+    assert!(notify(&f.cfg, &f.job()).is_err());
     assert!(!f.job().turn("1", "question-lapsed").exists());
     assert!(!f.job().turn("1", "question-closed").exists());
     assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
