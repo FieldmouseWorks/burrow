@@ -39,9 +39,10 @@ const LOCKED: &str = r#"locked() {
 
 const STAND_INS: [(&str, &str); 4] = [
     (
-        // GitHub: a repo as it spells it (none for OWNER/gone), and what
-        // each owner's installation reaches (FAKE/OWNER-repos, or
-        // FAKE/OWNER-fails to fail).
+        // GitHub: a repo as it spells it (none for OWNER/gone), what each
+        // owner's installation reaches (FAKE/OWNER-repos, or FAKE/OWNER-fails
+        // to fail), and its allowance: spent till the time in
+        // FAKE/OWNER-spent (FAKE/user-spent for the user's login).
         "gh",
         r#"echo "gh $* owner=${GH_TOKEN_OWNER-} socket=${GH_TOKEN_SOCKET-}" >>"$FAKE/log"
 if [ "$1" = api ]; then
@@ -62,6 +63,11 @@ if [ "$1" = api ]; then
     exit 1
   fi
   case "$path" in
+    rate_limit)
+      spent=$FAKE/${GH_TOKEN_OWNER:-user}-spent
+      left=4999 reset=1
+      [ ! -e "$spent" ] || { left=0; reset=$(cat "$spent"); }
+      printf 'HTTP/2.0 200 OK\n\n{"resources":{"core":{"remaining":%s,"reset":%s},"graphql":{"remaining":5000,"reset":1}}}' "$left" "$reset" ;;
     repos/*)
       case "$path" in
         repos/sam/r) repo=Sam/R ;;
@@ -652,4 +658,57 @@ fn a_wait_it_cant_book_is_a_failure() {
     let (code, _, err) = m.run(&["sam/r"]);
     assert_eq!(code, Some(1));
     assert!(err.starts_with("renovate-run: "), "{err}");
+}
+
+#[test]
+fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
+    // Renovate meets the limit mid-run and fails; GitHub's rate_limit says
+    // the owner's installation is spent: booked for when it lifts.
+    let at = in_an_hour();
+    let met = |what: &str| {
+        format!(
+            "{}: Renovate's run met GitHub's rate limit\n",
+            booked_again(what, at)
+        )
+    };
+    // The owner as GitHub spells it, whose installation the token is for.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("Sam-spent", &at.to_string());
+    m.set("renovate-fails", "Sam/R");
+    assert_eq!(m.run(&["sam/r"]), ok(&met("sam/r")));
+    assert_eq!(m.booked(), serde_json::json!({"sam/r": at}));
+    let calls = m.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with("gh api -i -X GET rate_limit") && c.contains("owner=Sam")),
+        "{calls:#?}"
+    );
+
+    // In a full run, the rest of that owner's repos are booked with it,
+    // and another owner's installation has an allowance of its own.
+    let m = Machine::new(Some(&["sam", "kim"]));
+    m.set("sam-repos", "sam/a\nsam/b\n");
+    m.set("kim-repos", "kim/c\n");
+    m.set("sam-spent", &at.to_string());
+    m.set("renovate-fails", "sam/a");
+    assert_eq!(
+        m.run(&[]),
+        ok(&format!("{}{}\n", met("sam/a"), booked_again("sam/b", at)))
+    );
+    assert_eq!(m.runs(), [filter("sam/a"), filter("kim/c")]);
+    assert_eq!(m.booked(), serde_json::json!({"sam/a": at, "sam/b": at}));
+
+    // As the user, the one run over everything, by the login's allowance.
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    m.set("renovate-fails", "");
+    assert_eq!(m.run(&[]), ok(&met("every repo")));
+    assert_eq!(m.booked(), serde_json::json!({"": at}));
+
+    // With allowance left, a run that fails failed.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("renovate-fails", "Sam/R");
+    assert_eq!(m.run(&["sam/r"]), (Some(1), String::new(), String::new()));
+    assert_eq!(m.booked(), serde_json::json!({}));
 }

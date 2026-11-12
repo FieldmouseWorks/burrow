@@ -14,7 +14,10 @@
 //! holds off, and the rest of its owner's in a full run, is booked again in
 //! the renovate handler's wake file (burrow-events) for when it lifts, as is
 //! the full pass when an owner's repos can't be listed; the pass exits 0
-//! unless something else failed.
+//! unless something else failed. Renovate meets the limit too, mid-run (it
+//! stops with "rate-limit-exceeded"): a run of it that fails while GitHub's
+//! `rate_limit` says the installation's allowance is spent is booked the
+//! same way, not failed.
 //!
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
@@ -94,7 +97,11 @@ impl Config {
             };
         }
         let Some(app) = &self.app else {
-            return self.renovate("", &[]).max(self.used_up("", started));
+            let rc = match self.renovate("", &[]) {
+                0 => 0,
+                rc => self.spent(None).map_or(rc, |held| self.held("", &held)),
+            };
+            return rc.max(self.used_up("", started));
         };
         // Every repo the installations reach, a run each. One that fails
         // doesn't hold up the rest, but fails the pass. Each owner's
@@ -173,7 +180,35 @@ impl Config {
             }
         }
         let filter = serde_json::Value::from(vec![repo.as_str()]);
-        Ok(self.renovate(&repo, &[format!("--autodiscover-filter={filter}")]))
+        match self.renovate(&repo, &[format!("--autodiscover-filter={filter}")]) {
+            0 => Ok(0),
+            rc => self.spent(repo.split('/').next()).map_or(Ok(rc), Err),
+        }
+    }
+
+    /// After a run of Renovate's failed: GitHub's rate limit, as an error
+    /// that holds the run off, when `rate_limit` (which costs nothing
+    /// against it) says the allowance is spent: `owner`'s installation's as
+    /// the App, else the user's login's. None when it isn't, or GitHub
+    /// won't say: then the run failed.
+    fn spent(&self, owner: Option<&str>) -> Option<burrow_github::Error> {
+        let mut gh = self.github();
+        if let Some(owner) = owner {
+            gh.env.push(("GH_TOKEN_OWNER".into(), owner.into()));
+        }
+        let budget = burrow_github::call(&mut gh, "GET", "rate_limit", None, None)
+            .ok()?
+            .json()
+            .ok()?;
+        let at = now();
+        let mut meter = burrow_github::quota::Meter::new("", owner.unwrap_or_default(), at);
+        meter.budget(&budget);
+        let lifts = meter.until(at)?;
+        Some(burrow_github::Error {
+            why: "Renovate's run met GitHub's rate limit".into(),
+            unanswered: true,
+            retry_at: Some(lifts),
+        })
     }
 
     /// The repos `owner`'s installation reaches, archived ones aside.
