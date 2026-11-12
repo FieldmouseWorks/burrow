@@ -348,6 +348,7 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
+        crate::inbox::enrollment::admit(&job)?;
         let crate::inbox::resumption::Resume::Ready(_capacity) =
             crate::inbox::resumption::admission(cfg, &job)?
         else {

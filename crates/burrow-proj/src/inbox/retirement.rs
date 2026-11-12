@@ -48,8 +48,26 @@ impl Pass<'_> {
         if !stopped {
             self.retry(repo);
         }
-        if !d.join("reported").exists() {
+        let job = crate::job::Job::new(self.cfg, id);
+        let turns = job.turns().and_then(|n| n.parse::<i64>().ok()).unwrap_or(0);
+        let answered = read(&d.join("answered"))
+            .and_then(|n| n.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut snapshot = None;
+        if stopped && answered < turns {
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
+                self.miss(repo);
+                return Ok(());
+            };
+            if self.eligible(repo, &issue) && !self.answers(repo, n, &job, d, turns, None)? {
+                return Ok(());
+            }
+            snapshot = Some(issue);
+        }
+        if !d.join("reported").exists() {
+            let Some(issue) =
+                snapshot.or_else(|| api(self.cfg, &format!("repos/{repo}/issues/{n}")))
+            else {
                 self.miss(repo);
                 return Ok(());
             };
@@ -73,8 +91,8 @@ impl Pass<'_> {
                 // Include post()'s signature in the limit, leaving room below
                 // GitHub's 65,536-character maximum. IDs, never bodies, are posted.
                 let signature = self.signed("").chars().count();
-                let header = "The job ended because this issue was closed or its job label was removed, with unread author replies:\n\n";
-                let footer = "\nReopen the issue and restore its job label to have them picked up.";
+                let header = "The job ended because this issue was closed or parked, with unread author replies:\n\n";
+                let footer = "\nReopen the issue, remove `later` and restore an engine label to have them picked up.";
                 let mut at = 0;
                 while at < unread.len() {
                     let mut body = header.to_owned();

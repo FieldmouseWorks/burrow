@@ -157,6 +157,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     }
     let time = burrow_probe::answer::utc(q.due);
     if q.recommendation.one_way {
+        crate::inbox::enrollment::admit(job)?;
         // A one-way decision gets no engine and cannot accidentally execute
         // its default. Record a completed host turn for the normal issue writer.
         let n = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;

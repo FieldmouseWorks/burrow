@@ -161,6 +161,7 @@ fn stale_split_proposals_resume_the_updated_verified_task_and_keep_receipts() {
 fn worker_admission_uses_the_verified_payload_it_launches_without_a_second_read() {
     for child in [false, true] {
         let (mut b, mut task, _) = parent_fixture();
+        task["labels"] = json!([{"name":"claude"}]);
         b.cfg.projects = b.path("projects");
         fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
         b.cfg.tools.systemd_run = "true".into();
@@ -216,6 +217,7 @@ fn launched_workers_share_approved_prompt_handed_text_and_comment_cursor() {
         b.cfg.tools.systemd_run = "true".into();
         b.cfg.tools.systemctl = "false".into();
         if kind == "ordinary" {
+            task["labels"] = json!([{"name":"claude"}]);
             fs::remove_file(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
         } else {
             for (i, planned) in list.tasks.iter_mut().enumerate() {

@@ -257,7 +257,7 @@ fn refuses_once() {
         burrow_github::fake::author("sam-steward[bot]"),
     ];
     let mut p = pass(&cfg);
-    let outside = json!({"number": 7, "user": burrow_github::fake::actor("someone-else"), "body": "from-outside"});
+    let outside = json!({"number": 7, "user": burrow_github::fake::actor("someone-else"), "body": "from-outside", "labels":[{"name":"claude"}]});
     let record = tmp.path().join("state/sam_box-7");
 
     fs::write(&closed, "").unwrap();

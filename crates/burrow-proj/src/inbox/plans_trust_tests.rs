@@ -112,6 +112,18 @@ fn lost_creation_response_recovers_the_exact_child_and_its_approval() {
     let input = b.pass().issue_text("sam/box", &child, &[]);
     assert!(b.pass().approved_input("sam/box", "8", &input));
     assert!(b.pass().child_admissible("sam/box", "8"));
+    b.pass().new_issues("sam/box", &[child.clone()]).unwrap();
+    assert!(
+        !b.cfg
+            .inbox
+            .as_ref()
+            .unwrap()
+            .state
+            .join("sam_box-8/job")
+            .exists()
+    );
+    child["labels"] = json!([{"name":"claude"}]);
+    fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
     b.pass().new_issues("sam/box", &[child]).unwrap();
     assert!(
         b.cfg

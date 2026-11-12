@@ -200,6 +200,14 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
     /// The inbox's record of issue 7's job, nothing of it answered yet,
     /// handed the issue as [`issue`] has it and no comments.
     pub(super) fn record(&self, id: &str) -> PathBuf {
+        // An absent open-list entry can be a closed issue that retains its
+        // engine label. Live enrollment checks need an actual label snapshot.
+        let remote = self.path("repos_sam_box_issues_7");
+        if !remote.exists() {
+            let mut closed = issue(7, "sam", &["claude"]);
+            closed["state"] = json!("closed");
+            fs::write(remote, closed.to_string()).unwrap();
+        }
         let d = self.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&d).unwrap();
         for (f, v) in [
@@ -817,10 +825,11 @@ fn a_queued_job_is_stopped_once_its_issue_is_barred() {
 #[test]
 fn a_barred_issue_off_the_list_stops_its_job() {
     let seven = |labels: &[&str]| issue(7, "sam", labels);
-    for (now, stopped) in [
-        (seven(&["outside text"]), true),
-        (issue(7, "former", &[]), true),
-        (seven(&[]), false),
+    for (now, worker_stopped, stopped) in [
+        (seven(&["outside text"]), true, true),
+        (issue(7, "former", &[]), true, true),
+        (seven(&[]), true, false),
+        (seven(&["claude"]), false, false),
     ] {
         let mut now = now;
         now["repository_url"] = json!("https://api.github.com/repos/sam/box");
@@ -831,8 +840,12 @@ fn a_barred_issue_off_the_list_stops_its_job() {
         on_github(&b, &now);
         let d = b.record("j1");
         b.pass().jobs("sam/box", "box", &[]).unwrap();
-        assert_eq!(!d.exists(), stopped, "{now}");
-        assert_eq!(b.cfg.jobs.join("j1/1.stopped").exists(), stopped, "{now}");
+        assert_eq!(!d.exists(), worker_stopped, "{now}");
+        assert_eq!(
+            b.cfg.jobs.join("j1/1.stopped").exists(),
+            worker_stopped,
+            "{now}"
+        );
 
         let b = Box::new();
         let d = sorting(&b, "");
