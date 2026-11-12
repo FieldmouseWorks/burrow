@@ -6,7 +6,7 @@
 # a reason.
 disallowed-methods = [
   { path = "std::fs::rename", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason" },
-  { path = "tempfile::NamedTempFile::persist", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason" },
-  { path = "tempfile::NamedTempFile::persist_noclobber", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason" },
-  { path = "tokio::fs::rename", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason" },
+  { path = "tempfile::NamedTempFile::persist", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason", allow-invalid = true },
+  { path = "tempfile::NamedTempFile::persist_noclobber", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason", allow-invalid = true },
+  { path = "tokio::fs::rename", reason = "write state with burrow_process::replace::replace; allow a non-state move with a reason", allow-invalid = true },
 ]
