@@ -337,7 +337,10 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if authority::holds_slot(cfg, pid)? {
             continue;
         }
-        if Checkpoint::load(&job, &n)?.is_none() && !authority::legacy_waiting(cfg, pid)? {
+        if Checkpoint::load(&job, &n)?.is_none()
+            && !authority::legacy_waiting(cfg, pid)?
+            && !authority::polling_retry(cfg, &job, &n)
+        {
             busy = true;
             continue;
         }

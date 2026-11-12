@@ -154,6 +154,26 @@ pub(super) fn legacy_waiting(cfg: &Config, pid: u32) -> io::Result<bool> {
     }))
 }
 
+/// Earlier parents that poll the scheduler lock without blocking on it never
+/// appear in the kernel's table of blocked locks, so a retained refusal is
+/// proved otherwise, and only from what the sandbox can't forge: the caller
+/// has checked that the unit's own main process holds no pool slot (a running
+/// turn is held by the kernel's lock, whatever its job files say), usage is
+/// back, so the parent has nothing left to wait out, and the parent's own
+/// stream ends in the refusal it is retrying. A turn that was refused holds no
+/// slot and has no other work than getting one again.
+pub(super) fn polling_retry(cfg: &Config, job: &Job, n: &str) -> bool {
+    if crate::usage::out(cfg).is_some() {
+        return false;
+    }
+    let stream = job.turn(n, "jsonl");
+    engine::last_result(&stream, 0)
+        .and_then(|last| {
+            engine::refused_file(engine::Engine::Claude, &last, &stream, 0, crate::now())
+        })
+        .is_some()
+}
+
 /// An old parent's `hand_over` shell: `bash -c SCRIPT LOCK FLOCK PROJ _exec
 /// ID CLASS`, exactly. It is the unit's main process until the shell has
 /// taken the lock and executed the replacement, and the barrier can hold that
