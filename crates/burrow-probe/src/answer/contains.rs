@@ -349,13 +349,12 @@ mod tests {
         let bin = root.join("run/current-system/sw/bin");
         fs::create_dir_all(&bin).unwrap();
         let script = bin.join("nixos-version");
-        fs::write(
+        burrow_test::executable(
             &script,
-            format!("#!/bin/sh\necho '{{\"nixosVersion\":\"1\",\"configurationRevision\":\"{first}\"}}'\n"),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            format!(
+                "#!/bin/sh\necho '{{\"nixosVersion\":\"1\",\"configurationRevision\":\"{first}\"}}'\n"
+            ),
+        );
         let cfg: Config = serde_json::from_value(serde_json::json!({"repo":"sam/issues","systemRepo":"sam/host","label":"probe","authors":[],"host":"host","user":"dev","stateDir":root,"projects":root.join("projects"),"proj":null,"journal":{"units":[],"userUnits":[]},"tools":{"journalctl":"false","systemctl":"false"}})).unwrap();
         let commands = crate::answer::Commands;
         let machine = Machine {
