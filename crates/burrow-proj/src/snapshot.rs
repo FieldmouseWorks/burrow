@@ -283,7 +283,7 @@ pub struct Triage {
     pub drain: Option<Engine>,
     pub drain_jobs: usize,
     pub sorting_at_once: usize,
-    /// Issues waiting for a sorting slot, each with why.
+    /// Issues waiting for sorting admission or verdict application, each with why.
     #[serde(default)]
     pub waiting: Vec<String>,
 }
@@ -636,7 +636,7 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
         .collect()
 }
 
-/// The issues the inbox says wait for a sorting slot.
+/// The issues the inbox says wait for sorting, each with why.
 fn waiting(cfg: &Config) -> Vec<String> {
     let Some(i) = cfg.inbox.as_ref() else {
         return Vec::new();

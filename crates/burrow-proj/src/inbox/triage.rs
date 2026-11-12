@@ -260,7 +260,9 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
             if d.exists() {
-                self.planner_wait(repo, &n, None);
+                let why = (d.join("plan").is_file() && !self.sorting_slot(&d))
+                    .then_some("its verdict's steps are still being carried out");
+                self.planner_wait(repo, &n, why);
                 continue;
             }
             if room == 0 && !self.lane(issue) {

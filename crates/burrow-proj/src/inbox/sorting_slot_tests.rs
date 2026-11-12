@@ -161,7 +161,13 @@ fn unreadable_holds_reserve_capacity_for_every_consumer() {
 
 #[test]
 fn existing_sorting_records_are_not_waiting_for_new_admission() {
-    for existing in ["queued", "running", "failed", "verdict"] {
+    for existing in [
+        "queued",
+        "running",
+        "failed",
+        "verdict-free",
+        "verdict-busy",
+    ] {
         let b = single_slot();
         b.job("s1", "done", "kept verdict");
         let d = record(&b, "sam/box", 7, "s1");
@@ -176,12 +182,14 @@ fn existing_sorting_records_are_not_waiting_for_new_admission() {
                 fs::remove_file(d.join("job")).unwrap();
                 fs::write(d.join("failed"), super::UPDATED).unwrap();
             }
-            "verdict" => {
+            "verdict-free" | "verdict-busy" => {
                 fs::write(d.join("plan"), "[]").unwrap();
-                // A separate live sorter fills the lane while this verdict is pending.
-                b.job("s2", "done", "kept");
-                record(&b, "sam/game", 3, "s2");
-                fs::write(b.cfg.jobs.join("s2/1.end"), "ask").unwrap();
+                if existing == "verdict-busy" {
+                    // Another sorter fills the lane while this verdict is pending.
+                    b.job("s2", "done", "kept");
+                    record(&b, "sam/game", 3, "s2");
+                    fs::write(b.cfg.jobs.join("s2/1.end"), "ask").unwrap();
+                }
             }
             _ => unreachable!(),
         }
@@ -190,7 +198,13 @@ fn existing_sorting_records_are_not_waiting_for_new_admission() {
         let f = seed_wait(&b, "sam/box", "7");
         b.pass().triage("sam/box", &[issue(7, "sam", &[])]).unwrap();
         assert!(d.exists(), "{existing}");
-        assert!(!f.exists(), "{existing}");
+        if existing.starts_with("verdict-") {
+            let why = fs::read_to_string(f).unwrap();
+            assert!(why.contains("verdict's steps"), "{existing}: {why}");
+            assert!(!why.contains("planner slot"), "{existing}: {why}");
+        } else {
+            assert!(!f.exists(), "{existing}");
+        }
     }
 }
 

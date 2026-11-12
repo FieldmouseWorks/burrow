@@ -1,4 +1,4 @@
-//! Persist only issues awaiting new sorting admission. Successful issue lists
+//! Persist issues awaiting sorting admission or verdict application. Successful issue lists
 //! retire vanished issues; project discovery retires removed repositories.
 use super::{Pass, key, raw};
 use crate::{Fail, io_fail, read};
@@ -44,7 +44,7 @@ impl Pass<'_> {
     }
 
     /// Records, once per change, that issue N waits (or no longer waits) for
-    /// a sorting slot: in the journal, and in `.triage-waiting/KEY-N` for the
+    /// sorting admission or verdict application: in the journal, and in `.triage-waiting/KEY-N` for the
     /// snapshot.
     pub(super) fn planner_wait(&self, repo: &str, n: &str, why: Option<&str>) {
         let dir = self.inbox.state.join(".triage-waiting");
@@ -62,7 +62,7 @@ impl Pass<'_> {
             }
             None => {
                 if had.is_some() {
-                    eprintln!("proj-inbox: {repo}#{n}: no longer waiting for a sorting slot");
+                    eprintln!("proj-inbox: {repo}#{n}: no longer waiting for sorting");
                     let _ = fs::remove_file(&f);
                 }
             }
