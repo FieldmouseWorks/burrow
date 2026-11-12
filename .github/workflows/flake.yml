@@ -1,13 +1,28 @@
 # burrow's own gate, through the same shared workflow every project calls
 # (flake-check.yml), taken from this checkout so a PR runs its own version.
+#
+# The merge train's candidates (a push to a conary/train/ branch: main with
+# the PRs in it merged on top) run it in `train`, from main's copy instead:
+# Conary counts a result only when the workflow that signed it is at a commit
+# on burrow's main (its docs/ci-attestation.md, "Checking one", rule 2), and a
+# candidate's own copy is a branch's, which could sign anything. So does a
+# PR's negative run for the train (`train / negative`), which `train` makes
+# beside the PR's own: with pr-gate off, a PR to main gets only that and its
+# commits there, and its whole gate from `check`, until the train lands
+# burrow's PRs. The train asks for `train / check`, and `train / negative`.
+# Both skip the agents check, as `check` does (below), and the train counts
+# no result that skipped one until the machine's proof of it on the
+# candidate covers it (FieldmouseWorks/Conary#341).
 name: flake
 on:
   # A PR retargeted onto another branch runs from flake-retarget.yml.
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "conary/train/**"]
 jobs:
+  # Everything but the train's candidates: main, and every PR.
   check:
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/conary/train/')
     uses: ./.github/workflows/flake-check.yml
     # What the shared workflow needs to attest its result.
     permissions:
@@ -43,3 +58,22 @@ jobs:
       # it: the steward's config carries them (modules/autoland.nix,
       # baselineDocs), so every machine's build reads them.
       docs-paths: README.md AGENTS.md CLAUDE.md
+  # The train's candidates, on GitHub's hosted runners (a VM of its own for
+  # each job, which Conary counts as started fresh for it), and a PR to main's
+  # negative run. The same gate as `check`, its four legs and all; main's
+  # copy, which Renovate leaves at main (renovate.json): a pin would need a
+  # PR after every merge.
+  train:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/conary/train/') || github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch
+    uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      build-skip: agents
+      eval-apart: true
+      legs: 4
+      keep-builds: true
+      docs-paths: README.md AGENTS.md CLAUDE.md
+      pr-gate: false

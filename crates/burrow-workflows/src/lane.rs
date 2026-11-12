@@ -249,8 +249,13 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
             "{path} takes `edited`: {:?}",
             caller["on"]
         );
-        for (_, j) in &mine {
-            assert!(j.get("if").is_none(), "{path} skips: {:?}", j["if"]);
+        // A call skips only where another call takes the run: burrow's own,
+        // whose train candidates `train` gates rather than `check` (train.rs
+        // holds which runs each takes). A project's never does.
+        if path != CALLERS[0].0 {
+            for (_, j) in &mine {
+                assert!(j.get("if").is_none(), "{path} skips: {:?}", j["if"]);
+            }
         }
 
         let twin = workflow(retarget);
@@ -266,13 +271,19 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
         assert_eq!(twin["permissions"], caller["permissions"], "{retarget}");
         let its = calls(&twin);
         assert_eq!(its.len(), mine.len(), "{retarget}");
-        // Only a new base, and otherwise the same call: the same check.
+        // Only a new base, and otherwise the same call: the same check, and
+        // the same runs taken.
         for ((name, j), (their_name, theirs)) in mine.iter().zip(&its) {
             assert_eq!(name, their_name, "{retarget}");
-            assert_eq!(theirs["if"], "github.event.changes.base", "{retarget}");
-            let mut same = (*theirs).clone();
+            let only = match j.get("if").and_then(|c| c.as_str()) {
+                Some(c) => format!("github.event.changes.base && ({c})"),
+                None => "github.event.changes.base".to_owned(),
+            };
+            assert_eq!(theirs["if"], only.as_str(), "{retarget}: {name:?}");
+            let (mut same, mut mine) = ((*theirs).clone(), (*j).clone());
             same.as_mapping_mut().unwrap().remove("if");
-            assert_eq!(&same, *j, "{retarget}: {name:?}");
+            mine.as_mapping_mut().unwrap().remove("if");
+            assert_eq!(same, mine, "{retarget}: {name:?}");
         }
     }
     // Autoland knows the pair by these files (modules/autoland/prs.py's FLAKE).

@@ -65,8 +65,10 @@ Every repo with code gets a `flake.nix` from the template
   public repo runs it on GitHub's hosted runners, which cost it nothing and
   have KVM for NixOS VM tests. A private repo pays for hosted minutes, so it
   runs it on a self-hosted NixOS runner (`runner` and `install-nix: false`).
-  On a public repo it also attests the gate's result for Conary's ledger, so
-  the caller's job grants it `id-token: write` and `attestations: write`. On
+  It attests the gate's result for Conary's ledger with the job's own OIDC
+  token, the only evidence Conary's train reads, and on a public repo with
+  a Sigstore bundle too, so the caller's job grants it `id-token: write`
+  and `attestations: write`. On
   a PR, its `commits` job fails any commit GitHub can't verify: a signed one
   under a name and email its key isn't for (the house rules' Commits). Its
   `negative` job holds a PR to the house rule that a new check fails on the
@@ -80,7 +82,16 @@ Every repo with code gets a `flake.nix` from the template
   pushes to `conary/train/**` too, and turns
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
   the default branch gets only its `commits` and `negative` (one to another branch, or
-  retargeted to one, still gets the gate). A repo that lists its
+  retargeted to one, still gets the gate). The train counts a result only
+  when the copy of `flake-check.yml` that signed it is at a commit on burrow's
+  main, so a repo's candidates and negatives call it from there, never from
+  their own tree. burrow's own `flake.yml` does that in a second call,
+  `train`, at `@main`, for its candidates (its whole gate, legs and all) and
+  its PRs to main (their negative, pr-gate off), while `check` keeps every
+  PR's own gate until the train lands burrow's PRs: the train's configuration
+  names `train / check` and `train / negative`
+  ([train.rs](../crates/burrow-workflows/src/train.rs) holds which run takes
+  which call). `flake-gate` runs a caller's `check` when it has several. A repo that lists its
   documentation in `docs-paths` (files nothing its flake builds or tests
   reads; the input says how) gives a PR that changes only those the docs
   lane: only the checks named in `docs-checks`, and none of autoland's

@@ -19,9 +19,13 @@ cd "$root" || exit
 caller=.github/workflows/flake.yml
 [ -f "$caller" ] || { echo "flake-gate: no $caller in $root" >&2; exit 1; }
 
-# The one job that calls flake-check.yml, and where that workflow is.
+# The job that calls flake-check.yml, and where that workflow is: the one
+# job, or of several, the one named check, the gate a repo's PRs and default
+# branch run (burrow's and remi's train candidates take theirs in a call of
+# their own, from the shared workflow's main, with the same inputs).
 jobs=$(yq -o=json '[.jobs | to_entries[] | select(.value.uses // "" | test("(^|/)[.]github/workflows/flake-check[.]yml(@|$)"))]' "$caller")
-[ "$(jq length <<<"$jobs")" = 1 ] || { echo "flake-gate: $caller has $(jq length <<<"$jobs") jobs calling flake-check.yml, not one" >&2; exit 1; }
+[ "$(jq length <<<"$jobs")" = 1 ] || jobs=$(jq -c 'map(select(.key == "check"))' <<<"$jobs")
+[ "$(jq length <<<"$jobs")" = 1 ] || { echo "flake-gate: $caller has no one job calling flake-check.yml: none, or several and none of them named check" >&2; exit 1; }
 uses=$(jq -r '.[0].value.uses' <<<"$jobs")
 with=$(jq -c '.[0].value.with // {}' <<<"$jobs")
 

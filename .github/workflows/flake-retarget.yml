@@ -7,14 +7,15 @@
 # would stop counting the push's. It keeps flake.yml's name (the shared
 # workflow's concurrency group takes the two as one workflow, as autoland does by
 # these files' names), and its
-# call matches flake.yml's (crates/burrow-workflows/src/lane.rs).
+# calls match flake.yml's, each only on a new base
+# (crates/burrow-workflows/src/lane.rs).
 name: flake
 on:
   pull_request:
     types: [edited]
 jobs:
   check:
-    if: github.event.changes.base
+    if: github.event.changes.base && (github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/conary/train/'))
     uses: ./.github/workflows/flake-check.yml
     # What the shared workflow needs to attest its result.
     permissions:
@@ -27,3 +28,17 @@ jobs:
       legs: 4
       keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
+  train:
+    if: github.event.changes.base && (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/conary/train/') || github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch)
+    uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      build-skip: agents
+      eval-apart: true
+      legs: 4
+      keep-builds: true
+      docs-paths: README.md AGENTS.md CLAUDE.md
+      pr-gate: false
