@@ -199,6 +199,23 @@ pub fn queue(m: &Machine) -> Result<String, String> {
         .map(|s| or_none(&s) + "\n")
 }
 
+/// What the running system says about itself (`nixos-version --json`).
+fn nixos_version(m: &Machine) -> Result<Value, String> {
+    let version = m.path("/run/current-system/sw/bin/nixos-version");
+    let v = m.output(&version, &["--json"], false, &[])?;
+    Ok(serde_json::from_str(&v).unwrap_or_default())
+}
+
+/// The flake revision the running system was built from: the machine's own
+/// repo, which is not one of its inputs.
+pub(super) fn configuration_revision(m: &Machine) -> Result<String, String> {
+    nixos_version(m)?
+        .get("configurationRevision")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "the running system has no configuration revision".into())
+}
+
 /// `deployed`: the system that runs and the one that booted, its
 /// generation, version and revision, its inputs' revisions, and what
 /// HOST-update last found live.
@@ -223,10 +240,8 @@ pub fn deployed(m: &Machine) -> Result<String, String> {
             .map_or("?".into(), |t| utc(t.as_second()));
         out += &format!("Generation: {generation}, made {at}\n");
     }
-    let version = m.path("/run/current-system/sw/bin/nixos-version");
-    match m.output(&version, &["--json"], false, &[]) {
+    match nixos_version(m) {
         Ok(v) => {
-            let v: Value = serde_json::from_str(&v).unwrap_or_default();
             let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("?").to_string();
             out += &format!(
                 "NixOS {}, configuration revision {}\n",

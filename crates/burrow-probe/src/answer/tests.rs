@@ -66,6 +66,7 @@ fn config(state: &Path) -> Config {
             user_units: vec!["claude-rc@*.service".into()],
         },
         state_dir: state.to_path_buf(),
+        system_repo: None,
         proj: Some(PathBuf::from("/run/current-system/sw/bin/proj")),
         tools: Tools {
             git: "git".into(),
