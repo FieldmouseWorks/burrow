@@ -256,33 +256,83 @@ pub fn timer(line: &str) -> bool {
     TIMER.is_match(line)
 }
 
-/// A line's code: block comments written inside it and a trailing `#` or
-/// `//` comment taken out, comment marks inside quotes left alone.
-pub fn code(line: &str) -> String {
-    let (mut out, mut quote, mut block) = (String::new(), false, false);
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let two: String = chars[i..chars.len().min(i + 2)].iter().collect();
-        if block {
-            if two == "*/" {
-                block = false;
+/// Which comment marks a language writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Comments {
+    /// `#` to the end of the line, after whitespace or at its start.
+    pub hash: bool,
+    /// `//` to the end of the line. Not Nix's merge operator.
+    pub slash: bool,
+    /// `/* ... */`, across lines.
+    pub block: bool,
+}
+
+/// A path's comment marks by its extension; a path that says nothing has
+/// none, so none of its text is dropped as a comment.
+pub fn comments(path: &str) -> Comments {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let extension = name.rsplit_once('.').map_or("", |(_, e)| e);
+    let (hash, slash, block) = match extension {
+        "nix" => (true, false, true),
+        "toml" | "yaml" | "yml" | "sh" | "bash" | "zsh" | "py" | "pyi" | "conf" | "rb" => {
+            (true, false, false)
+        }
+        "rs" | "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "svelte" | "vue"
+        | "go" | "java" | "kt" | "kts" | "c" | "h" | "cc" | "cpp" | "hpp" | "cs" | "swift"
+        | "gd" => (false, true, true),
+        _ => (false, false, false),
+    };
+    Comments { hash, slash, block }
+}
+
+/// Each line of a whole text as its code: comments taken out (a block
+/// comment across any number of lines, so a line between its unchanged
+/// delimiters is inside it), comment marks inside quotes left alone, a
+/// quote ending at its own mark (a backslash escapes in a double-quoted
+/// one) or at the end of its line.
+pub fn code_lines(text: &str, marks: Comments) -> Vec<String> {
+    let mut block = false;
+    text.lines()
+        .map(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            let (mut out, mut quote, mut i) = (String::new(), None::<char>, 0);
+            while i < chars.len() {
+                let c = chars[i];
+                let next = chars.get(i + 1).copied();
+                if block {
+                    if c == '*' && next == Some('/') {
+                        block = false;
+                        i += 1;
+                        out.push(' ');
+                    }
+                } else if let Some(q) = quote {
+                    out.push(c);
+                    if c == '\\' && q == '"' {
+                        if let Some(n) = next {
+                            out.push(n);
+                            i += 1;
+                        }
+                    } else if c == q {
+                        quote = None;
+                    }
+                } else if marks.block && c == '/' && next == Some('*') {
+                    block = true;
+                    i += 1;
+                } else if marks.slash && c == '/' && next == Some('/') {
+                    break;
+                } else if marks.hash && c == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
+                    break;
+                } else {
+                    if c == '"' || c == '\'' {
+                        quote = Some(c);
+                    }
+                    out.push(c);
+                }
                 i += 1;
             }
-        } else if !quote && two == "/*" {
-            block = true;
-            i += 1;
-        } else if !quote && (chars[i] == '#' || two == "//") {
-            break;
-        } else {
-            if chars[i] == '"' {
-                quote = !quote;
-            }
-            out.push(chars[i]);
-        }
-        i += 1;
-    }
-    out
+            out
+        })
+        .collect()
 }
 
 /// Whether a line turns an automated spender (a model drain, paid usage,
@@ -290,7 +340,8 @@ pub fn code(line: &str) -> String {
 /// (dotted, or inside an inline `{ }`), or the drain given an engine. Null,
 /// false and comments are not. An option declared `default = true` over
 /// several lines, or inside a multi-line block comment, is the review's to
-/// judge: this reads one line at a time.
+/// judge: this reads one line at a time. The line is code already (see
+/// `code_lines`); on a raw line it says whether it could be one.
 pub fn spender(line: &str) -> bool {
     static SPENDER: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         let key = r"(?i)\b(drain|auto[-_]?drain|extra[-_]?usage|paid([-_]?usage)?|fresh|spend(ing)?|runners?)\b";
@@ -301,7 +352,6 @@ pub fn spender(line: &str) -> bool {
             re(r#"(?i)\bdrain\s*=\s*(lib\.(mkDefault|mkForce|mkOverride\s+\d+)\s+)?"[^"]+""#),
         ]
     });
-    let line = code(line);
     SPENDER.iter().any(|r| r.is_match(&line))
 }
 
@@ -333,6 +383,11 @@ pub fn model(line: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Whether any line of `text` is an active spender in `path`'s syntax.
+    fn spends(path: &str, text: &str) -> bool {
+        code_lines(text, comments(path)).iter().any(|l| spender(l))
+    }
+
     #[test]
     fn spenders() {
         for line in [
@@ -349,8 +404,10 @@ mod tests {
             "fresh = { enable = true; owner = \"x\"; };",
             "fresh = { owner = \"x\"; enable = lib.mkForce true; };",
             "/* opt in */ fresh.enable = true;",
+            "burrow.dispatch = {} // { fresh.enable = true; };",
+            "x = \"#\"; fresh.enable = true;",
         ] {
-            assert!(spender(line), "{line}");
+            assert!(spends("a.nix", line), "{line}");
         }
         for line in [
             "drain.enable = false;",
@@ -361,11 +418,37 @@ mod tests {
             "fresh = { enable = false; };",
             "fresh.enable = false; # previously fresh.enable = true;",
             "/* fresh.enable = true; */ x = 1;",
-            "fresh.enable = false; // was true",
             "description = \"drain on\";",
         ] {
-            assert!(!spender(line), "{line}");
+            assert!(!spends("a.nix", line), "{line}");
         }
+    }
+
+    #[test]
+    fn spenders_by_language() {
+        // TOML: a single-quoted string holding a mark, then the spender.
+        assert!(spends(
+            "a.toml",
+            "opts = { label = '#', paid_usage = true }"
+        ));
+        assert!(!spends("a.toml", "paid_usage = false # paid_usage = true"));
+        // An escaped quote doesn't end the string.
+        assert!(spends("a.toml", "x = \"a\\\" # b\"; paid_usage = true"));
+        assert!(!spends("a.rs", "let a = 1; // fresh.enable = true;"));
+        assert!(spends("a.rs", "let a = \"//\"; fresh.enable = true;"));
+        assert!(!spends("a.yaml", "# drain: true"));
+    }
+
+    #[test]
+    fn block_comments_span_lines() {
+        // Added between unchanged delimiters: inside the comment.
+        assert!(!spends("a.nix", "/*\nfresh.enable = true;\n*/\n"));
+        assert!(!spends("a.rs", "/* a\n  fresh.enable = true;\n b */"));
+        // Code after the closing delimiter is live.
+        assert!(spends("a.nix", "/*\nnote\n*/ fresh.enable = true;\n"));
+        assert!(spends("a.nix", "/* a */\nfresh.enable = true;\n"));
+        // A language without block comments has none.
+        assert!(spends("a.toml", "/*\nfresh.enable = true\n*/"));
     }
 
     #[test]
