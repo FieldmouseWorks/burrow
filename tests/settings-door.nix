@@ -65,7 +65,12 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     machine.wait_for_unit("multi-user.target")
     # No scheduler or inbox is available to perform the change.
-    machine.succeed("systemctl mask --runtime --now burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service autoland.service autoland@.service autoland-review.service burrow-update.service burrow-ledger.service burrow-ledger@.service")
+    machine.succeed('systemctl mask --runtime burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service autoland.service autoland@.service autoland-review.service burrow-update.service burrow-ledger.service burrow-ledger@.service')
+    # Boot can cancel queued control jobs; require the actual stopped state.
+    stopped, output = machine.execute("systemctl stop 'burrow-events.service' 'proj-inbox*' 'proj-watch*' 'autoland*' 'burrow-update*' 'burrow-ledger*'")
+    if stopped:
+        print(output)
+    machine.wait_until_succeeds('test -z "$(systemctl list-units --plain --no-legend --state=active,activating,deactivating \'burrow-events.service\' \'proj-inbox*\' \'proj-watch*\' \'autoland*\' \'burrow-update*\' \'burrow-ledger*\')"', timeout=30)
     machine.succeed("burrow-settings /etc/settings-tracked allows sam/code")
     machine.fail("burrow-settings /etc/settings-tracked allows sam/new")
     machine.succeed("touch /var/lib/settings-fixture/pause /var/lib/settings-fixture/limited")

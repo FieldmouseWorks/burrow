@@ -68,7 +68,12 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     import json, shlex
     machine.wait_for_unit("user@1001.service")
-    machine.succeed("systemctl mask --runtime --now burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service")
+    machine.succeed('systemctl mask --runtime burrow-events.service proj-inbox.service proj-inbox@.service proj-watch.service proj-watch@.service')
+    # Boot can cancel queued control jobs; require the actual stopped state.
+    stopped, output = machine.execute("systemctl stop 'burrow-events.service' 'proj-inbox*' 'proj-watch*'")
+    if stopped:
+        print(output)
+    machine.wait_until_succeeds('test -z "$(systemctl list-units --plain --no-legend --state=active,activating,deactivating \'burrow-events.service\' \'proj-inbox*\' \'proj-watch*\')"', timeout=30)
     def dev(cmd):
         return machine.succeed("runuser -u dev -- bash -lc " + shlex.quote(cmd)).strip()
     def state(j):
