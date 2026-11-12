@@ -238,6 +238,33 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(['sam/r'], continuing=True)
         assert operations == ['sam/r'] and len(handled) == 1, (operations, handled)
 
+    # A bounded multi-repo kick owes the repo it never entered, and an
+    # unavailable train is retried at its own deadline, not at once.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        repos[:] = [{'repo': 'sam/r', 'default': 'main'}, {'repo': 'sam/s', 'default': 'main'}]
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r', 'sam/s'])
+        assert 'sam/s' in C.load('pass-progress.json', {})['owed'], C.load('pass-progress.json', {})
+        for _ in range(4):
+            S.run_pass(['sam/r', 'sam/s'], continuing=True)
+        assert len(handled) >= 4, ('the repo the kick never entered was lost', handled)
+        assert C.load('pass-progress.json', {}).get('owed') == [], C.load('pass-progress.json', {})
+
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        def down(repo):
+            raise C.Unavailable('temporarily unavailable')
+
+        with patch.object(S.T, 'step', down):
+            S.run_pass(['sam/r'])
+        due = C.load('continue.json', {})['sam/r']
+        assert due >= C.NOW + 5 * 60, (due, C.NOW)
+
     with fixture() as (clock, *_):
         seen = []
         with C.pass_deadline(18 * 60):

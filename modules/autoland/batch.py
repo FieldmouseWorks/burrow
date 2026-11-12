@@ -28,6 +28,10 @@ class Batch:
         self.state = C.load(FILE, {})
         self.state.setdefault("repos", {})
         self.state.setdefault("finished", [])
+        self.state.setdefault("owed", [])  # kicked repos not yet entered or finished
+        self.done = set()
+        self.left = False  # PRs or repos still unvisited, not only retries
+        self.later = None  # when an unavailable operation may be retried
         self.traversal_full = self.state.get("full", False) or (self.full and not continuing)
 
     def repos(self, repos):
@@ -45,7 +49,7 @@ class Batch:
             return True
         if kick is None:
             return self.traversal_full or bool(self.state["repos"])
-        return any(r.lower() in kick for r in self.state["repos"])
+        return any(r.lower() in kick for r in [*self.state["repos"], *self.state["owed"]])
 
     def expired(self):
         now = time.monotonic()
@@ -56,6 +60,10 @@ class Batch:
                 self.until = min(now + SECONDS, self.hard_until)
             return False
         return now >= self.until
+
+    def retry(self, at):
+        self.advanced = True  # an unsuccessful attempt still spends the slice
+        self.later = at if self.later is None else min(self.later, at)
 
     def digest(self, repo):
         return list(self.state["repos"].get(repo, {}).get("digest", []))
@@ -119,6 +127,7 @@ class Batch:
 
     def finish(self, repo):
         self.advanced = True
+        self.done.add(repo.lower())
         self.state["repos"].pop(repo, None)
         if self.traversal_full and repo not in self.state["finished"]:
             self.state["finished"].append(repo)
@@ -128,6 +137,11 @@ class Batch:
             self.state["full"] = not complete
             if complete:
                 self.state["finished"] = []
+        if kick is not None:
+            # A bounded multi-repo kick owes every target it didn't finish,
+            # including ones it never entered and so have no cursor.
+            owed = set(self.state["owed"]) | set(kick)
+            self.state["owed"] = sorted(owed - self.done if not complete else owed - set(kick))
         C.save(FILE, self.state)
         # Continuations have their own event line: they are not new-work
         # requests and must not consume GitHub events or decision deadlines.
@@ -136,5 +150,6 @@ class Batch:
         for key in again:
             wakes.pop(key, None)
             if not complete:
-                wakes[key] = C.NOW + 1
+                # Retries wait for their own deadline; only unvisited work is due at once.
+                wakes[key] = C.NOW + 1 if self.left or not self.later else self.later
         C.save("continue.json", wakes)

@@ -267,6 +267,7 @@ def run_pass(kick, continuing=False):
     for r in repos:
         if batch.expired() and seen:
             complete = False
+            batch.left = True
             break
         repo = r["repo"]
         seen.add(repo)
@@ -344,6 +345,7 @@ def run_pass(kick, continuing=False):
                 for pr in sorted(pending, key=order):
                     if batch.expired():
                         partial = True
+                        batch.left = True
                         break
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
@@ -361,6 +363,7 @@ def run_pass(kick, continuing=False):
                 # failed before then would have the sweep take what's theirs.
                 if partial or batch.expired():
                     complete = False
+                    batch.left = True
                     continue
                 # A partial traversal leaves all reviewer files alone. Once
                 # complete, include the snapshots carried from earlier batches
@@ -381,6 +384,7 @@ def run_pass(kick, continuing=False):
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
                         operations_complete = False
+                        batch.retry(C.NOW + 5 * MIN)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
