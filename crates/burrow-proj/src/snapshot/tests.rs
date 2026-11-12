@@ -254,7 +254,6 @@ fn an_idle_machine() {
 // starting; one whose lock can't be looked at is unknown, and no room.
 #[test]
 fn held_slots_say_whose_and_since_when() {
-    use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
@@ -311,7 +310,7 @@ fn held_slots_say_whose_and_since_when() {
     for i in 1..=cfg.codex_slots {
         let f = codex.join(i.to_string());
         fs::write(&f, "").unwrap();
-        fs::set_permissions(&f, fs::Permissions::from_mode(0o000)).unwrap();
+        burrow_test::permissions(&f, 0o000);
     }
     let snap = Snapshot::take(&cfg, 0).unwrap();
     for r in &mut runners {
