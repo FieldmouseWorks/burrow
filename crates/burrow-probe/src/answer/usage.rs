@@ -6,8 +6,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 mod accounting;
+mod codex;
 mod totals;
-use accounting::{Session, decode};
+use accounting::Session;
 use burrow_process::state_reads::Dir;
 use totals::Totals;
 fn read(dir: &Dir, name: &str) -> String {
@@ -119,18 +120,19 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
                 continue;
             }
             let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
+            let mut threads: BTreeMap<String, codex::Thread> = BTreeMap::new();
             for n in turns {
                 let at = turn_time(&dir, n);
                 let engine = read(&dir, &format!("{n}.engine"));
                 let engine = if engine.is_empty() { "claude" } else { &engine };
-                let report = if engine == "claude" {
-                    Some(decode(
-                        records(dir.file(Path::new(&format!("{n}.jsonl"))).ok()),
-                        &mut sessions,
-                        &format!("{}/{n}", name.to_string_lossy()),
-                    ))
-                } else {
-                    None
+                // Every turn of the job is decoded, in the span or not, so a
+                // resumed one counts only what it added.
+                let stream = || records(dir.file(Path::new(&format!("{n}.jsonl"))).ok());
+                let identity = format!("{}/{n}", name.to_string_lossy());
+                let report = match engine {
+                    "claude" => Some(accounting::decode(stream(), &mut sessions, &identity)),
+                    "codex" => Some(codex::decode(stream(), &mut threads, &identity)),
+                    _ => None,
                 };
                 let Some(at) = at else {
                     continue;

@@ -1,5 +1,6 @@
 //! The usage answer's table: turns, tokens and cost by engine, role and
-//! project, with cost recovery matched by run identity across selected turns.
+//! project, with cost recovery matched by run identity across selected turns
+//! (token recovery, for engines whose streams carry no cost).
 use super::accounting::Report;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +13,9 @@ struct Tally {
     missing: BTreeSet<String>,
     recovered: BTreeSet<String>,
     tokens_partial: u64,
-    /// Turns whose engine's stream isn't priced here.
+    /// Turns whose engine's stream carries tokens but no cost.
+    unpriced: u64,
+    /// Turns whose engine's stream isn't read here: no cost or tokens.
     unread: u64,
 }
 
@@ -23,6 +26,7 @@ impl Tally {
             *sum += v;
         }
         self.cost += other.cost;
+        self.unpriced += other.unpriced;
         self.unread += other.unread;
         self.missing.extend(other.missing.iter().cloned());
         self.recovered.extend(other.recovered.iter().cloned());
@@ -35,6 +39,7 @@ impl Tally {
                 turns: 1,
                 tokens: r.tokens,
                 cost: r.cost,
+                unpriced: u64::from(r.unpriced),
                 unread: 0,
                 missing: r.missing.clone(),
                 recovered: r.recovered.clone(),
@@ -48,18 +53,19 @@ impl Tally {
         }
     }
 
-    /// The row's cells after its key: tokens and cost read `-` where no
-    /// turn of it was priced.
+    /// The row's cells after its key: tokens read `-` where no turn of it
+    /// was read, and cost where none was priced.
     fn cells(&self) -> [String; 11] {
         let none = self.unread == self.turns;
         let n = |v: u64| if none { "-".into() } else { v.to_string() };
+        let unpriced = self.unread + self.unpriced == self.turns;
         [
             self.turns.to_string(),
             n(self.tokens[0]),
             n(self.tokens[1]),
             n(self.tokens[2]),
             n(self.tokens[3]),
-            if none {
+            if unpriced {
                 "-".into()
             } else {
                 format!("${:.2}", self.cost)
@@ -111,10 +117,10 @@ impl Totals {
         let recovered = whole.recovered.intersection(&whole.missing).count();
         let outside = whole.recovered.difference(&whole.missing).count();
         let mut out = format!(
-            "Cost: ${:.2} recorded over {} turns; {missing} runs with cost still missing; {recovered} runs with cost recovered in this span; {outside} earlier runs outside the selected turns whose cost may be included; {} turns whose engine's cost and tokens aren't read.\nTokens: {} turns with partial counts (output counts completed runs only).\n",
-            whole.cost, whole.turns, whole.unread, whole.tokens_partial
+            "Cost: ${:.2} recorded over {} turns; {missing} runs with cost still missing; {recovered} runs with cost recovered in this span; {outside} earlier runs outside the selected turns whose cost may be included; {} turns whose engine's stream carries tokens but no cost (their runs' missing and recovered tokens count above); {} turns whose engine's cost and tokens aren't read.\nTokens: {} turns with partial counts (claude output counts completed runs only; a codex run that reported no total counts nothing).\n",
+            whole.cost, whole.turns, whole.unpriced, whole.unread, whole.tokens_partial
         );
-        out += "Columns: missing-runs excludes recovered cost; recovered-runs matches gaps in selected turns; outside-span counts recovered gaps outside selected turns; partial-tokens counts turns with incomplete tokens. Unread turns have unknown cost and tokens.\n";
+        out += "Columns: missing-runs excludes recovered cost (tokens, for an engine whose stream carries no cost); recovered-runs matches gaps in selected turns; outside-span counts recovered gaps outside selected turns; partial-tokens counts turns with incomplete tokens. Unread turns have unknown cost and tokens.\n";
         let head = [
             "engine",
             "role",
