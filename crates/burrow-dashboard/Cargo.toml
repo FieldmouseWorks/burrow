@@ -10,7 +10,6 @@ publish.workspace = true
 burrow-process = { path = "../burrow-process" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "form"] }
 base64.workspace = true
-burrow-proj = { path = "../burrow-proj" }
 getrandom = "0.4.3"
 maud = "0.27.0"
 serde.workspace = true

@@ -283,21 +283,10 @@ fn names_are_tidied() {
     assert_eq!(core.name(""), "Passkey 1");
 }
 
-/// Saving the state fails until what's returned is dropped: a directory
-/// where its new file goes, which nothing (root included) can write over.
-struct Jammed(std::path::PathBuf);
-
-fn jam(dir: &std::path::Path) -> Jammed {
-    let tmp = dir.join("state.tmp");
-    std::fs::create_dir(&tmp).unwrap();
-    std::fs::write(tmp.join("x"), "").unwrap();
-    Jammed(tmp)
-}
-
-impl Drop for Jammed {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
+/// Saving the state fails until what's returned is dropped: the state
+/// directory refuses new files.
+fn jam(dir: &std::path::Path) -> burrow_test::BlockWrites {
+    burrow_test::BlockWrites::new(dir)
 }
 
 #[test]
