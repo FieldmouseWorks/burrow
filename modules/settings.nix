@@ -6,10 +6,16 @@ let
   cfg = config.burrow.settings;
   inherit (config.burrow) user stateDir;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-settings;
+  # Only where proj's queue exists to be ordered with: the lock lives in its
+  # jobs directory, which nothing else provisions.
+  projQueue = lib.attrByPath [ "burrow" "proj" "enable" ] false config;
   settings = {
     overlay = "${stateDir}/settings/overlay.json";
     inherit (cfg) allowed;
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
+  } // lib.optionalAttrs projQueue {
+    # A release through the door is ordered with proj's queue births by it.
+    usageLock = "${config.burrow.proj.jobsDir}/.usage.lock";
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);
   command = pkgs.writeShellScriptBin "settings" ''

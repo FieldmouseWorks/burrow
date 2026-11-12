@@ -126,6 +126,7 @@ fn every_option_shown_comes_from_the_schema() {
     assert!(err.starts_with("autoland.rounds: declared"), "{err}");
     // And a usage record that can't be read is no "no hold".
     set(&mut cfg, tracked());
+    crate::usage::back(&cfg, None);
     fs::write(cfg.jobs.join(crate::usage::FILE), "{not json").unwrap();
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.contains(".usage.json"), "{err}");
@@ -154,6 +155,7 @@ fn admission_reads_the_one_overlay_and_writes_without_a_tracked_document() {
         overlay: d.path().join("overlay.json"),
         allowed: vec!["sam/kept".into()],
         pipeline_repos: vec!["sam/pipeline".into()],
+        usage_lock: None,
     };
     cfg.settings = Some(policy.clone());
     cfg.tracked_settings = None;

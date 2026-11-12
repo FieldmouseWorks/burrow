@@ -1,610 +1,543 @@
-//! Owner pauses: compatibility, deadline reconciliation and atomic generations.
-use super::tests::{cutoff, earlier_resets, rig, told};
+//! The owner's pause lives in the settings overlay and changes through its door.
+use super::tests::{cutoff, rig, told};
 use super::*;
 use std::fs;
 
-// Owner-record content checks run as serialized transactions. Public admission
-// contention is tested separately, rather than assuming no concurrent fork
-// briefly inherits a descriptor before exec.
-fn admission_cutoff(cfg: &Config) -> std::io::Result<Option<i64>> {
-    let _held = super::lock(cfg).map_err(std::io::Error::other)?;
-    super::admission_cutoff_locked(cfg)
+fn dispatch(cfg: &Config, words: &[&str]) -> Result<(), crate::Fail> {
+    crate::cmd::dispatch(
+        cfg,
+        &words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+    )
+}
+
+fn log(cfg: &Config) -> String {
+    let overlay = &cfg.settings.as_ref().unwrap().overlay;
+    fs::read_to_string(overlay.with_extension("log")).unwrap_or_default()
 }
 
 #[test]
-fn owner_hold_after_release_is_fresh_and_only_explicitly_released() {
-    let (_d, cfg) = rig();
-    back(&cfg, None);
-    let args = [
-        "usage",
-        "hold",
-        &(now() + 7200).to_string(),
-        "--reason",
-        "save usage",
-    ]
-    .map(String::from);
-    crate::cmd::dispatch(&cfg, &args).unwrap();
-    let held = out(&cfg).unwrap();
+fn a_hold_set_through_the_door_stops_turns_and_back_releases_it_and_both_are_logged() {
+    let (d, cfg) = rig();
+    let until = (now() + 7200).to_string();
+    dispatch(&cfg, &["usage", "hold", &until, "--reason", "save usage"]).unwrap();
+    let held = out(&cfg).expect("the next Claude turn finds the machine out");
     assert!(held.owner);
     assert_eq!(held.said, "save usage");
-    back(&cfg, Some(held.at + 1));
+    assert_eq!(held.until.to_string(), until);
+    assert!(
+        !cfg.jobs.join(FILE).exists(),
+        "nothing is kept in the old file"
+    );
+    assert_eq!(told(&d).len(), 1);
+    // A successful run, or a refusal, neither ends nor replaces it.
+    back(&cfg, Some(now() + 1));
+    record(&cfg, "j", Some(now() + 99999), "refused", now()).unwrap();
     assert_eq!(out(&cfg), Some(held));
-    back(&cfg, None);
+    fs::write(d.path().join("pending"), "").unwrap();
+    dispatch(&cfg, &["usage", "back"]).unwrap();
     assert!(out(&cfg).is_none());
-    // Stale watchdog imports remain suppressed, unlike fresh owner holds.
-    earlier(&cfg, "watchdog", now() + 7200, None).unwrap();
-    assert!(out(&cfg).is_none());
-    hold(&cfg, now() + 3600, "another pause").unwrap();
-    assert!(out(&cfg).unwrap().owner);
+    assert!(
+        told(&d).last().unwrap().starts_with("close"),
+        "{:?}",
+        told(&d)
+    );
+    let log = log(&cfg);
+    assert!(
+        log.contains("proj usage hold") && log.contains("usage-hold") && log.contains("save usage"),
+        "{log}"
+    );
+    assert!(
+        log.contains("proj usage back") && log.contains("usage-back"),
+        "{log}"
+    );
 }
 
 #[test]
-fn owner_hold_rejects_invalid_deadlines_and_arguments_without_changing_state() {
+fn a_hold_works_without_the_inbox_or_any_daemon_and_rejects_bad_arguments() {
     let (_d, cfg) = rig();
-    hold(&cfg, now() + 7200, "pause").unwrap();
-    let before = kept(&cfg);
     for words in [
         vec!["usage", "hold", "0"],
         vec!["usage", "hold", "9999999999", "--reason"],
         vec!["usage", "hold", "9999999999", "--reason", ""],
         vec!["usage", "hold", "9999999999", "--unknown"],
     ] {
-        assert!(
-            crate::cmd::dispatch(
-                &cfg,
-                &words.into_iter().map(String::from).collect::<Vec<_>>()
-            )
-            .is_err()
-        );
-        assert_eq!(kept(&cfg), before);
-    }
-}
-
-#[test]
-fn owner_deadline_survives_refusals_and_expires_normally() {
-    let (_d, cfg) = rig();
-    hold(&cfg, now() + 60, "owner deadline").unwrap();
-    let held = out(&cfg).unwrap();
-    record(&cfg, "running", Some(now() + 7200), "refused", now()).unwrap();
-    assert_eq!(out(&cfg), Some(held.clone()));
-    let expired = Spent {
-        until: now() - 1,
-        ..held
-    };
-    keep(&cfg, &expired).unwrap();
-    assert!(out(&cfg).is_none());
-    back(&cfg, Some(now() + 1));
-    assert!(kept(&cfg).unwrap().back.is_some());
-    // A new refusal after expiry is an ordinary usage hold again.
-    record(&cfg, "running", Some(now() + 7200), "refused", now()).unwrap();
-    assert!(!out(&cfg).unwrap().owner);
-}
-
-// The disk schema used by turns that keep the previous binary through a deploy.
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct LegacySpent {
-    until: i64,
-    said: String,
-    job: String,
-    at: i64,
-    back: Option<i64>,
-    told: i64,
-    last: Option<i64>,
-}
-
-#[test]
-fn owner_holds_survive_legacy_reads_refusals_and_successful_turns() {
-    let (_d, cfg) = rig();
-    record(&cfg, "ordinary", Some(now() + 60), "refused", now()).unwrap();
-    let old: LegacySpent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-    assert!(old.back.is_none() && old.until > now());
-    hold(&cfg, now() + 3600, "owner reason").unwrap();
-    let held = out(&cfg).unwrap();
-    let mut old: LegacySpent =
-        serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-    // The old slot/retry loop still reads an active hold, and its successful
-    // turn cannot satisfy back()'s started > last-refusal condition.
-    assert!(old.back.is_none() && old.until > now());
-    assert!(now() < old.last.unwrap());
-    // Exactly the old put() update: a refusal extends the compatible mirror
-    // and preserves the rest. It cannot erase the owner's actual deadline.
-    old.until = old.until.max(now() + 7200);
-    old.last = Some(old.last.unwrap().max(now()));
-    fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-    assert_eq!(out(&cfg), Some(held.clone()));
-    back(&cfg, Some(now() + 1));
-    assert_eq!(out(&cfg), Some(held));
-    // Replacement owner pauses update both the old reader and the metadata.
-    hold(&cfg, now() + 1200, "replacement").unwrap();
-    let old: LegacySpent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-    assert_eq!(old.until, out(&cfg).unwrap().until);
-    assert_eq!(out(&cfg).unwrap().said, "replacement");
-    back(&cfg, None);
-    assert!(out(&cfg).is_none());
-}
-
-#[test]
-fn owner_expiry_settles_without_a_claude_run_and_retries_its_close() {
-    let (d, cfg) = rig();
-    fs::write(d.path().join("pending"), "").unwrap();
-    hold(&cfg, now() + 60, "short pause").unwrap();
-    assert!(tend(&cfg).unwrap() <= out(&cfg).unwrap().until);
-    let mut expired = kept(&cfg).unwrap();
-    expired.until = now() - 1;
-    keep(&cfg, &expired).unwrap();
-    tend(&cfg);
-    assert_eq!(kept(&cfg).unwrap().back, Some(expired.until));
-    assert!(last_release(&cfg).unwrap() >= expired.until);
-    assert!(out(&cfg).is_none());
-    assert!(told(&d).iter().any(|s| s.starts_with("close ")));
-    let closes = told(&d).iter().filter(|s| s.starts_with("close ")).count();
-    let mut retry = kept(&cfg).unwrap();
-    retry.told = now() - RETRY;
-    keep(&cfg, &retry).unwrap();
-    tend(&cfg);
-    assert!(told(&d).iter().filter(|s| s.starts_with("close ")).count() > closes);
-    fs::remove_file(d.path().join("pending")).unwrap();
-    let mut settled = kept(&cfg).unwrap();
-    settled.until = now() - cfg.stall_queued() - 2;
-    settled.back = Some(settled.until);
-    keep(&cfg, &settled).unwrap();
-    tend(&cfg);
-    assert!(kept(&cfg).is_none());
-}
-
-#[test]
-fn legacy_refusals_at_and_after_expiry_survive_delayed_cleanup() {
-    for delta in [-1, 0, 1] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "pause").unwrap();
-        let mut expired = kept(&cfg).unwrap();
-        let deadline = now() - 10;
-        expired.until = deadline;
-        keep(&cfg, &expired).unwrap();
-        let mut old: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        old.until = deadline + 7200;
-        old.last = Some(old.last.unwrap().max(deadline + delta));
-        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        if delta < 0 {
-            assert!(out(&cfg).is_none());
-            assert!(kept(&cfg).unwrap().owner);
-            tend(&cfg);
-            assert!(kept(&cfg).unwrap().back.is_some());
-        } else {
-            let refused = out(&cfg).unwrap();
-            assert!(!refused.owner);
-            assert_eq!(refused.refused(), deadline + delta);
-            tend(&cfg);
-            assert_eq!(out(&cfg), Some(refused.clone()));
-            // A stale successful turn cannot end the reconciled refusal.
-            back(&cfg, Some(deadline + delta));
-            assert_eq!(out(&cfg), Some(refused));
-            earlier(&cfg, "import", deadline + 7300, Some(deadline + delta)).unwrap();
-            adopt(&cfg).unwrap();
-            tend(&cfg);
-            assert!(!out(&cfg).unwrap().owner);
-            assert!(out(&cfg).unwrap().until >= deadline + 7300);
-            back(&cfg, Some(now() + 1));
-            assert!(out(&cfg).is_none());
-        }
-    }
-}
-
-#[test]
-fn current_refusals_respect_the_same_deadline_boundary() {
-    for delta in [-1, 0, 1] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "pause").unwrap();
-        let mut expired = kept(&cfg).unwrap();
-        let deadline = now() - 10;
-        expired.until = deadline;
-        keep(&cfg, &expired).unwrap();
-        let refusal = record(
-            &cfg,
-            "turn",
-            Some(deadline + 7200),
-            "refused",
-            deadline + delta,
-        )
-        .unwrap();
-        assert_eq!(refusal.owner, delta < 0);
-        if delta >= 0 {
-            tend(&cfg);
-            assert_eq!(out(&cfg), Some(refusal));
-        }
-    }
-}
-
-#[test]
-fn owner_generations_commit_only_when_the_shared_record_commits() {
-    for seconds in [0, 1] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "original").unwrap();
-        let original = out(&cfg).unwrap();
-        let old_metadata = fs::read(cfg.jobs.join(&original.job)).unwrap();
-        let mut replacement = original.clone();
-        replacement.at += seconds;
-        replacement.until += 1000;
-        replacement.said = "replacement".into();
-        // An interruption after preparing metadata has not committed anything.
-        let prepared = owner_generation(&cfg, &replacement).unwrap();
-        assert_eq!(out(&cfg), Some(original.clone()));
-        assert_ne!(prepared.job, original.job);
-        let blocked = cfg.jobs.join(format!("{FILE}.new"));
-        fs::create_dir(&blocked).unwrap();
-        assert!(keep(&cfg, &replacement).is_err());
-        assert_eq!(out(&cfg), Some(original.clone()));
-        assert_eq!(
-            fs::read(cfg.jobs.join(&original.job)).unwrap(),
-            old_metadata
-        );
-        fs::remove_dir(&blocked).unwrap();
-        keep(&cfg, &replacement).unwrap();
-        let committed = out(&cfg).unwrap();
-        assert_eq!(committed.said, "replacement");
-        assert_eq!(committed.until, replacement.until);
-        assert_ne!(committed.job, original.job);
-        // Concurrent readers of the previous record still have its metadata.
-        assert_eq!(
-            fs::read(cfg.jobs.join(&original.job)).unwrap(),
-            old_metadata
-        );
-        let mut reminder = committed.clone();
-        reminder.told += 1;
-        fs::create_dir(&blocked).unwrap();
-        assert!(keep(&cfg, &reminder).is_err());
-        assert_eq!(out(&cfg), Some(committed.clone()));
-        back(&cfg, None); // Failed release cannot downgrade the active owner.
-        assert_eq!(out(&cfg), Some(committed.clone()));
-        fs::remove_dir(&blocked).unwrap();
-        keep(&cfg, &reminder).unwrap();
-        assert_eq!(out(&cfg).unwrap().job, committed.job);
-        back(&cfg, None);
+        assert!(dispatch(&cfg, &words).is_err());
         assert!(out(&cfg).is_none());
     }
+    hold(&cfg, now() + 60, "now").unwrap();
+    assert!(out(&cfg).is_some());
 }
 
 #[test]
-fn failed_creation_and_expiry_do_not_publish_partial_owner_state() {
+fn an_expired_hold_closes_itself_and_a_refusal_before_it_ends_is_ignored() {
     let (d, cfg) = rig();
-    let blocked = cfg.jobs.join(format!("{FILE}.new"));
-    fs::create_dir(&blocked).unwrap();
-    assert!(hold(&cfg, now() + 3600, "not committed").is_err());
-    assert!(kept(&cfg).is_none());
-    fs::remove_dir(&blocked).unwrap();
-    hold(&cfg, now() + 60, "expires").unwrap();
-    let mut expired = kept(&cfg).unwrap();
-    expired.until = now() - 1;
-    keep(&cfg, &expired).unwrap();
-    let before = kept(&cfg).unwrap();
-    fs::create_dir(&blocked).unwrap();
-    tend(&cfg);
-    assert_eq!(kept(&cfg), Some(before));
-    assert!(!told(&d).iter().any(|s| s.starts_with("close ")));
-    fs::remove_dir(&blocked).unwrap();
-    tend(&cfg);
-    assert!(kept(&cfg).unwrap().back.is_some());
-    assert!(told(&d).iter().any(|s| s.starts_with("close ")));
-}
-
-#[test]
-fn expiry_cutoff_survives_every_first_writer_and_later_imports() {
-    for first in [
-        "tend", "dated", "undated", "adopt", "current", "legacy", "hold",
-    ] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "expires").unwrap();
-        let deadline = now() - 30;
-        let mut expired = kept(&cfg).unwrap();
-        expired.until = deadline;
-        keep(&cfg, &expired).unwrap();
-        let reset = now() + 3600;
-        match first {
-            "tend" => {
-                tend(&cfg);
-            }
-            "dated" => {
-                earlier(&cfg, "await", reset, Some(deadline - 1)).unwrap();
-            }
-            "undated" => {
-                earlier(&cfg, "watchdog", reset, None).unwrap();
-            }
-            "adopt" => {
-                earlier_resets(&cfg, "owned", reset, deadline - 1, true);
-                earlier_resets(&cfg, "unowned", reset, deadline - 1, false);
-                adopt(&cfg).unwrap();
-            }
-            "current" => {
-                record(&cfg, "fresh", Some(reset), "refused", deadline).unwrap();
-            }
-            "legacy" => {
-                let mut raw: LegacySpent =
-                    serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-                raw.until = reset;
-                raw.last = Some(deadline);
-                fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&raw).unwrap()).unwrap();
-                // Even the import, rather than tend, can first see this write.
-                earlier(&cfg, "await", reset + 1000, Some(deadline - 1)).unwrap();
-            }
-            "hold" => {
-                hold(&cfg, reset, "replacement").unwrap();
-            }
-            _ => unreachable!(),
-        }
-        let expected = out(&cfg);
-        assert!(released(&cfg).unwrap() >= deadline - 1, "{first}");
-        if matches!(first, "current" | "legacy" | "hold") {
-            assert_eq!(expected.as_ref().unwrap().until, reset, "{first}");
-        } else {
-            assert!(expected.is_none(), "{first}");
-        }
-        // Every adoption route sees the durable cutoff, even after replacement.
-        earlier(&cfg, "await", reset + 1000, Some(deadline - 1)).unwrap();
-        earlier(&cfg, "watchdog", reset + 1000, None).unwrap();
-        earlier_resets(&cfg, "owned-stale", reset + 1000, deadline - 1, true);
-        earlier_resets(&cfg, "unowned-stale", reset + 1000, deadline - 1, false);
-        adopt(&cfg).unwrap();
-        tend(&cfg);
-        assert_eq!(out(&cfg), expected, "{first}");
-        if first != "hold" {
-            // Cleanup cannot erase the cutoff; a refusal exactly at or after
-            // expiry is still new and eligible, including through imports.
-            fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-            earlier(&cfg, "stale", reset + 1000, Some(deadline - 1)).unwrap();
-            assert!(out(&cfg).is_none(), "{first}");
-            earlier(&cfg, "boundary", reset + 2000, Some(deadline)).unwrap();
-            assert_eq!(out(&cfg).unwrap().until, reset + 2000, "{first}");
-            earlier(&cfg, "after", reset + 3000, Some(deadline + 1)).unwrap();
-            assert_eq!(out(&cfg).unwrap().until, reset + 3000, "{first}");
-        }
-    }
-}
-
-#[test]
-fn early_owner_release_is_not_later_replaced_by_its_original_deadline() {
-    for writer in ["import", "refusal"] {
-        let (_d, cfg) = rig();
-        hold(&cfg, now() + 3600, "released early").unwrap();
-        let deadline = now() - 30;
-        let released_at = deadline - 60;
-        let mut retired = kept(&cfg).unwrap();
-        retired.until = deadline;
-        keep(&cfg, &retired).unwrap();
-        retired = kept(&cfg).unwrap();
-        retired.back = Some(released_at);
-        mark(&cfg, released_at).unwrap();
-        keep(&cfg, &retired).unwrap();
-        tend(&cfg);
-        assert_eq!(released(&cfg).unwrap(), released_at);
-        let reset = now() + 7200;
-        if writer == "import" {
-            earlier(&cfg, "after release", reset, Some(released_at + 1)).unwrap();
-        } else {
-            record(
-                &cfg,
-                "after release",
-                Some(reset),
-                "refused",
-                released_at + 1,
-            )
-            .unwrap();
-        }
-        assert_eq!(out(&cfg).unwrap().until, reset, "{writer}");
-        assert!(!out(&cfg).unwrap().owner, "{writer}");
-    }
-}
-
-#[test]
-fn fresh_meter_cannot_release_an_owner_pause() {
-    let (d, mut cfg) = rig();
-    cfg.meters = Some(d.path().join("meters"));
-    hold(&cfg, now() + 7200, "owner pause").unwrap();
-    let held = out(&cfg).unwrap();
-    fs::create_dir_all(cfg.meters.as_ref().unwrap()).unwrap();
+    hold(&cfg, now() + 60, "short").unwrap();
+    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
+    let past = now() - 5;
     fs::write(
-        cfg.meters.as_ref().unwrap().join("claude.json"),
-        serde_json::json!({
-            "windows": {"seven_day": {"used": 1.0, "resets_at": 0.0}},
-            "credits": false, "read_at": now() as f64, "requested_at": now() as f64
-        })
-        .to_string(),
+        &overlay,
+        format!(
+            r#"{{"usageHold":{{"until":{past},"reason":"short","since":{}}}}}"#,
+            past - 60
+        ),
     )
     .unwrap();
-    metered(&cfg);
+    assert!(out(&cfg).is_none(), "it expires without a daemon");
+    fs::write(d.path().join("pending"), "").unwrap();
+    let stale = record(&cfg, "j", Some(now() + 3600), "refused", past - 1).unwrap();
+    assert!(
+        !stale.holds(now()),
+        "a stale refusal waits as ended, not failed"
+    );
+    assert!(out(&cfg).is_none());
+    assert!(
+        !cfg.settings
+            .as_ref()
+            .unwrap()
+            .overlay
+            .to_string_lossy()
+            .is_empty()
+    );
     tend(&cfg);
+    assert!(told(&d).last().unwrap().starts_with("close"));
+    let again = record(&cfg, "j", Some(now() + 3600), "refused", past - 2).unwrap();
+    assert!(
+        !again.holds(now()),
+        "still stale once the overlay is cleared"
+    );
+    assert!(log(&cfg).contains("deadline passed"));
+    record(&cfg, "j", Some(now() + 3600), "refused", now()).unwrap();
+    assert!(
+        !out(&cfg).unwrap().owner,
+        "a later refusal holds as an ordinary one"
+    );
+}
+
+#[test]
+fn a_hold_in_the_old_file_is_migrated_once() {
+    let (_d, cfg) = rig();
+    let until = now() + 3600;
+    let at = now() - 10;
+    let meta = ".usage-owner-abc123";
+    let spent = |job: &str, last: i64| {
+        json!({"until": until, "said": "old pause", "job": job, "at": at, "told": at, "last": last})
+            .to_string()
+    };
+    fs::write(cfg.jobs.join(meta), spent(meta, at)).unwrap();
+    fs::write(cfg.jobs.join(FILE), spent(meta, until - 1)).unwrap();
+    tend(&cfg);
+    let held = out(&cfg).unwrap();
+    assert!(held.owner);
+    assert_eq!((held.until, held.said.as_str()), (until, "old pause"));
+    assert!(!cfg.jobs.join(FILE).exists() && !cfg.jobs.join(meta).exists());
+    assert!(log(&cfg).contains("migrated"));
+    let before = log(&cfg);
+    tend(&cfg);
+    assert_eq!(log(&cfg), before, "once");
     assert_eq!(out(&cfg), Some(held));
-    assert_eq!(last_release(&cfg), None);
 }
 
+use serde_json::json;
+
 #[test]
-fn owner_release_preserves_precise_admission_boundary_through_cleanup() {
+fn expiry_and_migration_leave_a_newer_overlay_decision_alone() {
     let (_d, cfg) = rig();
-    hold(&cfg, now() + 3600, "pause").unwrap();
-    assert_eq!(cutoff(&cfg), None);
-    let before = crate::now_nanos();
-    back(&cfg, None);
-    let after = crate::now_nanos();
-    let boundary = cutoff(&cfg).unwrap();
-    assert!((before..=after).contains(&boundary));
-    let mut s = kept(&cfg).unwrap();
-    assert_eq!(s.admission, Some(boundary));
-    s.until = now() - cfg.stall_queued() - 2;
-    s.back = Some(s.until);
-    keep(&cfg, &s).unwrap();
-    tend(&cfg);
-    assert!(kept(&cfg).is_none());
-    assert_eq!(cutoff(&cfg), Some(boundary));
+    let door = cfg.settings.as_ref().unwrap();
+    let past = now() - 5;
+    fs::write(
+        &door.overlay,
+        format!(
+            r#"{{"usageHold":{{"until":{past},"reason":"old","since":{}}}}}"#,
+            past - 60
+        ),
+    )
+    .unwrap();
+    // A replacement made after expiry was read stands against its cleanup.
+    let fresh = (now() + 600).to_string();
+    door.command(&["usage-hold".into(), fresh.clone(), "new".into()], "t")
+        .unwrap();
+    door.command(&["usage-expire".into(), past.to_string()], "t")
+        .unwrap();
+    assert_eq!(out(&cfg).unwrap().said, "new");
+    // And a migration doesn't overwrite it.
+    door.command(
+        &[
+            "usage-migrate".into(),
+            (now() + 900).to_string(),
+            "stale".into(),
+        ],
+        "t",
+    )
+    .unwrap();
+    assert_eq!(out(&cfg).unwrap().said, "new");
 }
 
 #[test]
-fn owner_expiry_retains_natural_admission_boundary() {
+fn the_issue_door_takes_a_hold_with_a_spaced_reason_and_the_release() {
+    let words = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+    let until = now() + 600;
+    assert!(burrow_settings::valid_command(&words(&format!(
+        "usage-hold {until} save my usage"
+    ))));
+    assert!(!burrow_settings::valid_command(&words(&format!(
+        "usage-hold {until}"
+    ))));
+    assert!(!burrow_settings::valid_command(&words("usage-hold 1 late")));
+    assert!(burrow_settings::valid_command(&words("usage-back")));
     let (_d, cfg) = rig();
-    hold(&cfg, now() + 3600, "pause").unwrap();
-    let mut s = kept(&cfg).unwrap();
-    s.until = now() - 1;
-    keep(&cfg, &s).unwrap();
-    let boundary = s.until * 1_000_000_000;
-    assert_eq!(cutoff(&cfg), Some(boundary));
-    back(&cfg, Some(now() + 1));
-    assert_eq!(cutoff(&cfg), Some(boundary));
-}
-
-#[test]
-fn released_records_and_owner_metadata_remain_readable_by_the_previous_schema() {
-    for owner in [false, true] {
-        for early in [false, true] {
-            let (_d, cfg) = rig();
-            let t = now();
-            if owner {
-                hold(&cfg, t + 3600, "owner reason").unwrap();
-            } else {
-                record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
-            }
-            let before: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            if owner {
-                let _: LegacySpent =
-                    serde_json::from_slice(&fs::read(cfg.jobs.join(&before.job)).unwrap()).unwrap();
-            }
-            if early {
-                back(&cfg, None);
-            } else {
-                let mut s = kept(&cfg).unwrap();
-                s.until = t - 1;
-                keep(&cfg, &s).unwrap();
-                back(&cfg, None);
-            }
-            let released = kept(&cfg).unwrap();
-            let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-            // Old writers update told and preserve job/back, then settle by
-            // deleting the compatible record. The precise cutoff survives
-            // both that write and a rollback to the strict schema.
-            let mut old: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            old.told += 1;
-            fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-            assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-            assert_eq!(kept(&cfg).unwrap().owner, owner);
-            fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-            assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-            record(&cfg, "old retry", Some(t + 7200), "refused again", t + 1).unwrap();
-            let _: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            assert!(out(&cfg).is_some());
-            assert_eq!(admission_cutoff(&cfg).unwrap(), None);
-            assert!(released.back.is_some());
-        }
-    }
-}
-
-#[test]
-fn failed_release_journal_or_record_never_poison_old_writers() {
-    for owner in [false, true] {
-        for boundary in [".usage.admission.new", ".usage.json.new"] {
-            let (_d, cfg) = rig();
-            let t = now();
-            if owner {
-                hold(&cfg, t + 3600, "pause").unwrap();
-            } else {
-                record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
-            }
-            fs::create_dir(cfg.jobs.join(boundary)).unwrap();
-            back(&cfg, None);
-            let mut old: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            assert!(old.back.is_none());
-            // The real old put() update preserves all fields but until/last.
-            old.until = old.until.max(t + 7200);
-            old.last = Some(old.last.unwrap_or(old.at).max(t));
-            fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-            assert_eq!(admission_cutoff(&cfg).unwrap(), None);
-            fs::remove_dir(cfg.jobs.join(boundary)).unwrap();
-            back(&cfg, None);
-            let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-            let _: LegacySpent =
-                serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-            assert_eq!(kept(&cfg).unwrap().admission, Some(cutoff));
-        }
-    }
-}
-
-#[test]
-fn legacy_releases_include_the_whole_release_second_and_keep_the_boundary_on_later_writes() {
-    for owner in [false, true] {
-        let (_d, cfg) = rig();
-        let t = now();
-        if owner {
-            hold(&cfg, t + 3600, "pause").unwrap();
-        } else {
-            record(&cfg, "ordinary", Some(t + 3600), "refused", t - 10).unwrap();
-        }
-        let mut old: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        // The old back() publishes back, without knowing the new journal.
-        old.back = Some(now());
-        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&old).unwrap()).unwrap();
-        let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-        assert_eq!(cutoff, (old.back.unwrap() + 1) * 1_000_000_000);
-        let mut released: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        released.told += 1;
-        fs::write(cfg.jobs.join(FILE), serde_json::to_vec(&released).unwrap()).unwrap();
-        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-        settle(&cfg, kept(&cfg).unwrap(), t + cfg.stall_queued() + 1);
-        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-    }
-}
-
-#[test]
-fn committed_reference_recovers_precision_even_without_the_retention_journal() {
-    for owner in [false, true] {
-        let (_d, cfg) = rig();
-        if owner {
-            hold(&cfg, now() + 3600, "pause").unwrap();
-        } else {
-            record(&cfg, "ordinary", Some(now() + 3600), "refused", now() - 10).unwrap();
-        }
-        back(&cfg, None);
-        let cutoff = admission_cutoff(&cfg).unwrap().unwrap();
-        fs::remove_file(cfg.jobs.join(".usage.admission")).unwrap();
-        let s = kept(&cfg).unwrap();
-        assert_eq!(s.owner, owner);
-        assert_eq!(s.admission, Some(cutoff));
-        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-        settle(&cfg, s.clone(), s.release() + cfg.stall_queued() + 1);
-        assert!(kept(&cfg).is_none());
-        assert_eq!(admission_cutoff(&cfg).unwrap(), Some(cutoff));
-    }
-}
-
-#[test]
-fn deploy_scan_repairs_intermediate_records_before_old_running_writers_refuse() {
-    for owner in [false, true] {
-        let (_d, cfg) = rig();
-        if owner {
-            hold(&cfg, now() + 3600, "owner pause").unwrap();
-        } else {
-            record(&cfg, "legacy", Some(now() + 3600), "refused", now() - 10).unwrap();
-        }
-        back(&cfg, None);
-        let released = kept(&cfg).unwrap();
-        // The deployed intermediate generation committed these fields together,
-        // before switching to the fixed writer: no waiter need have run yet.
-        let mut intermediate = serde_json::to_value(&released).unwrap();
-        intermediate["admission"] = released.admission.unwrap().into();
-        fs::write(
-            cfg.jobs.join(FILE),
-            serde_json::to_vec(&intermediate).unwrap(),
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &words(&format!("usage-hold {until} save my usage")),
+            "issue",
         )
         .unwrap();
-        assert!(
-            serde_json::from_slice::<LegacySpent>(&fs::read(cfg.jobs.join(FILE)).unwrap()).is_err()
-        );
-        crate::retry::pass(&cfg).unwrap();
-        let _: LegacySpent =
-            serde_json::from_slice(&fs::read(cfg.jobs.join(FILE)).unwrap()).unwrap();
-        assert_eq!(kept(&cfg), Some(released));
-    }
+    assert_eq!(out(&cfg).unwrap().said, "save my usage");
+}
+
+#[test]
+fn a_release_keeps_its_cutoff_over_an_older_refusal_and_works_without_settings() {
+    let (_d, cfg) = rig();
+    let t = now() - 100;
+    record(&cfg, "web", Some(t + 10), "limit", t).unwrap();
+    hold(&cfg, now() + 3600, "pause").unwrap();
+    back(&cfg, None);
+    let c = super::tests::cutoff(&cfg).unwrap();
+    assert!(
+        c > (t + 10) * 1_000_000_000,
+        "the newer release bounds the queue"
+    );
+    let (_d2, mut bare) = rig();
+    bare.settings = None;
+    back(&bare, None);
+}
+
+#[test]
+fn an_expired_old_file_hold_migrates_as_ended_and_pre_deadline_extensions_do_not_hold() {
+    let (_d, cfg) = rig();
+    let until = now() - 30;
+    let meta = ".usage-owner-expired1";
+    let body = |job: &str, mirror_until: i64| {
+        json!({"until": mirror_until, "said": "old", "job": job, "at": until - 60, "told": 0, "last": until - 1})
+            .to_string()
+    };
+    fs::write(cfg.jobs.join(meta), body(meta, until)).unwrap();
+    // An old writer extended the mirror's deadline before the owner's.
+    fs::write(cfg.jobs.join(FILE), body(meta, now() + 7200)).unwrap();
+    tend(&cfg);
+    assert!(out(&cfg).is_none());
+    assert!(!cfg.jobs.join(FILE).exists() && !cfg.jobs.join(meta).exists());
+    assert_eq!(last_release(&cfg), Ok(Some(until)));
+    assert!(cutoff(&cfg).is_some());
+}
+
+fn legacy(cfg: &Config, until: i64, at: i64) {
+    let meta = ".usage-owner-abc123";
+    let spent = |job: &str, last: i64| {
+        json!({"until": until, "said": "old pause", "job": job, "at": at, "told": at, "last": last})
+            .to_string()
+    };
+    fs::write(cfg.jobs.join(meta), spent(meta, at)).unwrap();
+    fs::write(cfg.jobs.join(FILE), spent(meta, until - 1)).unwrap();
+}
+
+#[test]
+fn an_older_pause_is_not_carried_over_after_a_release_through_any_door() {
+    // A host or issue release with no hold on, then the old pause is found.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 10);
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(&["usage-back".into()], "issue")
+        .unwrap();
+    tend(&cfg);
+    tend(&cfg);
+    assert!(out(&cfg).is_none(), "the release stands across retries");
+    assert!(!cfg.jobs.join(FILE).exists());
+    // proj's own release, with no hold in the overlay yet.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 10);
+    back(&cfg, None);
+    tend(&cfg);
+    assert!(out(&cfg).is_none());
+    // A pause set after the release is a newer decision and is kept.
+    legacy(&cfg, now() + 3600, now() + 1);
+    tend(&cfg);
+    assert!(out(&cfg).unwrap().owner);
+}
+
+#[test]
+fn a_refusal_at_the_deadline_after_natural_expiry_is_kept_but_a_release_hides_its_second() {
+    let (_d, cfg) = rig();
+    let past = now() - 5;
+    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
+    let expired = |until: i64| {
+        fs::write(
+            &overlay,
+            format!(r#"{{"usageHold":{{"until":{until},"reason":"x","since":0}}}}"#),
+        )
+        .unwrap();
+    };
+    expired(past);
+    // Reconciled on its own, it is a natural expiry.
+    tend(&cfg);
+    // At the deadline's second: genuine.
+    earlier(&cfg, "a", now() + 7200, Some(past)).unwrap();
+    assert!(out(&cfg).is_some(), "a refusal at the deadline holds");
+    back(&cfg, None);
+    // An explicit release hides its own second, expiries before it too.
+    earlier(&cfg, "b", now() + 7200, Some(now())).unwrap();
+    assert!(out(&cfg).is_none(), "a same-second release is inclusive");
+}
+
+#[test]
+fn queued_jobs_keep_their_grace_after_an_owner_release_with_no_refusal_record() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 3600, "x").unwrap();
+    assert!(
+        completed(&cfg).unwrap().unwrap().owner && completed(&cfg).unwrap().unwrap().back.is_none()
+    );
+    back(&cfg, None);
+    assert!(kept(&cfg).is_none());
+    let grace = completed(&cfg).unwrap().expect("the release is the grace");
+    assert_eq!(grace.back, Some(grace.release()));
+    assert!(grace.release() >= now() - 2);
+    assert_eq!(
+        completed(&cfg).unwrap().unwrap().release(),
+        grace.release(),
+        "fixed"
+    );
+    // An older refusal does not shadow the later owner release.
+    let t = now();
+    record(&cfg, "j", Some(t + 100), "refused", t - 50).unwrap();
+}
+
+#[test]
+fn the_notice_follows_a_replacement_and_an_expired_hold_closes_it_with_retries() {
+    let (d, cfg) = rig();
+    hold(&cfg, now() + 3600, "first").unwrap();
+    assert_eq!(told(&d).len(), 1);
+    fs::write(d.path().join("pending"), "").unwrap(); // HOST-notify has it open
+    // A replacement by the door while the notice is open is told by the look.
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &[
+                "usage-hold".into(),
+                (now() + 7200).to_string(),
+                "second".into(),
+            ],
+            "issue",
+        )
+        .unwrap();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 2, "{:?}", told(&d));
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 2, "told once per hold, not hourly");
+    // Its deadline passes with no refusal record; the close is chased.
+    let overlay = cfg.settings.as_ref().unwrap().overlay.clone();
+    let past = now() - 5;
+    fs::write(
+        &overlay,
+        format!(r#"{{"usageHold":{{"until":{past},"reason":"x","since":0}}}}"#),
+    )
+    .unwrap();
+    assert!(tend(&cfg).is_some(), "retried while unconfirmed");
+    assert!(told(&d).last().unwrap().starts_with("close"));
+    let n = told(&d).len();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), n + 1, "sent again until confirmed");
+    fs::remove_file(d.path().join("pending")).unwrap();
+    tend(&cfg);
+    let n = told(&d).len();
+    assert_eq!(tend(&cfg), None);
+    assert_eq!(told(&d).len(), n, "confirmed: nothing more");
+    // An unreadable journal doesn't cancel it either.
+    hold(&cfg, now() + 3600, "again").unwrap();
+    fs::write(overlay.with_extension("usage-end"), "{bad").unwrap();
+    assert!(tend(&cfg).is_some());
+}
+
+#[test]
+fn a_same_deadline_replacement_with_a_new_reason_and_a_failed_open_are_told_again() {
+    let (d, cfg) = rig();
+    let until = now() + 3600;
+    hold(&cfg, until, "first").unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &[
+                "usage-hold".into(),
+                until.to_string(),
+                "other reason".into(),
+            ],
+            "issue",
+        )
+        .unwrap();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 2, "the reason alone is a transition");
+    // HOST-notify no longer has it open (the open never got through).
+    fs::remove_file(d.path().join("pending")).unwrap();
+    tend(&cfg);
+    assert_eq!(told(&d).len(), 3);
+    // The notifier failing to run leaves nothing noted, so it is retried.
+    fs::remove_file(cfg.jobs.join(NOTICED)).unwrap();
+    let notify = cfg.notify.clone().unwrap();
+    let saved = fs::read(&notify).unwrap();
+    fs::write(&notify, "#!/bin/sh\nexit 1\n").unwrap();
+    tend(&cfg);
+    assert!(noticed(&cfg).is_none());
+    fs::write(&notify, saved).unwrap();
+    burrow_test::executable(
+        &notify,
+        String::from_utf8(fs::read(&notify).unwrap()).unwrap(),
+    );
+    tend(&cfg);
+    assert!(noticed(&cfg).is_some());
+}
+
+#[test]
+fn a_close_is_chased_with_no_note_and_a_retained_refusal_takes_the_notice_back() {
+    // An older proj's pause opened a notice and the new version has no note.
+    let (d, cfg) = rig();
+    let until = now() + 3600;
+    let at = now() - 10;
+    legacy(&cfg, until, at);
+    fs::remove_file(cfg.jobs.join(FILE)).ok();
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .record_usage_end(burrow_settings::UsageEnd {
+            release: now(),
+            cutoff: 1,
+            stale: 0,
+            explicit: now(),
+        })
+        .unwrap();
+    fs::write(d.path().join("pending"), "").unwrap();
+    assert!(tend(&cfg).is_some());
+    assert!(
+        told(&d).last().unwrap().starts_with("close"),
+        "{:?}",
+        told(&d)
+    );
+    // An unreadable note is not an absent one.
+    fs::remove_file(cfg.jobs.join(NOTICED)).ok();
+    fs::create_dir(cfg.jobs.join(NOTICED)).unwrap();
+    assert!(noticed(&cfg).is_some());
+    fs::remove_dir(cfg.jobs.join(NOTICED)).unwrap();
+    // A refusal that is retained takes the notice back from the owner's.
+    let (d, cfg) = rig();
+    let t = now();
+    hold(&cfg, t + 3600, "owner").unwrap();
+    // Due refusal reminders don't overwrite the owner's notice.
+    let n = told(&d).len();
+    remind(&cfg);
+    assert_eq!(told(&d).len(), n);
+    let spent = Spent {
+        owner: false,
+        until: t + 7200,
+        said: "refused".into(),
+        job: "j".into(),
+        at: t,
+        back: None,
+        admission: None,
+        told: t - RETELL * 2,
+        last: Some(t),
+    };
+    keep(&cfg, &spent).unwrap();
+    remind(&cfg);
+    assert_eq!(told(&d).len(), n, "still the owner's");
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(&["usage-back".into()], "issue")
+        .unwrap();
+    tend(&cfg);
+    assert!(
+        told(&d).last().unwrap().starts_with("open")
+            && told(&d).last().unwrap().contains("out of usage"),
+        "{:?}",
+        told(&d)
+    );
+    assert!(noticed(&cfg).is_none());
+}
+
+#[test]
+fn an_unreadable_journal_is_uncertain_not_no_grace_and_recovers() {
+    let (_d, cfg) = rig();
+    hold(&cfg, now() + 3600, "x").unwrap();
+    back(&cfg, None);
+    let journal = cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .overlay
+        .with_extension("usage-end");
+    let good = fs::read(&journal).unwrap();
+    fs::write(&journal, "{bad").unwrap();
+    assert!(completed(&cfg).is_err());
+    assert!(last_release(&cfg).is_err());
+    fs::write(&journal, good).unwrap();
+    assert!(completed(&cfg).unwrap().is_some(), "the grace comes back");
+}
+
+#[test]
+fn migration_removes_its_reference_only_after_the_replacement_is_durable() {
+    // The replacement and the removal are written through the durable helpers
+    // (file and directory synced) before any metadata file is deleted: with
+    // the metadata gone and the reference left, migration would fail forever.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 10);
+    tend(&cfg);
+    assert!(!cfg.jobs.join(FILE).exists());
+    assert!(!cfg.jobs.join(".usage-owner-abc123").exists());
+    // An interrupted run: the reference stands, the metadata is gone.
+    legacy(&cfg, now() + 3600, now() - 5);
+    let meta = cfg.jobs.join(".usage-owner-abc123");
+    fs::remove_file(&meta).unwrap();
+    assert!(migrate(&cfg).is_err(), "reported, not taken for done");
+    assert!(cfg.jobs.join(FILE).exists(), "the reference is kept");
+}
+
+#[test]
+fn metadata_left_by_an_interrupted_migration_is_swept() {
+    // Interrupted after the reference was removed, before the metadata was:
+    // nothing names it, and the next look deletes it.
+    let (_d, cfg) = rig();
+    let meta = cfg.jobs.join(".usage-owner-abc123");
+    fs::write(&meta, "{}").unwrap();
+    assert!(!cfg.jobs.join(FILE).exists());
+    tend(&cfg);
+    assert!(!meta.exists());
+    // One a live record still names is never swept.
+    legacy(&cfg, now() + 3600, now() - 5);
+    sweep_orphans(&cfg).unwrap();
+    assert!(meta.exists());
+}
+
+#[test]
+fn metadata_survives_an_unreadable_or_malformed_record() {
+    // Reference state uncertain: nothing is proven unreferenced.
+    let (_d, cfg) = rig();
+    legacy(&cfg, now() + 3600, now() - 5);
+    let meta = cfg.jobs.join(".usage-owner-abc123");
+    let record = cfg.jobs.join(FILE);
+    let good = fs::read_to_string(&record).unwrap();
+    fs::write(&record, "{not json").unwrap();
+    assert!(sweep_orphans(&cfg).is_err());
+    assert!(meta.exists());
+    fs::remove_file(&record).unwrap();
+    fs::create_dir(&record).unwrap();
+    assert!(sweep_orphans(&cfg).is_err(), "a read error is not absence");
+    assert!(meta.exists());
+    fs::remove_dir(&record).unwrap();
+    fs::write(&record, good).unwrap();
+    sweep_orphans(&cfg).unwrap();
+    assert!(meta.exists(), "recovered record still names it");
 }

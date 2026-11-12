@@ -56,7 +56,7 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
             _ => Vec::new(),
         };
         let body = if !crate::valid_command(&args) {
-            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, pipeline TIMESTAMP or back.".into()
+            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, pipeline TIMESTAMP, usage-hold TIMESTAMP REASON, usage-back or back.".into()
         } else {
             cfg.settings.request(
                 &receipt,
@@ -125,6 +125,7 @@ mod tests {
                 overlay: dir.path().join("overlay.json"),
                 allowed: vec!["sam/code".into()],
                 pipeline_repos: vec![],
+                usage_lock: None,
             },
         };
         for (author, editor) in [("outsider", None), ("sam", Some("outsider"))] {

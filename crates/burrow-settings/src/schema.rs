@@ -469,7 +469,7 @@ pub static SETTINGS: &[Setting] = &[
         "proj.usageHold",
         &HOLD,
         "null",
-        "The usage hold in force: no Claude turn takes a slot until it ends. Null for none.",
+        "The usage hold in force (the owner's, in the settings overlay, or a refusal's in proj's record): no Claude turn takes a slot until it ends. Null for none.",
     ),
 ];
 

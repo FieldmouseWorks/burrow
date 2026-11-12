@@ -60,6 +60,9 @@ pub struct Facts {
     pub awaits: Vec<(String, String)>,
     /// The machine out of Claude usage, if it is (usage.rs).
     pub spent: Option<usage::Spent>,
+    /// The usage record or the owner's journal couldn't be read: its release
+    /// grace is unknown, not none, so no new deadline is made of it.
+    pub usage_unreadable: bool,
     /// A Codex refusal waits for this reset, independently of Claude's hold.
     pub usage_reset: Option<(i64, i64)>,
     /// A GitHub API refusal waits independently of either engine.
@@ -348,11 +351,15 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     for id in ids {
         let f = dir.join(id);
         let job = Job::new(cfg, id);
+        let mut uncertain = false;
         let wait = (!crate::policy::parked(&job) && !crate::policy::denied(&job))
             .then_some(&job)
             .filter(|job| job.dir.is_dir())
             .and_then(|job| job.facts())
             .and_then(|mut facts| {
+                // Uncertain, not overdue: the deadline already published
+                // stands (or none is made) until the state can be read again.
+                uncertain = facts.usage_unreadable && facts.state == "queued";
                 if let Some(released) =
                     read(&crate::policy::path(&job, "released")).and_then(|s| s.parse::<i64>().ok())
                 {
@@ -365,6 +372,7 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
             });
 
         match wait {
+            _ if uncertain => {}
             Some(item) => swap(&f, &format!("{}\n", json!(item)))?,
             None => {
                 for gone in [f.clone(), f.with_file_name(format!("{id}.new"))] {
