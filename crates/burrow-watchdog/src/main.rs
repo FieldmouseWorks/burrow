@@ -10,7 +10,8 @@ use burrow_watchdog::ladder::{run, snooze, status};
 use burrow_watchdog::now;
 use burrow_watchdog::world::Real;
 
-const USAGE: &str = "usage: burrow-watchdog [status | snooze SOURCE KEY MINUTES WHY]";
+const USAGE: &str =
+    "usage: burrow-watchdog [status | snooze SOURCE KEY MINUTES WHY | dismiss CHECK SUBJECT]";
 
 fn main() -> ExitCode {
     match command(&std::env::args().skip(1).collect::<Vec<_>>()) {
@@ -30,8 +31,13 @@ fn command(args: &[String]) -> Result<(), String> {
         println!("{}", status(&cfg, now));
         return Ok(());
     }
+    let mut dismissing = None;
     let snoozing = match args[..] {
         [] => None,
+        ["dismiss", check, subject] => {
+            dismissing = Some((check, subject));
+            None
+        }
         ["snooze", source, key, minutes, why]
             if !minutes.is_empty() && minutes.bytes().all(|b| b.is_ascii_digit()) =>
         {
@@ -44,6 +50,13 @@ fn command(args: &[String]) -> Result<(), String> {
     let lock = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     lock.lock()
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Some((check, subject)) = dismissing {
+        println!(
+            "{}",
+            burrow_watchdog::anomaly::dismiss(&cfg, check, subject)?
+        );
+        return Ok(());
+    }
     match snoozing {
         Some((source, key, minutes, why)) => {
             println!("{}", snooze(&cfg, source, key, minutes, why, now)?);
