@@ -51,7 +51,7 @@ query($owner: String!, $name: String!, $cursor: String) {
             ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt workflow { name } } checkRuns(first: 1) { totalCount } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }
@@ -169,7 +169,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{flow} (failed to start)")
-    for s in unstarted(suites.get("nodes", [])):
+    for s in unstarted(suites.get("nodes", []), stale):
         seen += 1
         flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
         pending.append(f"{flow} (never started, to be run again)")
@@ -231,37 +231,72 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 UNSTARTED_AFTER = 15 * 60
 
 
-def unstarted(suite_nodes, now=None):
+def unstarted(suite_nodes, stale=(), now=None):
     """The suites of a head whose workflow run has had no job for longer than
     UNSTARTED_AFTER: still queued, with no check run at all. A run that has
-    started (a job exists, even a queued one waiting for a runner) isn't."""
+    started (a job exists, even a queued one waiting for a runner) isn't, and
+    one a replacement run of the same workflow stands in for isn't owed
+    either: another suite of it that has a job or is under way or finished,
+    and didn't judge another diff than the PR's (stale, runs()). A run of
+    another workflow doesn't stand in for it."""
     now = C.NOW if now is None else now
+
+    def idle(s):
+        return s.get("status") in ("QUEUED", "REQUESTED", "PENDING") and (s.get("checkRuns") or {}).get("totalCount", 1) == 0
+
+    def flow(s):
+        w = (s.get("workflowRun") or {}).get("workflow") or {}
+        return w.get("id") or w.get("name")
+
     out = []
     for s in suite_nodes:
-        run = s.get("workflowRun") or {}
-        if s.get("status") not in ("QUEUED", "REQUESTED", "PENDING") or (s.get("checkRuns") or {}).get("totalCount", 1) != 0:
+        made = (s.get("workflowRun") or {}).get("createdAt")
+        if not idle(s) or not (s.get("workflowRun") or {}).get("databaseId") or not made or now - C.ts(made) <= UNSTARTED_AFTER:
             continue
-        made = run.get("createdAt")
-        if run.get("databaseId") and made and now - C.ts(made) > UNSTARTED_AFTER:
-            out.append(s)
+        if any(o is not s and o.get("id") not in stale and not idle(o) and flow(o) == flow(s) and flow(s) is not None
+               for o in suite_nodes):
+            continue
+        out.append(s)
     return out
+
+
+def whole_run_fit(c, contexts, repo):
+    """Whether the cancelled check run c's whole run is one to start again:
+    its suite has finished (a cancel still being carried out is waited for),
+    and none of its jobs failed or ran out of time, since a run again would
+    replace that verdict, which is the head's, with a pass."""
+    mine = suite(c)
+    if mine.get("status") != "COMPLETED":
+        return False
+    for x in contexts:
+        if x["__typename"] != "CheckRun" or suite(x).get("id") != mine.get("id"):
+            continue
+        if x.get("status") != "COMPLETED":
+            return False
+        if cancelled(x):
+            if timed_out(repo, x):
+                return False
+        elif x.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            return False
+    return True
 
 
 def dead_runs(pr, repo=None, now=None):
     """The one check of whether a head has no live run, for what CI is owed
     on it: the run ids to ask GitHub to run again, from a run that never
-    started (unstarted) and a cancelled check nothing ran through since
-    (after_cancel), unless it timed out, which is the head's."""
+    started (unstarted) and a run whose check was cancelled with nothing run
+    through since (after_cancel) and none of whose jobs failed or timed out
+    (whole_run_fit)."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = ((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", [])
     suites = (commit.get("checkSuites") or {}).get("nodes", [])
-    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, now)]
     # Only a cancelled check needs runs() (which asks GitHub about the fork).
-    stale = runs(pr, repo)[0] if any(c["__typename"] == "CheckRun" and cancelled(c) for c in contexts) else set()
+    stale = runs(pr, repo)[0] if any(c["__typename"] == "CheckRun" and cancelled(c) for c in contexts) or suites else set()
+    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, stale, now)]
     for c in contexts:
         if c["__typename"] == "CheckRun" and cancelled(c) and suite(c).get("id") not in stale \
-                and after_cancel(c, contexts, stale) is None and not timed_out(repo, c):
+                and after_cancel(c, contexts, stale) is None and whole_run_fit(c, contexts, repo):
             if (run_id := (suite(c).get("workflowRun") or {}).get("databaseId")):
                 ids.append(run_id)
     return list(dict.fromkeys(ids))
