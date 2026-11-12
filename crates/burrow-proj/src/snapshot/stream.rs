@@ -183,4 +183,48 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(sub.next(Duration::from_millis(100)).unwrap().is_none());
     }
+
+    #[test]
+    fn stream_a_class_change_under_one_prefix_is_news_and_a_repeat_is_not() {
+        use crate::pick::Class;
+        let mut shown = None;
+        assert!(!crate::slot::class_is_news(&mut shown, Class::Lead));
+        assert!(!crate::slot::class_is_news(&mut shown, Class::Lead));
+        assert!(crate::slot::class_is_news(&mut shown, Class::Pipeline));
+        assert!(!crate::slot::class_is_news(&mut shown, Class::Pipeline));
+    }
+
+    #[test]
+    fn stream_leaving_the_claude_line_for_codex_notifies_a_subscriber() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_stream(dir.path());
+        let queue = cfg.jobs.join(".queue");
+        fs::create_dir_all(&queue).unwrap();
+        fs::write(
+            queue.join("2-1700000000000000000-held"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let job = crate::job::Job::new(&cfg, "held");
+        fs::create_dir_all(&job.dir).unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Local,
+            crate::policy::Kind::Manual,
+        )
+        .unwrap();
+        let mut sub = subscribe(&cfg).unwrap();
+        sub.next(Duration::from_secs(1)).unwrap();
+        let _slot = crate::slot::take_engine(
+            &cfg,
+            "held",
+            "1",
+            crate::pick::Class::Normal,
+            false,
+            crate::engine::Engine::Codex,
+        )
+        .unwrap();
+        assert!(!queue.join("2-1700000000000000000-held").exists());
+        assert!(sub.next(Duration::from_secs(1)).unwrap().is_some());
+    }
 }

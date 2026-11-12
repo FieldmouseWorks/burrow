@@ -398,6 +398,7 @@ fn codex_slot(
     // this escape pool independent of a stalled Claude admission lock.
     while let Some((left, _)) = place_left(&queue, id, process::id()) {
         fs::remove_file(queue.join(left))?;
+        snapshot::stream::notify(cfg);
     }
     loop {
         if may_hand_over
@@ -482,6 +483,9 @@ pub fn take(
         })
         .unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
+    // The class the snapshot last showed for this place: lead and pipeline
+    // share a filename prefix, so only this sees one become the other.
+    let mut shown: Option<Class> = None;
     loop {
         let paused = automation_paused(cfg, &job);
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
@@ -576,6 +580,9 @@ pub fn take(
             }
             me = new;
         }
+        if class_is_news(&mut shown, class) {
+            snapshot::stream::notify(cfg);
+        }
         if !publish(cfg, &queue, &me, original)? {
             drop(lk);
             sleep(Duration::from_secs(2));
@@ -653,6 +660,13 @@ pub fn take(
         drop(lk);
         sleep(Duration::from_secs(2));
     }
+}
+
+/// Whether a place's class changed since the snapshot last showed it. Lead and
+/// pipeline share a filename prefix, so a rename never tells of one becoming
+/// the other. The first look is no news: the place's creation was.
+pub(crate) fn class_is_news(shown: &mut Option<Class>, class: Class) -> bool {
+    shown.replace(class).is_some_and(|before| before != class)
 }
 
 /// This waiter's place in line, `me`, published whole (a dot file, which the
