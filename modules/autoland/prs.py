@@ -125,7 +125,7 @@ def has_ci(pr, proofs=()):
         for c in contexts)
 
 
-def ci_state(pr, proofs=(), moved=None, repo=None):
+def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, the names of the ones that aren't green, and
     whether CI took the head in its docs lane for the PR's diff (runs, and
@@ -146,7 +146,10 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     head's to fix. Only the App's counts, as with ours. A cancelled check run
     goes by what its workflow did after it (after_cancel), and with nothing
     after it is pending, since a stopped run found nothing, unless it ran out
-    of time (timed_out), which is red. A workflow's
+    of time (timed_out), which is red. Given `rerun` (its "done" names: the
+    checks already run again on this head; "want" is filled with the others'
+    job ids), a cancelled check run is run again once, and one cancelled
+    again after that is red: a hang is the head's to look at. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -191,6 +194,11 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
                 # stopped it), not failed, so there's nothing in the head for
                 # a fix job to fix. Pending until it's run again, and a stall
                 # once that's overdue.
+                if rerun is not None and name in rerun["done"]:
+                    red.append(f"{name} (cancelled again after a rerun)")
+                    continue
+                if rerun is not None and c.get("databaseId"):
+                    rerun["want"][name] = c["databaseId"]
                 pending.append(f"{name} (cancelled, to be run again)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)

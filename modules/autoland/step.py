@@ -106,7 +106,16 @@ class Pass(Context, Jobs, Actions):
             return
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
-        self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
+        again = self.st.get("rerun") or {}
+        rerun = {"done": set(again.get("names", [])) if again.get("head") == self.head else set(), "want": {}}
+        self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo, rerun)
+        # A check cancelled with nothing run through since found nothing: run
+        # it once more. Cancelled again, ci_state calls it red (a hang).
+        if rerun["want"] and not C.DRY:
+            for name, job in rerun["want"].items():
+                C.gh("run", "rerun", "--job", str(job), "--repo", self.repo)
+                C.log(f"{self.tag}: ran {name} again, cancelled with nothing run through since")
+            self.st["rerun"] = {"head": self.head, "names": sorted(rerun["done"] | set(rerun["want"]))}
         # A build's or run's verdicts GitHub took only some of: the rest go up
         # whatever CI says now, so a failure it took doesn't leave the others
         # unposted behind a red PR. Their statuses kick the pass that sees them.

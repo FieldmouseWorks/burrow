@@ -3,11 +3,11 @@ while CI ran, say) cancels its last one, whose suite stays on the head. It goes
 by what its workflow did after it: another suite that has done that check's
 work for the PR's diff clears it, one still going leaves CI pending, and with
 neither it's pending until it's run again, as when a runner shut down under
-it or someone cancelled it by hand: never red, since a stopped run found
-nothing in the head, so no fix job is sent for it."""
+it or someone cancelled it by hand: run again once, and red if cancelled again,
+since a hang is the head's to look at."""
 
 from docs import at, check, docs, whole
-from harness import ANNOTATIONS, JOBS, C, clean
+from harness import ANNOTATIONS, JOBS, RERUNS, C, clean, fresh_pr_state, run as one_pass
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
@@ -201,5 +201,27 @@ assert state(old + [check("browser-tests", suite="s1")], push + [check("browser-
 assert state(old, whole("next", "s2")) == stopped(CHECK)
 # One for the PR's base stands, whatever a cancelled run for another base says.
 assert state(whole("next", "s0", conclusion=CANCEL), whole("main", "s1"), base="main") == ("green", [])
+
+# A cancelled run nothing ran through since is run again, once, whatever its
+# annotations say (no timeout among them). A pass that sees it again waits.
+# Cancelled once more, on the same head, it is the head's: red, and a fix job's.
+def hung(job):
+    return [{**c, "databaseId": job} if c["name"] == CHECK else c for c in old]
+
+
+RERUNS.clear()
+fresh_pr_state()
+status, _ = one_pass(clean(checks=hung(51)), 700)
+assert RERUNS == [51] and "waiting for CI" in status and not JOBS, (RERUNS, status, JOBS)
+status, _ = one_pass(clean(checks=hung(51)), 760)
+assert RERUNS == [51], RERUNS  # not twice for the same attempt's check
+status, _ = one_pass(clean(checks=hung(52)), 800)
+assert RERUNS == [51] and "CI is red: check / check (cancelled again after a rerun)" in status, (RERUNS, status)
+# The rerun passing ends it; a new head starts over.
+fresh_pr_state()
+RERUNS.clear()
+one_pass(clean(checks=hung(51)), 700)
+status, landed = one_pass(clean(checks=whole(suite="s2")), 800)
+assert RERUNS == [51] and "CI is green" in status, (RERUNS, status)
 
 print("cancelled runs: ok")

@@ -157,10 +157,10 @@ root only.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
    branch is deleted. A check run cancelled with nothing run through since
-   (its runner shut down under it, say) leaves CI pending, not red: no fix
-   job is sent for a run that found nothing, and the stall watchdog takes it
-   if nobody runs it again. One GitHub stopped at its job's `timeout-minutes`
-   (its annotation says so) is red, the head's to fix. In a repo with its merge train on (`train`), it goes
+   (its runner shut down under it, say) is run again once, and CI is pending
+   meanwhile. Cancelled again on the same head, it is red, the head's to fix
+   like a hang: a Claude job takes it. One GitHub stopped at its job's
+   `timeout-minutes` (its annotation says so) is red at once. In a repo with its merge train on (`train`), it goes
    into the train instead, CI on the PR itself optional: Conary's `cn train`
    merges the PRs in the train onto the default branch together, has CI run
    on that, and once it's green posts `conary/train` on each PR's head and
