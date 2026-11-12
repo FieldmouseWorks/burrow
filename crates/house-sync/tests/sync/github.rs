@@ -17,23 +17,22 @@ pub enum Fails {
     All,
     /// Every call below the repo itself: its branches, files and PRs.
     Below,
-    /// Every call about it is held off by the installation's rate limit,
-    /// until RESET.
-    Limited,
-    /// Listing its owner's repos is held off by the rate limit, until RESET.
-    ListLimited,
+    /// Every call about it is held off by its installation's rate limit,
+    /// until then (seconds since the epoch).
+    Limited(u64),
+    /// Listing the page of its owner's repos it's on is held off by the
+    /// rate limit, until then.
+    ListLimited(u64),
 }
 
-/// When the stand-in's rate limit lifts, in seconds since the epoch.
-pub const RESET: u64 = 4_000_000_000;
-
-/// GitHub's answer for a call the installation's rate limit holds off.
-pub fn limited() -> Result<Response, Failed> {
+/// GitHub's answer for a call the installation's rate limit holds off
+/// until RESET.
+pub fn limited(reset: u64) -> Result<Response, Failed> {
     Ok(Response {
         status: 403,
         headers: vec![
             ("x-ratelimit-remaining".into(), "0".into()),
-            ("x-ratelimit-reset".into(), RESET.to_string()),
+            ("x-ratelimit-reset".into(), reset.to_string()),
         ],
         body: json!({"message": "API rate limit exceeded for installation ID 1."}).to_string(),
     })
@@ -115,8 +114,8 @@ impl Api for GitHub {
         else {
             return answer(404, json!({"message": "Not Found"}), None);
         };
-        if r.fails == Fails::Limited {
-            return limited();
+        if let Fails::Limited(reset) = r.fails {
+            return limited(reset);
         }
         if r.fails == Fails::All || (r.fails == Fails::Below && parts.len() > 3) {
             return answer(500, json!({"message": "Server Error"}), None);
@@ -240,9 +239,6 @@ impl Api for GitHub {
                     && !r.fork
             })
             .collect();
-        if theirs.iter().any(|r| r.fails == Fails::ListLimited) {
-            return limited();
-        }
         if theirs.is_empty() {
             return answer(
                 200,
@@ -253,10 +249,15 @@ impl Api for GitHub {
         let from: usize = body["variables"]["cursor"]
             .as_str()
             .map_or(0, |c| c.parse().unwrap());
-        let nodes: Vec<Value> = theirs
+        let page: Vec<&&Repo> = theirs.iter().skip(from).take(2).collect();
+        if let Some(reset) = page.iter().find_map(|r| match r.fails {
+            Fails::ListLimited(reset) => Some(reset),
+            _ => None,
+        }) {
+            return limited(reset);
+        }
+        let nodes: Vec<Value> = page
             .iter()
-            .skip(from)
-            .take(2)
             .map(|r| {
                 json!({
                     "nameWithOwner": r.name,
