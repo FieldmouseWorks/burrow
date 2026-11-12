@@ -1,7 +1,8 @@
 //! A machine made of files (systems with a kernel, an initrd and their
 //! params, what booted and runs, GRUB's menu and grubenvs), with stand-ins
-//! for what HOST-boot runs that keep how they were run in FAKE, a dir of
-//! the machine's own.
+//! for what HOST-boot runs: burrow_test's for the machine's own programs,
+//! and grub-editenv and switch-to-configuration, its own. Every one keeps how
+//! it was run in FAKE, a dir of the machine's own.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -10,36 +11,39 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
+use burrow_test::{chown, root};
+
 pub const BIN: &str = env!("CARGO_BIN_EXE_burrow-boot");
+
+/// What systemctl answers in FAKE, sourced after its words are logged.
+const SYSTEMCTL_SAYS: &str = r#"case "$*" in
+  --user*list-units*) cat "$FAKE/jobs" 2>/dev/null; exit 0 ;;
+  *ci-runner.service*) cat "$FAKE/runners" 2>/dev/null; exit 0 ;;
+  *box-update.service*) cat "$FAKE/update" 2>/dev/null; exit 0 ;;
+  list-units*) cat "$FAKE/sandboxes" 2>/dev/null; exit 0 ;;
+  "-q is-active sshd.service") [ ! -e "$FAKE/sshd-down" ] ;;
+  reboot) [ ! -e "$FAKE/fail-reboot" ] ;;
+esac
+"#;
+
+/// What journalctl follows in FAKE, sourced after its words are logged.
+const JOURNALCTL_SAYS: &str = "cat \"$FAKE/events\"\n";
 
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 pub fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&[
+            "sudo",
+            "systemctl",
+            "journalctl",
+            "box-notify",
+            "systemd-cat",
+        ]);
         for (name, text) in [
-            (
-                "sudo",
-                // Never inside itself: a run it starts that starts it again
-                // would never end.
-                "#!/bin/sh\n[ -z \"$IN_SUDO\" ] || exit 9\necho \"$*\" >>\"$FAKE/sudo\"\n[ \"$1\" = -- ] || exit 9\nshift\nexport IN_SUDO=1\nexec \"$@\"\n",
-            ),
             (
                 "grub-editenv",
                 "#!/bin/sh\necho \"$*\" >>\"$FAKE/grub-editenv\"\n[ ! -e \"$FAKE/fail-editenv-$2\" ] || exit 1\nd=${1%/grub/grubenv}\n[ ! -e \"$FAKE/fail-editenv-$2-${d##*/}\" ] || exit 1\ncase \"$2\" in\n  create) : >\"$1\" ;;\n  set) echo \"$3\" >>\"$1\" ;;\n  unset) echo \"-$3\" >>\"$1\" ;;\nesac\n",
-            ),
-            (
-                "systemctl",
-                "#!/bin/sh\necho \"$*\" >>\"$FAKE/systemctl\"\ncase \"$*\" in\n  --user*list-units*) cat \"$FAKE/jobs\" 2>/dev/null; exit 0 ;;\n  *ci-runner.service*) cat \"$FAKE/runners\" 2>/dev/null; exit 0 ;;\n  *box-update.service*) cat \"$FAKE/update\" 2>/dev/null; exit 0 ;;\n  list-units*) cat \"$FAKE/sandboxes\" 2>/dev/null; exit 0 ;;\n  \"-q is-active sshd.service\") [ ! -e \"$FAKE/sshd-down\" ] ;;\n  reboot) [ ! -e \"$FAKE/fail-reboot\" ] ;;\nesac\n",
-            ),
-            ("journalctl", "#!/bin/sh\ncat \"$FAKE/events\"\n"),
-            (
-                "box-notify",
-                "#!/bin/sh\n(IFS='|'; echo \"$*\") >>\"$FAKE/notify\"\n[ ! -e \"$FAKE/fail-notify\" ]\n",
-            ),
-            (
-                "systemd-cat",
-                "#!/bin/sh\necho \"$* $(cat)\" >>\"$FAKE/journal\"\n",
             ),
             (
                 // Every system's: which one it is is the dir it's in.
@@ -47,18 +51,11 @@ pub fn bin() -> &'static Path {
                 "#!/bin/sh\nsys=${0%/bin/switch-to-configuration}\nname=${sys##*/}\necho \"$name $*\" >>\"$FAKE/switch-to-configuration\"\n[ ! -e \"$FAKE/fail-$name\" ]\n",
             ),
         ] {
-            let path = bin.path().join(name);
-            burrow_test::executable(&path, text);
+            burrow_test::executable(bin.path().join(name), text);
         }
-        // For a run as nobody, too.
-        burrow_test::permissions(bin.path(), 0o755);
         bin
     })
     .path()
-}
-
-pub fn root() -> bool {
-    rustix::process::geteuid().is_root()
 }
 
 pub struct Machine {
@@ -86,6 +83,8 @@ impl Machine {
         ] {
             fs::create_dir_all(m.path(d)).unwrap();
         }
+        fs::write(m.path("fake/systemctl.says"), SYSTEMCTL_SAYS).unwrap();
+        fs::write(m.path("fake/journalctl.says"), JOURNALCTL_SAYS).unwrap();
         m.system("one", "k1", "i1", "panic=10 loglevel=4\n");
         m.boots("one");
         symlink(m.path("systems/one"), m.path("run/current-system")).unwrap();
@@ -207,23 +206,6 @@ impl Machine {
         assert!(out.status.success());
         String::from_utf8(out.stdout).unwrap()
     }
-}
-
-pub fn chown(path: &Path) {
-    std::os::unix::fs::lchown(path, Some(65534), Some(65534)).unwrap();
-    if path.is_dir() && !path.is_symlink() {
-        for entry in fs::read_dir(path).unwrap() {
-            chown(&entry.unwrap().path());
-        }
-    }
-}
-
-pub fn said(out: &Output) -> (Option<i32>, String, String) {
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
 }
 
 pub fn ok(out: &str) -> (Option<i32>, String, String) {

@@ -30,7 +30,8 @@
 //!
 //! Every one finds `cat`, `env` and `sed` on the PATH the test was started
 //! with, whatever PATH the program under test gives it, and passes the PATH it
-//! was given on (`sudo`, `runuser`).
+//! was given on (`sudo`, `runuser`); `systemd-cat` finds `cat` on the PATH it
+//! was given, as the real one finds the program it runs.
 
 use std::fs;
 use std::path::Path;
@@ -49,7 +50,8 @@ pub const OWNED: [&str; 7] = [
 ];
 
 /// Everything but the name's own words: the log, the answer, the exit.
-const HEAD: &str = "#!/bin/sh\ngiven=$PATH PATH='@PATH@'\n: \"${FAKE:=${0%/*}/../fake}\"\nexport FAKE\n";
+const HEAD: &str =
+    "#!/bin/sh\ngiven=$PATH PATH='@PATH@'\n: \"${FAKE:=${0%/*}/../fake}\"\nexport FAKE\n";
 
 const SAYS: &str = "[ ! -e \"$FAKE/@NAME@.says\" ] || . \"$FAKE/@NAME@.says\"\n";
 
@@ -72,14 +74,14 @@ fn script(name: &str) -> String {
             "echo \"$*\" >>\"$FAKE/runuser\"\n\
              echo \"${{XDG_RUNTIME_DIR-unset}}\" >>\"$FAKE/runuser.xdg\"\n\
              {says}\
-             while [ \"$1\" != -- ]; do shift; done\n\
+             while [ \"$1\" != -- ]; do [ $# -gt 1 ] || exit 9; shift; done\n\
              shift\n\
              exec env PATH=\"$given\" \"$@\"\n"
         ),
         "systemctl" | "journalctl" => format!("echo \"$*\" >>\"$FAKE/{name}\"\n{says}"),
         "systemd-cat" => "[ ! -e \"$FAKE/fail-systemd-cat\" ] || exit 1\n\
              printf '%s ' \"$*\" >>\"$FAKE/journal\"\n\
-             exec cat >>\"$FAKE/journal\"\n"
+             PATH=\"$given\" exec cat >>\"$FAKE/journal\"\n"
             .into(),
         "box-notify" => format!(
             "(IFS='|'; echo \"$*\") >>\"$FAKE/notify\"\n{says}[ ! -e \"$FAKE/fail-notify\" ]\n"
@@ -111,10 +113,7 @@ pub fn stand_ins(names: &[&str]) -> tempfile::TempDir {
     assert!(!path.contains('\''), "PATH has a quote in it: {path}");
     let dir = tempfile::tempdir().unwrap();
     for name in names {
-        crate::executable(
-            dir.path().join(name),
-            script(name).replace("@PATH@", &path),
-        );
+        crate::executable(dir.path().join(name), script(name).replace("@PATH@", &path));
     }
     crate::permissions(dir.path(), 0o755);
     dir

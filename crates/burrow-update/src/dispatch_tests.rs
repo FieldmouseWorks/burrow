@@ -1,5 +1,6 @@
-//! The fix jobs, with the stand-ins for runuser and proj (testing.rs): pipeline
-//! work, and one job for a problem while it's recent.
+//! The fix jobs, with the stand-ins for runuser and proj (burrow_test's, in
+//! testing.rs's machine): pipeline work, and one job for a problem while it's
+//! recent.
 
 use std::fs::File;
 use std::time::{Duration, SystemTime};
@@ -29,17 +30,17 @@ fn a_problem_gets_one_pipeline_job_while_its_recent() {
     let mut m = Machine::new();
     assert_eq!(
         dispatch(&m.cfg, "build-main", "main doesn't build"),
-        Some("homelab-1".into())
+        Some("job-1".into())
     );
     assert_eq!(
-        m.kept("proj.log"),
+        m.proj_log(),
         "run --pipeline --role update homelab main doesn't build\n"
     );
-    assert_eq!(m.job("build-main"), Some("homelab-1".into()));
+    assert_eq!(m.job("build-main"), Some("job-1".into()));
 
     // The same problem again while its job is recent: no second job.
     assert_eq!(dispatch(&m.cfg, "build-main", "main doesn't build"), None);
-    assert_eq!(m.kept("proj.log").lines().count(), 1);
+    assert_eq!(m.proj_log().lines().count(), 1);
 
     // Once it's 6 hours old, the problem gets a job again.
     m.job_made(
@@ -48,15 +49,15 @@ fn a_problem_gets_one_pipeline_job_while_its_recent() {
     );
     assert_eq!(
         dispatch(&m.cfg, "build-main", "main doesn't build"),
-        Some("homelab-2".into())
+        Some("job-2".into())
     );
-    assert_eq!(m.job("build-main"), Some("homelab-2".into()));
+    assert_eq!(m.job("build-main"), Some("job-2".into()));
 
     // With a machine App, the job acts as it.
     m.cfg.app = Some("workers".into());
     dispatch(&m.cfg, "switch", "the switch failed");
     assert_eq!(
-        m.kept("proj.log").lines().last(),
+        m.proj_log().lines().last(),
         Some("run --pipeline --role update --app workers homelab the switch failed")
     );
 }
@@ -64,15 +65,12 @@ fn a_problem_gets_one_pipeline_job_while_its_recent() {
 #[test]
 fn a_job_proj_doesnt_take_is_no_job() {
     let m = Machine::new();
-    fs::write(m.home("proj-down"), "").unwrap();
+    fs::write(m.path("fake/fail-proj"), "").unwrap();
     assert_eq!(dispatch(&m.cfg, "health", "it broke"), None);
     assert_eq!(m.job("health"), None);
     // So the next run hands it over.
-    fs::remove_file(m.home("proj-down")).unwrap();
-    assert_eq!(
-        dispatch(&m.cfg, "health", "it broke"),
-        Some("homelab-2".into())
-    );
+    fs::remove_file(m.path("fake/fail-proj")).unwrap();
+    assert_eq!(dispatch(&m.cfg, "health", "it broke"), Some("job-2".into()));
 
     // An empty record is no job; one from a clock set back is recent.
     fs::write(m.cfg.state.join("jobs/activation"), "").unwrap();

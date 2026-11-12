@@ -11,21 +11,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
+use burrow_test::{chown, root, said};
+
 const BIN: &str = env!("CARGO_BIN_EXE_burrow-firmware");
 
-/// Shared stand-ins, installed by burrow_test and cached for the test binary.
+/// The shared stand-ins (sudo, runuser, proj, box-notify), installed by
+/// burrow_test, and the firmware's own beside them, cached for the test binary.
 fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&["sudo", "runuser", "proj", "box-notify"]);
         for (name, text) in [
-            (
-                "sudo",
-                // Never inside itself: a run it starts that starts it again
-                // would never end. It keeps none of the environment, as sudo
-                // doesn't, but what the stand-ins need.
-                "#!/bin/sh\n[ -z \"$IN_SUDO\" ] || exit 9\necho \"$*\" >>\"$FAKE/sudo\"\n[ \"$1\" = -- ] || exit 9\nshift\nexec env -i IN_SUDO=1 FAKE=\"$FAKE\" PATH=\"$PATH\" XDG_RUNTIME_DIR=/run/user/0 \"$@\"\n",
-            ),
             (
                 // refresh fails when told to; get-updates says FAKE/updates
                 // and exits with FAKE/updates-exit.
@@ -40,34 +36,12 @@ fn bin() -> &'static Path {
                 "nvme",
                 "#!/bin/sh\necho \"$*\" >>\"$FAKE/nvme\"\necho noise >&2\ncat \"$FAKE/drives\" 2>/dev/null\n",
             ),
-            (
-                // runuser -u USER -- PROGRAM ARGS
-                "runuser",
-                "#!/bin/sh\necho \"$1 $2 $3 ${XDG_RUNTIME_DIR-unset}\" >>\"$FAKE/runuser\"\nshift 3\nexec \"$@\"\n",
-            ),
-            (
-                // Each word on lines of its own, then a line of ---; and a
-                // job's id, as proj says it.
-                "proj",
-                "#!/bin/sh\nfor w; do printf '%s\\n---\\n' \"$w\"; done >>\"$FAKE/proj\"\necho job-7\n[ ! -e \"$FAKE/fail-proj\" ]\n",
-            ),
-            (
-                "box-notify",
-                "#!/bin/sh\n(IFS='|'; echo \"$*\") >>\"$FAKE/notify\"\n[ ! -e \"$FAKE/fail-notify\" ]\n",
-            ),
         ] {
-            let path = bin.path().join(name);
-            burrow_test::executable(&path, text);
+            burrow_test::executable(bin.path().join(name), text);
         }
-        // For a run as nobody, too.
-        burrow_test::permissions(bin.path(), 0o755);
         bin
     })
     .path()
-}
-
-fn root() -> bool {
-    rustix::process::geteuid().is_root()
 }
 
 struct Machine {
@@ -154,23 +128,6 @@ impl Machine {
     fn offered(&self) -> Option<String> {
         fs::read_to_string(self.path("state/firmware-offered")).ok()
     }
-}
-
-fn chown(path: &Path) {
-    std::os::unix::fs::lchown(path, Some(65534), Some(65534)).unwrap();
-    if path.is_dir() && !path.is_symlink() {
-        for entry in fs::read_dir(path).unwrap() {
-            chown(&entry.unwrap().path());
-        }
-    }
-}
-
-fn said(out: &Output) -> (Option<i32>, String, String) {
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
 }
 
 fn ok() -> (Option<i32>, String, String) {
@@ -389,12 +346,12 @@ fn an_offer_it_cant_keep_says_so() {
     assert_eq!(m.fake("notify"), "");
 }
 
-/// The words proj was run with, each.
+/// The words proj was run with, each, since it was last asked.
 fn proj_words(m: &Machine) -> Vec<String> {
-    m.fake("proj")
-        .split_terminator("\n---\n")
-        .map(String::from)
-        .collect()
+    let mut runs = burrow_test::proj_jobs(&m.path("fake"));
+    let _ = fs::remove_file(m.path("fake/proj"));
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    runs.remove(0)
 }
 
 fn today() -> String {
@@ -432,7 +389,15 @@ fn a_review_is_a_job_told_what_the_machine_runs() {
     );
     assert_eq!(m.fake("nvme"), "list -o json\n");
     // As the user, without root's runtime dir: proj finds the user's.
-    assert_eq!(m.fake("runuser"), "-u sam -- unset\n");
+    let runuser = m.fake("runuser");
+    assert!(
+        runuser.starts_with(&format!(
+            "-u sam -- {} run --role firmware ",
+            bin().join("proj").display()
+        )),
+        "{runuser}"
+    );
+    assert_eq!(m.fake("runuser.xdg"), "unset\n");
     assert_eq!(
         proj_words(&m),
         [
@@ -483,12 +448,13 @@ fn what_a_review_cant_find_out_is_unknown() {
 fn a_review_proj_wont_take_says_so() {
     let m = Machine::new();
     m.set("fail-proj", "");
+    // proj's own complaint on stderr comes first.
     assert_eq!(
         said(&m.run(&["--review"])),
         (
             Some(1),
             String::new(),
-            "firmware-check: proj run: exit status: 1\n".into()
+            "proj: no\nfirmware-check: proj run: exit status: 1\n".into()
         )
     );
 }

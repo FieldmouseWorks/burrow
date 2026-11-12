@@ -2,7 +2,7 @@
 //! write descriptors, and [`stand_ins`] for the programs a binary runs as the
 //! machine's (how to fake the machine in a test: [`standins`]).
 
-mod standins;
+pub mod standins;
 pub use standins::{OWNED, chown, proj_jobs, root, said, stand_ins};
 
 use std::fs;

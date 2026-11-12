@@ -45,8 +45,8 @@ Mon 2026-11-02 03:00:00 PST 17h  -    -      box-boot-trial.timer         box-bo
 ";
     assert_eq!(status(&m.cfg), format!("no run yet\n{timers}"));
     assert_eq!(
-        m.did("calls"),
-        "systemctl list-timers burrow-events-catch-up.timer --no-pager\n"
+        m.fake("systemctl"),
+        "list-timers burrow-events-catch-up.timer --no-pager\n"
     );
 
     fs::write(
