@@ -17,6 +17,7 @@ pub fn lex(src: &str) -> Vec<Tok> {
     let s: Vec<char> = src.chars().collect();
     let mut out: Vec<Tok> = Vec::new();
     let mut i = 0;
+    let mut last_end: Option<usize> = None;
     while i < s.len() {
         let c = s[i];
         if c.is_whitespace() {
@@ -32,9 +33,13 @@ pub fn lex(src: &str) -> Vec<Tok> {
             }
             i += 2;
         } else if c == '"' {
+            let glued = last_end == Some(i);
             let (text, next) = string(&s, i + 1, &mut out);
             i = next;
-            quoted(&mut out, text);
+            if is_name(&s, i, &out, glued) {
+                quoted(&mut out, text, glued);
+                last_end = Some(i);
+            }
         } else if c == '\'' && s.get(i + 1) == Some(&'\'') {
             i = indented(&s, i + 2, &mut out);
         } else if word_char(c) {
@@ -42,29 +47,43 @@ pub fn lex(src: &str) -> Vec<Tok> {
             while i < s.len() && word_char(s[i]) {
                 i += 1;
             }
-            out.push(Tok::Word(s[start..i].iter().collect()));
+            let text: String = s[start..i].iter().collect();
+            match out.last_mut() {
+                Some(Tok::Word(w)) if last_end == Some(start) && w.ends_with('"') => {
+                    w.push_str(&text)
+                }
+                _ => out.push(Tok::Word(text)),
+            }
+            last_end = Some(i);
         } else {
             out.push(Tok::Punct(c));
             i += 1;
         }
     }
-    // A string that isn't a name (nothing binds it) is data.
-    let mut kept = Vec::new();
-    for (n, tok) in out.iter().enumerate() {
-        let quoted = matches!(tok, Tok::Word(w) if w.starts_with('"'));
-        if !quoted || out.get(n + 1) == Some(&Tok::Punct('=')) {
-            kept.push(tok.clone());
-        }
+    out
+}
+
+/// Whether the string that just ended at `i` is part of an attribute name:
+/// it continues a dotted path (`x."a"`, `"a".b`), or is what an `=` binds.
+/// Any other string is data.
+fn is_name(s: &[char], i: usize, out: &[Tok], glued: bool) -> bool {
+    let after_dot = matches!(out.last(), Some(Tok::Word(w)) if w.ends_with('.'));
+    if after_dot || glued || s.get(i) == Some(&'.') {
+        return true;
     }
-    kept
+    let rest = s[i.min(s.len())..].iter().skip_while(|c| c.is_whitespace());
+    let mut rest = rest.copied();
+    rest.next() == Some('=') && rest.next() != Some('=')
 }
 
 /// A quoted attribute name (`x."authors" = `) is a name; any other string
 /// is data, and dropped.
-fn quoted(out: &mut Vec<Tok>, text: Option<String>) {
+fn quoted(out: &mut Vec<Tok>, text: Option<String>, glued: bool) {
     let Some(text) = text else { return };
     match out.last_mut() {
-        Some(Tok::Word(w)) if w.ends_with('.') => w.push_str(&format!("\"{text}\"")),
+        Some(Tok::Word(w)) if w.ends_with('.') || (glued && !w.is_empty()) => {
+            w.push_str(&format!("\"{text}\""))
+        }
         _ => out.push(Tok::Word(format!("\"{text}\""))),
     }
 }
@@ -72,7 +91,7 @@ fn quoted(out: &mut Vec<Tok>, text: Option<String>) {
 /// The authors' type file, named in a string (`import "${./x}/github-author.nix"`),
 /// is a word, as its path is.
 fn note_type(text: &str, sink: &mut Vec<Tok>) {
-    if text.contains("github-author") {
+    if text.contains("github-author") && !text.contains(char::is_whitespace) {
         sink.push(Tok::Word("github-author".into()));
     }
 }
@@ -127,7 +146,8 @@ fn indented(s: &[char], mut i: usize, sink: &mut Vec<Tok>) -> usize {
 /// `sink`: an interpolation is Nix, and can bind or read authors.
 fn interpolation(s: &[char], i: usize, sink: &mut Vec<Tok>) -> usize {
     let end = skip(s, i);
-    let inner: String = s[i..end.saturating_sub(1).max(i)].iter().collect();
+    let stop = end.saturating_sub(1).max(i).min(s.len());
+    let inner: String = s[i.min(stop)..stop].iter().collect();
     sink.extend(lex(&inner));
     end
 }
@@ -140,6 +160,20 @@ fn skip(s: &[char], mut i: usize) -> usize {
         match s[i] {
             '{' => depth += 1,
             '}' => depth -= 1,
+            '#' => {
+                while i < s.len() && s[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '/' if s.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < s.len() && !(s[i] == '*' && s.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
             '"' => {
                 i = string(s, i + 1, &mut Vec::new()).1;
                 continue;

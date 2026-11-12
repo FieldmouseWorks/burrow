@@ -31,41 +31,62 @@ const SHARED: [&str; 3] = [
 /// The forms only these modules may use: where the list is declared, and the
 /// steward's own PR authors. A declaration carries the path it sits under, so
 /// the same words under another option are refused.
-const OWN: [(&str, &[&str]); 4] = [
+const OWN: [(&str, &[(&str, &str)]); 4] = [
     // Where `burrow.authors` and its type are declared, and nothing else.
     (
         "modules/common.nix",
         &[
-            "options.burrow.authors = mkOption { type = types.listOf ( import ../lib/github-author.nix { inherit lib; } )*",
-            "../lib/github-author.nix",
+            (
+                "imports.options.burrow",
+                "authors = mkOption { type = types.listOf ( import ../lib/github-author.nix { inherit lib; } )*",
+            ),
+            (
+                "imports.options.burrow.authors.type",
+                "../lib/github-author.nix",
+            ),
         ],
     ),
     (
         "modules/autoland.nix",
         &[
-            "inherit (cfg) authors",
-            "inherit (settings) stateDir owner proj projectsDir authors bots app jobTimeout renovate",
-            "options.burrow.autoland.authors = mkOption { type = types.listOf types.str*",
-            "burrow.authors = [ { login = \"${cfg.app.slug}[bot]\"; id = cfg.app.accountId; } ]",
-            "cfg.authors",
+            ("settings", "inherit (cfg) authors"),
+            (
+                "upkeepConfig",
+                "inherit (settings) stateDir owner proj projectsDir authors bots app jobTimeout renovate",
+            ),
+            (
+                "options.burrow.autoland",
+                "authors = mkOption { type = types.listOf types.str*",
+            ),
+            (
+                "config",
+                "burrow.authors = [ { login = \"${cfg.app.slug}[bot]\"; id = cfg.app.accountId; } ]",
+            ),
         ],
     ),
     (
         "modules/autoland/shadow.nix",
         &[
-            "trusted_authors = cfg.authors*",
-            "review_authors = [ stewardLogin ]",
-            "verdict_authors = [ stewardLogin ]*",
-            "cfg.authors",
+            ("", "trusted_authors = cfg.authors*"),
+            ("", "cfg.authors"),
+            ("settings", "review_authors = [ stewardLogin ]"),
+            ("settings", "verdict_authors = [ stewardLogin ]*"),
+            ("settings", "cfg.authors"),
         ],
     ),
     (
         "modules/watchdog/degradations.nix",
         &[
-            "inherit (cfg) repos prThreshold authors",
-            "options.burrow.watchdog.degradations.authors = mkOption { type = types.listOf types.str*",
-            "config.burrow.autoland.authors",
-            "cfg.authors",
+            ("settings", "inherit (cfg) repos prThreshold authors"),
+            (
+                "options.burrow.watchdog.degradations",
+                "authors = mkOption { type = types.listOf types.str*",
+            ),
+            (
+                "options.burrow.watchdog.degradations.authors",
+                "config.burrow.autoland.authors",
+            ),
+            ("config.assertions", "cfg.authors"),
         ],
     ),
 ];
@@ -103,11 +124,12 @@ pub fn scan(files: &[File]) -> Vec<String> {
             .iter()
             .find(|(p, _)| *p == file.path)
             .map_or(&[][..], |(_, forms)| forms);
-        for (what, form) in forms(&lex(&file.text)) {
-            let ok = SHARED.iter().chain(own).any(|a| allows(a, &form));
+        for (what, scope, form) in forms(&lex(&file.text)) {
+            let ok = SHARED.iter().any(|a| allows(a, &form))
+                || own.iter().any(|(at, a)| *at == scope && allows(a, &form));
             if !ok {
                 found.push(format!(
-                    "{}: {what}: `{form}` (the authors are burrow.authors)",
+                    "{}: {what}: `{form}` in `{scope}` (the authors are burrow.authors)",
                     file.path
                 ));
             }
@@ -119,64 +141,87 @@ pub fn scan(files: &[File]) -> Vec<String> {
 /// Every place the tokens name authors or the type that describes one, as
 /// what it is and the tokens around it (the statement from its start, to
 /// its `;` when it is a binding), spaced out.
-fn forms(toks: &[Tok]) -> Vec<(&'static str, String)> {
+fn forms(toks: &[Tok]) -> Vec<(&'static str, String, String)> {
     let mut out = Vec::new();
     for (i, tok) in toks.iter().enumerate() {
         let Tok::Word(w) = tok else { continue };
         if w.contains("github-author") {
-            out.push(("takes the authors' type", w.clone()));
+            out.push(("takes the authors' type", scope(toks, i), w.clone()));
         } else if w.contains('/') || !mentions(w) {
             continue;
         } else if is_bind(toks.get(i + 1)) {
-            out.push(("declares or sets authors", binding(toks, i)));
+            out.push(("declares or sets authors", scope(toks, i), binding(toks, i)));
         } else if inherited(toks, i) {
-            out.push(("inherits authors", statement(toks, inherit_start(toks, i))));
+            let start = inherit_start(toks, i);
+            out.push((
+                "inherits authors",
+                scope(toks, start),
+                statement(toks, start),
+            ));
         } else {
-            out.push(("reads authors", w.clone()));
+            out.push(("reads authors", scope(toks, i), w.clone()));
         }
     }
     out
 }
 
-/// A binding's statement; a declaration (`mkOption`) is named by every
-/// attribute it sits under (`options.burrow.x.authors`), so where it is
-/// declared is part of what is allowed.
+/// A binding's statement. Where it sits (`scope`) is checked with it, so a
+/// declaration under another option is another form.
 fn binding(toks: &[Tok], i: usize) -> String {
-    let text = statement(toks, i);
-    let declares = matches!(toks.get(i + 2), Some(Tok::Word(w)) if w.ends_with("mkOption"));
-    if !declares {
-        return text;
-    }
+    statement(toks, i)
+}
+
+/// The bindings the token at `i` sits inside, outermost first, dotted: each
+/// bracket is named by the binding whose value it opens (`inbox = {` or
+/// `x = f (g {`), so the same words under another binding are another
+/// scope.
+fn scope(toks: &[Tok], i: usize) -> String {
     let mut stack: Vec<String> = Vec::new();
     for n in 0..i {
         match &toks[n] {
-            Tok::Punct('{' | '[' | '(') => {
-                let name = match (
-                    n.checked_sub(2).and_then(|k| toks.get(k)),
-                    n.checked_sub(1).and_then(|k| toks.get(k)),
-                ) {
-                    (Some(Tok::Word(w)), Some(Tok::Punct('='))) if toks[n] == Tok::Punct('{') => {
-                        w.clone()
-                    }
-                    _ => String::new(),
-                };
-                stack.push(name);
-            }
+            Tok::Punct('{' | '[' | '(') => stack.push(opened_by(toks, n)),
             Tok::Punct('}' | ']' | ')') => {
                 stack.pop();
             }
             _ => {}
         }
     }
-    let Tok::Word(w) = &toks[i] else { return text };
-    let path: Vec<&str> = stack
-        .iter()
-        .map(String::as_str)
+    stack
+        .into_iter()
         .filter(|p| !p.is_empty())
-        .chain([w.as_str()])
-        .collect();
-    let rest = text.strip_prefix(w.as_str()).unwrap_or(&text);
-    format!("{}{rest}", path.join("."))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// The name of the binding (`name =`) whose value holds the bracket at
+/// `open`: the first word of its statement, found by walking back over
+/// whole brackets to the statement's start.
+fn opened_by(toks: &[Tok], open: usize) -> String {
+    let mut depth = 0i32;
+    let mut start = 0;
+    for j in (0..open).rev() {
+        match &toks[j] {
+            Tok::Punct('}' | ']' | ')') => depth += 1,
+            Tok::Punct('{' | '[' | '(') if depth == 0 => {
+                start = j + 1;
+                break;
+            }
+            Tok::Punct('{' | '[' | '(') => depth -= 1,
+            Tok::Punct(';') if depth == 0 => {
+                start = j + 1;
+                break;
+            }
+            Tok::Word(w) if depth == 0 && matches!(w.as_str(), "let" | "in") => {
+                start = j + 1;
+                break;
+            }
+            _ => {}
+        }
+    }
+    match (toks.get(start), toks.get(start + 1)) {
+        (Some(Tok::Word(w)), Some(Tok::Punct('='))) => w.clone(),
+        _ => String::new(),
+    }
 }
 
 fn is_bind(tok: Option<&Tok>) -> bool {

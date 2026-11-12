@@ -89,7 +89,7 @@ fn a_door_taking_authors_from_elsewhere_is_refused() {
 
 #[test]
 fn the_steward_own_authors_are_exempt_and_only_those() {
-    let own = "{ options.burrow.autoland = { authors = mkOption { type = types.listOf types.str; }; }; x = { inherit (cfg) authors; }; y = cfg.authors; }";
+    let own = "{ options.burrow.autoland = { authors = mkOption { type = types.listOf types.str; }; }; settings = { inherit (cfg) authors; }; }";
     accepted("modules/autoland.nix", own);
     refused("modules/probe.nix", own);
     // A door payload in the exempt file is not the steward's.
@@ -113,7 +113,7 @@ fn the_steward_own_authors_are_exempt_and_only_those() {
 
 #[test]
 fn where_it_is_declared_is_scanned_too() {
-    let decl = "options.burrow = { authors = mkOption { type = types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; }; };";
+    let decl = "imports = [ { options.burrow = { authors = mkOption { type = types.listOf (import ../lib/github-author.nix { inherit lib; }); default = [ ]; }; }; } ];";
     accepted("modules/common.nix", &format!("{{ {decl} }}"));
     // The removed option, declared in the home file or under an exempt path.
     refused(
@@ -149,5 +149,40 @@ fn interpolated_code_is_scanned() {
     accepted(
         "modules/probe.nix",
         "{ x = \"authors ${toString 1} data\"; }",
+    );
+}
+
+#[test]
+fn exemptions_are_scoped_to_their_bindings() {
+    // The inbox's payload is accounts, not the steward's logins.
+    refused(
+        "modules/autoland.nix",
+        "{ settings = { inbox = { inherit (cfg) authors; }; }; }",
+    );
+    accepted(
+        "modules/autoland.nix",
+        "{ settings = { inherit (cfg) authors; }; }",
+    );
+    refused(
+        "modules/watchdog/degradations.nix",
+        "{ other = { inherit (cfg) repos prThreshold authors; }; }",
+    );
+}
+
+#[test]
+fn quoted_names_and_comments_in_the_lexer() {
+    refused("modules/x.nix", "{ \"authors\".allowed = mkOption { }; }");
+    refused("modules/x.nix", "{ x.\"authors\".y = 1; }");
+    refused(
+        "modules/x.nix",
+        "{ x = \"${ # }\n builtins.toJSON { authors = []; }\n}\"; }",
+    );
+    refused(
+        "modules/x.nix",
+        "{ x = \"${ /* } */ builtins.toJSON { authors = []; } }\"; }",
+    );
+    accepted(
+        "modules/x.nix",
+        "{ description = \"reads the github-author type, not imports it\"; }",
     );
 }
