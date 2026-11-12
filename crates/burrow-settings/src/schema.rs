@@ -63,6 +63,19 @@ impl Change {
     }
 }
 
+/// Whether the settings door writes an option, and if not, why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Write {
+    /// `settings set` and `unset` write it to the overlay; this is what a
+    /// write lasts.
+    Door { lasts: &'static str },
+    /// The door refuses it, saying this.
+    Refused { reason: &'static str },
+}
+
+const DEPLOY_REASON: &str = "it is built by Nix into the machine's flake (burrow.* options): change the flake, open a PR and deploy";
+const FILE_REASON: &str = "it is kept in proj's own file and written by proj's commands (proj roles, proj models, proj engines, proj usage), not by the settings overlay";
+
 /// What it is when nothing sets it.
 #[derive(Debug)]
 pub enum Fallback {
@@ -85,6 +98,7 @@ pub struct Setting {
     /// The part of the pipeline that reads it.
     pub owner: &'static str,
     pub change: Change,
+    pub write: Write,
 }
 
 impl Setting {
@@ -187,6 +201,9 @@ const fn flake(
         help,
         owner,
         change: Change::Deploy,
+        write: Write::Refused {
+            reason: DEPLOY_REASON,
+        },
     }
 }
 
@@ -204,6 +221,28 @@ const fn live(
         help,
         owner: "proj",
         change: Change::Live,
+        write: Write::Refused {
+            reason: FILE_REASON,
+        },
+    }
+}
+
+/// A live option the settings door writes, into the overlay.
+const fn overlay(
+    name: &'static str,
+    kind: &'static Kind,
+    default: &'static str,
+    lasts: &'static str,
+    help: &'static str,
+) -> Setting {
+    Setting {
+        name,
+        kind,
+        default: Fallback::Value(default),
+        help,
+        owner: "proj",
+        change: Change::Live,
+        write: Write::Door { lasts },
     }
 }
 
@@ -282,16 +321,18 @@ pub static SETTINGS: &[Setting] = &[
         "proj",
         "Tracked repositories whose automated work may move; the live repository overlay overrides these defaults.",
     ),
-    live(
+    overlay(
         "settings.repositoryOverrides",
         &Kind::Map(&Kind::Bool),
         "{}",
+        "until it is changed back; a deploy leaves the overlay alone",
         "Runtime repository permissions overriding settings.allowed; false vacates every role immediately.",
     ),
-    live(
+    overlay(
         "settings.pipelineUntil",
         &Kind::Maybe(&Kind::Count { min: 0 }),
         "null",
+        "until that time passes or it is changed back; a deploy leaves the overlay alone",
         "Until this timestamp only pipeline repositories may move; null means no scoped hold.",
     ),
     // proj-inbox: sorting issues and handing ready ones on.

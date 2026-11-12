@@ -55,8 +55,8 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        let body = if !crate::valid_command(&args) {
-            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, pipeline TIMESTAMP or back.".into()
+        let body = if let Err(why) = crate::parse(&args) {
+            format!("Nothing changed. {why}")
         } else {
             cfg.settings.request(
                 &receipt,
