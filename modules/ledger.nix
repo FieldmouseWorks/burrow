@@ -43,6 +43,23 @@ let
   };
   # The machine's runners started fresh for one job each, if it has them.
   fresh = lib.attrByPath [ "burrow" "dispatch" ] { } config;
+  flow = cfg.flow;
+  # CONARY_FLOW_CONFIG: `cn flow`'s machine-owned settings (Conary's
+  # docs/flow.md), rendered from what the steward reads, so there is no
+  # second copy to keep. Unset plugins are left out: their step waits.
+  flowConfig = pkgs.writeText "conary-flow.json" (builtins.toJSON {
+    trusted_authors = flow.trustedAuthors;
+    settings = {
+      inherit (flow) people reviewers;
+      review_authors = cfg.reviewers;
+    };
+    plugins = lib.filterAttrs (_: v: v != null) flow.plugins;
+    evidence = {
+      signer = cfg.signerWorkflow;
+      fresh = if (fresh.enable or false) && fresh.fresh.enable then fresh.fresh.prefix else null;
+      inherit (flow.evidence) require negative;
+    };
+  });
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
   socket = "/run/conary/conaryd.sock";
 
@@ -269,6 +286,50 @@ in
       '';
     };
 
+    flow = {
+      enable = lib.mkEnableOption ''
+        CONARY_FLOW_CONFIG (`env`, and every login): the config `cn flow`
+        reads, rendered from the settings the steward reads. Nobody writes it
+        by hand: defining that variable elsewhere fails the build, since it
+        would be a second copy of the steward's settings. Conary still reads
+        a plain file, so it runs without burrow
+      '';
+      trustedAuthors = mkOption {
+        type = types.listOf types.str;
+        default = autoland.authors or [ ];
+        defaultText = lib.literalExpression "config.burrow.autoland.authors";
+        description = "Whose PRs merge themselves once settled: the steward's authors.";
+      };
+      people = mkOption {
+        type = types.listOf types.str;
+        default = autoland.authors or [ ];
+        defaultText = lib.literalExpression "config.burrow.autoland.authors";
+        description = "GitHub users whose approval an R2 change or an owner decision waits for.";
+      };
+      reviewers = mkOption {
+        type = types.listOf types.str;
+        default = [ "reviewer" ];
+        description = "The reviewer roles flow counts (`settings.reviewers`).";
+      };
+      plugins = lib.genAttrs [ "review" "fix" "judge" "proof" ] (kind: mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = "Absolute path of the ${kind} plugin executable (Conary's docs/plugins.md); unset, that step waits.";
+      });
+      evidence = {
+        require = mkOption {
+          type = types.listOf types.str;
+          default = [ "check" ];
+          description = "Checks that count as green, each attested by `signerWorkflow`.";
+        };
+        negative = mkOption {
+          type = types.str;
+          default = "attest / negative";
+          description = "The check that attests the new tests fail on old code.";
+        };
+      };
+    };
+
     sessionLinks = mkOption {
       type = types.listOf (types.strMatching "[^/]+/[^/]+");
       default = [ ];
@@ -341,6 +402,8 @@ in
           ${cfg.package}/bin/cn policy "$policyPath" >/dev/null
           cp "$policyPath" "$out"
         ''}";
+      } // lib.optionalAttrs flow.enable {
+        CONARY_FLOW_CONFIG = "${flowConfig}";
       } // lib.optionalAttrs ((fresh.enable or false) && fresh.fresh.enable) {
         # A self-hosted runner's CI counts only from one started fresh for
         # its job, and only burrow.dispatch.fresh names a runner so
@@ -422,6 +485,9 @@ in
     } {
       assertion = cfg.door.enable -> cfg.door.repo != null;
       message = "burrow.ledger.door.repo: name the repo whose issues ask for undos.";
+    } {
+      assertion = !flow.enable || (flow.trustedAuthors != [ ] && flow.people != [ ] && flow.evidence.require != [ ]);
+      message = "burrow.ledger.flow: name trustedAuthors, people and evidence.require (the first two default to the steward's authors).";
     }];
 
     # `cn` for everyone, on this ledger.
@@ -429,7 +495,8 @@ in
     environment.variables = {
       CONARY_LEDGER = cfg.dir;
       CONARY_ANCHOR_REPO = cfg.anchorRepo;
-    } // lib.optionalAttrs cfg.daemon { CONARY_SOCKET = socket; };
+    } // lib.optionalAttrs cfg.daemon { CONARY_SOCKET = socket; }
+      // lib.optionalAttrs flow.enable { CONARY_FLOW_CONFIG = "${flowConfig}"; };
 
     systemd.tmpfiles.settings.burrow = {
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
