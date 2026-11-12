@@ -88,9 +88,11 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
         }
+        let _permit = resumption::Permit::new(pass);
         return forget(&inbox.state, repo);
     }
     pass.lock().map_err(|e| io_fail(&lock, e))?;
+    let pass = resumption::Permit::new(pass);
     let mut p = Pass {
         cfg,
         inbox,
