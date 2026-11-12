@@ -303,10 +303,9 @@ def run_pass(kick):
                 # Every open PR's branches, head and base, drafts and forks' PRs
                 # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
-                in_use = {branch for pr in prs for branch in (pr["headRefName"], pr["baseRefName"])}
+                in_use = set()
                 seen_to = batch.seen_to(repo)
-                snaps = {V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"])
-                         for pr in prs}
+                snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
                 # own step below).
@@ -325,6 +324,8 @@ def run_pass(kick):
                     if batch.expired():
                         partial = True
                         break
+                    in_use.update((pr["headRefName"], pr["baseRefName"]))
+                    snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
                     except Exception as e:  # one bad PR mustn't stop the rest
@@ -337,11 +338,18 @@ def run_pass(kick):
                     batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
                 # Swept only once it has every open PR's head: one whose look
                 # failed before then would have the sweep take what's theirs.
-                live[repo] = snaps
                 if partial:
                     complete = False
                     C.wake(repo, C.NOW + 1)  # ends: the saved PR cursor reaches the repo's remaining PRs
                     continue
+                # A partial traversal leaves all reviewer files alone. Once
+                # complete, include the snapshots carried from earlier batches
+                # before sweeping, just as a single complete pass does.
+                for pr in prs:
+                    if pr not in pending:
+                        in_use.update((pr["headRefName"], pr["baseRefName"]))
+                        snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                live[repo] = snaps
                 if seen_to:
                     covered.append(r)
                 else:
