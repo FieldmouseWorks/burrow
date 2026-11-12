@@ -418,7 +418,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     let identity = match &new.admission {
         Some(identity) => identity.clone(),
         None => crate::policy::identify(cfg, &project, automated, new.local_work)
-        .map_err(|e| Fail::new(1, e))?,
+            .map_err(|e| Fail::new(1, e))?,
     };
     if let Some(kind) = &new.usage_kind {
         write("usage-kind", kind)?;
