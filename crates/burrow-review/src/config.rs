@@ -39,16 +39,26 @@ pub struct Config {
     /// burrow-events' kick for the steward's passes:
     /// `http://127.0.0.1:PORT/kick/autoland`, a repo's under it.
     pub kick: String,
-    /// The file this was read from, and what it said then: the deployed
-    /// copy, which a switch replaces under a running service (load).
+    /// The generation deployed now, and what this run's config said, which
+    /// a switch replaces under a running service (load).
     #[serde(skip)]
-    pub source: Option<(PathBuf, String)>,
+    pub deployed: Option<Deployed>,
+}
+
+/// Where a switch puts the reviewers' service (modules/autoland/review.nix):
+/// a directory holding `config.json` and the `burrow-review` that goes
+/// with it, from one generation, replaced at once.
+#[derive(Clone, Debug)]
+pub struct Deployed {
+    pub dir: PathBuf,
+    /// This run's own config, as it read it.
+    pub ran: String,
 }
 
 /// Just the admission policy of a deployed config, which may be a newer
 /// one's, with fields this one doesn't know.
 #[derive(Deserialize)]
-struct Deployed {
+struct Policy {
     #[serde(default)]
     settings: Option<burrow_settings::Config>,
 }
@@ -88,45 +98,60 @@ pub struct Sandboxed {
     pub links: BTreeMap<String, String>,
 }
 
+impl Deployed {
+    pub fn config(&self) -> PathBuf {
+        self.dir.join("config.json")
+    }
+
+    /// The program the deployed generation runs, with its own config.
+    pub fn program(&self) -> PathBuf {
+        self.dir.join("burrow-review")
+    }
+}
+
 impl Config {
     /// Whether the repo's looks wait: the admission policy deployed now,
     /// with its runtime overlay, decides, not the one the service started
     /// with. One it can't read pauses everything.
     pub fn paused(&self, repo: &str) -> bool {
-        let deployed;
-        let settings = match &self.source {
+        let now;
+        let settings = match &self.deployed {
             None => self.settings.as_ref(),
-            Some((path, _)) => {
-                deployed = fs::read(path)
+            Some(d) => {
+                now = fs::read(d.config())
                     .ok()
-                    .and_then(|b| serde_json::from_slice::<Deployed>(&b).ok())
-                    .and_then(|d| d.settings);
-                deployed.as_ref()
+                    .and_then(|b| serde_json::from_slice::<Policy>(&b).ok())
+                    .and_then(|p| p.settings);
+                now.as_ref()
             }
         };
         settings.is_none_or(|s| !s.allows(repo).unwrap_or(false))
     }
 
-    /// Whether a switch has deployed another config since this one was
-    /// read: the next run is the new one's, so this one starts no more
-    /// looks (work.rs). One it can't read now hasn't moved.
+    /// Whether the deployed generation isn't this run's: a switch (or a
+    /// rollback) put another in place, or this run was started from a unit
+    /// systemd hadn't reloaded yet. It takes no more looks, and hands the
+    /// queue to the deployed program (main.rs).
     pub fn moved(&self) -> bool {
-        self.source
+        self.deployed
             .as_ref()
-            .is_some_and(|(path, was)| fs::read_to_string(path).is_ok_and(|now| now != *was))
+            .is_some_and(|d| fs::read_to_string(d.config()).map_or(true, |now| now != d.ran))
     }
 
-    /// The config REVIEW_CONFIG names.
+    /// The config REVIEW_CONFIG names, its own generation's, and the
+    /// generation deployed now, in REVIEW_DEPLOYED.
     pub fn load() -> Result<Config, String> {
         let path = std::env::var_os("REVIEW_CONFIG").ok_or("REVIEW_CONFIG names no config")?;
-        Config::read(Path::new(&path))
+        let deployed = std::env::var_os("REVIEW_DEPLOYED").map(PathBuf::from);
+        Config::read(Path::new(&path), deployed)
     }
 
-    /// The config at path, which it reads again for what's deployed since.
-    pub fn read(path: &Path) -> Result<Config, String> {
+    /// The config at path, and where its generation's successors are
+    /// deployed, if anywhere.
+    pub fn read(path: &Path, deployed: Option<PathBuf>) -> Result<Config, String> {
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut cfg = Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        cfg.source = Some((path.to_owned(), text));
+        cfg.deployed = deployed.map(|dir| Deployed { dir, ran: text });
         Ok(cfg)
     }
 

@@ -1,7 +1,9 @@
 //! A run outlives a switch while the admission policy parks its looks: it
 //! holds them to the policy deployed now, not the one it started with, and
-//! hands the queue to the new config's run, entries and sessions intact.
+//! hands the queue to the deployed generation's program, entries and
+//! sessions intact. Its own config and program stay one generation's.
 use crate::rig::{HEAD, Rig};
+use burrow_review::Ended;
 use serde_json::{Value, json};
 use std::{
     fs, thread,
@@ -21,7 +23,7 @@ fn entry(rig: &Rig, name: &str) -> Value {
 }
 
 #[test]
-fn a_deploy_that_allows_a_parked_repo_hands_its_look_to_the_new_run() {
+fn a_deploy_that_allows_a_parked_repo_hands_its_look_to_the_new_program() {
     let mut rig = Rig::new();
     let snap = rig.snapshot(5, HEAD);
     let parked = rig.queue(&snap, 5, HEAD, json!({"repo":"sam/new","opened":1,"at":2}));
@@ -37,15 +39,15 @@ fn a_deploy_that_allows_a_parked_repo_hands_its_look_to_the_new_run() {
     rig.cfg["settings"]["allowed"] = json!(["sam/r", "sam/new"]);
     rig.deploy();
     until("the parked run never handed over", || work.is_finished());
-    work.join().unwrap();
+    assert_eq!(work.join().unwrap(), Ended::Moved);
     assert!(
         rig.runs().is_empty(),
         "the old run took a look after the switch"
     );
     assert_eq!(entry(&rig, &parked), queued, "the queue entry kept its age");
-    assert!(rig.said().contains("a new config is deployed"));
-    // The queue watcher starts the new config's run, which takes it.
-    burrow_review::work(rig.deployed());
+    assert!(rig.said().contains("another generation is deployed"));
+    // The deployed program, with its own config, takes it.
+    assert_eq!(burrow_review::work(rig.deployed()), Ended::Done);
     assert_eq!(rig.runs().len(), 1);
     assert_eq!(rig.back(&parked)["result"], "review");
 }
@@ -68,17 +70,69 @@ fn a_deploy_that_drops_a_repo_vacates_its_look_and_keeps_its_session() {
     until("the look ran on under the old policy", || {
         work.is_finished()
     });
-    work.join().unwrap();
+    assert_eq!(work.join().unwrap(), Ended::Moved);
     assert!(!rig.path("done").join(&name).exists());
     assert!(rig.path("queue").join(&name).exists());
     assert_eq!(rig.look(&snap)["id"], session);
-    // Allowed again by the next deploy: the next run resumes its session.
+    // Allowed again by the next deploy: its program resumes the session.
     fs::write(rig.home().join(".fake/codex.json"), "{}").unwrap();
     rig.cfg["settings"]["allowed"] = json!(["sam/r"]);
-    burrow_review::work(rig.deployed());
+    assert_eq!(burrow_review::work(rig.deployed()), Ended::Done);
     let runs = rig.runs();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[1]["session"], session);
     assert_eq!(runs[1]["resumed"], true);
     assert_eq!(rig.back(&name)["result"], "review");
+}
+
+/// systemd starts the unit it has: between a switch putting the new /etc in
+/// place and reloading the units, that's the old generation's program and
+/// config. It takes nothing, and hands the queue to the deployed program.
+#[test]
+fn a_run_from_a_unit_not_yet_reloaded_takes_nothing() {
+    let mut rig = Rig::new();
+    let snap = rig.snapshot(5, HEAD);
+    let name = rig.queue(&snap, 5, HEAD, json!({}));
+    let old = rig.cfg.clone();
+    rig.cfg["timeoutMinutes"] = json!(31);
+    assert_eq!(burrow_review::work(rig.started(&old)), Ended::Moved);
+    assert!(rig.runs().is_empty());
+    assert!(rig.path("queue").join(&name).exists());
+    // Nor does one whose generation was rolled back past this one's.
+    fs::remove_dir_all(rig.path("deployed")).unwrap();
+    let s = rig.started(&rig.cfg);
+    fs::remove_dir_all(rig.path("deployed")).unwrap();
+    assert_eq!(burrow_review::work(s), Ended::Moved);
+    assert!(rig.runs().is_empty());
+    assert_eq!(burrow_review::work(rig.deployed()), Ended::Done);
+    assert_eq!(rig.back(&name)["result"], "review");
+}
+
+/// The hand-over itself, as systemd runs the service: the deployed program
+/// takes the run's place, with its own config, not this run's.
+#[test]
+fn the_service_hands_over_to_the_deployed_program() {
+    let mut rig = Rig::new();
+    let old = rig.path("own.json");
+    fs::write(&old, rig.cfg.to_string()).unwrap();
+    rig.cfg["timeoutMinutes"] = json!(31);
+    let dir = rig.deploy();
+    let said = rig.path("next.txt");
+    burrow_test::executable(
+        dir.join("burrow-review"),
+        format!(
+            "#!{}\necho \"${{REVIEW_CONFIG-none}} $*\" > {}\n",
+            crate::rig::which("bash").display(),
+            said.display()
+        ),
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_burrow-review"))
+        .arg("work")
+        .env("REVIEW_CONFIG", &old)
+        .env("REVIEW_DEPLOYED", &dir)
+        .env("HOME", rig.home())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(fs::read_to_string(&said).unwrap(), "none work\n");
 }

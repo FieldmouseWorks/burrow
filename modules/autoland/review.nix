@@ -60,11 +60,20 @@ let
     inherit (cfg) leadRepos pipelineRepos;
     kick = stewardKick;
   });
-  reviewConfigFile = "burrow/review.json";
   review = pkgs.writeShellScriptBin "burrow-review" ''
     export REVIEW_CONFIG=''${REVIEW_CONFIG:-${reviewConfig}}
     exec ${service}/bin/burrow-review "$@"
   '';
+  # The generation deployed now, for a run that outlives a switch (looks
+  # the admission policy parks wait in it): the policy it holds looks to,
+  # and the program, with that config, it hands the queue to
+  # (crates/burrow-review, config.rs `Deployed`). One link in /etc, so
+  # they change together, before systemd reloads the unit.
+  deployedDir = "burrow/review";
+  deployed = pkgs.linkFarm "burrow-review-deployed" [
+    { name = "config.json"; path = reviewConfig; }
+    { name = "burrow-review"; path = "${review}/bin/burrow-review"; }
+  ];
 
 in
 {
@@ -92,10 +101,7 @@ in
       # own sandbox inside theirs.
       path = reviewTools;
       environment.HOME = reviewerHome;
-      # The deployed config, not this run's copy: a run that outlives a
-      # switch (looks parked by the admission policy wait in it) reads the
-      # new policy there, and ends for the new config's run.
-      environment.REVIEW_CONFIG = "/etc/${reviewConfigFile}";
+      environment.REVIEW_DEPLOYED = "/etc/${deployedDir}";
       # The gate's TLS to the agents' APIs (crates/burrow-review, egress.rs).
       environment.SSL_CERT_FILE = config.security.pki.caBundle;
       serviceConfig = {
@@ -111,7 +117,7 @@ in
         ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ];
       };
     };
-    environment.etc.${reviewConfigFile} = lib.mkIf (!cfg.dryRun) { source = reviewConfig; };
+    environment.etc.${deployedDir} = lib.mkIf (!cfg.dryRun) { source = deployed; };
     systemd.paths.autoland-review = lib.mkIf (!cfg.dryRun) {
       wantedBy = [ "paths.target" ];
       # A review to do, or a closed PR's sessions to delete.

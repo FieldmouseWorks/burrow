@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use work::{forget, review, work};
+pub use work::{Ended, forget, review, work};
 
 use crate::config::Config;
 use crate::egress::Dial;

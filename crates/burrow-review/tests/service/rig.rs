@@ -121,17 +121,28 @@ impl Rig {
         self.with(Config::parse(&self.cfg.to_string()).unwrap())
     }
 
-    /// The config as a switch deploys it, at the one path the service
-    /// reads it from (modules/autoland/review.nix): its path.
+    /// The config as a switch deploys it (modules/autoland/review.nix):
+    /// the generation's directory.
     pub fn deploy(&self) -> PathBuf {
-        let path = self.path("review.json");
-        fs::write(&path, self.cfg.to_string()).unwrap();
-        path
+        let dir = self.path("deployed");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), self.cfg.to_string()).unwrap();
+        dir
     }
 
-    /// The service as systemd starts it: from the deployed config.
+    /// The service as systemd starts it, from a unit of the generation
+    /// deployed now.
     pub fn deployed(&self) -> Arc<Service> {
-        self.with(Config::read(&self.deploy()).unwrap())
+        self.started(&self.cfg)
+    }
+
+    /// The service started from a unit whose config is `ran`, with the
+    /// config as it is now deployed.
+    pub fn started(&self, ran: &Value) -> Arc<Service> {
+        let own = self.path("own.json");
+        fs::write(&own, ran.to_string()).unwrap();
+        let cfg = Config::read(&own, Some(self.deploy())).unwrap();
+        self.with(cfg)
     }
 
     fn with(&self, cfg: Config) -> Arc<Service> {

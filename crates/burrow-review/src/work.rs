@@ -269,9 +269,9 @@ fn remove_all(path: &Path) -> io::Result<()> {
 /// was opened, not when its head came, so a PR pushed again keeps its
 /// place. One look at a time in a session: a PR's next head waits for the
 /// look at its last one, and resumes it. Looks the admission policy holds
-/// back wait here for it, until a switch deploys another config: then this
-/// run ends, and the queue watcher starts the new one's.
-pub fn work(s: Arc<Service>) {
+/// back wait here for it, until another generation is deployed: then this
+/// run ends, for that generation's program to take the queue (main.rs).
+pub fn work(s: Arc<Service>) -> Ended {
     forget(&s);
     let _watch = s.logins.watch();
     let (done_tx, done) = mpsc::channel::<String>();
@@ -326,9 +326,9 @@ pub fn work(s: Arc<Service>) {
                 name.clone(),
             ));
         }
-        // A switch deployed another config: the looks under way finish (the
+        // Another generation is deployed: the looks under way finish (the
         // policy they're held to is the deployed one's), none starts, and
-        // the next run, the new config's, takes the queue as it stands.
+        // the deployed program takes the queue as it stands.
         let moved = s.cfg.moved();
         let handed = moved && (parked || !waiting.is_empty());
         if moved {
@@ -358,9 +358,10 @@ pub fn work(s: Arc<Service>) {
         if busy.is_empty() {
             if moved {
                 if handed {
-                    s.say("a new config is deployed: its run takes the queue");
+                    s.say("another generation is deployed: its program takes the queue");
                 }
-                break;
+                forget(&s);
+                return Ended::Moved;
             }
             if parked {
                 thread::sleep(AGAIN_EVERY);
@@ -374,4 +375,15 @@ pub fn work(s: Arc<Service>) {
         }
     }
     forget(&s);
+    Ended::Done
+}
+
+/// How a run of the queue ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// Nothing left that it can take.
+    Done,
+    /// Another generation is deployed, and nothing is under way: the
+    /// deployed program, with its own config, takes the queue from here.
+    Moved,
 }
