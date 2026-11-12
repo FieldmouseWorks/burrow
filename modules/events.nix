@@ -273,6 +273,8 @@ in
     };
     systemd.services.burrow-events-secret = lib.mkIf hooked {
       description = "burrow-events: restart for a new webhook secret";
+      # It waits out the handlers' passes, so a switch leaves it be too.
+      restartIfChanged = false;
       after = map (u: "${u}.service") units;
       path = [ config.systemd.package ];
       script = "systemctl try-restart burrow-events.service";
@@ -328,7 +330,15 @@ in
     # active unit that changed, and each of these stays active, with a
     # handler's units in its triggers, so its start is the kick. Not at boot:
     # burrow-events' own start runs every full pass then.
-    systemd.services = lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
+    #
+    # So a switch never restarts a handler's pass itself: it leaves a running
+    # one be, and the kick runs the next, the new unit's. Restarting it would
+    # have the switch wait out a pass of minutes, or one ordered after another
+    # pass (renovate-sweep after renovate), past its deadline, and revert.
+    systemd.services = lib.mkMerge [
+      (lib.listToAttrs (lib.concatMap (h: map (unit: lib.nameValuePair unit { restartIfChanged = false; })
+        ([ h.unit ] ++ lib.optional h.perRepo "${h.unit}@")) (lib.attrValues cfg.handlers)))
+      (lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
       description = "burrow-events: a full pass of ${name} when a switch changes it";
       wantedBy = [ "multi-user.target" ];
       after = [ "burrow-events.service" ];
@@ -343,6 +353,7 @@ in
         RemainAfterExit = true;
         User = "burrow-events";
       };
-    }) cfg.handlers;
+    }) cfg.handlers)
+    ];
   }]);
 }

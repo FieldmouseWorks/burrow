@@ -138,15 +138,25 @@ let
   # just the same. A minute or less is a reload, such as NixOS's nginx's.
   # Only a declared timeout counts: most of NixOS's own oneshots set none and
   # are meant to rerun on a switch, so a job that can run long says so.
-  longOneshots = lib.attrNames (lib.filterAttrs (_: s:
+  long = s:
     let
       sc = s.serviceConfig;
       t = if sc.TimeoutStartSec or null != null then sc.TimeoutStartSec else sc.TimeoutSec or null;
-    in s.enable && s.restartIfChanged
+    in s.enable
       && (sc.Type or null) == "oneshot"
       && t != null
       && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w
-        || (n > 60 && !remains sc))
+        || (n > 60 && !remains sc));
+  # A unit ordered after a long one waits for it too: the start the switch
+  # queues for it sits behind the long one's run, whether or not the switch
+  # left that one be (renovate-sweep behind a 13-minute renovate reverted a
+  # switch that had nothing wrong with it).
+  behindLong = s: lib.any (u:
+    let name = lib.removeSuffix ".service" u; in
+    lib.hasSuffix ".service" u && config.systemd.services ? ${name} && long config.systemd.services.${name}
+  ) s.after;
+  longOneshots = lib.attrNames (lib.filterAttrs (_: s:
+    s.enable && s.restartIfChanged && (long s || behindLong s)
   ) config.systemd.services);
 in
 {
@@ -204,9 +214,10 @@ in
       assertions = [{
         assertion = longOneshots == [ ];
         message = ''
-          These oneshot services may run longer than burrow.switch.confirmWithin
-          (${cfg.confirmWithin}), or are passes a switch can catch mid-run, and a switch that
-          finds one running restarts it and waits, reverting if it times out:
+          These services may run longer than burrow.switch.confirmWithin
+          (${cfg.confirmWithin}), are passes a switch can catch mid-run, or are ordered
+          after such a oneshot, and a switch that finds one running restarts it and waits,
+          reverting if it times out:
           ${lib.concatStringsSep ", " longOneshots}. Give each restartIfChanged = false,
           so a switch leaves a running one be and the next run is the new one.'';
       } {

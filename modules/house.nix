@@ -93,8 +93,6 @@ in
     };
     systemd.services = lib.genAttrs [ "house-sync" "house-sync@" ] (name: {
       description = "house-sync: ${if name == "house-sync" then "every repo's" else "%I's"} house blocks, as burrow has them";
-      # A switch leaves a running one be (see burrow.switch's check).
-      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {

@@ -77,7 +77,21 @@ let
     { probe = abortService { }; })) == 1;
   abortBoundaryDefault = v: builtins.length (refused (machine
     { DefaultTimeoutAbortSec = v; } { probe = abortService { }; })) == 1;
+  # A unit ordered after a long oneshot waits out its run in the switch:
+  # renovate-sweep behind renovate. Only the one the switch would restart.
+  oneshot = timeout: { serviceConfig = { Type = "oneshot"; ExecStart = "true"; TimeoutStartSec = timeout; }; };
+  ordered = refused (machine { } {
+    long = (oneshot "2h") // { restartIfChanged = false; };
+    short = (oneshot "30s") // { restartIfChanged = false; };
+    behind = { after = [ "long.service" ]; serviceConfig = { Type = "oneshot"; ExecStart = "true"; }; };
+    daemon = { after = [ "long.service" ]; serviceConfig.ExecStart = "sleep infinity"; };
+    left = { after = [ "long.service" ]; restartIfChanged = false; serviceConfig.ExecStart = "true"; };
+    quick = { after = [ "short.service" ]; serviceConfig = { Type = "oneshot"; ExecStart = "true"; }; };
+  });
 in
+assert lib.assertMsg (builtins.length ordered == 1
+  && lib.hasInfix "out:\nbehind, daemon. Give each" (builtins.head ordered).message)
+  "switch accepted a restartable unit ordered after a long oneshot";
 assert lib.assertMsg (builtins.length mixed == 1 && lib.hasInfix
   ("Unbounded or unrecognised service timeouts: " + lib.concatStringsSep ", " (lib.attrNames badServices) + ".")
   (builtins.head mixed).message) "switch accepted an unbounded or invalid stop/abort timeout";

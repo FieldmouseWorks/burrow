@@ -74,9 +74,6 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       environment.USAGE_RESET_CONFIG = "${configFile}";
-      # A switch leaves a running pass to finish, its yes perhaps pressed;
-      # the next pass is the new one.
-      restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         # Claude Code's login, and its config, are the user's.
