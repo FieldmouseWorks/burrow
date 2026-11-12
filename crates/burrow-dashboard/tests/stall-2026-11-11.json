@@ -13,11 +13,11 @@
   ],
   "slots": [
     {"kind": "claude", "name": "1", "state": "parked", "since": 1794370000, "age": 28400,
-     "holder": {"job": "burrow-20261110-181200-QwEr", "project": "burrow", "issue": "FieldmouseWorks/burrow#671", "role": "worker", "class": "pipeline", "engine": "claude", "model": "claude-sonnet-5-5", "effort": "high", "awaits": ["https://github.com/FieldmouseWorks/burrow/pull/690"]}},
+     "holder": {"job": "burrow-20261110-181200-QwEr", "project": "burrow", "issue": "FieldmouseWorks/burrow#671", "role": "worker", "class": "pipeline", "engine": "claude", "model": "model-a", "effort": "high", "awaits": ["https://github.com/FieldmouseWorks/burrow/pull/690"]}},
     {"kind": "claude", "name": "2", "state": "parked", "since": 1794375000, "age": 23400,
      "holder": {"job": "lok-20261110-203000-ZxCv", "project": "lok", "issue": "FieldmouseWorks/lok#208", "role": "worker", "class": "normal", "engine": "claude", "model": null, "effort": null, "awaits": ["https://github.com/FieldmouseWorks/lok/pull/209"]}},
     {"kind": "claude", "name": "3", "state": "parked", "since": 1794380000, "age": 18400,
-     "holder": {"job": "career-20261110-224500-AsDf", "project": "career", "issue": "FieldmouseWorks/career#39", "role": "worker", "class": "normal", "engine": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "awaits": ["https://github.com/FieldmouseWorks/career/pull/40", "https://github.com/FieldmouseWorks/career/issues/38"]}},
+     "holder": {"job": "career-20261110-224500-AsDf", "project": "career", "issue": "FieldmouseWorks/career#39", "role": "worker", "class": "normal", "engine": "claude", "model": "model-b", "effort": "xhigh", "awaits": ["https://github.com/FieldmouseWorks/career/pull/40", "https://github.com/FieldmouseWorks/career/issues/38"]}},
     {"kind": "unstick", "name": "unstick", "state": "idle", "since": null, "age": null, "holder": null},
     {"kind": "codex", "name": "1", "state": "running", "since": 1794397000, "age": 1400,
      "holder": {"job": "burrow-20261111-221000-Codx", "project": "burrow", "issue": "FieldmouseWorks/burrow#680", "role": "reviewer", "class": null, "engine": "codex", "model": null, "effort": "medium", "awaits": []}},
