@@ -220,9 +220,165 @@ fn host_rejects_traversal_new_execution_options_and_probe_mutations() {
         vec!["run", "web", "go"],
         vec!["_exec", "stalled", "first"],
         vec!["stop", "/outside"],
+        vec!["stop", "a/../outside"],
+        vec!["stop", ".question-control"],
+        vec!["stop", "--first"],
+        vec!["stop", "bad\0name"],
     ] {
         let response = exchange("host-jobs-1.sock", &args);
         assert!(response.contains("unsupported command"), "{response}");
     }
     assert!(exchange("probe-1.sock", &["stop", "stalled"]).contains("Err"));
+}
+
+#[test]
+fn redacted_snapshot_and_transcript_keep_json_framing_and_public_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let target = Job::new(&cfg, "structured");
+    fs::create_dir(&target.dir).unwrap();
+    target.set_turns(1).unwrap();
+    fs::write(target.turn("1", "outcome"), "done").unwrap();
+    fs::write(
+        target.turn("1", "result"),
+        r#"public prefix "quotes" Authorization: header-fixture"#,
+    )
+    .unwrap();
+    let token = format!("ghp_{}", "x".repeat(36));
+    let records = [
+        json!({"type":"system", "Authorization":"field-header-fixture",
+            "client_secret":"quoted \"credential\"\nsecond credential line",
+            "nested":[{"api_key":r#"escaped \"credential"#, "public":17}],
+            "credentials":{"value":"nested credential"}, "public":"keep this field"}),
+        json!({"type":"result", "subtype":"success", "is_error":false, "num_turns":1,
+            "result":format!("Authorization: header-fixture\npublic suffix \"quotes\"\npassword=\"first \\\"second\\\"; tail\"\n{token}"),
+            "public":true}),
+    ];
+    fs::write(
+        target.turn("1", "jsonl"),
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let caller = Job::new(&cfg, "recovery");
+    let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+    let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+    let run = |args: &[&str]| success(cli(&cfg, Some(&socket), args));
+
+    let snapshot = run(&["state", "--json", "10"]);
+    let value: serde_json::Value = serde_json::from_str(&snapshot).expect("snapshot remains JSON");
+    let row = value["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "structured")
+        .unwrap();
+    assert!(
+        row["answer"]
+            .as_str()
+            .unwrap()
+            .starts_with("public prefix \"quotes\"")
+    );
+    assert!(!snapshot.contains("header-fixture"));
+    assert!(!snapshot.contains(&token));
+
+    let raw = run(&["log", "structured", "--raw"]);
+    let decoded: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each transcript record remains JSON"))
+        .collect();
+    assert_eq!(decoded.len(), records.len());
+    assert_eq!(decoded[0]["public"], "keep this field");
+    assert_eq!(decoded[0]["nested"][0]["public"], 17);
+    assert_eq!(decoded[1]["public"], true);
+    assert!(
+        decoded[1]["result"]
+            .as_str()
+            .unwrap()
+            .contains("public suffix \"quotes\"")
+    );
+    for field in ["Authorization", "client_secret", "credentials"] {
+        assert_eq!(decoded[0][field], "[redacted]");
+    }
+    assert_eq!(decoded[0]["nested"][0]["api_key"], "[redacted]");
+    for secret in [
+        "header-fixture",
+        "credential line",
+        "nested credential",
+        "second",
+        "; tail",
+        &token,
+    ] {
+        assert!(!raw.contains(secret), "{secret:?} survived redaction");
+    }
+    serde_json::from_str::<serde_json::Value>(&run(&["state", "--schema"])).unwrap();
+}
+
+#[test]
+fn every_launcher_name_is_usable_through_host_job_operations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let caller = Job::new(&cfg, "recovery");
+    let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+    let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+    let run = |args: &[&str]| success(cli(&cfg, Some(&socket), args));
+    let names = [
+        "my app".into(),
+        "web%test".into(),
+        "_worker".into(),
+        "日本語🐭".into(),
+        " leading".into(),
+        "with\ttab".into(),
+        "with\nnewline".into(),
+        "back\\slash".into(),
+        "\"quoted\"".into(),
+        ".github".into(),
+        "-worker".into(),
+        "x".repeat(205),
+    ];
+    for (index, name) in names.iter().enumerate() {
+        fs::create_dir(cfg.projects.join(name)).unwrap();
+        let key = format!("launcher-{index}");
+        let id = burrow_proj::cmd::start_job(
+            &cfg,
+            &burrow_proj::cmd::New {
+                local_work: true,
+                key: Some(key.clone()),
+                ..Default::default()
+            },
+            name,
+            "seed original task",
+        )
+        .unwrap();
+        let job = Job::new(&cfg, &id);
+        fs::write(job.path("session"), "saved-conversation").unwrap();
+        fs::write(job.turn("1", "outcome"), "timed out after 60m").unwrap();
+        fs::write(
+            job.turn("1", "jsonl"),
+            json!({"type":"result", "result":"original answer", "num_turns":1}).to_string(),
+        )
+        .unwrap();
+        let found = run(&["find", &key]);
+        assert_eq!(found, format!("{id}\n"));
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&run(&["state", "--json", "100"])).unwrap();
+        assert!(
+            snapshot["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == id)
+        );
+        assert_eq!(run(&["state", &id]), "timed out after 60m\n");
+        assert!(run(&["lifecycle", &id]).contains("timed out after 60m"));
+        assert!(run(&["log", &id]).contains("original answer"));
+        assert!(run(&["log", &id, "--raw"]).contains("original answer"));
+        assert_eq!(run(&["withdraw", &id]), "over\n");
+        run(&["reply", &id, "continue this task"]);
+        assert_eq!(job.turns().as_deref(), Some("2"));
+        run(&["stop", &id]);
+        assert!(job.turn("2", "stopped").exists());
+    }
 }

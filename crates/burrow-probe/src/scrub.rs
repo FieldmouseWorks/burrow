@@ -12,6 +12,14 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
+use serde_json::Value;
+
+const HEADER_NAME: &str =
+    "(?:proxy-)?authorization|x-api-key|api-key|x-auth-token|private-token|cookie|set-cookie";
+const SECRET_NAME: &str = "[a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?)";
+static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?i)\b(?:{HEADER_NAME}|{SECRET_NAME})$")).expect("credential field names")
+});
 
 /// What a secret is replaced with.
 pub const REDACTED: &str = "[redacted]";
@@ -30,6 +38,12 @@ impl Scrubbed {
 /// keep the parts around the secret). In order: a rule that hides a whole
 /// line goes before the ones that would hide a part of it.
 static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
+    let header = format!(r"(?im)\b({HEADER_NAME})(\s*[:=]\s*)[^\r\n]*");
+    let double =
+        format!(r#"(?i)\b({SECRET_NAME})(["']?\s*[:=]\s*)"(?:[^"\\\r\n]|\\[^\r\n])*\\?"?"#);
+    let single =
+        format!(r#"(?i)\b({SECRET_NAME})(["']?\s*[:=]\s*)'(?:[^'\\\r\n]|\\[^\r\n])*\\?'?"#);
+    let bare = format!(r#"(?i)\b({SECRET_NAME})(["']?\s*[:=]\s*["']?)([^\s"',;&]+)"#);
     let rules: &[(&str, &str)] = &[
         // A private key, PEM or PGP, to its END line, or to the end of the
         // text when that was cut off. A journal puts each of its lines on
@@ -47,10 +61,7 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
             "[redacted private key]",
         ),
         // Headers that carry a credential, to the end of the line.
-        (
-            r"(?im)\b((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|private-token|cookie|set-cookie)(\s*[:=]\s*)[^\r\n]*",
-            "$1$2[redacted]",
-        ),
+        (&header, "$1$2[redacted]"),
         (
             r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}",
             "$1 [redacted]",
@@ -85,18 +96,9 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
         // with none, the line's end (LF, CRLF or the text's). Nothing stops
         // it short, so the unquoted rule after never gets half of one; that
         // one is for a bare value, to the first character that ends one.
-        (
-            r#"(?i)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)"(?:[^"\\\r\n]|\\[^\r\n])*\\?"?"#,
-            "$1$2\"[redacted]\"",
-        ),
-        (
-            r#"(?i)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)'(?:[^'\\\r\n]|\\[^\r\n])*\\?'?"#,
-            "$1$2'[redacted]'",
-        ),
-        (
-            r#"(?i)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*["']?)([^\s"',;&]+)"#,
-            "$1$2[redacted]",
-        ),
+        (&double, "$1$2\"[redacted]\""),
+        (&single, "$1$2'[redacted]'"),
+        (&bare, "$1$2[redacted]"),
     ];
     rules
         .iter()
@@ -120,6 +122,31 @@ pub fn scrub(text: &str) -> Scrubbed {
     Scrubbed(out)
 }
 
+/// Redact decoded JSON values before serialization so text rules cannot
+/// consume its delimiters or escape sequences. Credential fields are hidden
+/// whole, including multiline strings and non-string credentials.
+pub fn json(value: &Value) -> Result<Value, String> {
+    Ok(match value {
+        Value::String(text) => Value::String(scrub(text).0),
+        Value::Array(values) => Value::Array(values.iter().map(json).collect::<Result<_, _>>()?),
+        Value::Object(fields) => {
+            let mut clean = serde_json::Map::new();
+            for (key, value) in fields {
+                let value = if SECRET_FIELD.is_match(key) {
+                    Value::String(REDACTED.into())
+                } else {
+                    json(value)?
+                };
+                if clean.insert(scrub(key).0, value).is_some() {
+                    return Err("JSON property names collide after redaction".into());
+                }
+            }
+            Value::Object(clean)
+        }
+        value => value.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::scrub;
@@ -128,6 +155,42 @@ mod tests {
     // (burrow's own secrets check reads them).
     fn github() -> String {
         format!("gh{}_{}", "p", "a1B2c3D4e5".repeat(4))
+    }
+
+    #[test]
+    fn structured_values_hide_credentials_without_touching_json_delimiters() {
+        let source = serde_json::json!({
+            "Authorization":"header credential",
+            "client_secret":"quoted \"credential\"\nand a second line",
+            "array":[{"api-key":{"nested":"credential"}, "count":9}],
+            "message":"Authorization: header credential\npublic line \"with quotes\"",
+            "input_tokens":42, "public":true
+        });
+        let value = super::json(&source).unwrap();
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(!encoded.contains("credential"));
+        assert_eq!(value["Authorization"], "[redacted]");
+        assert_eq!(value["client_secret"], "[redacted]");
+        assert_eq!(value["array"][0]["api-key"], "[redacted]");
+        assert_eq!(value["array"][0]["count"], 9);
+        assert_eq!(value["input_tokens"], 42);
+        assert_eq!(value["public"], true);
+        assert_eq!(
+            value["message"],
+            "Authorization: [redacted]\npublic line \"with quotes\""
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn redacting_property_names_never_silently_overwrites_another_field() {
+        let first = github();
+        let second = format!("gh{}_{}", "p", "different".repeat(4));
+        let source = serde_json::json!({first:1, second:2});
+        assert!(super::json(&source).unwrap_err().contains("collide"));
     }
 
     fn hidden(line: &str, secret: &str) {

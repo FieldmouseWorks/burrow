@@ -42,10 +42,10 @@ fn number(s: &str) -> bool {
     !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
 }
 fn id(s: &str) -> bool {
-    s.len() <= 200
-        && s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    // The launcher retains punctuation, whitespace and Unicode, and prefixes
+    // dot/option-like project names. Reserve hidden host state and refuse
+    // path traversal/options without imposing another naming policy.
+    !s.is_empty() && !s.starts_with(['.', '-']) && !s.contains(['/', '\0'])
 }
 fn validate(args: &[String]) -> Result<(), String> {
     let words: Vec<_> = args.iter().map(String::as_str).collect();
@@ -150,15 +150,43 @@ pub(crate) fn answer(cfg: &Config, request: &str) -> String {
                 .code()
                 .and_then(|c| c.try_into().ok())
                 .unwrap_or(1),
-            stdout: burrow_probe::scrub::scrub(&String::from_utf8_lossy(&output.stdout))
-                .as_str()
-                .to_owned(),
-            stderr: burrow_probe::scrub::scrub(&String::from_utf8_lossy(&output.stderr))
-                .as_str()
-                .to_owned(),
+            stdout: scrub_output(&String::from_utf8_lossy(&output.stdout))?,
+            stderr: scrub_output(&String::from_utf8_lossy(&output.stderr))?,
         })
     })();
     serde_json::to_string(&result).expect("host job response")
+}
+
+fn scrub_output(text: &str) -> Result<String, String> {
+    let encoded = |value: serde_json::Value, source: &str| -> Result<String, String> {
+        let value = burrow_probe::scrub::json(&value)?;
+        let mut clean = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        if source.ends_with("\r\n") {
+            clean.push_str("\r\n");
+        } else if source.ends_with('\n') {
+            clean.push('\n');
+        }
+        Ok(clean)
+    };
+    if let Ok(value) = serde_json::from_str(text) {
+        return encoded(value, text);
+    }
+    // Raw transcripts may mix JSONL with diagnostic text or a final partial
+    // record. Keep complete JSON records framed, and scrub contiguous plain
+    // text together so multiline private-key redaction still works.
+    let mut clean = String::new();
+    let mut plain = String::new();
+    for line in text.split_inclusive('\n') {
+        if let Ok(value) = serde_json::from_str(line) {
+            clean.push_str(burrow_probe::scrub::scrub(&plain).as_str());
+            plain.clear();
+            clean.push_str(&encoded(value, line)?);
+        } else {
+            plain.push_str(line);
+        }
+    }
+    clean.push_str(burrow_probe::scrub::scrub(&plain).as_str());
+    Ok(clean)
 }
 
 pub(crate) fn recovery_reply(cfg: &Config, args: &[String]) -> Result<String, Fail> {
@@ -179,4 +207,46 @@ pub(crate) fn recovery_reply(cfg: &Config, args: &[String]) -> Result<String, Fa
     }
     crate::cmd::reply(cfg, &args[i], &args[i + 1], first, cutoff)?;
     Ok(format!("{}\n", args[i]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_output;
+
+    #[test]
+    fn formatted_json_jsonl_and_mixed_diagnostics_keep_their_structure() {
+        let record = serde_json::json!({"message":"Authorization: credential\npublic \"quotes\"",
+            "password":"escaped \"credential\"\nsecond line", "count":3});
+        let pretty = format!("{}\n", serde_json::to_string_pretty(&record).unwrap());
+        let output = scrub_output(&pretty).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(decoded["count"], 3);
+        assert_eq!(decoded["password"], "[redacted]");
+        assert_eq!(
+            decoded["message"],
+            "Authorization: [redacted]\npublic \"quotes\""
+        );
+        assert!(!output.contains("credential"));
+        let lines = format!("{record}\r\n{record}\n");
+        let clean = scrub_output(&lines).unwrap();
+        assert!(clean.contains("\r\n"));
+        assert_eq!(
+            clean
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>(),
+            vec![decoded.clone(), decoded]
+        );
+        let key = format!(
+            "-----BEGIN RSA {} KEY-----\ncredential payload\n-----END RSA {} KEY-----\n",
+            "PRIVATE", "PRIVATE"
+        );
+        let mixed = scrub_output(&format!(
+            "diagnostic\n{key}{record}\npartial password=\"credential"
+        ))
+        .unwrap();
+        assert!(!mixed.contains("credential"));
+        assert!(mixed.contains("[redacted private key]"));
+        assert!(mixed.contains("\"count\":3"));
+    }
 }

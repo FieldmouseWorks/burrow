@@ -97,7 +97,7 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_unit("reach.service")
     def dev(command):
         return machine.succeed("su - dev -c " + shlex.quote(command)).strip()
-    machine.succeed("install -d -o dev -g dev /data/dev/src/web /srv/origin.git")
+    machine.succeed("install -d -o dev -g dev /data/dev/src/web /data/dev/src/target /srv/origin.git")
     dev("git config --global user.name Dev && git config --global user.email dev@example.test")
     dev("git init -q -b trunk /data/dev/src/web && git -C /data/dev/src/web commit -q --allow-empty -m initial && git clone -q --bare /data/dev/src/web /srv/origin.git && git -C /data/dev/src/web remote add origin git://127.0.0.1/origin.git")
     dev("setsid -f git daemon --base-path=/srv --export-all --enable=receive-pack --listen=127.0.0.1 /srv >/tmp/git.log 2>&1")
@@ -120,7 +120,10 @@ in pkgs.testers.runNixOSTest {
     # Its host history is outside the Codex sandbox. Both engines must
     # continue it through the ordinary CLI and get a new engine result.
     original = dev("sed -n 's/^export PROJ_CONFIG=\\([^ ]*\\).*/\\1/p' $(command -v proj)")
-    target_id = dev('proj run --local-work --role first --app workers web "seed a resumable conversation"')
+    # Ordinary jobs reserve their project's last slot for steward work. A
+    # machine recovery and its target belong to different projects, so the
+    # caller can await the resumed target without holding its project slot.
+    target_id = dev('proj run --local-work --role first --app workers target "seed a resumable conversation"')
     machine.wait_until_succeeds(f"su - dev -c 'proj state {target_id}' | grep -Evx 'queued|running'", timeout=300)
     target = "/data/dev/jobs/" + target_id
     machine.succeed("test -s " + target + "/session")
