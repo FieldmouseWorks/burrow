@@ -1,4 +1,5 @@
-//! Job state is data, never authority to follow another host path.
+//! Confined job-state reads and recovery writes. Guest paths never authorize
+//! following a link to another host file or directory.
 use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use std::{
     fs::File,
@@ -148,7 +149,11 @@ impl Dir {
         self.file(Path::new(name))
     }
     pub fn append_file(&self, name: &str) -> io::Result<File> {
+        use std::os::unix::fs::MetadataExt;
         let pinned = self.pin(Path::new(name))?;
+        if pinned.metadata()?.nlink() != 1 {
+            return Err(io::Error::other("writable state must have one link"));
+        }
         std::fs::OpenOptions::new()
             .append(true)
             .open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
@@ -161,6 +166,107 @@ fn child_name(path: &Path) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Atomically replace a record relative to a pinned directory. Neither the
+/// destination nor a predictable staging name is ever opened for writing.
+pub fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = Dir::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("state has no parent"))?,
+    )?;
+    parent.replace(
+        path.file_name()
+            .ok_or_else(|| io::Error::other("state has no name"))?
+            .as_ref(),
+        bytes,
+    )
+}
+
+/// Open a transcript for append without following any alias, creating it only
+/// when absent. A concurrently renamed pathname cannot redirect the pinned fd.
+pub fn append(path: &Path) -> io::Result<File> {
+    let parent = Dir::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("state has no parent"))?,
+    )?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("state has no name"))?;
+    match parent.create_new(
+        name.to_str()
+            .ok_or_else(|| io::Error::other("invalid state name"))?,
+    ) {
+        Ok(file) => std::fs::OpenOptions::new()
+            .append(true)
+            .open(format!("/proc/self/fd/{}", file.as_raw_fd())),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => parent.append_file(
+            Path::new(name)
+                .to_str()
+                .ok_or_else(|| io::Error::other("invalid state name"))?,
+        ),
+        Err(e) => Err(e),
+    }
+}
+
+impl Dir {
+    pub fn replace(&self, name: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        child_name(name)?;
+        if name.components().count() != 1 {
+            return Err(io::Error::other("replacement requires a single filename"));
+        }
+        let directory = format!("/proc/self/fd/{}", self.0.as_raw_fd());
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".state-")
+            .tempfile_in(&directory)?;
+        temporary.write_all(bytes)?;
+        temporary.as_file().sync_all()?;
+        // Both rename endpoints stay beneath this same pinned directory even
+        // if the guest concurrently renames or symlinks its original pathname.
+        temporary
+            .persist(Path::new(&directory).join(name))
+            .map_err(|e| e.error)?;
+        File::open(&directory)?.sync_all()?;
+        Ok(())
+    }
+}
+
+pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> io::Result<()> {
+    replace(path.as_ref(), bytes.as_ref())
+}
+
+pub fn remove(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    let parent = Dir::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("state has no parent"))?,
+    )?;
+    parent.remove(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid state name"))?,
+    )
+}
+
+pub fn directory(path: &Path) -> io::Result<Dir> {
+    let parent = Dir::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("state has no parent"))?,
+    )?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("invalid state name"))?;
+    match fs::mkdirat(
+        &parent.0,
+        Path::new(name),
+        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+    ) {
+        Ok(()) => (),
+        Err(rustix::io::Errno::EXIST) => (),
+        Err(e) => return Err(e.into()),
+    }
+    parent.dir(Path::new(name))
 }
 
 #[cfg(test)]

@@ -3,9 +3,9 @@
 use super::sandbox::{self, Env};
 use super::{Choice, Engine, stream::resume};
 use crate::{config::Config, job::Job, scratch};
-use std::fs::File;
+
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 
 /// How a job waits on its own long work, which its answer would stop.
 pub const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
@@ -90,7 +90,7 @@ pub fn spawn(
     choice: &Choice,
 ) -> std::io::Result<Child> {
     let mut args = args(choice, resume(job, choice.engine));
-    let out = File::options().append(true).open(job.turn(n, "jsonl"))?;
+    let out = crate::state_reads::append(&job.turn(n, "jsonl"))?;
     let mut c = Command::new(&cfg.tools.timeout);
     // No claude.ai connectors (mail, calendar, drive, design tools): one of
     // 2,188 jobs in 14 days called one, and their tools were a ninth of
@@ -100,7 +100,8 @@ pub fn spawn(
         c.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
     } else {
         // Login/config failures may precede the first JSON event.
-        c.stderr(File::create(job.turn(n, "stderr"))?);
+        crate::state_reads::write(job.turn(n, "stderr"), "")?;
+        c.stderr(crate::state_reads::append(&job.turn(n, "stderr"))?);
     }
     if let Some(agent) = agent {
         let next = if must {
@@ -121,7 +122,7 @@ pub fn spawn(
                 "sh",
             ])
             .args(&args)
-            .stdin(File::open(prompt)?);
+            .stdin(crate::state_reads::open(prompt)?);
         return job.start_run(n, crate::now(), || c.spawn());
     }
     let id = job.id;
@@ -159,12 +160,13 @@ pub fn spawn(
     // A login shell, so the job sees the same PATH and env as an SSH login,
     // and then its App's env, which nothing the login sets can undo; Claude
     // starts only once that has.
-    c.arg(&cfg.tools.bash)
+    c.stdin(crate::state_reads::open(prompt)?)
+        .arg(&cfg.tools.bash)
         .args([
             "-lc",
-            r#"eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec "$@" <"$0""#,
+            r#"eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec "$@""#,
         ])
-        .arg(prompt);
+        .arg("proj-engine");
     if choice.engine == Engine::Codex {
         // After the login and App env: the App sets its own git config count.
         c.arg(&cfg.me).arg("_codex");
@@ -176,8 +178,7 @@ pub fn spawn(
         .env("PROJ_JOB", id)
         .env("PROJ_WAIT_DIR", waitdir)
         .env("PROJ_SCRATCH", &scratch)
-        .env("PROJ_APP_ENV", app_env)
-        .stdin(Stdio::null());
+        .env("PROJ_APP_ENV", app_env);
     job.start_run(n, crate::now(), || c.spawn())
 }
 
@@ -304,7 +305,7 @@ mod tests {
         // VM command. It emits immediately without buffering or initialization.
         burrow_test::executable(
             &fixture,
-            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\"}'\n",
+            "#!/bin/sh\ntest \"$(cat)\" = prompt || exit 41\nprintf '%s\\n' '{\"type\":\"result\"}'\n",
         );
         for engine in [Engine::Claude, Engine::Codex] {
             for agent in [None, Some("vm")] {

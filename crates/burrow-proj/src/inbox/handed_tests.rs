@@ -343,7 +343,7 @@ fn authorized_issue_answer_clears_question_only_after_a_successful_start() {
         let blocked = if fault == "receipt" {
             crate::ask::host_path(&crate::job::Job::new(&b.cfg, "j1"), "resume-2.new")
         } else {
-            job.join("question-answered-through.new")
+            job.join("question-answered-through")
         };
         let runner = b.path("runner");
         burrow_test::executable(

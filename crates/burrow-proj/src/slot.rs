@@ -11,7 +11,7 @@
 //! asked again at every look, and its place in line, its admission and its
 //! slot's N.who all go by that one answer.
 //!
-//! One waiter looks at a time, under jobs/.slots/.lock, and only those pick
+//! One waiter looks at a time, under jobs/.slots/.admission-lock, and only those pick
 //! names can take a slot, so what a look costs comes out of every waiter's
 //! turn at the lock: with the line long, of how soon a free slot gets filled.
 //! So a look runs git once per project ([`Classes`]) and nothing else, and it
@@ -35,13 +35,13 @@
 //! [`HANDOVER_FORMAT`] names them, and a proj that doesn't print the same one
 //! isn't handed anything: the turn stays on the proj it has.
 
-use std::fs::{self, File};
+use std::fs::{self, File, FileTimes};
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::engine::Engine;
@@ -50,6 +50,7 @@ use crate::pick::{Class, Classes, Slot, Waiter, pick_budget, project};
 use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
+pub const RETRY_HANDOVER_FORMAT: &str = "3";
 const NEXT_FRESH: i64 = 2;
 /// Whatever the note says, a waiter looks this often, which is as long as a
 /// job whose class changed can go on holding its old place in line.
@@ -73,6 +74,20 @@ pub fn successor(cfg: &Config) -> Option<PathBuf> {
     (String::from_utf8_lossy(&said.stdout).trim_end() == HANDOVER_FORMAT).then_some(d)
 }
 
+/// Every turn requires protected-state-aware startup. Even initial waiters
+/// already have an execution identity that older generations cannot maintain.
+pub(crate) fn retry_compatible(to: &Path) -> bool {
+    Command::new(to)
+        .arg("_retry_format")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|said| {
+            said.status.success()
+                && String::from_utf8_lossy(&said.stdout).trim_end() == RETRY_HANDOVER_FORMAT
+        })
+}
+
 /// On with the proj at `to`, in this pid, its look's lock on fd 9 until it's up:
 /// mid-exec a waiter's cmdline reads empty, and a look clearing out dead places
 /// would take it for gone. Only returns if the exec fails. This crate holds no
@@ -82,7 +97,7 @@ pub fn successor(cfg: &Config) -> Option<PathBuf> {
 fn hand_over(cfg: &Config, to: &Path, id: &str, given: Class) -> io::Error {
     Command::new(&cfg.tools.bash)
         .args(["-c", r#"exec 9>"$0"; "$1" 9; shift; exec "$@""#])
-        .arg(cfg.jobs.join(".slots/.lock"))
+        .arg(cfg.jobs.join(".slots/.admission-lock"))
         .arg(&cfg.tools.flock)
         .arg(to)
         .args(["_exec", id, given.name()])
@@ -124,12 +139,16 @@ fn place_left(queue: &Path, id: &str, pid: u32) -> Option<(String, i64)> {
 /// --since), or else from now. Every WHEN has the same number of digits, so
 /// sorting the names sorts them by when.
 fn entry(job: &Job, id: &str, given: Class) -> String {
+    entry_at(job, id, given, now_nanos())
+}
+
+pub(crate) fn entry_at(job: &Job, id: &str, given: Class, arrived: i64) -> String {
     let prefix = if given == Class::First { 1 } else { 2 };
     let since = read(&job.path("since"));
     let began = since.as_deref().and_then(|s| s.lines().next());
     match began.filter(|s| !s.is_empty()) {
         Some(s) => format!("{prefix}-{s}000000000-{id}"),
-        None => format!("{prefix}-{}-{id}", now_nanos()),
+        None => format!("{prefix}-{arrived}-{id}"),
     }
 }
 
@@ -166,7 +185,7 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
 /// stop. One withdrawn while it waits here is stopped with no slot.
 fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    fs::write(job.turn(n, "slot"), format!("{s}\n"))
+    crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))
 }
 
 /// Say this job's turn N may be withdrawn no more, under the job's lock, so none
@@ -176,7 +195,7 @@ fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
 /// at the top of its [`take`].
 fn unmark(job: &Job, n: &str) -> io::Result<()> {
     let _held = job.lock()?;
-    match fs::remove_file(job.turn(n, "withdrawable")) {
+    match crate::state_reads::remove(job.turn(n, "withdrawable")) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -266,6 +285,33 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             });
         }
     }
+    let pending = crate::retry::admission(cfg)?;
+    let existing: Vec<_> = fs::read_dir(&queue)?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    for (id, name, arrived) in &pending {
+        let mut places = existing
+            .iter()
+            .filter(|n| !n.starts_with('.') && job_of(n) == id)
+            .map(|n| queue.join(n))
+            .collect::<Vec<_>>();
+        if places.is_empty() {
+            // A dead parent's place may have been cleared by another census.
+            let path = queue.join(name);
+            crate::state_reads::write(&path, "pending\n")?;
+            places.push(path);
+        }
+        for path in places {
+            let file = crate::state_reads::open(&path)?;
+            let birth = UNIX_EPOCH + Duration::from_nanos((*arrived).max(0) as u64);
+            if file.metadata()?.modified()? > birth {
+                // Preserve the earlier refusal even when an old writer only
+                // managed to publish its queue entry after reset.
+                file.set_times(FileTimes::new().set_modified(birth))?;
+            }
+        }
+    }
     let mut names: Vec<String> = fs::read_dir(&queue)?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -273,25 +319,34 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
         .collect();
     names.sort();
     let mut line = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // The live caller's place wins over any stale names of that same job.
+    names.sort_by_key(|name| (name != me, name.clone()));
     for name in names {
         let fid = job_of(&name);
+        let alive = name == me
+            || waiter_alive(&queue.join(&name), fid)
+            || pending.iter().any(|(id, _, _)| id == fid);
+        if !alive || !seen.insert(fid.to_owned()) {
+            remove_place(&queue.join(&name))?;
+            continue;
+        }
         if name == me {
             line.push(Waiter {
                 name,
                 class: own,
                 project: project(dir),
             });
-        } else if waiter_alive(&queue.join(&name), fid) {
+        } else {
             let dir = cfg.jobs.join(fid);
             line.push(Waiter {
                 class: classes.place(cfg, &name, &dir).0,
                 project: project(&dir),
                 name,
             });
-        } else {
-            let _ = fs::remove_file(queue.join(&name));
         }
     }
+    line.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Look { slots, busy, line })
 }
 
@@ -309,7 +364,7 @@ fn codex_slot(
     fs::create_dir_all(&slots)?;
     fs::create_dir_all(cfg.jobs.join(".slots"))?;
     let job = Job::new(cfg, id);
-    fs::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
     // A turn that waited in Claude's line and was handed to this proj brings
     // its place with it, under this pid. It is Codex's now, and a place left in
     // Claude's line would count as a live waiter there (waiter_alive) while it
@@ -322,9 +377,12 @@ fn codex_slot(
         fs::remove_file(queue.join(left))?;
     }
     loop {
-        if may_hand_over && let Some(to) = successor(cfg) {
+        if may_hand_over
+            && let Some(to) = successor(cfg)
+            && retry_compatible(&to)
+        {
             unmark(&job, n)?;
-            let lk = File::create(cfg.jobs.join(".slots/.lock"))?;
+            let lk = File::create(cfg.jobs.join(".slots/.admission-lock"))?;
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
         }
@@ -373,11 +431,19 @@ pub fn take(
     // so proj withdraw may stop it while it waits. On a proj from before that,
     // it can't be, never having said so: until it hands over to this one, or
     // from the moment this one hands it over ([`unmark`]).
-    fs::write(job.turn(n, "withdrawable"), "")?;
+    crate::state_reads::write(job.turn(n, "withdrawable"), "")?;
     // maxWait goes by when this turn came, not its name's WHEN, which for a job
     // run --since is when its work began.
-    let (mut me, came) =
-        place_left(&queue, id, process::id()).unwrap_or_else(|| (entry(&job, id, given), now()));
+    let retry = crate::retry::Checkpoint::load(&job, n)?;
+    let original = retry.as_ref().map(|s| s.queue().1);
+    let (mut me, came) = place_left(&queue, id, process::id())
+        .or_else(|| {
+            retry.as_ref().map(|s| {
+                let (name, waited) = s.queue();
+                (name.to_owned(), waited / 1_000_000_000)
+            })
+        })
+        .unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
     loop {
         // Out of usage, nothing takes a slot till it's back (usage.rs): every
@@ -403,15 +469,18 @@ pub fn take(
         // A switch since the last pass: on with the deployed proj, in this
         // place, whether or not a look is due (one the note skips can wait
         // LOOK_EVERY).
-        if may_hand_over && let Some(to) = successor(cfg) {
+        if may_hand_over
+            && let Some(to) = successor(cfg)
+            && retry_compatible(&to)
+        {
             unmark(&job, n)?;
-            let lk = File::create(slots.join(".lock"))?;
+            let lk = File::create(slots.join(".admission-lock"))?;
             lk.lock()?;
             let failed = hand_over(cfg, &to, id, given);
             drop(lk);
             return Err(failed);
         }
-        let lk = File::create(slots.join(".lock"))?;
+        let lk = File::create(slots.join(".admission-lock"))?;
         // Keep checking for emergency reclassification while another census
         // is stuck: blocking here would strand a queue-to-unstick transition.
         match lk.try_lock() {
@@ -422,6 +491,11 @@ pub fn take(
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
+        // Adopt one logical place under the census lock. A checkpoint may
+        // predate a promotion or a configuration-driven class rename.
+        if retry.is_some() {
+            reconcile(&queue, id, &me)?;
+        }
         // Waited long enough: among the --first ones now, in its place by WHEN.
         if let Some(rest) = me.strip_prefix("2-")
             && now() - came >= cfg.max_wait as i64
@@ -431,7 +505,7 @@ pub fn take(
             me = to;
         }
         if spent {
-            if !job.path("unstick").exists() && !publish(cfg, &queue, &me)? {
+            if !job.path("unstick").exists() && !publish(cfg, &queue, &me, original)? {
                 drop(lk);
                 sleep(Duration::from_secs(2));
                 continue;
@@ -455,7 +529,7 @@ pub fn take(
             }
             me = new;
         }
-        if !publish(cfg, &queue, &me)? {
+        if !publish(cfg, &queue, &me, original)? {
             drop(lk);
             sleep(Duration::from_secs(2));
             continue;
@@ -532,8 +606,8 @@ pub fn take(
 /// line skips, then renamed), so a waiter clearing out dead places never sees
 /// it without its pid. Put back if it went anyway. False means the usage
 /// transaction is busy; retry from the emergency check without publishing.
-fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<bool> {
-    if !queue.join(me).exists() {
+fn publish(cfg: &Config, queue: &Path, me: &str, original: Option<i64>) -> io::Result<bool> {
+    if read(&queue.join(me)).as_deref() != Some(process::id().to_string().as_str()) {
         // Birth and early release are ordered by the same usage lock, so a
         // queue entry cannot appear between capturing the cutoff and committing
         // the release. The independent pools never publish here.
@@ -544,6 +618,10 @@ fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<bool> {
         };
         let tmp = queue.join(format!(".{me}.new"));
         fs::write(&tmp, format!("{}\n", process::id()))?;
+        let arrived = original.unwrap_or_else(now_nanos);
+        File::open(&tmp)?.set_times(
+            FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_nanos(arrived.max(0) as u64)),
+        )?;
         fs::rename(&tmp, queue.join(me))?;
     }
     Ok(true)
@@ -555,6 +633,7 @@ fn publish(cfg: &Config, queue: &Path, me: &str) -> io::Result<bool> {
 /// name's WHEN, which for a job started --since is when its work began.
 pub fn in_line(cfg: &Config) -> String {
     let queue = cfg.jobs.join(".queue");
+    let pending = crate::retry::admission(cfg).unwrap_or_default();
     let mut names: Vec<String> = fs::read_dir(&queue)
         .map(|d| {
             d.filter_map(|e| e.ok())
@@ -568,7 +647,7 @@ pub fn in_line(cfg: &Config) -> String {
     let mut rows: Vec<(Class, String)> = Vec::new();
     for name in &names {
         let fid = job_of(name);
-        if !waiter_alive(&queue.join(name), fid) {
+        if !waiter_alive(&queue.join(name), fid) && !pending.iter().any(|(id, _, _)| id == fid) {
             continue;
         }
         let Some(made) = mtime(&queue.join(name)) else {
@@ -639,6 +718,7 @@ pub fn room(cfg: &Config, engine: Engine) -> bool {
         Engine::Claude => {
             usage::metered(cfg);
             usage::out(cfg).is_none()
+                && crate::retry::admission(cfg).is_ok_and(|p| p.is_empty())
                 && in_line(cfg).is_empty()
                 && free(".slots", cfg.max_jobs) > cfg.pipeline_slots
         }
@@ -679,3 +759,22 @@ pub fn spare() -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+/// Remove obsolete names only while holding the shared census lock.
+fn reconcile(queue: &Path, id: &str, adopted: &str) -> io::Result<()> {
+    for entry in fs::read_dir(queue)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') && name != adopted && job_of(&name) == id {
+            remove_place(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_place(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}

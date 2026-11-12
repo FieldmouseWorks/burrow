@@ -171,6 +171,7 @@ pub mod pick;
 pub mod planning;
 pub mod probe;
 mod question;
+pub mod retry;
 mod roles;
 pub mod scratch;
 pub mod settings;
@@ -233,8 +234,8 @@ pub fn filled(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
 
-/// Swapped in whole, through PATH.new, so a reader never finds it missing or
-/// half written.
+/// Swap host-owned state through PATH.new. Guest-writable job state uses
+/// `state_reads::write`, whose directory and replacement are confined.
 pub fn swap(path: &Path, text: &str) -> io::Result<()> {
     let new = path.with_file_name(format!(
         "{}.new",

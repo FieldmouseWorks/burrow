@@ -183,6 +183,7 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
             .unwrap()
             .contains("Which release?")
     );
+    fs::write(job.path("prompt.2"), "continue the conversation").unwrap();
     let prompt = crate::engine::first_prompt(&job, "2", Engine::Claude).unwrap();
     // Handoffs retain the terminal answer rather than the bulk progress.
     assert!(
