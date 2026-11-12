@@ -369,6 +369,56 @@ mod tests {
         assert!(!got.contains("plain private environment"));
     }
     #[test]
+    fn crash_bridge_scrubs_complete_fields_before_output_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let journal = dir.path().join("journalctl");
+        cfg.probe.as_mut().unwrap().tools.journalctl = journal.clone();
+        let job = Job::new(&cfg, "crash-boundaries");
+        let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+        for (field, limit) in [("COREDUMP_CGROUP", 1024), ("MESSAGE", 12000)] {
+            for token in [false, true] {
+                let (value, hidden) = if token {
+                    let credential = format!("gh{}_{}", "p", "x".repeat(36));
+                    (
+                        format!(
+                            "Authorization: {}\n{credential} end",
+                            "x".repeat(limit - 4 - 19 - 16)
+                        ),
+                        credential[..23].to_string(),
+                    )
+                } else {
+                    let credential = "reader:opaque-value";
+                    let url = format!("https://{credential}");
+                    (
+                        format!(
+                            "Authorization: {}\n{url}@example.org/path",
+                            "x".repeat(limit - url.len() - 16)
+                        ),
+                        credential.to_string(),
+                    )
+                };
+                let mut entry =
+                    serde_json::json!({"COREDUMP_EXE":"/bin/example","COREDUMP_PID":"123"});
+                entry[field] = serde_json::json!(value);
+                burrow_test::executable(
+                    &journal,
+                    format!("#!/bin/sh\ncat <<'ENTRY'\n{entry}\nENTRY\n"),
+                );
+                let got = exchange(
+                    &socket(&cfg, &job, "1"),
+                    &["crashes /bin/example -1h".into()],
+                )
+                .unwrap();
+                assert!(
+                    !got.contains(&hidden),
+                    "{field}: credential crossed sandbox boundary"
+                );
+                assert!(got.contains("[redacted]") || got.contains("[answer truncated]"));
+            }
+        }
+    }
+    #[test]
     fn vm_mailbox_returns_host_deployed_result_without_config_or_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = fixture(dir.path());

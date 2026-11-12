@@ -176,7 +176,7 @@ fn crash_queries_reject_commands_and_report_an_empty_span() {
 }
 
 #[test]
-fn crash_reports_bound_backtraces_and_reject_bad_journal_results() {
+fn crash_reports_keep_complete_fields_and_reject_bad_journal_results() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let q = Query::parse("crashes /bin/godot").unwrap();
@@ -205,8 +205,79 @@ fn crash_reports_bound_backtraces_and_reject_bad_journal_results() {
         &entry,
     );
     let got = machine(&cfg, dir.path(), &fake).answer(&q).unwrap();
-    assert!(got.contains("[field truncated]"));
-    assert!(!got.contains(&"x".repeat(12001)));
+    assert!(got.contains(&"x".repeat(12001)));
+}
+
+#[test]
+fn crash_comments_scrub_credentials_across_old_field_boundaries() {
+    use burrow_github::fake::{Fake as Github, actor, ok};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    for (field, limit) in [("COREDUMP_CGROUP", 1024), ("MESSAGE", 12000)] {
+        for credential in [
+            "reader:opaque-value".to_string(),
+            format!("gh{}_{}", "p", "x".repeat(36)),
+        ] {
+            // The URL's @ or the token's twentieth payload character falls
+            // just beyond the old cut, defeating recognition after cutting.
+            let (value, hidden) = if credential.starts_with("reader:") {
+                let url = format!("https://{credential}");
+                (
+                    format!(
+                        "Authorization: {}\n{url}@example.org/path",
+                        "x".repeat(limit - url.len() - 16)
+                    ),
+                    credential,
+                )
+            } else {
+                (
+                    format!(
+                        "Authorization: {}\n{credential} end",
+                        "x".repeat(limit - 4 - 19 - 16)
+                    ),
+                    credential[..23].to_string(),
+                )
+            };
+            let mut entry = json!({"COREDUMP_EXE":"/bin/example", "COREDUMP_PID":"123"});
+            entry[field] = json!(value);
+            let fake = Fake::default().on(
+                "journalctl",
+                "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+                0,
+                &entry.to_string(),
+            );
+            let m = machine(&cfg, dir.path(), &fake);
+            let q = Query::parse("crashes /bin/example -1h").unwrap();
+            assert!(
+                m.answer(&q).unwrap().contains(&hidden),
+                "local ask remains unscrubbed"
+            );
+            let body = "crashes /bin/example -1h";
+            let author = actor("sam");
+            let mut gh = Github::default();
+            gh.on("GET", "repos/sam/box/issues", vec![ok(200, json!([{"number":1,"user":author,"title":"probe","body":body}]), &[])])
+                .on("GET", "repos/sam/box", vec![ok(200, json!({"private":true}), &[])])
+                .on("POST", "graphql", vec![ok(200, json!({"data":{"repository":{"issue":{
+                    "author": {"login":"sam","databaseId":author["id"]}, "title":"probe", "body":body,
+                    "userContentEdits":{"totalCount":0,"nodes":[]}, "timelineItems":{"totalCount":0,"nodes":[]}
+                }}}}), &[])])
+                .on("POST", "repos/sam/box/issues/1/comments", vec![ok(201,json!({}), &[])])
+                .on("PATCH", "repos/sam/box/issues/1", vec![ok(200,json!({}), &[])]);
+            crate::pass::pass(&mut gh, &cfg, &mut |q| m.answer(q), "now").unwrap();
+            let posted = gh
+                .asked("POST")
+                .into_iter()
+                .find(|a| a.1.ends_with("/comments"))
+                .unwrap();
+            let text = posted.2.as_ref().unwrap()["body"].as_str().unwrap();
+            assert!(text.contains("[redacted]"), "{field}");
+            assert!(
+                !text.contains(&hidden),
+                "{field}: credential crossed GitHub boundary"
+            );
+        }
+    }
 }
 
 #[test]

@@ -64,14 +64,13 @@ pub fn answer(m: &Machine, exe: &str, since: i64) -> Result<String, String> {
     }
     // Keep every report's identity ahead of potentially long backtraces so
     // the job bridge's response limit cannot hide the other crash PIDs.
+    // Keep selected values whole here, as local ask promises. Both external
+    // callers scrub the full answer before enforcing their output limits:
+    // cutting here could remove a URL's @ or a token's identifying suffix.
     for entry in &reports {
         for field in FIELDS.into_iter().filter(|f| *f != "MESSAGE") {
             if let Some(value) = entry.get(field).and_then(Value::as_str) {
-                let bounded: String = value.chars().take(1024).collect();
-                out += &format!("{field}: {bounded}\n");
-                if bounded.len() < value.len() {
-                    out += "[field truncated]\n";
-                }
+                out += &format!("{field}: {value}\n");
             }
         }
         out.push('\n');
@@ -82,11 +81,7 @@ pub fn answer(m: &Machine, exe: &str, since: i64) -> Result<String, String> {
                 .get("COREDUMP_PID")
                 .and_then(Value::as_str)
                 .unwrap_or("?");
-            let bounded: String = value.chars().take(12000).collect();
-            out += &format!("PID {pid}, MESSAGE: {bounded}\n");
-            if bounded.len() < value.len() {
-                out += "[field truncated]\n";
-            }
+            out += &format!("PID {pid}, MESSAGE: {value}\n");
         }
     }
     if reports.is_empty() {
