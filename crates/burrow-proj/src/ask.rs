@@ -203,6 +203,8 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             "No answer by {time}. Take your reversible recommended answer now: {}\n\nCarry out that default and say on the issue that you took it because the question timed out. Do not ask the same question again.",
             q.recommendation.default
         );
+        let resumed = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
+        crate::question::record_default(job, resumed)?;
         crate::turn::start_answer(cfg, job.id, &prompt, false)?;
     }
     Ok(None)

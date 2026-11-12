@@ -46,9 +46,9 @@ impl Pass<'_> {
             // Equality at that limit no longer proves that every editor is known.
             nodes.len() < 100
                 && list["totalCount"].as_u64() == Some(nodes.len() as u64)
-                && nodes.iter().all(|e| {
-                    ok(&e[field]) && (e["deletedBy"].is_null() || ok(&e["deletedBy"]))
-                })
+                && nodes
+                    .iter()
+                    .all(|e| ok(&e[field]) && (e["deletedBy"].is_null() || ok(&e["deletedBy"])))
         })
     }
     fn authored(&self, text: &Value) -> bool {
@@ -88,9 +88,12 @@ impl Pass<'_> {
             return None;
         }
         let mut safe = rest.clone();
+        // The machinery's extra authority covers only issues it opened itself.
+        let by_machine = !self.allowed(issue["author"]["databaseId"].as_u64())
+            && self.issue_writer(&issue["author"]);
         if (self.issue_writer(&issue["author"]) || self.generated_child(repo, rest))
-            && self.writers(&issue["userContentEdits"], "editor", true)
-            && self.writers(&issue["timelineItems"], "actor", true)
+            && self.writers(&issue["userContentEdits"], "editor", by_machine)
+            && self.writers(&issue["timelineItems"], "actor", by_machine)
         {
             safe["title"] = issue["title"].clone();
             safe["body"] = issue["body"].clone();
@@ -214,8 +217,17 @@ mod tests {
         assert_eq!(read(&s).issue["title"], "Issue text withheld");
         // Comments stay author-only, even from the App.
         let mut c = t.clone();
-        c["comments"]["nodes"][0]["author"] = app;
+        c["comments"]["nodes"][0]["author"] = app.clone();
         assert!(read(&c).comments.is_empty());
+        // On a human's issue, the App's edit is not trusted.
+        let mut h = text();
+        h["userContentEdits"] =
+            json!({"totalCount":1,"nodes":[{"editor":app.clone(),"deletedBy":null}]});
+        let human = issue(7, "sam", &[]);
+        assert_eq!(
+            b.pass().checked("sam/box", &human, &h).unwrap().issue["title"],
+            "Issue text withheld"
+        );
         // An outside-labelled machinery issue is still not eligible.
         let outside = issue(7, "workers[bot]", &["outside text"]);
         assert!(!b.pass().eligible("sam/box", &outside));

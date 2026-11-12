@@ -532,19 +532,26 @@ fn a_one_way_question_keeps_its_notice_after_its_deadline() {
 #[test]
 fn each_question_keeps_its_own_closing_cause() {
     let f = watched();
-    for (n, text) in [
-        ("2", "an answer"),
-        ("4", "No answer by 12:00. Take your reversible recommended answer now: x"),
-    ] {
-        fs::write(f.job().path(&format!("prompt.{n}")), text).unwrap();
-    }
     let job = f.job();
-    // Question 1 was answered, question 3 timed out: judged apart, whichever
-    // turn is latest.
-    assert!(close_reason(&job, false, false, "1", 4).contains("answered"));
-    assert!(close_reason(&job, false, false, "3", 4).contains("deadline"));
-    assert!(close_reason(&job, false, true, "3", 4).contains("stopped"));
-    assert!(close_reason(&job, true, false, "3", 4).contains("ended"));
+    // Question 3 took its default in turn 4, accepted; question 1 has no
+    // such event, and prompt text alone proves nothing.
+    fs::write(job.path("prompt.2"), "No answer by 12:00. impostor").unwrap();
+    fs::write(job.turn("3", "question-cause"), "default 4\n").unwrap();
+    let receipt = |accepted| Receipt {
+        through: 3,
+        answered: true,
+        clear: true,
+        accepted,
+        applied: false,
+    };
+    save_receipt(&receipt_path(&job, "4"), &receipt(false)).unwrap();
+    assert!(close_reason(&job, false, false, "3").contains("answered"));
+    save_receipt(&receipt_path(&job, "4"), &receipt(true)).unwrap();
+    assert!(close_reason(&job, false, false, "1").contains("answered"));
+    assert!(close_reason(&job, false, false, "3").contains("deadline"));
+    assert!(close_reason(&job, false, true, "3").contains("deadline"));
+    assert!(close_reason(&job, false, true, "1").contains("stopped"));
+    assert!(close_reason(&job, true, false, "1").contains("ended"));
 }
 
 #[test]
@@ -563,4 +570,35 @@ fn a_recorded_cause_is_replayed_unchanged_after_a_failed_delivery() {
     .unwrap();
     notify(&f.cfg, &f.job()).unwrap();
     assert_eq!(closed_with(&f), "Closed: the question was answered.\n");
+}
+
+#[test]
+fn a_default_after_an_automatic_update_keeps_its_cause() {
+    let f = watched();
+    recording(&f);
+    question(&f, false, crate::now() + 3600);
+    // An automatic update resumes the job and keeps the question open.
+    publish(&f, false, false);
+    accept(&f.job(), "2").unwrap();
+    f.ending(2, "done");
+    fs::write(f.job().turn("2", "end"), "ask\n").unwrap();
+    // Its deadline default is the next accepted answer.
+    let ask = crate::ask::load(&f.job());
+    assert!(ask.is_some());
+    let resume = Resume::prepare(&f.job(), true).unwrap();
+    crate::turn::write_prompt(
+        &f.job().path("prompt.3"),
+        &resume.prompt("No answer by x. Take it"),
+    )
+    .unwrap();
+    f.job().set_turns(3).unwrap();
+    crate::question::record_default(&f.job(), 3).unwrap();
+    resume.commit().unwrap();
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert!(f.job().turn("1", "question-closed").exists());
+    assert!(
+        closed_with(&f).contains("reversible default"),
+        "{}",
+        closed_with(&f)
+    );
 }

@@ -318,26 +318,47 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
     })
 }
 
+/// Called by the deadline once its default's turn is started: the cause of
+/// this question's end, by the turn that took it. It counts only while that
+/// turn's receipt is accepted and answering, so an abandoned start can't claim it.
+pub(crate) fn record_default(job: &Job, resumed: u64) -> Result<(), String> {
+    let asked = read(&job.path("open-question"))
+        .or_else(|| job.turns())
+        .ok_or("no question turn")?;
+    crate::state_reads::write(
+        job.turn(asked.trim(), "question-cause"),
+        format!("default {resumed}\n"),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn took_default(job: &Job, turn: &str) -> bool {
+    let Some(text) = read(&job.turn(turn, "question-cause")) else {
+        return false;
+    };
+    let Some(n) = text.trim().strip_prefix("default ") else {
+        return false;
+    };
+    read_state(&receipt_path(job, n))
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str::<Receipt>(&t).ok())
+        .is_some_and(|r| r.accepted && r.answered)
+}
+
 /// The one line a closed notice carries: why this question no longer
-/// waits. Judged from the question's own turn: the first prompt after it is
-/// what ended the wait, a deadline default or a human answer.
-fn close_reason(job: &Job, finished: bool, stopped: bool, turn: &str, latest: u64) -> String {
+/// waits. A deadline default is the recorded event, never read off prompt
+/// text; otherwise the job's stop or end, else a person's answer.
+fn close_reason(job: &Job, finished: bool, stopped: bool, turn: &str) -> String {
+    if took_default(job, turn) {
+        return "Closed: no answer came by the deadline, so the job took its reversible default."
+            .into();
+    }
     if stopped {
         return "Closed: the job was stopped.".into();
     }
     if finished {
         return "Closed: the job ended.".into();
-    }
-    let next = turn
-        .parse::<u64>()
-        .ok()
-        .and_then(|t| (t + 1..=latest).find(|n| job.path(&format!("prompt.{n}")).exists()));
-    if next
-        .and_then(|n| read(&job.path(&format!("prompt.{n}"))))
-        .is_some_and(|p| p.starts_with("No answer by "))
-    {
-        return "Closed: no answer came by the deadline, so the job took its reversible default."
-            .into();
     }
     "Closed: the question was answered.".into()
 }
@@ -496,13 +517,12 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // Only an accepted human resume clears the marker. Preparatory
         // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
-        if (finished || active.as_deref() != Some(turn))
-        {
+        if finished || active.as_deref() != Some(turn) {
             // The cause is recorded once, with the intent, and replayed as is.
             if !closing.exists()
                 && let Err(e) = crate::state_reads::write(
                     &closing,
-                    format!("{}\n", close_reason(job, finished, stopped, turn, latest)),
+                    format!("{}\n", close_reason(job, finished, stopped, turn)),
                 )
             {
                 errors.push(e.to_string());
@@ -520,9 +540,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                     continue;
                 }
             };
-            Command::new(notifier)
-                .args(["close", &key, &said])
-                .status()
+            Command::new(notifier).args(["close", &key, &said]).status()
         } else {
             let body = match read_state(&entry.path()) {
                 Ok(Some(body)) => body,
