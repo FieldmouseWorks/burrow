@@ -5,11 +5,17 @@
 //! one. Broken markers and repos it couldn't get through go to the owner,
 //! but only from a full pass: one repo's pass says so to the journal, and
 //! the next full pass puts it in the notice.
+//!
+//! GitHub's rate limit is a wait, not a failure: the installation's hourly
+//! allowance is shared with everything else acting as the App. A pass it
+//! holds off stops there and is booked again in the house handler's wake
+//! file (burrow-events) for when it lifts, the repo's for one repo's pass
+//! and the full pass for a full one, and exits 0, telling the owner nothing.
 
 use std::fs::File;
 use std::io::Write;
 
-use burrow_github::{Api, Error};
+use burrow_github::{Api, Error, deferred};
 
 use crate::blocks::{House, Rewritten, rewrite, same_tree};
 use crate::config::Config;
@@ -30,7 +36,8 @@ pub struct Ask<'a> {
 }
 
 /// Runs a pass. Ok(false) when one repo's pass couldn't get through its
-/// repo; Err when the pass couldn't run at all, or couldn't tell the owner.
+/// repo; Err when the pass couldn't run at all, couldn't book itself again
+/// after GitHub's rate limit held it off, or couldn't tell the owner.
 pub fn run(
     cfg: &Config,
     ask: &Ask,
@@ -60,6 +67,9 @@ pub fn run(
         mangled: Vec::new(),
     };
 
+    // What this pass is booked as in the wake file.
+    let key = ask.only.unwrap_or_default();
+    let started = now()?;
     let mut repos = Vec::new();
     if let Some(only) = ask.only {
         // One repo: only one of the owners', as a full pass would list it.
@@ -67,6 +77,9 @@ pub fn run(
             Ok(Some(repo)) => repos.push(repo),
             Ok(None) => pass.say(&format!("{only}: not a repo it keeps")),
             Err(e) => {
+                if let Some(at) = pass.limited(&e) {
+                    return pass.held(cfg, key, at, &e);
+                }
                 pass.say(&format!(
                     "{only}: couldn't read it, trying again next pass ({e})"
                 ));
@@ -80,6 +93,9 @@ pub fn run(
             match github::repos(pass.api, owner) {
                 Ok(found) => repos.extend(found),
                 Err(e) => {
+                    if let Some(at) = pass.limited(&e) {
+                        return pass.held(cfg, key, at, &e);
+                    }
                     pass.say(&format!(
                         "{owner}: couldn't list its repos, trying again next pass ({e})"
                     ));
@@ -93,6 +109,10 @@ pub fn run(
             continue;
         }
         if let Err(e) = pass.repo(&repo) {
+            // The rest would only be held off too.
+            if let Some(at) = pass.limited(&e) {
+                return pass.held(cfg, key, at, &e);
+            }
             pass.say(&format!(
                 "{}: failed, trying again next pass ({e})",
                 repo.name
@@ -104,6 +124,8 @@ pub fn run(
     if dry {
         return Ok(true);
     }
+    // Through: a booking this pass was started for is used up.
+    deferred::ran(&cfg.wake, key, started)?;
     // The owner's notices are about every repo, so only a full pass changes
     // them.
     if ask.only.is_some() {
@@ -149,6 +171,14 @@ pub fn run(
     Ok(true)
 }
 
+/// The time now, in seconds since the epoch, as wake files have it.
+fn now() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| e.to_string())
+}
+
 /// The lock every pass that can change anything holds, waited for.
 fn lock(cfg: &Config) -> Result<File, String> {
     let why = |e: std::io::Error| format!("{}: {e}", cfg.lock.display());
@@ -175,6 +205,25 @@ impl Pass<'_> {
     fn say(&mut self, what: &str) {
         // The journal; a pass goes on whether or not it takes the line.
         let _ = writeln!(self.out, "house-sync: {what}");
+    }
+
+    /// When GitHub's rate limit that `e` says held this pass off lifts.
+    /// None for any other failure, and in a dry pass, which books nothing.
+    fn limited(&self, e: &Error) -> Option<u64> {
+        e.retry_at.filter(|_| !self.dry)
+    }
+
+    /// GitHub's rate limit held this pass off until AT, as `held` says:
+    /// KEY's pass (one repo's, or "" for the full pass) is booked again for
+    /// then, and this one ends here. Neither a failure nor news for the
+    /// owner: the notices stay as the last pass that got through left them.
+    fn held(&mut self, cfg: &Config, key: &str, at: u64, held: &Error) -> Result<bool, String> {
+        deferred::book(&cfg.wake, key, at)?;
+        let what = if key.is_empty() { "every repo" } else { key };
+        self.say(&format!(
+            "{what}: booked again for {at}, when GitHub's rate limit lifts ({held})"
+        ));
+        Ok(true)
     }
 
     fn repo(&mut self, repo: &Repo) -> Result<(), Error> {

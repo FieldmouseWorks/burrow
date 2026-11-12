@@ -14,6 +14,10 @@ let
   # before it starts anything, so a pass started under older blocks can tell.
   current = "burrow/house";
   lockDir = "/run/house-sync";
+  # A pass GitHub's rate limit held off books itself here for when it lifts
+  # (burrow-events' wake file for the handler).
+  stateDir = "${config.burrow.stateDir}/house-sync";
+  wake = "${stateDir}/wake.json";
 
   # What a pass is told (crates/house-sync), and the command with it built
   # in. gh is the machine's: as its own App, when it has one.
@@ -21,6 +25,7 @@ let
     house = ../house;
     current = "/etc/${current}";
     lock = "${lockDir}/lock";
+    inherit wake;
     inherit (cfg) owners exclude dryRun;
     notify = "${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify";
   });
@@ -76,7 +81,7 @@ in
     # Every pass, full or one repo's, takes this lock: burrow-events lines
     # them up, but not across its own restarts, and two passes at once can
     # each close the other's PR.
-    systemd.tmpfiles.rules = [ "d ${lockDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
+    systemd.tmpfiles.rules = map (d: "d ${d} 0755 ${user} ${config.users.users.${user}.group} -") [ lockDir stateDir ];
 
     # A push to a repo's default branch (a house PR merged, AGENTS.md edited
     # by hand, a new repo's first commits) starts house-sync@OWNER-REPO, its
@@ -90,6 +95,7 @@ in
       events = [ "push" ];
       unit = "house-sync";
       pushes = "default";
+      inherit wake;
     };
     systemd.services = lib.genAttrs [ "house-sync" "house-sync@" ] (name: {
       description = "house-sync: ${if name == "house-sync" then "every repo's" else "%I's"} house blocks, as burrow has them";
