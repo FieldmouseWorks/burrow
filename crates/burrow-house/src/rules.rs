@@ -339,8 +339,7 @@ pub fn code_lines(text: &str, marks: Comments) -> Vec<String> {
 /// runners, spend) on, as Nix, TOML or YAML write it: its key set true
 /// (dotted, or inside an inline `{ }`), or the drain given an engine. Null,
 /// false and comments are not. An option declared `default = true` over
-/// several lines, or inside a multi-line block comment, is the review's to
-/// judge: this reads one line at a time. The line is code already (see
+/// several lines is the review's to judge: this reads one line at a time. The line is code already (see
 /// `code_lines`); on a raw line it says whether it could be one.
 pub fn spender(line: &str) -> bool {
     static SPENDER: LazyLock<Vec<Regex>> = LazyLock::new(|| {
