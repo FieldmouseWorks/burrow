@@ -5,7 +5,7 @@ and a cancelled check nothing ran through since is named by the same check."""
 
 from docs import whole
 from harness import ANNOTATIONS, C, T0, clean
-from prs import FLAKE, UNSTARTED_AFTER, ci_state, dead_runs as _dead_runs
+from prs import FLAKE, UNSTARTED_AFTER, ci_state as _ci_state, dead_runs as _dead_runs
 
 NOW = C.ts(T0) + 700  # where the step's pass (docs.at) puts the clock
 
@@ -23,6 +23,11 @@ def suite(id, age, jobs=0, status="QUEUED", run=77):
 def dead_runs(pr, repo, now=None):
     with C.acting_for(repo):
         return _dead_runs(pr, repo, now)
+
+
+def ci_state(pr, repo=None):
+    with C.acting_for(repo):
+        return _ci_state(pr, repo=repo)
 
 
 def head(suites=(), checks=()):
@@ -112,6 +117,52 @@ twin = lambda **kw: other("s9", workflow="B", path=FLAKE[1], **kw)
 assert dead_runs(head([caller, twin()], did("s9", workflow="B", path=FLAKE[1], lane=True)), "sam/r") == []
 assert dead_runs(head([caller, twin()], did("s9", workflow="B", path=FLAKE[1])), "sam/r") == [77]
 assert dead_runs(head([caller, twin()], did("s9", workflow="B", path=FLAKE[1], lane=True, conclusion="SKIPPED")), "sam/r") == [77]
+
+# Completed replacements owe the gate in every shared call, not just a
+# successful lane selection or a fragment of the gate.
+from docs import docs
+for kind in ("lane-only", "commits-only", "leg-only", "skipped-gate", "skipped-docs", "missing-gate", "sibling-call"):
+    checks = did("s9", workflow="B", path=FLAKE[1], lane=True)
+    if kind in ("lane-only", "missing-gate"):
+        checks = checks[:1]
+    elif kind == "commits-only":
+        checks[1]["name"] = "check / commits"
+    elif kind == "leg-only":
+        checks[1]["name"] = "check / leg 1 of 2"
+    elif kind in ("skipped-gate", "skipped-docs"):
+        checks[1]["conclusion"] = "SKIPPED"
+    else:
+        checks[1]["name"] = "sibling / check"
+    pr = head([caller, twin()], checks)
+    assert dead_runs(pr, "sam/r") == [77], kind
+    assert ci_state(pr, repo="sam/r")[0] == "pending", kind
+# Every call, including one skipped in a replacement, owes its own work.
+checks = did("s9", workflow="B", path=FLAKE[1], lane=True)
+extra = dict(checks[0], name="second / lane into main")
+pr = head([caller, twin()], checks + [extra])
+assert dead_runs(pr, "sam/r") == [77]
+# Current-diff docs and whole-gate twins cover the work; a genuine failure
+# remains red, and an active replacement keeps CI pending.
+for conclusion in ("SUCCESS", "FAILURE"):
+    pr = head([caller, twin()], did("s9", workflow="B", path=FLAKE[1], lane=True, conclusion=conclusion))
+    assert dead_runs(pr, "sam/r") == []
+    assert ci_state(pr, repo="sam/r")[0] == ("green" if conclusion == "SUCCESS" else "red")
+checks = docs(suite="s9")
+pr = head([caller, twin()], checks)
+assert dead_runs(pr, "sam/r") == []
+assert ci_state(pr, repo="sam/r")[0] == "green"
+pr = head([caller, twin(status="IN_PROGRESS")], did("s9", workflow="B", path=FLAKE[1], lane=True))
+for c in pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]:
+    c["checkSuite"]["status"] = "IN_PROGRESS"
+assert dead_runs(pr, "sam/r") == []
+assert ci_state(pr, repo="sam/r")[0] == "pending"
+# Train eligibility does not let a lane-only run pretend to execute a gate.
+# The train's admission rules remain responsible for waiving PR gate work.
+from harness import S
+prior = S.CFG["repos"]["sam/r"]
+S.CFG["repos"]["sam/r"] = {**prior, "train": True}
+assert dead_runs(head([caller, twin()], did("s9", workflow="B", path=FLAKE[1], lane=True)[:1]), "sam/r") == [77]
+S.CFG["repos"]["sam/r"] = prior
 
 # A rollup or suite list cut off at 100 can't clear a rerun: a failed sibling
 # may be past it.

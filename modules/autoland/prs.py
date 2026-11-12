@@ -169,7 +169,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{flow} (failed to start)")
-    for s in unstarted(suites.get("nodes", []), stale, contexts=contexts.get("nodes", [])):
+    for s in unstarted(suites.get("nodes", []), stale, contexts=contexts.get("nodes", []), base=pr["baseRefName"]):
         seen += 1
         flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
         pending.append(f"{flow} (never started, to be run again)")
@@ -231,7 +231,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 UNSTARTED_AFTER = 15 * 60
 
 
-def unstarted(suite_nodes, stale=(), now=None, contexts=()):
+def unstarted(suite_nodes, stale=(), now=None, contexts=(), base=None):
     """The suites of a head whose workflow run has had no job for longer than
     UNSTARTED_AFTER: still queued, with no check run at all. A run that has
     started (a job exists, even a queued one waiting for a runner) isn't, and
@@ -239,7 +239,8 @@ def unstarted(suite_nodes, stale=(), now=None, contexts=()):
     the same workflow (suite_flow: the shared CI's caller and its twin for a
     new base are one) that didn't judge another diff than the PR's (stale,
     runs()) and either is under way with a job, or has finished with a check
-    run that did its work (ran) - and, for the shared CI, a lane job that did,
+    run that did its work (ran) - and, for the shared CI, every call
+    completed its gate or its current-diff docs lane,
     which a push's or a dispatch's run has none of. A skipped caller, an empty
     suite, or a run of another workflow doesn't stand in for it."""
     now = C.NOW if now is None else now
@@ -256,7 +257,17 @@ def unstarted(suite_nodes, stale=(), now=None, contexts=()):
         if o.get("status") != "COMPLETED":
             return (o.get("checkRuns") or {}).get("totalCount", 1) > 0
         mine = [x for x in contexts if x["__typename"] == "CheckRun" and suite(x).get("id") == o.get("id") and ran(x)]
-        return any(judged(x) for x in mine) if suite_flow(o) == FLAKE[0] else bool(mine)
+        if suite_flow(o) != FLAKE[0]:
+            return bool(mine)
+        # Lane selection is not gate execution. Account for every shared
+        # call visible in this workflow, including calls skipped in this
+        # replacement, and never borrow a sibling call's gate.
+        calls = {job_of(x)[0] for x in contexts if workflow(x) == FLAKE[0]
+                 and job_of(x)[1].startswith(LANE)}
+        laned = {job_of(x)[0] for x in mine if judged(x) == (base, None)}
+        worked = {job_of(x)[0] for x in mine
+                  if job_of(x)[1] == GATE or (judged(x) and judged(x)[1] is not None)}
+        return bool(calls) and calls <= laned & worked
 
     out = []
     for s in suite_nodes:
@@ -307,7 +318,7 @@ def dead_runs(pr, repo=None, now=None):
     contexts, suites = rollup.get("nodes", []), listed.get("nodes", [])
     # Only a cancelled check needs runs() (which asks GitHub about the fork).
     stale = runs(pr, repo)[0] if any(c["__typename"] == "CheckRun" and cancelled(c) for c in contexts) or suites else set()
-    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, stale, now, contexts)]
+    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, stale, now, contexts, pr["baseRefName"])]
     fit = {}  # each run judged once, however many of its jobs were cancelled
     for c in contexts:
         if c["__typename"] == "CheckRun" and cancelled(c) and suite(c).get("id") not in stale \
