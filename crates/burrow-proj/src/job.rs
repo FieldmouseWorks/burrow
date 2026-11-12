@@ -84,14 +84,19 @@ impl<'a> Job<'a> {
 
     /// What turn N runs on, in its N.engine, N.model and N.effort: no model
     /// or effort file for the engine's own.
-    pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) {
-        let _ = crate::state_reads::write(self.turn(n, "engine"), choice.engine.name());
+    pub fn record_choice(&self, n: &str, choice: &crate::engine::Choice) -> io::Result<()> {
+        crate::state_reads::write(self.turn(n, "engine"), choice.engine.name())?;
         for (kind, said) in [("model", &choice.model), ("effort", &choice.effort)] {
+            let path = self.turn(n, kind);
             match said {
-                Some(v) => drop(fs::write(self.turn(n, kind), v)),
-                None => drop(fs::remove_file(self.turn(n, kind))),
+                Some(v) => crate::state_reads::write(path, v)?,
+                None => match crate::state_reads::remove(path) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                },
             }
         }
+        Ok(())
     }
 
     /// The latest turn's number, as written; None before the first.

@@ -248,7 +248,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         return Err(Fail::quiet(1));
     }
     crate::retry::Identity::capture_choice(&job, &n, &choice).map_err(|e| Fail::new(1, e))?;
-    job.record_choice(&n, &choice);
+    job.record_choice(&n, &choice)
+        .map_err(|e| Fail::new(1, format!("couldn't record the turn's engine: {e}")))?;
     // As its App, or not at all ([`github_app`]). Its env, read now, is what
     // every run of the turn starts in, so none starts as the user if the App
     // goes while the turn waits for a slot: it acts as an App that's gone,
