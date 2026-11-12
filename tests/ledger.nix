@@ -92,12 +92,31 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import shlex
     import time
 
     def calls():
         return machine.succeed("cat /tmp/cn-calls 2>/dev/null || true").splitlines()
 
     machine.wait_for_unit("multi-user.target")
+
+    with subtest("the listing fixture rejects invalid request bodies before responding"):
+        for body in [
+            '{"variables":{"owner":"kim"},"query":"repositoryOwner"}',
+            '{"variables":{},"query":"repositoryOwner"}',
+            '{"query":"repositoryOwner"}',
+            '{"variables":{"owner":"sam"},"query":"unrelated"}',
+            '{"variables":{"owner":"sam"}}',
+            '{"variables":{"owner":"sam"},"query":null}',
+            '{"variables":{"owner":"sam"},"query":42}',
+            '{not json',
+        ]:
+            status, output = machine.execute(
+                "printf %s " + shlex.quote(body)
+                + " | ${gh}/bin/gh api -i -X POST graphql --input -"
+            )
+            assert status != 0 and "HTTP/2.0 200" not in output, (body, status, output)
+        machine.succeed("rm /tmp/gh-calls")
 
     with subtest("the first pass sets the ledger up, and the next only syncs"):
         machine.succeed("systemctl start burrow-ledger@sam-r.service")
