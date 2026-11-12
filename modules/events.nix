@@ -20,7 +20,7 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
   });
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-events;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
@@ -172,6 +172,17 @@ in
               delivery that one went on or came off is no news to it, so it
               starts none of its passes. Other labels, and other handlers,
               still count.
+            '';
+          };
+          pullRequestActions = mkOption {
+            type = types.nullOr (types.listOf types.str);
+            default = null;
+            example = [ "closed" ];
+            description = ''
+              For `pull_request` events: only these actions count. A handler
+              that reads a PR only when it ends (a PR closing an issue)
+              takes `closed`; relabels and pushes then start nothing. null:
+              every action.
             '';
           };
           wake = mkOption {
