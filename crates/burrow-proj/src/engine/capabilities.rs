@@ -175,7 +175,13 @@ pub fn resolve(
         std::fs::create_dir_all(root)?;
     }
     let mut system = sandbox::readable(env, machine)?;
-    system.extend(cfg.meters.iter().filter(|p| p.is_dir()).cloned());
+    system.extend(
+        cfg.meters
+            .iter()
+            .chain(cfg.github_meters.iter())
+            .filter(|p| p.is_dir())
+            .cloned(),
+    );
     let github = var(env, "GH_TOKEN_SOCKET")
         .map(std::path::absolute)
         .transpose()?

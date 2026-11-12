@@ -91,6 +91,9 @@ pub struct Deploy {
     pub handler: String,
     /// What its last run said (status.json).
     pub status: PathBuf,
+    /// Where it writes what its steps say as they go (the build's and each
+    /// VM test's log): the newest write is the last a run was seen at work.
+    pub logs: PathBuf,
     /// The machine's own flake's repo (OWNER/REPO), when HOST-update watches
     /// it. Its main is live up to the commit HOST-update last found in what
     /// runs, as `live` says, read as a pass starts: not the system's stamp,
@@ -103,9 +106,10 @@ pub struct Deploy {
     /// Each of the flake's inputs whose default branch it puts live
     /// (OWNER/REPO), and the commit of it the running system was built from.
     pub running: BTreeMap<String, String>,
-    /// Seconds a commit may wait to go live, a run of HOST-update may take,
-    /// and a commit may wait behind HOST-update's own open PR (it brings in
-    /// nothing newer until that lands).
+    /// Seconds a commit may wait to go live, a run of HOST-update may go
+    /// without writing to its logs, and a commit may wait behind
+    /// HOST-update's own open PR (it brings in nothing newer until that
+    /// lands).
     pub after: f64,
     pub run: f64,
     pub ride: f64,

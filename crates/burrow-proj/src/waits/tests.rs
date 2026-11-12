@@ -69,7 +69,7 @@ fn case(more: &[&str], want: impl Fn(&Item) -> bool) {
     assert_eq!(
         keys,
         [
-            "claude", "due", "kick", "line", "link", "phase", "since", "unstick", "what"
+            "claude", "due", "kick", "line", "link", "phase", "refresh", "since", "unstick", "what"
         ]
     );
 }
@@ -369,6 +369,37 @@ fn a_codex_refusal_waits_for_its_reset_even_for_an_owned_job() {
     assert_eq!(wait.kick.as_deref(), Some("proj-watch"));
     assert!(wait.phase.contains("Codex"));
     assert!(job_wait(&cfg, &Facts { stopped: true, ..f }).is_none());
+}
+
+#[test]
+fn a_queued_turn_held_by_github_quota_is_not_stalled_before_the_reset() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let stall = cfg.stall_queued();
+    let f = Facts {
+        id: "q".into(),
+        turn: "1".into(),
+        state: "queued".into(),
+        queued: 1000,
+        ..Facts::default()
+    };
+    // Unrelated installations keep the ordinary deadline.
+    assert_eq!(job_wait(&cfg, &f).unwrap().due, (1000 + stall) as f64);
+    let held = Facts {
+        quota_reset: Some((1000, 1000 + 2 * stall)),
+        ..f.clone()
+    };
+    let wait = job_wait(&cfg, &held).unwrap();
+    assert_eq!(wait.due, (1000 + 3 * stall) as f64);
+    assert!(wait.phase.contains("GitHub"));
+    // Unstick turns (the emergency queue) are held by it as well.
+    let unstick = Facts {
+        unstick: true,
+        ..held
+    };
+    assert_eq!(
+        job_wait(&cfg, &unstick).unwrap().due,
+        (1000 + 3 * stall) as f64
+    );
 }
 
 #[test]

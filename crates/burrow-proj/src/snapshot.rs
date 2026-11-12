@@ -13,8 +13,8 @@
 //!   holds it (job, repo, issue or PR, role, engine, model, effort), since
 //!   when, and how that holder stands: running, queued, parked on an await,
 //!   asking a person, or ended with nothing held and still counted.
-//! - **meters**: each engine's latest reading, however old (its age says),
-//!   and Claude's usage hold.
+//! - **meters**: each engine and GitHub installation's latest reading,
+//!   however old (its age says), and their holds.
 //! - **holds**: what's configured to hold work back: paused repos, the
 //!   pipeline's own repos and slots, and the drain and sorting.
 //! - **jobs**: the jobs most recently changed, as `proj status` lists them.
@@ -37,7 +37,7 @@ use crate::turn::lines;
 use crate::{Fail, io_fail, mtime, now, read, usage};
 
 /// The shape's version: a reader refuses one it doesn't know.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// How many recently changed jobs it lists unless asked for another number.
 pub const JOBS: usize = 15;
@@ -180,10 +180,40 @@ pub struct Holder {
     pub awaits: Vec<String>,
 }
 
+/// Engine and installation meters share the live snapshot. Engine entries
+/// retain their original JSON fields; installation entries identify the App
+/// and owner whose token supplied the free rate-limit reading.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Meter {
+    Engine(EngineMeter),
+    GitHub(GitHubMeter),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Installation {
+    pub app: String,
+    pub owner: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitHubMeter {
+    pub installation: Installation,
+    pub remaining: Option<u64>,
+    pub reset: Option<u64>,
+    /// Primary, secondary or GraphQL deadline, independently of REST budget.
+    pub retry_at: Option<u64>,
+    pub read_at: u64,
+    pub age: u64,
+    pub held: bool,
+}
+
 /// One engine's meter and hold.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Meter {
+pub struct EngineMeter {
     pub engine: Engine,
     /// Its latest reading, none when there's none to read.
     pub reading: Option<Reading>,
@@ -302,6 +332,10 @@ impl Snapshot {
         if let Some(h) = self
             .meters
             .iter()
+            .filter_map(|m| match m {
+                Meter::Engine(m) => Some(m),
+                Meter::GitHub(_) => None,
+            })
             .find(|m| m.engine == Engine::Claude)
             .and_then(|m| m.hold.as_ref())
         {
@@ -531,7 +565,7 @@ pub(crate) fn held(
     }
 }
 
-/// Each engine's latest reading, however old, and Claude's usage hold.
+/// Latest engine and installation readings and their holds.
 fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
     use burrow_usage_reset::meter::{FRESH, Snapshot as Read, Span};
     [Engine::Claude, Engine::Codex]
@@ -570,12 +604,27 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
                     until: s.until,
                     reason: s.said,
                 });
-            Meter {
+            Meter::Engine(EngineMeter {
                 engine,
                 reading,
                 hold,
-            }
+            })
         })
+        .chain(crate::github_quota::meters(cfg).into_iter().map(|m| {
+            let held = m.until(at.max(0) as u64).is_some();
+            Meter::GitHub(GitHubMeter {
+                installation: Installation {
+                    app: m.app,
+                    owner: m.owner,
+                },
+                remaining: m.remaining,
+                reset: m.reset,
+                retry_at: m.retry_at,
+                read_at: m.at,
+                age: (at.max(0) as u64).saturating_sub(m.at),
+                held,
+            })
+        }))
         .collect()
 }
 

@@ -373,7 +373,7 @@ fn deploy() {
             .clone();
     assert_eq!(
         (it.since, it.due, it.kick),
-        (T + 30.0, T + 30.0 + 5400.0, None)
+        (T + 30.0, T + 30.0 + 5400.0, Some(cfg.handler.clone()))
     );
     assert_eq!(
         it.phase,
@@ -382,6 +382,32 @@ fn deploy() {
             clock(T + 30.0)
         )
     );
+    // A run that has written to its logs since it started is at work: due
+    // `run` after its last write, however long it has been going (a build
+    // from source well past `run`). A write from before it started is an
+    // earlier run's, and moves nothing.
+    s.progress = Some(T + 7200.0);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 7260.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(
+        (it.since, it.due, it.kick),
+        (T + 30.0, T + 7200.0 + 5400.0, Some(cfg.handler.clone()))
+    );
+    assert!(it.refresh, "a run's deadline is read between passes");
+    assert_eq!(
+        it.phase,
+        format!(
+            "box-update has been putting it live since {}, its last output at {}",
+            clock(T + 30.0),
+            clock(T + 7200.0)
+        )
+    );
+    s.progress = Some(T);
+    let it =
+        decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+            .clone();
+    assert_eq!(it.due, T + 30.0 + 5400.0);
 }
 
 // The flake's own repo with what's live unknown (no record, or a switch
@@ -455,7 +481,7 @@ fn deploy_unknown() {
     let it = &d.items["deploy/sam/box"];
     assert_eq!(
         (it.since, it.due, it.kick.as_deref()),
-        (T - 300.0, T - 300.0 + 5400.0, None)
+        (T - 300.0, T - 300.0 + 5400.0, Some("dispatch"))
     );
     assert_eq!(d.state.going_live["sam/box"], T - 600.0);
     // Unknown, behind its own PR: the longer wait; its unit failed since,
@@ -550,4 +576,77 @@ fn moot_runs() {
     );
     let d = decide(&cfg, &s, &st, &none, T + RECENT);
     assert_eq!(cancels(&d), [1]);
+}
+
+// A wait the pass couldn't read (GitHub, or the live record) still takes a
+// run's progress from the unit and logs now, for the flake's own repo and
+// for an input alike; a write from before the run is an earlier run's; and
+// the unread alert is kept.
+#[test]
+fn deploy_unread_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let unit = |state: &str, since: f64| Unit {
+        state: state.into(),
+        since: Some(since),
+        ..Unit::default()
+    };
+    for repo in ["sam/box", "sam/kit"] {
+        let key = format!("deploy/{repo}");
+        let waiting = Snapshot {
+            deploys: BTreeMap::from([(
+                repo.into(),
+                Behind {
+                    count: 1,
+                    oldest: T - 600.0,
+                    ..Behind::default()
+                },
+            )]),
+            update: Some((Unit::default(), "ok".into())),
+            ..Snapshot::default()
+        };
+        let other = if repo == "sam/box" {
+            "sam/kit"
+        } else {
+            "sam/box"
+        };
+        let mut base = waiting.clone();
+        base.deploys.insert(other.into(), Behind::default());
+        let d = decide(&cfg, &base, &State::default(), &BTreeMap::new(), T);
+        // Unreadable now; a run under way, last wrote at T + 1000.
+        let mut s = Snapshot {
+            unread: BTreeMap::from([(repo.into(), "HTTP 502".into())]),
+            update: Some((unit("activating", T - 300.0), "ok".into())),
+            progress: Some(T + 1000.0),
+            ..Snapshot::default()
+        };
+        s.deploys.insert(other.into(), Behind::default());
+        let e = decide(&cfg, &s, &d.state, &d.items, T + 1100.0);
+        let it = &e.items[&key];
+        assert_eq!(
+            (it.since, it.due, it.kick.as_deref()),
+            (T - 300.0, T + 1000.0 + 5400.0, Some("dispatch")),
+            "{repo}"
+        );
+        assert_eq!(it.what, d.items[&key].what);
+        assert_eq!(it.link, d.items[&key].link);
+        assert_eq!(e.state.going_live[repo], T - 600.0);
+        // Only an earlier run's write: from its start.
+        s.progress = Some(T - 400.0);
+        let e2 = decide(&cfg, &s, &d.state, &d.items, T + 1100.0);
+        assert_eq!(e2.items[&key].due, T - 300.0 + 5400.0);
+        // The run it was on ended: back on HOST-update's own wait, which
+        // carries on from the wait's age.
+        let mut ended = s.clone();
+        ended.update = Some((Unit::default(), "ok".into()));
+        let e3 = decide(&cfg, &ended, &e.state, &e.items, T + 1200.0);
+        let it = &e3.items[&key];
+        assert_eq!(
+            (it.since, it.due, it.kick.as_deref()),
+            (T - 600.0, T - 600.0 + 1800.0, Some("update"))
+        );
+        // Not at work, not on a run: as it was.
+        let e4 = decide(&cfg, &ended, &d.state, &d.items, T + 1200.0);
+        assert_eq!(e4.items[&key], d.items[&key]);
+    }
 }

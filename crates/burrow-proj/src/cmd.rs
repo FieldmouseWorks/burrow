@@ -138,11 +138,15 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 if let Err(e) = usage::adopt(cfg) {
                     eprintln!("{e}");
                 }
-                if let Some(s) = usage::out(cfg) {
-                    put(&format!(
-                        "{}\n",
-                        serde_json::to_string(&s).unwrap_or_default()
-                    ));
+                let mut value = usage::out(cfg)
+                    .and_then(|s| serde_json::to_value(s).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let meters = crate::github_quota::meters(cfg);
+                if !meters.is_empty() {
+                    value["github"] = serde_json::json!(meters);
+                }
+                if value.as_object().is_some_and(|v| !v.is_empty()) {
+                    put(&format!("{value}\n"));
                 }
                 Ok(())
             }
@@ -457,7 +461,7 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // the turn is known to be over: one that ended on its own between the
     // look and the stop is stopped all the same, and one systemd can't be
     // asked about may still be running.
-    for f in ["await", "await.next"] {
+    for f in ["await", "await.next", "github-await"] {
         let _ = fs::remove_file(job.path(f));
     }
     if rc != 0 && !systemd::gone(cfg, &unit) {
@@ -551,22 +555,100 @@ pub(crate) fn record_wait(
     targets: &[String],
     until: Option<Instant>,
 ) -> Result<(), Fail> {
-    let text = baselines(cfg, found, targets, until)?;
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    crate::github::take_limit();
+    let pending = job.path(crate::github_quota::PENDING);
+    let saved: Option<crate::github_quota::Pending> = crate::github_quota::state(&pending)?
+        .map(|text| {
+            serde_json::from_str::<crate::github_quota::Pending>(&text)
+                .map_err(|e| Fail::new(1, format!("saved GitHub await: {e}")))
+        })
+        .transpose()?;
+    let prior_due = saved.as_ref().map_or(0, |p| p.retry_at);
+    let saved_baselines = saved
+        .as_ref()
+        .map(|p| p.baselines.clone())
+        .unwrap_or_default();
+    let captured =
+        crate::github_quota::join_records(&crate::github_quota::captured(job)?, &saved_baselines);
+    let known: Vec<_> = crate::job::awaits(&captured)
+        .into_iter()
+        .map(|a| a.target)
+        .collect();
+    let mut all = targets.to_vec();
+    let mut found = found.to_vec();
+    for saved_target in saved.map(|p| p.targets).unwrap_or_default() {
+        if !all.contains(&saved_target) {
+            found.push(
+                target(&saved_target).ok_or_else(|| Fail::new(1, "invalid saved GitHub target"))?,
+            );
+            all.push(saved_target);
+        }
+    }
+    let targets = &all;
+    let mut limited_owner = String::new();
+    let mut text = String::new();
+    let result = found.iter().zip(targets).try_for_each(|(found, target)| {
+        if known.contains(&format!("{}#{}", found.0, found.1)) {
+            return Ok(());
+        }
+        limited_owner = found.0.split('/').next().unwrap_or_default().to_owned();
+        text.push_str(&crate::github::for_job(job, || {
+            baselines(
+                cfg,
+                std::slice::from_ref(found),
+                std::slice::from_ref(target),
+                until,
+            )
+        })?);
+        Ok(())
+    });
+    match result {
+        Ok(()) => {}
+        Err(error) => {
+            if let Some(due) = crate::github::take_limit() {
+                let intent = crate::github_quota::Pending {
+                    targets: targets.clone(),
+                    retry_at: due.max(prior_due),
+                    turn: job.turns().unwrap_or_default(),
+                    baselines: crate::github_quota::join_records(&captured, &text),
+                };
+                crate::state_reads::write(
+                    &pending,
+                    serde_json::to_vec(&intent).expect("pending await"),
+                )
+                .map_err(|e| io_fail(&pending, e))?;
+                crate::github_quota::remember(job, &text)?;
+                crate::state_reads::write(job.path("end.next"), "await\n")
+                    .map_err(|e| io_fail(&job.path("end.next"), e))?;
+                if let Err(e) = crate::github_quota::note(cfg, job, &limited_owner, due) {
+                    eprintln!("proj: quota meter unavailable: {e}");
+                }
+                kick(cfg, ["proj-watch".into()]);
+                put(
+                    "Noted durably. GitHub quota is exhausted; proj will register the wait after its reset. End your turn now.\n",
+                );
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     if until.is_some_and(|d| Instant::now() >= d) {
         return Err(Fail::new(
             1,
             "proj: turn deadline expired while registering waits; nothing is awaited",
         ));
     }
+    crate::github_quota::remember(
+        job,
+        &crate::github_quota::join_records(&saved_baselines, &text),
+    )?;
     let next = job.path("await.next");
-    File::options()
-        .append(true)
-        .create(true)
-        .open(&next)
-        .and_then(|mut f| f.write_all(text.as_bytes()))
+    crate::state_reads::write(&next, crate::github_quota::captured(job)?)
         .map_err(|e| io_fail(&next, e))?;
     crate::state_reads::write(job.path("end.next"), "await\n")
         .map_err(|e| io_fail(&job.path("end.next"), e))?;
+    let _ = fs::remove_file(job.path(crate::github_quota::PENDING));
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
         targets.join(" ")
@@ -579,7 +661,7 @@ pub(crate) fn record_wait(
 /// words, rather than leaving the job waiting on something proj never read.
 /// So does one that's already merged or closed ([`over`]): the job checked it
 /// before it merged, as a rule, and goes on to what comes after.
-fn baselines(
+pub(crate) fn baselines(
     cfg: &Config,
     found: &[(String, String)],
     targets: &[String],
@@ -694,6 +776,12 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     } else {
         None
     };
+    if let Some(n) = job.turns()
+        && !job.turn(&n, "stopped").exists()
+        && !job.path("await").exists()
+    {
+        crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?;
+    }
     job.mark_ended();
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
@@ -735,144 +823,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use std::env;
-
-    use std::process::Command;
-
-    use super::{baselines, left_be};
-    use crate::config::Config;
-    use crate::job::Job;
-
-    // proj withdraw stops only a turn that says it may be, and has no slot: one
-    // that has started or ended it leaves be, saying so, and one from an older
-    // proj, or one systemd can't say about, it fails on, to be asked about again.
-    #[test]
-    fn what_withdraw_leaves_be() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut v = crate::config::tests::example();
-        v["jobs"] = tmp.path().to_str().unwrap().into();
-        let cfg: Config = serde_json::from_value(v).unwrap();
-        fs::create_dir(tmp.path().join("j")).unwrap();
-        fs::write(tmp.path().join("j/turns"), "1\n").unwrap();
-        let job = Job::new(&cfg, "j");
-        let said = |active| left_be(&job, "1", active).map_err(|f| f.code);
-
-        for active in ["inactive", "failed"] {
-            assert_eq!(said(active), Ok(Some("over")), "{active}");
-        }
-        for active in ["", "deactivating", "maintenance"] {
-            assert_eq!(said(active), Err(1), "{active:?}");
-        }
-        assert_eq!(
-            said("active"),
-            Err(1),
-            "unsaid: it isn't known to take its slot locked"
-        );
-        fs::write(job.turn("1", "withdrawable"), "").unwrap();
-        for active in ["active", "activating", "reloading"] {
-            assert_eq!(said(active), Ok(None), "{active}");
-        }
-        fs::write(job.turn("1", "slot"), "2\n").unwrap();
-        assert_eq!(said("active"), Ok(Some("running")));
-    }
-
-    // A baseline GitHub can't give fails the whole await, and writes nothing.
-    #[test]
-    fn an_await_needs_every_baseline() {
-        let mut v = crate::config::tests::example();
-        v["tools"]["gh"] = "/nowhere/gh".into();
-        let cfg: Config = serde_json::from_value(v).unwrap();
-        let found = [("o/r".to_owned(), "5".to_owned())];
-        let fail = baselines(&cfg, &found, &["o/r#5".to_owned()], None).unwrap_err();
-        assert_eq!(fail.code, 1);
-        assert!(
-            fail.say
-                .unwrap()
-                .contains("couldn't read o/r#5 from GitHub")
-        );
-    }
-
-    // An await on a PR that's merged, or one or an issue that's closed, fails
-    // the whole await and writes nothing: its baseline says what it will say
-    // until awaitHours runs out, so the job would sit until then for nothing.
-    // The stand-in gh is written and run where nothing else forks, as
-    // slot::tests' stand-in git is.
-    #[test]
-    fn an_await_on_what_is_over_is_refused() {
-        let status = Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "cmd::tests::awaits_against_a_stand_in_gh",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("BURROW_PROJ_TEST_AWAIT", "1")
-            .output()
-            .unwrap();
-        let out = String::from_utf8_lossy(&status.stdout);
-        assert!(status.status.success(), "{out}");
-        assert!(out.contains("1 passed"), "{out}");
-    }
-
-    #[test]
-    fn awaits_against_a_stand_in_gh() {
-        if env::var_os("BURROW_PROJ_TEST_AWAIT").is_none() {
-            return;
-        }
-        let tmp = tempfile::TempDir::new().unwrap();
-        let gh = tmp.path().join("gh");
-        // #5 a merged PR, #6 a PR closed without merging, #7 a closed
-        // issue, #8 an open PR.
-        burrow_test::executable(
-            &gh,
-            r#"#!/bin/sh
-for a; do ep=${a%%\?*}; done
-printf 'HTTP/2.0 200 OK\n\n'
-case $ep in
-  */comments | */reviews) echo '[]' ;;
-  */status) echo '{"total_count": 0, "state": "pending"}' ;;
-  */check-runs) echo '{"check_runs": []}' ;;
-  repos/o/r/issues/7) echo '{"state": "closed"}' ;;
-  repos/o/r/issues/8) echo '{"pull_request": {}, "state": "open"}' ;;
-  repos/o/r/issues/*) echo '{"pull_request": {}, "state": "closed"}' ;;
-  repos/o/r/pulls/5) echo '{"state": "closed", "merged": true, "head": {"sha": "abc"}, "review_comments": 0}' ;;
-  repos/o/r/pulls/6) echo '{"state": "closed", "merged": false, "head": {"sha": "abc"}, "review_comments": 0}' ;;
-  repos/o/r/pulls/8) echo '{"state": "open", "merged": false, "head": {"sha": "abc"}, "review_comments": 0}' ;;
-  *) exit 1 ;;
-esac
-"#,
-        );
-        let mut v = crate::config::tests::example();
-        v["tools"]["gh"] = gh.to_str().unwrap().into();
-        let cfg: Config = serde_json::from_value(v).unwrap();
-        let await_on = |ns: &[&str]| {
-            let found: Vec<(String, String)> = ns
-                .iter()
-                .map(|n| ("o/r".to_owned(), (*n).to_owned()))
-                .collect();
-            let targets: Vec<String> = ns.iter().map(|n| format!("o/r#{n}")).collect();
-            baselines(&cfg, &found, &targets, None).map_err(|f| (f.code, f.say.unwrap_or_default()))
-        };
-
-        let open = await_on(&["8"]).unwrap();
-        assert!(open.starts_with("o/r#8\t"), "{open}");
-        assert!(open.contains(r#""merged":false"#), "{open}");
-        for (n, how) in [("5", "merged"), ("6", "closed"), ("7", "closed")] {
-            let (code, say) = await_on(&[n]).unwrap_err();
-            assert_eq!(code, 1, "o/r#{n}");
-            assert!(
-                say.contains(&format!("o/r#{n} is {how} already, so nothing is awaited")),
-                "o/r#{n}: {say}"
-            );
-        }
-        // One that's over fails the lot, open ones with it.
-        let (_, say) = await_on(&["8", "5"]).unwrap_err();
-        assert!(say.contains("o/r#5 is merged already"), "{say}");
-    }
-}
+mod tests;
 
 #[cfg(test)]
 pub(crate) mod declaration_tests {

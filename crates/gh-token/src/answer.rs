@@ -31,14 +31,25 @@ pub struct Config {
 /// The longest request read: a target is shorter.
 const MAX_REQUEST: u64 = 256;
 
-pub fn answer(
+pub fn answer(config: &Config, input: impl Read, output: impl Write, now: i64) -> io::Result<()> {
+    answer_with_quota(config, None, input, output, now)
+}
+pub fn answer_with_quota(
     config: &Config,
+    quota: Option<&crate::relay::Config>,
     input: impl Read,
     mut output: impl Write,
     now: i64,
 ) -> io::Result<()> {
+    let mut input = BufReader::new(input);
     let mut line = String::new();
-    let reply = match BufReader::new(input.take(MAX_REQUEST)).read_line(&mut line) {
+    // A relay request has a fixed preamble; its JSON body is separately bounded.
+    input.by_ref().take(MAX_REQUEST).read_line(&mut line)?;
+    if line == "http\n" {
+        let quota = quota.ok_or_else(|| io::Error::other("HTTP relay is not configured"))?;
+        return crate::relay::answer(config, quota, input, output, now);
+    }
+    let reply = match Ok::<_, io::Error>(line.len()) {
         Ok(_) => token(config, line.strip_suffix('\n').unwrap_or(&line), now),
         Err(e) => Err(Error::refused(format!("the request: {e}"))),
     };
@@ -60,7 +71,7 @@ pub fn answer(
     output.write_all(reply.as_bytes())
 }
 
-fn token(config: &Config, request: &str, now: i64) -> Result<String, Error> {
+pub(crate) fn token(config: &Config, request: &str, now: i64) -> Result<String, Error> {
     let target =
         Target::parse(request).ok_or_else(|| Error::refused("a request is OWNER or OWNER/REPO"))?;
     // Kept as this App's, on this GitHub: another's tokens, kept under the

@@ -120,6 +120,7 @@ pub fn decide(
                 line: false,
                 unstick: false,
                 claude: false,
+                refresh: false,
             },
         );
     }
@@ -225,18 +226,44 @@ pub fn decide(
                 d.state.going_live.insert(repo.clone(), since);
                 let what = format!("{repo} going live");
                 let link = Some(format!("https://github.com/{repo}"));
-                let it = going_live(dep, update, said, behind, what, why, since, link, true);
+                let it = going_live(
+                    dep,
+                    update,
+                    said,
+                    snap.progress,
+                    behind,
+                    what,
+                    why,
+                    since,
+                    link,
+                    true,
+                    &cfg.handler,
+                );
                 d.items.insert(key, it);
                 continue;
             }
             let Some(b) = snap.deploys.get(repo) else {
-                // Not read: as the last pass saw it.
+                // Not read: as the last pass saw it, but a run's progress is
+                // local, so it is taken from what the unit and its logs say
+                // now, whatever GitHub or the live record would not.
                 if snap.unread.contains_key(repo) {
+                    let since = st.going_live.get(repo).copied();
                     if let Some(it) = was.get(&key) {
-                        d.items.insert(key, it.clone());
+                        let it = retained(
+                            dep,
+                            update,
+                            said,
+                            snap.progress,
+                            behind,
+                            it,
+                            since,
+                            now,
+                            cfg,
+                        );
+                        d.items.insert(key, it);
                     }
-                    if let Some(t) = st.going_live.get(repo) {
-                        d.state.going_live.insert(repo.clone(), *t);
+                    if let Some(t) = since {
+                        d.state.going_live.insert(repo.clone(), t);
                     }
                 }
                 continue;
@@ -257,7 +284,17 @@ pub fn decide(
                 short(&b.newest),
             );
             let it = going_live(
-                dep, update, said, behind, what, &waiting, b.oldest, link, false,
+                dep,
+                update,
+                said,
+                snap.progress,
+                behind,
+                what,
+                &waiting,
+                b.oldest,
+                link,
+                false,
+                &cfg.handler,
             );
             d.items.insert(key, it);
         }
@@ -267,7 +304,16 @@ pub fn decide(
 
 /// A repo's wait to go live, `waiting` since `since`: on HOST-update's run
 /// once one under way has it (one that started since, or, with `any`, any
-/// one), and otherwise on HOST-update, which the watchdog kicks: soon, unless
+/// one), due `run` after it last wrote to its logs (`progress`), or after it
+/// started if it hasn't since: a run at work, however long its build, isn't
+/// stalled, and one that has gone quiet is; the watchdog kicks `refresh`
+/// (this handler) first, since a log write triggers no pass and the
+/// deadline it was given may be stale. The item says `refresh`, so the
+/// watchdog takes it no further than that kick until a pass has written the
+/// file again, however long the kick's pass takes to start (it can start
+/// only a handler's gap after the last): a run still quiet after it is
+/// stalled. Otherwise on HOST-update, which
+/// the watchdog kicks: soon, unless
 /// its last run is `behind` its own open PR, which brings the commit in only
 /// after it lands and has a wait of its own with the steward.
 #[allow(clippy::too_many_arguments)]
@@ -275,29 +321,40 @@ fn going_live(
     dep: &Deploy,
     update: &Unit,
     said: &str,
+    progress: Option<f64>,
     behind: Option<u64>,
     what: String,
     waiting: &str,
     since: f64,
     link: Option<String>,
     any: bool,
+    refresh: &str,
 ) -> Item {
     match update.since {
         Some(start) if update.state == "activating" && (any || start >= since) => Item {
             repo: None,
             what,
-            phase: format!(
-                "{} has been putting it live since {}",
-                dep.unit,
-                clock(start)
-            ),
+            phase: match progress.filter(|p| *p > start) {
+                Some(p) => format!(
+                    "{} has been putting it live since {}, its last output at {}",
+                    dep.unit,
+                    clock(start),
+                    clock(p)
+                ),
+                None => format!(
+                    "{} has been putting it live since {}",
+                    dep.unit,
+                    clock(start)
+                ),
+            },
             since: start,
-            due: start + dep.run,
+            due: progress.filter(|p| *p > start).unwrap_or(start) + dep.run,
             link,
-            kick: None,
+            kick: Some(refresh.to_owned()),
             line: false,
             unstick: false,
             claude: false,
+            refresh: true,
         },
         _ => Item {
             repo: None,
@@ -316,8 +373,58 @@ fn going_live(
             line: false,
             unstick: false,
             claude: false,
+            refresh: false,
         },
     }
+}
+
+/// A wait the pass couldn't read (GitHub or the live record failed), as the
+/// last pass `was` left it: unchanged while it's waiting on HOST-update, but
+/// a run's progress is local, so one under way (or since ended) is taken
+/// from the unit and logs now, with the wait's age, text and link kept.
+#[allow(clippy::too_many_arguments)]
+fn retained(
+    dep: &Deploy,
+    update: &Unit,
+    said: &str,
+    progress: Option<f64>,
+    behind: Option<u64>,
+    was: &Item,
+    since: Option<f64>,
+    now: f64,
+    cfg: &Config,
+) -> Item {
+    let was_run = was.kick.as_deref() == Some(cfg.handler.as_str());
+    // Its run is the one it waited on, or a later one: any run at work that
+    // started no earlier than the wait, or than the run the wait was on.
+    let ours = update
+        .since
+        .filter(|_| update.state == "activating")
+        .is_some_and(|start| start >= was.since);
+    if !ours && !was_run {
+        return was.clone();
+    }
+    going_live(
+        dep,
+        update,
+        said,
+        progress,
+        behind,
+        was.what.clone(),
+        if was_run {
+            "its commits aren't live yet"
+        } else {
+            &was.phase
+        },
+        if was_run {
+            since.unwrap_or(now)
+        } else {
+            was.since
+        },
+        was.link.clone(),
+        was_run,
+        &cfg.handler,
+    )
 }
 
 /// One runner's wait, and its move: what's queued for it waits while it's
@@ -371,6 +478,7 @@ fn runner(
             line: false,
             unstick: false,
             claude: false,
+            refresh: false,
         },
     );
     if snap.switching || recent.len() >= RESTARTS {

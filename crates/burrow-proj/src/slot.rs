@@ -171,7 +171,10 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     slot.lock()?;
     // The one it waited for may have been refused for usage, and let go of
     // the slot to wait for the reset: so does this one (None).
-    if usage::out(cfg).is_some() || automation_paused(cfg, &job) {
+    if usage::out(cfg).is_some()
+        || automation_paused(cfg, &job)
+        || crate::github_quota::held(cfg, &job, Engine::Claude).is_some()
+    {
         return Ok(None);
     }
     let slot = held(slot)?;
@@ -345,7 +348,10 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
             remove_place(&queue.join(&name))?;
             continue;
         }
-        if automation_paused(cfg, &Job::new(cfg, fid)) {
+        let other = Job::new(cfg, fid);
+        if automation_paused(cfg, &other)
+            || crate::github_quota::held(cfg, &other, Engine::Claude).is_some()
+        {
             continue;
         }
         if name == me {
@@ -403,7 +409,10 @@ fn codex_slot(
             lk.lock()?;
             return Err(hand_over(cfg, &to, id, given));
         }
-        if automation_paused(cfg, &job) || crate::policy::earlier_pending(&job) {
+        if automation_paused(cfg, &job)
+            || crate::policy::earlier_pending(&job)
+            || crate::github_quota::held(cfg, &job, Engine::Codex).is_some()
+        {
             sleep(Duration::from_secs(2));
             continue;
         }
@@ -433,6 +442,7 @@ pub fn take_engine(
     may_hand_over: bool,
     engine: Engine,
 ) -> io::Result<File> {
+    crate::waits::rewatch_later(cfg, id);
     match engine {
         Engine::Claude => take(cfg, id, n, given, may_hand_over),
         Engine::Codex => codex_slot(cfg, id, n, given, may_hand_over),
@@ -485,7 +495,7 @@ pub fn take(
             if fs::remove_file(queue.join(&me)).is_ok() {
                 snapshot::stream::notify(cfg);
             }
-            if spent {
+            if spent || crate::github_quota::held(cfg, &job, Engine::Claude).is_some() {
                 usage::remind(cfg);
                 sleep(Duration::from_secs(2));
                 continue;
