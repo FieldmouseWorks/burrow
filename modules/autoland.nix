@@ -329,8 +329,9 @@ in
         description = ''
           The ID of the GitHub App the steward acts as, installed on every
           one of `owners` for all their repos. It needs read and write on
-          administration, contents, issues, pull requests, commit statuses,
-          webhooks and workflows, and read on checks and actions
+          administration, actions (to run a workflow run again), contents,
+          issues, pull requests, commit statuses, webhooks and workflows,
+          and read on checks
           (docs/repo-baseline.md). Everything the steward does on GitHub,
           it does as the App, never as the machine user's own login, which
           its Claude jobs and every Claude session share: so only the App
@@ -892,8 +893,6 @@ in
       description = if name == "autoland"
         then "autoland: settle and merge every PR, keep every repo at the baseline"
         else "autoland: settle and merge the PRs of %I";
-      # A switch leaves a running one be (see burrow.switch's check).
-      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = stewardTools;

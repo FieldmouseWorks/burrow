@@ -89,9 +89,19 @@ pub struct Config {
     /// `apps`: what a bot's issue's job, and every Codex turn with no App
     /// of its own, acts as ([`crate::turn::github_app`]). None for none.
     pub machinery: Option<String>,
+    /// Identity of cfg.tools.gh, independently of the engine's selected App.
+    #[serde(default)]
+    pub host_github_app: Option<String>,
+    /// Host token service observations; never a job-writable directory.
+    #[serde(default)]
+    pub github_meters: Option<PathBuf>,
     /// The steward App's account, distinct from the App running jobs.
     #[serde(default)]
     pub steward_account: Option<burrow_github::Author>,
+    /// The machinery App's account: its issues are sorted and run like an
+    /// author's, admitted by this id alone. Its comments stay unheard.
+    #[serde(default)]
+    pub machinery_account: Option<burrow_github::Author>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// ROLE[@OWNER/REPO] ENGINE [over PCT ENGINE], outside the repos.

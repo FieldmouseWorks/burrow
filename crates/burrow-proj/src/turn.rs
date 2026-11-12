@@ -29,12 +29,18 @@ pub(crate) const SPENT: &str = "Your last run was refused before it finished: Cl
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false, None)
+    start_with(cfg, id, msg, first, false, false, None)
 }
 
 /// An explicit operator or authorized human issue reply answers the question.
 pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, true, None)
+    start_with(cfg, id, msg, first, true, false, None)
+}
+
+/// The deadline's reversible default answers the question: the launch's
+/// receipt carries that as the question's cause.
+pub(crate) fn start_default(cfg: &Config, id: &str, msg: &str) -> Result<(), String> {
+    start_with(cfg, id, msg, false, true, true, None)
 }
 
 /// Restoration already owns the serialized inbox admission permit.
@@ -45,7 +51,7 @@ pub(crate) fn start_admitted(
     first: bool,
     permit: &crate::inbox::resumption::Permit,
 ) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false, Some(permit))
+    start_with(cfg, id, msg, first, false, false, Some(permit))
 }
 
 /// A failed write may leave a truncated file. Never leave that prompt in
@@ -64,6 +70,7 @@ fn start_with(
     msg: &str,
     first: bool,
     answered: bool,
+    deadline: bool,
     permit: Option<&crate::inbox::resumption::Permit>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
@@ -103,7 +110,7 @@ fn start_with(
     };
     job.quarantine_unstarted(last)
         .map_err(|e| format!("proj: quarantine unstarted turns: {e}"))?;
-    let question = crate::question::Resume::prepare(&job, answered)?;
+    let question = crate::question::Resume::prepare_as(&job, answered, deadline)?;
     let msg = question.prompt(msg);
     let n = last + 1;
     // The last turn's waits are the new turn's to clear (exec), so a turn
@@ -165,6 +172,9 @@ fn start_with(
         undo();
         return Err(couldnt());
     }
+    // Accepted resumption owns the previous intent, including an error
+    // recovery. A failed launch above leaves it durable for another attempt.
+    let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
     // systemd has accepted this turn. Reconciliation errors cannot turn it
     // into a failed start: callers must consume its input exactly once.
     let reconcile_pending = if let Err(e) = question.commit() {
@@ -261,6 +271,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         if !job.turn(&n, "retry-migration").exists() {
             let _ = crate::state_reads::remove(job.path(f));
         }
+    }
+    if read(&job.path(crate::github_quota::PENDING)).is_some_and(|text| {
+        serde_json::from_str::<crate::github_quota::Pending>(&text).map_or(true, |p| p.turn != n)
+    }) {
+        let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
     }
     let retry =
         crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;
@@ -454,6 +469,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             rewatch_later(cfg, id);
             told
         };
+        // A GitHub refusal takes precedence over an engine's ask/done or
+        // the missing-declaration correction. Running peers are left alone.
+        if crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))? {
+            // The refusal (recorded by the gh door) now holds its
+            // installation's queue: the watchdog's deadlines follow it.
+            crate::waits::rewatch_all(cfg);
+            return Ok(());
+        }
         // Refused because the plan's usage is spent: so is every other
         // turn's, until the limit resets (usage.rs). This one gives up its
         // slot and waits in line again, where none is handed out till then,

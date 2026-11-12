@@ -372,6 +372,37 @@ fn a_codex_refusal_waits_for_its_reset_even_for_an_owned_job() {
 }
 
 #[test]
+fn a_queued_turn_held_by_github_quota_is_not_stalled_before_the_reset() {
+    let cfg: Config = serde_json::from_value(example()).unwrap();
+    let stall = cfg.stall_queued();
+    let f = Facts {
+        id: "q".into(),
+        turn: "1".into(),
+        state: "queued".into(),
+        queued: 1000,
+        ..Facts::default()
+    };
+    // Unrelated installations keep the ordinary deadline.
+    assert_eq!(job_wait(&cfg, &f).unwrap().due, (1000 + stall) as f64);
+    let held = Facts {
+        quota_reset: Some((1000, 1000 + 2 * stall)),
+        ..f.clone()
+    };
+    let wait = job_wait(&cfg, &held).unwrap();
+    assert_eq!(wait.due, (1000 + 3 * stall) as f64);
+    assert!(wait.phase.contains("GitHub"));
+    // Unstick turns (the emergency queue) are held by it as well.
+    let unstick = Facts {
+        unstick: true,
+        ..held
+    };
+    assert_eq!(
+        job_wait(&cfg, &unstick).unwrap().due,
+        (1000 + 3 * stall) as f64
+    );
+}
+
+#[test]
 fn a_policy_hold_is_not_a_queue_stall() {
     let cfg: Config = serde_json::from_value(example()).unwrap();
     let f = Facts {

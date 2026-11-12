@@ -2,10 +2,12 @@
 //! branch kept for that leg, into a directory there before nix is, whose
 //! config names it as a substituter it trusts unsigned, but a PR from a fork
 //! restores nothing (its earlier runs could have saved anything under its
-//! own ref); and only a push to the default branch whose gate passed keeps
-//! them, last, under the key and the path restores look for, without its
-//! failure failing the gate, with crates/burrow-keep (whose tests say what
-//! it keeps) from the workflow's own commit. A PR's negative run restores
+//! own ref); and only a push to the default branch keeps them, last, whether
+//! its gate passed or failed (#812: a red default branch that kept nothing
+//! left every later leg to build cold), under the key and the path restores
+//! look for, without its failure failing the gate, with crates/burrow-keep
+//! (whose tests say what it keeps) from the workflow's own commit, told how
+//! the gate went. A PR's negative run restores
 //! every leg's, on the same terms, before installing Nix.
 
 use yaml_serde::Value;
@@ -124,7 +126,8 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     );
     assert!(
         keep["id"] == "keep"
-            && keep["if"] == "steps.keep-tool.outcome == 'success'"
+            && keep["if"] == "${{ !cancelled() && steps.keep-tool.outcome == 'success' }}"
+            && keep["env"]["GATE"] == "${{ steps.gate.outcome }}"
             && keep["continue-on-error"] == true
             && keep["shell"] == "bash"
             && keep["working-directory"] == format!("{dir}/crates")
@@ -132,15 +135,18 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         "{keep:?}"
     );
     // Built as the workspace locks it, on the toolchain it pins, and run on
-    // the directory the kept builds were restored to and are saved from.
+    // the directory the kept builds were restored to and are saved from,
+    // told the gate's outcome: a failed gate's evaluation can't say what of
+    // the kept builds is stale.
     assert_eq!(
         script(keep),
         "cargo build --release --locked --quiet -p burrow-keep\n\
-         \"$CARGO_TARGET_DIR/release/burrow-keep\" \"$RUNNER_TEMP\"\n"
+         \"$CARGO_TARGET_DIR/release/burrow-keep\" --gate \"$GATE\" \"$RUNNER_TEMP\"\n"
     );
     assert!(repo_file("crates/burrow-keep/src/main.rs").is_file());
     assert!(
-        save["if"] == "steps.keep.outcome == 'success'" && save["continue-on-error"] == true,
+        save["if"] == "${{ !cancelled() && steps.keep.outcome == 'success' }}"
+            && save["continue-on-error"] == true,
         "{save:?}"
     );
     assert!(uses(save, "actions/cache/save@"), "{save:?}");
@@ -149,15 +155,31 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     assert_eq!(save["with"]["path"], restore["with"]["path"]);
     assert_eq!(save["with"]["key"], key);
     assert_eq!(save["with"].as_mapping().map(|m| m.len()), Some(2));
-    for (event, git_ref, gate, kept) in [
-        ("push", "refs/heads/main", "success", true),
-        ("push", "refs/heads/main", "failure", false),
-        ("push", "refs/heads/feat", "success", false),
-        ("push", "refs/heads/main", "skipped", false),
-        ("pull_request", "refs/pull/12/merge", "success", false),
-        ("workflow_dispatch", "refs/heads/main", "success", false),
+    // A red gate keeps its builds too (#812), and the steps after the tool
+    // follow it there: each of them would otherwise run only while the job
+    // is still green. None runs once the run is cancelled.
+    let (main, feat, pr) = ("refs/heads/main", "refs/heads/feat", "refs/pull/12/merge");
+    for (event, git_ref, gate, cancelled, kept) in [
+        ("push", main, "success", false, true),
+        ("push", main, "failure", false, true),
+        ("push", main, "failure", true, false),
+        ("push", main, "cancelled", false, false),
+        ("push", feat, "success", false, false),
+        ("push", feat, "failure", false, false),
+        ("push", main, "skipped", false, false),
+        ("pull_request", pr, "success", false, false),
+        ("pull_request", pr, "failure", false, false),
+        ("workflow_dispatch", main, "success", false, false),
     ] {
+        for (step, id) in [(keep, "keep-tool"), (save, "keep")] {
+            let c = ctx(&[
+                ("cancelled()", cancelled.into()),
+                (&format!("steps.{id}.outcome"), "success".into()),
+            ]);
+            assert_eq!(value(text(&step["if"]), &c).truthy(), !cancelled);
+        }
         let mut c = ctx(&[
+            ("cancelled()", cancelled.into()),
             ("inputs.keep-builds", true.into()),
             ("inputs.install-nix", true.into()),
             ("steps.gate.outcome", gate.into()),
@@ -165,7 +187,7 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
             ("github.ref", git_ref.into()),
             ("github.event.repository.default_branch", "main".into()),
         ]);
-        let case = format!("{event} {git_ref} {gate}");
+        let case = format!("{event} {git_ref} {gate} {cancelled}");
         assert_eq!(value(text(&tool["if"]), &c).truthy(), kept, "{case}");
         for off in ["inputs.keep-builds", "inputs.install-nix"] {
             c.insert(off.to_owned(), false.into());

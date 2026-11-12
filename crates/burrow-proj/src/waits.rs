@@ -65,6 +65,8 @@ pub struct Facts {
     pub usage_unreadable: bool,
     /// A Codex refusal waits for this reset, independently of Claude's hold.
     pub usage_reset: Option<(i64, i64)>,
+    /// A GitHub API refusal waits independently of either engine.
+    pub quota_reset: Option<(i64, i64)>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -79,6 +81,13 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let (since, due, phase) = match f.state.as_str() {
         _ if !matches!(f.state.as_str(), "queued" | "running")
             && !f.stopped
+            && let Some((since, reset)) = f.quota_reset =>
+        {
+            kick = Some(crate::watch::kick_for(crate::github_quota::LIMIT));
+            (since, reset + GRACE, "waiting for GitHub quota reset; proj-watch registers saved waits and resumes work then".to_owned())
+        }
+        _ if !matches!(f.state.as_str(), "queued" | "running")
+            && !f.stopped
             && let Some((since, reset)) = f.usage_reset =>
         {
             kick = Some(crate::watch::kick_for(USAGE_LIMIT));
@@ -88,6 +97,23 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
                 "waiting for Codex's usage reset; proj-watch resumes it then".to_owned(),
             )
         }
+        "queued" if let Some((since, reset)) = f.quota_reset => (
+            since,
+            (reset + stall)
+                .max(f.queued + stall)
+                .max(f.spent.as_ref().map_or(0, |s| s.release() + stall)),
+            if reset > now() {
+                format!(
+                    "turn {turn} is waiting for GitHub quota reset at {}",
+                    crate::usage::when(reset)
+                )
+            } else {
+                format!(
+                    "turn {turn} is waiting for a slot after GitHub quota reset at {}",
+                    crate::usage::when(reset)
+                )
+            },
+        ),
         // Out of usage, no turn takes a slot till it's back (usage.rs): each
         // has stallAfterMinutes from then, its reset or the sooner end the
         // record has, which stays a while after.
