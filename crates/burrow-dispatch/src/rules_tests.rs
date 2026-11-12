@@ -480,7 +480,7 @@ fn deploy_unknown() {
     let it = &d.items["deploy/sam/box"];
     assert_eq!(
         (it.since, it.due, it.kick.as_deref()),
-        (T - 300.0, T - 300.0 + 5400.0, None)
+        (T - 300.0, T - 300.0 + 5400.0, Some("dispatch"))
     );
     assert_eq!(d.state.going_live["sam/box"], T - 600.0);
     // Unknown, behind its own PR: the longer wait; its unit failed since,
