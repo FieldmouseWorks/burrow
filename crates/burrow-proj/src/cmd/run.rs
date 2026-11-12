@@ -571,6 +571,10 @@ fn deliver(
 ) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    crate::question::recover(&job).map_err(|e| Fail::new(1, e))?;
+    if crate::question::acceptance_pending(&job).map_err(|e| Fail::new(1, e))? {
+        return Ok(());
+    }
     if !crate::ask::still_waiting(&job, key, question) {
         return Ok(());
     }
@@ -601,6 +605,7 @@ fn resume_one(
     // A job's turns start one at a time, and a look by proj-watch writes
     // back a wait only under the same lock.
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    crate::question::recover(&job).map_err(|e| Fail::new(no, e))?;
     let st = job.state();
     crate::planning::admit(&job).map_err(|e| Fail::new(no, e))?;
     if st == "queued" || st == "running" {

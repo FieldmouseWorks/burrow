@@ -1,28 +1,16 @@
-//! A question's subject. Jobs that ask about the same key share one notice:
-//! the first member still waiting leads and owns the notice, the rest wait on
-//! its answer and add none. The registry lives in host state, outside every
-//! job's writable files. It holds the group's order and its policy (deadline,
-//! one-way), so a member joining after the leader timed out still inherits
-//! them. Who leads is read from it each time rather than stored, so a leader
-//! that stops or is answered hands the notice on.
-//!
-//! Lock order: a job's lock, then the registry's. Readers take neither.
-use super::{Question, host_path, load_raw};
+//! Shared questions: one atomic registry owns each published question's
+//! subject, ordering and effective policy. Job locks precede the registry;
+//! multi-job operations only try locks, never wait while holding another.
+use super::{Question, host_path};
 use crate::{config::Config, job::Job, read, swap};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-pub(crate) const FILE: &str = "question-about";
+mod state;
+use state::{Group, Member, State};
+pub(crate) const FILE: &str = "question-about"; // legacy host metadata
 const MAX_KEY: usize = 120;
 
-#[derive(Default, Serialize, Deserialize)]
-struct Group {
-    due: i64,
-    one_way: bool,
-    members: Vec<String>,
-}
-
-/// One spelling per subject: trimmed, single-spaced, lowercase.
 pub(crate) fn normalize(raw: &str) -> Result<String, String> {
     let key = raw
         .split_whitespace()
@@ -41,13 +29,6 @@ fn dir(cfg: &Config) -> std::path::PathBuf {
     super::control_root(cfg).join(".about")
 }
 
-fn registry(cfg: &Config, key: &str) -> std::path::PathBuf {
-    let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
-    dir(cfg).join(hex)
-}
-
-/// Held while the registry is read and rewritten, so joins, merges and the
-/// question writes they belong to are one step to every other job.
 fn locked(cfg: &Config) -> Result<fs::File, String> {
     use std::os::unix::fs::DirBuilderExt;
     super::ensure_root(cfg)?;
@@ -65,100 +46,131 @@ fn locked(cfg: &Config) -> Result<fs::File, String> {
     Ok(file)
 }
 
-fn group(cfg: &Config, key: &str) -> Option<Group> {
-    serde_json::from_str(&read(&registry(cfg, key))?).ok()
+/// Legacy publications predate embedded identity. Bind them to the opened
+/// file itself, never to the separately allocated question-id marker.
+fn publication(job: &Job, name: &str) -> Option<Question> {
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let file = crate::state_reads::open(&host_path(job, name)).ok()?;
+    let meta = file.metadata().ok()?;
+    let mut text = String::new();
+    file.take(64_001).read_to_string(&mut text).ok()?;
+    if text.len() > 64_000 {
+        return None;
+    }
+    let mut q: Question = serde_json::from_str(&text).ok()?;
+    q.id.get_or_insert_with(|| format!("legacy:{}:{}", meta.dev(), meta.ino()));
+    Some(q)
 }
 
-fn save(cfg: &Config, key: &str, group: &Group) -> Result<(), String> {
-    let path = registry(cfg, key);
-    if group.members.is_empty() {
-        let _ = fs::remove_file(path);
-        return Ok(());
+fn legacy_due(job: &Job) -> i64 {
+    // Released legacy questions kept the exact deadline in their synthetic
+    // completion. Prefer that over reconstructing it with today's timeout.
+    let latest = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+    for n in (1..=latest).rev() {
+        if let Some(result) = read(&job.turn(&n.to_string(), "result"))
+            && let Some(time) = result
+                .strip_prefix("No answer by ")
+                .and_then(|s| s.split_once(". The recommended answer was:").map(|p| p.0))
+        {
+            if let Some(epoch) = time.strip_prefix('@').and_then(|s| s.parse().ok()) {
+                return epoch;
+            }
+            if let Ok(at) = time.replacen(' ', "T", 1).parse::<jiff::Timestamp>() {
+                return at.as_second();
+            }
+        }
     }
-    swap(
-        &path,
-        &serde_json::to_string(group).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
+    read(&host_path(job, "question-since"))
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+        .saturating_add(job.cfg.ask_timeout as i64)
+}
+
+/// Both forms of an unanswered question, with identity read from the same
+/// publication as policy. Released legacy questions are always owner-required.
+fn open_raw(job: &Job) -> Option<Question> {
+    publication(job, "question").or_else(|| {
+        let default = read(&host_path(job, "question-needs-owner"))?;
+        if host_path(job, "question-released").exists() {
+            return publication(job, "question-released");
+        }
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(host_path(job, "question-needs-owner")).ok()?;
+        Some(Question {
+            id: Some(format!("legacy:{}:{}", meta.dev(), meta.ino())),
+            recommendation: super::Recommendation {
+                default,
+                one_way: true,
+                about: None,
+            },
+            due: legacy_due(job),
+        })
+    })
+}
+
+fn identity(job: &Job) -> Option<String> {
+    open_raw(job)?.id.filter(|s| !s.is_empty())
 }
 
 pub(crate) fn key_of(job: &Job) -> Option<String> {
-    read(&host_path(job, FILE))
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+    let state = State::load(job.cfg).ok()?;
+    state.standing(job).map(|(key, _)| key.to_owned())
 }
 
-/// Still waiting on an answer to this subject, timed out for the owner too.
-fn waiting(cfg: &Config, id: &str, key: &str) -> bool {
-    let job = Job::new(cfg, id);
-    key_of(&job).as_deref() == Some(key)
-        && (load_raw(&job).is_some() || host_path(&job, "question-needs-owner").exists())
-}
-
-fn waiting_members(cfg: &Config, key: &str, group: &Group) -> Vec<String> {
-    group
-        .members
-        .iter()
-        .filter(|id| waiting(cfg, id, key))
-        .cloned()
-        .collect()
-}
-
-/// This job's key, its group, and who waits in it: only for a registered member.
-fn standing(job: &Job) -> Option<(Group, Vec<String>)> {
-    let key = key_of(job)?;
-    let group = group(job.cfg, &key)?;
-    group.members.contains(&job.id.to_owned()).then_some(())?;
-    let live = waiting_members(job.cfg, &key, &group);
-    Some((group, live))
-}
-
-/// The job whose notice carries this job's question, when it is another's.
 pub(crate) fn follows(job: &Job) -> Option<String> {
-    let (_, live) = standing(job)?;
-    live.into_iter().next().filter(|leader| leader != job.id)
+    let state = State::load(job.cfg).ok()?;
+    let (_, group) = state.standing(job)?;
+    state
+        .live(job.cfg, group)
+        .first()
+        .map(|m| m.id.clone())
+        .filter(|id| id != job.id)
 }
 
-/// The group's deadline and requirement, over this job's own.
-pub(crate) fn apply(job: &Job, q: &mut Question) {
-    if let Some((group, _)) = standing(job) {
-        q.due = group.due;
-        q.recommendation.one_way |= group.one_way;
+pub(crate) fn open(job: &Job) -> Result<Option<Question>, String> {
+    let Some(mut q) = open_raw(job) else {
+        if host_path(job, "question").exists() || host_path(job, "question-needs-owner").exists() {
+            return Err(format!("{} has unreadable question authority", job.id));
+        }
+        return Ok(None);
+    };
+    apply(job, &mut q)?;
+    Ok(Some(q))
+}
+
+pub(crate) fn apply(job: &Job, q: &mut Question) -> Result<(), String> {
+    if q.id.is_none() {
+        q.id = identity(job);
     }
+    State::load(job.cfg)?.apply(job, q)
 }
 
-/// Jobs waiting on this job's answer when it leads, each with the question it
-/// was asking, so an answer reaches only questions that were open when given.
 pub(crate) fn cohort(job: &Job) -> Vec<(String, String)> {
-    let Some((_, live)) = standing(job) else {
+    let Ok(state) = State::load(job.cfg) else {
         return vec![];
     };
-    if live.first().map(String::as_str) != Some(job.id) {
+    let Some((_, group)) = state.standing(job) else {
+        return vec![];
+    };
+    let live = state.live(job.cfg, group);
+    if live.first().map(|m| m.id.as_str()) != Some(job.id) {
         return vec![];
     }
     live.into_iter()
-        .filter(|id| id != job.id)
-        .map(|id| {
-            let question = question_id(&Job::new(job.cfg, &id));
-            (id, question)
-        })
+        .skip(1)
+        .map(|m| (m.id, m.question))
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn question_id(job: &Job) -> String {
-    read(&host_path(job, "question-id")).unwrap_or_default()
+    identity(job).unwrap_or_default()
 }
 
-/// Still the question, about the subject, that was open when the answer came.
 pub(crate) fn still_waiting(job: &Job, key: &str, question: &str) -> bool {
-    key_of(job).as_deref() == Some(key)
-        && question_id(job) == question
-        && (load_raw(job).is_some() || host_path(job, "question-needs-owner").exists())
+    identity(job).as_deref() == Some(question) && key_of(job).as_deref() == Some(key)
 }
 
-/// Publish this job's question under `key`: its place in the group, the
-/// group's policy over its own, and the question itself, as one step under the
-/// registry's lock. A redeclared open question keeps its place.
 pub(crate) fn publish(
     job: &Job,
     key: &str,
@@ -167,42 +179,41 @@ pub(crate) fn publish(
 ) -> Result<(), String> {
     let _lock = locked(job.cfg)?;
     super::ensure(job)?;
-    let before = group(job.cfg, key).unwrap_or_default();
-    let was_waiting = waiting(job.cfg, job.id, key) && before.members.iter().any(|m| m == job.id);
-    let others: Vec<String> = waiting_members(job.cfg, key, &before)
-        .into_iter()
-        .filter(|id| id != job.id)
-        .collect();
+    let mut state = State::load(job.cfg)?;
+    let before = state.0.get(key);
+    let live = before.map(|g| state.live(job.cfg, g)).unwrap_or_default();
+    let existing = live
+        .iter()
+        .any(|m| m.id == job.id && Some(&m.question) == q.id.as_ref());
     let mut next = Group {
         due: q.due,
         one_way: q.recommendation.one_way,
-        members: vec![],
+        members: live,
     };
-    if !others.is_empty() {
+    if !next.members.is_empty() {
+        let before = before.unwrap();
         next.due = before.due;
         next.one_way |= before.one_way;
     }
-    next.members = if was_waiting {
-        // Same question again: same place, even behind or ahead of others.
-        before
-            .members
-            .iter()
-            .filter(|id| *id == job.id || others.contains(id))
-            .cloned()
-            .collect()
-    } else {
-        others.into_iter().chain([job.id.to_owned()]).collect()
-    };
+    if !existing {
+        next.members.retain(|m| m.id != job.id);
+        next.members.push(Member {
+            id: job.id.to_owned(),
+            question: q.id.clone().ok_or("question has no identity")?,
+        });
+    }
+    for group in state.0.values_mut() {
+        group.members.retain(|m| m.id != job.id);
+    }
     q.due = next.due;
     q.recommendation.one_way = next.one_way;
-    // Registered first: a crash before the question is written leaves a
-    // member that is not waiting, which the next join drops.
-    save(job.cfg, key, &next)?;
-    swap(&host_path(job, FILE), key).map_err(|e| e.to_string())?;
+    state.0.insert(key.to_owned(), next);
+    // Commit binding and policy before publication. Redeclarations retain the
+    // identity, so even a crash here keeps their constraints authoritative.
+    state.save(job.cfg)?;
     write(&q)
 }
 
-/// The footer a leader's notice carries: who else waits on the same answer.
 pub(crate) fn footer(job: &Job) -> String {
     let others: Vec<String> = cohort(job).into_iter().map(|(id, _)| id).collect();
     if others.is_empty() {
@@ -217,58 +228,82 @@ pub(crate) fn footer(job: &Job) -> String {
     )
 }
 
-/// The one-time pass for questions asked before keys existed: put these jobs'
-/// open questions under one subject, the newest leading so its wording is the
-/// notice that stays. Their other notices close, linking to it. Members the
-/// subject already has stay in it, behind the ones named.
 pub(crate) fn merge(cfg: &Config, key: &str, ids: &[String]) -> Result<String, String> {
     let key = normalize(key)?;
-    let mut ids: Vec<String> = ids.to_vec();
+    let mut ids = ids.to_vec();
     ids.sort();
     ids.dedup();
-    // Job locks first, in id order, then the registry's.
+    if ids.is_empty() {
+        return Err("name at least one job to merge".into());
+    }
     let mut held = Vec::new();
     for id in &ids {
         let job = Job::new(cfg, id);
         if !job.dir.is_dir() {
             return Err(format!("no job {id}"));
         }
-        held.push(job.lock().map_err(|e| e.to_string())?);
+        // Admission may hold any other job's lock while inspecting this one.
+        // Never block here with a lock it could need: abandon this attempt.
+        held.push(
+            job.try_lock()
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("{id} is busy; retry the merge"))?,
+        );
+    }
+    for id in &ids {
+        crate::question::recover(&Job::new(cfg, id))?;
     }
     let _lock = locked(cfg)?;
+    let mut state = State::load(cfg)?;
     let mut named = Vec::new();
     for id in &ids {
         let job = Job::new(cfg, id);
-        let Some(q) = load_raw(&job) else {
-            return Err(format!("{id} has no open question to merge"));
-        };
+        let mut q = open_raw(&job).ok_or_else(|| format!("{id} has no open question to merge"))?;
+        state.apply(&job, &mut q)?;
+        let question = identity(&job).ok_or_else(|| format!("{id} has no question identity"))?;
         let since = read(&host_path(&job, "question-since"))
-            .and_then(|s| s.trim().parse::<i64>().ok())
+            .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
-        named.push((since, id.clone(), q));
+        named.push((
+            since,
+            Member {
+                id: id.clone(),
+                question,
+            },
+            q,
+        ));
     }
-    named.sort_by(|a, b| (b.0, &b.1).cmp(&(a.0, &a.1)));
-    let before = group(cfg, &key).unwrap_or_default();
-    let kept: Vec<String> = waiting_members(cfg, &key, &before)
-        .into_iter()
-        .filter(|id| !ids.contains(id))
-        .collect();
-    let leader = named[0].1.clone();
-    let joined = Group {
-        due: if kept.is_empty() {
-            named[0].2.due
-        } else {
-            before.due
-        },
-        one_way: before.one_way || named.iter().any(|n| n.2.recommendation.one_way),
-        members: named.iter().map(|n| n.1.clone()).chain(kept).collect(),
+    named.sort_by(|a, b| (b.0, &b.1.id).cmp(&(a.0, &a.1.id)));
+    let before = state.0.get(&key);
+    let live = before.map(|g| state.live(cfg, g)).unwrap_or_default();
+    let due = if live.is_empty() {
+        named[0].2.due
+    } else {
+        before.unwrap().due
     };
-    for (_, id, _) in &named {
-        let job = Job::new(cfg, id);
-        super::ensure(&job)?;
-        swap(&host_path(&job, FILE), &key).map_err(|e| e.to_string())?;
+    let one_way = (!live.is_empty() && before.unwrap().one_way)
+        || named.iter().any(|n| n.2.recommendation.one_way);
+    let members = named
+        .iter()
+        .map(|n| n.1.clone())
+        .chain(live.into_iter().filter(|m| !ids.contains(&m.id)))
+        .collect();
+    let leader = named[0].1.id.clone();
+    for group in state.0.values_mut() {
+        group.members.retain(|m| !ids.contains(&m.id));
     }
-    save(cfg, &key, &joined)?;
+    state.0.insert(
+        key,
+        Group {
+            due,
+            one_way,
+            members,
+        },
+    );
+    // All source removals, destination membership and effective policies are
+    // one rename. A failed or interrupted write exposes the complete old state.
+    state.save(cfg)?;
+    drop(_lock);
     drop(held);
     crate::job::kick(cfg, ["proj-watch".to_owned(), "autoland".to_owned()]);
     Ok(leader)

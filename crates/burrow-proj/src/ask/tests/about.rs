@@ -1,6 +1,6 @@
 use super::*;
 
-fn fixture() -> (tempfile::TempDir, Config) {
+pub(crate) fn fixture() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
     cfg.jobs = dir.path().join("jobs");
@@ -25,7 +25,7 @@ fn fixture() -> (tempfile::TempDir, Config) {
 }
 
 /// The job's turn 1 ends asking `key`, as proj does when the turn finishes.
-fn asks(cfg: &Config, id: &str, key: Option<&str>, one_way: bool) {
+pub(crate) fn asks(cfg: &Config, id: &str, key: Option<&str>, one_way: bool) {
     let job = Job::new(cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
     crate::policy::bind(
@@ -62,7 +62,7 @@ fn asks(cfg: &Config, id: &str, key: Option<&str>, one_way: bool) {
     finish(cfg, &job, "ask").unwrap();
 }
 
-fn calls(dir: &tempfile::TempDir) -> String {
+pub(crate) fn calls(dir: &tempfile::TempDir) -> String {
     fs::read_to_string(dir.path().join("calls")).unwrap_or_default()
 }
 
@@ -80,8 +80,8 @@ fn two_jobs_asking_about_one_key_post_one_notice_and_one_reply_resumes_both() {
     assert_eq!(seen.matches("ensure|").count(), 2 - 1, "{seen}");
     assert!(seen.contains("proj-question-j1-1"), "{seen}");
     assert!(
-        !seen.contains("proj-question-j2"),
-        "never posted, so nothing to close: {seen}"
+        seen.contains("close|proj-question-j2"),
+        "closure is confirmed even without delivery metadata: {seen}"
     );
     assert!(
         seen.contains("waiting on this answer for 1 other job: j2"),
@@ -196,7 +196,7 @@ fn keys_are_short_single_lines() {
     );
 }
 
-fn notified(cfg: &Config, ids: &[&str]) {
+pub(crate) fn notified(cfg: &Config, ids: &[&str]) {
     for id in ids {
         let job = Job::new(cfg, id);
         let _held = job.lock().unwrap();
@@ -207,25 +207,32 @@ fn notified(cfg: &Config, ids: &[&str]) {
 #[test]
 fn a_join_after_a_one_way_leader_timed_out_keeps_its_policy_and_deadline() {
     let (_dir, cfg) = fixture();
-    asks(&cfg, "j1", Some("profile"), true);
-    let due = load(&Job::new(&cfg, "j1")).unwrap().due;
-    let mut q = load_raw(&Job::new(&cfg, "j1")).unwrap();
-    q.due = crate::now() - 1;
+    asks(&cfg, "j1", None, true);
+    let j1 = Job::new(&cfg, "j1");
+    let due = crate::now() - 1;
+    let mut q = load_raw(&j1).unwrap();
+    q.due = due;
     fs::write(
-        host_path(&Job::new(&cfg, "j1"), "question"),
+        host_path(&j1, "question"),
         serde_json::to_string(&q).unwrap(),
     )
     .unwrap();
-    // Group policy is the registry's, so the stale file's deadline is not it.
-    assert_eq!(load(&Job::new(&cfg, "j1")).unwrap().due, due);
-    let j1 = Job::new(&cfg, "j1");
-    let _held = j1.lock().unwrap();
-    expire(&cfg, &j1).unwrap();
-    drop(_held);
-    assert!(host_path(&j1, "question-needs-owner").exists() || load(&j1).is_some());
-    // Force the timed-out state the group would be in.
-    fs::remove_file(host_path(&j1, "question")).unwrap();
-    fs::write(host_path(&j1, "question-needs-owner"), "leave it").unwrap();
+    merge(&cfg, "profile", &["j1".into()]).unwrap();
+    // A stale raw deadline cannot postpone the shared question's expiry.
+    q.due = crate::now() + 3600;
+    fs::write(
+        host_path(&j1, "question"),
+        serde_json::to_string(&q).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(load(&j1).unwrap().due, due);
+    {
+        let _held = j1.lock().unwrap();
+        expire(&cfg, &j1).unwrap();
+    }
+    assert!(host_path(&j1, "question-needs-owner").exists());
+    assert!(load(&j1).is_none());
+    assert_eq!(j1.turns().as_deref(), Some("2"));
     asks(&cfg, "j2", Some("profile"), false);
     let q2 = load(&Job::new(&cfg, "j2")).unwrap();
     assert!(q2.recommendation.one_way);
@@ -327,3 +334,9 @@ fn a_hidden_notice_comes_back_when_its_job_takes_the_lead() {
         calls(&dir)
     );
 }
+
+#[path = "migration.rs"]
+mod migration;
+
+#[path = "notices.rs"]
+mod notices;

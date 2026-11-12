@@ -52,6 +52,8 @@ impl Recommendation {
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Question {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub recommendation: Recommendation,
     pub due: i64,
 }
@@ -76,7 +78,7 @@ pub(crate) fn load_raw(job: &Job) -> Option<Question> {
 /// The open question, under its group's deadline and one-way requirement.
 pub(crate) fn load(job: &Job) -> Option<Question> {
     let mut q = load_raw(job)?;
-    about::apply(job, &mut q);
+    about::apply(job, &mut q).ok()?;
     Some(q)
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
@@ -95,20 +97,19 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
         let mut recommendation: Recommendation =
             serde_json::from_str(&read(&job.path("ask.next")).ok_or(USAGE)?)
                 .map_err(|e| e.to_string())?;
-        if load(job).is_some_and(|q| q.recommendation.one_way) {
+        let prior = about::open(job)?;
+        if prior.as_ref().is_some_and(|q| q.recommendation.one_way) {
             recommendation.one_way = true;
         }
         // Asking again without the key stays under the one it has.
         if recommendation.about.is_none() {
             recommendation.about = about::key_of(job);
         }
-        let due = load_raw(job)
+        let due = prior
+            .as_ref()
             .map(|q| q.due)
             .unwrap_or_else(|| crate::now().saturating_add(cfg.ask_timeout as i64));
-        let q = Question {
-            recommendation,
-            due,
-        };
+
         if !host_path(job, "question-text").exists() {
             swap(
                 &host_path(job, "question-id"),
@@ -136,6 +137,16 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
         }
+        let q = Question {
+            id: Some(
+                prior
+                    .and_then(|q| q.id)
+                    .or_else(|| read(&host_path(job, "question-id")))
+                    .ok_or("question has no identity")?,
+            ),
+            recommendation,
+            due,
+        };
         let write = |q: &Question| {
             swap(
                 &host_path(job, "question"),
@@ -159,6 +170,7 @@ pub(crate) fn clear(job: &Job) {
     for name in [
         "question",
         "question-needs-owner",
+        "question-released",
         "question-text",
         "question-since",
         "question-id",
@@ -191,6 +203,11 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         // its default. Record a completed host turn for the normal issue writer.
         let n = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
         let ntext = n.to_string();
+        swap(
+            &host_path(job, "question-released"),
+            &serde_json::to_string(&q).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
         fs::write(
             host_path(job, "question-needs-owner"),
             &q.recommendation.default,
@@ -298,7 +315,8 @@ fn summary(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod about_tests;
+#[path = "ask/tests/about.rs"]
+pub(crate) mod about_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +349,7 @@ mod tests {
         fs::write(job.turn("1", "end"), "ask\n").unwrap();
         fs::write(job.turn("1", "outcome"), "done\n").unwrap();
         let q = Question {
+            id: None,
             recommendation: Recommendation {
                 default: "keep the change".into(),
                 one_way,

@@ -38,6 +38,7 @@ struct Receipt {
 const METADATA: &[&str] = &[
     "question",
     "question-needs-owner",
+    "question-released",
     "question-text",
     "question-since",
     "question-id",
@@ -478,15 +479,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         let hidden = job.turn(turn, "question-hidden");
         let outstanding = !finished && active.as_deref() == Some(turn);
         if outstanding && let Some(leader) = &leader {
-            if hidden.exists() {
-                continue;
-            }
-            let sent_marker = job.turn(turn, "question-sent");
-            if !sent_marker.exists() {
-                // Never posted: nothing to close.
-                if let Err(e) = crate::state_reads::write(&hidden, "hidden\n") {
-                    errors.push(e.to_string());
-                }
+            if read(&hidden).as_deref() == Some("closed") {
                 continue;
             }
             retry = true;
@@ -503,7 +496,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 .stdout(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.code() == Some(1))
-                && let Err(e) = crate::state_reads::write(&hidden, "hidden\n")
+                && let Err(e) = crate::state_reads::write(&hidden, "closed\n")
             {
                 errors.push(e.to_string());
             }
@@ -548,14 +541,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                 .status()
         };
         match result {
-            Ok(s) if s.success() => {
-                if !closing.exists()
-                    && let Err(e) =
-                        crate::state_reads::write(job.turn(turn, "question-sent"), "sent\n")
-                {
-                    errors.push(e.to_string());
-                }
-            }
+            Ok(s) if s.success() => (),
             other => {
                 errors.push(format!("question notification: {other:?}"));
                 continue;
