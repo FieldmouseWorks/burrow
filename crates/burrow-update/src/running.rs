@@ -45,12 +45,13 @@ impl Running {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Already {
     /// A bump of HOST-update's own that it put live itself, through the
-    /// switch and the health check: put it up (a PR in a train repo, main
-    /// otherwise), once the VM tests pass on HEAD's tree.
+    /// switch and the health check: push it to main, once the VM tests pass
+    /// on HEAD's tree. (Never in a train repo, where a bump isn't switched
+    /// to.)
     Up,
     /// One someone else put live: hold it until main has it.
     Hold,
-    /// Riding its PR, or nothing new: nothing to do.
+    /// Nothing new: nothing to do.
     Current,
 }
 
@@ -126,26 +127,19 @@ pub fn main_runs(cfg: &Config, run: &Running, main: &str) -> bool {
 
 /// Whether `new`, HEAD's system, runs already, and if so what to do with it.
 /// It runs already when it's that very system, or, when HEAD is a commit
-/// this run made (`made`: a bump, or the merge that rides its PR on main),
+/// this run made (`made`: a bump),
 /// the same one apart from its stamp. Each run makes that commit afresh, at
 /// its own time, so its stamp never matches the one an earlier run put
 /// live, even when nothing that runs differs. (Of HEAD as main itself, the
 /// run asked before building, unless it's forced.)
 ///
 /// What runs already is put up only once HOST-update put that system live
-/// itself (its record in `deployed`), and not while it rides its PR
-/// (`riding`).
-pub fn runs_already(
-    cfg: &Config,
-    run: &Running,
-    new: &str,
-    made: bool,
-    riding: bool,
-) -> Option<Already> {
+/// itself (its record in `deployed`).
+pub fn runs_already(cfg: &Config, run: &Running, new: &str, made: bool) -> Option<Already> {
     if new != run.current && !(made && same_as_running(cfg, run)) {
         return None;
     }
-    Some(if riding || !made {
+    Some(if !made {
         Already::Current
     } else if cfg.recorded("deployed") == run.current {
         Already::Up
@@ -167,8 +161,7 @@ pub fn live_through(cfg: &Config, main: &str) -> String {
 /// That every commit of main up to `main` is in `running`, the system that
 /// runs: what a run found, for burrow-dispatch, which counts main's commits
 /// past it as not live yet (live.json). The stamp can't say it: a system
-/// that runs already keeps an older commit's, and a ride's is a merge never
-/// pushed. It names the system, so a switch to another since, by anyone,
+/// that runs already keeps an older commit's. It names the system, so a switch to another since, by anyone,
 /// leaves it saying nothing. Written whole, or not at all.
 pub fn live_at(cfg: &Config, main: &str, running: &str) -> Result<(), String> {
     let live = cfg.state.join("live.json");

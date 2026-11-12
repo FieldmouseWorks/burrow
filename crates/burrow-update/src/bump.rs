@@ -193,7 +193,7 @@ pub fn commit(cfg: &Config, inputs: &[String]) -> bool {
         &format!("deps: update {what}"),
         "-m",
         &format!(
-            "Pushed by {} after the build, the VM tests and the health check passed.",
+            "Pushed by {} after the build and the VM tests passed.",
             cfg.update
         ),
     ])

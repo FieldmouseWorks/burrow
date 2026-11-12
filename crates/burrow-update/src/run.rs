@@ -9,8 +9,11 @@
 //! It works in its own clone (`work`), never in the operator's checkout, and
 //! holds off while a switch is pending or while the box runs changes that
 //! aren't on main yet. In a repo whose PRs land through its merge train,
-//! what it would push goes up as a PR instead (train.rs), and it rides that
-//! PR until it lands, or puts a fresh bump on it when a check fails on it.
+//! what it would push goes up as a PR instead (train.rs), built and
+//! VM-tested but never switched to: only main goes live, so a bump is live
+//! after it lands, like any other change, and one held for a finding never
+//! strands the box. While that PR is open it brings in nothing newer, unless
+//! a check fails on it: then a fresh bump replaces its head.
 //!
 //! Its steps, in order: this file's, to the build; vm_tests.rs, the VM
 //! tests; live.rs, live and confirmed; and this file's again, put up.
@@ -61,14 +64,13 @@ pub struct Run<'a> {
     /// What the machine ran when it began.
     pub(crate) running: Running,
     pub(crate) inputs: Vec<String>,
-    /// Its PR, in a train repo, when it rides it, and when its head is
-    /// stuck (and why) and a fresh bump may replace it.
-    pub(crate) riding: Option<u64>,
+    /// In a train repo, its open PR's head when that is stuck (and why): a
+    /// fresh bump may replace it.
     pub(crate) replacing: Option<(Pr, train::Stuck)>,
-    /// Its open PR's number, while it holds off for that to land.
+    /// Its open PR's number, while it brings in nothing newer for that to
+    /// land (main still deploys).
     pub(crate) behind: Option<u64>,
-    /// HEAD is a commit of this run's: a bump, or the merge that rides its
-    /// PR.
+    /// HEAD is a commit of this run's: a bump.
     pub(crate) changed: bool,
     /// What it couldn't fetch, and what didn't build.
     pub(crate) unfetched: Vec<String>,
@@ -139,7 +141,6 @@ pub(crate) fn once(cfg: &Config, api: &mut dyn Api, force: bool) -> u8 {
             rev: None,
         },
         inputs: Vec::new(),
-        riding: None,
         replacing: None,
         behind: None,
         changed: false,
@@ -231,8 +232,8 @@ impl Run<'_> {
     /// clean copy of main, and whether the box runs main, or something main
     /// has since moved past: then it's this run's to update. If it runs
     /// changes that aren't on main, someone is mid-work: it holds. In a
-    /// train repo, its PR, when it's open: main with that on top, and
-    /// nothing fresh, unless it's stuck on a head of its own (red, or held
+    /// train repo, its PR, when it's open: nothing fresh is brought in (main
+    /// still deploys), unless it's stuck on a head of its own (red, or held
     /// by an open finding), which a fresh bump replaces.
     fn begin(&mut self) -> Step {
         let cfg = self.cfg;
@@ -346,26 +347,24 @@ impl Run<'_> {
             }
             Ok(None) => {
                 self.behind = Some(pr.number);
-                if let Err(why) = train::ride(cfg, t, &pr) {
-                    return Err(self.end(Outcome::Held, &why));
-                }
-                self.riding = Some(pr.number);
                 Ok(())
             }
         }
     }
 
     /// What's new upstream: every flake input, and Claude Code's latest
-    /// release. Riding its PR, nothing: what's new is what the PR has. With
-    /// nothing new, main running and no force, it's up to date.
+    /// release, except while main isn't live yet (that deploys first) or an
+    /// open PR of its own isn't stuck (a new head would take it out of the
+    /// train). With nothing new, main running and no force, it's up to date.
     fn bump(&mut self) -> Step {
         let cfg = self.cfg;
         self.inputs = bump::inputs(cfg)?;
         fs::write(cfg.state.join("logs/update.log"), "")
             .map_err(|e| Broke(format!("logs/update.log: {e}")))?;
-        if self.riding.is_some() {
-            self.changed = self.git(&["rev-parse", "HEAD"])? != self.main;
-        } else {
+        let train = cfg.train.is_some();
+        let main_first =
+            train && self.behind.is_none() && !running::main_runs(cfg, &self.running, &self.main);
+        if self.behind.is_none() && !main_first {
             for i in self.inputs.iter().map(String::as_str).chain([CLAUDE]) {
                 if !bump::update_one(cfg, i) {
                     self.unfetched.push(i.to_string());
@@ -375,49 +374,29 @@ impl Run<'_> {
         }
         if !self.changed && !self.memo.force && running::main_runs(cfg, &self.running, &self.main) {
             running::live_at(cfg, &self.main, &self.running.current).map_err(Broke)?;
-            return Err(self.end(Outcome::Current, "up to date"));
+            return Err(self.end(
+                Outcome::Current,
+                &format!("up to date{}", self.behind_said()),
+            ));
         }
         Ok(())
     }
 
     /// The build. If everything at once doesn't, it takes what does, one
     /// input at a time, so one broken input never holds back another's
-    /// security fix. Riding, main with its PR on top builds or the PR's
-    /// branch gets a fix.
+    /// security fix.
     fn build(&mut self) -> Step {
         let cfg = self.cfg;
         let logs = cfg.state.join("logs");
-        if let Some(n) = self.riding {
-            match self.built() {
-                Some(new) => self.new = new,
-                None => {
-                    if !self.memo.failed_before("build") {
-                        self.memo.failed("build")?;
-                    }
-                    let e = self.end(
-                        Outcome::Failed,
-                        &format!("main with its PR #{n} on top doesn't build"),
-                    );
-                    self.dispatch(
-                        "build-riding",
-                        &format!(
-                            "{update}: {origin} main ({main}) with {update}'s own PR #{n} merged on top doesn't build; the log is {log}. Fix it on that PR's branch, in your own worktree, so the train can land it; {update} holds off until it has. Never push to main.",
-                            update = cfg.update,
-                            origin = cfg.origin,
-                            main = self.main,
-                            log = logs.join("build.log").display(),
-                        ),
-                    );
-                    return Err(e);
-                }
-            }
-        }
-        settled(cfg, "build-riding", "main with its PR on top builds.");
-        if self.riding.is_none() {
-            match self.built() {
-                Some(new) => self.new = new,
-                None => self.input_by_input()?,
-            }
+        // Riding a PR is gone: only main is ever live. Close what it left.
+        settled(
+            cfg,
+            "build-riding",
+            &format!("{} no longer rides its PR.", cfg.update),
+        );
+        match self.built() {
+            Some(new) => self.new = new,
+            None => self.input_by_input()?,
         }
         if self.failed.is_empty() {
             settled(cfg, "build-inputs", "Cleared by a later run.");
@@ -525,6 +504,10 @@ impl Run<'_> {
         let Some((pr, stuck)) = &self.replacing else {
             return Ok(());
         };
+        if !self.changed {
+            // Main deploys first; the bump comes on a later run.
+            return Ok(());
+        }
         let short: Vec<String> = self.unfetched.iter().chain(&self.failed).cloned().collect();
         match train::replaces(self.cfg, pr, &self.main, &short) {
             Ok(()) => Ok(()),
@@ -538,7 +521,9 @@ impl Run<'_> {
         }
     }
 
-    /// Running already, and not on main: what a run before put live (its
+    /// In a train repo a bump is never switched to, so it has no running
+    /// system to match: it goes on to the VM tests and up as its PR.
+    /// Otherwise, running already, and not on main: what a run before put live (its
     /// PR didn't open, or closed, or the train took it while that run was
     /// testing a newer one, or its push to main was refused), or a bump
     /// that changes only what the checks use. It goes up with what any
@@ -551,13 +536,10 @@ impl Run<'_> {
     /// commit's stamp.
     fn already(&mut self) -> Step {
         let cfg = self.cfg;
-        let already = running::runs_already(
-            cfg,
-            &self.running,
-            &self.new,
-            self.changed,
-            self.riding.is_some(),
-        );
+        if cfg.train.is_some() && self.changed {
+            return Ok(());
+        }
+        let already = running::runs_already(cfg, &self.running, &self.new, self.changed);
         match already {
             None => Ok(()),
             Some(Already::Up) => {
@@ -581,7 +563,7 @@ impl Run<'_> {
                     Outcome::Current,
                     &format!(
                         "nothing new builds; up to date{}{}",
-                        self.riding_said(),
+                        self.behind_said(),
                         self.held_back()
                     ),
                 ))
@@ -589,9 +571,9 @@ impl Run<'_> {
         }
     }
 
-    pub(crate) fn riding_said(&self) -> String {
-        self.riding
-            .map(|n| format!(" (riding #{n})"))
+    pub(crate) fn behind_said(&self) -> String {
+        self.behind
+            .map(|n| format!(" (#{n} waits for the train)"))
             .unwrap_or_default()
     }
 
@@ -605,7 +587,7 @@ impl Run<'_> {
 
     /// The commit says what was skipped, before it can go up.
     fn amend(&mut self) -> Step {
-        if self.untested.is_empty() || !self.changed || self.riding.is_some() {
+        if self.untested.is_empty() || !self.changed {
             return Ok(());
         }
         let what = self.what()?;
@@ -617,10 +599,15 @@ impl Run<'_> {
             &format!("deps: update {what}"),
             "-m",
             &format!(
-                "Pushed by {} without the VM test {}, which fails on main itself, because it fixes:\n{}\nIt built and stayed healthy live.",
+                "Pushed by {} without the VM test {}, which fails on main itself, because it fixes:\n{}\n{}",
                 self.cfg.update,
                 self.untested.join(" "),
-                self.fixes.join("\n")
+                self.fixes.join("\n"),
+                if self.cfg.train.is_some() {
+                    "It built; it goes live after it lands."
+                } else {
+                    "It built and stayed healthy live."
+                }
             ),
         ])?;
         Ok(())
@@ -631,37 +618,18 @@ impl Run<'_> {
     /// `deployed` is how the next run knows it's this one.)
     fn put_up(&mut self) -> Step {
         let cfg = self.cfg;
+        if self.changed && cfg.train.is_some() {
+            return self.propose();
+        }
         fs::write(cfg.state.join("deployed"), format!("{}\n", self.new))
             .map_err(|e| Broke(format!("deployed: {e}")))?;
         // What went live, in words: pushing can rebase it onto what hasn't.
         let went = self.what()?;
-        if let Some(t) = &cfg.train {
-            if self.riding.is_some() || !self.changed {
-                // Riding, or nothing new on main: nothing to put up.
-            } else if let Some((pr, _)) = &self.replacing {
-                // Up already, before its confirm, unless it was live before
-                // this run: then it goes up now, and a refusal leaves the
-                // box as this run found it.
-                if self.live {
-                    match train::replace(cfg, t, self.api, pr) {
-                        Ok(url) => self.url = Some(url),
-                        Err(why) => println!("{why}"),
-                    }
-                }
-            } else {
-                match train::propose(cfg, t, self.api) {
-                    Ok(url) => self.url = Some(url),
-                    Err(why) => {
-                        eprintln!("{why}");
-                        println!("its PR didn't open; the next run opens it");
-                    }
-                }
-            }
-            if !self.changed {
-                let head = self.git(&["rev-parse", "HEAD"])?;
-                fs::write(cfg.state.join("deployed-main"), format!("{head}\n"))
-                    .map_err(|e| Broke(format!("deployed-main: {e}")))?;
-            }
+        if cfg.train.is_some() {
+            // Main itself, put live: nothing to put up.
+            let head = self.git(&["rev-parse", "HEAD"])?;
+            fs::write(cfg.state.join("deployed-main"), format!("{head}\n"))
+                .map_err(|e| Broke(format!("deployed-main: {e}")))?;
         } else if let Err(why) = push::push_main(cfg) {
             println!("{why}");
         }
@@ -671,7 +639,7 @@ impl Run<'_> {
         let message = format!(
             "{}live and confirmed: {went}{}{}{}",
             if self.live { "already " } else { "" },
-            self.riding_said(),
+            self.behind_said(),
             self.url
                 .as_ref()
                 .map(|u| format!(" (up as {u})"))
@@ -691,6 +659,39 @@ impl Run<'_> {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// In a train repo, a bump that built and passed the VM tests goes up as
+    /// its PR (a fresh head on the stuck one) and nowhere else: the box
+    /// keeps running main, and the bump goes live after the train lands it,
+    /// as main.
+    fn propose(&mut self) -> Step {
+        let cfg = self.cfg;
+        let Some(t) = &cfg.train else { return Ok(()) };
+        let went = self.what()?;
+        let put = match &self.replacing {
+            Some((pr, _)) => train::replace(cfg, t, self.api, pr),
+            None => train::propose(cfg, t, self.api),
+        };
+        match put {
+            Ok(url) => self.url = Some(url),
+            Err(why) => {
+                eprintln!("{why}");
+                return Err(self.end(
+                    Outcome::Held,
+                    &format!(
+                        "{went} built and passed, but its PR didn't go up; the next run tries again"
+                    ),
+                ));
+            }
+        }
+        let message = format!(
+            "tested, not live (it goes live after it lands): {went} (up as {}){}",
+            self.url.as_deref().unwrap_or(""),
+            self.held_back()
+        );
+        note(cfg, Outcome::Ok, &message, self.behind);
         Ok(())
     }
 

@@ -6,10 +6,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::Broke;
 use crate::dispatch::{open, settled};
 use crate::run::{Run, Step, name};
 use crate::status::Outcome;
-use crate::{Broke, train};
 
 /// How long the health check waits for the box to settle after a switch,
 /// in seconds.
@@ -21,7 +21,9 @@ const DOWNGRADE: i32 = 3;
 
 impl Run<'_> {
     pub(crate) fn go_live(&mut self) -> Step {
-        if self.live {
+        // A bump in a train repo isn't switched to: it goes live after it
+        // lands, as main.
+        if self.live || (self.changed && self.cfg.train.is_some()) {
             return Ok(());
         }
         let cfg = self.cfg;
@@ -130,21 +132,6 @@ impl Run<'_> {
         // as ours.
         if self.claude_version() != claude_before && !self.claude_answers() {
             self.warn("warning: the new Claude Code didn't answer a one-line prompt");
-        }
-
-        // A fresh bump for its stuck PR goes up as that PR's head before
-        // it's confirmed: refused (a fix, a rerun or a resolve got there
-        // first), it goes straight back, so the box never stays on what
-        // nothing will land, and the next run rides or holds for that PR as
-        // usual.
-        if let (Some(t), Some((pr, _))) = (&cfg.train, &self.replacing) {
-            match train::replace(cfg, t, self.api, pr) {
-                Ok(url) => self.url = Some(url),
-                Err(why) => {
-                    self.back(&log);
-                    return Err(self.end(Outcome::Held, &format!("{why}; reverted")));
-                }
-            }
         }
 
         let (out, err) = to(&log, true)?;
