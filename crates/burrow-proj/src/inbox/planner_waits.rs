@@ -48,22 +48,34 @@ impl Pass<'_> {
     /// snapshot.
     pub(super) fn planner_wait(&self, repo: &str, n: &str, why: Option<&str>) {
         let dir = self.inbox.state.join(".triage-waiting");
-        let f = dir.join(format!("{}-{n}", key(repo)));
-        let had = read(&f);
+        let repo_key = key(repo).to_lowercase();
+        let f = dir.join(format!("{repo_key}-{n}"));
+        let variants: Vec<_> = self
+            .planner_wait_records()
+            .into_iter()
+            .filter(|(kept, number, _)| kept == &repo_key && number == n)
+            .map(|(_, _, path)| path)
+            .collect();
         match why {
             Some(why) => {
                 let line = format!("{repo}#{n}: {why}");
-                if had.as_deref() != Some(line.as_str()) {
+                if read(&f).as_deref() != Some(line.as_str()) {
                     eprintln!("proj-inbox: {line}");
-                    if fs::create_dir_all(&dir).is_ok() {
-                        let _ = fs::write(&f, &line);
+                    if fs::create_dir_all(&dir).is_err() || fs::write(&f, &line).is_err() {
+                        return;
                     }
+                }
+                // Remove legacy spellings only after the replacement exists.
+                for path in variants.into_iter().filter(|path| path != &f) {
+                    let _ = fs::remove_file(path);
                 }
             }
             None => {
-                if had.is_some() {
+                if !variants.is_empty() {
                     eprintln!("proj-inbox: {repo}#{n}: no longer waiting for sorting");
-                    let _ = fs::remove_file(&f);
+                    for path in variants {
+                        let _ = fs::remove_file(path);
+                    }
                 }
             }
         }

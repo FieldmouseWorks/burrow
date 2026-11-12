@@ -316,3 +316,163 @@ fn an_unfinished_verdict_does_not_hold_other_repos_slots() {
         json!([said])
     );
 }
+
+// A fresh fixture for each consumer prevents one observation from publishing
+// the hold before another consumer exercises the same transition.
+fn consumer(b: &Box, which: &str, expected: bool) {
+    match which {
+        "planning" => {
+            b.pass().triage("sam/box", &[issue(9, "sam", &[])]).unwrap();
+            assert_eq!(wait(b, "sam/box", "9").exists(), expected, "{which}");
+        }
+        "resume" => {
+            b.job("candidate", "done", "kept");
+            record(b, "sam/box", 88, "candidate");
+            assert_eq!(
+                matches!(
+                    inbox::resumption::admission(&b.cfg, &Job::new(&b.cfg, "candidate")).unwrap(),
+                    inbox::resumption::Resume::Waiting
+                ),
+                expected,
+                "{which}"
+            );
+        }
+        "snapshot" => {
+            let view = inbox::view::view(&b.cfg, 15);
+            assert_eq!(
+                view.slots
+                    .iter()
+                    .any(|s| s.kind == crate::snapshot::SlotKind::Sorting && s.holder.is_some()),
+                expected,
+                "{which}"
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn completion_publishes_holds_before_capacity_can_be_released() {
+    for which in ["planning", "resume", "snapshot"] {
+        for hold in ["question", "await", "recovered-await"] {
+            let b = single_slot();
+            b.job("s1", "done", "kept");
+            record(&b, "sam/game", 3, "s1");
+            let job = Job::new(&b.cfg, "s1");
+            let (unit, path, value) = match hold {
+                "question" => (job.unit(), job.turn("1", "end"), "ask"),
+                "await" => (job.unit(), job.path("await"), "sam/game#4"),
+                _ => (job.end_unit(), job.path("await"), "sam/game#4"),
+            };
+            // Finish the turn or its _ended recovery during a lifecycle query.
+            // Neither turn::exec nor cmd::finish holds the launcher lock when
+            // publishing these final holds.
+            burrow_test::executable(
+                &b.cfg.tools.systemctl,
+                format!(
+                    r#"#!/bin/sh
+case "$*" in
+  *is-active*{unit}*|*ActiveState*{unit}*)
+    printf '%s' '{value}' >'{path}'
+    echo inactive
+    case "$*" in *is-active*) exit 3;; esac ;;
+  *is-active*) exit 3 ;;
+  *ActiveState*) echo inactive ;;
+esac
+exit 0
+"#,
+                    path = path.display()
+                ),
+            );
+            consumer(&b, which, true);
+        }
+    }
+}
+
+#[test]
+fn only_known_terminal_units_release_sorting_capacity() {
+    for which in ["planning", "resume", "snapshot"] {
+        for unit_kind in ["turn", "recovery"] {
+            for state in [
+                "active",
+                "activating",
+                "deactivating",
+                "reloading",
+                "pending",
+                "query-error",
+                "active-query-error",
+                "spawn-error",
+                "misleading-error",
+                "unknown",
+                "inactive",
+                "failed",
+            ] {
+                let mut b = single_slot();
+                b.job("s1", "done", "kept");
+                let job = Job::new(&b.cfg, "s1");
+                fs::remove_file(job.turn("1", "outcome")).unwrap();
+                record(&b, "sam/game", 3, "s1");
+                let unit = if unit_kind == "turn" {
+                    job.unit()
+                } else {
+                    job.end_unit()
+                };
+                burrow_test::executable(
+                    &b.cfg.tools.systemctl,
+                    format!(
+                        r#"#!/bin/sh
+case "$*" in
+  *{unit}*)
+    case '{state}' in
+      query-error) exit 1 ;;
+    esac
+    case "$*" in
+      *is-active*) exit 3 ;;
+      *Job*) if [ '{state}' = pending ]; then echo 42; fi ;;
+      *ActiveState*) case '{state}' in active-query-error) exit 1;; misleading-error) echo inactive; exit 1;; pending) echo inactive;; unknown) :;; *) echo '{state}';; esac ;;
+    esac ;;
+  *is-active*) exit 3 ;;
+  *ActiveState*) echo inactive ;;
+esac
+exit 0
+"#
+                    ),
+                );
+                if state == "spawn-error" {
+                    b.cfg.tools.systemctl = b.path("missing-systemctl");
+                }
+                consumer(&b, which, !matches!(state, "inactive" | "failed"));
+            }
+        }
+    }
+}
+
+#[test]
+fn wait_updates_clear_and_deduplicate_persisted_repository_spellings() {
+    let b = single_slot();
+    let old = seed_wait(&b, "SAM/Box", "7");
+    let duplicate = seed_wait(&b, "Sam/bOX", "7");
+    let other_repo = seed_wait(&b, "sam/box-other", "7");
+    let other_issue = seed_wait(&b, "SAM/Box", "8");
+    let p = b.pass();
+    p.planner_wait("sam/box", "7", Some("verdict's steps"));
+    let current = wait(&b, "sam/box", "7");
+    assert_eq!(
+        fs::read_to_string(&current).unwrap(),
+        "sam/box#7: verdict's steps"
+    );
+    assert!(!old.exists());
+    assert!(!duplicate.exists());
+    assert!(other_repo.exists());
+    assert!(other_issue.exists());
+    p.planner_wait("sAm/BoX", "7", None);
+    assert!(!current.exists());
+    assert!(other_repo.exists());
+    assert!(other_issue.exists());
+    let old = seed_wait(&b, "SAM/Box", "7");
+    b.pass()
+        .triage("sam/box", &[issue(7, "sam", &["later"])])
+        .unwrap();
+    assert!(!old.exists());
+    assert!(other_repo.exists());
+}

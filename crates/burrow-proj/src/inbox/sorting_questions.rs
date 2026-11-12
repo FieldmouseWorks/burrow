@@ -15,32 +15,30 @@ impl Pass<'_> {
     /// recovers the question's state under the job's lock, as a pass does;
     /// the live snapshot only reads, and takes it as it stands.
     pub(super) fn holds_sorting_slot(&self, d: &Path, settle: bool) -> bool {
-        if !self.record_uses_capacity(d) {
-            return false;
-        }
         read(&d.join("job")).is_some_and(|id| {
             let job = Job::new(self.cfg, &id);
-            let _held = if settle {
-                let Ok(held) = job.lock() else { return true };
-                if crate::question::recover(&job).is_err() {
-                    return true;
-                }
-                Some(held)
-            } else {
-                None
-            };
-            // Unknown holds retain capacity. Read them once, including before
-            // applying the owner-handoff exception.
+            // Serializes with new starts and question recovery, including in
+            // snapshots. The running turn itself publishes without this lock.
+            let held = if settle { job.lock() } else { job.read_lock() };
+            let Ok(_held) = held else { return true };
+            if settle && crate::question::recover(&job).is_err() {
+                return true;
+            }
+            // Establish completion before sampling holds. Both the turn and
+            // its _ended recovery can publish final holds without this lock;
+            // neither may still be running or queued when we release capacity.
+            let terminated = crate::systemd::terminated(self.cfg, &job.unit())
+                && crate::systemd::terminated(self.cfg, &job.end_unit());
             let Ok(holds) = job.holds() else { return true };
             if holds.iter().any(|h| h == "owner") {
                 return false;
             }
-            // A job that has ended holds a slot only for its outstanding holds.
-            // Its verdict's GitHub steps are the pass's own work, so one repo
-            // whose steps keep failing can't hold every repo's planners.
-            // state also recognizes terminal turns without an outcome (a
-            // killed unit or reboot), and keeps pending retries queued.
-            matches!(job.state().as_str(), "queued" | "running" | "parked") || !holds.is_empty()
+            if !terminated {
+                return true;
+            }
+            // Policy-paused records keep their existing exception once their
+            // units are known terminal. Retries and other holds retain capacity.
+            self.record_uses_capacity(d) && !holds.is_empty()
         })
     }
 
