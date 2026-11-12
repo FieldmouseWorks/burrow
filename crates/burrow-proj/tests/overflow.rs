@@ -37,8 +37,7 @@ fn config(dir: &Path) -> Config {
         "deployed": path("deployed"),
         "apps": {},
         "notify": "/bin/notify",
-        "roles": path("roles"),
-        "models": path("models"),
+        "settings": {"overlay": path("overlay.json")},
         "meters": path("meters"),
         "codexSlots": 2,
         "codexHooks": "/hooks",
@@ -70,7 +69,7 @@ fn claude_short_overflows_to_codex_while_codex_has_room_or_credits() {
     let dir = d.path();
     let cfg = config(dir);
     fs::create_dir_all(dir.join("jobs")).unwrap();
-    fs::write(dir.join("roles"), "work claude over 90 codex\n").unwrap();
+    cfg.seed("work claude over 90 codex\n", "");
     let stays = Engine::Claude;
     let moves = Engine::Codex;
 
@@ -119,11 +118,7 @@ fn overflow_belongs_to_the_winning_scoped_line() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path();
     let cfg = config(dir);
-    fs::write(
-        dir.join("roles"),
-        "work codex\nwork@sam/code claude over 80 codex\n",
-    )
-    .unwrap();
+    cfg.seed("work codex\nwork@sam/code claude over 80 codex\n", "");
     meter(dir, "codex", &[("300m", 1.0)], false);
     for (used, expected) in [(79.0, Engine::Claude), (80.0, Engine::Codex)] {
         meter(dir, "claude", &[("seven_day", used)], false);

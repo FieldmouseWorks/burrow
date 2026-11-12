@@ -42,8 +42,11 @@ fn show(cfg: &Config) -> Value {
 #[test]
 fn every_option_shown_comes_from_the_schema() {
     let (d, mut cfg) = crate::usage::tests::rig();
-    cfg.roles = d.path().join("config/roles");
-    cfg.models = d.path().join("config/models");
+    let overlay = d.path().join("config/overlay.json");
+    cfg.settings = Some(burrow_settings::Config {
+        overlay: overlay.clone(),
+        ..Default::default()
+    });
     set(&mut cfg, tracked());
 
     // Nothing live yet: every live option at its default, naming its file.
@@ -63,38 +66,47 @@ fn every_option_shown_comes_from_the_schema() {
     );
     assert_eq!(
         options["proj.roles"],
-        json!({"value": {}, "origin": "default", "file": cfg.roles})
+        json!({"value": {}, "origin": "default", "file": overlay})
     );
     assert_eq!(options["proj.usageHold"]["value"], Value::Null);
 
-    // Each live file, read with the parser its turns use.
-    fs::create_dir_all(d.path().join("config/roles.d")).unwrap();
-    fs::write(d.path().join("config/roles.d/cheap"), "triage codex\n").unwrap();
-    fs::write(
-        d.path().join("config/roles.d/usual"),
-        "# usual\ntriage claude\nfix@Sam/Box   codex over 80 claude\n",
-    )
-    .unwrap();
-    std::os::unix::fs::symlink(d.path().join("config/roles.d/usual"), &cfg.roles).unwrap();
-    fs::write(&cfg.models, "triage claude small low\nfix codex - high\n").unwrap();
+    // Each live option, set through the door.
+    let door = cfg.settings.clone().unwrap();
+    let say = |args: &[&str]| {
+        door.command(
+            &args.iter().map(|a| (*a).into()).collect::<Vec<_>>(),
+            "test",
+        )
+        .unwrap()
+    };
+    say(&["offer", "claude", "small"]);
+    say(&["role", "triage", "codex"]);
+    say(&["engines", "save", "cheap"]);
+    say(&["role", "triage", "claude"]);
+    say(&["role", "fix@Sam/Box", "codex", "over", "80", "claude"]);
+    say(&["model", "triage", "claude", "small", "low"]);
+    say(&["model", "fix", "codex", "-", "high"]);
+    say(&["engines", "save", "usual"]);
     crate::usage::hold(&cfg, crate::now() + 3600, "save usage").unwrap();
     let doc = show(&cfg);
     let options = &doc["options"];
+    let usual_roles = json!({"triage": "claude", "fix@sam/box": "codex over 80 claude"});
+    let models = json!({"triage claude": {"model": "small", "effort": "low"},
+                        "fix codex": {"model": null, "effort": "high"}});
     assert_eq!(
         options["proj.roles"],
-        json!({"value": {"triage": "claude", "fix@Sam/Box": "codex over 80 claude"},
-               "origin": "live", "file": cfg.roles})
+        json!({"value": usual_roles, "origin": "live", "file": overlay})
     );
+    assert_eq!(options["proj.models"]["value"], models);
     assert_eq!(
-        options["proj.models"]["value"],
-        json!({"triage claude": {"model": "small", "effort": "low"},
-               "fix codex": {"model": null, "effort": "high"}})
+        options["proj.offeredModels"]["value"],
+        json!({"claude": ["small"]})
     );
     assert_eq!(
         options["proj.engineSetups"]["value"],
-        json!({"active": "usual", "saved": {
-            "cheap": {"triage": "codex"},
-            "usual": {"triage": "claude", "fix@Sam/Box": "codex over 80 claude"}}})
+        json!({"active": "usual", "previous": null, "saved": {
+            "cheap": {"roles": {"triage": "codex"}, "models": {}},
+            "usual": {"roles": usual_roles, "models": models}}})
     );
     let hold = &options["proj.usageHold"];
     assert_eq!(hold["origin"], "live");
@@ -130,10 +142,14 @@ fn every_option_shown_comes_from_the_schema() {
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.contains(".usage.json"), "{err}");
     fs::remove_file(cfg.jobs.join(crate::usage::FILE)).unwrap();
-    // And a live file a turn would refuse.
+    // The door refuses what a turn would.
     set(&mut cfg, tracked());
-    fs::write(&cfg.models, "triage claude small enormous\n").unwrap();
-    let err = command(&cfg, &["show".into()]).unwrap_err();
+    let err = door
+        .command(
+            &["model", "triage", "claude", "small", "enormous"].map(String::from),
+            "test",
+        )
+        .unwrap_err();
     assert!(err.contains("takes no effort enormous"), "{err}");
 }
 
@@ -148,12 +164,11 @@ fn the_schema_is_burrow_settings_own() {
 #[test]
 fn admission_reads_the_one_overlay_and_writes_without_a_tracked_document() {
     let (d, mut cfg) = crate::usage::tests::rig();
-    cfg.roles = d.path().join("roles");
-    cfg.models = d.path().join("models");
     let policy = burrow_settings::Config {
         overlay: d.path().join("overlay.json"),
         allowed: vec!["sam/kept".into()],
         pipeline_repos: vec!["sam/pipeline".into()],
+        ..Default::default()
     };
     cfg.settings = Some(policy.clone());
     cfg.tracked_settings = None;

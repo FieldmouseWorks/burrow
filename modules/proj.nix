@@ -66,12 +66,13 @@ let
   # The flake's value of each option in burrow-settings' schema, for `proj
   # settings show`.
   settingsFile = "burrow/settings.json";
-  roles = "${config.users.users.${user}.home}/.config/proj/roles";
-  models = "${config.users.users.${user}.home}/.config/proj/models";
+  # Where the roles, models and roles.d files were kept: read once into the
+  # settings overlay, then renamed (burrow-settings' migrate).
+  settings = config.burrow.settings.effective // { legacy = "${config.users.users.${user}.home}/.config/proj"; };
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
     inherit (cfg.engines.door) repo label authors;
     state = "${stateDir}/proj-engines";
-    inherit roles;
+    inherit settings;
   });
 
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
@@ -103,7 +104,7 @@ let
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
     heavySlots = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.slots else 0;
     inherit (cfg) meters;
-    settings = config.burrow.settings.effective;
+    inherit settings;
     policyUnit = "proj-policy.service";
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
     agentTool = if config.burrow.agents.enable or false then lib.getExe config.burrow.agents.package else null;
@@ -113,7 +114,6 @@ let
     proofBuildDriver = [ "${pkgs.python3}/bin/python3" "-E" "-s" "${./autoland}/steward.py" ];
     usagePaid = cfg.usage.paid;
     usageTrickle = cfg.usageTrickle;
-    inherit roles models;
     # A path, not the file: the flake's values include ones that run proj
     # (a repo's proofRuns), so proj's config can't hold them.
     trackedSettings = "/etc/${settingsFile}";
@@ -655,7 +655,7 @@ in
           proj run --first web "the task"   the same, ahead of the line
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj run --app NAME web "task"    acting on GitHub as the App NAME
-          proj run --role NAME web "task"   on the engine ~/.config/proj/roles gives NAME
+          proj run --role NAME web "task"   on the engine the roles setting gives NAME
           proj status                       what's running, what finished
           proj status --line                every turn in line, next first, and its wait
           proj state --json                 the live snapshot: queue, every slot and its holder, meters, holds
@@ -673,15 +673,16 @@ in
       relay (`proj status` marks it [asks]; `proj reply` answers; a reversible default runs after ${toString cfg.askTimeout}s without an answer, a one-way default stays open for the owner), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       Check machine facts with `proj probe QUESTION...` before asking anyone; jobs never open probe issues.
-      Roles live in ~/.config/proj/roles, one `ROLE ENGINE` line each.
+      Roles are live settings (`proj settings show`; `proj settings role ROLE ENGINE`), one engine each.
       `ROLE@OWNER/REPO` takes precedence in that repo, matched case-insensitively;
       other repos and jobs with no repo use the bare role. Duplicate keys fail
       the turn with both lines named. Engines are claude and codex; unlisted
       roles use Claude, except planner, which defaults to Codex and requires
-      an explicit small model to use Claude. Each role's model and effort on each engine live in
-      ~/.config/proj/models, one `ROLE ENGINE MODEL|- [EFFORT]` line each
-      (`-` keeps the engine's own model); unlisted roles keep the engine's
-      own settings. Either kind of roles line may end with `over PCT ENGINE`:
+      an explicit small model to use Claude. Each role's model and effort on each engine are
+      settings too (`proj settings model ROLE ENGINE MODEL|- [EFFORT]`, refused unless
+      the engine offers the model: `proj settings offer ENGINE MODEL`); `-` keeps
+      the engine's own model, and unlisted roles keep the engine's own settings.
+      `proj engines save/use/back` store and select named sets of both. A role's engine may end with `over PCT ENGINE`:
       the turn moves when its engine's fresh meter has any window (five-hour or
       weekly) at PCT and no credits, or Claude is out of usage, and the other
       engine's fresh meter has room (credits, or no window used up).

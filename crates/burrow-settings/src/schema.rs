@@ -148,10 +148,25 @@ const SETUPS: Kind = Kind::Record(&[
         kind: &MAYBE_TEXT,
     },
     Field {
+        name: "previous",
+        kind: &MAYBE_TEXT,
+    },
+    Field {
         name: "saved",
-        kind: &Kind::Map(&ROLES),
+        kind: &Kind::Map(&SAVED),
     },
 ]);
+const SAVED: Kind = Kind::Record(&[
+    Field {
+        name: "roles",
+        kind: &ROLES,
+    },
+    Field {
+        name: "models",
+        kind: &MODELS,
+    },
+]);
+const OFFERED: Kind = Kind::Map(&Kind::List(&Kind::Text));
 const STAMP: Kind = Kind::Count { min: 0 };
 const HOLD: Kind = Kind::Maybe(&Kind::Record(&[
     Field {
@@ -457,13 +472,19 @@ pub static SETTINGS: &[Setting] = &[
         "proj.models",
         &MODELS,
         "{}",
-        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE). A role with no line keeps the engine's own.",
+        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE). Set through the settings door, which refuses a model the engine doesn't offer or an effort it doesn't take. A role with no entry, or a null model, runs on the engine's own default (null is the declared default, never a hidden fallback).",
+    ),
+    live(
+        "proj.offeredModels",
+        &OFFERED,
+        "{}",
+        "The model ids each engine offers; the only ones a role's model may be set to. Ids live here, in the overlay, never in a tracked file.",
     ),
     live(
         "proj.engineSetups",
         &SETUPS,
-        r#"{"active": null, "saved": {}}"#,
-        "Saved engine setups (proj engines save/use), each a whole roles file, and the one in force.",
+        r#"{"active": null, "previous": null, "saved": {}}"#,
+        "Saved engine setups (proj engines save/use/back): named sets of the roles and models above, the one in force and the one before it.",
     ),
     live(
         "proj.usageHold",

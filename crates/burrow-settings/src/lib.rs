@@ -2,6 +2,7 @@
 //! the overlay; an unreadable policy fails closed. No pipeline daemon is needed
 //! to change it. Other settings can join this document without another store.
 pub mod door;
+pub mod engines;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -17,6 +18,10 @@ pub struct Config {
     pub allowed: Vec<String>,
     #[serde(default)]
     pub pipeline_repos: Vec<String>,
+    /// The directory that held proj's roles, models and roles.d files, read
+    /// once into the overlay ([`Config::migrate`]).
+    #[serde(default)]
+    pub legacy: Option<PathBuf>,
 }
 
 /// A scheduling decision and its next change without another external event.
@@ -37,6 +42,8 @@ struct Overlay {
     pipeline_until: Option<i64>,
     #[serde(default)]
     receipts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "engines::Engines::is_empty")]
+    engines: engines::Engines,
 }
 
 pub fn now() -> i64 {
@@ -56,6 +63,8 @@ pub fn valid_command(args: &[String]) -> bool {
         .as_slice()
     {
         ["show" | "back"] => true,
+        ["engines", "list"] => true,
+        ["engines", "use", name] => engines::valid_name(name),
         ["allow" | "pause", repo] => burrow_github::repo_name(repo),
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
         _ => false,
@@ -177,6 +186,10 @@ impl Config {
         if args == ["show"] {
             return self.show();
         }
+        if matches!(args, [e] | [e, _] if e == "engines") && args.get(1).is_none_or(|a| a == "list")
+        {
+            return Ok(self.read()?.engines.status(None));
+        }
         let parent = self
             .overlay
             .parent()
@@ -190,6 +203,7 @@ impl Config {
             .map_err(|e| e.to_string())?;
         lock.lock().map_err(|e| e.to_string())?;
         let mut state = self.read()?;
+        let mut engines_answer = None;
         if let Some(body) = receipt.and_then(|r| state.receipts.get(r)) {
             return Ok(body.clone());
         }
@@ -203,12 +217,39 @@ impl Config {
                 state.pipeline_until = Some(t);
             }
             ["back"] => state.pipeline_until = None,
-            _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back".into()),
+            ["role", role, spec @ ..] => state.engines.set_role(role, spec)?,
+            ["unrole", role] => state.engines.clear_role(role)?,
+            ["offer", on, models @ ..] if !models.is_empty() => state.engines.offer(on, models)?,
+            ["model", rest @ ..] => state.engines.set_model(rest)?,
+            ["unmodel", role, on] => state.engines.clear_model(role, on)?,
+            ["engines", rest @ ..] => engines_answer = Some(state.engines.apply(rest, now())?),
+            _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back | role ROLE ENGINE [over PCT ENGINE] | unrole ROLE | offer ENGINE MODEL... | model ROLE ENGINE MODEL|- [EFFORT] | unmodel ROLE ENGINE | engines [list | save NAME [--replace] | use NAME|back]".into()),
         }
-        let answer = "Settings changed; use settings show for the current policy.".to_owned();
+        let answer = engines_answer.clone().unwrap_or_else(|| {
+            "Settings changed; use settings show for the current policy.".to_owned()
+        });
         if let Some(receipt) = receipt {
             state.receipts.insert(receipt.into(), answer.clone());
         }
+        self.persist(&state, actor, serde_json::json!(args))?;
+        if receipt.is_some() || engines_answer.is_some() {
+            Ok(answer)
+        } else {
+            self.show()
+        }
+    }
+
+    /// Append the audit line, then publish the overlay atomically.
+    fn persist(
+        &self,
+        state: &Overlay,
+        actor: &str,
+        change: serde_json::Value,
+    ) -> Result<(), String> {
+        let parent = self
+            .overlay
+            .parent()
+            .ok_or("overlay needs a parent directory")?;
         use std::io::Write;
         let mut log = File::options()
             .append(true)
@@ -218,13 +259,13 @@ impl Config {
         writeln!(
             log,
             "{}",
-            serde_json::json!({"at": now(), "actor": actor, "change": args})
+            serde_json::json!({"at": now(), "actor": actor, "change": change})
         )
         .map_err(|e| e.to_string())?;
         log.sync_all().map_err(|e| e.to_string())?;
         let pending = self.overlay.with_extension("pending");
         let mut file = File::create(&pending).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
+        file.write_all(&serde_json::to_vec(state).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         // Readers include the isolated reviewer account. This overlay holds
         // public operational policy, regardless of the writer's umask.
@@ -238,12 +279,121 @@ impl Config {
         fs::rename(pending, &self.overlay).map_err(|e| e.to_string())?;
         File::open(parent)
             .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The engines, models and saved sets in force, read fresh.
+    pub fn engines(&self) -> Result<engines::Engines, String> {
+        Ok(self.read()?.engines)
+    }
+
+    /// Replace the roles and models with those the old file formats say
+    /// (`ROLE ENGINE [over PCT ENGINE]` and `ROLE ENGINE MODEL|- [EFFORT]`
+    /// lines), logged. Models they name become offered. Saved sets stay.
+    pub fn import(&self, roles: &str, models: &str, actor: &str) -> Result<(), String> {
+        let parent = self
+            .overlay
+            .parent()
+            .ok_or("overlay needs a parent directory")?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.overlay.with_extension("lock"))
             .map_err(|e| e.to_string())?;
-        if receipt.is_some() {
-            Ok(answer)
-        } else {
-            self.show()
+        lock.lock().map_err(|e| e.to_string())?;
+        let new = engines::import(roles, models, &[], None)?;
+        let mut state = self.read()?;
+        state.engines.roles = new.roles;
+        state.engines.models = new.models;
+        for (on, models) in new.offered {
+            let refs: Vec<&str> = models.iter().map(String::as_str).collect();
+            state.engines.offer(&on, &refs)?;
         }
+        self.persist(&state, actor, serde_json::json!(["import"]))
+    }
+
+    /// Move the old roles, models and roles.d files into the overlay, once:
+    /// each is renamed `NAME.migrated` after the overlay holds its values, so
+    /// a second call finds nothing. Anything already set in the overlay wins.
+    /// A file that doesn't parse stops it with the old files untouched.
+    pub fn migrate(&self) -> Result<bool, String> {
+        let Some(dir) = &self.legacy else {
+            return Ok(false);
+        };
+        let names = ["roles", "models", "roles.d", "roles.previous"];
+        if !names.iter().any(|n| dir.join(n).symlink_metadata().is_ok()) {
+            return Ok(false);
+        }
+        let parent = self
+            .overlay
+            .parent()
+            .ok_or("overlay needs a parent directory")?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.overlay.with_extension("lock"))
+            .map_err(|e| e.to_string())?;
+        lock.lock().map_err(|e| e.to_string())?;
+        let text = |name: &str| match fs::read_to_string(dir.join(name)) {
+            Ok(t) => Ok(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(format!("{}: {e}", dir.join(name).display())),
+        };
+        let mut setups = Vec::new();
+        match fs::read_dir(dir.join("roles.d")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.file_type().map_err(|e| e.to_string())?.is_file() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let body = fs::read_to_string(entry.path())
+                            .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+                        setups.push((name, body));
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", dir.join("roles.d").display())),
+        }
+        let previous = text("roles.previous")?.trim().to_owned();
+        let old = engines::import(
+            &text("roles")?,
+            &text("models")?,
+            &setups,
+            (!previous.is_empty()).then_some(previous),
+        )
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mut state = self.read()?;
+        let mine = &mut state.engines;
+        for (k, v) in old.roles {
+            mine.roles.entry(k).or_insert(v);
+        }
+        for (k, v) in old.models {
+            mine.models.entry(k).or_insert(v);
+        }
+        for (on, models) in old.offered {
+            let refs: Vec<&str> = models.iter().map(String::as_str).collect();
+            mine.offer(&on, &refs)?;
+        }
+        for (k, v) in old.saved {
+            mine.saved.entry(k).or_insert(v);
+        }
+        if mine.previous.is_none() {
+            mine.previous = old.previous;
+        }
+        self.persist(&state, "migration", serde_json::json!(["migrate", dir]))?;
+        for name in names {
+            let from = dir.join(name);
+            if from.symlink_metadata().is_ok() {
+                fs::rename(&from, dir.join(format!("{name}.migrated")))
+                    .map_err(|e| format!("{}: {e}", from.display()))?;
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -257,6 +407,7 @@ mod tests {
             overlay: dir.path().join("overlay.json"),
             allowed: vec!["sam/box".into(), "sam/game".into()],
             pipeline_repos: vec!["sam/box".into()],
+            ..Default::default()
         };
         assert!(!cfg.allows("sam/new").unwrap());
         assert!(cfg.allows("SAM/GAME").unwrap());

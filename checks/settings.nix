@@ -23,15 +23,19 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   # The fixture's own config, its live files moved where the build can write.
   config=$(grep -o '/nix/store/[^ ]*-proj\.json' ${proj}/bin/proj | head -n1)
   live=$TMPDIR/live
-  mkdir -p $live/jobs $live/config/roles.d
+  mkdir -p $live/jobs $live/config
   [ "$(jq -r .trackedSettings "$config")" = /etc/burrow/settings.json ]
   jq --arg live "$live" --arg pwd "$PWD" \
-    '.jobs = "\($live)/jobs" | .roles = "\($live)/config/roles" | .models = "\($live)/config/models" | .trackedSettings = "\($pwd)/settings.json"' \
+    '.jobs = "\($live)/jobs" | .settings.overlay = "\($live)/config/overlay.json" | .trackedSettings = "\($pwd)/settings.json"' \
     "$config" >proj.json
   jq . ${tracked} >settings.json
-  printf 'triage codex\nfix@sam/homelab codex over 80 claude\n' >$live/config/roles.d/usual
-  ln -s $live/config/roles.d/usual $live/config/roles
-  printf 'triage codex - low\n' >$live/config/models
+  # The live engine settings go in through the settings door, as an operator's do.
+  settings() { PROJ_CONFIG=$PWD/proj.json PROJ_SELF=${proj}/bin/proj ${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj settings "$@"; }
+  settings role triage codex
+  settings role fix@sam/homelab codex over 80 claude
+  settings model triage codex - low
+  settings engines save usual
+  if settings model triage claude unoffered-model; then echo "the door took a model nothing offers"; exit 1; fi
   now=$(date +%s)
   printf '{"until": %d, "said": "out of usage", "job": "j1", "at": %d, "told": %d}' \
     $((now + 3600)) $now $now >$live/jobs/.usage.json

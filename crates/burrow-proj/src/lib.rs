@@ -64,9 +64,9 @@
 //!                             turn of it waiting in line leaves it at its
 //!                             next look, one running carries on
 //! proj engines                list saved engine setups, active and previous
-//! proj engines save NAME [--replace]  check and save the current roles
-//! proj engines use NAME       check and atomically switch roles (back returns)
-//! proj check-config           validate machine config and every roles line
+//! proj engines save NAME [--replace]  save the roles and models in force
+//! proj engines use NAME       put a saved set's roles and models in force (back returns)
+//! proj check-config           validate machine config, every role and model
 //! proj settings show [--json] every pipeline option in effect, its value and
 //!                             where it came from (default, flake, live file)
 //! proj settings schema        the options' JSON Schema (burrow-settings)
@@ -180,7 +180,6 @@ pub mod retry;
 mod roles;
 pub mod scratch;
 pub mod settings;
-pub mod setups;
 pub mod slot;
 pub mod snapshot;
 mod subprocess;

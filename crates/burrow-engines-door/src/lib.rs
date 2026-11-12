@@ -1,7 +1,7 @@
 //! The engines door shares proj's checked switch; issue text is never a command.
 use burrow_door::{Door, asked, fenced};
 use burrow_github::{Api, Error};
-use burrow_proj::setups::{Store, valid_name};
+use burrow_settings::engines::valid_name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -14,7 +14,7 @@ pub struct Config {
     pub repo: String,
     pub label: String,
     pub authors: Vec<burrow_github::Author>,
-    pub roles: PathBuf,
+    pub settings: burrow_settings::Config,
     pub state: PathBuf,
 }
 
@@ -92,34 +92,36 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
             },
             _ => None,
         };
-        let store = Store::new(&cfg.roles);
         let (body, reason) = match args {
-            Some(args) => match if args[0] == "use" {
-                store.request(&operation, &args)
-            } else {
-                store.command(&args)
-            } {
-                Ok(said) => (fenced(&said), "completed"),
-                // Roles errors include the raw line, which may name a model.
-                // Keep just the location, never echo issue text or model choices.
-                Err(e) => {
-                    if store.pending()? || operation.try_exists().map_err(|e| e.to_string())? {
-                        return Err(e.into());
+            Some(args) => {
+                let mut change = vec!["engines".to_owned()];
+                change.extend(args.iter().cloned());
+                let actor = format!("github:{}#{}", cfg.repo, issue.number);
+                match if args[0] == "use" {
+                    cfg.settings.request(&operation, &change, &actor)
+                } else {
+                    cfg.settings.command(&change, &actor)
+                } {
+                    Ok(said) => (fenced(&said), "completed"),
+                    // The overlay publishes atomically, so an error changed
+                    // nothing. Name the class of it, never a model choice.
+                    Err(e) => {
+                        let current = cfg
+                            .settings
+                            .command(&["engines".into(), "list".into()], &actor)
+                            .map(|s| fenced(&s))
+                            .unwrap_or_else(|e| diagnostic(&e));
+                        (
+                            format!("Nothing changed. {}\n\n{current}", diagnostic(&e)),
+                            "not_planned",
+                        )
                     }
-                    let why = diagnostic(&e);
-                    let current = store
-                        .command(&["list".into()])
-                        .map(|s| fenced(&s))
-                        .unwrap_or_else(|e| diagnostic(&e));
-                    (
-                        format!("Nothing changed. {why}\n\n{current}"),
-                        "not_planned",
-                    )
                 }
-            },
+            }
             None => {
-                let current = store
-                    .command(&["list".into()])
+                let current = cfg
+                    .settings
+                    .command(&["engines".into(), "list".into()], "github")
                     .map(|s| fenced(&s))
                     .unwrap_or_else(|e| diagnostic(&e));
                 (
@@ -143,22 +145,8 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// The location and class of an error, with no raw roles line or model choice.
+/// The class of an error, with no raw overlay content or model choice.
 fn diagnostic(error: &str) -> String {
-    let location = error.split(": ").next().unwrap_or("");
-    if location.starts_with('/') {
-        let line = error
-            .split("line ")
-            .nth(1)
-            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
-            .filter(|s| !s.is_empty());
-        if !location.contains(" line ")
-            && let Some(line) = line
-        {
-            return format!("Invalid configuration: {location} line {line}.");
-        }
-        return format!("Check {location}.");
-    }
     if error.starts_with("unknown setup:") {
         "Unknown setup.".into()
     } else if error == "no previous setup" {

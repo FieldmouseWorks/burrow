@@ -10,7 +10,6 @@ use burrow_settings::show::{self, Document, Reading};
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::setups::Store;
 use crate::usage;
 
 /// Every option in effect, and where each came from.
@@ -38,30 +37,56 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         file.clone(),
         overrides,
     ));
-    readings.push(Reading::live("settings.pipelineUntil", file, until));
-    let roles = crate::roles::read(&cfg.roles)?;
+    readings.push(Reading::live("settings.pipelineUntil", file.clone(), until));
+    let engines = cfg
+        .settings
+        .as_ref()
+        .map(|s| s.engines())
+        .transpose()?
+        .unwrap_or_default();
+    let set = there(&file) && !engines.is_empty();
+    let tuning =
+        |t: &burrow_settings::engines::Tuning| json!({"model": t.model, "effort": t.effort});
+    let models: serde_json::Map<String, Value> = engines
+        .models
+        .iter()
+        .map(|(k, t)| (k.clone(), tuning(t)))
+        .collect();
+    let saved: serde_json::Map<String, Value> = engines
+        .saved
+        .iter()
+        .map(|(n, s)| {
+            let m: serde_json::Map<String, Value> = s
+                .models
+                .iter()
+                .map(|(k, t)| (k.clone(), tuning(t)))
+                .collect();
+            (n.clone(), json!({"roles": s.roles, "models": m}))
+        })
+        .collect();
+    let when = |v: Value, on: bool| on.then_some(v);
     readings.push(Reading::live(
         "proj.roles",
-        cfg.roles.clone(),
-        there(&cfg.roles)
-            .then(|| crate::roles::shown(&cfg.roles, &roles))
-            .transpose()?
-            .map(Value::Object),
+        file.clone(),
+        when(json!(engines.roles), set),
     ));
-    let models = crate::roles::read(&cfg.models)?;
     readings.push(Reading::live(
         "proj.models",
-        cfg.models.clone(),
-        there(&cfg.models)
-            .then(|| crate::models::shown(&cfg.models, &models))
-            .transpose()?
-            .map(Value::Object),
+        file.clone(),
+        when(Value::Object(models), set),
     ));
-    let setups = Store::new(&cfg.roles);
+    readings.push(Reading::live(
+        "proj.offeredModels",
+        file.clone(),
+        when(json!(engines.offered), set),
+    ));
     readings.push(Reading::live(
         "proj.engineSetups",
-        setups.dir().to_owned(),
-        setups.shown()?,
+        file,
+        when(
+            json!({"active": engines.active(), "previous": engines.previous, "saved": saved}),
+            set,
+        ),
     ));
     readings.push(Reading::live(
         "proj.usageHold",

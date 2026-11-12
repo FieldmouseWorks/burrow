@@ -104,14 +104,14 @@ fn a_saved_identity_and_deleted_slot_cannot_authorize_stopping_active_work() {
 #[test]
 fn startup_saves_the_resolved_choice_despite_later_settings_changes() {
     let mut r = rig();
-    r.cfg.roles = r.tmp.path().join("roles");
-    fs::write(&r.cfg.roles, "worker claude\n").unwrap();
+    let dir = r.tmp.path().to_path_buf();
+    r.cfg.seed_engines(&dir, "worker claude\n", "");
     let job = Job::new(&r.cfg, "choice");
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
     fs::write(job.path("role"), "worker").unwrap();
     let choice = engine::choice(&r.cfg, &job).unwrap();
-    fs::write(&r.cfg.roles, "worker codex\n").unwrap();
+    r.cfg.seed("worker codex\n", "");
     Identity::capture_choice(&job, "1", &choice).unwrap();
     assert_eq!(Identity::load(&job, "1").unwrap().unwrap().choice, choice);
     assert_eq!(engine::choice(&r.cfg, &job).unwrap(), choice);

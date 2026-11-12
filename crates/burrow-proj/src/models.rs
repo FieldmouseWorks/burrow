@@ -1,8 +1,8 @@
-//! Which model and effort each role's turns run at, on each engine: the
-//! models file beside the roles file. The roles file picks the engine (and
-//! a saved engine setup swaps it whole); this one tunes each engine, so a
-//! switch of setups keeps it. A role with no line, or a line's `-` model,
-//! keeps the engine's own setting (Claude's settings.json, Codex's config).
+//! Which model and effort each role's turns run at, on each engine, as the
+//! overlay's models rendered to lines. The settings door has already refused
+//! a model an engine doesn't offer; this checks again what a hand-edited
+//! overlay could hold. A role with no entry, or a `-` model, keeps the
+//! engine's own setting (Claude's settings.json, Codex's config).
 
 use crate::engine::{Engine, RoleKey};
 use std::collections::BTreeMap;
@@ -96,12 +96,12 @@ fn entries<'a>(path: &Path, text: &'a str) -> Result<Entries<'a>, String> {
 /// settings over a bare line's.
 pub(crate) fn tuning(
     path: &Path,
+    text: &str,
     role: &str,
     repo: Option<&str>,
     engine: Engine,
 ) -> Result<Tuning, String> {
-    let text = crate::roles::read(path)?;
-    Ok(entries(path, &text)?
+    Ok(entries(path, text)?
         .into_iter()
         .filter(|((_, on), _)| *on == engine)
         .filter_map(|((key, _), (_, _, tuning))| {
@@ -112,28 +112,20 @@ pub(crate) fn tuning(
         .unwrap_or_default())
 }
 
-/// Every line of the file, as `settings show` gives it: `ROLE[@OWNER/REPO]
-/// ENGINE`, as the line says it, to its model and effort (null for the
-/// engine's own).
-pub(crate) fn shown(
-    path: &Path,
-    text: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    Ok(entries(path, text)?
-        .into_iter()
-        .map(|((_, engine), (_, line, tuning))| {
-            let role = line.split_whitespace().next().unwrap_or_default();
-            (
-                format!("{role} {}", engine.name()),
-                serde_json::json!({"model": tuning.model, "effort": tuning.effort}),
-            )
-        })
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests keep their lines in a file; production renders the overlay.
+    fn tuning(
+        path: &Path,
+        role: &str,
+        repo: Option<&str>,
+        engine: Engine,
+    ) -> Result<Tuning, String> {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        super::tuning(path, &text, role, repo, engine)
+    }
 
     fn tune(model: Option<&str>, effort: Option<&str>) -> Tuning {
         Tuning {
@@ -224,9 +216,5 @@ mod tests {
             error.contains("line 1: fix claude a") && error.contains("line 3: fix claude - low"),
             "{error}"
         );
-        // An unreadable path is never "nothing tuned".
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        assert!(tuning(&path, "fix", None, Engine::Claude).is_err());
     }
 }

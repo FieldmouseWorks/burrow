@@ -220,42 +220,64 @@ mod tests {
     fn planning_defaults_to_codex_and_never_falls_through_to_the_claude_default() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.roles = tmp.path().join("roles");
-        cfg.models = tmp.path().join("models");
         assert_eq!(
             resolve(&cfg, "planner", None, None).unwrap().engine,
             Engine::Codex
         );
-        fs::write(&cfg.roles, "planner claude\n").unwrap();
+        cfg.seed_engines(tmp.path(), "planner claude\n", "");
         assert!(
             resolve(&cfg, "planner", None, None)
                 .unwrap_err()
                 .contains("explicit small model")
         );
-        fs::write(&cfg.models, "planner claude selected\n").unwrap();
+        cfg.seed_engines(tmp.path(), "planner claude\n", "planner claude selected\n");
         let chosen = resolve(&cfg, "planner", None, None).unwrap();
         assert_eq!(chosen.engine, Engine::Claude);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
+    }
+    #[test]
+    fn a_model_changed_through_the_door_is_what_the_next_job_of_that_role_runs_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.use_overlay(dir.path());
+        let door = cfg.settings.clone().unwrap();
+        let say = |line: &str| {
+            let args: Vec<String> = line.split_whitespace().map(String::from).collect();
+            door.command(&args, "test")
+        };
+        say("offer claude first second").unwrap();
+        say("role worker claude").unwrap();
+        say("model worker claude first low").unwrap();
+        let on = |cfg: &Config| resolve(cfg, "worker", None, None).unwrap();
+        assert_eq!(on(&cfg).model.as_deref(), Some("first"));
+        say("model worker claude second low").unwrap();
+        let next = on(&cfg);
+        assert_eq!(
+            (next.model.as_deref(), next.effort.as_deref()),
+            (Some("second"), Some("low"))
+        );
+        // A model the engine doesn't offer is refused, and the role keeps its own.
+        assert!(say("model worker claude third").is_err());
+        assert_eq!(on(&cfg).model.as_deref(), Some("second"));
+        // Another role is untouched.
+        assert_eq!(resolve(&cfg, "other", None, None).unwrap().model, None);
     }
     #[test]
     fn a_judge_never_routes_to_codex_even_with_a_role_or_inbox_override() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
-        fs::write(&cfg.roles, "steward-judged codex\n").unwrap();
+        cfg.seed_engines(dir.path(), "steward-judged codex\n", "");
         let job = Job::new(&cfg, "judge");
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-judged").unwrap();
         fs::write(job.path("engine"), "codex").unwrap();
         assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
         // The judge's own model and effort are Claude's line, not Codex's.
-        fs::write(
-            &cfg.models,
+        cfg.seed(
+            "steward-judged codex\n",
             "steward-judged codex other low\nsteward-judged claude chosen max\n",
-        )
-        .unwrap();
+        );
         let c = choice(&cfg, &job).unwrap();
         assert_eq!(
             (c.engine, c.model.as_deref(), c.effort.as_deref()),
@@ -275,8 +297,6 @@ mod scoped_tests {
         let project = dir.path().join("project");
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
         cfg.tools.git = "git".into();
         let git = |args: &[&str]| {
             assert!(
@@ -293,20 +313,15 @@ mod scoped_tests {
         fs::create_dir(&project).unwrap();
         git(&["init", "-q"]);
         git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
+        cfg.use_overlay(dir.path());
         let job = Job::new(&cfg, "job");
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-handed").unwrap();
         fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
-        fs::write(
-            &cfg.roles,
+        cfg.seed(
             "steward-handed claude\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n",
-        )
-        .unwrap();
-        fs::write(
-            &cfg.models,
             "steward-handed claude bare\nsteward-handed@sam/code claude scoped\n",
-        )
-        .unwrap();
+        );
         for url in [
             "https://github.com/Sam/Code.git",
             "git@github.com:SAM/CODE.git",

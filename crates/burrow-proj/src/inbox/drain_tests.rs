@@ -457,8 +457,8 @@ fn drain_admission_uses_the_candidate_role_instead_of_the_enrollment_engine() {
     ] {
         for full in [Engine::Claude, Engine::Codex] {
             let mut b = Box::new();
-            b.cfg.roles = b.path("roles");
-            fs::write(&b.cfg.roles, roles).unwrap();
+            let dir = b.path("engines");
+            b.cfg.seed_engines(&dir, roles, "");
             let inbox = b.cfg.inbox.as_mut().unwrap();
             inbox
                 .authors
@@ -506,8 +506,8 @@ fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
     ] {
         for full_codex in [false, true] {
             let mut b = Box::new();
-            b.cfg.roles = b.path("roles");
-            fs::write(&b.cfg.roles, roles).unwrap();
+            let dir = b.path("engines");
+            b.cfg.seed_engines(&dir, roles, "");
             b.cfg
                 .inbox
                 .as_mut()
@@ -572,8 +572,8 @@ fn drain_usage_wakes_and_overflow_follow_the_selected_engine() {
 #[test]
 fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
     let mut b = Box::new();
-    b.cfg.roles = b.path("roles");
-    fs::write(&b.cfg.roles, "").unwrap();
+    let dir = b.path("engines");
+    b.cfg.seed_engines(&dir, "", "");
     b.cfg
         .inbox
         .as_mut()
@@ -671,6 +671,7 @@ fn paused_ready_issues_wait_without_relabelling() {
         overlay: b.path("overlay.json"),
         allowed: vec!["sam/game".into(), "sam/burrow".into()],
         pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+        ..Default::default()
     });
     on_github(&b, &active);
     b.pass().drain().unwrap();
@@ -707,6 +708,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
         overlay: b.path("overlay.json"),
         allowed: vec!["sam/game".into(), "sam/burrow".into()],
         pipeline_repos: vec!["sam/box".into(), "sam/burrow".into()],
+        ..Default::default()
     });
     b.cfg
         .inbox

@@ -596,10 +596,12 @@ fn unavailable_planning_reads_retry_without_false_stale_notices() {
 fn unstick_preflight_bypasses_ordinary_triage_admission() {
     for engine in ["claude", "codex"] {
         let mut b = Box::new();
-        b.cfg.roles = b.path("roles");
-        b.cfg.models = b.path("models");
-        fs::write(&b.cfg.roles, format!("planner {engine}\n")).unwrap();
-        fs::write(&b.cfg.models, format!("planner {engine} selected\n")).unwrap();
+        let dir = b.path("engines");
+        b.cfg.seed_engines(
+            &dir,
+            &format!("planner {engine}\n"),
+            &format!("planner {engine} selected\n"),
+        );
         b.cfg.inbox.as_mut().unwrap().planning = true;
         for n in [8, 9] {
             let id = format!("busy{n}");

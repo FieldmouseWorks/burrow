@@ -57,7 +57,7 @@ fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.jobs = dir.path().join("jobs");
     cfg.scratch = dir.path().join("scratch");
-    cfg.roles = dir.path().join("roles");
+    cfg.use_overlay(dir.path());
     let job = Job::new(&cfg, "job");
     fs::create_dir_all(&job.dir).unwrap();
     job.set_turns(1).unwrap();
@@ -67,7 +67,13 @@ fn invalid_roles_and_codex_vms_fail_with_an_outcome_before_taking_a_slot() {
         ("work unknown", "line 1: work unknown"),
         ("work codex", "codex cannot run a --vm job"),
     ] {
-        fs::write(&cfg.roles, line).unwrap();
+        let (role, bad) = line.split_once(' ').unwrap();
+        // The door refuses a bad engine, so a hand-edited overlay carries it.
+        fs::write(
+            dir.path().join("overlay.json"),
+            serde_json::json!({"engines": {"roles": {role: bad}}}).to_string(),
+        )
+        .unwrap();
         assert!(exec(&cfg, "job", "normal").is_err());
         assert!(read(&job.turn("1", "outcome")).unwrap().contains(expected));
         assert!(!job.turn("1", "slot").exists());

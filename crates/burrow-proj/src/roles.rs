@@ -1,17 +1,8 @@
-//! One file parser for turns, checked switches and deployment checks.
+//! The roles grammar, run over the overlay's roles as lines: one parser for
+//! turns and deployment checks.
 use crate::engine::{Engine, RoleKey, role};
 use std::collections::BTreeMap;
 use std::path::Path;
-
-pub(crate) fn read(path: &Path) -> Result<String, String> {
-    match std::fs::read_to_string(path) {
-        Ok(t) => Ok(t),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
-            Ok(String::new())
-        }
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
-}
 
 pub(crate) fn parse<'a>(
     path: &Path,
@@ -39,28 +30,5 @@ pub(crate) fn parse<'a>(
     Ok(entries
         .into_iter()
         .map(|(key, (_, _, engine))| (key, engine))
-        .collect())
-}
-
-/// A validated policy, one line a role, as the shared parser read it.
-pub(crate) fn engines(path: &Path, text: &str) -> Result<String, String> {
-    parse(path, text, None, false, crate::now())?;
-    Ok(text
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") + "\n")
-        .collect())
-}
-
-/// Every line of a roles file, as `settings show` gives it: `ROLE[@OWNER/REPO]`
-/// to `ENGINE [over PCT ENGINE]`, each checked as a turn checks it.
-pub(crate) fn shown(
-    path: &Path,
-    text: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    Ok(engines(path, text)?
-        .lines()
-        .filter_map(|l| l.split_once(' '))
-        .map(|(role, engine)| (role.to_owned(), engine.into()))
         .collect())
 }

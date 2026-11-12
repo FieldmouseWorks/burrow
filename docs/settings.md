@@ -29,9 +29,7 @@ machine, named beside it). What it covers today:
 | `autoland.reviewers.*` | `burrow.autoland.reviewers` in the flake |
 | `settings.allowed` | `burrow.settings` in the flake |
 | `settings.repositoryOverrides`, `settings.pipelineUntil` | the one runtime settings overlay |
-| `proj.roles` | the roles file (`~/.config/proj/roles`) |
-| `proj.models` | the models file beside it |
-| `proj.engineSetups` | the saved setups, `roles.d/`, and the one in force |
+| `proj.roles`, `proj.models`, `proj.offeredModels`, `proj.engineSetups` | the one runtime settings overlay, written through the settings door and logged |
 | `proj.usageHold` | proj's usage record, `.usage.json` in its jobs dir |
 
 The JSON Schema marks each option with `x-owner` and `x-change`, gives each
