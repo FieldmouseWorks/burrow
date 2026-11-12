@@ -450,7 +450,7 @@ fn fresh(p: &mut Pass, path: &str, etag: Option<&str>) -> Result<Option<Page>, S
     }
     let tag = r.header("etag").map(String::from);
     match r.json().map_err(|e| p.github(e))? {
-        Value::Array(page) => Ok(Some((tag, page, r.next()))),
+        Value::Array(page) => Ok(Some((tag, page, r.next(path)))),
         _ => Err(format!("GET {path}: GitHub's answer isn't a list")),
     }
 }

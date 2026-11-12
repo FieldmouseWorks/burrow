@@ -18,9 +18,15 @@ fn reads_gh() {
         (r.status, r.header("ETAG"), r.body.as_str()),
         (200, Some("W/\"abc\""), "[1]")
     );
-    assert_eq!(r.next().as_deref(), Some("repositories/1/issues?page=2"));
+    assert_eq!(
+        r.next("repos/sam/game/issues").as_deref(),
+        Some("repos/sam/game/issues?page=2")
+    );
     let r = parse("HTTP/2.0 304 Not Modified\nEtag: x\n").unwrap();
-    assert_eq!((r.status, r.body.as_str(), r.next()), (304, "", None));
+    assert_eq!(
+        (r.status, r.body.as_str(), r.next("repos/sam/game/issues")),
+        (304, "", None)
+    );
     assert_eq!(r.header("etag"), Some("x"));
     // What gh really prints: \n after the status, \r\n after headers, and
     // a body that can hold either blank line itself.
@@ -89,6 +95,87 @@ fn a_later_page_is_retried_without_losing_the_earlier_one() {
         vec![json!([1]), json!([2])]
     );
     assert_eq!(gh.paused, vec![2]);
+}
+
+#[test]
+fn a_repos_later_pages_are_asked_for_by_its_name() {
+    // GitHub links a repo's later pages by its id, which names no account:
+    // gh-token refused them ("which account is `gh api` for?"), so every
+    // read past a hundred items failed (remi#1027).
+    let mut gh = Fake::default();
+    let link = "<https://api.github.com/repositories/1429139383/issues?state=all&per_page=100&after=Y3Vy%3D&page=2>; rel=\"next\"";
+    gh.on(
+        "GET",
+        "repos/sam/game/issues?state=all&per_page=100&after=",
+        vec![ok(200, json!([2]), &[])],
+    );
+    gh.on(
+        "GET",
+        "repos/sam/game/issues?state=all&per_page=100",
+        vec![ok(200, json!([1]), &[("Link", link)])],
+    );
+    assert_eq!(
+        pages(&mut gh, "repos/sam/game/issues?state=all&per_page=100").unwrap(),
+        vec![json!([1]), json!([2])]
+    );
+    let asked: Vec<&str> = gh.asked.iter().map(|a| a.1.as_str()).collect();
+    assert_eq!(
+        asked,
+        [
+            "repos/sam/game/issues?state=all&per_page=100",
+            "repos/sam/game/issues?state=all&per_page=100&after=Y3Vy%3D&page=2",
+        ]
+    );
+}
+
+#[test]
+fn a_next_link_keeps_its_own_path_when_it_names_no_repo_by_id() {
+    let r = |link: &str| Response {
+        status: 200,
+        headers: vec![(
+            "Link".into(),
+            format!("<https://api.github.com/{link}>; rel=\"next\""),
+        )],
+        body: "[]".into(),
+    };
+    for (asked, link, want) in [
+        // The repo itself, and a query straight after it.
+        ("repos/o/r", "repositories/7?page=2", "repos/o/r?page=2"),
+        (
+            "/repos/o/r/pulls",
+            "repositories/7/pulls?page=2",
+            "repos/o/r/pulls?page=2",
+        ),
+        // Nothing by id: as GitHub gave it.
+        (
+            "repos/o/r/issues",
+            "repos/o/r/issues?page=2",
+            "repos/o/r/issues?page=2",
+        ),
+        (
+            "orgs/o/repos",
+            "organizations/9/repos?page=2",
+            "organizations/9/repos?page=2",
+        ),
+        // Asked by id, or by no repo: no name to give it.
+        (
+            "repositories/7/issues",
+            "repositories/7/issues?page=2",
+            "repositories/7/issues?page=2",
+        ),
+        (
+            "user/repos",
+            "repositories/7/x?page=2",
+            "repositories/7/x?page=2",
+        ),
+        (
+            "repos/o/r",
+            "repositories/x7/issues",
+            "repositories/x7/issues",
+        ),
+    ] {
+        assert_eq!(r(link).next(asked).as_deref(), Some(want), "{asked} {link}");
+    }
 }
 
 #[test]
