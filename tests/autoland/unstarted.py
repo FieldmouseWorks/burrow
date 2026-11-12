@@ -141,6 +141,16 @@ checks = did("s9", workflow="B", path=FLAKE[1], lane=True)
 extra = dict(checks[0], name="second / lane into main")
 pr = head([caller, twin()], checks + [extra])
 assert dead_runs(pr, "sam/r") == [77]
+# A stale suite (another base) under a different caller name neither
+# discharges nor creates an obligation: the current-base replacement stands.
+old_base = whole(base="dev", suite="s8")
+for c in old_base:
+    c["name"] = "older / " + c["name"].split(" / ", 1)[-1]
+    c["checkSuite"]["workflowRun"] = {"databaseId": 79, "workflow": {"id": "B", "name": "B"}, "file": {"path": FLAKE[1]}}
+older = other("s8", workflow="B", path=FLAKE[1])
+pr = head([caller, twin(), older], did("s9", workflow="B", path=FLAKE[1], lane=True) + old_base)
+assert dead_runs(pr, "sam/r") == []
+assert ci_state(pr, repo="sam/r")[0] == "green"
 # Current-diff docs and whole-gate twins cover the work; a genuine failure
 # remains red, and an active replacement keeps CI pending.
 for conclusion in ("SUCCESS", "FAILURE"):

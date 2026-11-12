@@ -262,8 +262,10 @@ def unstarted(suite_nodes, stale=(), now=None, contexts=(), base=None):
         # Lane selection is not gate execution. Account for every shared
         # call visible in this workflow, including calls skipped in this
         # replacement, and never borrow a sibling call's gate.
+        # A stale suite (another base, an obsolete fork) creates no
+        # obligation, as it discharges none.
         calls = {job_of(x)[0] for x in contexts if workflow(x) == FLAKE[0]
-                 and job_of(x)[1].startswith(LANE)}
+                 and suite(x).get("id") not in stale and job_of(x)[1].startswith(LANE)}
         laned = {job_of(x)[0] for x in mine if judged(x) == (base, None)}
         worked = {job_of(x)[0] for x in mine
                   if job_of(x)[1] == GATE or (judged(x) and judged(x)[1] is not None)}
