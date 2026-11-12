@@ -73,7 +73,10 @@ fn a_redeployed_allow_list_reaches_a_running_service() {
     let service = rig.service();
     let work = thread::spawn(move || burrow_review::work(service));
     thread::sleep(Duration::from_millis(300));
-    assert!(rig.runs().is_empty(), "a repo off the allow list was reviewed");
+    assert!(
+        rig.runs().is_empty(),
+        "a repo off the allow list was reviewed"
+    );
     assert!(rig.path("queue").join(&parked).exists());
     only(&["sam/r"]);
     work.join().unwrap();
