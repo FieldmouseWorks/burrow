@@ -39,7 +39,7 @@ Issue, PR and turn-completion events advance the list without a parent job.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes
-`inbox.authors`. Comments and edit histories always require configured
+`burrow.authors`. Comments and edit histories always require configured
 authors, including on generated children. Outside-text labels retain their
 existing protection. An edited parent pauses child
 admission and posts a notice; the task list and completed work remain on

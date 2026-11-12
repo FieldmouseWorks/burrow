@@ -37,6 +37,7 @@ in pkgs.testers.runNixOSTest {
   nodes.machine = { config, lib, ... }: {
     imports = [ self.nixosModules.proj self.nixosModules.cpu ((import ../examples/machine.nix { inherit lib; }) // { nixpkgs={}; boot={}; fileSystems={}; }) ];
     burrow = {
+      authors = [ { login = "sam"; id = 1; } ];
       claude.package = engine "claude";
       cpu.enable = true;
       settings.allowed = [ "o/r" "o/web" ];
@@ -49,7 +50,7 @@ in pkgs.testers.runNixOSTest {
         inherit gh;
         maxJobs=1; pipelineSlots=0; maxJobsPerProject=10; minFreeMemory=0;
         codex = { slots=1; package=engine "codex"; };
-        inbox = { enable=true; planning=false; authors=[ { login = "sam"; id = 1; } ]; triage = { enable=true; drain="codex"; drainJobs=1; }; };
+        inbox = { enable=true; planning=false; triage = { enable=true; drain="codex"; drainJobs=1; }; };
       };
     };
     environment.systemPackages = [ pkgs.git pkgs.jq self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof ];

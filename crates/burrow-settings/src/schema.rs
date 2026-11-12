@@ -124,6 +124,16 @@ pub fn find(name: &str) -> Option<&'static Setting> {
 }
 
 const REPOS: Kind = Kind::List(&Kind::Repo);
+const AUTHORS: Kind = Kind::List(&Kind::Record(&[
+    Field {
+        name: "login",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "id",
+        kind: &Kind::Count { min: 1 },
+    },
+]));
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
 const ENGINE: Kind = Kind::OneOf(&["claude", "codex"]);
@@ -226,6 +236,15 @@ fn per_project(values: &Values) -> Option<Value> {
 
 /// Every option, in the order `settings show` lists them.
 pub static SETTINGS: &[Setting] = &[
+    // Who the doors answer: one list for the inbox, engines, probe, undo and
+    // settings doors.
+    flake(
+        "authors",
+        &AUTHORS,
+        Is("[]"),
+        "proj",
+        "GitHub accounts, with immutable numeric IDs, whose issues and replies the doors act on.",
+    ),
     // proj: its slots and what it holds back.
     flake(
         "proj.maxJobs",

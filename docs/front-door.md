@@ -53,7 +53,7 @@ box on a private repo's issues (`burrow.probe.repo`, the machine flake's
 own, say), in seconds and without starting a Claude.
 
 - **Ask:** open an issue there labelled `probe` (`probe.label`), as one of
-  `probe.authors` (the inbox's, unless set), or as the configured
+  `burrow.authors`, or as the configured
   `github.machinery` App. A job uses the in-job path below. Ask with a question a line:
   - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
   - `units`: failed units and jobs under way, the system's and the user's
@@ -126,7 +126,7 @@ its work.
 Use the engines door when the chat asks to move the machine between saved
 engine setups, or back to the previous one. No job or session needs to start.
 The machine flake enables `burrow.proj.engines.door` and sets its `repo`;
-`label` defaults to `engines`, and `authors` to the inbox's authors.
+`label` defaults to `engines`; who may ask is `burrow.authors`.
 
 Open an issue there with that label, as an author, whose body is one line:
 `list`, `use NAME` or `use back`. The door uses proj's checked switch as the
@@ -160,8 +160,7 @@ stop those mistakes before new turns have to discover them.
 
 `burrow.ledger.door` (crates/burrow-ledger-door) asks Conary's ledger for an
 undo on the same kind of issue: `undo`-labelled (`door.label`), in the
-probe's repo and from its authors unless set otherwise (`door.repo`,
-`door.authors`).
+probe's repo and from `burrow.authors` (`door.repo`).
 
 - **Ask:** one line, in `cn undo`'s words: `undo OWNER/REPO#N` (the change
   that PR is), `undo --actor SESSION_URL` (everything an agent session
@@ -189,14 +188,14 @@ into project jobs.
 
 - **Start:** open an issue in the project's own GitHub repo (one checked out in
   `burrow.projectsDir`) with a label from `inbox.labels`, as one of
-  `inbox.authors`. Put the whole brief in the body: the job knows only the
+  `burrow.authors`. Put the whole brief in the body: the job knows only the
   issue. Within seconds it's a `proj run` job in that project, and the
   issue gets an "On it" comment naming the job.
 - **Engine:** `codex` for code work with a checkable bar: a gate or tests.
   `claude` for judgment, anything the owner reads, and one-way calls. If an
   issue has both, Codex takes it. VM jobs stay Claude-only.
 - **Answer:** when the job finishes a turn, its answer is posted to the issue.
-- **Follow-ups:** reply on the issue. Replies from `inbox.authors` go to the
+- **Follow-ups:** reply on the issue. Replies from `burrow.authors` go to the
   same job as its next turn (`proj reply`), with everything it already did in
   context. A reply sent while a turn runs waits for it to finish.
 - **Done:** a turn that ends `proj done` closes the issue once its answer is
@@ -210,7 +209,7 @@ into project jobs.
   and restore the job label to pick them up. Notice delivery retries separately
   from stopping the old job, so a reopened issue starts afresh even while a
   notice is pending. Long lists of unread replies are delivered in batches.
-- **Who:** only `inbox.authors` can hand the box work; everyone else's issues
+- **Who:** only `burrow.authors` can hand the box work; everyone else's issues
   Author lists use `{ login = "NAME"; id = ACCOUNT_ID; }`, shared by the inbox,
   engines door, probe and undo door. The positive numeric account ID grants
   access; the login is only a display label. GitHub's authenticated REST
@@ -236,7 +235,7 @@ into project jobs.
 ### Triage and the drain: issues nobody labelled
 
 With `inbox.triage.enable`, an issue doesn't need a label to get done. Every
-open issue one of `inbox.authors` opened, with none of the labels below, an
+open issue one of `burrow.authors` opened, with none of the labels below, an
 engine's or one in `triage.skip` (probe, undo, flaky: other machinery's), is
 sorted by a job of its own: the `triage` role's engine reads the issue and the
 repo, changes nothing, and answers with a verdict the inbox carries out.
@@ -289,7 +288,7 @@ its players' reports, say, even with an author's token) puts that label on as
 it opens the issue, and no job ever starts from it, engine label or not. That
 text gets to an agent only through an author who opens an issue of their own
 for it. A job whose issue gets the label later, or whose opener
-leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
+leaves `burrow.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
 Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE`, with

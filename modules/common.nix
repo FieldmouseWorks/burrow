@@ -23,6 +23,19 @@ inputs:
             '';
           };
 
+          authors = mkOption {
+            type = types.listOf (import ../lib/github-author.nix { inherit lib; });
+            default = [ ];
+            example = [ { login = "octocat"; id = 1; } ];
+            description = ''
+              The GitHub accounts, with immutable numeric IDs, whose issues and
+              replies the doors act on: the proj inbox, the engines door, the
+              probe, the undo door and the settings door all read this one list.
+              Anyone else's text, edits included, is left alone: an issue is a
+              task given to an agent with your logins.
+            '';
+          };
+
           projectsDir = mkOption {
             type = types.str;
             default = "/data/dev/src";

@@ -69,7 +69,8 @@ let
   roles = "${config.users.users.${user}.home}/.config/proj/roles";
   models = "${config.users.users.${user}.home}/.config/proj/models";
   enginesConfig = pkgs.writeText "proj-engines-door.json" (builtins.toJSON {
-    inherit (cfg.engines.door) repo label authors;
+    inherit (cfg.engines.door) repo label;
+    inherit (config.burrow) authors;
     state = "${stateDir}/proj-engines";
     inherit roles;
   });
@@ -119,7 +120,8 @@ let
     trackedSettings = "/etc/${settingsFile}";
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
-      inherit (cfg.inbox) labels roles ownerRole unstickLabel authors vm outsideLabel;
+      inherit (cfg.inbox) labels roles ownerRole unstickLabel vm outsideLabel;
+      inherit (config.burrow) authors;
       inherit (cfg.inbox) planning;
       host = config.networking.hostName;
       wake = inboxWake;
@@ -391,12 +393,6 @@ in
         default = "engines";
         description = "The label on an issue asking for list, use NAME or use back.";
       };
-      authors = lib.mkOption {
-        type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
-        default = cfg.inbox.authors;
-        defaultText = lib.literalExpression "config.burrow.proj.inbox.authors";
-        description = "GitHub accounts, with immutable numeric IDs, whose issues may switch setups. Anyone else's text, including an edit, is ignored.";
-      };
     };
 
     inbox = {
@@ -442,16 +438,6 @@ in
           waits in the line it may be about. Put on an issue whose job is
           still waiting for its first turn, it starts that job over that way.
           Codex jobs still stay within their own codex.slots cap.
-        '';
-      };
-      authors = lib.mkOption {
-        type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
-        default = [ ];
-        example = [ { login = "octocat"; id = 1; } ];
-        description = ''
-          GitHub accounts, with immutable numeric IDs, whose issues and replies the agents act on. Anyone else's
-          are left alone, labelled or not: an issue is a task given to an agent
-          with your logins.
         '';
       };
       vm = lib.mkOption {
@@ -698,8 +684,8 @@ in
 
   (lib.mkIf cfg.engines.door.enable {
     assertions = [{
-      assertion = cfg.engines.door.authors != [ ];
-      message = "burrow.proj.engines.door.authors: name who may switch this machine's engines.";
+      assertion = config.burrow.authors != [ ];
+      message = "burrow.authors: name who may switch this machine's engines.";
     }];
     burrow.events.handlers.engines = {
       events = [ "issues" ];
@@ -735,8 +721,8 @@ in
 
   (lib.mkIf cfg.inbox.enable {
     assertions = [{
-      assertion = cfg.inbox.authors != [ ];
-      message = "burrow.proj.inbox.authors: name who may hand the agents issues.";
+      assertion = config.burrow.authors != [ ];
+      message = "burrow.authors: name who may hand the agents issues.";
     }];
     environment.systemPackages = [ inbox ];
     # The steward has it forget a repo GitHub's name now means another of.
@@ -763,7 +749,7 @@ in
 
     burrow.claude.machineMd = lib.mkOrder 701 ''
       Issues work too: label one `${lib.concatStringsSep "` or `" (lib.attrNames cfg.inbox.labels)}` in a project's GitHub repo
-      (opened by ${lib.concatStringsSep " or " (map (a: a.login) cfg.inbox.authors)}) and within seconds it's a job there.
+      (opened by ${lib.concatStringsSep " or " (map (a: a.login) config.burrow.authors)}) and within seconds it's a job there.
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows
       which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as
