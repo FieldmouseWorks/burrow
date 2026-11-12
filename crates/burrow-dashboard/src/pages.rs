@@ -2,6 +2,9 @@
 //! and its content, with nothing for a script to fill in.
 
 use maud::{DOCTYPE, Markup, html};
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::assets::Assets;
 use crate::core::{Enrolled, Live};
@@ -200,6 +203,117 @@ pub fn home(
     )
 }
 
+/// Render `settings show --json` using its JSON Schema. Neither option names
+/// nor their owners are known to the page; the schema owns both.
+pub fn settings(f: &Frame, document: &Value, schema: &Value) -> Result<Markup, String> {
+    Ok(page(
+        f,
+        "settings",
+        "Settings",
+        true,
+        settings_body(document, schema)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct SettingsDocument {
+    options: BTreeMap<String, SettingReading>,
+}
+
+#[derive(Deserialize)]
+struct SettingReading {
+    value: Value,
+    origin: String,
+    file: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SettingDescription {
+    description: String,
+    #[serde(rename = "x-owner")]
+    owner: String,
+    #[serde(rename = "x-change")]
+    change: String,
+}
+
+fn settings_body(document: &Value, schema: &Value) -> Result<Markup, String> {
+    let document: SettingsDocument =
+        serde_json::from_value(document.clone()).map_err(|e| format!("Settings values: {e}"))?;
+    let descriptions: BTreeMap<String, SettingDescription> = serde_json::from_value(
+        schema
+            .pointer("/properties/options/properties")
+            .ok_or("Settings schema has no options")?
+            .clone(),
+    )
+    .map_err(|e| format!("Settings schema: {e}"))?;
+    let mut owners = BTreeMap::<_, Vec<_>>::new();
+    for (name, description) in &descriptions {
+        let reading = document
+            .options
+            .get(name)
+            .ok_or_else(|| format!("Settings value missing: {name}"))?;
+        owners
+            .entry(&description.owner)
+            .or_default()
+            .push((name, description, reading));
+    }
+    if let Some(name) = document
+        .options
+        .keys()
+        .find(|name| !descriptions.contains_key(*name))
+    {
+        return Err(format!("Settings schema missing: {name}"));
+    }
+    Ok(html! {
+        section.hero {
+            div.shaft aria-hidden="true" {}
+            div.hero-inner {
+                p.eyebrow { "Configuration" }
+                h1 { "Settings" }
+                p.lede { "Every setting in effect, grouped by the part of the pipeline that reads it." }
+                p { "Read only. Live settings take effect at the next decision; other settings need a deploy." }
+            }
+        }
+        div.panels {
+            @for (index, (owner, options)) in owners.iter().enumerate() {
+                section.settings-group.panel aria-labelledby=(format!("settings-owner-{index}")) {
+                    h2 id=(format!("settings-owner-{index}")) { (owner) }
+                    @for (name, description, reading) in options {
+                        article.setting data-setting=(name) {
+                            h3 { code { (setting_text(name)) } }
+                            dl.facts {
+                                div { dt { "Value" } dd { code data-setting-value { (setting_text(&reading.value.to_string())) } } }
+                                div { dt { "Source" } dd {
+                                    (reading.origin)
+                                    @if let Some(file) = &reading.file {
+                                        @if reading.origin == "live" { " · " code { (setting_text(file)) } }
+                                    }
+                                } }
+                                div { dt { "Changes" } dd {
+                                    @if description.change == "live" { "Live · next decision" }
+                                    @else { "Deploy required" }
+                                } }
+                            }
+                            p { (setting_text(&description.description)) }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+// Break opportunities keep arbitrary JSON and option names within a phone's
+// width, using the shell's existing styles and no inline CSS.
+fn setting_text(text: &str) -> Markup {
+    html! {
+        @for (index, character) in text.chars().enumerate() {
+            (character)
+            @if index % 16 == 15 { wbr; }
+        }
+    }
+}
+
 pub fn offline(f: &Frame) -> Markup {
     page(
         f,
@@ -269,6 +383,112 @@ pub fn until(now: u64, then: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn settings_fixture() -> Value {
+        serde_json::from_str(include_str!("../tests/settings-show.json")).unwrap()
+    }
+
+    #[test]
+    fn settings_render_every_schema_option_and_new_fields() {
+        let mut fixture = settings_fixture();
+        let before = settings_body(&fixture["document"], &fixture["schema"])
+            .unwrap()
+            .into_string()
+            .replace("<wbr>", "");
+        assert!(!before.contains("future.extra"));
+        fixture["schema"]["properties"]["options"]["properties"]["future.extra"] = json!({
+            "x-owner": "another reader", "x-change": "live",
+            "description": "A new setting <with help> & details.",
+            "type": "object", "properties": {"value": {"type": "string"}}
+        });
+        fixture["document"]["options"]["future.extra"] = json!({
+            "value": "<script>alert('value')</script>", "origin": "live", "file": "/new/<settings>"
+        });
+        let rendered = settings_body(&fixture["document"], &fixture["schema"])
+            .unwrap()
+            .into_string()
+            .replace("<wbr>", "");
+        let names = fixture["schema"]["properties"]["options"]["properties"]
+            .as_object()
+            .unwrap();
+        assert_eq!(rendered.matches("<article ").count(), names.len());
+        for name in names.keys() {
+            assert!(
+                rendered.contains(&format!("data-setting=\"{name}\"")),
+                "{name}"
+            );
+        }
+        assert!(rendered.contains(">another reader</h2>"));
+        assert!(rendered.contains("A new setting &lt;with help&gt; &amp; details."));
+        assert!(rendered.contains("&lt;script&gt;"));
+        assert!(rendered.contains("/new/&lt;settings&gt;"));
+        assert!(!rendered.contains("<script>"));
+        assert!(rendered.contains("Live · next decision"));
+        assert!(rendered.contains("Deploy required"));
+        assert!(!rendered.contains("<input") && !rendered.contains("<form"));
+    }
+
+    #[test]
+    fn settings_show_values_sources_and_help_without_inventing_readings() {
+        let mut fixture = settings_fixture();
+        let rendered = settings_body(&fixture["document"], &fixture["schema"])
+            .unwrap()
+            .into_string()
+            .replace("<wbr>", "");
+        for text in [
+            "default",
+            "flake",
+            "live",
+            "/config/proj/roles",
+            "null",
+            "true",
+            "6",
+        ] {
+            assert!(rendered.contains(text), "{text}");
+        }
+        // A live-capable setting at its default must not claim its file was read.
+        assert!(!rendered.contains("/jobs/.usage.json"));
+        fixture["document"]["options"]
+            .as_object_mut()
+            .unwrap()
+            .remove("proj.roles");
+        assert_eq!(
+            settings_body(&fixture["document"], &fixture["schema"]).unwrap_err(),
+            "Settings value missing: proj.roles"
+        );
+        let mut fixture = settings_fixture();
+        fixture["schema"]["properties"]["options"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("proj.roles");
+        assert_eq!(
+            settings_body(&fixture["document"], &fixture["schema"]).unwrap_err(),
+            "Settings schema missing: proj.roles"
+        );
+    }
+
+    #[test]
+    fn settings_fixture_preview() {
+        let fixture = settings_fixture();
+        let body = settings_body(&fixture["document"], &fixture["schema"]).unwrap();
+        // Optional output lets the browser acceptance use the very same renderer.
+        if let Some(path) = std::env::var_os("BURROW_SETTINGS_PREVIEW") {
+            let preview = html! {
+                (DOCTYPE)
+                html lang="en" {
+                    head {
+                        meta charset="utf-8";
+                        meta name="viewport" content="width=device-width, initial-scale=1";
+                        title { "Settings fixture" }
+                        link rel="stylesheet" href="/assets/app.css";
+                    }
+                    body { main { (body) } }
+                }
+            };
+            std::fs::write(path, preview.into_string()).unwrap();
+        }
+    }
 
     #[test]
     fn times_read_plainly() {
