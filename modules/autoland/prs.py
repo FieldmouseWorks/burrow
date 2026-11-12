@@ -48,10 +48,10 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
+            ... on CheckRun { databaseId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt workflow { name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }
@@ -169,6 +169,10 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{flow} (failed to start)")
+    for s in unstarted(suites.get("nodes", [])):
+        seen += 1
+        flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
+        pending.append(f"{flow} (never started, to be run again)")
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
             if suite(c).get("id") in stale:
@@ -220,6 +224,47 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     if not seen:
         return "none", [], docs
     return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending)), docs
+
+
+# A run GitHub queued and never started (its incident, a lost event) has no
+# job and can't be cancelled; past this long it's dead, not slow.
+UNSTARTED_AFTER = 15 * 60
+
+
+def unstarted(suite_nodes, now=None):
+    """The suites of a head whose workflow run has had no job for longer than
+    UNSTARTED_AFTER: still queued, with no check run at all. A run that has
+    started (a job exists, even a queued one waiting for a runner) isn't."""
+    now = C.NOW if now is None else now
+    out = []
+    for s in suite_nodes:
+        run = s.get("workflowRun") or {}
+        if s.get("status") not in ("QUEUED", "REQUESTED", "PENDING") or (s.get("checkRuns") or {}).get("totalCount", 1) != 0:
+            continue
+        made = run.get("createdAt")
+        if run.get("databaseId") and made and now - C.ts(made) > UNSTARTED_AFTER:
+            out.append(s)
+    return out
+
+
+def dead_runs(pr, repo=None, now=None):
+    """The one check of whether a head has no live run, for what CI is owed
+    on it: the run ids to ask GitHub to run again, from a run that never
+    started (unstarted) and a cancelled check nothing ran through since
+    (after_cancel), unless it timed out, which is the head's."""
+    nodes = pr["commits"]["nodes"]
+    commit = nodes[0]["commit"] if nodes else {}
+    contexts = ((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", [])
+    suites = (commit.get("checkSuites") or {}).get("nodes", [])
+    ids = [s["workflowRun"]["databaseId"] for s in unstarted(suites, now)]
+    # Only a cancelled check needs runs() (which asks GitHub about the fork).
+    stale = runs(pr, repo)[0] if any(c["__typename"] == "CheckRun" and cancelled(c) for c in contexts) else set()
+    for c in contexts:
+        if c["__typename"] == "CheckRun" and cancelled(c) and suite(c).get("id") not in stale \
+                and after_cancel(c, contexts, stale) is None and not timed_out(repo, c):
+            if (run_id := (suite(c).get("workflowRun") or {}).get("databaseId")):
+                ids.append(run_id)
+    return list(dict.fromkeys(ids))
 
 
 # The names burrow's shared CI (flake-check.yml) gives two of its check runs

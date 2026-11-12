@@ -27,11 +27,11 @@ import stages as S
 import stopping
 import train as T
 from aside import aside
-from common import CFG, MIN, save, ts
+from common import CFG, MIN, log, save, ts
 from touches import bot_edited, codex_written, dep_kind, gate_edit, moved_from
 from tasks import FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
 from tasks import fix_task as fix_task, judge_task as judge_task, proof_task as proof_task, negative as negative
-from prs import ci_state, has_ci, our_status
+from prs import ci_state, dead_runs, has_ci, our_status
 from prs import onto, land, MERGE_STEPS as MERGE_STEPS
 from step_context import Context, CHECKS_START, SESSION, clock, STRIKES as STRIKES
 from step_jobs import Jobs
@@ -107,6 +107,18 @@ class Pass(Context, Jobs, Actions):
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
         self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
+        # A head with no live run (one GitHub never started, or one cancelled
+        # that nothing ran through since) is asked to run it again, through
+        # GitHub's own re-run, once per run: never an empty commit or a
+        # reopen. Said in the log; a re-run that changes nothing stays pending
+        # and goes on as a stall.
+        if self.ci != "green" and (dead := dead_runs(self.pr, self.repo)):
+            asked = self.st.get("rerun") if (self.st.get("rerun") or {}).get("head") == self.head else {"head": self.head, "runs": []}
+            for run in [r for r in dead if r not in asked["runs"]]:
+                asked["runs"].append(run)
+                done = C.gh("api", "-X", "POST", f"repos/{self.repo}/actions/runs/{run}/rerun", check=False)
+                log(f"  {self.key}: run {run} has no live job on {self.head[:7]}; asked GitHub to run it again" + ("" if done is not None else " (refused)"))
+            self.st["rerun"] = asked
         # A build's or run's verdicts GitHub took only some of: the rest go up
         # whatever CI says now, so a failure it took doesn't leave the others
         # unposted behind a red PR. Their statuses kick the pass that sees them.
