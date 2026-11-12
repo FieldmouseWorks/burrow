@@ -15,7 +15,8 @@ let
     echo "$1 $2 ''${GH_TOKEN_SOCKET:-none}" >>/tmp/gh-calls
     case "$*" in
       "auth token") echo gho_stand_in ;;
-      "api -i -X POST graphql")
+      "api -i -X POST graphql --input -")
+        cat >/dev/null
         printf 'HTTP/2.0 200 OK\r\n\r\n%s' '{"data":{"repositoryOwner":{"repositories":{"nodes":[{"nameWithOwner":"sam/r"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;
       *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
     esac
@@ -99,7 +100,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("as the user, cn has gh's login for every repo"):
         assert machine.succeed("cat /tmp/cn-auth") == "gho_stand_in none\n", machine.succeed("cat /tmp/cn-auth")
-        assert machine.succeed("cat /tmp/gh-calls") == "auth token none\n" * 2
+        assert machine.succeed("cat /tmp/gh-calls") == "auth token none\n" * 3
 
     with subtest("as the machine's own App, cn asks for each repo's token, and never has the user's login"):
         app.wait_for_unit("fake-github.service")
@@ -112,7 +113,7 @@ pkgs.testers.runNixOSTest {
         # The full pass lists the owner's repos as the App too.
         app.succeed("systemctl start burrow-ledger.service")
         listed = app.succeed("cat /tmp/gh-calls").splitlines()
-        assert listed == ["api -i /run/gh-token/workers.sock"], listed
+        assert listed == ["api -i none"], listed
 
     with subtest("GitHub unavailable books the repo's next pass, and the unit hasn't failed"):
         machine.succeed("echo 75 >/tmp/cn-exit")

@@ -56,17 +56,20 @@ pub fn set_up(cfg: &Config, cn: &dyn Cn) -> Result<(), String> {
     }
 }
 
-/// Syncs one repo. GitHub being unavailable books its next pass and is no
+/// Syncs one repo; `now` is read when the booking is made, so the retry is
+/// five minutes after the failure, however long the pass has run. GitHub being unavailable books its next pass and is no
 /// failure; any other failure is one.
-pub fn sync_repo(cfg: &Config, cn: &dyn Cn, repo: &str, now: u64) -> Result<(), String> {
-    if !burrow_github::repo_name(repo) {
-        return Err(format!("{repo}: not an OWNER/REPO"));
-    }
+pub fn sync_repo(
+    cfg: &Config,
+    cn: &dyn Cn,
+    repo: &str,
+    now: &dyn Fn() -> u64,
+) -> Result<(), String> {
     match cn.run(&["sync", repo])? {
         Some(0) => Ok(()),
         Some(UNAVAILABLE) => {
             eprintln!("{repo}: GitHub is unavailable; again in five minutes");
-            deferred::book(&cfg.wake, repo, now + AGAIN)
+            deferred::book(&cfg.wake, repo, now() + AGAIN)
         }
         other => Err(format!("cn sync {repo} {}", how(other))),
     }
@@ -113,7 +116,7 @@ pub fn pass(
     api: &mut dyn Api,
     cn: &dyn Cn,
     only: Option<&str>,
-    now: u64,
+    now: &dyn Fn() -> u64,
 ) -> Result<(), String> {
     set_up(cfg, cn)?;
     if let Some(repo) = only {

@@ -39,19 +39,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(e) => {
-            eprintln!("burrow-ledger-sync: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
     match pass(
         &cfg,
         &mut burrow_github::Gh::default(),
         &Run(&cfg),
         only,
-        now,
+        &now,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -59,4 +52,10 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }

@@ -63,12 +63,12 @@ fn the_ledger_is_set_up_only_until_its_anchor_exists() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path(), &[]);
     let cn = Scripted::default();
-    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), 0).unwrap();
+    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), &|| 0).unwrap();
     assert_eq!(*cn.calls.borrow(), ["init", "sync sam/r"]);
     fs::create_dir(&cfg.ledger).unwrap();
     fs::write(cfg.ledger.join("anchor"), "").unwrap();
     let cn = Scripted::default();
-    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), 0).unwrap();
+    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), &|| 0).unwrap();
     assert_eq!(*cn.calls.borrow(), ["sync sam/r"]);
 }
 
@@ -84,7 +84,7 @@ fn a_failed_set_up_syncs_nothing() {
         }
     }
     // Init asserts it is never asked to sync.
-    assert!(pass(&cfg, &mut gh(vec![]), &Init, Some("sam/r"), 0).is_err());
+    assert!(pass(&cfg, &mut gh(vec![]), &Init, Some("sam/r"), &|| 0).is_err());
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn exit_75_books_the_repo_five_minutes_on_and_is_no_failure() {
         exits: HashMap::from([("sam/R", 75)]),
         ..Default::default()
     };
-    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/R"), 1000).unwrap();
+    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/R"), &|| 1000).unwrap();
     assert_eq!(booked(dir.path()), json!({ "sam/r": 1300 }));
 }
 
@@ -107,7 +107,7 @@ fn any_other_exit_fails_and_books_nothing() {
         exits: HashMap::from([("sam/r", 1)]),
         ..Default::default()
     };
-    assert!(pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), 0).is_err());
+    assert!(pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), &|| 0).is_err());
     assert!(!dir.path().join("wake.json").exists());
 }
 
@@ -122,7 +122,7 @@ fn a_booking_that_cannot_be_written_fails_and_leaves_the_file() {
     for bad in ["", "  ", "[]", "not json", r#"{"a": 1} {"b": 2}"#] {
         fs::write(&cfg.wake, bad).unwrap();
         assert!(
-            pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), 0).is_err(),
+            pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), &|| 0).is_err(),
             "{bad:?}"
         );
         assert_eq!(fs::read_to_string(&cfg.wake).unwrap(), bad);
@@ -138,7 +138,7 @@ fn a_booking_for_another_repo_stays() {
         exits: HashMap::from([("sam/r", 75)]),
         ..Default::default()
     };
-    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), 1000).unwrap();
+    pass(&cfg, &mut gh(vec![]), &cn, Some("sam/r"), &|| 1000).unwrap();
     assert_eq!(booked(dir.path()), json!({ "sam/old": 1, "sam/r": 1300 }));
 }
 
@@ -154,7 +154,7 @@ fn one_repo_failing_does_not_stop_the_rest_but_fails_the_pass() {
         listing(&["sam/a", "sam/b", "sam/c"]),
         listing(&["eve/d"]),
     ]);
-    assert!(pass(&cfg, &mut api, &cn, None, 0).is_err());
+    assert!(pass(&cfg, &mut api, &cn, None, &|| 0).is_err());
     assert_eq!(
         *cn.calls.borrow(),
         [
@@ -182,7 +182,7 @@ fn an_owner_that_cannot_be_listed_fails_the_pass_not_the_other_owners() {
             ok(200, listing(&["eve/d"]), &[]),
         ],
     );
-    assert!(pass(&cfg, &mut api, &cn, None, 0).is_err());
+    assert!(pass(&cfg, &mut api, &cn, None, &|| 0).is_err());
     assert_eq!(*cn.calls.borrow(), ["init", "sync eve/d"]);
 }
 
@@ -191,7 +191,7 @@ fn a_clean_full_pass_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path(), &["sam"]);
     let cn = Scripted::default();
-    pass(&cfg, &mut gh(vec![listing(&["sam/a"])]), &cn, None, 0).unwrap();
+    pass(&cfg, &mut gh(vec![listing(&["sam/a"])]), &cn, None, &|| 0).unwrap();
     assert_eq!(*cn.calls.borrow(), ["init", "sync sam/a"]);
 }
 
@@ -213,10 +213,29 @@ fn listing_follows_pages_and_asks_for_source_repos_not_archived() {
 }
 
 #[test]
-fn a_repo_that_is_not_a_name_is_never_passed_to_cn() {
+fn the_retry_is_five_minutes_after_cn_returns_not_after_the_pass_began() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), &[]);
+    let clock = std::cell::Cell::new(1000);
+    struct Slow<'a>(&'a std::cell::Cell<u64>);
+    impl Cn for Slow<'_> {
+        fn run(&self, args: &[&str]) -> Result<Option<i32>, String> {
+            self.0.set(self.0.get() + 600);
+            Ok(Some(if args[0] == "sync" { 75 } else { 0 }))
+        }
+    }
+    pass(&cfg, &mut gh(vec![]), &Slow(&clock), Some("sam/r"), &|| {
+        clock.get()
+    })
+    .unwrap();
+    assert_eq!(booked(dir.path()), json!({ "sam/r": 2200 + 300 }));
+}
+
+#[test]
+fn a_repo_named_with_a_leading_hyphen_reaches_cn() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path(), &[]);
     let cn = Scripted::default();
-    assert!(sync_repo(&cfg, &cn, "--help", 0).is_err());
-    assert!(cn.calls.borrow().is_empty());
+    sync_repo(&cfg, &cn, "sam/-r", &|| 0).unwrap();
+    assert_eq!(*cn.calls.borrow(), ["sync sam/-r"]);
 }
