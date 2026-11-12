@@ -336,11 +336,11 @@ fn main_not_building_with_a_pr_open_never_falls_back_to_a_bump() {
 
 #[test]
 fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
-    // The old updater's bump (a commit main doesn't have) is live, recorded
-    // as its own: main's system may be a downgrade from it, and the switch
-    // is told to allow that. A system stamped with a commit of main, even
-    // one the updater recorded, keeps the switch's check.
-    let tree = |m: &Machine, rev: &str| {
+    // The old updater's bump (a commit the clone has and main doesn't) is
+    // live, recorded as its own: main's system may be a downgrade from it,
+    // and the switch is told to allow that. Any other stamp, or none the
+    // clone can read, keeps the switch's check.
+    let stamp = |m: &Machine, rev: &str| {
         let live = m.running();
         fs::write(format!("{live}/revision"), format!("{rev}\n")).unwrap();
         fs::write(m.cfg.state.join("deployed"), format!("{live}\n")).unwrap();
@@ -357,17 +357,39 @@ fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
         assert_eq!(once(&m.cfg, &mut gh, false), 0);
         m.did("calls")
     };
-    let (m, _) = proposed();
-    tree(&m, &sha('f'));
+    let (m, bump) = proposed();
+    stamp(&m, &bump);
     let calls = deploy(&m);
     assert!(calls.contains("--allow-downgrade"), "{calls}");
 
-    let (m, _) = proposed();
-    tree(&m, &m.main());
+    for rev in [m.main(), sha('f'), String::new()] {
+        let (m, _) = proposed();
+        stamp(&m, &rev);
+        let calls = deploy(&m);
+        assert!(calls.contains("switch --toplevel"), "{calls}");
+        assert!(!calls.contains("--allow-downgrade"), "{calls}");
+    }
+    // Once main is what runs, later deploys keep the check too.
     let calls = deploy(&m);
-    assert!(calls.contains("switch --toplevel"), "{calls}");
     assert!(!calls.contains("--allow-downgrade"), "{calls}");
-    // And once main is what runs, later deploys keep the check too.
-    let calls = deploy(&m);
-    assert!(!calls.contains("--allow-downgrade"), "{calls}");
+}
+
+#[test]
+fn a_bump_the_old_updater_left_live_waits_while_its_pr_is_open() {
+    // Switching back to main would let the old updater ride the PR again.
+    let (m, bump) = proposed();
+    let live = m.running();
+    fs::write(format!("{live}/revision"), format!("{bump}\n")).unwrap();
+    fs::write(m.cfg.state.join("deployed"), format!("{live}\n")).unwrap();
+    m.landed("system.nix", "unrelated");
+    let mut gh = open_at(&bump, &[false]);
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    let (outcome, said) = said(&m);
+    assert_eq!(outcome, "held");
+    assert!(
+        said.contains("its PR #8 is open; holding until it lands"),
+        "{said}"
+    );
+    assert_eq!(m.running(), live);
+    assert!(!switched(&m));
 }

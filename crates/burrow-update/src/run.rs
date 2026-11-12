@@ -376,6 +376,7 @@ impl Run<'_> {
                 }
             }
             self.changed = bump::commit(cfg, &self.inputs);
+            self.committed()?;
         }
         if !self.changed && !self.memo.force && running::main_runs(cfg, &self.running, &self.main) {
             running::live_at(cfg, &self.main, &self.running.current).map_err(Broke)?;
@@ -385,6 +386,18 @@ impl Run<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// That a bump which wasn't committed was nothing: pins left in the
+    /// clone mean the commit failed, and no system built from them is ever
+    /// deployed.
+    fn committed(&self) -> Result<(), Broke> {
+        if self.changed || bump::clean(self.cfg) {
+            return Ok(());
+        }
+        Err(Broke(
+            "couldn't commit the bump; the pins stay uncommitted".into(),
+        ))
     }
 
     /// The build. If everything at once doesn't, it takes what does, one
@@ -449,6 +462,7 @@ impl Run<'_> {
                 self.unfetched.push(i.to_string());
             }
             if !bump::commit(cfg, &self.inputs) {
+                self.committed()?;
                 continue;
             }
             match self.built() {

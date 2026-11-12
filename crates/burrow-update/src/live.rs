@@ -21,20 +21,29 @@ const DOWNGRADE: i32 = 3;
 
 impl Run<'_> {
     /// Whether the system that runs is a bump the updater before this one
-    /// put live itself (its record in `deployed`) and left unmerged: its
-    /// stamp isn't a commit of main. Going back to main from it can be a
-    /// downgrade the switch would refuse for ever, so then, and only then,
-    /// it's allowed. Anything else (a rollback main itself carries, a first
-    /// install, a system someone else switched to) keeps the switch's check.
+    /// put live itself (its record in `deployed`) and left unmerged: the
+    /// commit it's stamped with is one the clone has and main doesn't. That
+    /// takes positive evidence: no stamp, a stamp the clone can't read, or
+    /// any failed query is not it. Going back to main from such a bump can
+    /// be a downgrade the switch would refuse for ever, so then, and only
+    /// then, it's allowed. Anything else (a rollback main itself carries, a
+    /// first install, a system someone else switched to) keeps the switch's
+    /// check.
     fn leaves_old_bump(&self) -> bool {
         let run = &self.running;
+        let Some(rev) = run.rev.as_deref() else {
+            return false;
+        };
         self.cfg.train.is_some()
             && run.current == self.cfg.recorded("deployed")
-            && !run.rev.as_ref().is_some_and(|rev| {
-                self.cfg
-                    .git_hushed(&["merge-base", "--is-ancestor", rev, &self.main])
-                    .is_ok()
-            })
+            && self
+                .cfg
+                .git_hushed(&["cat-file", "-e", &format!("{rev}^{{commit}}")])
+                .is_ok()
+            && self
+                .cfg
+                .git_hushed(&["merge-base", "--is-ancestor", rev, &self.main])
+                .is_err()
     }
 
     pub(crate) fn go_live(&mut self) -> Step {
@@ -44,6 +53,19 @@ impl Run<'_> {
             return Ok(());
         }
         let cfg = self.cfg;
+        // The system that runs is a bump the updater before this one left
+        // live, and its PR is open: switching back to main would let that
+        // updater ride it again, and this one return, for ever. It waits
+        // for the PR to land (once, for this hand-over).
+        if let (Some(n), true) = (self.behind, self.leaves_old_bump()) {
+            return Err(self.end(
+                Outcome::Held,
+                &format!(
+                    "{} runs a bump the updater before this one put live, and its PR #{n} is open; holding until it lands",
+                    cfg.host
+                ),
+            ));
+        }
         let tools = &cfg.tools;
         let log = cfg.state.join("logs/switch.log");
         let before = cfg.state.join("health-before");

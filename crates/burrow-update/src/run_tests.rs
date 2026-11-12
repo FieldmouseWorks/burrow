@@ -783,3 +783,19 @@ fn a_machine_without_its_clone_makes_one() {
 
 #[path = "run_train_tests.rs"]
 mod train;
+
+#[test]
+fn a_bump_that_cant_be_committed_is_never_deployed() {
+    // The pins stay in the clone, uncommitted. The system they'd build is
+    // not main, and not what the VM tests ran on: nothing goes live.
+    let m = machine();
+    let was = m.running();
+    m.upstream("nixpkgs", &sha('c'));
+    let hook = m.cfg.work.join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    assert_eq!(once(&m.cfg, &mut Fake::default(), true), 1);
+    assert_eq!(m.running(), was);
+    assert!(!switched(&m));
+}

@@ -180,6 +180,12 @@ fn shown(cfg: &Config, commit: &str, file: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Whether the clone has no uncommitted pin: after `commit` says false,
+/// that it was nothing brought in and not a commit that failed.
+pub fn clean(cfg: &Config) -> bool {
+    cfg.git(&["diff", "--quiet"]).is_ok()
+}
+
 /// What's been brought in, committed on HEAD as a bump that says what moved:
 /// false when nothing was.
 pub fn commit(cfg: &Config, inputs: &[String]) -> bool {
