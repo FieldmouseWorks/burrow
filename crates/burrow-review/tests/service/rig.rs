@@ -86,8 +86,13 @@ impl Rig {
         let kicks = Arc::new(Mutex::new(Vec::new()));
         let port = kick_port(kicks.clone());
         let p = |x: &str| t.join(x).to_string_lossy().into_owned();
+        fs::write(
+            t.join("settings.json"),
+            json!({"overlay":p("overlay.json"),"allowed":["sam/r","sam/q","sam/pipe","sam/lead"],"pipelineRepos":["sam/pipe"]}).to_string(),
+        )
+        .unwrap();
         let cfg = json!({
-            "settings": {"overlay":p("overlay.json"),"allowed":["sam/r","sam/q","sam/pipe","sam/lead"],"pipelineRepos":["sam/pipe"]},
+            "settings": p("settings.json"),
             "queue": p("queue"), "done": p("done"), "sessions": p("sessions"), "snapshots": p("trees"),
             "reviewers": {"codex": {"enable": true, "effort": "high", "parallel": 2, "off": []}},
             "timeoutMinutes": 30, "agents": p("agents"),

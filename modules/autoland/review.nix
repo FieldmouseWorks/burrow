@@ -39,8 +39,12 @@ let
   # The reviewers' service (crates/burrow-review, config.rs): the queue the
   # passes fill and what it leaves for them, its reviewers, and what a
   # look's sandbox shows.
+  # The admission policy lives at a path the deploy rewrites, not in the
+  # store, because a switch leaves a running service be: it reads the file
+  # again on every decision (config.rs `paused`).
+  policyPath = "/etc/burrow/review-settings.json";
   reviewConfig = pkgs.writeText "burrow-review.json" (builtins.toJSON {
-    settings = config.burrow.settings.effective;
+    settings = policyPath;
     queue = "${reviewDir}/queue";
     done = "${reviewDir}/done";
     sessions = "${reviewDir}/sessions";
@@ -69,6 +73,7 @@ in
 {
   imports = [ { key = "burrow/codex-login"; imports = [ (import ../codex-login.nix inputs) ]; } ];
   config = lib.mkIf cfg.enable {
+    environment.etc."burrow/review-settings.json".text = builtins.toJSON config.burrow.settings.effective;
 
     users.users.${reviewer} = {
       isSystemUser = true;

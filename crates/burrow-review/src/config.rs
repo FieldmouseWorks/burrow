@@ -9,8 +9,11 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    /// The tracked admission policy, a file the system rewrites at every
+    /// deploy (not a store path): read again on every decision, so a
+    /// service a switch leaves running still follows the deployed policy.
     #[serde(default)]
-    pub settings: Option<burrow_settings::Config>,
+    pub settings: Option<PathBuf>,
     /// The looks the steward's passes queue, a file each (burrow-upkeep's
     /// queue.rs), which this takes off once it has answered.
     pub queue: PathBuf,
@@ -76,9 +79,13 @@ pub struct Sandboxed {
 }
 
 impl Config {
+    /// Whether the policy keeps this repo's looks parked. Fails closed: a
+    /// missing or unreadable policy parks everything.
     pub fn paused(&self, repo: &str) -> bool {
         self.settings
             .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<burrow_settings::Config>(&bytes).ok())
             .is_none_or(|s| !s.allows(repo).unwrap_or(false))
     }
 
