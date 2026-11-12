@@ -1,4 +1,9 @@
-//! Fixtures shared by the workspace's tests.
+//! Fixtures shared by the workspace's tests: executables that cannot leak
+//! write descriptors, and [`stand_ins`] for the programs a binary runs as the
+//! machine's (how to fake the machine in a test: [`standins`]).
+
+mod standins;
+pub use standins::{OWNED, chown, proj_jobs, root, said, stand_ins};
 
 use std::fs;
 use std::io::Write;
