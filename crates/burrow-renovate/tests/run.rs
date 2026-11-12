@@ -41,8 +41,9 @@ const STAND_INS: [(&str, &str); 4] = [
     (
         // GitHub: a repo as it spells it (none for OWNER/gone), what each
         // owner's installation reaches (FAKE/OWNER-repos, or FAKE/OWNER-fails
-        // to fail), and its allowance: spent till the time in
-        // FAKE/OWNER-spent (FAKE/user-spent for the user's login).
+        // to fail), and the allowance of the token asked with: spent till
+        // the time in FAKE/OWNER-spent (FAKE/user-spent for the user's
+        // login's).
         "gh",
         r#"echo "gh $* owner=${GH_TOKEN_OWNER-} socket=${GH_TOKEN_SOCKET-}" >>"$FAKE/log"
 if [ "$1" = api ]; then
@@ -64,7 +65,13 @@ if [ "$1" = api ]; then
   fi
   case "$path" in
     rate_limit)
-      spent=$FAKE/${GH_TOKEN_OWNER:-user}-spent
+      echo "rate_limit token=${GH_TOKEN-}" >>"$FAKE/log"
+      case "${GH_TOKEN-}" in
+        ghs_*) who=${GH_TOKEN#ghs_}; who=${who%_*} ;;
+        gho_user) who=user ;;
+        *) who=nobody ;;
+      esac
+      spent=$FAKE/$who-spent
       left=4999 reset=1
       [ ! -e "$spent" ] || { left=0; reset=$(cat "$spent"); }
       printf 'HTTP/2.0 200 OK\n\n{"resources":{"core":{"remaining":%s,"reset":%s},"graphql":{"remaining":5000,"reset":1}}}' "$left" "$reset" ;;
@@ -677,11 +684,12 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     m.set("renovate-fails", "Sam/R");
     assert_eq!(m.run(&["sam/r"]), ok(&met("sam/r")));
     assert_eq!(m.booked(), serde_json::json!({"sam/r": at}));
+    // Asked with the token Renovate ran with, whatever repo is around.
     let calls = m.calls();
     assert!(
         calls
             .iter()
-            .any(|c| c.starts_with("gh api -i -X GET rate_limit") && c.contains("owner=Sam")),
+            .any(|c| c.starts_with("rate_limit token=ghs_Sam_")),
         "{calls:#?}"
     );
 
@@ -705,6 +713,20 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     m.set("renovate-fails", "");
     assert_eq!(m.run(&[]), ok(&met("every repo")));
     assert_eq!(m.booked(), serde_json::json!({"": at}));
+
+    // A runner that never got Renovate going failed, whatever the
+    // allowance: its token, or its lock.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("Sam-spent", &at.to_string());
+    m.set("gh-token-fails", "3");
+    assert_eq!(m.run(&["sam/r"]), (Some(3), String::new(), String::new()));
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    fs::create_dir(m.path("fake/lock")).unwrap();
+    let (code, _, err) = m.run(&[]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("renovate-run: "), "{err}");
+    assert_eq!(m.booked(), serde_json::json!({}));
 
     // With allowance left, a run that fails failed.
     let m = Machine::new(Some(&["sam"]));

@@ -15,9 +15,11 @@
 //! the renovate handler's wake file (burrow-events) for when it lifts, as is
 //! the full pass when an owner's repos can't be listed; the pass exits 0
 //! unless something else failed. Renovate meets the limit too, mid-run (it
-//! stops with "rate-limit-exceeded"): a run of it that fails while GitHub's
-//! `rate_limit` says the installation's allowance is spent is booked the
-//! same way, not failed.
+//! stops with "rate-limit-exceeded"): a run of Renovate's that fails while
+//! GitHub's `rate_limit`, asked with the very token it ran with, says that
+//! allowance is spent is booked the same way, not failed. A run that never
+//! got Renovate going (its lock, its token) or couldn't be noted fails
+//! whatever the allowance.
 //!
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
@@ -98,8 +100,8 @@ impl Config {
         }
         let Some(app) = &self.app else {
             let rc = match self.renovate("", &[]) {
-                0 => 0,
-                rc => self.spent(None).map_or(rc, |held| self.held("", &held)),
+                Err(rc) | Ok((rc @ 0, _)) => rc,
+                Ok((rc, token)) => self.spent(token).map_or(rc, |held| self.held("", &held)),
             };
             return rc.max(self.used_up("", started));
         };
@@ -181,27 +183,28 @@ impl Config {
         }
         let filter = serde_json::Value::from(vec![repo.as_str()]);
         match self.renovate(&repo, &[format!("--autodiscover-filter={filter}")]) {
-            0 => Ok(0),
-            rc => self.spent(repo.split('/').next()).map_or(Ok(rc), Err),
+            Err(rc) | Ok((rc @ 0, _)) => Ok(rc),
+            Ok((rc, token)) => self.spent(token).map_or(Ok(rc), Err),
         }
     }
 
     /// After a run of Renovate's failed: GitHub's rate limit, as an error
     /// that holds the run off, when `rate_limit` (which costs nothing
-    /// against it) says the allowance is spent: `owner`'s installation's as
-    /// the App, else the user's login's. None when it isn't, or GitHub
-    /// won't say: then the run failed.
-    fn spent(&self, owner: Option<&str>) -> Option<burrow_github::Error> {
-        let mut gh = self.github();
-        if let Some(owner) = owner {
-            gh.env.push(("GH_TOKEN_OWNER".into(), owner.into()));
-        }
+    /// against it) says the allowance of `token`, the one Renovate ran with,
+    /// is spent: its installation's as the App, the user's login's as the
+    /// user, whatever repo or checkout is around. None when it isn't, or
+    /// GitHub won't say: then the run failed.
+    fn spent(&self, token: String) -> Option<burrow_github::Error> {
+        let mut gh = burrow_github::Gh {
+            token: Some(token),
+            ..self.github()
+        };
         let budget = burrow_github::call(&mut gh, "GET", "rate_limit", None, None)
             .ok()?
             .json()
             .ok()?;
         let at = now();
-        let mut meter = burrow_github::quota::Meter::new("", owner.unwrap_or_default(), at);
+        let mut meter = burrow_github::quota::Meter::new("", "", at);
         meter.budget(&budget);
         let lifts = meter.until(at)?;
         Some(burrow_github::Error {
@@ -269,23 +272,26 @@ impl Config {
 
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
     /// empty), in its turn, with a token asked for once it's its turn.
-    fn renovate(&self, repo: &str, args: &[String]) -> u8 {
+    /// Renovate's exit and the token it ran with, once its run is noted; Err
+    /// with the exit when the runner failed (its lock, its token, starting
+    /// Renovate, noting the run), which no rate limit excuses.
+    fn renovate(&self, repo: &str, args: &[String]) -> Result<(u8, String), u8> {
         let lock = match OpenOptions::new()
             .append(true)
             .create(true)
             .open(&self.run_lock)
         {
             Ok(lock) => lock,
-            Err(e) => return self.broke(&self.run_lock, e),
+            Err(e) => return Err(self.broke(&self.run_lock, e)),
         };
         if let Err(e) = flock(&lock, FlockOperation::LockExclusive) {
-            return self.broke(&self.run_lock, e.into());
+            return Err(self.broke(&self.run_lock, e.into()));
         }
         // Renovate holds it too, until it's gone: a renovate-run killed
         // while its Renovate still runs (or shuts down) leaves no gap for
         // another run on the same clones.
         if let Err(e) = fcntl_setfd(&lock, FdFlags::empty()) {
-            return self.broke(&self.run_lock, e.into());
+            return Err(self.broke(&self.run_lock, e.into()));
         }
         let mut asked = match &self.app {
             Some(app) => {
@@ -301,14 +307,14 @@ impl Config {
         };
         let token = match asked.stderr(Stdio::inherit()).output() {
             Ok(out) if out.status.success() => trimmed(out.stdout),
-            Ok(out) => return exit_of(out.status),
+            Ok(out) => return Err(exit_of(out.status)),
             Err(e) => {
                 complain(&format!(
                     "{}: {}: {e}",
                     self.name,
                     asked.get_program().display()
                 ));
-                return NOT_RUN;
+                return Err(NOT_RUN);
             }
         };
         let ran = self
@@ -318,19 +324,19 @@ impl Config {
             .env("GITHUB_COM_TOKEN", &token)
             .status();
         let rc = match ran {
-            Ok(status) => exit_of(status),
+            Ok(status) => Ok(exit_of(status)),
             Err(e) => {
                 complain(&format!(
                     "{}: {}: {e}",
                     self.name,
                     self.tools.renovate.display()
                 ));
-                NOT_RUN
+                Err(NOT_RUN)
             }
         };
         match self.ran(if repo.is_empty() { "all" } else { repo }) {
-            Ok(()) => rc,
-            Err((path, e)) => self.broke(&path, e),
+            Ok(()) => rc.map(|rc| (rc, token)),
+            Err((path, e)) => Err(self.broke(&path, e)),
         }
     }
 
