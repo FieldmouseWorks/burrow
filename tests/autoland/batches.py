@@ -105,7 +105,9 @@ with tempfile.TemporaryDirectory() as tmp:
         assert C.load('digest-repos.json', {})['sam/a'][0][0] == 'Owner'
         assert C.load('watch.json', {})['items']['sam/b#7']['since'] == 10
         assert len(publications) == 4
-        assert C.load('wake.json', {})['sam/b'] == 11000
+        # The stop's five-minute recovery is sooner than the distant PR
+        # deadline. The last batch rebooks that missed recovery at NOW + 1.
+        assert C.load('wake.json', {})['sam/b'] == C.NOW - 600, (C.load('wake.json', {}), C.NOW)
 
     # A cursor cannot carry a settlement past changed decision inputs.
     from batch import Batch

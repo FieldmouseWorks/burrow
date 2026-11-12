@@ -243,6 +243,13 @@ def run_pass(kick, continuing=False):
     if not batch.active(kick):
         batch.end(True, kick)
         return
+    if (at := load(C.RETRY_AFTER, 0)) > C.NOW:
+        # Even discovery is remote work. A startup or local event must not
+        # spend the rate limit again before either handler's saved reset.
+        C.LIMITED[:] = [at - 1]
+        C.after_limit(kick)
+        batch.end(False, kick)
+        return
     all_repos = R.discover()
     repos = batch.repos(all_repos)
     if kick is not None:
@@ -315,8 +322,6 @@ def run_pass(kick, continuing=False):
                          {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
                 P.begin(repo, (pr["number"] for pr in prs), first)
                 T.begin(repo)
-                if why := batch.stopped(repo):
-                    T.stop(repo, why)
                 waits.read(repo, prs)
                 pending = batch.pending(repo, prs, mine, info)
                 # First, so a red-branch fix it holds isn't merged by this same pass.
@@ -326,7 +331,6 @@ def run_pass(kick, continuing=False):
                 # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
                 in_use = set()
-                seen_to = batch.seen_to(repo)
                 snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
@@ -349,6 +353,8 @@ def run_pass(kick, continuing=False):
                         break
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                    T.STOPPED.pop(repo, None)
+                    seen_to = True
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
                     except Exception as e:  # one bad PR mustn't stop the rest
@@ -373,7 +379,12 @@ def run_pass(kick, continuing=False):
                         in_use.update((pr["headRefName"], pr["baseRefName"]))
                         snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 live[repo] = snaps
-                if seen_to:
+                if why := batch.stopped(repo):
+                    T.stop(repo, why)
+                    # Receipts keep the train safe across batches; a fresh
+                    # ordinary look must revalidate the PR that stopped it.
+                    C.wake(repo, C.NOW + 5 * MIN)  # ends: the stopping PR is revalidated
+                if batch.seen_to(repo):
                     covered.append(r)
                 else:
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
@@ -384,7 +395,7 @@ def run_pass(kick, continuing=False):
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
                         operations_complete = False
-                        batch.retry(C.NOW + 5 * MIN)
+                        batch.retry(repo, max(C.NOW + 5 * MIN, C.LIMITED[0] + 1 if C.LIMITED else 0))
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
@@ -412,7 +423,8 @@ def run_pass(kick, continuing=False):
         # acknowledge those obligations.
         for r in all_repos:
             if r["repo"] not in seen or r["repo"] in deferred:
-                C.wake(r["repo"], C.NOW + 1)  # ends: its ordinary pass re-evaluates every decision input
+                retry = batch.state["retry"].get(r["repo"].lower(), 0)
+                C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
     inventory = {r["repo"] for r in all_repos}
     names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
     visited.update(r.lower() for r in kick or () if r.lower() not in names)
@@ -431,8 +443,8 @@ def run_pass(kick, continuing=False):
         # jobs how every repo's proofs run.
         coverage = C.coverage(all_repos, covered)
         old = load("repos.json", {}).get("repos", {})
-        for repo in batch.state["finished"]:
-            if repo not in seen and repo in coverage["repos"]:
+        for repo in inventory:
+            if repo.lower() in batch.state["finished"] and repo not in seen:
                 coverage["repos"][repo]["covered"] = old.get(repo, {}).get("covered", False)
         save("repos.json", coverage)
     save("known.json", sorted(known))

@@ -21,6 +21,7 @@ class Batch:
     def __init__(self, kick, continuing=False):
         self.full = kick is None
         self.continuing = continuing
+        self.kick = None if kick is None else {r.lower() for r in kick}
         self.advanced = False
         start = time.monotonic()
         self.until = start + SECONDS
@@ -29,27 +30,54 @@ class Batch:
         self.state.setdefault("repos", {})
         self.state.setdefault("finished", [])
         self.state.setdefault("owed", [])  # kicked repos not yet entered or finished
+        self.state["repos"] = {k.lower(): v for k, v in self.state["repos"].items()}
+        for st in self.state["repos"].values():
+            # Old checkpoints did not identify which PR held the train.
+            if why := st.pop("stopped", None):
+                st["stops"] = dict.fromkeys(st.get("done", {}), why)
+                st["done"] = dict.fromkeys(st.get("done", {}))
+            if not st.pop("seen_to", True):
+                st["unseen"] = list(st.get("done", {}))
+                st["done"] = dict.fromkeys(st.get("done", {}))
+        for key in ("finished", "owed"):
+            self.state[key] = sorted({r.lower() for r in self.state[key]})
+        self.state["retry"] = {k.lower(): v for k, v in self.state.get("retry", {}).items()}
         self.done = set()
         self.left = False  # PRs or repos still unvisited, not only retries
         self.later = None  # when an unavailable operation may be retried
         self.traversal_full = self.state.get("full", False) or (self.full and not continuing)
 
     def repos(self, repos):
-        names = {r["repo"] for r in repos}
+        names = {r["repo"].lower() for r in repos}
         self.state["repos"] = {k: v for k, v in self.state["repos"].items() if k in names}
-        self.state["finished"] = [k for k in self.state["finished"] if k in names]
+        for key in ("finished", "owed"):
+            self.state[key] = [k for k in self.state[key] if k in names]
+        self.state["retry"] = {k: at for k, at in self.state["retry"].items() if k in names}
+        if self.kick is not None:
+            repos = [r for r in repos if r["repo"].lower() in self.kick]
+        candidates = self.state["repos"].keys() | set(self.state["owed"])
         if self.full and self.continuing and not self.traversal_full:
-            # The event runner's startup full catch-up also consumes due
-            # per-repo continuations. Resume those cursors, not the fleet.
-            return [r for r in repos if r["repo"] in self.state["repos"]]
-        return [r for r in repos if not self.full or r["repo"] not in self.state["finished"]]
+            repos = [r for r in repos if r["repo"].lower() in candidates]
+        else:
+            repos = [r for r in repos if not self.full or r["repo"].lower() not in self.state["finished"]]
+        ready = []
+        limited = C.load(C.RETRY_AFTER, 0)
+        for r in repos:
+            repo = r["repo"].lower()
+            at = max(self.state["retry"].get(repo, 0), limited)
+            if at > C.NOW:
+                self.later = min(self.later or at, at)
+                C.wake(r["repo"], at)  # ends: retry's deadline
+            else:
+                ready.append(r)
+        return ready
 
     def active(self, kick):
         if not self.continuing:
             return True
         if kick is None:
-            return self.traversal_full or bool(self.state["repos"])
-        return any(r.lower() in kick for r in [*self.state["repos"], *self.state["owed"]])
+            return self.traversal_full or bool(self.state["repos"] or self.state["owed"])
+        return bool({r.lower() for r in kick} & (self.state["repos"].keys() | set(self.state["owed"])))
 
     def expired(self):
         now = time.monotonic()
@@ -61,15 +89,16 @@ class Batch:
             return False
         return now >= self.until
 
-    def retry(self, at):
+    def retry(self, repo, at):
+        self.state["retry"][repo.lower()] = at
         self.advanced = True  # an unsuccessful attempt still spends the slice
         self.later = at if self.later is None else min(self.later, at)
 
     def digest(self, repo):
-        return list(self.state["repos"].get(repo, {}).get("digest", []))
+        return list(self.state["repos"].get(repo.lower(), {}).get("digest", []))
 
     def pending(self, repo, prs, mine, info):
-        st = self.state["repos"].get(repo, {})
+        st = self.state["repos"].get(repo.lower(), {})
         done = st.get("done", {})
         elapsed = st.get("wake") and st["wake"] <= C.NOW
         if not self.continuing or elapsed:
@@ -81,6 +110,9 @@ class Batch:
             st.pop("wake", None)
         elif st.get("wake"):
             C.wake(repo, st["wake"])  # ends: the carried PR deadline gets its next look after this traversal
+        live = {str(pr["number"]) for pr in prs}
+        st["stops"] = {k: v for k, v in st.get("stops", {}).items() if k in live}
+        st["unseen"] = [k for k in st.get("unseen", []) if k in live]
         pending = [pr for pr in prs if done.get(str(pr["number"])) != self.rev(pr, info)]
         # A closed or changed PR's old owner line mustn't suppress its new
         # watchdog wait. Repo-wide notices survive until its traversal ends.
@@ -104,35 +136,52 @@ class Batch:
         return hashlib.sha256(json.dumps([value, info, C.CFG], sort_keys=True).encode()).hexdigest()
 
     def visited(self, repo, pr):
-        st = self.state["repos"].get(repo, {})
+        st = self.state["repos"].get(repo.lower(), {})
         key = str(pr["number"])
         return st.get("visits", {}).get(key, 1) if key in st.get("done", {}) else 0
 
     def stopped(self, repo):
-        return self.state["repos"].get(repo, {}).get("stopped")
+        return next(iter(self.state["repos"].get(repo.lower(), {}).get("stops", {}).values()), None)
 
     def seen_to(self, repo):
-        return self.state["repos"].get(repo, {}).get("seen_to", True)
+        return not self.state["repos"].get(repo.lower(), {}).get("unseen")
 
     def note(self, repo, pr, mine, seen_to, info, stopped=None):
-        st = self.state["repos"].setdefault(repo, {"done": {}})
+        st = self.state["repos"].setdefault(repo.lower(), {"done": {}})
         st["sequence"] = st.get("sequence", 1) + 1
         st.setdefault("visits", {})[str(pr["number"])] = st["sequence"]
         st["done"][str(pr["number"])] = self.rev(pr, info)
         st["digest"] = mine
-        st["seen_to"] = seen_to
+        key = str(pr["number"])
+        st.setdefault("stops", {}).pop(key, None)
+        if stopped:
+            st["stops"][key] = stopped
+        unseen = set(st.get("unseen", [])) - {key}
+        if not seen_to:
+            unseen.add(key)
+        st["unseen"] = sorted(unseen)
         st["wake"] = C.WAKE.get(repo)
-        st["stopped"] = stopped
         self.advanced = True
 
     def finish(self, repo):
         self.advanced = True
         self.done.add(repo.lower())
+        repo = repo.lower()
         self.state["repos"].pop(repo, None)
+        self.state["retry"].pop(repo, None)
+        self.state["owed"] = [r for r in self.state["owed"] if r != repo]
         if self.traversal_full and repo not in self.state["finished"]:
             self.state["finished"].append(repo)
 
     def end(self, complete, kick):
+        if C.LIMITED and C.LIMITED[0] > C.NOW:
+            at = C.LIMITED[0] + 1
+            targets = set(kick or self.state["repos"]) | set(self.state["owed"])
+            self.state["retry"].update(dict.fromkeys(targets, at))
+            self.left = False
+            self.later = at
+        if self.later:
+            complete = False
         if self.full and self.traversal_full:
             self.state["full"] = not complete
             if complete:
@@ -140,16 +189,19 @@ class Batch:
         if kick is not None:
             # A bounded multi-repo kick owes every target it didn't finish,
             # including ones it never entered and so have no cursor.
-            owed = set(self.state["owed"]) | set(kick)
-            self.state["owed"] = sorted(owed - self.done if not complete else owed - set(kick))
+            owed = set(self.state["owed"]) | {r.lower() for r in kick}
+            self.state["owed"] = sorted(owed - self.done if not complete else owed - {r.lower() for r in kick})
+        self.state["owed"] = sorted(set(self.state["owed"]) - self.done)
         C.save(FILE, self.state)
         # Continuations have their own event line: they are not new-work
         # requests and must not consume GitHub events or decision deadlines.
         wakes = C.load("continue.json", {})
         again = [""] if kick is None else kick
+        wakes = {k: at for k, at in wakes.items() if k.lower() not in self.done and k.lower() not in again}
         for key in again:
-            wakes.pop(key, None)
             if not complete:
                 # Retries wait for their own deadline; only unvisited work is due at once.
-                wakes[key] = C.NOW + 1 if self.left or not self.later else self.later
+                wakes[key] = self.state["retry"].get(key.lower(), C.NOW + 1 if self.left or not self.later else self.later)
+        if C.LIMITED and C.LIMITED[0] > C.NOW:
+            wakes = {k: max(v, C.LIMITED[0] + 1) for k, v in wakes.items()}
         C.save("continue.json", wakes)

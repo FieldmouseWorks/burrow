@@ -299,3 +299,162 @@ with tempfile.TemporaryDirectory() as tmp:
             else:
                 raise AssertionError('unaccepted work was acknowledged')
     print('hard deadline reserve and nonblocking pass admission: passed')
+
+    # Owed targets survive every entry point, even without a PR cursor.
+    # Discovery and requests can spell the same GitHub repo differently.
+    for route in ('per-repo', 'startup', 'ordinary full', 'ordinary kick'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            repos[:] = [{'repo': 'Sam/R', 'default': 'main'}, {'repo': 'SAM/S', 'default': 'main'},
+                        {'repo': 'sam/unrelated', 'default': 'main'}]
+            C.save('pass-progress.json', {'owed': ['sAM/s'], 'repos': {}, 'finished': []})
+            if route == 'per-repo':
+                S.run_pass(['sam/s'], continuing=True)
+            elif route == 'startup':
+                S.run_pass(None, continuing=True)
+            elif route == 'ordinary full':
+                S.run_pass(None)
+            else:
+                S.run_pass(['sam/s'])
+            assert len(handled) == (6 if route == 'ordinary full' else 2), (route, handled)
+            assert C.load('pass-progress.json', {})['owed'] == [], route
+            handled.clear()
+            S.run_pass(['sam/s'], continuing=True)
+            S.run_pass(None, continuing=True)
+            assert handled == [], ('stale continuation', route, handled)
+
+    # Real budget boundaries: a full catch-up consumes the requests for A
+    # and B together, but must keep B through a second bounded batch.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        repos.append({'repo': 'Sam/S', 'default': 'main'})
+        original = S.step.handle
+
+        def slow_repo(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        with patch.object(S.step, 'handle', slow_repo):
+            S.run_pass(['sam/r', 'sam/s'])
+            C.WAKE.clear()
+            S.run_pass(None, continuing=True)
+        assert 'sam/s' in C.load('pass-progress.json', {})['owed']
+        C.WAKE.clear()
+        S.run_pass(None, continuing=True)
+        assert len(handled) == 4, handled
+        assert C.load('pass-progress.json', {})['owed'] == []
+    print('owed targets survive full catch-up, case changes and stale requests: passed')
+
+    # Stops belong to individual PR evaluations. Revalidating another PR
+    # must not clear one; successfully retrying its cause must clear it,
+    # even when an ordinary retry was consumed mid-traversal.
+    for cause in ('withdrawal', 'exception'):
+        for mid_traversal in (False, True):
+            with fixture() as (clock, handled, facts, repos, prs, info):
+                advanced = []
+                original = S.step.handle
+
+                def unsafe(repo, p, *args):
+                    original(repo, p, *args)
+                    if p['number'] == 1:
+                        if cause == 'exception':
+                            raise RuntimeError('PR evaluation failed')
+                        S.T.stop(repo, 'withdrawal failed')
+                    clock[0] += 9 * 60
+
+                def safe_step(repo):
+                    if repo not in S.T.STOPPED:
+                        advanced.append(repo)
+
+                with patch.object(S.T, 'seat', return_value='seated'), patch.object(S.T, 'step', safe_step):
+                    with patch.object(S.step, 'handle', unsafe):
+                        S.run_pass(['sam/r'])
+                    C.WAKE.clear()
+                    if mid_traversal:
+                        def retry_one(*args):
+                            original(*args)
+                            clock[0] += 9 * 60
+
+                        with patch.object(S.step, 'handle', retry_one):
+                            S.run_pass(['sam/r'])
+                        assert advanced == [], (cause, advanced)
+                    else:
+                        S.run_pass(['sam/r'], continuing=True)
+                        assert advanced == [], (cause, advanced)
+                        assert C.load('wake.json', {})['sam/r'] <= C.NOW + 5 * 60
+                    C.WAKE.clear()
+                    S.run_pass(['sam/r'], continuing=mid_traversal)
+                assert advanced == ['sam/r'], (cause, mid_traversal, advanced)
+                assert C.load('pass-progress.json', {})['repos'] == {}
+
+    # Legacy saved stops are conservatively attached to all old receipts,
+    # then retired by revalidation, rather than discarded during migration.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        C.save('pass-progress.json', {'repos': {'sam/r': {
+            'done': {'1': 'old'}, 'stopped': 'old unsafe PR', 'seen_to': False}}})
+        steps = []
+        with patch.object(S.T, 'step', lambda repo: steps.append((repo, S.T.STOPPED.get(repo)))):
+            S.run_pass(['sam/r'], continuing=True)
+        assert steps == [('sam/r', None)], steps
+        assert sorted(n for n, *_ in handled) == [1, 2], handled
+    print('train stops remain safe and recover after cause revalidation: passed')
+
+    # Both event lines and full catch-up honor a failed operation's durable
+    # retry deadline, keeping its watchdog clock and cursor while ready
+    # unrelated repositories can continue.
+    for initial in (None, ['sam/r']):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
+                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+            C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
+            attempts = []
+
+            def unavailable(repo):
+                attempts.append((repo, C.NOW))
+                if repo == 'sam/r':
+                    raise C.Unavailable('train unavailable')
+
+            with patch.object(S.T, 'step', unavailable):
+                S.run_pass(initial)
+                assert C.load('wake.json', {})['sam/r'] == 1300
+                cursor = copy.deepcopy(C.load('pass-progress.json', {})['repos']['sam/r'])
+                repos.append({'repo': 'sam/ready', 'default': 'main'})
+                for kick, continuing in ((['sam/r'], False), (['sam/r'], True),
+                                         (None, True), (None, False)):
+                    C.WAKE.clear()
+                    C.NOW = 1021
+                    S.run_pass(kick, continuing)
+                    assert attempts.count(('sam/r', 1000)) == 1 and not any(r == 'sam/r' and t > 1000 for r, t in attempts), attempts
+                    assert C.load('pass-progress.json', {})['repos']['sam/r'] == cursor
+                    assert C.load('watch.json', {})['items']['sam/r'] == old
+                    assert C.load('wake.json', {})['sam/r'] == 1300
+                assert ('sam/ready', 1021) in attempts, attempts
+                C.WAKE.clear()
+                C.NOW = 1300
+                S.run_pass(None, continuing=True)
+                assert ('sam/r', 1300) in attempts, attempts
+    print('full and kicked retries preserve deadlines, cursors and failure clocks: passed')
+
+    for initial in (None, ['sam/r']):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            def limited(repo):
+                C.LIMITED[:] = [1800]
+                raise C.Unavailable('rate limited')
+
+            with patch.object(S.T, 'step', limited):
+                S.run_pass(initial)
+            C.after_limit(initial)  # main's finally, on both handler lines
+            assert all(at >= 1801 for at in C.load('continue.json', {}).values())
+            attempts = []
+            with patch.object(S.T, 'step', attempts.append):
+                for kick, continuing in ((None, True), (None, False), (['sam/r'], False), (['sam/r'], True)):
+                    C.WAKE.clear()
+                    C.LIMITED.clear()
+                    C.NOW = 1300
+                    with patch.object(S.R, 'discover', side_effect=AssertionError('discovery before reset')):
+                        S.run_pass(kick, continuing)
+                    assert attempts == [], (initial, kick, continuing, attempts)
+                    assert all(at >= 1801 for at in C.load('continue.json', {}).values())
+                C.WAKE.clear()
+                C.NOW = 1801
+                S.run_pass(None, continuing=True)
+            assert attempts == ['sam/r'], attempts
+    print('rate limits gate both event lines and startup until reset: passed')

@@ -406,6 +406,7 @@ def ts(s):
 # burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
+RETRY_AFTER = "retry-after.json"  # rate limits apply across both event lines
 
 
 def wake(repo, at):
@@ -974,6 +975,9 @@ def after_limit(kick):
     booked before it was met and other passes'. None sooner could do
     anything, and none then waits on another event or the hourly pass."""
     at = LIMITED[0] + 1
+    save(RETRY_AFTER, at)
+    continuations = load("continue.json", {})
+    save("continue.json", {k: max(v, at) for k, v in continuations.items()})
     again = [""] if kick is None else kick
     wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
              if v > NOW and k.lower() not in {r.lower() for r in again}}
