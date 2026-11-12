@@ -16,8 +16,8 @@
 //! the full pass when an owner's repos can't be listed; the pass exits 0
 //! unless something else failed. Renovate meets the limit too, mid-run (it
 //! stops with "rate-limit-exceeded"): a run of Renovate's that fails while
-//! GitHub's `rate_limit`, asked with the very token it ran with, says that
-//! allowance is spent is booked the same way, not failed. A run that never
+//! GitHub's `rate_limit`, asked as the account whose token it ran with,
+//! says that allowance is spent is booked the same way, not failed. A run that never
 //! got Renovate going (its lock, its token) or couldn't be noted fails
 //! whatever the allowance.
 //!
@@ -100,8 +100,8 @@ impl Config {
         }
         let Some(app) = &self.app else {
             let rc = match self.renovate("", &[]) {
-                Err(rc) | Ok((rc @ 0, _)) => rc,
-                Ok((rc, token)) => self.spent(token).map_or(rc, |held| self.held("", &held)),
+                Err(rc) | Ok(rc @ 0) => rc,
+                Ok(rc) => self.spent(None).map_or(rc, |held| self.held("", &held)),
             };
             return rc.max(self.used_up("", started));
         };
@@ -183,20 +183,21 @@ impl Config {
         }
         let filter = serde_json::Value::from(vec![repo.as_str()]);
         match self.renovate(&repo, &[format!("--autodiscover-filter={filter}")]) {
-            Err(rc) | Ok((rc @ 0, _)) => Ok(rc),
-            Ok((rc, token)) => self.spent(token).map_or(Ok(rc), Err),
+            Err(rc) | Ok(rc @ 0) => Ok(rc),
+            Ok(rc) => self.spent(repo.split('/').next()).map_or(Ok(rc), Err),
         }
     }
 
     /// After a run of Renovate's failed: GitHub's rate limit, as an error
     /// that holds the run off, when `rate_limit` (which costs nothing
-    /// against it) says the allowance of `token`, the one Renovate ran with,
-    /// is spent: its installation's as the App, the user's login's as the
-    /// user, whatever repo or checkout is around. None when it isn't, or
-    /// GitHub won't say: then the run failed.
-    fn spent(&self, token: String) -> Option<burrow_github::Error> {
+    /// against it) says the allowance Renovate ran on is spent. As the App,
+    /// that's `owner`'s installation's, whose token the run was given (gh
+    /// as the App, bound to that account whatever repo or checkout is
+    /// around, as GraphQL's calls are); as the user, the login's. None when
+    /// it isn't, or GitHub won't say: then the run failed.
+    fn spent(&self, owner: Option<&str>) -> Option<burrow_github::Error> {
         let mut gh = burrow_github::Gh {
-            token: Some(token),
+            owner: self.app.as_ref().and(owner).map(str::to_owned),
             ..self.github()
         };
         let budget = burrow_github::call(&mut gh, "GET", "rate_limit", None, None)
@@ -272,10 +273,10 @@ impl Config {
 
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
     /// empty), in its turn, with a token asked for once it's its turn.
-    /// Renovate's exit and the token it ran with, once its run is noted; Err
-    /// with the exit when the runner failed (its lock, its token, starting
-    /// Renovate, noting the run), which no rate limit excuses.
-    fn renovate(&self, repo: &str, args: &[String]) -> Result<(u8, String), u8> {
+    /// Renovate's exit, once its run is noted; Err with the exit when the
+    /// runner failed (its lock, its token, starting Renovate, noting the
+    /// run), which no rate limit excuses.
+    fn renovate(&self, repo: &str, args: &[String]) -> Result<u8, u8> {
         let lock = match OpenOptions::new()
             .append(true)
             .create(true)
@@ -335,7 +336,7 @@ impl Config {
             }
         };
         match self.ran(if repo.is_empty() { "all" } else { repo }) {
-            Ok(()) => rc.map(|rc| (rc, token)),
+            Ok(()) => rc,
             Err((path, e)) => Err(self.broke(&path, e)),
         }
     }

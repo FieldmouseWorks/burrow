@@ -41,9 +41,10 @@ const STAND_INS: [(&str, &str); 4] = [
     (
         // GitHub: a repo as it spells it (none for OWNER/gone), what each
         // owner's installation reaches (FAKE/OWNER-repos, or FAKE/OWNER-fails
-        // to fail), and the allowance of the token asked with: spent till
-        // the time in FAKE/OWNER-spent (FAKE/user-spent for the user's
-        // login's).
+        // to fail), and the allowance of the account it's asked as, routed
+        // as gh as the App routes it (GH_REPO, then GH_TOKEN_OWNER; the
+        // user's login without the App's socket): spent
+        // till the time in FAKE/OWNER-spent (FAKE/user-spent for the user's).
         "gh",
         r#"echo "gh $* owner=${GH_TOKEN_OWNER-} socket=${GH_TOKEN_SOCKET-}" >>"$FAKE/log"
 if [ "$1" = api ]; then
@@ -65,12 +66,14 @@ if [ "$1" = api ]; then
   fi
   case "$path" in
     rate_limit)
-      echo "rate_limit token=${GH_TOKEN-}" >>"$FAKE/log"
-      case "${GH_TOKEN-}" in
-        ghs_*) who=${GH_TOKEN#ghs_}; who=${who%_*} ;;
-        gho_user) who=user ;;
-        *) who=nobody ;;
-      esac
+      # gh as the App (burrow.github's appGh) sets GH_TOKEN empty over
+      # whatever it's given, so a token handed to it is no token.
+      [ -z "${GH_TOKEN_SOCKET-}" ] || GH_TOKEN=
+      echo "rate_limit token=${GH_TOKEN-} owner=${GH_TOKEN_OWNER-} repo=${GH_REPO-} dir=$PWD" >>"$FAKE/log"
+      if [ -z "${GH_TOKEN_SOCKET-}" ]; then who=user
+      elif [ -n "${GH_REPO-}" ]; then who=${GH_REPO%%/*}
+      else who=${GH_TOKEN_OWNER:-nobody}
+      fi
       spent=$FAKE/$who-spent
       left=4999 reset=1
       [ ! -e "$spent" ] || { left=0; reset=$(cat "$spent"); }
@@ -150,7 +153,9 @@ impl Machine {
         let b = bin();
         let app = app.map(|owners| {
             serde_json::json!({
-                "env": {"GH_TOKEN_SOCKET": "/run/gh-token/workers.sock"},
+                // As burrow.github's appEnv has it: a token the process
+                // has is none.
+                "env": {"GH_TOKEN_SOCKET": "/run/gh-token/workers.sock", "GH_TOKEN": ""},
                 "owners": owners, "ghToken": b.join("gh-token"),
             })
         });
@@ -176,14 +181,22 @@ impl Machine {
     }
 
     fn run(&self, words: &[&str]) -> Said {
-        let out = Command::new(RENOVATE_RUN)
-            .arg(self.path("config.json"))
+        self.run_in(words, None)
+    }
+
+    /// A run started in a checkout of `repo`'s, GH_REPO naming it.
+    fn run_in(&self, words: &[&str], repo: Option<&str>) -> Said {
+        let mut run = Command::new(RENOVATE_RUN);
+        run.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"))
             .env_remove("GH_TOKEN_SOCKET")
             .env_remove("GH_TOKEN_OWNER")
-            .output()
-            .unwrap();
+            .env_remove("GH_REPO");
+        if let Some(repo) = repo {
+            run.env("GH_REPO", repo);
+        }
+        let out = run.output().unwrap();
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -682,14 +695,15 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     let m = Machine::new(Some(&["sam"]));
     m.set("Sam-spent", &at.to_string());
     m.set("renovate-fails", "Sam/R");
-    assert_eq!(m.run(&["sam/r"]), ok(&met("sam/r")));
+    // Started in another owner's checkout, which gh-token would go by,
+    // whose allowance isn't spent.
+    assert_eq!(m.run_in(&["sam/r"], Some("kim/x")), ok(&met("sam/r")));
     assert_eq!(m.booked(), serde_json::json!({"sam/r": at}));
-    // Asked with the token Renovate ran with, whatever repo is around.
+    // Asked as the account whose token Renovate ran with, whatever repo
+    // is around, through gh as the App.
     let calls = m.calls();
     assert!(
-        calls
-            .iter()
-            .any(|c| c.starts_with("rate_limit token=ghs_Sam_")),
+        calls.contains(&"rate_limit token= owner=Sam repo= dir=/".to_string()),
         "{calls:#?}"
     );
 
