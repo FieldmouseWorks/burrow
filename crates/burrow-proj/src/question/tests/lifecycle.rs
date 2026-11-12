@@ -545,14 +545,18 @@ fn each_question_keeps_its_own_closing_cause() {
     // A person answered question 1 in turn 2; question 3's default ran in 4.
     save_receipt(&receipt_path(&job, "2"), &receipt(1, true, false)).unwrap();
     save_receipt(&receipt_path(&job, "4"), &receipt(3, true, true)).unwrap();
-    assert!(close_reason(&job, false, true, "1", 4, false).contains("answered"));
-    assert!(close_reason(&job, false, true, "3", 4, false).contains("deadline"));
+    assert!(close_reason(&job, "1", 4).contains("answered"));
+    assert!(close_reason(&job, "3", 4).contains("deadline"));
     // A failed default start, its turn number reused by a person, is no timeout.
     save_receipt(&receipt_path(&job, "4"), &receipt(3, true, false)).unwrap();
-    assert!(close_reason(&job, false, false, "3", 4, false).contains("answered"));
+    assert!(close_reason(&job, "3", 4).contains("answered"));
+    // An unaccepted attempt answers nothing: the job's stop or end decides.
     save_receipt(&receipt_path(&job, "4"), &receipt(3, false, true)).unwrap();
-    assert!(close_reason(&job, false, true, "3", 4, false).contains("stopped"));
-    assert!(close_reason(&job, true, false, "3", 4, false).contains("ended"));
+    fs::write(job.turn("4", "stopped"), "").unwrap();
+    assert!(close_reason(&job, "3", 4).contains("stopped"));
+    fs::remove_file(job.turn("4", "stopped")).unwrap();
+    fs::write(job.turn("4", "end"), "done\n").unwrap();
+    assert!(close_reason(&job, "3", 4).contains("ended"));
 }
 
 #[test]
@@ -598,18 +602,38 @@ fn a_reply_after_the_question_ended_does_not_answer_it() {
         applied: true,
     };
     // Question 1 survived automatic turn 2, which completed the job; a
-    // later human resume (receipt 3) is a new conversation.
+    // later human resume (receipt 3) is a new conversation, however its own
+    // turn is going when the notice is finally sent.
     fs::write(job.turn("2", "end"), "done\n").unwrap();
     save_receipt(&receipt_path(&job, "3"), &receipt(false)).unwrap();
-    assert!(close_reason(&job, true, false, "1", 3, false).contains("ended"));
+    assert!(close_reason(&job, "1", 3).contains("ended"));
     // An earlier accepted answer survives a later completion.
     save_receipt(&receipt_path(&job, "2"), &receipt(true)).unwrap();
-    assert!(close_reason(&job, true, false, "1", 3, false).contains("deadline"));
-    // A one-way timeout's synthetic completion does not end the question.
+    assert!(close_reason(&job, "1", 3).contains("deadline"));
+    // A one-way timeout's synthetic completion does not end the question,
+    // even once the owner state is gone: the human answer (receipt 3) counts
+    // and its turn finishing before the notice does not turn it into "ended".
     fs::remove_file(receipt_path(&job, "2")).unwrap();
-    assert!(close_reason(&job, false, false, "1", 3, true).contains("answered"));
+    fs::write(job.turn("2", "timeout"), "one-way\n").unwrap();
+    fs::write(job.turn("3", "end"), "done\n").unwrap();
+    assert!(close_reason(&job, "1", 3).contains("answered"));
+    // The same history holds when the human turn is stopped.
+    fs::write(job.turn("3", "stopped"), "").unwrap();
+    assert!(close_reason(&job, "1", 3).contains("answered"));
     // A stop ends it too.
+    fs::remove_file(receipt_path(&job, "3")).unwrap();
     fs::write(job.turn("2", "end"), "ask\n").unwrap();
+    fs::remove_file(job.turn("2", "timeout")).unwrap();
     fs::write(job.turn("2", "stopped"), "").unwrap();
-    assert!(close_reason(&job, false, true, "1", 3, false).contains("stopped"));
+    assert!(close_reason(&job, "1", 3).contains("stopped"));
+}
+
+#[test]
+fn a_delayed_notice_names_the_cause_recorded_in_history() {
+    let f = watched();
+    let job = f.job();
+    // Question 1's automatic turn 2 ended in done; a new human turn 3 is
+    // still running (no end yet) when the notice is built.
+    fs::write(job.turn("2", "end"), "done\n").unwrap();
+    assert!(close_reason(&job, "1", 3).contains("ended"));
 }

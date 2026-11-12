@@ -331,26 +331,21 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
 /// waits. The accepted launch that first answered it (a receipt is written per
 /// launch attempt and only counts once accepted) says whether that was the
 /// deadline's default or a person; with no such launch, the job's stop or end.
-fn close_reason(
-    job: &Job,
-    finished: bool,
-    stopped: bool,
-    turn: &str,
-    latest: u64,
-    pending_owner: bool,
-) -> String {
+fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
     let asked = turn.parse::<u64>().unwrap_or(0);
     // The question's lifetime ends at the first turn that stopped or
-    // completed the job. A one-way timeout's synthetic completion is not an
-    // end while the owner is still owed an answer. Later replies belong to a
-    // new conversation and never supply this question's cause.
-    let last = (asked..=latest)
-        .find(|t| {
-            let t = t.to_string();
-            job.turn(&t, "stopped").exists()
-                || (!pending_owner && read(&job.turn(&t, "end")).as_deref() == Some("done"))
-        })
-        .unwrap_or(u64::MAX);
+    // completed the job. A one-way timeout's synthetic completion carries
+    // its own `timeout` mark, so it is no end however the owner state has
+    // moved since. Everything here is recorded history, never the job's
+    // current flags, so a deferred notice names the same cause as a prompt
+    // one. Later replies belong to a new conversation.
+    let ended = (asked..=latest).find(|t| {
+        let t = t.to_string();
+        job.turn(&t, "stopped").exists()
+            || (read(&job.turn(&t, "end")).as_deref() == Some("done")
+                && !job.turn(&t, "timeout").exists())
+    });
+    let last = ended.unwrap_or(u64::MAX);
     let answer = crate::ask::host_path(job, "")
         .read_dir()
         .into_iter()
@@ -372,9 +367,13 @@ fn close_reason(
             "Closed: no answer came by the deadline, so the job took its reversible default.".into()
         }
         Some(_) => "Closed: the question was answered.".into(),
-        None if stopped => "Closed: the job was stopped.".into(),
-        None if finished => "Closed: the job ended.".into(),
-        None => "Closed: the question was answered.".into(),
+        None => match ended {
+            Some(t) if job.turn(&t.to_string(), "stopped").exists() => {
+                "Closed: the job was stopped.".into()
+            }
+            Some(_) => "Closed: the job ended.".into(),
+            None => "Closed: the question was answered.".into(),
+        },
     }
 }
 
@@ -537,10 +536,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             if !closing.exists()
                 && let Err(e) = crate::state_reads::write(
                     &closing,
-                    format!(
-                        "{}\n",
-                        close_reason(job, finished, stopped, turn, latest, pending_owner)
-                    ),
+                    format!("{}\n", close_reason(job, turn, latest)),
                 )
             {
                 errors.push(e.to_string());

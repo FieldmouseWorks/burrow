@@ -171,6 +171,8 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             q.recommendation.default
         );
         for (kind, value) in [
+            // Durable mark: this done is the timeout's, not the job's own.
+            ("timeout", "one-way\n"),
             ("result", text.as_str()),
             ("end", "done\n"),
             ("outcome", "done\n"),
