@@ -415,3 +415,21 @@ fn a_bump_the_old_updater_left_live_waits_while_its_pr_is_open() {
     assert_eq!(m.running(), live);
     assert!(!switched(&m));
 }
+
+#[test]
+fn a_stuck_bump_the_old_updater_left_live_goes_back_to_main_without_waiting() {
+    // A red PR can't land and a fresh bump waits for main to run: holding
+    // here would wait for ever. Main goes live (a downgrade is allowed from
+    // a verified unmerged bump); the next run replaces the PR.
+    let (m, bump) = proposed();
+    let live = m.running();
+    fs::write(format!("{live}/revision"), format!("{bump}\n")).unwrap();
+    fs::write(m.cfg.state.join("deployed"), format!("{live}\n")).unwrap();
+    m.landed("system.nix", "unrelated");
+    let mut gh = open_at(&bump, &[true, true]);
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    let calls = m.did("calls");
+    assert!(calls.contains("switch --toplevel"), "{calls}");
+    assert!(calls.contains("--allow-downgrade"), "{calls}");
+    assert_ne!(m.running(), live);
+}

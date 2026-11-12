@@ -68,13 +68,11 @@ impl Run<'_> {
         }
         let cfg = self.cfg;
         // The system that runs is a bump the updater before this one left
-        // live, and its PR is open: switching back to main would let that
-        // updater ride it again, and this one return, for ever. It waits
-        // for the PR to land (once, for this hand-over).
-        let pending = self
-            .behind
-            .or_else(|| self.replacing.as_ref().map(|(pr, _)| pr.number));
-        if let (Some(n), true) = (pending, self.leaves_old_bump()) {
+        // live, and its healthy PR is open: switching back to main would let
+        // that updater ride it again, and this one return, for ever. It
+        // waits for the PR to land (once, for this hand-over). A stuck PR
+        // doesn't wait: the next run replaces it, but only once main runs.
+        if let (Some(n), true) = (self.behind, self.leaves_old_bump()) {
             return Err(self.end(
                 Outcome::Held,
                 &format!(
