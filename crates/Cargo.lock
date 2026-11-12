@@ -913,6 +913,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-trust"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

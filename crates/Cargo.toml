@@ -44,6 +44,7 @@ members = [
     "burrow-usage-reset",
     "burrow-watchdog",
     "burrow-workflows",
+    "claude-trust",
     "codex-stand-in",
     "flaky",
     "gh-token",

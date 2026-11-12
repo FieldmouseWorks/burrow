@@ -163,12 +163,8 @@ inputs:
 
         # Marks folders trusted in the user's Claude Code config, for the
         # Claudes that start in one with nobody at their terminal to answer
-        # its question about it (claude/trust.sh).
-        config.burrow.tools.claude-trust = pkgs.writeShellApplication {
-          name = "claude-trust";
-          runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.jq ];
-          text = builtins.readFile ./claude/trust.sh;
-        };
+        # its question about it (crates/claude-trust).
+        config.burrow.tools.claude-trust = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.claude-trust;
 
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)
         # and Remote Control servers (claude-rc.slice) run. No limit of its
