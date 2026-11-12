@@ -90,7 +90,9 @@ in pkgs.testers.runNixOSTest {
         dev("XDG_RUNTIME_DIR=/run/user/1001 systemctl --user is-active proj-policy.service")
         machine.succeed("systemctl stop policy-lock.service")
         machine.wait_until_succeeds("test $(systemctl show -P ActiveState burrow-settings-reconcile.service) = inactive", timeout=30)
-        machine.wait_until_succeeds("runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1001 systemctl --user is-active proj-policy.service | grep -x inactive", timeout=30)
+        # is-active can report unknown after an inactive user unit is unloaded.
+        # show loads its definition again and still distinguishes active/failed.
+        machine.wait_until_succeeds("runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1001 systemctl --user show -P ActiveState proj-policy.service | grep -x inactive", timeout=30)
         machine.succeed("test $(systemctl show -P Result burrow-settings-reconcile.service) = success")
         assert dev("XDG_RUNTIME_DIR=/run/user/1001 systemctl --user show -P Result proj-policy.service") == "success"
         machine.succeed("systemctl start burrow-settings-reconcile.path burrow-settings-reconcile.timer")
