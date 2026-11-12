@@ -240,7 +240,7 @@ pub(crate) fn join_records(before: &str, after: &str) -> String {
 pub(crate) fn state(path: &std::path::Path) -> Result<Option<String>, crate::Fail> {
     match crate::state_reads::bytes(path) {
         Ok(bytes) => String::from_utf8(bytes)
-            .map(Some)
+            .map(|text| Some(text.trim_end_matches('\n').to_owned()))
             .map_err(|e| crate::Fail::new(1, e.to_string())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(crate::io_fail(path, e)),

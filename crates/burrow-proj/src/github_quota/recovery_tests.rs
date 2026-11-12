@@ -713,3 +713,18 @@ fn replay_records_only_its_own_reset_in_the_installation_meter() {
     assert_eq!(own.len(), 1);
     assert!(own[0].retry_at.unwrap() < wide, "job-wide maximum leaked");
 }
+
+#[test]
+fn an_existing_future_hold_is_not_republished_by_a_watcher_pass() {
+    let (_d, cfg) = fixture();
+    let job = job(&cfg);
+    let since = now() - 500;
+    let until = now() + 3600;
+    pending(&job, until as u64, vec!["sam/r#7".into()]);
+    swap(job.turn("1", LIMIT), format!("{since}\t{until}")).unwrap();
+    let original = format!("{LIMIT}\t{since}\t{until}");
+    swap(job.path("await"), format!("{original}\n")).unwrap();
+    swap(job.turn("1", "end"), "await\n").unwrap();
+    crate::watch::look(&cfg, "").unwrap();
+    assert_eq!(read(&job.path("await")).as_deref(), Some(original.as_str()));
+}

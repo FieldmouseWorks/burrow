@@ -189,7 +189,10 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         // The libtest harness surrounds the command's stdout; the JSON
         // line itself must be a single value, not an appended JSON stream.
         let stdout = String::from_utf8(out.stdout).unwrap();
-        let lines: Vec<_> = stdout.lines().filter(|s| s.starts_with('{')).collect();
+        let lines: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.find('{').map(|start| &line[start..]))
+            .collect();
         assert_eq!(lines.len(), 1, "{stdout}");
         let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         let active = kind.ends_with("held");
