@@ -189,6 +189,7 @@ pub(crate) struct Resume {
 }
 
 impl Resume {
+    #[cfg(test)]
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
         Self::prepare_as(job, answered, false)
     }
@@ -330,8 +331,26 @@ pub(crate) fn needs_watch(job: &Job) -> bool {
 /// waits. The accepted launch that first answered it (a receipt is written per
 /// launch attempt and only counts once accepted) says whether that was the
 /// deadline's default or a person; with no such launch, the job's stop or end.
-fn close_reason(job: &Job, finished: bool, stopped: bool, turn: &str) -> String {
+fn close_reason(
+    job: &Job,
+    finished: bool,
+    stopped: bool,
+    turn: &str,
+    latest: u64,
+    pending_owner: bool,
+) -> String {
     let asked = turn.parse::<u64>().unwrap_or(0);
+    // The question's lifetime ends at the first turn that stopped or
+    // completed the job. A one-way timeout's synthetic completion is not an
+    // end while the owner is still owed an answer. Later replies belong to a
+    // new conversation and never supply this question's cause.
+    let last = (asked..=latest)
+        .find(|t| {
+            let t = t.to_string();
+            job.turn(&t, "stopped").exists()
+                || (!pending_owner && read(&job.turn(&t, "end")).as_deref() == Some("done"))
+        })
+        .unwrap_or(u64::MAX);
     let answer = crate::ask::host_path(job, "")
         .read_dir()
         .into_iter()
@@ -345,7 +364,7 @@ fn close_reason(job: &Job, finished: bool, stopped: bool, turn: &str) -> String 
                 .parse::<u64>()
                 .ok()?;
             let r: Receipt = serde_json::from_str(&read_state(&e.path()).ok()??).ok()?;
-            (r.accepted && r.answered && r.through >= asked).then_some((n, r))
+            (r.accepted && r.answered && r.through >= asked && n <= last).then_some((n, r))
         })
         .min_by_key(|(n, _)| *n);
     match answer {
@@ -518,7 +537,10 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             if !closing.exists()
                 && let Err(e) = crate::state_reads::write(
                     &closing,
-                    format!("{}\n", close_reason(job, finished, stopped, turn)),
+                    format!(
+                        "{}\n",
+                        close_reason(job, finished, stopped, turn, latest, pending_owner)
+                    ),
                 )
             {
                 errors.push(e.to_string());
