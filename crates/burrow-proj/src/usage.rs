@@ -232,10 +232,53 @@ fn meter_start(cfg: &Config) -> Option<i64> {
 /// The actual release, retained after the usage notice and record are gone.
 pub fn last_release(cfg: &Config) -> Option<i64> {
     let now = now();
-    if let Some(spent) = kept(cfg) {
-        return (spent.release() <= now).then(|| spent.release());
+    let owner = owner_end(cfg).release;
+    let refusal = if let Some(spent) = kept(cfg) {
+        (spent.release() <= now).then(|| spent.release())
+    } else {
+        released(cfg).ok().filter(|at| *at > 0)
+    };
+    refusal
+        .into_iter()
+        .chain((owner > 0).then_some(owner))
+        .max()
+}
+
+/// How the owner's last pause ended, kept apart from the refusals' record so
+/// neither's settling moves the other: when, the admission cutoff its queue
+/// is cut at, and (for a deadline that passed) the deadline, before which a
+/// refusal is a stale run's and holds nothing. Each only grows.
+#[derive(Default)]
+struct OwnerEnd {
+    release: i64,
+    cutoff: i64,
+    stale: i64,
+}
+
+const OWNER_END: &str = ".usage.owner-end";
+
+fn owner_end(cfg: &Config) -> OwnerEnd {
+    let text = crate::read(&cfg.jobs.join(OWNER_END)).unwrap_or_default();
+    let mut n = text.split_whitespace().map(|w| w.parse().unwrap_or(0));
+    OwnerEnd {
+        release: n.next().unwrap_or(0),
+        cutoff: n.next().unwrap_or(0),
+        stale: n.next().unwrap_or(0),
     }
-    released(cfg).ok().filter(|at| *at > 0)
+}
+
+fn owner_ended(cfg: &Config, release: i64, cutoff: i64, stale: i64) -> Result<(), String> {
+    let o = owner_end(cfg);
+    swap(
+        &cfg.jobs.join(OWNER_END),
+        &format!(
+            "{} {} {}\n",
+            o.release.max(release),
+            o.cutoff.max(cutoff),
+            o.stale.max(stale)
+        ),
+    )
+    .map_err(|e| format!("proj: {OWNER_END}: {e}"))
 }
 
 /// Admission's nanosecond cutoff, independent of the later successful-run
@@ -253,6 +296,18 @@ struct Admission {
 }
 
 fn admission_cutoff_locked(cfg: &Config) -> std::io::Result<Option<i64>> {
+    if hold_record(cfg).map_err(std::io::Error::other)?.is_some() {
+        return Ok(None);
+    }
+    let refusals = refusal_cutoff_locked(cfg)?;
+    let owner = owner_end(cfg).cutoff;
+    Ok(refusals
+        .into_iter()
+        .chain((owner > 0).then_some(owner))
+        .max())
+}
+
+fn refusal_cutoff_locked(cfg: &Config) -> std::io::Result<Option<i64>> {
     if let Some(s) = refusals(cfg).map_err(std::io::Error::other)? {
         if s.holds(now()) {
             return Ok(None);
@@ -386,35 +441,19 @@ fn reconcile(cfg: &Config) -> Result<(), String> {
     let Some(h) = hold_raw(cfg)?.filter(|h| h.until <= now()) else {
         return Ok(());
     };
+    // Kept first, so a failure leaves the hold to be retired again.
     mark(cfg, h.until - 1)?;
-    write_admission(cfg, &ended(&h, h.until, None), true)?;
-    cfg.settings
-        .as_ref()
-        .ok_or("settings are not configured")?
-        .command(
-            &["usage-back".into()],
-            "proj: the usage hold's deadline passed",
-        )?;
-    if !refusals(cfg)?.is_some_and(|s| s.holds(now())) {
-        close_if_open(cfg);
+    owner_ended(cfg, h.until, h.until * 1_000_000_000, h.until)?;
+    let settings = cfg.settings.as_ref().ok_or("settings are not configured")?;
+    // Retires only this hold: a replacement made meanwhile stands.
+    settings.command(
+        &["usage-expire".into(), h.until.to_string()],
+        "proj: the usage hold's deadline passed",
+    )?;
+    if hold_raw(cfg)?.is_none() {
+        changed(cfg);
     }
-    changed(cfg);
     Ok(())
-}
-
-/// A pause that has ended at `back`, as the record admission's cohort is cut from.
-fn ended(h: &burrow_settings::UsageHold, back: i64, admission: Option<i64>) -> Spent {
-    Spent {
-        owner: true,
-        until: h.until,
-        said: h.reason.clone(),
-        job: "owner".into(),
-        at: h.since,
-        back: Some(back),
-        admission,
-        told: back,
-        last: Some(h.since),
-    }
 }
 
 /// The owner's notice closed, if it may be open.
@@ -436,9 +475,12 @@ fn migrate(cfg: &Config) -> Result<(), String> {
     let Ok(mut mirror) = serde_json::from_str::<Spent>(&text) else {
         return Ok(());
     };
-    let inner = match mirror.job.strip_prefix(ADMISSION_REF) {
-        Some(r) => r.split_once('-').map_or(r, |(_, j)| j).to_owned(),
-        None => mirror.job.clone(),
+    let (cutoff, inner) = match mirror.job.strip_prefix(ADMISSION_REF) {
+        Some(r) => match r.split_once('-') {
+            Some((c, j)) => (c.parse::<i64>().ok(), j.to_owned()),
+            None => (None, r.to_owned()),
+        },
+        None => (None, mirror.job.clone()),
     };
     if !(inner.starts_with(OWNER) && !inner.contains('/')) {
         return Ok(());
@@ -447,21 +489,38 @@ fn migrate(cfg: &Config) -> Result<(), String> {
         &fs::read(cfg.jobs.join(&inner)).map_err(|e| format!("proj: {inner}: {e}"))?,
     )
     .map_err(|e| format!("proj: {inner}: {e}"))?;
-    if mirror.back.is_none() && mirror.refused() < owner.until && owner.until > now() {
+    let now = now();
+    if mirror.refused() >= owner.until {
+        // A genuine refusal at or after the deadline: an ordinary record,
+        // no longer naming the metadata.
+        mirror.job = mirror.job.replacen(&inner, "owner", 1);
+        let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
+        swap(&path, &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))?;
+        if owner.until <= now && mirror.back.is_none() {
+            mark(cfg, owner.until - 1)?;
+            owner_ended(cfg, owner.until, owner.until * 1_000_000_000, owner.until)?;
+        }
+    } else if mirror.back.is_none() && owner.until > now {
+        // Still holds: carried over unless the overlay already has a say.
         cfg.settings
             .as_ref()
             .ok_or("settings are not configured")?
             .command(
-                &["usage-hold".into(), owner.until.to_string(), owner.said],
+                &["usage-migrate".into(), owner.until.to_string(), owner.said],
                 "proj: migrated from jobs/.usage.json",
             )?;
         fs::remove_file(&path).map_err(|e| format!("proj: {FILE}: {e}"))?;
     } else {
-        // What's left is a refusal's, or a release's cutoff: it stays, no
-        // longer naming the metadata.
-        mirror.job = mirror.job.replacen(&inner, "owner", 1);
-        let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
-        swap(&path, &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))?;
+        // Ended, by a release or its deadline: kept as an ended hold, with
+        // the cutoffs a release keeps. Mirror extensions before the
+        // deadline are not refusals.
+        let expired = mirror.back.is_none();
+        let back = mirror.back.map_or(owner.until, |b| b.min(owner.until));
+        let admission =
+            cutoff.unwrap_or(((back + 1) * 1_000_000_000).min(owner.until * 1_000_000_000));
+        mark(cfg, if expired { owner.until - 1 } else { back })?;
+        owner_ended(cfg, back, admission, if expired { owner.until } else { 0 })?;
+        fs::remove_file(&path).map_err(|e| format!("proj: {FILE}: {e}"))?;
     }
     for e in fs::read_dir(&cfg.jobs)
         .map_err(|e| e.to_string())?
@@ -497,11 +556,26 @@ pub fn record(
     at: i64,
 ) -> Result<Spent, String> {
     let _lock = lock(cfg)?;
-    // A run refused before an expired pause's deadline says nothing of usage after it.
-    let stale = hold_raw(cfg)?.is_some_and(|h| h.until <= now() && at < h.until);
+    // A run refused before an owner pause's deadline says nothing of usage
+    // after it, however soon it is told and whoever reconciles the expiry
+    // first; it waits in line as ended, not failed.
+    let expired = hold_raw(cfg)?
+        .filter(|h| h.until <= now())
+        .map_or(0, |h| h.until);
     reconcile(cfg)?;
-    if stale {
-        return Err("proj: this refusal predates the owner pause that has ended".into());
+    let stale = owner_end(cfg).stale.max(expired);
+    if at < stale {
+        return Ok(Spent {
+            owner: true,
+            until: stale,
+            said: "the owner pause ended".into(),
+            job: "owner".into(),
+            at,
+            back: Some(stale),
+            admission: None,
+            told: stale,
+            last: Some(at),
+        });
     }
     put(cfg, id, until, said, at, at)
 }
@@ -631,13 +705,14 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     }
     let now = now();
     if owner && let Ok(Some(h)) = hold_raw(cfg).map(|h| h.filter(|h| h.until > now)) {
-        // The door first: a release takes effect at once. The turns in line
-        // before it are the cohort admission then trickles.
-        let released = ended(
-            &h,
-            now,
-            Some(crate::now_nanos().min(h.until * 1_000_000_000)),
-        );
+        // Its release is kept first, recoverably, and then the door clears
+        // it: a failure before that leaves the hold on. The turns in line
+        // are the cohort admission then trickles.
+        let cut = crate::now_nanos().min(h.until * 1_000_000_000);
+        if let Err(e) = mark(cfg, now).and_then(|_| owner_ended(cfg, now, cut, 0)) {
+            eprintln!("{e}");
+            return;
+        }
         let cleared = cfg
             .settings
             .as_ref()
@@ -645,9 +720,6 @@ pub fn back(cfg: &Config, started: Option<i64>) {
         if let Some(Err(e)) = cleared {
             eprintln!("proj usage back: {e}");
             return;
-        }
-        if let Err(e) = write_admission(cfg, &released, true) {
-            eprintln!("{e}");
         }
     }
     let s = refusals(cfg).ok().flatten();
@@ -731,6 +803,19 @@ pub fn tend(cfg: &Config) -> Option<i64> {
         }
     }
     let s = match read(cfg) {
+        // Nothing holds: a close that didn't get through (GitHub failed, or
+        // notify did) is sent again until `pending` says it did.
+        Ok(None) => {
+            // Only an owner pause's close is chased here, for a day: the
+            // refusals' own is settled with their record.
+            let recent = now - owner_end(cfg).release < 86_400 && owner_end(cfg).release > 0;
+            return if recent && pending(cfg) {
+                tell(cfg, &["close", NOTICE, CLOSED]);
+                retry
+            } else {
+                None
+            };
+        }
         Ok(s) => s?,
         Err(e) => {
             eprintln!("{e}");
@@ -739,6 +824,10 @@ pub fn tend(cfg: &Config) -> Option<i64> {
     };
     let next = if s.holds(now) {
         if s.owner {
+            // Opened here too when the door set it and nothing else did.
+            if !pending(cfg) {
+                tell(cfg, &["open", NOTICE, &title(&s), &body(cfg, &s)]);
+            }
             // Its deadline is the look that closes it ([`reconcile`]).
             Some(s.until)
         } else {

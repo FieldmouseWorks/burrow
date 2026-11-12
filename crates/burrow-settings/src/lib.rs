@@ -69,6 +69,9 @@ pub fn valid_command(args: &[String]) -> bool {
         .as_slice()
     {
         ["show" | "back" | "usage-back"] => true,
+        ["usage-hold", until, reason @ ..] => {
+            !reason.is_empty() && until.parse::<i64>().is_ok_and(|t| t > now())
+        }
         ["allow" | "pause", repo] => burrow_github::repo_name(repo),
         ["pipeline", until] => until.parse::<i64>().is_ok_and(|t| t > now()),
         _ => false,
@@ -227,13 +230,29 @@ impl Config {
             }
             ["back"] => state.pipeline_until = None,
             // Always allowed, at once: no other daemon is asked.
-            ["usage-hold", until, reason] if !reason.trim().is_empty() => {
+            // A reason is the rest of the words, as the issue door splits them.
+            ["usage-hold", until, reason @ ..] if !reason.join(" ").trim().is_empty() => {
                 let until: i64 = until.parse().map_err(|_| "usage-hold needs a Unix timestamp")?;
                 let at = now();
                 if until <= at { return Err("usage hold deadline must be in the future".into()); }
-                state.usage_hold = Some(UsageHold { until, reason: reason.to_string(), since: at });
+                state.usage_hold = Some(UsageHold { until, reason: reason.join(" "), since: at });
             }
             ["usage-back"] => state.usage_hold = None,
+            // Cleanups that retire only the hold they examined, decided here
+            // under the write lock: a newer hold or release stands.
+            ["usage-expire", until] if state.usage_hold.as_ref().is_some_and(|h| {
+                until.parse() == Ok(h.until) && h.until <= now()
+            }) => state.usage_hold = None,
+            ["usage-expire", _] => {}
+            ["usage-migrate", until, reason @ ..]
+                if state.usage_hold.is_none() && !reason.is_empty() =>
+            {
+                let until: i64 = until.parse().map_err(|_| "usage-migrate needs a Unix timestamp")?;
+                if until > now() {
+                    state.usage_hold = Some(UsageHold { until, reason: reason.join(" "), since: now() });
+                }
+            }
+            ["usage-migrate", ..] => {}
             _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back | usage-hold UNTIL REASON | usage-back".into()),
         }
         let answer = "Settings changed; use settings show for the current policy.".to_owned();

@@ -63,13 +63,17 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         setups.dir().to_owned(),
         setups.shown()?,
     ));
+    let hold = usage::held(cfg)?;
+    // The file the shown hold actually came from.
+    let source = match (&hold, &cfg.settings) {
+        (Some(s), Some(settings)) if s.owner => settings.overlay.clone(),
+        (None, Some(settings)) => settings.overlay.clone(),
+        _ => cfg.jobs.join(usage::FILE),
+    };
     readings.push(Reading::live(
         "proj.usageHold",
-        cfg.settings
-            .as_ref()
-            .map_or_else(|| cfg.jobs.join(usage::FILE), |s| s.overlay.clone()),
-        usage::held(cfg)?
-            .map(|s| json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said})),
+        source,
+        hold.map(|s| json!({"until": s.until, "since": s.at, "owner": s.owner, "reason": s.said})),
     ));
     Document::build(readings)
 }
