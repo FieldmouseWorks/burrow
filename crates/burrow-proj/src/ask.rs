@@ -218,6 +218,8 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             q.recommendation.default
         );
         for (kind, value) in [
+            // Durable mark: this done is the timeout's, not the job's own.
+            ("timeout", "one-way\n"),
             ("result", text.as_str()),
             ("end", "done\n"),
             ("outcome", "done\n"),
@@ -250,7 +252,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             "No answer by {time}. Take your reversible recommended answer now: {}\n\nCarry out that default and say on the issue that you took it because the question timed out. Do not ask the same question again.",
             q.recommendation.default
         );
-        crate::turn::start_answer(cfg, job.id, &prompt, false)?;
+        crate::turn::start_default(cfg, job.id, &prompt)?;
     }
     Ok(None)
 }

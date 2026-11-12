@@ -818,6 +818,7 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
         save_receipt(
             &receipt_path(&f.job(), "2"),
             &Receipt {
+                deadline: false,
                 through: 1,
                 answered: true,
                 clear: true,
