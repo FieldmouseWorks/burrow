@@ -865,7 +865,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         swap(wake, &format!("{text}\n")).map_err(|e| io_fail(wake, e))?;
 
         // Since when each repo has been out of reach, until a pass reaches it
-        // again: a file per repo, named by its key.
+        // again in full: a scoped success hasn't verified the failed work.
         let gone = self.inbox.state.join(".unreached");
         fs::create_dir_all(&gone).map_err(|e| io_fail(&gone, e))?;
         for repo in &self.looked {
@@ -874,7 +874,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 if !f.exists() {
                     fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
                 }
-            } else {
+            } else if self.scope.is_none() {
                 let _ = fs::remove_file(&f);
             }
         }

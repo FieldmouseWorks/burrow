@@ -66,6 +66,17 @@ impl Pass<'_> {
         let mut open = Vec::new();
         for n in ns {
             let issue = crate::github::api(self.cfg, &format!("repos/{repo}/issues/{n}"))?;
+            // gh follows transfers. A redirected response must never be
+            // acted on under this repo's identity, even when its number is
+            // unchanged. Discard the whole read before any effects; run()
+            // records a miss and books the ordinary, full reconciliation.
+            if issue["number"].as_u64() != Some(n)
+                || !issue["repository_url"].as_str().is_some_and(|url| {
+                    url.eq_ignore_ascii_case(&format!("https://api.github.com/repos/{repo}"))
+                })
+            {
+                return None;
+            }
             if issue["state"] == "open" {
                 open.push(issue);
             }

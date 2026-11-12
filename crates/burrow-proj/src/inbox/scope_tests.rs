@@ -10,6 +10,13 @@ use super::drain::READY_LISTS;
 use super::scope::issues_in;
 use super::sorting_tests::{Box, issue};
 
+fn scoped_issue(n: u64) -> Value {
+    let mut i = issue(n, "sam", &["claude"]);
+    i["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    i["state"] = json!("open");
+    i
+}
+
 /// Issue N's record, its job `id`'s.
 fn record(b: &Box, n: u64, id: &str) -> std::path::PathBuf {
     let d = b
@@ -42,7 +49,7 @@ fn an_issue_events_pass_asks_for_its_issue_alone() {
     let seven = b.record("j1");
     b.job("j2", "done", "Fixed in #13.");
     let eight = record(&b, 8, "j2");
-    let mut now = issue(7, "sam", &["claude"]);
+    let mut now = scoped_issue(7);
     now["state"] = json!("open");
     fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
 
@@ -74,7 +81,7 @@ fn an_issue_events_pass_ends_a_closed_issues_job() {
     let b = Box::new();
     b.job("j1", "done", "Fixed in #12.");
     let seven = b.record("j1");
-    let mut now = issue(7, "sam", &["claude"]);
+    let mut now = scoped_issue(7);
     now["state"] = json!("closed");
     fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
     let mut p = b.pass();
@@ -134,4 +141,101 @@ fn told_issues() {
     assert_eq!(issues_in(""), None);
     assert_eq!(issues_in("7\nx\n"), None);
     assert_eq!(issues_in("-1\n"), None);
+}
+
+// gh follows transferred-issue redirects. Neither a different number nor
+// the same number in another repo is the requested issue, even if closed.
+#[test]
+fn scoped_fetches_reject_redirects_and_book_a_full_reconciliation() {
+    for (repo, n) in [("else/box", 42), ("else/box", 7), ("sam/box", 42)] {
+        for state in ["open", "closed"] {
+            let mut b = Box::new();
+            b.cfg.notify = None;
+            b.job("j1", "done", "original answer");
+            let saved = b.record("j1");
+            let mut redirected = scoped_issue(n);
+            redirected["repository_url"] = json!(format!("https://api.github.com/repos/{repo}"));
+            redirected["state"] = json!(state);
+            fs::write(b.path("repos_sam_box_issues_7"), redirected.to_string()).unwrap();
+            let mut p = b.pass();
+            p.scope = Some(BTreeSet::from([7]));
+            p.run("sam/box").unwrap();
+            p.finish("sam/box").unwrap();
+            assert_eq!(p.unreached, ["sam/box"]);
+            assert!(p.wake.contains_key("sam/box"));
+            assert_eq!(fs::read_to_string(saved.join("answered")).unwrap(), "0\n");
+            assert!(b.posted().is_empty());
+            assert!(!b.log().contains("api -X"), "{}", b.log());
+            assert!(!b.log().contains("repos/else/"), "{}", b.log());
+        }
+    }
+}
+
+#[test]
+fn scoped_fetches_accept_repository_case() {
+    let b = Box::new();
+    let mut seven = scoped_issue(7);
+    seven["repository_url"] = json!("https://api.github.com/repos/SAM/Box");
+    fs::write(b.path("repos_sam_box_issues_7"), seven.to_string()).unwrap();
+    assert_eq!(
+        b.pass().asked("sam/box", BTreeSet::from([7])).unwrap(),
+        [seven]
+    );
+}
+
+#[test]
+fn scoped_success_keeps_failure_age_and_notification_until_a_full_success() {
+    let mut b = Box::new();
+    let notify = b.path("notify");
+    burrow_test::executable(
+        &notify,
+        format!(
+            "#!/bin/sh\necho \"$*\" >>'{}'\n",
+            b.path("notices").display()
+        ),
+    );
+    b.cfg.notify = Some(notify);
+    let marker = b
+        .cfg
+        .inbox
+        .as_ref()
+        .unwrap()
+        .state
+        .join(".unreached/sam_box");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    let first = format!("{}\n", crate::now() - 7200);
+    fs::write(&marker, &first).unwrap();
+    fs::write(
+        b.path("repos_sam_box_issues_7"),
+        scoped_issue(7).to_string(),
+    )
+    .unwrap();
+    // A scoped success cannot verify issue 8 or a failed repo listing.
+    for failed in [false, true, false] {
+        let mut p = b.pass();
+        p.scope = Some(BTreeSet::from([7]));
+        p.looked.push("sam/box".into());
+        if failed {
+            p.miss("sam/box");
+        }
+        p.finish("sam/box").unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap(), first);
+        let notices = fs::read_to_string(b.path("notices")).unwrap();
+        assert!(notices.contains("open proj-inbox"));
+        assert!(!notices.contains("close proj-inbox"));
+    }
+    let mut p = b.pass();
+    p.looked.push("sam/box".into());
+    p.miss("sam/box");
+    p.finish("sam/box").unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), first);
+    let mut p = b.pass();
+    p.looked.push("sam/box".into());
+    p.finish("sam/box").unwrap();
+    assert!(!marker.exists());
+    assert!(
+        fs::read_to_string(b.path("notices"))
+            .unwrap()
+            .contains("close proj-inbox")
+    );
 }
