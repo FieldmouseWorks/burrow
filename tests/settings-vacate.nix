@@ -80,7 +80,7 @@ in pkgs.testers.runNixOSTest {
         machine.succeed("systemctl stop burrow-settings-reconcile.timer burrow-settings-reconcile.path burrow-settings-reconcile.service")
         dev("XDG_RUNTIME_DIR=/run/user/1001 systemctl --user stop proj-policy.service")
         machine.succeed("install -d -o dev -g dev /data/dev/jobs")
-        machine.succeed("systemd-run --unit=policy-lock --uid=dev -- flock /data/dev/jobs/.policy.lock sh -c 'touch /tmp/policy-locked; exec sleep infinity'")
+        machine.succeed("systemd-run --unit=policy-lock --uid=dev -- ${pkgs.util-linux}/bin/flock /data/dev/jobs/.policy.lock ${pkgs.runtimeShell} -c '${pkgs.coreutils}/bin/touch /tmp/policy-locked; exec ${pkgs.coreutils}/bin/sleep infinity'")
         machine.wait_for_file("/tmp/policy-locked")
         # This is the same blocking StartUnit operation activation uses. A
         # oneshot waits for reconciliation and times out against the held lock.
