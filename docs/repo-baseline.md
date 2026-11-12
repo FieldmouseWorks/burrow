@@ -38,6 +38,13 @@ the reviewers' sessions) is forgotten, so the new one gets its own clone and
 its own baseline job. A pass that fails partway, or finds a review still
 under way, does it all again on the next.
 
+Steward passes stop taking new PR steps after eight minutes and book an
+immediate continuation. `pass-progress.json` in the steward's state directory
+keeps the PRs and repos already seen, after their waits and wake-ups have
+been saved. A changed decision input makes the PR eligible again. Train
+steps, branch cleanup and coverage wait until the repo's PR traversal is
+complete; later repos retain their notices and watches in the meantime.
+
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and
 change nothing else in the same PR.
