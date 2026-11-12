@@ -75,7 +75,9 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
     } = context;
     let mut meter = Meter::new(app, owner, unix());
     let mut state_error = None;
-    let mut woke = false;
+    // The latest deadline the watcher was told of; a later extension (the
+    // free probe revealing a longer reset) must notify it again.
+    let mut woke: Option<u64> = None;
     for line in io::BufReader::new(trace).lines() {
         let record: Evidence = serde_json::from_str(&line?)?;
         let response = burrow_github::Response {
@@ -98,15 +100,16 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
             state_error.get_or_insert(e);
         }
         meter.retry_at = meter.retry_at.into_iter().chain(observed.retry_at).max();
-        if observed.until(unix()).is_some() {
+        if let Some(until) = observed.until(unix()) {
             // Publish known holds before the optional free probe, so peers
             // cannot start while a slow observation request is in flight.
             match save(&observed, dir) {
-                Ok(()) if !woke => {
-                    wake(context);
-                    woke = true;
+                Ok(()) => {
+                    if woke.is_none_or(|known| until > known) {
+                        wake(context);
+                        woke = Some(until);
+                    }
                 }
-                Ok(()) => {}
                 Err(e) => {
                     state_error.get_or_insert(e);
                 }
@@ -130,8 +133,13 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
         meter.budget(&v);
     }
     match save(&meter, dir) {
-        Ok(()) if !woke && meter.until(unix()).is_some() => wake(context),
-        Ok(()) => {}
+        Ok(()) => {
+            if let Some(until) = meter.until(unix())
+                && woke.is_none_or(|known| until > known)
+            {
+                wake(context);
+            }
+        }
         Err(e) => {
             state_error.get_or_insert(e);
         }
@@ -286,5 +294,56 @@ esac
                 code
             );
         }
+    }
+
+    #[test]
+    fn a_probe_extension_notifies_the_watcher_again() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let d = tempfile::tempdir().unwrap();
+        let gh = d.path().join("gh");
+        fs::write(&gh, r#"#!/bin/sh
+if [ "$1 $2" = 'api rate_limit' ]; then
+ echo '{"resources":{"core":{"remaining":5,"reset":1},"graphql":{"remaining":0,"reset":4000000000}}}'
+ exit 0
+fi
+echo '{"status":403,"at":2000000000,"headers":[["retry-after","60"]],"body":"{}"}' >> "$BURROW_GH_RESPONSES"
+exit 1
+"#).unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/kick/proj-watch", listener.local_addr().unwrap());
+        let kicks = Arc::new(AtomicUsize::new(0));
+        let seen = kicks.clone();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf);
+                seen.fetch_add(1, Ordering::SeqCst);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let dir = d.path().join("meters");
+        run(
+            &mut Command::new(&gh),
+            Context {
+                gh: gh.to_str().unwrap(),
+                token: "t",
+                app: "workers",
+                owner: "sam",
+                dir: &dir,
+                refusals: None,
+                kick: Some(&url),
+            },
+        )
+        .unwrap();
+        // The short refusal woke the watcher; the longer GraphQL reset found
+        // by the probe afterwards must wake it again.
+        assert_eq!(kicks.load(Ordering::SeqCst), 2);
     }
 }

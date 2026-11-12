@@ -297,22 +297,25 @@ pub(crate) fn replay(cfg: &Config, job: &Job) -> Result<Option<i64>, RecoveryErr
     let waits = match result {
         Ok(waits) => waits,
         Err(error) => {
-            if let Some(due) = crate::github::take_limit() {
+            if let Some(limit) = crate::github::take_limit() {
+                let due = limit;
                 pending.retry_at = pending.retry_at.max(due);
                 swap(
                     job.path(PENDING),
                     serde_json::to_vec(&pending).expect("pending await"),
                 )
                 .map_err(|e| crate::io_fail(&job.path(PENDING), e))?;
-                let due = std::iter::once(pending.retry_at)
+                let parked = std::iter::once(pending.retry_at)
                     .chain(refused(job).map(|t| t as u64))
                     .max()
                     .unwrap_or(due);
-                park(job, due as i64).map_err(|e| crate::Fail::new(1, e))?;
-                if let Err(e) = note(cfg, job, &owner, due) {
+                park(job, parked as i64).map_err(|e| crate::Fail::new(1, e))?;
+                // The job parks at its widest deadline, but only this
+                // failure's own reset is evidence about this installation.
+                if let Err(e) = note(cfg, job, &owner, limit) {
                     eprintln!("proj: quota meter unavailable: {e}");
                 }
-                return Ok(Some(due as i64));
+                return Ok(Some(parked as i64));
             }
             return Err(RecoveryError::Request(error));
         }

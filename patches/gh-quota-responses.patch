@@ -5,7 +5,7 @@
 +	return quotaClient(client), nil
 --- /dev/null
 +++ b/api/burrow_quota.go
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,78 @@
 +package api
 +
 +// BURROW_GH_RESPONSES is an opt-in private side channel for schedulers.
@@ -16,7 +16,6 @@
 +	"io"
 +	"net/http"
 +	"os"
-+	"strings"
 +	"sync"
 +	"time"
 +)
@@ -41,6 +40,12 @@
 +	}
 +	return inner
 +}
++
++// isGraphQL is true only for gh's own GraphQL endpoint, never for repository
++// content whose path merely ends in graphql.
++func isGraphQL(req *http.Request) bool {
++	return req.Method == "POST" && (req.URL.Path == "/graphql" || req.URL.Path == "/api/graphql")
++}
 +func (q *quotaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 +	resp, err := q.inner.RoundTrip(req)
 +	if err != nil {
@@ -57,7 +62,7 @@
 +			record.Headers = append(record.Headers, [2]string{key, val})
 +		}
 +	}
-+	if resp.Body != nil && (resp.StatusCode == 403 || resp.StatusCode == 429 || strings.HasSuffix(req.URL.Path, "/graphql")) {
++	if resp.Body != nil && (resp.StatusCode == 403 || resp.StatusCode == 429 || isGraphQL(req)) {
 +		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 +		resp.Body = quotaBody{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
 +		// Retain API errors only, never a successful GraphQL data payload.
@@ -81,7 +86,7 @@
 +}
 --- /dev/null
 +++ b/api/burrow_quota_test.go
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,83 @@
 +package api
 +
 +import (
@@ -115,6 +120,8 @@
 +		{403, "/repos/o/r", "{}", http.Header{"X-Ratelimit-Remaining": []string{"0"}, "X-Ratelimit-Reset": []string{"4000000000"}}},
 +		{403, "/repos/o/r", `{"message":"permission denied"}`, nil},
 +		{200, "/graphql", `{"data":{"secret":"private"},"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++		{200, "/repos/o/r/contents/graphql", `{"errors":[{"type":"RATE_LIMITED"}]}`, nil},
++		{200, "/repos/o/r/graphql", `{"errors":[{"type":"RATE_LIMITED"}]}`, nil},
 +	} {
 +		file := filepath.Join(t.TempDir(), "responses")
 +		if err := os.WriteFile(file, nil, 0600); err != nil {
@@ -124,7 +131,11 @@
 +		transport := quotaResponses(roundTripFunc(func(req *http.Request) (*http.Response, error) {
 +			return &http.Response{StatusCode: tc.status, Header: tc.headers, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
 +		}))
-+		req, _ := http.NewRequest("GET", "https://api.github.com"+tc.path, nil)
++		method := "GET"
++		if tc.path == "/graphql" {
++			method = "POST"
++		}
++		req, _ := http.NewRequest(method, "https://api.github.com"+tc.path, nil)
 +		resp, err := transport.RoundTrip(req)
 +		if err != nil {
 +			t.Fatal(err)
@@ -141,6 +152,9 @@
 +		}
 +		if err := json.Unmarshal(raw, &record); err != nil {
 +			t.Fatal(err)
++		}
++		if tc.path != "/graphql" && strings.Contains(record.Body, "RATE_LIMITED") {
++			t.Fatalf("repository content became quota evidence: %s", raw)
 +		}
 +		if record.Status != tc.status || strings.Contains(record.Body, "private") || strings.Contains(record.Body, "forged") {
 +			t.Fatalf("untrusted evidence: %s", raw)
