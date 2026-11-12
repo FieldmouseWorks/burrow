@@ -18,6 +18,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 burrow-github = { path = "../burrow-github", features = ["fake"] }
+burrow-test = { path = "../burrow-test" }
 tempfile.workspace = true
 
 [lints]

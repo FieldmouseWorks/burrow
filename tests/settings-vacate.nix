@@ -76,6 +76,26 @@ in pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds('test -z "$(systemctl list-units --plain --no-legend --state=active,activating,deactivating \'proj-retry*\' \'burrow-events.service\' \'proj-inbox*\' \'proj-watch*\')"', timeout=30)
     def dev(cmd):
         return machine.succeed("runuser -u dev -- bash -lc " + shlex.quote(cmd)).strip()
+    with subtest("a busy policy reader does not hold either service startup"):
+        machine.succeed("systemctl stop burrow-settings-reconcile.timer burrow-settings-reconcile.path burrow-settings-reconcile.service")
+        dev("XDG_RUNTIME_DIR=/run/user/1001 systemctl --user stop proj-policy.service")
+        machine.succeed("install -d -o dev -g dev /data/dev/jobs")
+        machine.succeed("systemd-run --unit=policy-lock --uid=dev -- ${pkgs.util-linux}/bin/flock /data/dev/jobs/.policy.lock ${pkgs.runtimeShell} -c '${pkgs.coreutils}/bin/touch /tmp/policy-locked; exec ${pkgs.coreutils}/bin/sleep infinity'")
+        machine.wait_for_file("/tmp/policy-locked")
+        # This is the same blocking StartUnit operation activation uses. A
+        # oneshot waits for reconciliation and times out against the held lock.
+        machine.succeed("timeout 5 systemctl start burrow-settings-reconcile.service")
+        machine.succeed("systemctl is-active burrow-settings-reconcile.service")
+        dev("XDG_RUNTIME_DIR=/run/user/1001 timeout 5 systemctl --user start proj-policy.service")
+        dev("XDG_RUNTIME_DIR=/run/user/1001 systemctl --user is-active proj-policy.service")
+        machine.succeed("systemctl stop policy-lock.service")
+        machine.wait_until_succeeds("test $(systemctl show -P ActiveState burrow-settings-reconcile.service) = inactive", timeout=30)
+        # is-active can report unknown after an inactive user unit is unloaded.
+        # show loads its definition again and still distinguishes active/failed.
+        machine.wait_until_succeeds("runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1001 systemctl --user show -P ActiveState proj-policy.service | grep -x inactive", timeout=30)
+        machine.succeed("test $(systemctl show -P Result burrow-settings-reconcile.service) = success")
+        assert dev("XDG_RUNTIME_DIR=/run/user/1001 systemctl --user show -P Result proj-policy.service") == "success"
+        machine.succeed("systemctl start burrow-settings-reconcile.path burrow-settings-reconcile.timer")
     def state(j):
         return dev("proj state " + j)
     def eventually(j, expected):

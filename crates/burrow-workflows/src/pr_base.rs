@@ -144,6 +144,12 @@ fn inputs() -> Vec<(&'static str, V)> {
 fn group(jobs: &Value, name: &str, r: &Run) -> String {
     let c = &jobs[name]["concurrency"];
     assert_eq!(c["cancel-in-progress"], true, "{name}: {c:?}");
+    group_of(c, name == "check", r)
+}
+
+/// A concurrency group (`c`, cancelling) for a run, a check job's leg's
+/// (`leg`) or not.
+fn group_of(c: &Value, leg: bool, r: &Run) -> String {
     let pr = r.event == "pull_request";
     let mut c2 = ctx(inputs());
     for (k, v) in r.inputs {
@@ -162,14 +168,7 @@ fn group(jobs: &Value, name: &str, r: &Run) -> String {
             if pr { r.pr.into() } else { V::Null },
         ),
         ("github.run_id", r.run.into()),
-        (
-            "matrix.leg",
-            if name == "check" {
-                r.leg.into()
-            } else {
-                V::Null
-            },
-        ),
+        ("matrix.leg", if leg { r.leg.into() } else { V::Null }),
         ("github.workflow", r.workflow.into()),
         (
             "github.event.action",
@@ -377,6 +376,70 @@ fn only_a_prs_newer_run_cancels() {
                 pushed,
                 "{name} {action}"
             );
+        }
+    }
+}
+
+/// Every caller's own group, which GitHub takes when it makes the run, before
+/// any job of it waits for a runner: a PR's newer run cancels the whole of its
+/// last one at once, its legs included, rather than each job once its
+/// successor is queued, which waits on the new run's first job getting a
+/// runner the old legs may hold (burrow#815). Keyed as the jobs' groups are:
+/// anything but a PR's push or retarget is a run of its own. No job of the
+/// shared workflow shares it, which would cancel the caller.
+#[test]
+fn a_prs_newer_run_cancels_its_last_when_made() {
+    let jobs = jobs();
+    for (caller, retarget) in crate::lane::CALLERS {
+        let c = &workflow(caller)["concurrency"];
+        assert_eq!(c["cancel-in-progress"], true, "{caller}: {c:?}");
+        assert_eq!(&workflow(retarget)["concurrency"], c, "{retarget}");
+        let g = |r: Run| group_of(c, false, &r);
+        let pushed = g(PUSHED);
+        for action in ["opened", "reopened", "synchronize"] {
+            let next = Run {
+                run: 1002,
+                action,
+                ..PUSHED
+            };
+            assert_eq!(g(next), pushed, "{caller} {action}");
+        }
+        for changes in [BASE, TITLE_AND_BASE] {
+            let next = Run {
+                run: 1002,
+                action: "edited",
+                changes,
+                ..PUSHED
+            };
+            assert_eq!(g(next), pushed, "{caller} {changes:?}");
+        }
+        for changes in [TITLE, BODY] {
+            let edit = |run| Run {
+                run,
+                action: "edited",
+                changes,
+                ..PUSHED
+            };
+            assert_ne!(g(edit(1002)), pushed, "{caller} {changes:?}");
+            assert_ne!(g(edit(1002)), g(edit(1003)), "{caller} {changes:?}");
+        }
+        assert_ne!(g(Run { pr: 13, ..PUSHED }), pushed, "{caller}");
+        assert_ne!(
+            g(Run {
+                workflow: "other",
+                ..PUSHED
+            }),
+            pushed,
+            "{caller}"
+        );
+        let push = Run {
+            event: "push",
+            ..PUSHED
+        };
+        assert_ne!(g(Run { run: 1001, ..push }), g(Run { run: 1002, ..push }));
+        assert_ne!(g(Run { run: 12, ..push }), pushed, "{caller}");
+        for name in JOBS {
+            assert_ne!(group(&jobs, name, &PUSHED), pushed, "{caller} {name}");
         }
     }
 }

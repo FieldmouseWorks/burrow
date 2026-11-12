@@ -4,7 +4,8 @@
 # secret starts the repo's pass as its own unit (polkit lets the service
 # start those and nothing else), that one signed otherwise doesn't, that a
 # kick on the local port does, that a wake-up a pass booked comes on time,
-# and that a new secret is the one checked once it's written.
+# that a new secret is the one checked once it's written, and that a switch
+# leaves the handler's units be.
 #
 #   nix build .#checks.x86_64-linux.events-service -L
 { self, pkgs }:
@@ -20,7 +21,22 @@ let
       echo "{\"sam/later\": $(( $(date +%s) + 8 ))}" >/var/lib/probe/wake.json
     fi
   '';
+  # With burrow-events off a handler's units are still there, and a switch
+  # still leaves their running passes be.
+  off = (self.inputs.nixpkgs.lib.nixosSystem {
+    modules = [ self.nixosModules.events {
+      nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+      system.stateVersion = "26.05";
+      burrow.events = {
+        enable = false;
+        handlers.probe = { events = [ "push" ]; unit = "probe"; perRepo = true; };
+      };
+      systemd.services = pkgs.lib.genAttrs [ "probe" "probe@" ] (_: { serviceConfig.ExecStart = "true"; });
+    } ];
+  }).config.systemd.services;
 in
+assert pkgs.lib.assertMsg (!off.probe.restartIfChanged && !off."probe@".restartIfChanged)
+  "a handler's units restart on a switch with burrow-events off";
 pkgs.testers.runNixOSTest {
   name = "events";
 
@@ -73,6 +89,9 @@ pkgs.testers.runNixOSTest {
                                f"-H 'X-GitHub-Event: {event}' --data-binary @/tmp/body http://127.0.0.1:8787/burrow/hook").strip()
 
     machine.wait_for_unit("burrow-events.service")
+    with subtest("a switch leaves a handler's running pass be"):
+        for unit in ["probe", "probe@"]:
+            machine.succeed(f"grep -qx X-RestartIfChanged=false /etc/systemd/system/{unit}.service")
     machine.wait_for_open_port(8787)
     machine.wait_for_open_port(8788)
 
