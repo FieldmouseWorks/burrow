@@ -15,7 +15,8 @@ let
     echo "$1 $2 ''${GH_TOKEN_SOCKET:-none}" >>/tmp/gh-calls
     case "$*" in
       "auth token") echo gho_stand_in ;;
-      "repo list sam "*) echo sam/r ;;
+      "api -i -X POST graphql")
+        printf 'HTTP/2.0 200 OK\r\n\r\n%s' '{"data":{"repositoryOwner":{"repositories":{"nodes":[{"nameWithOwner":"sam/r"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;
       *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
     esac
   '';
@@ -111,7 +112,7 @@ pkgs.testers.runNixOSTest {
         # The full pass lists the owner's repos as the App too.
         app.succeed("systemctl start burrow-ledger.service")
         listed = app.succeed("cat /tmp/gh-calls").splitlines()
-        assert listed == ["repo list /run/gh-token/workers.sock"], listed
+        assert listed == ["api -i /run/gh-token/workers.sock"], listed
 
     with subtest("GitHub unavailable books the repo's next pass, and the unit hasn't failed"):
         machine.succeed("echo 75 >/tmp/cn-exit")
