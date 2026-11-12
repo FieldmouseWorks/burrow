@@ -70,14 +70,19 @@ own, say), in seconds and without starting a Claude.
     or ambiguous history is reported as unknown
   - `usage [SINCE] [--totals]`: engine turns, tokens and cost; defaults to
     `-5h`. It leads with a table of totals by engine, by engine and role, by
-    engine and project (the job's checkout) and by all three, after one line
-    giving the known cost and how many turns it couldn't price (`known-cost`
-    turns, and engines whose streams it doesn't price); `--totals` gives only
-    that. Meter readings follow, then each turn by role, inbox label and
-    opener category, or starter, last, so a comment cut to fit loses only
-    per-turn detail and says how many lines. Claude turns include stream
-    token counts and cost. Result tokens are per invocation; only session cost totals are
-    subtracted across resumes. Every appended invocation is accounted for,
+    engine and project (the job's checkout) and by all three. The leading
+    summary and every aggregate distinguish cost still missing, cost recovered
+    from selected turns, recovered cost potentially belonging outside the span,
+    unread engine streams and partial token counts. Recovery is matched by run
+    identity, so including both a crash and its recovery does not claim the
+    recovered cost is still missing. `--totals` gives only this required section.
+    Project basenames, including leading dots and underscores, remain distinct;
+    names are escaped for display. Meter readings follow, then each turn by
+    role, inbox label and opener category, or starter. Optional detail is cut
+    to its question's budget with a count of omitted lines; required sections
+    span multiple comments when necessary, including multi-question issues.
+    Claude turns include stream token counts and cost. Result tokens are per
+    invocation; only session cost totals are subtracted across resumes. Every appended invocation is accounted for,
     including unfinished runs and zeroed crash results. Partial input/cache
     tokens exclude duplicate message IDs; output counts completed runs only.
     Incomplete cost is labelled `known-cost`, with unavailable coverage and
@@ -96,7 +101,8 @@ own, say), in seconds and without starting a Claude.
 
   A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
   or `@EPOCH`, in UTC. An empty body asks its title.
-- **Answer:** one comment with every answer, then the issue is closed.
+- **Answer:** comments with every answer, split when required totals exceed
+  one comment. The issue closes only after every comment succeeds.
   Reopen it to ask again. An issue whose body or title someone else changed
   (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
 - **What keeps it safe:** no shell, and nothing of the issue's text reaches a

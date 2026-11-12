@@ -470,15 +470,15 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect();
     for row in [
-        "engine role project turns input output cache-read cache-write cost unpriced",
-        "claude all all 2 17 20 30 40 $0.00 1",
-        "codex all all 2 - - - - - 2",
-        "claude repair all 2 17 20 30 40 $0.00 1",
-        "codex (none) all 1 - - - - - 1",
-        "codex all web 1 - - - - - 1",
-        "codex all (unknown) 1 - - - - - 1",
-        "claude repair web 2 17 20 30 40 $0.00 1",
-        "Cost: $0.00 known over 4 turns; 3 of them unpriced (1 with part of their cost unavailable, the known-cost turns; 2 whose engine's stream isn't priced here), so the true total is higher.",
+        "engine role project turns input output cache-read cache-write cost unread missing-runs recovered-runs outside-span partial-tokens",
+        "claude all all 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "codex all all 2 - - - - - 2 0 0 0 0",
+        "claude repair all 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "codex (none) all 1 - - - - - 1 0 0 0 0",
+        "codex all web 1 - - - - - 1 0 0 0 0",
+        "codex all (unknown) 1 - - - - - 1 0 0 0 0",
+        "claude repair web 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "Cost: $0.00 recorded over 4 turns; 1 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside the selected turns whose cost may be included; 2 turns whose engine's cost and tokens aren't read.",
     ] {
         assert!(table.iter().any(|l| l == row), "{row}: {answer}");
     }
@@ -497,7 +497,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         "{full}"
     );
     assert!(
-        full.contains("Cost: $1.50 known over 5 turns; 3 of them unpriced"),
+        full.contains("Cost: $1.50 recorded over 5 turns; 1 runs with cost still missing"),
         "{full}"
     );
     assert!(fake.asked.borrow().is_empty());
@@ -659,3 +659,6 @@ fn usage_first_start_survives_slot_recreation_and_unknown_history_is_explicit() 
             .contains("claude: 1 turns")
     );
 }
+
+#[path = "usage_tests.rs"]
+mod usage_tests;

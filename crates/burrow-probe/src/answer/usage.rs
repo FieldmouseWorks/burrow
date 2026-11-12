@@ -27,16 +27,11 @@ fn project(dir: &Dir) -> String {
     Path::new(&path)
         .file_name()
         .and_then(|n| n.to_str())
-        .filter(|n| {
-            n.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-                && n.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
-        })
         .unwrap_or("(unknown)")
         .into()
 }
 /// `totals` keeps the table alone; otherwise meter readings and each turn
-/// follow it, the turns last, so a cut answer loses only per-turn detail.
+/// follow it. Comment fitting preserves the table and budgets optional detail.
 pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<String, String> {
     let mut table = Totals::default();
     let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
@@ -132,7 +127,7 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
                     Some(decode(
                         records(dir.file(Path::new(&format!("{n}.jsonl"))).ok()),
                         &mut sessions,
-                        &format!("turn-{n}"),
+                        &format!("{}/{n}", name.to_string_lossy()),
                     ))
                 } else {
                     None

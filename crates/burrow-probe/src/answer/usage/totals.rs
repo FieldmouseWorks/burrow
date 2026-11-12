@@ -1,8 +1,7 @@
 //! The usage answer's table: turns, tokens and cost by engine, role and
-//! project, totals first, so an answer cut to fit a comment keeps every
-//! total and loses only per-turn detail.
+//! project, with cost recovery matched by run identity across selected turns.
 use super::accounting::Report;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a group of turns adds up to.
 #[derive(Default, Clone)]
@@ -10,8 +9,9 @@ struct Tally {
     turns: u64,
     tokens: [u64; 4],
     cost: f64,
-    /// Turns whose stream says only part of their cost (`known-cost`).
-    partial: u64,
+    missing: BTreeSet<String>,
+    recovered: BTreeSet<String>,
+    tokens_partial: u64,
     /// Turns whose engine's stream isn't priced here.
     unread: u64,
 }
@@ -23,8 +23,10 @@ impl Tally {
             *sum += v;
         }
         self.cost += other.cost;
-        self.partial += other.partial;
         self.unread += other.unread;
+        self.missing.extend(other.missing.iter().cloned());
+        self.recovered.extend(other.recovered.iter().cloned());
+        self.tokens_partial += other.tokens_partial;
     }
 
     fn turn(report: Option<&Report>) -> Tally {
@@ -33,8 +35,10 @@ impl Tally {
                 turns: 1,
                 tokens: r.tokens,
                 cost: r.cost,
-                partial: u64::from(r.cost_partial),
                 unread: 0,
+                missing: r.missing.clone(),
+                recovered: r.recovered.clone(),
+                tokens_partial: u64::from(r.tokens_partial),
             },
             None => Tally {
                 turns: 1,
@@ -46,7 +50,7 @@ impl Tally {
 
     /// The row's cells after its key: tokens and cost read `-` where no
     /// turn of it was priced.
-    fn cells(&self) -> [String; 7] {
+    fn cells(&self) -> [String; 11] {
         let none = self.unread == self.turns;
         let n = |v: u64| if none { "-".into() } else { v.to_string() };
         [
@@ -60,7 +64,14 @@ impl Tally {
             } else {
                 format!("${:.2}", self.cost)
             },
-            (self.partial + self.unread).to_string(),
+            self.unread.to_string(),
+            self.missing.difference(&self.recovered).count().to_string(),
+            self.recovered
+                .intersection(&self.missing)
+                .count()
+                .to_string(),
+            self.recovered.difference(&self.missing).count().to_string(),
+            self.tokens_partial.to_string(),
         ]
     }
 }
@@ -96,21 +107,14 @@ impl Totals {
             roles.entry((engine, role)).or_default().add(t);
             projects.entry((engine, project)).or_default().add(t);
         }
-        let mut out = if whole.partial + whole.unread == 0 {
-            format!(
-                "Cost: ${:.2} over {} turns, every turn's cost known.\n",
-                whole.cost, whole.turns
-            )
-        } else {
-            format!(
-                "Cost: ${:.2} known over {} turns; {} of them unpriced ({} with part of their cost unavailable, the known-cost turns; {} whose engine's stream isn't priced here), so the true total is higher.\n",
-                whole.cost,
-                whole.turns,
-                whole.partial + whole.unread,
-                whole.partial,
-                whole.unread
-            )
-        };
+        let missing = whole.missing.difference(&whole.recovered).count();
+        let recovered = whole.recovered.intersection(&whole.missing).count();
+        let outside = whole.recovered.difference(&whole.missing).count();
+        let mut out = format!(
+            "Cost: ${:.2} recorded over {} turns; {missing} runs with cost still missing; {recovered} runs with cost recovered in this span; {outside} earlier runs outside the selected turns whose cost may be included; {} turns whose engine's cost and tokens aren't read.\nTokens: {} turns with partial counts (output counts completed runs only).\n",
+            whole.cost, whole.turns, whole.unread, whole.tokens_partial
+        );
+        out += "Columns: missing-runs excludes recovered cost; recovered-runs matches gaps in selected turns; outside-span counts recovered gaps outside selected turns; partial-tokens counts turns with incomplete tokens. Unread turns have unknown cost and tokens.\n";
         let head = [
             "engine",
             "role",
@@ -121,11 +125,15 @@ impl Totals {
             "cache-read",
             "cache-write",
             "cost",
-            "unpriced",
+            "unread",
+            "missing-runs",
+            "recovered-runs",
+            "outside-span",
+            "partial-tokens",
         ]
         .map(String::from);
         let row = |e: &str, r: &str, p: &str, t: &Tally| {
-            let mut cells = vec![e.to_string(), r.to_string(), p.to_string()];
+            let mut cells = vec![display(e), display(r), display(p)];
             cells.extend(t.cells());
             cells
         };
@@ -190,4 +198,18 @@ impl Totals {
         }
         out
     }
+}
+
+// Keep grouping keys verbatim; escape only the presentation so names cannot
+// create table rows or change terminal direction.
+fn display(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c == ' ' {
+                "\\x20".into()
+            } else {
+                c.escape_default().to_string()
+            }
+        })
+        .collect()
 }
