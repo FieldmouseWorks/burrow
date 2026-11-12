@@ -2,7 +2,7 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `rc`, `queue`, `deployed`, `usage [SINCE]`, `oom [SINCE]`): the
+# UNTIL`, `rc`, `queue`, `settings`, `deployed`, `usage [SINCE]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
@@ -31,6 +31,7 @@ let
     journal = { inherit (cfg.journal) units userUnits; };
     proj = null;
     projects = config.burrow.projectsDir;
+    settings = { command = config.burrow.settings.command; config = config.burrow.settings.file; };
     jobs = if config.burrow.proj.enable or false then config.burrow.proj.jobsDir else null;
     tools = {
       git = lib.getExe config.programs.git.package;
@@ -55,6 +56,7 @@ in
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
+    { key = "burrow/settings"; imports = [ (import ./settings.nix inputs) ]; }
   ];
 
   options.burrow.probe = {

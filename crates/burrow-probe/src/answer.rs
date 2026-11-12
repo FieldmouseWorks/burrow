@@ -156,6 +156,7 @@ impl Machine<'_> {
             }
             Query::Rc => system::rc(self),
             Query::Queue => system::queue(self),
+            Query::Settings => system::settings(self),
             Query::Contains { repo, commit } => contains::answer(self, repo, commit),
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),

@@ -9,6 +9,7 @@ fn config() -> Config {
     Config {
         jobs: None,
         projects: None,
+        settings: None,
         machinery: None,
         repo: "sam/box".into(),
         label: "probe".into(),

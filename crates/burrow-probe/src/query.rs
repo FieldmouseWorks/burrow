@@ -26,6 +26,9 @@ pub enum Query {
     Rc,
     /// proj's jobs (`proj status`).
     Queue,
+    /// The operational policy as `settings show` gives it: the flake's seed
+    /// and the runtime overlay over it.
+    Settings,
     /// What the machine runs: its system, its inputs' revisions, and what
     /// HOST-update last found live.
     Deployed,
@@ -41,7 +44,7 @@ pub enum Query {
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | settings | deployed | contains REPO COMMIT | usage [SINCE] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -187,6 +190,7 @@ impl Query {
             "units" => none(Query::Units),
             "rc" => none(Query::Rc),
             "queue" => none(Query::Queue),
+            "settings" => none(Query::Settings),
             "deployed" => none(Query::Deployed),
             "contains" => match args {
                 [repo, commit]
@@ -244,6 +248,7 @@ impl fmt::Display for Query {
             Query::Units => f.write_str("units"),
             Query::Rc => f.write_str("rc"),
             Query::Queue => f.write_str("queue"),
+            Query::Settings => f.write_str("settings"),
             Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
             Query::Deployed => f.write_str("deployed"),
             Query::Oom { since } => write!(f, "oom {}", show(*since)),
@@ -289,6 +294,8 @@ mod tests {
         assert_eq!(Query::parse("  Units "), Ok(Query::Units));
         assert_eq!(Query::parse("rc"), Ok(Query::Rc));
         assert_eq!(Query::parse("queue"), Ok(Query::Queue));
+        assert_eq!(Query::parse("settings"), Ok(Query::Settings));
+        assert!(Query::parse("settings pause o/r").is_err());
         assert_eq!(Query::parse("deployed"), Ok(Query::Deployed));
         assert_eq!(
             Query::parse("oom"),
