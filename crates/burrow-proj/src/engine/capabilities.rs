@@ -237,6 +237,17 @@ pub fn resolve(
                 socket.to_string_lossy().into_owned(),
             );
     }
+    if let Some(socket) = var(env, "PROJ_HOST_JOBS_SOCKET") {
+        items
+            .iter_mut()
+            .find(|g| g.capability == Capability::JobState)
+            .unwrap()
+            .env
+            .insert(
+                "PROJ_HOST_JOBS_SOCKET".into(),
+                socket.to_string_lossy().into_owned(),
+            );
+    }
     items
         .iter_mut()
         .find(|g| g.capability == Capability::Nix)
@@ -308,6 +319,9 @@ mod tests {
             "HOME" => Some(home.clone().into_os_string()),
             "SETTING" | "EXTRA" => Some("inherited".into()),
             "PROJ_PROBE_SOCKET" => Some(dir.path().join("scratch/probe.sock").into_os_string()),
+            "PROJ_HOST_JOBS_SOCKET" => {
+                Some(dir.path().join("scratch/host-jobs.sock").into_os_string())
+            }
             _ => None,
         };
         let machine = sandbox::tests::machine_in(dir.path());
@@ -358,6 +372,14 @@ mod tests {
                 .as_ref()
         );
         assert!(profile.contains("shell_environment_policy.set.PROJ_PROBE_SOCKET="));
+        assert_eq!(
+            settings["env"]["PROJ_HOST_JOBS_SOCKET"],
+            dir.path()
+                .join("scratch/host-jobs.sock")
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(profile.contains("shell_environment_policy.set.PROJ_HOST_JOBS_SOCKET="));
         assert!(profile.contains("shell_environment_policy.set.PROJ_CAPABILITIES="));
     }
 }

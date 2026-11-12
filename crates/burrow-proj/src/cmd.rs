@@ -17,6 +17,7 @@ use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 mod run;
 mod starter;
 
+pub(crate) use run::key_name;
 pub(crate) use run::reply_answer;
 pub use run::{New, reply, start_job};
 
@@ -71,6 +72,10 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
+        Some("_host-reply") => {
+            put(&crate::host_jobs::recovery_reply(cfg, &args[1..])?);
+            Ok(())
+        }
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
             put(&cfg.settings_line());
             put(&Snapshot::take(cfg, 0)?.in_line());

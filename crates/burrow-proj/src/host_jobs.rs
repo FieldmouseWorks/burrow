@@ -1,0 +1,182 @@
+//! Host job operations through a per-turn socket, never host filesystem access.
+//! Only the ordinary inspection and recovery CLI is accepted. The host keeps
+//! its executable, configuration, credentials and job admission authority.
+use crate::{Fail, config::Config, job::Job, scratch};
+use serde::{Deserialize, Serialize};
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, Instant},
+};
+
+pub(crate) const MAX_REQUEST: u64 = 65536;
+const MAX_OUTPUT: usize = 8 * 1024 * 1024;
+// JSON escaping can expand each output byte sixfold.
+const MAX_RESPONSE: u64 = (MAX_OUTPUT * 12 + 1024) as u64;
+
+pub(crate) fn socket(cfg: &Config, job: &Job, n: &str) -> PathBuf {
+    scratch::dir(cfg, job.id).join(format!("host-jobs-{n}.sock"))
+}
+
+/// Commands which must use the host's view when run inside a job. Other
+/// commands (await/ask/done in particular) keep their local declarations.
+pub fn remote(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some(
+            "status"
+                | "state"
+                | "lifecycle"
+                | "log"
+                | "reply"
+                | "stop"
+                | "withdraw"
+                | "list"
+                | "find"
+        )
+    )
+}
+
+fn number(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
+}
+fn id(s: &str) -> bool {
+    s.len() <= 200
+        && s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+fn validate(args: &[String]) -> Result<(), String> {
+    let words: Vec<_> = args.iter().map(String::as_str).collect();
+    let valid = match words.as_slice() {
+        ["status" | "list"] => true,
+        ["find", key] => crate::cmd::key_name(key),
+        ["status", n] => *n == "--line" || number(n),
+        ["state", "--schema" | "--json"] => true,
+        ["state", "--json", n] => number(n),
+        ["state" | "lifecycle" | "stop" | "withdraw", target] => id(target),
+        ["log", target, rest @ ..] if id(target) => {
+            let mut rest = rest;
+            let mut valid = true;
+            while !rest.is_empty() {
+                rest = match rest {
+                    ["--raw", tail @ ..] => tail,
+                    ["--turn", n, tail @ ..] if number(n) => tail,
+                    _ => {
+                        valid = false;
+                        break;
+                    }
+                };
+            }
+            valid
+        }
+        ["reply", rest @ ..] => {
+            let mut rest = rest;
+            loop {
+                rest = match rest {
+                    ["--first", tail @ ..] => tail,
+                    ["--cut-off", n, tail @ ..] if number(n) => tail,
+                    _ => break,
+                };
+            }
+            matches!(rest, [target, text] if id(target) && !text.is_empty())
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("host jobs: unsupported command or invalid arguments".into())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Response {
+    code: u8,
+    stdout: String,
+    stderr: String,
+}
+
+pub fn client(path: &Path, args: &[String]) -> Result<(), Fail> {
+    validate(args).map_err(|e| Fail::new(2, e))?;
+    let request = serde_json::to_vec(args).expect("host job request");
+    if request.len() > MAX_REQUEST as usize {
+        return Err(Fail::new(2, "host jobs: request exceeds 65536 bytes"));
+    }
+    let response = crate::probe::request(path, &request, MAX_RESPONSE)
+        .and_then(|s| {
+            serde_json::from_str::<Result<Response, String>>(&s).map_err(|e| e.to_string())
+        })
+        .and_then(|r| r)
+        .map_err(|e| Fail::new(1, format!("can't reach host jobs: {e}")))?;
+    let _ = io::stdout().lock().write_all(response.stdout.as_bytes());
+    let _ = io::stderr().lock().write_all(response.stderr.as_bytes());
+    if response.code == 0 {
+        Ok(())
+    } else {
+        Err(Fail::quiet(response.code))
+    }
+}
+
+pub(crate) fn answer(cfg: &Config, request: &str) -> String {
+    let result = (|| -> Result<Response, String> {
+        let args: Vec<String> = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        validate(&args)?;
+        let mut command = Command::new(&cfg.me);
+        command
+            // A machinery continuation is not an owner's answer. Retain
+            // open questions just as the watchdog's native reply does.
+            .arg(if args[0] == "reply" {
+                "_host-reply"
+            } else {
+                &args[0]
+            })
+            .args(&args[1..])
+            .env("PROJ_CONFIG", &cfg.path)
+            .env("PROJ_SELF", &cfg.me)
+            .env_remove("PROJ_JOB")
+            .env_remove("PROJ_HOST_JOBS_SOCKET")
+            .env_remove("PROJ_PROBE_SOCKET");
+        let output = burrow_process::output(
+            &mut command,
+            None,
+            Instant::now() + Duration::from_secs(90),
+            MAX_OUTPUT,
+        )?;
+        Ok(Response {
+            code: output
+                .status
+                .code()
+                .and_then(|c| c.try_into().ok())
+                .unwrap_or(1),
+            stdout: burrow_probe::scrub::scrub(&String::from_utf8_lossy(&output.stdout))
+                .as_str()
+                .to_owned(),
+            stderr: burrow_probe::scrub::scrub(&String::from_utf8_lossy(&output.stderr))
+                .as_str()
+                .to_owned(),
+        })
+    })();
+    serde_json::to_string(&result).expect("host job response")
+}
+
+pub(crate) fn recovery_reply(cfg: &Config, args: &[String]) -> Result<String, Fail> {
+    let mut words = vec!["reply".into()];
+    words.extend_from_slice(args);
+    validate(&words).map_err(|e| Fail::new(2, e))?;
+    let (mut i, mut first, mut cutoff) = (0, false, None);
+    while args[i].starts_with("--") {
+        match args[i].as_str() {
+            "--first" => first = true,
+            "--cut-off" => {
+                cutoff = Some(args[i + 1].as_str());
+                i += 1;
+            }
+            _ => unreachable!("validated recovery flags"),
+        }
+        i += 1;
+    }
+    crate::cmd::reply(cfg, &args[i], &args[i + 1], first, cutoff)?;
+    Ok(format!("{}\n", args[i]))
+}

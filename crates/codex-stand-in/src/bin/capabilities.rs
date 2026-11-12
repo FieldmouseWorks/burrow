@@ -55,6 +55,29 @@ fn main() {
             Command::new(env::args().nth(2).unwrap()).args(args).exec()
         );
     }
+    if args.first().is_some_and(|s| s == "drop-host-jobs") {
+        let mut forwarded = Vec::new();
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "-c"
+                && args.get(i + 1).is_some_and(|s| {
+                    s.starts_with("shell_environment_policy.set.PROJ_HOST_JOBS_SOCKET=")
+                })
+            {
+                i += 2;
+            } else {
+                forwarded.push(args[i].clone());
+                i += 1;
+            }
+        }
+        panic!(
+            "{}",
+            Command::new(&args[1])
+                .args(forwarded)
+                .env_remove("PROJ_HOST_JOBS_SOCKET")
+                .exec()
+        );
+    }
     if args.first().is_some_and(|s| s == "drop-claude-mcp") {
         let mut forwarded = args[2..].to_vec();
         let index = forwarded
@@ -109,6 +132,57 @@ fn main() {
                     &["await", "https://github.com/test/project/issues/1"],
                 );
                 run("proj", &["ask", "--default", "continue the test"]);
+                let target = env::var("PROJ_RECOVERY_TARGET").unwrap();
+                if fs::read_to_string(job.join("1.engine")).unwrap().trim() == "codex" {
+                    assert!(
+                        fs::read_dir(format!("/data/dev/jobs/{target}")).is_err(),
+                        "the sandbox must use the broker, not host job paths"
+                    );
+                }
+                let history = Command::new("proj")
+                    .args(["log", &target, "--turn", "1", "--raw"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    history.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&history.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&history.stdout).contains("host recovery transcript")
+                );
+                run("proj", &["reply", &target, "continue after timeout"]);
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+                loop {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "target did not finish its resumed turn"
+                    );
+                    let state = Command::new("proj")
+                        .args(["state", &target])
+                        .output()
+                        .unwrap();
+                    assert!(state.status.success());
+                    match String::from_utf8_lossy(&state.stdout).trim() {
+                        "queued" | "running" => {
+                            std::thread::sleep(std::time::Duration::from_millis(100))
+                        }
+                        "done" => break,
+                        other => panic!("resumed target failed: {other}"),
+                    }
+                }
+                let answer = Command::new("proj")
+                    .args(["log", &target])
+                    .output()
+                    .unwrap();
+                assert!(
+                    answer.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&answer.stderr)
+                );
+                assert!(String::from_utf8_lossy(&answer.stdout).starts_with("done\n"));
+                run("proj", &["stop", &target]);
+                fs::write(job.join("host-job-recovered"), "ok").unwrap();
             }
             "git-metadata" => {
                 let tree = scratch.join("tree");
