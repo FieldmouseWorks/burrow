@@ -62,22 +62,63 @@ impl Question {
 pub(crate) fn load(job: &Job) -> Option<Question> {
     serde_json::from_str(&read(&host_path(job, "question"))?).ok()
 }
+#[derive(Serialize, Deserialize)]
+struct PendingRecommendation {
+    #[serde(flatten)]
+    recommendation: Recommendation,
+    // Older declarations were bare recommendations; turn startup already
+    // clears those. New declarations can reject residue from another turn.
+    #[serde(default)]
+    turn: String,
+}
+pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
+    let state = |path: &std::path::Path| {
+        crate::github_quota::state(path).map_err(|e| format!("{:?}", e.say))
+    };
+    if state(&job.path("end.next"))?.is_some_and(|end| end != "ask") {
+        return Ok(None);
+    }
+    let Some(text) = state(&job.path("ask.next"))? else {
+        return Ok(None);
+    };
+    let pending: PendingRecommendation = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !pending.turn.is_empty() && job.turns().as_deref() != Some(pending.turn.as_str()) {
+        return Ok(None);
+    }
+    Ok(Some(pending.recommendation))
+}
+
+/// The end marker commits the active declaration; only asks keep a pending
+/// recommendation. Recovery also checks the marker if cleanup was interrupted.
+pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
+    swap(&job.path("end.next"), &format!("{end}\n")).map_err(|e| e.to_string())?;
+    if end != "ask" {
+        match crate::state_reads::remove(job.path("ask.next")) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
         return Err(USAGE.into());
     }
     swap(
         &job.path("ask.next"),
-        &serde_json::to_string(recommendation).map_err(|e| e.to_string())?,
+        &serde_json::to_string(&PendingRecommendation {
+            recommendation: recommendation.clone(),
+            turn: job.turns().unwrap_or_default(),
+        })
+        .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())
 }
 pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
     if end == "ask" {
         ensure(job)?;
-        let mut recommendation: Recommendation =
-            serde_json::from_str(&read(&job.path("ask.next")).ok_or(USAGE)?)
-                .map_err(|e| e.to_string())?;
+        let mut recommendation = pending(job)?.ok_or(USAGE)?;
         if load(job).is_some_and(|q| q.recommendation.one_way) {
             recommendation.one_way = true;
         }

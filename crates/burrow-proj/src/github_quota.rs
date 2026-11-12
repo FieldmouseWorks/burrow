@@ -115,11 +115,15 @@ fn finish_at(job: &Job, n: &str, due: i64) -> Result<(), String> {
         let expired = state(&crate::ask::host_path(job, "question-needs-owner"))
             .map_err(|e| format!("{:?}", e.say))?
             .is_some();
-        if crate::ask::load(job).is_none() && !expired {
-            let text = crate::engine::answer(&job.turn(n, "jsonl"));
-            if !text.is_empty() {
-                swap(job.turn(n, "result"), format!("{text}\n")).map_err(|e| e.to_string())?;
+        if !expired && crate::ask::pending(job)?.is_some() {
+            if crate::ask::load(job).is_none() {
+                let text = crate::engine::answer(&job.turn(n, "jsonl"));
+                if !text.is_empty() {
+                    swap(job.turn(n, "result"), format!("{text}\n")).map_err(|e| e.to_string())?;
+                }
             }
+            // Normal ask finalization applies upgrades and retains the
+            // committed question's identity, text, deadline and one-way flag.
             crate::ask::finish(job.cfg, job, "ask")?;
         }
         // The question is now the active declaration. Saved GitHub intent
@@ -170,14 +174,7 @@ fn owner_question(job: &Job) -> Result<bool, String> {
     if text(&crate::ask::host_path(job, "question-needs-owner"))?.is_some() {
         return Ok(true);
     }
-    text(&job.path("ask.next"))?
-        .map(|s| {
-            serde_json::from_str::<crate::ask::Recommendation>(&s)
-                .map(|r| r.one_way)
-                .map_err(|e| e.to_string())
-        })
-        .transpose()
-        .map(|r| r.unwrap_or(false))
+    Ok(crate::ask::pending(job)?.is_some_and(|r| r.one_way))
 }
 
 pub(crate) fn registered(text: &str) -> bool {
@@ -252,9 +249,9 @@ pub(crate) fn reconcile(job: &Job) -> Result<Option<i64>, crate::Fail> {
         if state(&job.path(PENDING))?.is_some() || refused(job).is_some() {
             finish_at(job, &n, 0).map_err(|e| crate::Fail::new(1, e))?;
         }
-        // ask::expire ran before reconciliation in this pass. A recovered
-        // declaration needs its first question wake booked here.
-        return Ok(crate::ask::load(job).map(|q| q.due.max(now() + 1)));
+        // The watcher now tends this question's expiry and notification;
+        // quota recovery owns no deadline for it.
+        return Ok(None);
     }
     let text = state(&job.path("await"))?.unwrap_or_default();
     let awaits = crate::job::awaits(&text);
@@ -476,6 +473,9 @@ mod tests {
         cfg.wake = d.path().join("wake");
         cfg.inbox = None;
         cfg.waits = None;
+        // Notification tests install their own notifier. Other quota tests
+        // must not invoke the example configuration's placeholder command.
+        cfg.notify = None;
         cfg.kick.clear();
         cfg.tools.systemctl = "false".into();
         cfg.tools.systemd_run = "true".into();
@@ -613,5 +613,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
     }
 }
 
+#[cfg(test)]
+mod owner_tests;
 #[cfg(test)]
 mod recovery_tests;
