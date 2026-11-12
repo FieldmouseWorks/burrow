@@ -36,14 +36,28 @@ impl Run<'_> {
         };
         self.cfg.train.is_some()
             && run.current == self.cfg.recorded("deployed")
+            && run.rev.as_deref() != Some(self.cfg.recorded("deployed-main").as_str())
             && self
                 .cfg
                 .git_hushed(&["cat-file", "-e", &format!("{rev}^{{commit}}")])
                 .is_ok()
-            && self
-                .cfg
-                .git_hushed(&["merge-base", "--is-ancestor", rev, &self.main])
-                .is_err()
+            && self.not_ancestor(rev)
+    }
+
+    /// That git positively says `rev` is no ancestor of main: exit status 1
+    /// of `merge-base --is-ancestor`. A failure to ask (a missing object, a
+    /// traversal or execution error) says nothing.
+    fn not_ancestor(&self, rev: &str) -> bool {
+        self.cfg
+            .run_as_user("git")
+            .arg("-C")
+            .arg(&self.cfg.work)
+            .args(["merge-base", "--is-ancestor", rev, &self.main])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.code() == Some(1))
     }
 
     pub(crate) fn go_live(&mut self) -> Step {
@@ -57,7 +71,10 @@ impl Run<'_> {
         // live, and its PR is open: switching back to main would let that
         // updater ride it again, and this one return, for ever. It waits
         // for the PR to land (once, for this hand-over).
-        if let (Some(n), true) = (self.behind, self.leaves_old_bump()) {
+        let pending = self
+            .behind
+            .or_else(|| self.replacing.as_ref().map(|(pr, _)| pr.number));
+        if let (Some(n), true) = (pending, self.leaves_old_bump()) {
             return Err(self.end(
                 Outcome::Held,
                 &format!(

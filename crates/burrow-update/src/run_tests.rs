@@ -799,3 +799,30 @@ fn a_bump_that_cant_be_committed_is_never_deployed() {
     assert_eq!(m.running(), was);
     assert!(!switched(&m));
 }
+
+#[test]
+fn a_fallback_input_that_cant_be_committed_is_never_deployed() {
+    // The bump as a whole commits but doesn't build; the fallback's own
+    // commit then fails. The first commit's success says nothing of the
+    // second: the pins stay uncommitted and nothing goes live.
+    let m = machine();
+    let was = m.running();
+    m.upstream("nixpkgs", &sha('c'));
+    fs::write(m.home("build-breaks"), sha('c')).unwrap();
+    let hook = m.cfg.work.join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let count = m.dir.path().join("commits");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho x >>{c}\n[ \"$(wc -l <{c})\" -le 1 ]\n",
+            c = count.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    assert_eq!(once(&m.cfg, &mut Fake::default(), true), 1);
+    assert_eq!(m.running(), was);
+    assert!(!switched(&m));
+    assert_eq!(m.recorded("deployed-main"), None);
+}

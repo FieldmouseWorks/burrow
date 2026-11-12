@@ -375,6 +375,28 @@ fn only_a_bump_the_old_updater_put_live_may_be_left_by_a_downgrade() {
 }
 
 #[test]
+fn a_main_deployment_whose_history_was_rewritten_keeps_the_downgrade_check() {
+    // The stamp is a commit the clone has and main doesn't, but it was
+    // recorded as a main deployment: not a legacy bump.
+    let (m, bump) = proposed();
+    let live = m.running();
+    fs::write(format!("{live}/revision"), format!("{bump}\n")).unwrap();
+    fs::write(m.cfg.state.join("deployed"), format!("{live}\n")).unwrap();
+    fs::write(m.cfg.state.join("deployed-main"), format!("{bump}\n")).unwrap();
+    m.landed("system.nix", "unrelated");
+    let mut gh = Fake::default();
+    gh.on(
+        "GET",
+        "repos/sam/homelab/pulls?",
+        vec![ok(200, json!([]), &[])],
+    );
+    assert_eq!(once(&m.cfg, &mut gh, false), 0);
+    let calls = m.did("calls");
+    assert!(calls.contains("switch --toplevel"), "{calls}");
+    assert!(!calls.contains("--allow-downgrade"), "{calls}");
+}
+
+#[test]
 fn a_bump_the_old_updater_left_live_waits_while_its_pr_is_open() {
     // Switching back to main would let the old updater ride the PR again.
     let (m, bump) = proposed();

@@ -376,7 +376,7 @@ impl Run<'_> {
                 }
             }
             self.changed = bump::commit(cfg, &self.inputs);
-            self.committed()?;
+            self.committed(self.changed)?;
         }
         if !self.changed && !self.memo.force && running::main_runs(cfg, &self.running, &self.main) {
             running::live_at(cfg, &self.main, &self.running.current).map_err(Broke)?;
@@ -390,9 +390,9 @@ impl Run<'_> {
 
     /// That a bump which wasn't committed was nothing: pins left in the
     /// clone mean the commit failed, and no system built from them is ever
-    /// deployed.
-    fn committed(&self) -> Result<(), Broke> {
-        if self.changed || bump::clean(self.cfg) {
+    /// deployed. `did` is this attempt's own commit, never an earlier one's.
+    fn committed(&self, did: bool) -> Result<(), Broke> {
+        if did || bump::clean(self.cfg) {
             return Ok(());
         }
         Err(Broke(
@@ -462,7 +462,7 @@ impl Run<'_> {
                 self.unfetched.push(i.to_string());
             }
             if !bump::commit(cfg, &self.inputs) {
-                self.committed()?;
+                self.committed(false)?;
                 continue;
             }
             match self.built() {
