@@ -330,7 +330,8 @@ in
           The ID of the GitHub App the steward acts as, installed on every
           one of `owners` for all their repos. It needs read and write on
           administration, contents, issues, pull requests, commit statuses,
-          webhooks and workflows, and read on checks and actions
+          webhooks, workflows and actions (a cancelled job is run
+          again once), and read on checks
           (docs/repo-baseline.md). Everything the steward does on GitHub,
           it does as the App, never as the machine user's own login, which
           its Claude jobs and every Claude session share: so only the App

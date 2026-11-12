@@ -82,6 +82,36 @@ class Pass(Context, Jobs, Actions):
             stage=S.OWNER,
         )
 
+    def ci_checks(self):
+        """ci_state, having run again, once, each Actions job cancelled with
+        nothing run through since (cancelled again, ci_state calls it red: a
+        hang). Each request is saved as GitHub takes it, so a later failure
+        in the pass doesn't forget it; one GitHub refuses (the App lacks
+        Actions write, say) is saved as refused, not as run, and not tried
+        again for that attempt."""
+        st = self.st.get("rerun")
+        if not st or st.get("head") != self.head:
+            st = {"head": self.head, "done": {}, "refused": {}}
+        rerun = {"done": st["done"], "refused": st["refused"], "want": {}}
+        moved = moved_from(self.repo, self.pr, self.st)
+        got = ci_state(self.pr, self.machine, moved, self.repo, rerun)
+        if not rerun["want"] or C.DRY:
+            return got
+        for key, (job, name) in rerun["want"].items():
+            try:
+                C.gh("run", "rerun", "--job", str(job), "--repo", self.repo)
+            except C.Unavailable:
+                raise
+            except RuntimeError as e:
+                st["refused"][key] = job
+                C.log(f"{self.tag}: {name} not run again: {e}")
+            else:
+                st["done"][key] = job
+                C.log(f"{self.tag}: ran {name} again, cancelled with nothing run through since")
+            self.st["rerun"] = st
+            save(self.key, self.st)
+        return ci_state(self.pr, self.machine, moved, self.repo, rerun)
+
     def run(self):
 
         # The jobs a new head left answering for nothing, stopped: one proj
@@ -106,16 +136,7 @@ class Pass(Context, Jobs, Actions):
             return
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
-        again = self.st.get("rerun") or {}
-        rerun = {"done": set(again.get("names", [])) if again.get("head") == self.head else set(), "want": {}}
-        self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo, rerun)
-        # A check cancelled with nothing run through since found nothing: run
-        # it once more. Cancelled again, ci_state calls it red (a hang).
-        if rerun["want"] and not C.DRY:
-            for name, job in rerun["want"].items():
-                C.gh("run", "rerun", "--job", str(job), "--repo", self.repo)
-                C.log(f"{self.tag}: ran {name} again, cancelled with nothing run through since")
-            self.st["rerun"] = {"head": self.head, "names": sorted(rerun["done"] | set(rerun["want"]))}
+        self.ci, self.ci_names, docs = self.ci_checks()
         # A build's or run's verdicts GitHub took only some of: the rest go up
         # whatever CI says now, so a failure it took doesn't leave the others
         # unposted behind a red PR. Their statuses kick the pass that sees them.

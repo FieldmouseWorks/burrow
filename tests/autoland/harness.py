@@ -398,11 +398,14 @@ ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless 
 
 
 RERUNS = []  # the jobs (by check run id) the steward ran again
+RERUN_FAILS = {}  # a job's id to what its rerun raises: none unless set
 
 
 def gh_stub(*a, **k):
     acting()
     if a[:3] == ("run", "rerun", "--job"):
+        if isinstance(err := RERUN_FAILS.get(int(a[3])), Exception):
+            raise err
         RERUNS.append(int(a[3]))
         return ""
     if a[:1] == ("api",) and a[1].startswith("repos/sam/r/rules/branches/"):

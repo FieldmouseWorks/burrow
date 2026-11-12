@@ -7,7 +7,7 @@ it or someone cancelled it by hand: run again once, and red if cancelled again,
 since a hang is the head's to look at."""
 
 from docs import at, check, docs, whole
-from harness import ANNOTATIONS, JOBS, RERUNS, C, clean, fresh_pr_state, run as one_pass
+from harness import ANNOTATIONS, JOBS, RERUN_FAILS, RERUNS, C, clean, fresh_pr_state, run as one_pass
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
@@ -203,25 +203,84 @@ assert state(old, whole("next", "s2")) == stopped(CHECK)
 assert state(whole("next", "s0", conclusion=CANCEL), whole("main", "s1"), base="main") == ("green", [])
 
 # A cancelled run nothing ran through since is run again, once, whatever its
-# annotations say (no timeout among them). A pass that sees it again waits.
-# Cancelled once more, on the same head, it is the head's: red, and a fix job's.
-def hung(job):
-    return [{**c, "databaseId": job} if c["name"] == CHECK else c for c in old]
+# annotations say (no timeout among them). A pass that sees the same attempt
+# again waits: no second rerun, no fix job. Only a later attempt cancelled
+# decides: red, and a fix job's.
+def hung(job, run=old, name=CHECK):
+    return [{**c, "databaseId": job} if c["name"] == name else c for c in run]
 
 
-RERUNS.clear()
-fresh_pr_state()
+def start():
+    RERUNS.clear()
+    RERUN_FAILS.clear()
+    fresh_pr_state()
+
+
+start()
 status, _ = one_pass(clean(checks=hung(51)), 700)
 assert RERUNS == [51] and "waiting for CI" in status and not JOBS, (RERUNS, status, JOBS)
 status, _ = one_pass(clean(checks=hung(51)), 760)
-assert RERUNS == [51], RERUNS  # not twice for the same attempt's check
+assert RERUNS == [51] and "cancelled again" not in status and not JOBS, (RERUNS, status, JOBS)
+# The retry queued or running (beside the original, as the rollup lists both).
+status, _ = one_pass(clean(checks=hung(51) + going("s2")), 770)
+assert RERUNS == [51] and "cancelled again" not in status and not JOBS, (RERUNS, status, JOBS)
 status, _ = one_pass(clean(checks=hung(52)), 800)
 assert RERUNS == [51] and "CI is red: check / check (cancelled again after a rerun)" in status, (RERUNS, status)
 # The rerun passing ends it; a new head starts over.
-fresh_pr_state()
-RERUNS.clear()
+start()
 one_pass(clean(checks=hung(51)), 700)
 status, landed = one_pass(clean(checks=whole(suite="s2")), 800)
 assert RERUNS == [51] and "CI is green" in status, (RERUNS, status)
+start()
+one_pass(clean("a" * 40, checks=hung(51)), 700)
+one_pass(clean("b" * 40, checks=hung(53)), 760)
+assert RERUNS == [51, 53], RERUNS
+
+# Jobs of different workflows that share a name keep a rerun each, and one
+# cancelled again is red without making the other red.
+def in_flow(flow, job):
+    run = hung(job, whole(suite=f"s-{flow}", conclusion=CANCEL))
+    for c in run:
+        c["checkSuite"]["workflowRun"]["workflow"] = {"id": flow, "name": flow}
+    return run
+
+
+start()
+a, b = in_flow("a", 61), in_flow("b", 62)
+one_pass(clean(checks=a + b), 700)
+assert sorted(RERUNS) == [61, 62], RERUNS
+status, _ = one_pass(clean(checks=a + in_flow("b", 63)), 760)
+assert sorted(RERUNS) == [61, 62] and "CI is red: check / check (cancelled again after a rerun)" in status, (RERUNS, status)
+
+# A rerun that fails keeps the ones before it: A is asked once though B raises
+# after it, and a pass that fails later still doesn't forget them. A refusal
+# (the App lacks Actions write) isn't a rerun: it says so, and isn't asked again.
+start()
+both = whole(suite="s1", conclusion=CANCEL)
+both[0]["conclusion"] = CANCEL
+two = [{**c, "databaseId": {"check / lane into main": 71, CHECK: 72}.get(c["name"])} for c in both]
+RERUN_FAILS[72] = C.Unavailable("github down")
+try:
+    one_pass(clean(checks=two), 700)
+    raise AssertionError("an unavailable GitHub should end the pass")
+except C.Unavailable:
+    pass
+RERUN_FAILS.clear()
+one_pass(clean(checks=two), 760)
+assert RERUNS == [71, 72], RERUNS
+start()
+RERUN_FAILS[51] = RuntimeError("gh run rerun: HTTP 403: Resource not accessible by integration")
+status, _ = one_pass(clean(checks=hung(51)), 700)
+assert RERUNS == [] and "Actions write" in status and not JOBS, (RERUNS, status, JOBS)
+RERUN_FAILS.clear()
+status, _ = one_pass(clean(checks=hung(51)), 760)
+assert RERUNS == [] and "Actions write" in status, (RERUNS, status)
+
+# A check that isn't an Actions job (another App's, no workflow) isn't sent to
+# gh run rerun: it waits as before.
+start()
+other = [{**check("some-app", CANCEL), "databaseId": 81, "checkSuite": {"id": "x", "status": "COMPLETED", "app": {"slug": "some-app"}}}]
+status, _ = one_pass(clean(checks=other), 700)
+assert RERUNS == [] and "waiting for CI" in status and not JOBS, (RERUNS, status, JOBS)
 
 print("cancelled runs: ok")

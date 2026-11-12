@@ -125,6 +125,16 @@ def has_ci(pr, proofs=()):
         for c in contexts)
 
 
+def rerun_key(c):
+    """Which job a cancelled check run is, for running it again once: its
+    workflow's id and its name, so jobs of different workflows (or matrix
+    legs) that share a name keep a run each. None for a check that isn't a
+    GitHub Actions job (another App's, say), which `gh run rerun` can't run."""
+    run = suite(c).get("workflowRun") or {}
+    flow = (run.get("workflow") or {}).get("id")
+    return f"{flow}/{c['name']}" if flow and c.get("databaseId") else None
+
+
 def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, the names of the ones that aren't green, and
@@ -146,10 +156,12 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
     head's to fix. Only the App's counts, as with ours. A cancelled check run
     goes by what its workflow did after it (after_cancel), and with nothing
     after it is pending, since a stopped run found nothing, unless it ran out
-    of time (timed_out), which is red. Given `rerun` (its "done" names: the
-    checks already run again on this head; "want" is filled with the others'
-    job ids), a cancelled check run is run again once, and one cancelled
-    again after that is red: a hang is the head's to look at. A workflow's
+    of time (timed_out), which is red. Given `rerun` (rerun_key to job id: "done"
+    the Actions jobs asked to be run again on this head, as of that attempt,
+    "refused" those GitHub wouldn't run; "want" is filled with the others),
+    a cancelled Actions job is run again once, pending while that attempt
+    stands, and one cancelled again by a later attempt is red: a hang is
+    the head's to look at. A workflow's
     check run that passed while its run is still going is pending: a job
     that needs it has no check run until it starts, so every check on the
     head can read green a moment before one more begins."""
@@ -194,12 +206,21 @@ def ci_state(pr, proofs=(), moved=None, repo=None, rerun=None):
                 # stopped it), not failed, so there's nothing in the head for
                 # a fix job to fix. Pending until it's run again, and a stall
                 # once that's overdue.
-                if rerun is not None and name in rerun["done"]:
+                key = rerun_key(c) if rerun is not None else None
+                job = c.get("databaseId")
+                if key is None:
+                    pending.append(f"{name} (cancelled, to be run again)")
+                elif job <= rerun["refused"].get(key, 0):
+                    pending.append(f"{name} (cancelled; the App may not run it again, which needs Actions write)")
+                elif key not in rerun["done"]:
+                    # The newest attempt seen is the one to run again.
+                    rerun["want"][key] = (max(job, rerun["want"].get(key, (0,))[0]), name)
+                    pending.append(f"{name} (cancelled, to be run again)")
+                elif job <= rerun["done"][key]:
+                    # The attempt we asked to be run again, still as it was.
+                    pending.append(f"{name} (cancelled, run again)")
+                else:
                     red.append(f"{name} (cancelled again after a rerun)")
-                    continue
-                if rerun is not None and c.get("databaseId"):
-                    rerun["want"][name] = c["databaseId"]
-                pending.append(f"{name} (cancelled, to be run again)")
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
             elif workflow(c) is not None and suite(c).get("status") != "COMPLETED":
