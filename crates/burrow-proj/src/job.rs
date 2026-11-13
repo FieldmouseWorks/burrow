@@ -171,6 +171,21 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// [`Job::try_lock`] for a pass over every job's folder: the lock only
+    /// when the job already has one, never made here, so a look at the jobs
+    /// puts no file back into a folder that's being removed (whose `rm -rf`
+    /// would then fail on it, and leave a job of nothing but a lock).
+    /// `NotFound` when the job has none, or its folder is going: the caller
+    /// says whether such a job has anything for it.
+    pub(crate) fn try_lock_existing(&self) -> io::Result<Option<File>> {
+        let f = crate::state_reads::Dir::open(&self.dir)?.append_file("lock")?;
+        match f.try_lock() {
+            Ok(()) => Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
     fn lock_file(&self) -> io::Result<File> {
         crate::state_reads::append(&self.path("lock"))
     }
