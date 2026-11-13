@@ -46,10 +46,23 @@ pub enum Query {
     Oom {
         since: When,
     },
+    /// The machine's Actions runners: each one's packages, PATH and
+    /// toolchain defaults, configured and as found; one runner's in full.
+    Runners {
+        name: Option<String>,
+    },
+    /// The deployed trust lists, and what each kind of job acts as.
+    Trust,
+    /// An issue's author, retained writers, edit count and labels: never
+    /// its text.
+    Issue {
+        repo: String,
+        number: u64,
+    },
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE] | runners [RUNNER] | trust | issue REPO N, one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -248,6 +261,34 @@ impl Query {
                 }),
                 _ => Err(format!("`oom` takes one time at most ({VOCABULARY})")),
             },
+            "trust" => none(Query::Trust),
+            "runners" => match args {
+                [] => Ok(Query::Runners { name: None }),
+                [name] if runner(name) => Ok(Query::Runners {
+                    name: Some(name.trim_end_matches(".service").to_string()),
+                }),
+                _ => Err(format!(
+                    "`runners` takes one runner's unit name at most ({VOCABULARY})"
+                )),
+            },
+            "issue" => match args {
+                [repo, n]
+                    if repository(repo)
+                        && (1..=10).contains(&n.len())
+                        && n.bytes().all(|b| b.is_ascii_digit())
+                        && !n.starts_with('0') =>
+                {
+                    Ok(Query::Issue {
+                        repo: repo.to_string(),
+                        number: n
+                            .parse()
+                            .map_err(|_| format!("{n:?} isn't an issue number"))?,
+                    })
+                }
+                _ => Err(format!(
+                    "`issue` takes OWNER/REPO and an issue number ({VOCABULARY})"
+                )),
+            },
             "journal" => match args {
                 [unit, since, until] => Ok(Query::Journal {
                     unit: Unit::parse(unit)?,
@@ -280,6 +321,10 @@ impl fmt::Display for Query {
             Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
             Query::Deployed => f.write_str("deployed"),
             Query::Oom { since } => write!(f, "oom {}", show(*since)),
+            Query::Runners { name: None } => f.write_str("runners"),
+            Query::Runners { name: Some(n) } => write!(f, "runners {n}"),
+            Query::Trust => f.write_str("trust"),
+            Query::Issue { repo, number } => write!(f, "issue {repo} {number}"),
             Query::Journal { unit, since, until } => {
                 write!(f, "journal {unit} {} {}", show(*since), show(*until))
             }
@@ -314,6 +359,21 @@ fn executable(path: &str) -> bool {
         })
 }
 
+/// A runner's unit name, with or without `.service`: what systemd allows in
+/// one, no escapes and no glob. Which runners there are is the config's to
+/// say (answer/runners.rs); this only keeps the word to a unit's shape.
+fn runner(word: &str) -> bool {
+    let name = word.strip_suffix(".service").unwrap_or(word);
+    (1..=200).contains(&name.len())
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b":_.@-".contains(&b))
+}
+
 pub fn repository(repo: &str) -> bool {
     repo.split_once('/').is_some_and(|(owner, name)| {
         [owner, name].iter().all(|s| {
@@ -346,6 +406,27 @@ mod tests {
             Query::parse("oom -2h"),
             Ok(Query::Oom {
                 since: When::Ago(7200)
+            })
+        );
+        assert_eq!(Query::parse("trust"), Ok(Query::Trust));
+        assert_eq!(Query::parse("runners"), Ok(Query::Runners { name: None }));
+        assert_eq!(
+            Query::parse("runners ci-runner.service"),
+            Ok(Query::Runners {
+                name: Some("ci-runner".into())
+            })
+        );
+        assert_eq!(
+            Query::parse("runners burrow-fresh-runner@"),
+            Ok(Query::Runners {
+                name: Some("burrow-fresh-runner@".into())
+            })
+        );
+        assert_eq!(
+            Query::parse("issue sam/box 210"),
+            Ok(Query::Issue {
+                repo: "sam/box".into(),
+                number: 210
             })
         );
         assert_eq!(
@@ -384,6 +465,25 @@ mod tests {
             "usage --totals --totals",
             "usage -1h -2h --totals",
             "usage -1h --total",
+            "trust me",
+            "runners a b",
+            "runners ../etc",
+            "runners 'x'",
+            "runners a*",
+            "runners -u",
+            "runners a;id",
+            "issue",
+            "issue sam/box",
+            "issue sam/box 0",
+            "issue sam/box 01",
+            "issue sam/box -1",
+            "issue sam/box 1 2",
+            "issue sam/box 12345678901",
+            "issue sam/box #1",
+            "issue sam 1",
+            "issue ../box 1",
+            "issue sam/box/x 1",
+            "issue sam/box 1e3",
         ] {
             assert!(Query::parse(line).is_err(), "{line:?} parsed");
         }
@@ -441,6 +541,10 @@ mod tests {
             "usage -5h",
             "journal remi-update.service -2h now",
             "journal a.timer 2026-11-01T13:05:00Z now",
+            "runners",
+            "runners ci-runner",
+            "trust",
+            "issue sam/box 210",
         ] {
             assert_eq!(Query::parse(line).unwrap().to_string(), line);
         }

@@ -64,3 +64,30 @@ fn quiet_is_all_of_idle_wherever_in_a_second_the_stream_last_spoke() {
 fn no_idle_never_goes_quiet() {
     assert!(!gone_quiet(1000 * SECOND, 0, 0));
 }
+
+// The probe's `trust` says what a turn acts as by burrow_probe's job_app:
+// it must say what github_app decides, for every engine, --app and
+// machinery there can be.
+#[test]
+fn the_probe_says_what_a_turn_acts_as() {
+    use burrow_probe::answer::trust::{Acts, job_app};
+    let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+    for machinery in [None, Some(""), Some("workers")] {
+        cfg.machinery = machinery.map(str::to_owned);
+        for own in [None, Some(""), Some("other")] {
+            for engine in [Engine::Claude, Engine::Codex] {
+                let decided = github_app(&cfg, own.map(str::to_owned), engine);
+                let expected = match job_app(own, engine == Engine::Codex, machinery) {
+                    Acts::App(a) => Ok(Some(a.to_owned())),
+                    Acts::User => Ok(None),
+                    Acts::Refused => Err(()),
+                };
+                assert_eq!(
+                    decided.map_err(|_| ()),
+                    expected,
+                    "{machinery:?} {own:?} {engine:?}"
+                );
+            }
+        }
+    }
+}

@@ -6,7 +6,11 @@
 # secrets gone and the rest of it kept, then is closed; a unit off the
 # allowlist is never read; an issue anyone else opened runs nothing and is
 # closed too; a repo GitHub doesn't call private gets no comment at all; and
-# a kick to burrow-events starts a pass, as a repo's issue event does. The
+# a kick to burrow-events starts a pass, as a repo's issue event does.
+# `runners` tells a named runner and the fresh runners' template apart from
+# what's found on their PATH, with no rustc, no rustup and no default
+# toolchain, never reading a path the reviewers never read; `trust` says the
+# deployed authors; `issue` gives an issue's writers and retained edits. The
 # secrets are put together here, so no tracked file holds one (burrow's own
 # secrets check reads them).
 #
@@ -63,8 +67,8 @@ in
 pkgs.testers.runNixOSTest {
   name = "probe";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ self.nixosModules.probe ];
+  nodes.machine = { pkgs, lib, ... }: {
+    imports = [ self.nixosModules.probe self.nixosModules.dispatch ];
     users.users.dev = {
       isNormalUser = true;
       uid = 1001;
@@ -77,6 +81,23 @@ pkgs.testers.runNixOSTest {
       authors = [ { login = "sam"; id = 1; } ];
       inherit gh;
       journal.units = [ "leaky.service" ];
+      hidden = [ "(^|/)secrets?/" ];
+    };
+    # A named runner, whose PATH has no Rust, a directory linked into a
+    # hidden one, and a rustc that leads to a hidden file; and the fresh
+    # runners' template.
+    burrow.dispatch = {
+      enable = true;
+      runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; };
+      fresh = { enable = true; owner = "sam"; repos = [ "sam/homelab" ]; };
+    };
+    users.users.ci = { isSystemUser = true; group = "ci"; home = "/var/lib/ci"; createHome = true; homeMode = "755"; };
+    users.groups.ci = { };
+    systemd.services.ci-runner = {
+      path = [ pkgs.jq ];
+      environment.PATH = lib.mkForce "/opt/runner/bin:/opt/sneaky:${pkgs.coreutils}/bin";
+      serviceConfig.User = "ci";
+      script = "exec sleep infinity";
     };
     systemd.services = {
       # A unit whose log holds what must never reach GitHub.
@@ -102,6 +123,13 @@ pkgs.testers.runNixOSTest {
       "d /var/lib/gh 0777 root root -"
       "f /var/lib/gh/repo 0666 root root - {\"private\": true}"
       "f /var/lib/gh/issues 0666 root root - []"
+      "d /run/secrets 0755 root root -"
+      "f /run/secrets/rustc 0755 root root - SECRET-RUSTC"
+      "d /run/secrets/bin 0755 root root -"
+      "d /opt/runner/bin 0755 root root -"
+      "L+ /opt/runner/bin/git - - - - ${pkgs.git}/bin/git"
+      "L+ /opt/runner/bin/rustc - - - - /run/secrets/rustc"
+      "L+ /opt/sneaky - - - - /run/secrets/bin"
     ];
     environment.systemPackages = [ pkgs.curl pkgs.util-linux ];
   };
@@ -172,6 +200,39 @@ pkgs.testers.runNixOSTest {
         assert "proj isn't on here" in body, body
         assert "\"rm\" isn't a question" in body, body
         assert json.loads(machine.succeed("cat /var/lib/gh/closed-1")) == {"state": "closed", "state_reason": "completed"}
+
+    with subtest("runners: configured, loaded and found, with no Rust and nothing hidden read"):
+        machine.succeed("systemctl start ci-runner.service")
+        out = machine.succeed("burrow-probe ask runners")
+        assert "ci-runner: a named runner for sam/homelab (labels: self-hosted, Linux, X64, homelab)" in out, out
+        assert "configured: user ci, HOME /var/lib/ci, PATH /opt/runner/bin:/opt/sneaky:" in out, out
+        assert "loaded: ci-runner.service active/running" in out, out
+        assert "/opt/sneaky (not read: it is, or leads to, a path the reviewers never read)" in out, out
+        assert "rustc in /opt/runner/bin, not read" in out, out
+        assert "cargo not on PATH" in out and "rustup not on PATH" in out, out
+        assert "default toolchain: unknown: a toolchain command on PATH isn't read" in out, out
+        assert "burrow-fresh-runner@INSTANCE: runners started fresh for one job each, for sam/homelab" in out, out
+        assert "configured: user a dynamic user of its own, HOME /var/lib/private/burrow-fresh-runner/%i" in out, out
+        assert "loaded: no instance is loaded now" in out, out
+        assert "default toolchain: none: neither rustc nor rustup is on PATH" in out, out
+        assert "SECRET-RUSTC" not in out, out
+        full = machine.succeed("burrow-probe ask runners ci-runner")
+        assert "/opt/runner/bin: 1 commands from git-" in full and "1 left out as hidden" in full, full
+        assert "found tools: git in /opt/runner/bin (git-" in full, full
+        machine.fail("burrow-probe ask runners nobody")
+
+    with subtest("trust and issue: deployed authors, and an issue's writers without its text"):
+        github("repo", {"private": True})
+        github("issues", [issue(6, "sam", "trust\nissue sam/homelab 6\nissue sam/homelab 0")])
+        github("edits-6", [{"editor": {"login": "sam", "databaseId": 1}, "deletedBy": None}] * 2)
+        machine.succeed("systemctl start burrow-probe.service")
+        body = posted(6)
+        assert "- probe (issues in sam/homelab): sam (1)" in body, body
+        assert "- a Claude job with no --app: dev's own gh login" in body, body
+        assert "sam/homelab#6: " in body, body
+        assert "Body edits: 2 edits, all retained and returned" in body, body
+        assert "- sam (an account 1): opened it, 2 edits; a probe author" in body, body
+        assert "`issue` takes OWNER/REPO and an issue number" in body, body
 
     with subtest("anyone else's runs nothing, and is closed"):
         assert "nothing was run" in posted(2), posted(2)

@@ -2,13 +2,15 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
+# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`,
+# `runners [RUNNER]`, `trust`, `issue REPO N`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
 # Nothing of the issue's text reaches a command but a unit name, executable path or time the
 # probe's grammar made, journals are read only for the units on the
-# allowlist, a repo GitHub doesn't call private gets no answer, and every
+# allowlist, no file the reviewers never read (their skipPaths) is opened,
+# listed or reached through a link, a repo GitHub doesn't call private gets no answer, and every
 # answer goes through the secret scrubber before it's posted
 # (tests/probe.nix plants a token to prove it). On the machine,
 # `burrow-probe ask QUESTION` answers one on the terminal, unscrubbed.
@@ -38,8 +40,56 @@ let
       git = lib.getExe config.programs.git.package;
       journalctl = "${config.systemd.package}/bin/journalctl";
       systemctl = "${config.systemd.package}/bin/systemctl";
+      # `issue` reads GitHub as the machine's own calls do, never as a
+      # job's login.
+      gh = lib.getExe cfg.gh;
     };
+    inherit runners trust hidden;
   };
+
+  # `runners`: each runner's unit as this configuration defines it, the
+  # named ones (burrow.dispatch.runners) and the template of the ones
+  # started fresh for one job, whoever defines the unit. Only the
+  # environment keys `runners` tells.
+  dispatch = lib.attrByPath [ "burrow" "dispatch" ] { } config;
+  dispatching = dispatch.enable or false;
+  told = [ "PATH" "HOME" "RUSTUP_HOME" "RUSTUP_TOOLCHAIN" "CARGO_HOME" ];
+  runner = kind: name: repos: labels: let
+    unit = config.systemd.services.${name} or null;
+    service = if unit == null then { } else unit.serviceConfig;
+    environment = if unit == null then { }
+      else lib.mapAttrs (_: toString) (lib.filterAttrs (k: v: lib.elem k told && v != null) unit.environment);
+    user = service.User or null;
+  in {
+    inherit name kind repos labels environment;
+    defined = unit != null;
+    user = if user == null then null else toString user;
+    dynamicUser = service.DynamicUser or false;
+    home = environment.HOME or (if user != null && config.users.users ? ${toString user}
+      then config.users.users.${toString user}.home else null);
+    packages = if unit == null then [ ] else map (p: if lib.isDerivation p then p.name else toString p) unit.path;
+  };
+  runners = lib.optionals dispatching (
+    lib.mapAttrsToList (name: r: runner "named" name [ r.repo ] r.labels) dispatch.settings.runners
+    ++ lib.optional dispatch.fresh.enable (runner "fresh" dispatch.fresh.template dispatch.fresh.repos [ dispatch.fresh.label ]));
+
+  # `trust`: the deployed trust lists and the machine's Apps. The steward's
+  # authors are read from its own deployed config at answer time, so they
+  # are never a second copy.
+  trust = {
+    inbox = if config.burrow.proj.inbox.enable or false
+      then { inherit (config.burrow.proj.inbox) authors vm; } else null;
+    engines = if config.burrow.proj.engines.door.enable or false
+      then config.burrow.proj.engines.door.authors else null;
+    apps = lib.mapAttrsToList (name: app: { inherit name; login = "${app.slug}[bot]"; id = app.accountId; }) config.burrow.github.apps;
+    machinery = if config.burrow.github.machineApp == null then null else config.burrow.github.machineApp.name;
+    autoland = if config.burrow.autoland.enable or false then config.burrow.autoland.configFile else null;
+    sandboxes = config.burrow.agents.enable or false;
+  };
+
+  # What no answer opens, lists or resolves.
+  hidden = cfg.hidden;
+
   probeConfig = pkgs.writeText "burrow-probe.json" (builtins.toJSON (settings // {
     proj = if config.burrow.proj.enable or false then lib.getExe' config.burrow.tools.proj "proj" else null;
   }));
@@ -87,6 +137,20 @@ in
       description = ''
         The GitHub accounts, with immutable numeric IDs, whose issues are answered: the inbox's, unless set.
         Anyone else's gets a line saying nothing ran, and is closed.
+      '';
+    };
+
+    hidden = mkOption {
+      type = types.listOf types.str;
+      default = let autoland = lib.attrByPath [ "burrow" "autoland" ] { } config; in
+        lib.unique ((autoland.reviewers.skipPaths or [ ])
+          ++ lib.concatLists (lib.mapAttrsToList (_: r: r.skipPaths or [ ]) (autoland.repos or { })));
+      defaultText = lib.literalMD "the steward's reviewers' skipPaths, the machine's and every repo's";
+      description = ''
+        Path regexes (Rust's syntax) no answer opens, lists or resolves on the
+        machine, held to each path, each link on the way to it and each
+        link's target: what the steward's reviewers never read. One that
+        doesn't compile stops every read.
       '';
     };
 
@@ -208,7 +272,7 @@ in
       Read-only questions about this machine need no Claude: open an issue in
       ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
       (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
-      `usage [SINCE] [--totals]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
+      `usage [SINCE] [--totals]`, `oom [SINCE]`, `runners [RUNNER]`, `trust`, `issue REPO N`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.
     '';
   };

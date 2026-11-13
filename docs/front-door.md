@@ -104,6 +104,32 @@ own, say), in seconds and without starting a Claude.
     execution. All job-state reads pin regular files and directories without
     following symlinks, including requests through the sandbox host door.
   - `oom [SINCE]`: the kernel's and systemd-oomd's kills, a day back by default
+  - `runners [RUNNER]`: each Actions runner the machine defines
+    (`burrow.dispatch.runners`) and the template of burrow's fresh runners
+    (`dispatch.fresh`), told three ways apart: *configured* (the deployed
+    unit's user, HOME, PATH, the packages its `path` adds and its rustup
+    variables), *loaded* (what systemd has loaded now, whose environment a
+    runner a switch never restarts may still differ from), and *found* (each
+    PATH directory as it is now, which of `rustc`, `cargo` and `rustup` it
+    holds and from which store package, and the default toolchain rustup's
+    `settings.toml` in its HOME names). Nothing on a runner is run. An
+    absent command or default is said to be absent, one the probe can't read
+    is unknown with why, and a fresh instance's per-job HOME starts empty.
+    `runners RUNNER` adds each PATH directory's packages and other tools.
+  - `trust`: the deployed inbox, probe and engines door authors (by numeric
+    ID), the steward's trusted authors from its deployed config, and what
+    each kind of job acts as on GitHub: a Claude or Codex job with no
+    `--app`, `--app NAME`, an inbox job on a person's or a bot's issue, a
+    sandboxed job, and the machine's own calls. The App a turn acts as is the
+    same rule proj applies (its tests hold the two together).
+  - `issue REPO N`: an issue's state, author, retained writers (each retained
+    body edit's editor, whoever deleted an edit, whoever renamed it), its
+    retained edit count and labels, each writer marked with the trust lists
+    that name them. It says whether GitHub kept the whole history, is at its
+    100-edit retention cap (older writers may be gone), or returned only part
+    of it, and names deleted accounts as unknown. It never asks GitHub for
+    the title, the body or any edit's text. GitHub is read as the machine's
+    own calls are (`burrow.github.machinery`'s App, else the user's login).
 
   A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
   or `@EPOCH`, in UTC. An empty body asks its title.
@@ -113,7 +139,10 @@ own, say), in seconds and without starting a Claude.
   (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
 - **What keeps it safe:** no shell, and nothing of the issue's text reaches a
   command but a unit name, exact executable path or time the grammar made; unit journals only of the
-  units on the allowlist; no answer at all in a repo GitHub doesn't call
+  units on the allowlist; no file the steward's reviewers never read
+  (`autoland.reviewers.skipPaths` and each repo's) is opened, listed or
+  resolved, walking each link on the way and holding its target to the same
+  patterns, and a file is opened without following a link; no answer at all in a repo GitHub doesn't call
   private; and every answer through a secret scrubber first
   (`tests/probe.nix` plants a token to prove it). Private keys come out of
   request titles and bodies, each block whole, before questions are read,

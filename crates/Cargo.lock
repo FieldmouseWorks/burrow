@@ -634,6 +634,7 @@ dependencies = [
  "burrow-test",
  "jiff",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
