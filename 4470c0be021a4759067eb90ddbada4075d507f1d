@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "6ctaz3gxf3mdy71842d1224p2x",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 816,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/816",
+  "summary": "autoland: require matching work before replacing checks",
+  "task": "FieldmouseWorks/remi#1028",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "5b9e93dedcd490766dcac200b8229af0fad6631ff0c1778bb24adffa23e6dc61",
+    "before": "d0f9cca29d71797c41f1d155f779da7e9e3a10f3",
+    "after": "4470c0be021a4759067eb90ddbada4075d507f1d",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794543928441
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473268066"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473268052"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498/job/131473266459"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#816)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#816)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#816)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#816)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#816)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#816)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408498"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473360826"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473360571"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473360876"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131480772140"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473360889"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43301408502/job/131473267743"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/816#pullrequestreview-5882184659"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/816"
+    }
+  ]
+}
