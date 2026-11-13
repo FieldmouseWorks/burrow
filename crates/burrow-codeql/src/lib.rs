@@ -6,9 +6,11 @@
 //! paths might be input to, deleted paths and renames' old paths included.
 //! A path is matched against what each extractor reads (CodeQL's own
 //! sources: the JavaScript extractor's FileExtractor.java, the Python
-//! extractor's PY_EXTENSIONS and script check), and a path nothing here
-//! classifies, as one of those inputs or as one no extractor reads, counts
-//! for every language: what this doesn't know is scanned, never skipped.
+//! extractor's PY_EXTENSIONS and script check) and the configuration each
+//! takes, by extension. A path with no extension, which an extractor reads
+//! by its content, and a path whose extension nothing here classifies, as an
+//! input or as one no extractor reads, count for every language: what this
+//! doesn't know is scanned, never skipped.
 //!
 //! The workflow takes only the languages CodeQL analyzes on Linux with no
 //! build (`build-mode: none`); any other is an error, on a push as on a PR,
@@ -70,38 +72,25 @@ impl Language {
             }
             Language::CCpp => {
                 C_CPP.contains(&ext)
-                    || matches!(name, "cmakelists.txt" | "makefile" | "meson.build")
+                    // Build configuration: CMake's lists among any text.
+                    || ext == "txt"
+                    || matches!(name, "meson.build" | "compile_commands.json")
             }
-            Language::JavascriptTypescript => {
-                JAVASCRIPT.contains(&ext)
-                    // JSON configuration the extractor sniffs: `.eslintrc`,
-                    // `.babelrc` and every other dotfile ending in rc.
-                    || name == ".xsaccess"
-                    || (ext.is_empty() && name.starts_with('.') && name.ends_with("rc"))
-                    || name.starts_with("tsconfig")
-                    || name.starts_with("jsconfig")
-            }
+            Language::JavascriptTypescript => JAVASCRIPT.contains(&ext),
             Language::Python => {
                 matches!(ext, "py" | "pyi" | "pyw")
-                    || matches!(
-                        name,
-                        "pyproject.toml" | "setup.cfg" | "pipfile" | "pipfile.lock"
-                    )
-                    || (name.starts_with("requirements") && ext == "txt")
+                    // Configuration, wherever it's kept and whatever it's
+                    // called: pyproject.toml, setup.cfg, requirements files.
+                    || matches!(ext, "toml" | "cfg" | "ini" | "txt")
+                    || name == "pipfile.lock"
             }
-            Language::Ruby => {
-                RUBY.contains(&ext)
-                    || matches!(
-                        name,
-                        "gemfile" | "gemfile.lock" | "rakefile" | "guardfile" | "vagrantfile"
-                    )
-            }
+            Language::Ruby => RUBY.contains(&ext) || name == "gemfile.lock",
             Language::Rust => {
                 ext == "rs"
-                    || matches!(
-                        name,
-                        "cargo.toml" | "cargo.lock" | "rust-toolchain" | "rust-toolchain.toml"
-                    )
+                    // Project configuration: Cargo.toml, .cargo/config.toml,
+                    // rust-toolchain.toml and any other TOML; rust-project.json.
+                    || ext == "toml"
+                    || matches!(name, "cargo.lock" | "rust-project.json")
             }
         }
     }
@@ -156,22 +145,12 @@ const RUBY: &[&str] = &[
     "rb", "erb", "rake", "gemspec", "ru", "rbw", "builder", "jbuilder", "thor",
 ];
 
-/// Paths no extractor here reads, by extension or by name. Each has an
-/// extension no extractor takes, or a format of its own that can't be a
-/// script: an extractor sniffs only a path with no extension for a shebang.
-const INERT_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "rst", "adoc", "txt", "nix", "toml", "cfg", "ini", "sh", "bash", "css",
-    "scss", "svg", "png", "jpg", "jpeg", "gif", "ico", "webp", "pdf", "docx", "patch", "diff",
-    "sql", "csv", "tsv",
-];
-const INERT_NAMES: &[&str] = &[
-    "license",
-    "copying",
-    "notice",
-    "codeowners",
-    ".gitignore",
-    ".gitattributes",
-    ".editorconfig",
+/// Extensions no extractor here reads, by CodeQL's sources and their
+/// configuration: no extractor sniffs a path with an extension for a
+/// shebang, so these can't be anyone's input.
+const INERT: &[&str] = &[
+    "md", "markdown", "rst", "adoc", "nix", "sh", "bash", "css", "scss", "svg", "png", "jpg",
+    "jpeg", "gif", "ico", "webp", "pdf", "docx", "patch", "diff", "sql", "csv", "tsv",
 ];
 
 /// The languages that might read a path, or None when nothing here
@@ -185,14 +164,21 @@ pub fn readers(path: &str) -> Option<BTreeSet<Language>> {
         Some(i) if i > 0 => &name[i + 1..],
         _ => "",
     };
+    if ext.is_empty() {
+        // The JavaScript and Python extractors read a path with no
+        // extension by its content (a shebang), which a name can't rule
+        // out, and nothing here reads content: so it counts for every
+        // language, `LICENSE` and `Gemfile` as much as `bin/deploy`.
+        return None;
+    }
     let found: BTreeSet<Language> = Language::ALL
         .into_iter()
         .filter(|l| l.reads(&path, name, ext))
         .collect();
-    if !found.is_empty() || INERT_EXTENSIONS.contains(&ext) || INERT_NAMES.contains(&name) {
-        Some(found)
-    } else {
+    if found.is_empty() && !INERT.contains(&ext) {
         None
+    } else {
+        Some(found)
     }
 }
 

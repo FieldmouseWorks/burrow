@@ -92,8 +92,8 @@ fn a_pr_scans_the_languages_it_touches() {
 
 /// The tables cover what the extractors read, case aside: the JavaScript
 /// extractor's every file type (its HTML templates and SAP's `.xsjs`
-/// included, and the JSON it sniffs in rc dotfiles), Python's `.pyw`, and
-/// each language's configuration.
+/// included), Python's `.pyw`, and each language's configuration wherever
+/// it's kept.
 #[test]
 fn the_tables_cover_what_the_extractors_read() {
     let langs = r#"["c-cpp", "javascript-typescript", "python", "ruby", "rust"]"#;
@@ -103,31 +103,43 @@ fn the_tables_cover_what_the_extractors_read() {
         ("web/App.TSX", &["javascript-typescript"]),
         ("hana/service.xsjs", &["javascript-typescript"]),
         ("hana/lib.XSJSLIB", &["javascript-typescript"]),
-        ("hana/.xsaccess", &["javascript-typescript"]),
         ("web/page.jsp", &["javascript-typescript"]),
         ("tpl/row.html.dot", &["javascript-typescript"]),
-        ("web/.babelrc", &["javascript-typescript"]),
         ("yarn.lock", &["javascript-typescript"]),
         ("views/show.html.erb", &["javascript-typescript", "ruby"]),
         ("lib/thing.gemspec", &["ruby"]),
-        ("Gemfile", &["ruby"]),
+        ("Gemfile.lock", &["javascript-typescript", "ruby"]),
         ("native/Vec.HPP", &["c-cpp"]),
         ("tools/run.PYW", &["python"]),
-        ("requirements-dev.txt", &["python"]),
-        ("rust-toolchain.toml", &["rust"]),
+        ("requirements/dev.txt", &["c-cpp", "python"]),
+        ("CMakeLists.txt", &["c-cpp", "python"]),
+        ("tox.ini", &["python"]),
+        ("rust-toolchain.toml", &["python", "rust"]),
+        (".cargo/config.toml", &["python", "rust"]),
+        ("rust-project.json", &["javascript-typescript", "rust"]),
+        (
+            "build/compile_commands.json",
+            &["c-cpp", "javascript-typescript"],
+        ),
     ] {
         assert_eq!(picked(langs, &[file]), want, "{file}");
     }
 }
 
-/// A path nothing here classifies scans every language: a script with no
-/// extension, which the JavaScript and Python extractors read by its
-/// shebang, and an extension the tables don't know.
+/// A path with no extension scans every language, whatever its name: the
+/// JavaScript and Python extractors read one by its shebang, and a name
+/// can't rule that out. So does an extension the tables don't know.
 #[test]
 fn what_it_cannot_classify_scans_everything() {
     for file in [
         "bin/deploy",
-        "tools/sync",
+        "bin/license",
+        "bin/notice",
+        "LICENSE",
+        "Gemfile",
+        "Makefile",
+        "crates/x/.cargo/config",
+        "web/.babelrc",
         "web/.prettierignore",
         "src/thing.xyz",
     ] {
@@ -146,7 +158,7 @@ fn what_it_cannot_classify_scans_everything() {
 fn a_docs_pr_scans_nothing() {
     let (got, said) = pr(
         BURROW,
-        changed(&["README.md", "modules/proj.nix", "LICENSE"]),
+        changed(&["README.md", "modules/proj.nix", "docs/flow.svg"]),
     );
     assert!(got.is_empty(), "{got:?}");
     assert!(
@@ -161,7 +173,7 @@ fn a_docs_pr_scans_nothing() {
 fn a_rename_counts_its_old_path() {
     let (got, _) = pr(
         BURROW,
-        json!([{"filename": "tools/sync.txt", "previous_filename": "tools/sync.py"}]),
+        json!([{"filename": "tools/sync.md", "previous_filename": "tools/sync.py"}]),
     );
     assert_eq!(got, ["python"]);
 }
