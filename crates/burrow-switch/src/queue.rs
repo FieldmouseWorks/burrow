@@ -268,9 +268,9 @@ impl<'c> Queue<'c> {
             .iter()
             .filter(|j| j.running())
             .filter(|j| {
-                self.running
-                    .get(&j.id())
-                    .is_some_and(|(kind, inv)| kind == j.kind() && *inv == Queue::invocation(cfg, j))
+                self.running.get(&j.id()).is_some_and(|(kind, inv)| {
+                    kind == j.kind() && *inv == Queue::invocation(cfg, j)
+                })
             })
             .map(Job::id)
             .collect();
@@ -366,7 +366,10 @@ impl<'c> Queue<'c> {
             .open(&path)
             .and_then(|mut f| writeln!(f, "{unit}"));
         if let Err(e) = written {
-            let line = format!("{unit} could not be kept for recovery in {}: {e}", path.display());
+            let line = format!(
+                "{unit} could not be kept for recovery in {}: {e}",
+                path.display()
+            );
             complain(&line);
             self.cfg.journal("err", &line);
         }
