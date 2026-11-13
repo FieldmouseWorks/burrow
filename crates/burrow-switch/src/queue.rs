@@ -167,11 +167,15 @@ fn only_behind(
 /// Whether every job in `after`, and every one that waits on those, is a
 /// target's: nothing that runs of its own, so one let go for a while holds
 /// back nothing that must follow it.
-pub fn only_targets_follow(job: &Job, mut after: impl FnMut(&Job) -> Vec<Job>) -> bool {
+/// A follower list that can't be read counts as a follower: it fails closed.
+pub fn only_targets_follow(job: &Job, mut after: impl FnMut(&Job) -> Option<Vec<Job>>) -> bool {
     let mut seen = HashSet::from([job.id()]);
     let mut next = vec![job.clone()];
     while let Some(j) = next.pop() {
-        for o in after(&j) {
+        let Some(followers) = after(&j) else {
+            return false;
+        };
+        for o in followers {
             if !seen.insert(o.id()) {
                 continue;
             }
@@ -213,9 +217,11 @@ pub fn activate(cfg: &Config, c: &mut Command) -> io::Result<ExitStatus> {
 /// systemd's queue as an activation began.
 struct Queue<'c> {
     cfg: &'c Config,
-    /// Every job there was, and the ones that were running.
+    /// Every job there was, and the ones that were running, each with its
+    /// kind and its unit's invocation then: a run is the same one only while
+    /// both hold (a restart or start merged into the job keeps its id).
     existing: HashSet<u32>,
-    running: HashSet<u32>,
+    running: HashMap<u32, (String, Option<Vec<u8>>)>,
     /// Units whose job was let go and not queued again.
     lost: Vec<String>,
     /// Units already said to be let go.
@@ -228,7 +234,11 @@ impl<'c> Queue<'c> {
         Queue {
             cfg,
             existing: jobs.iter().map(Job::id).collect(),
-            running: jobs.iter().filter(|j| j.running()).map(Job::id).collect(),
+            running: jobs
+                .iter()
+                .filter(|j| j.running())
+                .map(|j| (j.id(), (j.kind().to_string(), Queue::invocation(cfg, j))))
+                .collect(),
             lost: Vec::new(),
             said: HashSet::new(),
         }
@@ -244,32 +254,64 @@ impl<'c> Queue<'c> {
             return;
         };
         let touched = self.touched();
-        let cfg = self.cfg;
-        let held = held(&jobs, &touched, &self.existing, &self.running, |j| {
-            call(cfg, &[j.path(), JOB, "GetBefore"]).unwrap_or_default()
-        });
+        let held = self.held_in(&jobs, &touched);
         for (job, run) in held {
-            self.release(&jobs, job, &run);
+            self.release(&touched, &job, &run);
         }
     }
 
+    /// The jobs to let go among `jobs`, as `held` finds them, with the runs
+    /// still the ones that were going as the activation began.
+    fn held_in(&self, jobs: &[Job], touched: &HashSet<String>) -> Vec<(Job, Job)> {
+        let cfg = self.cfg;
+        let same: HashSet<u32> = jobs
+            .iter()
+            .filter(|j| j.running())
+            .filter(|j| {
+                self.running
+                    .get(&j.id())
+                    .is_some_and(|(kind, inv)| kind == j.kind() && *inv == Queue::invocation(cfg, j))
+            })
+            .map(Job::id)
+            .collect();
+        held(jobs, touched, &self.existing, &same, |j| {
+            call(cfg, &[j.path(), JOB, "GetBefore"]).unwrap_or_default()
+        })
+        .into_iter()
+        .map(|(j, r)| (j.clone(), r))
+        .collect()
+    }
+
+    /// The invocation of a job's unit: a new run of it has another.
+    fn invocation(cfg: &Config, job: &Job) -> Option<Vec<u8>> {
+        property::<Vec<u8>>(cfg, job.unit_path(), UNIT, "InvocationID")
+    }
+
     /// One held job, let go and queued again, unless something would be
-    /// lost by it or it isn't waiting any more.
-    fn release(&mut self, jobs: &[Job], job: &Job, run: &Job) {
+    /// lost by it or it isn't held any more. Everything is read again, just
+    /// before Cancel: new blockers, new consumers and a run that ended or
+    /// was replaced show in that read. What's left is the gap between that
+    /// read and Cancel (D-Bus has no cancel-if-waiting), and in it the unit
+    /// that starts anyway still has the new job to wait for.
+    fn release(&mut self, touched: &HashSet<String>, job: &Job, run: &Job) {
         let cfg = self.cfg;
         let Some(method) = queued_by(job.kind()) else {
             return;
         };
+        let Some(jobs) = Queue::jobs_of(cfg) else {
+            return;
+        };
+        let still = self
+            .held_in(&jobs, touched)
+            .into_iter()
+            .any(|(j, r)| j.id() == job.id() && r.id() == run.id());
         // What requires it, or must follow it, would fail or run early.
-        if self.required(jobs, job)
-            || !only_targets_follow(job, |j| {
-                call(cfg, &[j.path(), JOB, "GetAfter"]).unwrap_or_default()
-            })
+        if !still
+            || self.required(&jobs, job)
+            || !only_targets_follow(job, |j| call(cfg, &[j.path(), JOB, "GetAfter"]))
         {
             return;
         }
-        // Looked at again right before: the run may have ended meanwhile
-        // and the job started, which Cancel would let go all the same.
         let state = |j: &Job| property::<String>(cfg, j.path(), JOB, "State");
         if state(job).as_deref() != Some("waiting") || state(run).as_deref() != Some("running") {
             return;
@@ -295,6 +337,7 @@ impl<'c> Queue<'c> {
             );
             complain(&line);
             cfg.journal("err", &line);
+            self.keep_for_recovery(job.unit());
             self.lost.push(job.unit().to_string());
             return;
         }
@@ -308,6 +351,24 @@ impl<'c> Queue<'c> {
             );
             complain(&line);
             cfg.journal("warning", &line);
+        }
+    }
+
+    /// A unit whose start is lost goes in the list switch-to-configuration
+    /// reads back as it starts (also in the rollback), so the next
+    /// activation starts it again, not only this process remembers it.
+    fn keep_for_recovery(&self, unit: &str) {
+        use std::io::Write;
+        let path = self.cfg.activation_lists.join("activation-restart-list");
+        let written = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| writeln!(f, "{unit}"));
+        if let Err(e) = written {
+            let line = format!("{unit} could not be kept for recovery in {}: {e}", path.display());
+            complain(&line);
+            self.cfg.journal("err", &line);
         }
     }
 
@@ -606,6 +667,7 @@ mod tests {
             job(4, "consumer.service", "start", "waiting"),
             job(5, "late.target", "start", "waiting"),
         ];
+        let follow_err = |_: &Job| -> Option<Vec<Job>> { None };
         let follow = |ids: &'static [(u32, &'static [usize])]| {
             let all = all.clone();
             move |j: &Job| {
@@ -613,8 +675,11 @@ mod tests {
                     .filter(|(k, _)| *k == j.id())
                     .flat_map(|(_, v)| v.iter().map(|i| all[*i].clone()))
                     .collect::<Vec<_>>()
+                    .into()
             }
         };
+        // A follower list that can't be read keeps the job.
+        assert!(!only_targets_follow(&sweep, follow_err));
         assert!(only_targets_follow(&sweep, follow(&[(2, &[0])])));
         assert!(only_targets_follow(&sweep, follow(&[])));
         // A service ordered after it would run before it, in the gap.

@@ -498,6 +498,9 @@ fn a_job_let_go_that_cant_be_queued_again_fails_the_activation() {
     // Never said to be queued again.
     assert!(!stderr.contains("queued again, not waited for"), "{stderr}");
     assert!(m.fake("journal").contains("could not be queued again"));
+    // The lost start stays where the next activation reads it back.
+    let kept = std::fs::read_to_string(m.path("lists").join("activation-restart-list")).unwrap();
+    assert!(kept.lines().any(|l| l == "renovate-sweep.service"), "{kept}");
     // The revert's activation fails the same way: it says so, and in the
     // journal with the exit the revert records.
     let out = m.switch(&["--revert-to", &m.sys("one")]);
