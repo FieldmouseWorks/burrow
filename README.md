@@ -80,9 +80,10 @@ Each has an entry below, and each can be imported on its own.
   default; unless confirmed within 10 minutes the old one comes back by
   itself. So a change that cuts off SSH, the network or Claude undoes itself.
   An activation that hangs is killed before the window expires to let the
-  revert run. One that would wait on a unit queued behind a run already going
-  (a sweep ordered after a two-hour renovate) lets that unit's job go, queued
-  again, so it restarts after the run ([queue.rs](crates/burrow-switch/src/queue.rs)). Enabled services must have bounded stop timeouts (including the
+  revert run. One never waits on a job queued behind a run already going (a
+  sweep ordered after a two-hour renovate): switch-to-configuration is
+  patched to leave it queued, to run after that run
+  ([held.rs](patches/switch-to-configuration-ng/held.rs)). Enabled services must have bounded stop timeouts (including the
   manager default and `TimeoutSec`): the module rejects zero, infinity and
   time spans it cannot establish as positive integer seconds, minutes, hours
   or days within systemd's microsecond range. Boolean and list values are
@@ -96,8 +97,10 @@ Each has an entry below, and each can be imported on its own.
   new kernel, initrd or command line once when idle and makes it the
   default only after it came up; one that panics or hangs resets into the last
   good one and is never tried again. Trials wait for project jobs, sandboxes,
-  runner jobs, updates and steward passes. Completion events retry promptly;
-  `trialBoot.at` is the daily backstop, overriding busy work after two days.
+  runner jobs, updates and steward passes. Completion events retry promptly
+  and always wait for work; `trialBoot.at` is the daily backstop, and only it
+  overrides busy work, once a trial has waited two days. A kernel that failed
+  is unqueued, never trialled.
   An unconfirmed switch always blocks a trial.
 - **`updates`** (`burrow.updates`): Everything current, unattended.
   `HOST-update` (on each push to the flake's main or a watched input, and

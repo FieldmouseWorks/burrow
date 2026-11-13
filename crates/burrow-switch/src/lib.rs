@@ -7,8 +7,6 @@
 //! - switch.rs: HOST-switch's words: a switch, `--status`, `--abort`, and
 //!   what its own units run (`--revert-to`, `--activation-stopped`)
 //! - confirm.rs: HOST-confirm
-//! - queue.rs: an activation, the switch's or the revert's, kept from
-//!   waiting behind a run that was already going
 //!
 //! What they keep is in `Config::state`, while a switch is unconfirmed:
 //! `pending` (the system put live), `prev` (the confirmed one it reverts
@@ -28,7 +26,6 @@ use rustix::fs::{FlockOperation, flock};
 use serde::Deserialize;
 
 pub mod confirm;
-pub mod queue;
 pub mod switch;
 
 /// What modules/switch.nix tells HOST-switch and HOST-confirm about the
@@ -58,9 +55,6 @@ pub struct Config {
     pub profile: PathBuf,
     /// The lock switch-to-configuration holds while it activates.
     pub activation_lock: PathBuf,
-    /// Where switch-to-configuration lists the units it starts, restarts
-    /// and reloads while it activates (queue.rs).
-    pub activation_lists: PathBuf,
     /// The PATH a revert's units run with, and systemd-cat: systemd starts
     /// a unit with a bare one, without coreutils on NixOS, and systemd-cat
     /// hands what it logs to cat.
@@ -77,8 +71,6 @@ pub struct Tools {
     pub systemctl: PathBuf,
     pub systemd_run: PathBuf,
     pub systemd_analyze: PathBuf,
-    /// busctl, for systemd's job queue (queue.rs).
-    pub busctl: PathBuf,
     /// systemd-cat, for what the switch says in the journal.
     pub logger: PathBuf,
     /// What a switch builds the flake as its checkout's owner with.
@@ -332,9 +324,8 @@ mod tests {
             "state": "/run/box-switch", "flake": "/etc/nixos", "configuration": "box",
             "within": "10min", "current": "/run/current-system",
             "profile": "/nix/var/nix/profiles/system",
-            "activationLock": "/run/nixos/switch-to-configuration.lock",
-            "activationLists": "/run/nixos", "path": "/b",
-            "tools": {"sudo": "/s", "systemctl": "/c", "systemdRun": "/r", "systemdAnalyze": "/a", "busctl": "/d",
+            "activationLock": "/run/nixos/switch-to-configuration.lock", "path": "/b",
+            "tools": {"sudo": "/s", "systemctl": "/c", "systemdRun": "/r", "systemdAnalyze": "/a",
                       "logger": "/l", "runuser": "/u", "nix": "/n", "nixEnv": "/e", "boot": null},
         });
         fs::write(&path, config.to_string()).unwrap();

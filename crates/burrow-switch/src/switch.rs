@@ -18,11 +18,10 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use rustix::fs::{Access, FlockOperation, access, flock};
 
-use crate::{Broke, Config, canonical, complain, exit_of, queue, ran, say};
+use crate::{Broke, Config, canonical, complain, exit_of, ran, say};
 
 /// What a switch exits with when it refuses a downgrade, before anything
 /// changed (HOST-update tells it by this).
@@ -188,26 +187,20 @@ fn switch(
     // Killing it halfway leaves nothing behind: the revert picks up the
     // units it stopped from the list switch-to-configuration keeps in
     // /run/nixos, a start that never ends is stopped by the revert's own
-    // activation, and tests/switch.nix holds them to that. A job it waits on
-    // behind a run that was already going is let go (queue.rs, and
-    // tests/switch-queue.nix).
-    let deadline = Instant::now() + Duration::from_micros(window * 3 / 4);
-    let activated = queue::activate(
-        cfg,
-        Command::new(&cfg.tools.systemd_run)
-            .arg(format!("--unit={}-activate", cfg.switch))
-            .args([KEEP, "--collect", "--wait", "--pipe", "--quiet"])
-            .arg(format!("--property=RuntimeMaxSec={}us", window * 3 / 4))
-            .arg("--property=TimeoutStopSec=5s")
-            .arg(format!(
-                "--property=ExecStopPost={}",
-                me.line(&[Path::new("--activation-stopped"), &new])
-            ))
-            .arg(new.join("bin/switch-to-configuration"))
-            .arg("test")
-            .stdin(Stdio::null()),
-        Some(deadline),
-    );
+    // activation, and tests/switch.nix holds them to that.
+    let activated = Command::new(&cfg.tools.systemd_run)
+        .arg(format!("--unit={}-activate", cfg.switch))
+        .args([KEEP, "--collect", "--wait", "--pipe", "--quiet"])
+        .arg(format!("--property=RuntimeMaxSec={}us", window * 3 / 4))
+        .arg("--property=TimeoutStopSec=5s")
+        .arg(format!(
+            "--property=ExecStopPost={}",
+            me.line(&[Path::new("--activation-stopped"), &new])
+        ))
+        .arg(new.join("bin/switch-to-configuration"))
+        .arg("test")
+        .stdin(Stdio::null())
+        .status();
     let prev = prev.display();
     // The timer's gone once the revert has fired or the deadline started
     // it: the old system is coming back whatever the activation said.
@@ -496,13 +489,12 @@ fn revert_to(cfg: &Config, prev: &Path) -> Result<u8, Broke> {
         {
             let _ = flock(&lock, FlockOperation::LockExclusive);
         }
-        let rc = exit_of(queue::activate(
-            cfg,
+        let rc = exit_of(
             Command::new(prev.join("bin/switch-to-configuration"))
                 .arg("test")
-                .stdin(Stdio::null()),
-            None,
-        ));
+                .stdin(Stdio::null())
+                .status(),
+        );
         if rc != LOCKED {
             break rc;
         }

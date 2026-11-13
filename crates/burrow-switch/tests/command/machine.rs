@@ -44,7 +44,7 @@ pub fn bin() -> &'static Path {
     .path()
 }
 
-const STAND_INS: [(&str, &str); 11] = [
+const STAND_INS: [(&str, &str); 10] = [
     (
         "sudo",
         // Never inside itself: a run it starts that starts it again would
@@ -57,7 +57,7 @@ given=$PATH PATH='@PATH@'
 echo "$*" >>"$FAKE/sudo"
 [ "$1" = -- ] || exit 9
 shift
-exec env -i FAKE="$FAKE" CURRENT="$CURRENT" LISTS="$LISTS" PATH="$given" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
+exec env -i FAKE="$FAKE" CURRENT="$CURRENT" PATH="$given" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
 "#,
     ),
     (
@@ -123,87 +123,6 @@ PATH=$path exec "$@"
 "#,
     ),
     (
-        // systemd's job queue: FAKE/jobs is what ListJobs says, FAKE/before-ID
-        // what job ID waits for and FAKE/after-ID what waits for it (nothing,
-        // when they aren't there; FAKE/jobs-later replaces FAKE/jobs at the
-        // second ListJobs, FAKE/jobs-once-asked once a GetBefore is). A job's state is FAKE/state-ID, else the one
-        // FAKE/jobs says, and its type FAKE/type-ID, else FAKE/jobs's; a
-        // unit's RequiredBy, Requires, ActiveState and the like are
-        // FAKE/PROPERTY-UNIT (JSON), its InvocationID [1] when not there
-        // (FAKE/InvocationID-UNIT-later from the second ListJobs on). A
-        // job's Cancel and a unit's job queued again are kept in FAKE/busctl,
-        // and the recovery list as it was at the Cancel in
-        // FAKE/recovery-at-cancel;
-        // FAKE/fail-cancel fails a cancel, as for a job that just ended,
-        // FAKE/fail-requeue the job queued again. The job queued again, 900,
-        // takes the cancelled one's place, waiting for what it waited for,
-        // unless FAKE/requeued-ran says it ran at once (then it isn't there)
-        // or FAKE/requeued-state says it's in that state, waiting on nothing.
-        "busctl",
-        r#"#!/bin/sh
-PATH='@PATH@'
-[ "$1 $3" = "--json=short org.freedesktop.systemd1" ] || exit 1
-verb=$2
-shift 3
-reply() { printf '{"type":"a(usssoo)","data":[[%s]]}\n' "$1"; }
-field() { tr '[' '\n' <"$FAKE/jobs" | grep "^$1," | cut -d, -f"$2" | tr -d '"'; }
-if [ "$verb" = get-property ]; then
-  case "$1 $2 $3" in
-    /org/freedesktop/systemd1/job/*" org.freedesktop.systemd1.Job State")
-      id=${1##*/}
-      printf '{"type":"s","data":"%s"}\n' "$(cat "$FAKE/state-$id" 2>/dev/null || field "$id" 4)" ;;
-    /org/freedesktop/systemd1/job/*" org.freedesktop.systemd1.Job JobType")
-      id=${1##*/}
-      printf '{"type":"s","data":"%s"}\n' "$(cat "$FAKE/type-$id" 2>/dev/null || field "$id" 3)" ;;
-    /unit/*" org.freedesktop.systemd1.Unit InvocationID")
-      f=$FAKE/$3-${1##*/}
-      if [ -e "$f-later" ] && [ "$(cat "$FAKE/listed" 2>/dev/null || echo 0)" -ge 2 ]; then f=$f-later; fi
-      printf '{"type":"ay","data":%s}\n' "$(cat "$f" 2>/dev/null || echo '[1]')" ;;
-    /unit/*" org.freedesktop.systemd1.Unit "*)
-      [ "$3" != ActiveState ] || [ -e "$FAKE/$3-${1##*/}" ] || exit 1
-      printf '{"type":"as","data":%s}\n' "$(cat "$FAKE/$3-${1##*/}" 2>/dev/null || echo '[]')" ;;
-    *) exit 1 ;;
-  esac
-  exit 0
-fi
-[ "$verb" = call ] || exit 1
-case "$2 $3" in
-  "org.freedesktop.systemd1.Manager ListJobs")
-    # FAKE/jobs-later is what it says from the second look on.
-    n=$(($(cat "$FAKE/listed" 2>/dev/null || echo 0) + 1))
-    echo $n >"$FAKE/listed"
-    if [ -e "$FAKE/jobs-later" ] && [ $n -ge 2 ]; then mv "$FAKE/jobs-later" "$FAKE/jobs"; fi
-    reply "$(cat "$FAKE/jobs" 2>/dev/null)" ;;
-  "org.freedesktop.systemd1.Job GetBefore")
-    # FAKE/jobs-once-asked is what ListJobs says once one job's waits are read.
-    if [ -e "$FAKE/jobs-once-asked" ]; then mv "$FAKE/jobs-once-asked" "$FAKE/jobs"; fi
-    reply "$(cat "$FAKE/before-${1##*/}" 2>/dev/null)" ;;
-  "org.freedesktop.systemd1.Job GetAfter") reply "$(cat "$FAKE/after-${1##*/}" 2>/dev/null)" ;;
-  "org.freedesktop.systemd1.Job Cancel")
-    if [ -e "$FAKE/fail-cancel" ]; then echo "$1" >"$FAKE/cancel-failed"; exit 1; fi
-    echo "${1##*/}" >"$FAKE/cancelled"
-    # What the recovery list held as it was cancelled.
-    cp "$LISTS/activation-restart-list" "$FAKE/recovery-at-cancel" 2>/dev/null
-    echo "cancel ${1##*/}" >>"$FAKE/busctl" ;;
-  "org.freedesktop.systemd1.Manager "*Unit)
-    if [ -e "$FAKE/fail-requeue" ]; then echo "$3 $5 failed" >>"$FAKE/busctl"; touch "$FAKE/requeue-failed"; exit 1; fi
-    echo "$3 $5 $6" >>"$FAKE/busctl"
-    old=$(cat "$FAKE/cancelled")
-    case $3 in StartUnit) kind=start ;; RestartUnit) kind=restart ;; ReloadUnit) kind=reload ;; *) kind=try-restart ;; esac
-    rest=$(tr '[' '\n' <"$FAKE/jobs" | grep -v "^$old," | grep . | sed 's/^/[/; s/,$//' | paste -sd, -)
-    if [ -e "$FAKE/requeued-ran" ]; then
-      printf '%s' "$rest" >"$FAKE/jobs"
-    else
-      state=$(cat "$FAKE/requeued-state" 2>/dev/null || echo waiting)
-      [ -e "$FAKE/requeued-state" ] || cp "$FAKE/before-$old" "$FAKE/before-900" 2>/dev/null
-      printf '%s%s[900,"%s","%s","%s","/org/freedesktop/systemd1/job/900","/unit/%s"]' "$rest" "${rest:+,}" "$5" "$kind" "$state" "$5" >"$FAKE/jobs"
-    fi
-    echo '{"type":"o","data":["/org/freedesktop/systemd1/job/900"]}' ;;
-  *) exit 1 ;;
-esac
-"#,
-    ),
-    (
         "systemd-analyze",
         r#"#!/bin/sh
 PATH='@PATH@'
@@ -266,22 +185,13 @@ echo "$*" >>"$FAKE/box-boot"
     (
         // Every system's: which one it is is the dir it's in. `test` makes
         // it the one that runs, unless it hangs (the revert fires) or stays.
-        // FAKE/locked-NAME is how many tries it refuses as locked. With
-        // FAKE/lists, it lists what it restarts as FAKE/lists says, and waits
-        // (up to 20s, or FAKE/lists-ticks tenths) for one of its jobs to be let go (or tried), as a real one waits
-        // for its jobs.
+        // FAKE/locked-NAME is how many tries it refuses as locked.
         "switch-to-configuration",
         r#"#!/bin/sh
 PATH='@PATH@'
 sys=${0%/bin/switch-to-configuration}
 name=${sys##*/}
 echo "$name $*" >>"$FAKE/switch-to-configuration"
-if [ -e "$FAKE/lists" ]; then
-  cp "$FAKE/lists" "$LISTS/restart-list"
-  n=0
-  until grep -q '^cancel ' "$FAKE/busctl" 2>/dev/null || [ -e "$FAKE/cancel-failed" ] || [ $n -ge "$(cat "$FAKE/lists-ticks" 2>/dev/null || echo 200)" ]; do sleep 0.1; n=$((n + 1)); done
-  rm -f "$LISTS/restart-list"
-fi
 n=$(cat "$FAKE/locked-$name" 2>/dev/null || echo 0)
 if [ "$n" -gt 0 ]; then echo $((n - 1)) >"$FAKE/locked-$name"; exit 11; fi
 if [ -e "$FAKE/hang-$name" ]; then echo dead >"$FAKE/timer-state"; exit 1; fi
@@ -315,7 +225,7 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         let m = Machine { _dir: dir, root };
-        for d in ["fake", "systems", "run", "flake", "lists"] {
+        for d in ["fake", "systems", "run", "flake"] {
             fs::create_dir_all(m.path(d)).unwrap();
         }
         m.system("one", Some(100));
@@ -327,9 +237,8 @@ impl Machine {
             "switch": "box-switch", "confirm": "box-confirm", "revert": "box-revert",
             "state": m.path("state"), "flake": m.path("flake"), "configuration": "box",
             "within": "10min", "current": m.path("run/current-system"), "profile": m.path("profile"),
-            "activationLock": m.path("s2c.lock"), "activationLists": m.path("lists"),
-            "path": unit_path(),
-            "tools": {"sudo": b.join("sudo"), "systemctl": b.join("systemctl"), "busctl": b.join("busctl"),
+            "activationLock": m.path("s2c.lock"), "path": unit_path(),
+            "tools": {"sudo": b.join("sudo"), "systemctl": b.join("systemctl"),
                       "systemdRun": b.join("systemd-run"), "systemdAnalyze": b.join("systemd-analyze"),
                       "logger": b.join("systemd-cat"), "runuser": b.join("runuser"),
                       "nix": b.join("nix"), "nixEnv": b.join("nix-env"),
@@ -411,7 +320,6 @@ impl Machine {
             .args(words)
             .env("FAKE", self.path("fake"))
             .env("CURRENT", self.path("run/current-system"))
-            .env("LISTS", self.path("lists"))
             .env_remove("BURROW_CONFIRM_WITHIN")
             .env_remove("SERVICE_RESULT");
         if root() {

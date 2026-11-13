@@ -1,14 +1,17 @@
 # HOST-switch behind a long run (burrow#811): a unit the activation restarts
 # that is ordered after a oneshot already running, as renovate-sweep is after
 # renovate's two hours, would hold the activation past its deadline and revert
-# a switch with nothing wrong in it. The switch lets that job go, queued again,
-# and goes live; the unit restarts once the run ends. The revert's activation
-# does the same.
+# a switch with nothing wrong in it. switch-to-configuration, patched by the
+# module, stops waiting on that job and leaves it queued as it is, so the
+# switch goes live and the unit restarts once the run ends. The revert's
+# activation does the same.
 #
 #   nix build .#checks.x86_64-linux.switch-queue -L
 { self, pkgs }:
 pkgs.testers.runNixOSTest {
   name = "switch-queue";
+  # The module patches switch-to-configuration with an overlay.
+  node.pkgsReadOnly = false;
 
   nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.switch ];
@@ -38,8 +41,8 @@ pkgs.testers.runNixOSTest {
       script = "echo ran >>/run/pass";
     };
 
-    # What the sweep pulls in, done in a moment and gone: queued again with
-    # its requirements, the sweep would run it once more each time.
+    # What the sweep pulls in, done in a moment and gone: it runs with each
+    # start that pulls it in, and never again while the sweep waits.
     systemd.services.prep = {
       serviceConfig.Type = "oneshot";
       script = "echo ran >>/run/prep";
@@ -48,8 +51,8 @@ pkgs.testers.runNixOSTest {
     specialisation.behind.configuration = {
       environment.etc.switch-test.text = "behind";
       systemd.services.sweep.environment.FLAVOUR = "behind";
-      # A new unit the activation waits on for a while, so the sweep's job
-      # queued again is let go again at each look meanwhile.
+      # A new unit the activation waits on for a while: still waited for,
+      # though all else waits behind the run.
       systemd.services.slow = {
         wantedBy = [ "multi-user.target" ];
         serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
@@ -87,21 +90,24 @@ pkgs.testers.runNixOSTest {
             timeout=2 * window,
         )
         assert rc == 0 and f"live: {behind}" in out, out
-        assert "sweep.service start waited behind long.service" in out, out
-        # And the target the pass is pulled in by, waiting on the pass.
-        assert "multi-user.target start waited behind long.service" in out, out
+        assert "sweep.service start waits behind long.service" in out, out
+        # And the target the pass is pulled in by, waiting on the pass, once
+        # the slow unit it also waited on is up.
+        assert "multi-user.target start waits behind long.service" in out, out
+        machine.succeed("systemctl is-active slow.service")
         assert machine.succeed("readlink -f /run/current-system").strip() == behind
         assert machine.succeed("cat /etc/switch-test") == "behind"
-        # While it waited on the slow unit, the sweep was let go again at
-        # each look, without running what it pulls in again each time.
+        # Nothing was cancelled or queued again: what the sweep pulls in ran
+        # with the sweep's start and with the target's, as in any switch,
+        # and not again at each look while the slow unit was waited on.
         ran = int(machine.succeed("wc -l </run/prep")) - preps
-        assert ran <= 3, f"prep ran {ran} times during the switch"
-        # The run goes on, and the sweep waits its turn, queued again.
+        assert ran <= 2, f"prep ran {ran} times during the switch"
+        # The run goes on, and the sweep waits its turn, still queued.
         machine.succeed("systemctl list-jobs --no-legend | grep -q 'long.service *start *running'")
         machine.succeed("systemctl list-jobs --no-legend | grep -q 'sweep.service *start *waiting'")
         machine.succeed("grep -qx base /run/sweep")
         assert "pending: " in machine.succeed("machine-switch --status")
-        machine.succeed("journalctl -t machine-switch | grep -q 'sweep.service start waited behind long.service'")
+        machine.succeed("journalctl -t nixos | grep -q 'sweep.service start waits behind long.service'")
 
     with subtest("once the run ends, the sweep restarts as the new system has it"):
         machine.succeed("systemctl stop long.service")

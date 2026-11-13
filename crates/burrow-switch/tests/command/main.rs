@@ -9,5 +9,4 @@
 
 mod confirm;
 mod machine;
-mod queue;
 mod switch;

@@ -62,14 +62,12 @@ let
     current = "/run/current-system";
     profile = "/nix/var/nix/profiles/system";
     activationLock = "/run/nixos/switch-to-configuration.lock";
-    activationLists = "/run/nixos";
     path = lib.makeBinPath [ pkgs.coreutils pkgs.util-linux config.systemd.package ];
     tools = {
       sudo = "${config.security.wrapperDir}/sudo";
       systemctl = "${config.systemd.package}/bin/systemctl";
       systemdRun = "${config.systemd.package}/bin/systemd-run";
       systemdAnalyze = "${config.systemd.package}/bin/systemd-analyze";
-      busctl = "${config.systemd.package}/bin/busctl";
       logger = "${config.systemd.package}/bin/systemd-cat";
       runuser = "${pkgs.util-linux}/bin/runuser";
       nix = "${config.nix.package}/bin/nix";
@@ -196,7 +194,7 @@ in
       at = lib.mkOption {
         type = lib.types.str;
         default = "*-*-* 05:15:00";
-        description = "Daily backstop for queued trial boots, including the two-day busy-work deadline. Idle completion events try earlier.";
+        description = "When a queued trial boot is tried each day, and the only time one queued two days or more goes whatever work is running. Idle completion events try earlier, and never over running work.";
       };
     };
   };
@@ -229,6 +227,28 @@ in
 
       environment.systemPackages = [ switchTool confirmTool ];
       burrow.tools = { switch = switchTool; confirm = confirmTool; };
+
+      # switch-to-configuration waits on every job it queues, so a unit it
+      # restarts that is ordered after a long oneshot already running (a
+      # sweep after a two-hour renovate) would hold the activation past its
+      # deadline, and the switch would revert with nothing wrong in it
+      # (burrow#811). Patched to stop waiting on jobs that wait on nothing
+      # but runs going since before the activation: they stay queued as they
+      # are and run once the run ends (held.rs says how it tells). The
+      # revert's activation is a system built with it too. The patch stops
+      # applying, and the build says so, if nixpkgs' main.rs moves under it.
+      nixpkgs.overlays = [
+        (_: prev: {
+          switch-to-configuration-ng = prev.switch-to-configuration-ng.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [ ../patches/switch-to-configuration-ng/main.patch ];
+            postPatch = (old.postPatch or "") + ''
+              cp ${../patches/switch-to-configuration-ng/held.rs} src/held.rs
+              mkdir -p src/held
+              cp ${../patches/switch-to-configuration-ng/held/tests.rs} src/held/tests.rs
+            '';
+          });
+        })
+      ];
 
       # The commit the system was built from, `-dirty` from a dirty tree:
       # `nixos-version --configuration-revision` says it, and HOST-update and
@@ -338,6 +358,17 @@ in
           RestartSec = 5;
         };
       };
+      # The daily timer's own start: the only one that may go over work
+      # running, once the trial has waited two days.
+      systemd.services."${boot}-trial-deadline" = {
+        description = "Boot a new kernel once, if one is waiting, over work running two days on";
+        after = [ "${boot}-check.service" ];
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${bootTool}/bin/${boot} trial --deadline";
+        };
+      };
       systemd.paths."${boot}-trial" = {
         wantedBy = [ "multi-user.target" ];
         pathConfig = {
@@ -347,7 +378,10 @@ in
       };
       systemd.timers."${boot}-trial" = {
         wantedBy = [ "timers.target" ];
-        timerConfig.OnCalendar = cfg.trialBoot.at;
+        timerConfig = {
+          OnCalendar = cfg.trialBoot.at;
+          Unit = "${boot}-trial-deadline.service";
+        };
       };
     })
   ]);
