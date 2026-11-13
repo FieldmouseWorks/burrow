@@ -1,6 +1,7 @@
 //! Decode terminal answers without treating intermediate Codex messages as one.
 
 use super::*;
+use crate::host_jobs::View;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader};
 
@@ -72,21 +73,23 @@ pub fn stream_names_session(stream: &Path, from: u64) -> bool {
 }
 
 pub fn answer(stream: &Path) -> String {
+    results(stream).join("\n\n")
+}
+/// Each non-empty result a turn's stream holds, in order: the pieces its
+/// answer is made of, kept apart for a view that redacts each on its own.
+pub fn results(stream: &Path) -> Vec<String> {
     let mut decoder = Decoder::default();
-    let mut answer = String::new();
+    let mut results = Vec::new();
     if let Ok(lines) = lines(stream, 0) {
         for line in lines.map_while(Result::ok) {
             if let Some(v) = decoder.line(&line)
                 && let Some(text) = v["result"].as_str().filter(|s| !s.is_empty())
             {
-                if !answer.is_empty() {
-                    answer.push_str("\n\n");
-                }
-                answer.push_str(&burrow_probe::scrub::Redactor::default().plain(text));
+                results.push(text.to_owned());
             }
         }
     }
-    answer
+    results
 }
 pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
     let mut decoder = Decoder::default();
@@ -97,7 +100,10 @@ pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
         .last()
 }
 
-pub fn stream_tail(stream: &Path) -> String {
+/// The stream's last three records. The bridge's view redacts them, reading
+/// earlier records too: the visible tail may start in the middle of an
+/// earlier secret payload.
+pub fn stream_tail(stream: &Path, view: View) -> String {
     let mut tail = VecDeque::new();
     let mut redactor = burrow_probe::scrub::Jsonl::default();
     if let Ok(file) = crate::state_reads::open(stream) {
@@ -110,13 +116,12 @@ pub fn stream_tail(stream: &Path) -> String {
                     if tail.len() == 3 {
                         tail.pop_front();
                     }
-                    // Read and redact earlier records too: the visible tail
-                    // may start in the middle of an earlier secret payload.
-                    tail.push_back(
-                        redactor
+                    tail.push_back(match view {
+                        View::Owner => line,
+                        View::Bridge => redactor
                             .line(&line)
                             .unwrap_or_else(|_| "[redacted]\n".into()),
-                    );
+                    });
                 }
             }
         }

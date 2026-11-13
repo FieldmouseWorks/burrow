@@ -591,3 +591,82 @@ fn successful_structured_commands_still_reject_invalid_documents() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("can't reach host jobs"));
     }
 }
+
+/// The owner's own commands, and the answers the host stores, posts and hands
+/// on, keep every byte: only what the bridge sends a sandboxed caller is
+/// redacted.
+#[test]
+fn only_the_bridge_view_redacts_and_the_hosts_own_answers_keep_every_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let token = format!("ghp_{}", "x".repeat(36));
+    let results = [
+        "**Token:** the App's installation token".to_owned(),
+        "The token: it's rotated hourly.".to_owned(),
+        "Set `GITHUB_TOKEN=${{ github.token }}`".to_owned(),
+        "Review found: api_key = \"unterminated\nand the rest of the answer\nmore".to_owned(),
+        format!("the next result names {token} and keeps its tail"),
+    ];
+    let job = Job::new(&cfg, "prose");
+    fs::create_dir(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.turn("1", "outcome"), format!("stopped by {token}")).unwrap();
+    let stream = job.turn("1", "jsonl");
+    fs::write(
+        &stream,
+        results
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}\n",
+                    json!({"type":"result", "result":r, "is_error":false})
+                )
+            })
+            .collect::<String>(),
+    )
+    .unwrap();
+    let answer = burrow_proj::engine::answer(&stream);
+    assert_eq!(answer, results.join("\n\n"));
+    fs::write(job.turn("1", "result"), &answer).unwrap();
+
+    // The host's own commands: no job, the host's configuration.
+    let owner = |args: &[&str]| {
+        success(
+            Command::new(&cfg.me)
+                .args(args)
+                .env("PROJ_CONFIG", &cfg.path)
+                .env("PROJ_SELF", &cfg.me)
+                .env_remove("PROJ_JOB")
+                .env_remove("PROJ_HOST_JOBS_SOCKET")
+                .env_remove("PROJ_PROBE_SOCKET")
+                .output()
+                .unwrap(),
+        )
+    };
+    let log = owner(&["log", "prose"]);
+    assert!(log.starts_with(&format!("{answer}\n")), "{log}");
+    assert!(log.contains(&format!("stopped by {token}")), "{log}");
+    let state: serde_json::Value = serde_json::from_str(&owner(&["state", "--json"])).unwrap();
+    assert!(
+        state["jobs"][0]["answer"]
+            .as_str()
+            .unwrap()
+            .starts_with("**Token:** the App's installation token"),
+        "{state}"
+    );
+    assert!(owner(&["status"]).contains("**Token:** the App's"));
+
+    // The bridge redacts what it sends back, each result on its own: an
+    // unclosed quote in one can't swallow the next.
+    let caller = Job::new(&cfg, "recovery");
+    let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+    let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+    let bridged = success(cli(&cfg, Some(&socket), &["log", "prose"]));
+    assert!(!bridged.contains(&token), "{bridged}");
+    assert!(!bridged.contains("unterminated"), "{bridged}");
+    assert!(
+        bridged.contains("the next result names [redacted]"),
+        "{bridged}"
+    );
+    assert!(bridged.contains("stopped by [redacted]"), "{bridged}");
+}

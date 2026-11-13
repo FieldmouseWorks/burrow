@@ -15,6 +15,25 @@ const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 // JSON escaping can expand each output byte sixfold.
 const MAX_RESPONSE: u64 = (MAX_OUTPUT * 12 + 1024) as u64;
 
+/// Who a job view is rendered for. The owner's own commands, and everything
+/// the host stores, posts or hands on, keep every byte; only what the bridge
+/// sends back to a sandboxed caller is redacted, field by field, before any
+/// truncation or joining could hide a secret's boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Owner,
+    Bridge,
+}
+impl View {
+    /// One independent piece of text, as this view shows it.
+    pub(crate) fn plain(self, text: &str) -> String {
+        match self {
+            View::Owner => text.to_owned(),
+            View::Bridge => burrow_probe::scrub::Redactor::default().plain(text),
+        }
+    }
+}
+
 pub(crate) fn socket(cfg: &Config, job: &Job, n: &str) -> PathBuf {
     scratch::dir(cfg, job.id).join(format!("host-jobs-{n}.sock"))
 }
@@ -125,14 +144,10 @@ pub(crate) fn answer(cfg: &Config, request: &str) -> String {
         validate(&args)?;
         let mut command = Command::new(&cfg.me);
         command
-            // A machinery continuation is not an owner's answer. Retain
-            // open questions just as the watchdog's native reply does.
-            .arg(if args[0] == "reply" {
-                "_host-reply"
-            } else {
-                &args[0]
-            })
-            .args(&args[1..])
+            // The child renders the bridge's view: redacted, with recovery
+            // replies that retain open owner questions.
+            .arg("_host-view")
+            .args(&args)
             .env("PROJ_CONFIG", &cfg.path)
             .env("PROJ_SELF", &cfg.me)
             .env_remove("PROJ_JOB")
@@ -230,10 +245,16 @@ fn scrub_output(text: &str, output: Output) -> Result<String, String> {
     }
 }
 
-pub(crate) fn recovery_reply(cfg: &Config, args: &[String]) -> Result<String, Fail> {
-    let mut words = vec!["reply".into()];
-    words.extend_from_slice(args);
-    validate(&words).map_err(|e| Fail::new(2, e))?;
+/// `proj _host-view ARGS...`: the broker's child. The validated grammar,
+/// rendered as [`View::Bridge`].
+pub(crate) fn view(cfg: &Config, args: &[String]) -> Result<(), Fail> {
+    validate(args).map_err(|e| Fail::new(2, e))?;
+    if args[0] != "reply" {
+        return crate::cmd::dispatch_as(cfg, args, View::Bridge);
+    }
+    // A machinery continuation is not an owner's answer. Retain open
+    // questions just as the watchdog's native reply does.
+    let args = &args[1..];
     let (mut i, mut first, mut cutoff) = (0, false, None);
     while args[i].starts_with("--") {
         match args[i].as_str() {
@@ -247,7 +268,8 @@ pub(crate) fn recovery_reply(cfg: &Config, args: &[String]) -> Result<String, Fa
         i += 1;
     }
     crate::cmd::reply(cfg, &args[i], &args[i + 1], first, cutoff)?;
-    Ok(format!("{}\n", args[i]))
+    crate::cmd::put(&format!("{}\n", args[i]));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -278,12 +278,7 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       # Without --app, the user's own.
       u = proj("run web showenv")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x done", timeout=120)
-      # Check the actual environment in the saved engine result: the public
-      # log redacts credentials, so it cannot prove which token was used.
-      records = [json.loads(line) for line in machine.succeed(f"cat /data/dev/jobs/{u}/1.jsonl").splitlines()]
-      results = [record["result"] for record in records if record.get("type") == "result"]
-      assert results == ["did socket= count=0 token=mine"], results
-      assert proj(f"log {u}") == "did socket= count=0 token=[redacted]", proj(f"log {u}")
+      assert proj(f"log {u}") == "did socket= count=0 token=mine", proj(f"log {u}")
       machine.succeed("rm /home/dev/.bash_profile")
       # An App the machine hasn't, or one with a sandbox: refused.
       machine.fail("su - dev -c 'proj run --app nosuch web showenv'")
