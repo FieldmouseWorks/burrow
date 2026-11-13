@@ -163,8 +163,11 @@ on:
           can't read or one that can't tell runs the whole gate, as it runs
           without this. It also names that same gate in every result it
           attests (the predicate's `gate`), so a later push can be matched
-          to it. crates/burrow-flake-check/README.md, "Reusing an attested
-          pass", is the contract. Needs id-token write, as attesting does.
+          to it, and checks a commit of the tree alone, so its verdict is
+          the tree's: the flake's self.rev, revCount and lastModified come
+          from the tree, not the checked commit. crates/burrow-flake-check/
+          README.md, "Reusing an attested pass", is the contract. Needs
+          id-token write, as attesting does.
         type: boolean
         default: false
       gate-reuse-lookup:
@@ -344,7 +347,7 @@ jobs:
           jq -cnS --arg repository "$WORKFLOW_REPOSITORY" --arg file "$WORKFLOW_FILE" --arg commit "$commit" \
             --arg tree "$(git -C .flake-check rev-parse 'HEAD^{tree}')" --arg runner "$RUNNER_LABEL" \
             --argjson nix "$INSTALL_NIX" --argjson apart "$APART" --argjson legs "$LEGS" --arg skip "$SKIP" --argjson keep "$KEEP" \
-            '{workflow: {$repository, $file, $commit, $tree},
+            '{source: "tree", workflow: {$repository, $file, $commit, $tree},
               inputs: {$runner, "install-nix": $nix, "eval-apart": $apart, $legs,
                        "build-skip": ($skip | split(" ") | map(select(. != "")) | unique), "keep-builds": $keep}}' \
             > "$RUNNER_TEMP/gate.json"
@@ -533,10 +536,13 @@ jobs:
           key: ${{ steps.kept-wait.outputs.key }}
           fail-on-cache-miss: true
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
+      # With gate-reuse, Nix reads a commit of the tree alone, so the verdict
+      # is the tree's (crates/burrow-flake-check/src/source.rs).
       - id: gate
         if: needs.reuse.outputs.hit != 'true'
         shell: bash
         env:
+          TREE_SOURCE: ${{ inputs.gate-reuse }}
           SKIP: ${{ inputs.build-skip }}
           APART: ${{ inputs.eval-apart }}
           LEGS: ${{ inputs.legs }}

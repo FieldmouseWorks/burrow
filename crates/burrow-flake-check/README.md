@@ -94,7 +94,7 @@ sorted:
 
 ```json
 {"inputs":{"build-skip":["agents"],"eval-apart":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
- "workflow":{"commit":"<sha>","file":".github/workflows/flake-check.yml","repository":"FieldmouseWorks/burrow","tree":"<tree of that commit>"}}
+ "source":"tree","workflow":{"commit":"<sha>","file":".github/workflows/flake-check.yml","repository":"FieldmouseWorks/burrow","tree":"<tree of that commit>"}}
 ```
 
 `workflow` is this workflow (`job.workflow_*`), `inputs` its inputs that
@@ -135,12 +135,15 @@ commit. burrow's own main push runs the workflow at the pushed commit, which
 no earlier run used, so only the tree can match it. `run` names the run
 whose evidence it is (`/attempts/N` or `/job/N` may follow).
 
-Equal trees are the whole match for the checked source, as Conary's rule
-that evidence is about the tree it ran on says (its DESIGN, section 4.3,
-rule 3): a landing is always a new commit, so nothing could be reused
-otherwise. A check that reads the source's commit metadata (the flake's
-`self.rev`, `revCount` or `lastModified`) saw the commit the pass was
-attested on, not the push's.
+Equal trees are the whole match for the checked source, so with
+gate-reuse on, the gate makes its verdict the tree's (`src/source.rs`):
+while it evaluates and builds, in either mode, HEAD is a commit of the tree
+alone, with no parents and fixed authors and dates, and is put back after.
+Everything Nix reads of the commit (`self.rev`, `shortRev`, `revCount`,
+`lastModified`) is then the same for every checkout of the tree, whichever
+commit it was and however much history it fetched, on the run that attests
+and on the push that asks alike. A flake reads a `revCount` of 1 and a
+`lastModified` of 1 then. The gate says `"source": "tree"`.
 
 Only a hit, read whole, for this request (its `query`), naming a run of this
 repository on this server, skips the gate: the job named check (the gate

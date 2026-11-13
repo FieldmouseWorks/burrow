@@ -176,6 +176,77 @@ fn a_clean_checkout_is_its_commit() {
     assert!(r.build().contains(&format!("-meta-{rev}.drv^*")), "{rev}");
 }
 
+/// gate-reuse: Nix reads a commit of the tree alone, so one tree is checked
+/// as one source whatever commit has it, with however much history: another
+/// commit of it (later, with a parent) builds the very derivations the first
+/// did, in both evaluation modes, where without it the commit's own
+/// metadata makes them others. And HEAD is put back after, branch and all.
+#[test]
+fn with_gate_reuse_a_tree_is_checked_as_its_tree_alone() {
+    let g = Gate::new();
+    let d = g.flake(
+        r#"{
+      checks.${system}.meta = drv "meta-${self.shortRev}-${toString self.revCount}-${toString self.lastModified}";
+    }"#,
+    );
+    for whole in [false, true] {
+        let build = |source: bool| {
+            let r = g.run(
+                &d,
+                Run {
+                    whole,
+                    env: &[("TREE_SOURCE", if source { "true" } else { "false" })],
+                    ..Run::default()
+                },
+            );
+            assert_eq!(r.code, 0, "{}", r.out);
+            // The derivation it built, not where it linked it.
+            r.build()
+                .split_whitespace()
+                .find(|a| a.ends_with(".drv^*"))
+                .expect("a derivation")
+                .to_owned()
+        };
+        let (first, first_as_is) = (build(true), build(false));
+        let before = g.s.git(&d, &["rev-parse", "HEAD"]);
+        g.s.git(&d, &["commit", "-q", "--allow-empty", "-m", "again"]);
+        let again = g.s.git(&d, &["rev-parse", "HEAD"]);
+        assert_ne!(before, again);
+        assert_eq!(build(true), first, "whole {whole}");
+        assert_ne!(
+            build(false),
+            first_as_is,
+            "whole {whole}: the test can't tell"
+        );
+        assert!(
+            first.contains("-meta-") && first.contains("-1-1.drv"),
+            "{first}"
+        );
+        assert_eq!(g.s.git(&d, &["rev-parse", "HEAD"]), again);
+        assert_eq!(g.s.git(&d, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+    }
+    // A detached HEAD is put back detached.
+    let at = g.s.git(&d, &["rev-parse", "HEAD"]);
+    g.s.git(&d, &["checkout", "-q", "--detach"]);
+    let r = g.run(
+        &d,
+        Run {
+            env: &[("TREE_SOURCE", "true")],
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(g.s.git(&d, &["rev-parse", "HEAD"]), at);
+    assert!(
+        g.s.command("git")
+            .args(["-C", d.to_str().unwrap(), "symbolic-ref", "-q", "HEAD"])
+            .status()
+            .unwrap()
+            .code()
+            == Some(1)
+    );
+}
+
 /// The plan is as pure as the evaluations: the runner's environment hides no
 /// check.
 #[test]

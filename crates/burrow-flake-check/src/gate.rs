@@ -326,6 +326,12 @@ fn check(mode: Mode) -> Result<bool> {
             "legs need eval-apart: without it, the gate is one nix flake check, which can't be split",
         ));
     }
+    // gate-reuse: Nix reads the commit of the tree alone (source.rs).
+    let _source = if var("TREE_SOURCE") == "true" {
+        Some(super::source::TreeSource::enter()?)
+    } else {
+        None
+    };
     if var("APART") == "true" {
         apart(&var("SKIP"), legs, leg, mode)
     } else {

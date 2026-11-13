@@ -9,6 +9,7 @@ mod negative;
 mod plan;
 mod reuse;
 mod snapshot;
+mod source;
 
 use std::{
     env, fs,

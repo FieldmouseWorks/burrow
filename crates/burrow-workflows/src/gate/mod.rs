@@ -469,7 +469,7 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
     assert_eq!(
         s["env"],
         crate::harness::yaml(
-            "{APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
+            "{TREE_SOURCE: '${{ inputs.gate-reuse }}', APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
              LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}', \
              TOOLS: '${{ github.workspace }}/.flake-check/.github/flake-check'}"
         )

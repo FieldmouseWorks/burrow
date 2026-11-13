@@ -424,7 +424,7 @@ fn the_identity_is_the_workflows_commit_and_the_inputs_that_change_a_result() {
     assert_eq!(
         gate.as_deref().unwrap(),
         format!(
-            "{{\"inputs\":{{\"build-skip\":[\"a\",\"agents\",\"b\"],\"eval-apart\":true,\"install-nix\":true,\"keep-builds\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\
+            "{{\"inputs\":{{\"build-skip\":[\"a\",\"agents\",\"b\"],\"eval-apart\":true,\"install-nix\":true,\"keep-builds\":true,\"legs\":4,\"runner\":\"ubuntu-latest\"}},\"source\":\"tree\",\
              \"workflow\":{{\"commit\":\"{sha}\",\"file\":\".github/workflows/flake-check.yml\",\"repository\":\"FieldmouseWorks/burrow\",\"tree\":\"{tree}\"}}}}\n"
         )
     );
