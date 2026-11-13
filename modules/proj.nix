@@ -153,6 +153,13 @@ let
     exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj "$@"
   '';
 
+  # Reconciliation can wait for another reader or a large retained queue.
+  # Activation waits only for exec, never for that background work to drain.
+  policyService = {
+    Type = "exec";
+    ExecStart = "${proj}/bin/proj _policy";
+  };
+
   # proj-inbox, with the same config, whose inbox part is its own. The turns
   # it starts are proj's (PROJ_SELF), as if a job's Claude had run proj.
   inbox = pkgs.writeShellScriptBin "proj-inbox" ''
@@ -562,11 +569,8 @@ in
       burrow-settings-reconcile = {
         description = "Vacate and restore repository work from live settings";
         restartIfChanged = false;
-        serviceConfig = {
-          Type = "oneshot";
+        serviceConfig = policyService // {
           User = user;
-          ExecStart = "${proj}/bin/proj _policy";
-          TimeoutStartSec = "2min";
           Restart = "on-failure";
           RestartSec = "2s";
         };
@@ -607,7 +611,7 @@ in
       description = "Reconcile repository work when admission capacity changes";
       restartIfChanged = false;
       unitConfig.ConditionUser = user;
-      serviceConfig = { Type = "oneshot"; ExecStart = "${proj}/bin/proj _policy"; TimeoutStartSec = "2min"; };
+      serviceConfig = policyService;
     };
     systemd.user.services."proj-ended@" = {
       description = "The end of a turn of proj job %I";
@@ -713,6 +717,14 @@ in
       wake = enginesWake;
       gap = 2;
     };
+
+    # Written beside the wake file by a pass GitHub's rate limit holds off
+    # (burrow-github's deferred); one deferred past its grace is a stall.
+    burrow.watchdog.sources.engines-door = {
+      file = "${lib.removeSuffix ".json" enginesWake}.watch.json";
+      about = "The engines door";
+      look = "journalctl -u burrow-engines-door: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Requests wait meanwhile; cut the other consumers' calls on the installation.";
+    };
     systemd.tmpfiles.rules = [
       "d ${stateDir}/proj-engines 0700 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/engines-door 0755 ${user} ${config.users.users.${user}.group} -"
@@ -724,6 +736,7 @@ in
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = enginesWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
         User = user;

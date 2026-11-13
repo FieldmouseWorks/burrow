@@ -33,6 +33,10 @@ struct Receipt {
     /// The answer is the deadline's reversible default, not a person's.
     #[serde(default)]
     deadline: bool,
+    /// What the job awaited closed and settled the question, as said: "o/r#5
+    /// was merged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    awaited: Option<String>,
     accepted: bool,
     // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
     applied: bool,
@@ -207,23 +211,58 @@ pub(crate) fn acceptance_pending(job: &Job) -> Result<bool, String> {
     Ok(!r.accepted && !r.applied)
 }
 
+/// What a resume says of the job's open question.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Answer {
+    /// Nothing: an automatic update, which keeps the question open.
+    Update,
+    /// A person answered it.
+    Person,
+    /// The deadline's reversible default answered it.
+    Deadline,
+    /// What the job awaited closed ("o/r#5 was merged"). That settles a
+    /// reversible question: the job hears why and asks again if it still
+    /// needs to. A one-way question stays open for a person, so for it this
+    /// is an [`Answer::Update`].
+    Closed(String),
+}
+
 pub(crate) struct Resume {
     path: PathBuf,
     before: Option<String>,
     receipt: PathBuf,
     job_dir: PathBuf,
     asking: bool,
+    awaited: Option<String>,
     committed: bool,
 }
 
 impl Resume {
     #[cfg(test)]
     pub(crate) fn prepare(job: &Job, answered: bool) -> Result<Self, String> {
-        Self::prepare_as(job, answered, false)
+        Self::prepare_as(
+            job,
+            if answered {
+                Answer::Person
+            } else {
+                Answer::Update
+            },
+        )
     }
 
-    pub(crate) fn prepare_as(job: &Job, answered: bool, deadline: bool) -> Result<Self, String> {
+    pub(crate) fn prepare_as(job: &Job, answer: Answer) -> Result<Self, String> {
         recover(job)?;
+        // An unreadable question is an error, not a one-way one: the resume
+        // is retried rather than kept as an update that leaves it open.
+        let answer = match answer {
+            Answer::Closed(_)
+                if !crate::ask::load(job)?.is_some_and(|q| !q.recommendation.one_way) =>
+            {
+                Answer::Update
+            }
+            answer => answer,
+        };
+        let answered = answer != Answer::Update;
         if !answered && crate::ask::host_path(job, "question-needs-owner").exists() {
             return Err("the one-way question is still waiting for a person's answer; machine news cannot resume this completed job".into());
         }
@@ -254,7 +293,11 @@ impl Resume {
                 through,
                 answered,
                 clear: !asking,
-                deadline: answered && deadline,
+                deadline: answer == Answer::Deadline,
+                awaited: match &answer {
+                    Answer::Closed(what) => Some(what.clone()),
+                    _ => None,
+                },
                 accepted: false,
                 applied: false,
                 question: if asking {
@@ -270,6 +313,10 @@ impl Resume {
             receipt,
             job_dir: job.dir.clone(),
             asking,
+            awaited: match answer {
+                Answer::Closed(what) => Some(what),
+                _ => None,
+            },
             committed: false,
         };
         if asking {
@@ -281,6 +328,10 @@ impl Resume {
     pub(crate) fn prompt(&self, msg: &str) -> String {
         if self.asking {
             format!("{msg}\n\n{OPEN_UPDATE}")
+        } else if let Some(what) = &self.awaited {
+            format!(
+                "{msg}\n\nYour open question is closed: what you awaited closed ({what}), so it no longer waits for an answer. If it still needs one, ask it again in full and run `proj ask --default \"TEXT\" [--one-way]`."
+            )
         } else {
             msg.to_owned()
         }
@@ -435,6 +486,17 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
         })
         .min_by_key(|(n, _)| *n);
     match answer {
+        Some((
+            _,
+            Receipt {
+                awaited: Some(what),
+                ..
+            },
+        )) => {
+            format!(
+                "Closed: what the job awaited closed ({what}), so the question no longer waits."
+            )
+        }
         Some((_, r)) if r.deadline => {
             "Closed: no answer came by the deadline, so the job took its reversible default.".into()
         }

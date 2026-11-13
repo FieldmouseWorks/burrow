@@ -157,6 +157,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
@@ -456,6 +457,14 @@ in
       wake = doorWake;
       gap = 2;
     };
+
+    # Written beside the wake file by a pass GitHub's rate limit holds off
+    # (burrow-github's deferred); one deferred past its grace is a stall.
+    burrow.watchdog.sources.ledger-door = lib.mkIf cfg.door.enable {
+      file = "${lib.removeSuffix ".json" doorWake}.watch.json";
+      about = "The ledger door";
+      look = "journalctl -u burrow-ledger-door: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Requests wait meanwhile; cut the other consumers' calls on the installation.";
+    };
     burrow.claude.machineMd = lib.mkIf cfg.door.enable (lib.mkOrder 703 ''
       An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
       `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.door.authors)}), its body one line:
@@ -499,6 +508,7 @@ in
         path = [ cfg.gh ];
         environment.GH_NO_UPDATE_NOTIFIER = "1";
         environment.BURROW_DOOR_WAKE = doorWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
         serviceConfig = {
           Type = "oneshot";
           # burrow.user, whose key signs the ledger's ops; cn takes the

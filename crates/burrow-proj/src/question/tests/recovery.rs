@@ -55,6 +55,7 @@ fn watcher_recovers_before_expiry_and_owner_wait_at_every_cleanup_prefix() {
                     &receipt_path(&f.job(), "2"),
                     &Receipt {
                         deadline: false,
+                        awaited: None,
                         through: 1,
                         answered: true,
                         clear: true,

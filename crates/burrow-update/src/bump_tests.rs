@@ -165,7 +165,7 @@ fn a_bump_says_what_moved_and_is_committed() {
     assert_eq!(
         m.work(&["log", "-1", "--format=%B"]),
         format!(
-            "deps: update {moved}\n\nPushed by box-update after the build, the VM tests and the health check passed."
+            "deps: update {moved}\n\nPushed by box-update after the build and the VM tests passed."
         )
     );
     assert_eq!(m.work(&["rev-parse", "HEAD~1"]), base);

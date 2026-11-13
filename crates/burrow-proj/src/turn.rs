@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::engine::{self, Engine, LONG, NEXT, Said, answer, is_error};
 use crate::job::{Job, USAGE_LIMIT, kick};
 use crate::pick::{Class, demoted};
+use crate::question::Answer;
 use crate::waits::{rewatch, rewatch_later, waiting};
 use crate::{
     Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, systemd, usage,
@@ -29,12 +30,18 @@ pub(crate) const SPENT: &str = "Your last run was refused before it finished: Cl
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false, false, None)
+    start_with(cfg, id, msg, first, Answer::Update, None)
+}
+
+/// News that what the job awaited closed: that settles a reversible open
+/// question ([`Answer::Closed`]), whose receipt carries `what` as its cause.
+pub(crate) fn start_closed(cfg: &Config, id: &str, msg: &str, what: String) -> Result<(), String> {
+    start_with(cfg, id, msg, false, Answer::Closed(what), None)
 }
 
 /// An explicit operator or authorized human issue reply answers the question.
 pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
-    start_with(cfg, id, msg, first, true, false, None)
+    start_with(cfg, id, msg, first, Answer::Person, None)
 }
 
 /// The deadline's reversible default answers the question: the launch's
@@ -45,7 +52,7 @@ pub(crate) fn start_default(
     msg: &str,
     capacity: &crate::inbox::resumption::Resume,
 ) -> Result<(), String> {
-    start_with(cfg, id, msg, false, true, true, Some(capacity))
+    start_with(cfg, id, msg, false, Answer::Deadline, Some(capacity))
 }
 
 /// Restoration already owns the serialized inbox admission permit.
@@ -56,7 +63,7 @@ pub(crate) fn start_admitted(
     first: bool,
     permit: &crate::inbox::resumption::Resume,
 ) -> Result<(), String> {
-    start_with(cfg, id, msg, first, false, false, Some(permit))
+    start_with(cfg, id, msg, first, Answer::Update, Some(permit))
 }
 
 /// A failed write may leave a truncated file. Never leave that prompt in
@@ -74,8 +81,7 @@ fn start_with(
     id: &str,
     msg: &str,
     first: bool,
-    answered: bool,
-    deadline: bool,
+    answer: Answer,
     permit: Option<&crate::inbox::resumption::Resume>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
@@ -115,7 +121,7 @@ fn start_with(
     };
     job.quarantine_unstarted(last)
         .map_err(|e| format!("proj: quarantine unstarted turns: {e}"))?;
-    let question = crate::question::Resume::prepare_as(&job, answered, deadline)?;
+    let question = crate::question::Resume::prepare_as(&job, answer)?;
     let msg = question.prompt(msg);
     let n = last + 1;
     // The last turn's waits are the new turn's to clear (exec), so a turn
