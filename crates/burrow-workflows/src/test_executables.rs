@@ -34,10 +34,13 @@ struct Guard {
     installed: BTreeSet<(PathBuf, String)>,
     /// Each file's plain writes, by the name of the path written.
     written: BTreeSet<(PathBuf, String)>,
-    /// The current function's locals, by the name of the path each holds.
+    /// The current function's locals, by the names of the paths each may hold.
     lets: Lets,
-    /// What each name a `use` brought into scope stands for.
-    uses: BTreeMap<String, Vec<String>>,
+    /// How many conditional or deferred bodies (branches, loops, closures,
+    /// macros) the visit is inside, counted from the current function.
+    maybe: usize,
+    /// What the `use` items in scope bring in.
+    uses: Imports,
 }
 
 impl Guard {
@@ -50,7 +53,8 @@ impl Guard {
             installed: BTreeSet::new(),
             written: BTreeSet::new(),
             lets: Lets::default(),
-            uses: BTreeMap::new(),
+            maybe: 0,
+            uses: Imports::default(),
         }
     }
 
@@ -168,10 +172,21 @@ impl<'ast> Visit<'ast> for Guard {
         self.uses = old;
     }
 
+    /// A `let ... else` block diverges, so what it assigns may never be seen.
     fn visit_local(&mut self, l: &'ast syn::Local) {
-        visit::visit_local(self, l);
-        let named = l.init.as_ref().and_then(|i| name(&i.expr, &self.lets));
-        self.lets.bind(&l.pat, named);
+        self.visit_pat(&l.pat);
+        if let Some(init) = &l.init {
+            self.visit_expr(&init.expr);
+            if let Some((_, diverge)) = &init.diverge {
+                self.maybe(|g| g.visit_expr(diverge));
+            }
+        }
+        let named = l
+            .init
+            .as_ref()
+            .map(|i| name(&i.expr, &self.lets))
+            .unwrap_or_default();
+        self.lets.bind(&l.pat, named, self.maybe);
     }
 
     fn visit_expr_assign(&mut self, e: &'ast syn::ExprAssign) {
@@ -180,46 +195,87 @@ impl<'ast> Visit<'ast> for Guard {
             && let Some(local) = p.path.get_ident()
         {
             let named = name(&e.right, &self.lets);
-            self.lets.assign(&local.to_string(), named);
+            self.lets.assign(&local.to_string(), named, self.maybe);
         }
     }
 
     fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
         self.scope(|g| {
-            for input in &c.inputs {
-                g.lets.bind(input, None);
-            }
-            visit::visit_expr_closure(g, c);
+            g.maybe(|g| {
+                for input in &c.inputs {
+                    g.lets.bind(input, BTreeSet::new(), g.maybe);
+                }
+                visit::visit_expr_closure(g, c);
+            })
         });
+    }
+
+    fn visit_expr_async(&mut self, e: &'ast syn::ExprAsync) {
+        self.maybe(|g| visit::visit_expr_async(g, e));
     }
 
     fn visit_arm(&mut self, a: &'ast syn::Arm) {
         self.scope(|g| {
-            g.lets.bind(&a.pat, None);
-            visit::visit_arm(g, a);
+            g.maybe(|g| {
+                g.lets.bind(&a.pat, BTreeSet::new(), g.maybe);
+                visit::visit_arm(g, a);
+            })
         });
     }
 
     fn visit_expr_for_loop(&mut self, f: &'ast syn::ExprForLoop) {
         self.visit_expr(&f.expr);
         self.scope(|g| {
-            g.lets.bind(&f.pat, None);
-            g.visit_block(&f.body);
+            g.maybe(|g| {
+                g.lets.bind(&f.pat, BTreeSet::new(), g.maybe);
+                g.visit_block(&f.body);
+            })
         });
+    }
+
+    fn visit_expr_loop(&mut self, e: &'ast syn::ExprLoop) {
+        self.maybe(|g| visit::visit_expr_loop(g, e));
+    }
+
+    /// A labeled block can be left before its end.
+    fn visit_expr_block(&mut self, e: &'ast syn::ExprBlock) {
+        if e.label.is_some() {
+            self.maybe(|g| visit::visit_expr_block(g, e));
+        } else {
+            visit::visit_expr_block(self, e);
+        }
+    }
+
+    fn visit_expr_binary(&mut self, e: &'ast syn::ExprBinary) {
+        self.visit_expr(&e.left);
+        if matches!(e.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) {
+            self.maybe(|g| g.visit_expr(&e.right));
+        } else {
+            self.visit_expr(&e.right);
+        }
     }
 
     /// `if let` and `while let` bind for the rest of their condition and body.
     fn visit_expr_let(&mut self, e: &'ast syn::ExprLet) {
         visit::visit_expr_let(self, e);
-        self.lets.bind(&e.pat, None);
+        self.lets.bind(&e.pat, BTreeSet::new(), self.maybe);
     }
 
+    /// The condition's bindings reach its body but not its `else`.
     fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
-        self.scope(|g| visit::visit_expr_if(g, e));
+        self.maybe(|g| {
+            g.scope(|g| {
+                g.visit_expr(&e.cond);
+                g.visit_block(&e.then_branch);
+            });
+            if let Some((_, otherwise)) = &e.else_branch {
+                g.visit_expr(otherwise);
+            }
+        });
     }
 
     fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
-        self.scope(|g| visit::visit_expr_while(g, e));
+        self.scope(|g| g.maybe(|g| visit::visit_expr_while(g, e)));
     }
 
     fn visit_path(&mut self, p: &'ast syn::Path) {
@@ -267,13 +323,18 @@ impl<'ast> Visit<'ast> for Guard {
             let names = self.resolve(&p.path);
             let writer = names.ends_with(&["fs".into(), "write".into()])
                 || names.ends_with(&["File".into(), "create".into()]);
-            if self.testing
-                && let Some(path) = e.args.first().and_then(|p| name(p, &self.lets))
-            {
-                if names.last().is_some_and(|n| n == "executable") {
-                    self.installed.insert((self.file.clone(), path));
-                } else if writer {
-                    self.written.insert((self.file.clone(), path));
+            if self.testing {
+                let paths = e
+                    .args
+                    .first()
+                    .map(|p| name(p, &self.lets))
+                    .unwrap_or_default();
+                for path in paths {
+                    if names.last().is_some_and(|n| n == "executable") {
+                        self.installed.insert((self.file.clone(), path));
+                    } else if writer {
+                        self.written.insert((self.file.clone(), path));
+                    }
                 }
             }
             if writer && e.args.iter().nth(1).is_some_and(script) {
@@ -296,28 +357,48 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     /// A macro's arguments are tokens to syn: where they parse as Rust,
-    /// every check sees them as if written outside it.
+    /// every check sees them as if written outside it. A macro may not run
+    /// them all (`debug_assert!`), so what they assign may never be seen.
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
         self.tokens(
             m.tokens.clone(),
             m.path.is_ident("format") || m.path.is_ident("concat"),
         );
         self.scope(|g| {
-            if let Ok(args) = m.parse_body_with(
-                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
-            ) {
-                for arg in &args {
-                    match arg {
-                        // A named format argument, `name = value`, assigns nothing.
-                        syn::Expr::Assign(a) => g.visit_expr(&a.right),
-                        _ => g.visit_expr(arg),
+            g.maybe(|g| {
+                if let Ok(args) = m.parse_body_with(
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                ) {
+                    let mut formatting = false;
+                    for arg in &args {
+                        match arg {
+                            // After a format string, `name = value` names an
+                            // argument and assigns nothing.
+                            syn::Expr::Assign(a) if formatting && local(&a.left) => {
+                                g.visit_expr(&a.right)
+                            }
+                            _ => g.visit_expr(arg),
+                        }
+                        formatting |= matches!(
+                            arg,
+                            syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(_),
+                                ..
+                            })
+                        );
                     }
+                } else if let Ok(stmts) = m.parse_body_with(syn::Block::parse_within) {
+                    let uses = g.uses.clone();
+                    g.import(stmts.iter().filter_map(|s| match s {
+                        syn::Stmt::Item(i) => Some(i),
+                        _ => None,
+                    }));
+                    for stmt in &stmts {
+                        g.visit_stmt(stmt);
+                    }
+                    g.uses = uses;
                 }
-            } else if let Ok(stmts) = m.parse_body_with(syn::Block::parse_within) {
-                for stmt in &stmts {
-                    g.visit_stmt(stmt);
-                }
-            }
+            })
         });
         visit::visit_macro(self, m);
     }
@@ -368,19 +449,28 @@ impl Guard {
         self.lets.0.pop();
     }
 
+    /// Runs `visit` as code that may not run, or may run later: what it
+    /// assigns to an outer local adds to what that local may hold.
+    fn maybe(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.maybe += 1;
+        visit(self);
+        self.maybe -= 1;
+    }
+
     /// A function sees none of its caller's locals, and its parameters name
     /// nothing.
     fn function(&mut self, sig: &syn::Signature, visit: impl FnOnce(&mut Self)) {
-        let old = std::mem::take(&mut self.lets);
+        let old = (std::mem::take(&mut self.lets), self.maybe);
+        self.maybe = 0;
         self.scope(|g| {
             for input in &sig.inputs {
                 if let syn::FnArg::Typed(t) = input {
-                    g.lets.bind(&t.pat, None);
+                    g.lets.bind(&t.pat, BTreeSet::new(), 0);
                 }
             }
             visit(g);
         });
-        self.lets = old;
+        (self.lets, self.maybe) = old;
     }
 
     /// Records what the `use` items among `items` bring into scope. A child
@@ -394,14 +484,6 @@ impl Guard {
     }
 
     fn import_tree(&mut self, tree: &syn::UseTree, mut prefix: Vec<String>) {
-        // A `use` may start from a name an earlier one brought in.
-        let mut alias = |name: String, path: Vec<String>| {
-            let path = match path.first().and_then(|head| self.uses.get(head)) {
-                Some(full) => full.iter().chain(&path[1..]).cloned().collect(),
-                None => path,
-            };
-            self.uses.insert(name, path);
-        };
         match tree {
             syn::UseTree::Path(p) => {
                 prefix.push(p.ident.to_string());
@@ -409,31 +491,20 @@ impl Guard {
             }
             syn::UseTree::Name(n) if n.ident == "self" => {
                 if let Some(last) = prefix.last().cloned() {
-                    alias(last, prefix);
+                    self.uses.names.insert(last, prefix);
                 }
             }
             syn::UseTree::Name(n) => {
                 prefix.push(n.ident.to_string());
-                alias(n.ident.to_string(), prefix);
+                self.uses.names.insert(n.ident.to_string(), prefix);
             }
             syn::UseTree::Rename(r) => {
                 if r.ident != "self" {
                     prefix.push(r.ident.to_string());
                 }
-                alias(r.rename.to_string(), prefix);
+                self.uses.names.insert(r.rename.to_string(), prefix);
             }
-            syn::UseTree::Glob(_) => {
-                let names: &[&str] = match prefix.last().map(String::as_str) {
-                    Some("fs") => &["write", "File"],
-                    Some("burrow_test") => &["executable"],
-                    _ => &[],
-                };
-                for name in names {
-                    let mut path = prefix.clone();
-                    path.push(name.to_string());
-                    alias(name.to_string(), path);
-                }
-            }
+            syn::UseTree::Glob(_) => self.uses.globs.push(prefix),
             syn::UseTree::Group(g) => {
                 for tree in &g.items {
                     self.import_tree(tree, prefix.clone());
@@ -442,14 +513,13 @@ impl Guard {
         }
     }
 
-    /// A path's segments, with a head that a `use` brought in spelled out.
+    /// A path's segments, spelled out through the imports in scope.
     fn resolve(&self, path: &syn::Path) -> Vec<String> {
         let names: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        match names.first().and_then(|head| self.uses.get(head)) {
-            Some(full) if path.leading_colon.is_none() => {
-                full.iter().chain(&names[1..]).cloned().collect()
-            }
-            _ => names,
+        if path.leading_colon.is_some() {
+            names
+        } else {
+            self.uses.resolve(names, true)
         }
     }
 
@@ -460,25 +530,86 @@ impl Guard {
     }
 }
 
-/// The locals in scope, innermost scope last: the name of the path each
-/// holds, or `None` for one that holds something else, which hides any outer
-/// local of its name.
+/// The `use` items in scope, kept as written: a `use` may start from a name
+/// another brings in, declared before or after it.
+#[derive(Clone, Default)]
+struct Imports {
+    /// What each name brought in stands for.
+    names: BTreeMap<String, Vec<String>>,
+    /// The paths a `use ...::*` brings everything in from.
+    globs: Vec<Vec<String>>,
+}
+
+impl Imports {
+    /// `path` with its head replaced by what it stands for, until the head
+    /// is nothing brought in. `self::`, `super::` and `crate::` reach the
+    /// imports in scope, since a module keeps its parent's.
+    fn resolve(&self, mut path: Vec<String>, globs: bool) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        loop {
+            while path.len() > 1 && matches!(path[0].as_str(), "self" | "super" | "crate") {
+                path.remove(0);
+            }
+            let Some(head) = path.first().cloned() else {
+                return path;
+            };
+            if !seen.insert(head.clone()) {
+                return path;
+            }
+            let full = match self.names.get(&head) {
+                Some(full) => full.clone(),
+                None if globs => match self.glob(&head) {
+                    Some(full) => full,
+                    None => return path,
+                },
+                None => return path,
+            };
+            path.splice(0..1, full);
+        }
+    }
+
+    /// What a glob brings in under `name`, for the writers and the installer.
+    fn glob(&self, name: &str) -> Option<Vec<String>> {
+        let module = match name {
+            "write" | "File" => "fs",
+            "executable" => "burrow_test",
+            _ => return None,
+        };
+        self.globs.iter().find_map(|prefix| {
+            let mut full = self.resolve(prefix.clone(), false);
+            (full.last().map(String::as_str) == Some(module)).then(|| {
+                full.push(name.into());
+                full
+            })
+        })
+    }
+}
+
+/// What a local holds, as far as the guard can tell: the names of the paths
+/// it may hold (none known for anything else, which hides any outer local of
+/// its name), and how many conditional bodies deep it was bound.
+struct Held {
+    names: BTreeSet<String>,
+    maybe: usize,
+}
+
+/// The locals in scope, innermost scope last.
 #[derive(Default)]
-struct Lets(Vec<BTreeMap<String, Option<String>>>);
+struct Lets(Vec<BTreeMap<String, Held>>);
 
 impl Lets {
-    fn get(&self, local: &str) -> Option<String> {
+    fn get(&self, local: &str) -> BTreeSet<String> {
         self.0
             .iter()
             .rev()
             .find_map(|s| s.get(local))
-            .cloned()
-            .flatten()
+            .map(|h| h.names.clone())
+            .unwrap_or_default()
     }
 
     /// A pattern binds a single local to `named`; any other binds each of
     /// its locals to nothing known.
-    fn bind(&mut self, pat: &syn::Pat, named: Option<String>) {
+    fn bind(&mut self, pat: &syn::Pat, named: BTreeSet<String>, maybe: usize) {
         let mut locals = Vec::new();
         bound(pat, &mut locals);
         let single = match pat {
@@ -491,15 +622,25 @@ impl Lets {
         }
         let scope = self.0.last_mut().unwrap();
         for local in locals {
-            scope.insert(local, if single { named.clone() } else { None });
+            let names = if single {
+                named.clone()
+            } else {
+                BTreeSet::new()
+            };
+            scope.insert(local, Held { names, maybe });
         }
     }
 
     /// An assignment changes the innermost local of its name, wherever it
-    /// was bound.
-    fn assign(&mut self, local: &str, named: Option<String>) {
+    /// was bound. Where it may not run, the local may still hold what it
+    /// did, so the new names add to the old.
+    fn assign(&mut self, local: &str, named: BTreeSet<String>, maybe: usize) {
         if let Some(held) = self.0.iter_mut().rev().find_map(|s| s.get_mut(local)) {
-            *held = named;
+            if held.maybe == maybe {
+                held.names = named;
+            } else {
+                held.names.extend(named);
+            }
         }
     }
 }
@@ -525,26 +666,41 @@ fn bound(pat: &syn::Pat, locals: &mut Vec<String>) {
     }
 }
 
-/// The name an expression gives the path it builds: the last file name a
+/// Whether an expression is a bare local's name.
+fn local(e: &syn::Expr) -> bool {
+    matches!(e, syn::Expr::Path(p) if p.path.get_ident().is_some())
+}
+
+/// The names an expression gives the path it builds: the last file name a
 /// `join` or literal spells, else the field that holds it, or what the local
-/// holding it was bound to, seen through borrows and conversions. `None` when
-/// it's computed some other way or comes from a parameter: a helper's `path`
+/// holding it may hold, seen through borrows and conversions. None when it's
+/// computed some other way or comes from a parameter: a helper's `path`
 /// names nothing.
-fn name(e: &syn::Expr, lets: &Lets) -> Option<String> {
+fn name(e: &syn::Expr, lets: &Lets) -> BTreeSet<String> {
     match e {
         syn::Expr::Reference(r) => name(&r.expr, lets),
         syn::Expr::Paren(p) => name(&p.expr, lets),
         syn::Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(s),
             ..
-        }) => s.value().rsplit('/').next().map(String::from),
+        }) => s
+            .value()
+            .rsplit('/')
+            .next()
+            .map(String::from)
+            .into_iter()
+            .collect(),
         syn::Expr::Field(f) => match &f.member {
-            syn::Member::Named(n) => Some(n.to_string()),
-            syn::Member::Unnamed(_) => None,
+            syn::Member::Named(n) => BTreeSet::from([n.to_string()]),
+            syn::Member::Unnamed(_) => BTreeSet::new(),
         },
-        syn::Expr::Path(p) => p.path.get_ident().and_then(|i| lets.get(&i.to_string())),
+        syn::Expr::Path(p) => p
+            .path
+            .get_ident()
+            .map(|i| lets.get(&i.to_string()))
+            .unwrap_or_default(),
         syn::Expr::MethodCall(m) if m.method == "join" => {
-            m.args.first().and_then(|a| name(a, lets))
+            m.args.first().map(|a| name(a, lets)).unwrap_or_default()
         }
         syn::Expr::MethodCall(m)
             if matches!(
@@ -570,12 +726,12 @@ fn name(e: &syn::Expr, lets: &Lets) -> Option<String> {
                         matches!(s.ident.to_string().as_str(), "new" | "from")
                     }) && c.args.len() == 1 =>
                 {
-                    c.args.first().and_then(|a| name(a, lets))
+                    c.args.first().map(|a| name(a, lets)).unwrap_or_default()
                 }
-                _ => None,
+                _ => BTreeSet::new(),
             }
         }
-        _ => None,
+        _ => BTreeSet::new(),
     }
 }
 
@@ -654,173 +810,5 @@ fn check(root: &Path) -> BTreeSet<String> {
     guard.finish()
 }
 
-#[test]
-fn workspace_executables_use_the_child_installer() {
-    let root = std::env::var_os("BURROW_TEST_SOURCE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| super::harness::repo_file("crates"));
-    let findings = check(&root);
-    assert!(
-        findings.is_empty(),
-        "{}",
-        findings.into_iter().collect::<Vec<_>>().join("\n")
-    );
-}
-
-#[test]
-fn setters_cannot_bypass_the_guard() {
-    for code in [
-        "fs::set_permissions(p, Permissions::from_mode(0o755)).unwrap();",
-        "use std::fs::set_permissions as change; change(p, mode);",
-        "p.set_mode(0o755);",
-        "fs::copy(source, destination).unwrap();",
-        "use std::fs::copy as duplicate; duplicate(source, destination);",
-        "File::options().mode(0o755);",
-        "Command::new(\"chmod\").args([\"+x\", \"stand-in\"]);",
-        "Command::new(\"sh\").arg(\"chmod +x stand-in\");",
-        "wrapper!(fs::set_permissions(p, mode));",
-        "fs::write(&p, \"#!/bin/sh\\nexit 0\\n\").unwrap();",
-        "File::create(&p).unwrap().write_all(b\"#!/bin/sh\\n\").unwrap();",
-        "let gh = bin.join(\"gh\"); burrow_test::executable(&gh, GH); fs::write(&gh, OTHER).unwrap();",
-        "executable(bin.join(\"gh\"), GH); File::create(dir.path().join(\"bin/gh\")).unwrap();",
-    ] {
-        let ast = syn::parse_file(&format!("fn fixture() {{ {code} }}")).unwrap();
-        let mut guard = Guard::new("fixture.rs".into(), true);
-        guard.visit_file(&ast);
-        assert!(!guard.finish().is_empty(), "accepted: {code}");
-    }
-}
-
-/// The usage tests' notice capture (#902): the rig installs `notify`, and the
-/// test wrote its new body over it in place, keeping its mode.
-#[test]
-fn writing_over_a_stand_in_is_rejected() {
-    let rig = r##"
-        fn rig() {
-            let notify = d.path().join("notify");
-            burrow_test::executable(&notify, format!("#!/bin/sh\necho \"$1\" >>{dir}/told\n"));
-            cfg["notify"] = json!(notify);
-        }
-    "##;
-    let overwrite = r##"
-        #[test]
-        fn old_holds_are_normalized_for_status_reminders_and_extensions() {
-            fs::write(
-                cfg.notify.as_ref().unwrap(),
-                format!("#!/bin/sh\nprintf '%s' \"$4\" >'{}'\n", capture.display()),
-            )
-            .unwrap();
-        }
-    "##;
-    let found = |code: &str| {
-        let mut guard = Guard::new("usage/tests.rs".into(), true);
-        guard.visit_file(&syn::parse_file(code).unwrap());
-        guard.finish()
-    };
-    let old = found(&format!("{rig}{overwrite}"));
-    assert!(old.iter().any(|f| f.contains("script in place")), "{old:?}");
-    // Its path alone gives it away, whatever it writes.
-    let renamed = overwrite.replace("format!(\"#!", "format!(\"");
-    let renamed = found(&format!("{rig}{renamed}"));
-    assert!(
-        renamed
-            .iter()
-            .any(|f| f.contains("over the stand-in `notify`")),
-        "{renamed:?}"
-    );
-    let fixed = overwrite.replace("fs::write(", "burrow_test::executable(");
-    let fixed = fixed.replace(".unwrap();\n        }", ";\n        }");
-    assert_eq!(found(&format!("{rig}{fixed}")), BTreeSet::new());
-    // Data beside a stand-in is still written plainly.
-    let data = "#[test] fn data() { executable(bin.join(\"gh\"), GH); fs::write(bin.join(\"says\"), \"[]\").unwrap(); }";
-    assert_eq!(found(data), BTreeSet::new());
-}
-
-fn fixture_findings(code: &str) -> BTreeSet<String> {
-    let mut guard = Guard::new("fixture.rs".into(), true);
-    guard.visit_file(&syn::parse_file(code).unwrap());
-    guard.finish()
-}
-
-/// A write is no safer for sitting in a macro, coming through a `use`, or
-/// reaching its stand-in through a typed, shadowed or reassigned local.
-#[test]
-fn writes_cannot_hide_from_the_guard() {
-    for code in [
-        // Macro arguments, nested macros and statement bodies.
-        "assert!(fs::write(cfg.notify.as_ref().unwrap(), \"#!/bin/sh\\n\").is_ok());",
-        "executable(cfg.notify.as_ref().unwrap(), N); assert!(fs::write(cfg.notify.as_ref().unwrap(), OTHER).is_ok());",
-        "wrapper!(assert!(File::create(&p).unwrap().write_all(b\"#!/bin/sh\\n\").is_ok()));",
-        "executable(bin.join(\"gh\"), GH); assert!(File::create(bin.join(\"gh\")).is_ok());",
-        "assert_eq!(executable(bin.join(\"gh\"), GH), ()); fs::write(bin.join(\"gh\"), OTHER).unwrap();",
-        "wrapper! { let p = bin.join(\"gh\"); executable(&p, GH); fs::write(&p, OTHER).unwrap(); }",
-        // Direct, grouped, renamed, module and glob imports.
-        "use std::fs::write; write(&p, \"#!/bin/sh\\n\").unwrap();",
-        "use std::fs::{write as put}; put(&p, \"#!/bin/sh\\n\").unwrap();",
-        "use std::{fs::{self as files}}; files::write(&p, \"#!/bin/sh\\n\").unwrap();",
-        "use std::fs as files; use files::write as put; put(&p, \"#!/bin/sh\\n\").unwrap();",
-        "use std::fs::*; write(&p, \"#!/bin/sh\\n\").unwrap();",
-        "use std::fs::write; executable(bin.join(\"gh\"), GH); write(bin.join(\"gh\"), OTHER).unwrap();",
-        "use std::fs::File as F; executable(bin.join(\"gh\"), GH); F::create(bin.join(\"gh\")).unwrap();",
-        "use burrow_test::executable as script; script(bin.join(\"gh\"), GH); fs::write(bin.join(\"gh\"), OTHER).unwrap();",
-        "use burrow_test::{self as bt}; use bt::executable as script; script(bin.join(\"gh\"), GH); fs::write(bin.join(\"gh\"), OTHER).unwrap();",
-        // Typed bindings, outer bindings after a nested scope, reassignment.
-        "let p: PathBuf = bin.join(\"gh\"); executable(&p, GH); fs::write(&p, OTHER).unwrap();",
-        "let p = bin.join(\"gh\"); executable(&p, GH); { let p = dir.join(\"data\"); fs::write(&p, DATA).unwrap(); } fs::write(&p, OTHER).unwrap();",
-        "let mut p = dir.join(\"data\"); executable(bin.join(\"gh\"), GH); p = bin.join(\"gh\"); fs::write(&p, OTHER).unwrap();",
-        "let mut p = dir.join(\"data\"); executable(bin.join(\"gh\"), GH); { p = bin.join(\"gh\"); } fs::write(&p, OTHER).unwrap();",
-    ] {
-        let found = fixture_findings(&format!("fn fixture() {{ {code} }}"));
-        assert!(!found.is_empty(), "accepted: {code}");
-    }
-    // A test module sees its parent's imports through `use super::*`.
-    let module = "use std::fs::write as put;\nmod tests { use super::*; fn t() { put(&p, \"#!/bin/sh\\n\").unwrap(); } }";
-    assert!(!fixture_findings(module).is_empty(), "accepted: {module}");
-    let module =
-        "mod tests { use std::fs::write as put; fn t() { put(&p, \"#!/bin/sh\\n\").unwrap(); } }";
-    assert!(!fixture_findings(module).is_empty(), "accepted: {module}");
-}
-
-/// What names nothing, or names something else by the time it's written,
-/// is plain data beside a stand-in.
-#[test]
-fn data_beside_a_stand_in_is_still_written() {
-    for code in [
-        "fn install(notify: &Path) { executable(notify, N); } fn data(notify: &Path) { fs::write(notify, \"[]\").unwrap(); }",
-        "fn fixture() { let mut p = bin.join(\"gh\"); executable(&p, GH); p = bin.join(\"says\"); fs::write(&p, \"[]\").unwrap(); }",
-        "fn fixture() { let mut p = bin.join(\"gh\"); executable(&p, GH); p = helper(); fs::write(&p, \"[]\").unwrap(); }",
-        "fn fixture() { let p = bin.join(\"gh\"); executable(&p, GH); { let p = helper(); fs::write(&p, \"[]\").unwrap(); } }",
-        "fn fixture() { let p = bin.join(\"gh\"); executable(&p, GH); let (p, _) = (helper(), 0); fs::write(&p, \"[]\").unwrap(); }",
-        "fn fixture() { let p = bin.join(\"gh\"); executable(&p, GH); let put = |p: &Path| fs::write(p, \"[]\"); }",
-        "fn fixture() { let p = bin.join(\"gh\"); executable(&p, GH); for p in helpers() { fs::write(&p, \"[]\").unwrap(); } }",
-        "fn fixture() { let p = bin.join(\"says\"); executable(bin.join(\"gh\"), GH); println!(\"{p:?}\", p = bin.join(\"gh\")); fs::write(&p, \"[]\").unwrap(); }",
-        "use std::fs::write; fn fixture() { executable(bin.join(\"gh\"), GH); write(bin.join(\"says\"), \"[]\").unwrap(); }",
-    ] {
-        assert_eq!(fixture_findings(code), BTreeSet::new(), "{code}");
-    }
-}
-
-#[test]
-fn test_helpers_are_followed_regardless_of_their_names() {
-    let dir = tempfile::tempdir().unwrap();
-    let member = dir.path().join("example");
-    fs::create_dir_all(member.join("src/fixtures")).unwrap();
-    fs::write(member.join("Cargo.toml"), "").unwrap();
-    fs::write(
-        member.join("src/lib.rs"),
-        "fn production() { fs::set_permissions(p, mode); }\n#[cfg(test)] mod fixtures;",
-    )
-    .unwrap();
-    fs::write(member.join("src/fixtures.rs"), "mod arbitrary;").unwrap();
-    fs::write(
-        member.join("src/fixtures/arbitrary.rs"),
-        "fn helper() { fs::set_permissions(p, Permissions::from_mode(0o755)); }",
-    )
-    .unwrap();
-    let found = check(dir.path());
-    assert_eq!(found.len(), 2, "{found:?}");
-    assert!(
-        found.iter().all(|f| f.contains("arbitrary.rs")),
-        "{found:?}"
-    );
-}
+#[cfg(test)]
+mod tests;
