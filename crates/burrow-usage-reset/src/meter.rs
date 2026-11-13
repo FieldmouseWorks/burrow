@@ -39,6 +39,20 @@ pub struct Snapshot {
     pub requested_at: Option<f64>,
 }
 
+/// Why an engine's reading can't move a turn: there's none, it can't be
+/// read or parsed, a window's percent makes no sense, or it's from the
+/// future or older than [`FRESH`].
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "unfit", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Unfit {
+    Missing,
+    Unreadable { error: String },
+    Malformed { error: String },
+    OutOfRange { window: String, used: f64 },
+    Future { read_at: f64 },
+    Stale { read_at: f64 },
+}
+
 /// One limit window: percent used, 0 to 100, and when it resets by itself,
 /// in seconds since the epoch.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -73,11 +87,44 @@ impl Snapshot {
     /// sense. A missing, malformed, future or stale one is none: it moves
     /// nothing.
     pub fn read(dir: &Path, engine: &str, now: f64) -> Option<Self> {
-        let s = Self::load(dir, engine)?;
-        (s.read_at <= now
-            && now - s.read_at < FRESH
-            && s.windows.values().all(|w| (0.0..=100.0).contains(&w.used)))
-        .then_some(s)
+        Self::check(dir, engine, now).ok()
+    }
+
+    /// ENGINE's reading in DIR if it's fresh at NOW and makes sense, or
+    /// why it isn't: the evidence a usage selection keeps for each engine.
+    pub fn check(dir: &Path, engine: &str, now: f64) -> Result<Self, Unfit> {
+        let path = dir.join(format!("{engine}.json"));
+        let bytes = fs::read(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Unfit::Missing,
+            _ => Unfit::Unreadable {
+                error: format!("{}: {e}", path.display()),
+            },
+        })?;
+        let s: Self = serde_json::from_slice(&bytes).map_err(|e| Unfit::Malformed {
+            error: e.to_string(),
+        })?;
+        if !s.read_at.is_finite() {
+            return Err(Unfit::Malformed {
+                error: "read_at isn't a time".into(),
+            });
+        }
+        if let Some((name, w)) = s
+            .windows
+            .iter()
+            .find(|(_, w)| !(0.0..=100.0).contains(&w.used))
+        {
+            return Err(Unfit::OutOfRange {
+                window: name.clone(),
+                used: w.used,
+            });
+        }
+        if s.read_at > now {
+            return Err(Unfit::Future { read_at: s.read_at });
+        }
+        if now - s.read_at >= FRESH {
+            return Err(Unfit::Stale { read_at: s.read_at });
+        }
+        Ok(s)
     }
 
     /// ENGINE's reading in DIR as it was written, however old: for showing
