@@ -10,7 +10,7 @@
 //! Claude Code has its last word on it.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -44,7 +44,7 @@ pub struct ClaudeCode {
 
 impl Account for ClaudeCode {
     fn read(&mut self) -> Result<Reading, String> {
-        read_fresh(&mut copied_at, &mut crate::now, &mut || self.ask_usage())
+        read_usage(&self.claude, &self.dir)
     }
 
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
@@ -57,11 +57,35 @@ impl Account for ClaudeCode {
     }
 }
 
-impl ClaudeCode {
-    /// Claude Code's answer to `get_usage`, without the scan of local
-    /// transcripts the meter has no use for. It makes no model call.
-    fn ask_usage(&self) -> Result<Value, String> {
-        let mut child = Command::new(&self.claude)
+/// The weekly meter from CLAUDE's `get_usage`, run in DIR, only if it can be
+/// shown to be fresh (read_fresh).
+pub fn read_usage(claude: &Path, dir: &Path) -> Result<Reading, String> {
+    read_fresh(&mut copied_at, &mut crate::now, &mut || {
+        ask_usage(claude, dir)
+    })
+}
+
+/// Whether CLAUDE is logged in as the user it runs as, which only a fresh
+/// answer from its usage endpoint shows: `get_usage` answers `success` to
+/// the request alone, and from a cached copy or with null limits when the
+/// endpoint failed on an expired or revoked login. So it's a live reading
+/// of the meter (read_usage), asked once any copy that would answer in its
+/// place is old enough not to.
+pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
+    if let Some(at) = copied_at()? {
+        let age = crate::now() - at;
+        if age < SNAPSHOT {
+            thread::sleep(Duration::from_secs_f64(SNAPSHOT - age + 1.0));
+        }
+    }
+    read_usage(claude, dir).map(|_| ())
+}
+
+/// Claude Code's answer to `get_usage`, without the scan of local
+/// transcripts the meter has no use for. It makes no model call.
+fn ask_usage(claude: &Path, dir: &Path) -> Result<Value, String> {
+    {
+        let mut child = Command::new(claude)
             .args([
                 "-p",
                 "--input-format",
@@ -71,12 +95,12 @@ impl ClaudeCode {
                 "--verbose",
             ])
             .args(["--strict-mcp-config", "--no-session-persistence"])
-            .current_dir(&self.dir)
+            .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| format!("{}: {e}", self.claude.display()))?;
+            .map_err(|e| format!("{}: {e}", claude.display()))?;
         let request = r#"{"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}}"#;
         let sent = child
             .stdin
@@ -113,7 +137,9 @@ impl ClaudeCode {
         }
         Ok(answer["response"].clone())
     }
+}
 
+impl ClaudeCode {
     fn drive(&self, tmux: &Tmux, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         if let Err(e) = tmux.start(&self.dir, &self.claude) {
             return Reset::NotPressed(e);

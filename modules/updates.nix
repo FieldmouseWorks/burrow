@@ -692,23 +692,17 @@ in
           if [ "$(id -un)" = ${user} ]; then claude --version
           else runuser -u ${user} -- env HOME=${account.home} claude --version; fi
         '';
-        # Whether Claude Code can authenticate, asked of Claude Code itself
-        # (its SDK's get_usage, as burrow.usageReset does): no model call, and
-        # the token never leaves it. An expired login fails every server and
-        # job turn at once, so this names it rather than its symptoms.
-        claude-login = ''
-          login() {
-            local out dir
-            dir=$(mktemp -d) && cd "$dir" || return 1
-            out=$(timeout 60 claude -p --input-format stream-json --output-format stream-json \
-              --verbose --strict-mcp-config --no-session-persistence \
-              <<<'{"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}}' \
-              2>/dev/null | grep -m1 '"request_id":"usage"') || out=
-            cd / && rm -rf "$dir"
-            jq -e '.response.subtype == "success"' <<<"$out" >/dev/null
-          }
-          if [ "$(id -un)" = ${user} ]; then login
-          else runuser -u ${user} -- env HOME=${account.home} bash -c "$(declare -f login); login"; fi || {
+        # Whether Claude Code can authenticate: a live reading of its usage
+        # meter, which only an answer from its endpoint is (burrow-claude-login,
+        # of crates/burrow-usage-reset; no model call, and the token never
+        # leaves Claude Code). An expired login fails every server and job turn
+        # at once, so this names it rather than its symptoms.
+        claude-login = let
+          probe = "${inputs.self.packages.${system}.burrow-usage-reset}/bin/burrow-claude-login";
+          claude = lib.getExe' config.burrow.claude.package "claude";
+        in ''
+          if [ "$(id -un)" = ${user} ]; then ${probe} ${claude}
+          else runuser -u ${user} -- env HOME=${account.home} ${probe} ${claude}; fi || {
             echo "Claude Code can't authenticate as ${user}: its login expired. Log in again on this machine as ${user} (run claude, then /login)." >&2
             exit 1
           }
