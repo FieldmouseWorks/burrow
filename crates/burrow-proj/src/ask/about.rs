@@ -10,7 +10,6 @@ mod state;
 use state::{Group, State};
 mod pauses;
 pub(crate) use pauses::{Pauses, restore};
-pub(crate) const FILE: &str = "question-about"; // legacy host metadata
 const MAX_KEY: usize = 120;
 
 pub(crate) fn normalize(raw: &str) -> Result<String, String> {

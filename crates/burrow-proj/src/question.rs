@@ -53,7 +53,6 @@ const METADATA: &[&str] = &[
     "question-text",
     "question-since",
     "question-id",
-    crate::ask::ABOUT_FILE,
 ];
 
 fn receipt_path(job: &Job, n: &str) -> PathBuf {
