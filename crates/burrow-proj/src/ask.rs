@@ -233,7 +233,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
         };
         let write = |q: &Question| {
             swap(
-                &host_path(job, "question"),
+                host_path(job, "question"),
                 &serde_json::to_string(q).map_err(|e| e.to_string())?,
             )
             .map_err(|e| e.to_string())
