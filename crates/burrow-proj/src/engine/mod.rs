@@ -20,7 +20,9 @@ mod stream;
 pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
 pub use handoff::first_prompt;
 pub(crate) use role::{RoleKey, role};
-pub use stream::{Said, answer, last_result, names_session, stream_names_session, stream_tail};
+pub use stream::{
+    Said, answer, last_result, names_session, results, stream_names_session, stream_tail,
+};
 
 #[derive(
     Clone,
@@ -68,7 +70,6 @@ pub struct Choice {
 }
 
 /// Inbox jobs pin their label's engine; role jobs resolve the file each turn.
-/// Judges always use Claude, so a role or overflow cannot make Codex judge itself.
 pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     let role = read(&job.path("role")).unwrap_or_default();
     let repo = if role.is_empty() {
@@ -90,8 +91,8 @@ pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
     )
 }
 
-/// Turn startup and drain admission share role scopes, overflow, pins and
-/// the judge restriction. The model and effort follow the engine it ends on.
+/// Turn startup and drain admission share role scopes, overflow and pins.
+/// The model and effort follow the engine it ends on.
 pub(crate) fn resolve(
     cfg: &Config,
     role: &str,
@@ -109,9 +110,6 @@ pub(crate) fn resolve(
     )?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
-    }
-    if role == "steward-judged" {
-        engine = Engine::Claude;
     }
     let choice = cfg.choice(role, repo, engine)?;
     if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
@@ -238,7 +236,109 @@ mod tests {
         assert_eq!(chosen.model.as_deref(), Some("selected"));
     }
     #[test]
-    fn a_judge_never_routes_to_codex_even_with_a_role_or_inbox_override() {
+    fn a_judge_job_starts_fresh_without_a_writer_or_reviewer_session() {
+        // Exercise the steward's actual creation path without its service imports.
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/autoland/step_jobs.py");
+        let output = std::process::Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import pathlib
+import sys
+import types
+from unittest.mock import Mock
+
+for name in ('claims', 'common', 'proofs', 'stages', 'waits', 'step_context'):
+    sys.modules[name] = types.ModuleType(name)
+common = sys.modules['common']
+common.CFG, common.MIN, common.NOW = {}, 60, 123
+common.log, common.ts = lambda _: None, lambda value: value
+sys.modules['claims'].KINDS = ()
+context = sys.modules['step_context']
+for name in ('STRIKES', 'STRIKE_LIMIT', 'ON', 'VERB', 'clock', '_HEAD'):
+    setattr(context, name, object())
+source = pathlib.Path(sys.argv[1]).read_text()
+
+def assert_fresh(source):
+    namespace = {}
+    exec(compile(source, sys.argv[1], 'exec'), namespace)
+    job = namespace['Jobs']()
+    job.repo, job.head, job.tag = 'owner/repo', 'head', 'owner/repo#1'
+    job.pr = {'createdAt': 'created'}
+    job.st = {'handedJob': 'writer-job', 'reviewJob': 'reviewer-job'}
+    job.deadline, job.cleared = lambda _: None, lambda _: None
+    common.job = Mock(return_value='fresh-judge-job')
+    assert job.started('judged', 'judge this head', at='base')
+    common.job.assert_called_once_with(
+        'owner/repo', 'judge this head', since='created', role='steward-judged')
+    assert job.st['judgedJob'] == 'fresh-judge-job'
+
+assert_fresh(source)
+# Negative controls: the same assertion must reject either inherited session.
+call = 'role=f"steward-{kind}")'
+assert source.count(call) == 1
+for session in ('writer-session', 'reviewer-session'):
+    inherited = source.replace(call, f'role=f"steward-{{kind}}", session={session!r})')
+    try:
+        assert_fresh(inherited)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f'inherited {session} escaped the fresh-session check')
+"#,
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_judge_overflows_when_claudes_five_hour_window_is_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        cfg.models = dir.path().join("models");
+        cfg.meters = Some(dir.path().to_owned());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for (engine, window, used) in [("claude", "five_hour", 96), ("codex", "300m", 10)] {
+            fs::write(
+                dir.path().join(format!("{engine}.json")),
+                json!({
+                    "windows": {window: {"used": used, "resets_at": now + 3600}},
+                    "credits": false,
+                    "read_at": now,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        fs::write(&cfg.roles, "steward-judged claude over 95 codex\n").unwrap();
+        fs::write(&cfg.models, "steward-judged codex selected high\n").unwrap();
+        let chosen = resolve(&cfg, "steward-judged", None, None).unwrap();
+        assert_eq!(chosen.engine, Engine::Codex);
+        assert_eq!(chosen.model.as_deref(), Some("selected"));
+        assert_eq!(chosen.effort.as_deref(), Some("high"));
+        // The recorded choice identifies the engine and model that judged.
+        let recorded = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(recorded["engine"], "codex");
+        assert_eq!(recorded["model"], "selected");
+        fs::write(&cfg.roles, "steward-judged claude\n").unwrap();
+        assert_eq!(
+            resolve(&cfg, "steward-judged", None, None).unwrap().engine,
+            Engine::Claude
+        );
+    }
+    #[test]
+    fn a_judge_follows_its_role_or_inbox_override() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
@@ -248,9 +348,11 @@ mod tests {
         let job = Job::new(&cfg, "judge");
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-judged").unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
+        fs::write(&cfg.roles, "steward-judged claude\n").unwrap();
+        assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Claude);
         fs::write(job.path("engine"), "codex").unwrap();
-        assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
-        // The judge's own model and effort are Claude's line, not Codex's.
+        // Model and effort follow the engine the judge runs on.
         fs::write(
             &cfg.models,
             "steward-judged codex other low\nsteward-judged claude chosen max\n",
@@ -259,7 +361,7 @@ mod tests {
         let c = choice(&cfg, &job).unwrap();
         assert_eq!(
             (c.engine, c.model.as_deref(), c.effort.as_deref()),
-            (Engine::Claude, Some("chosen"), Some("max"))
+            (Engine::Codex, Some("other"), Some("low"))
         );
     }
 }
@@ -270,7 +372,7 @@ mod scoped_tests {
     use std::process::Command;
 
     #[test]
-    fn scoped_choices_follow_the_project_origin_and_keep_judges_on_claude() {
+    fn scoped_choices_follow_the_project_origin_for_judges_too() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
@@ -316,7 +418,7 @@ mod scoped_tests {
             assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
         }
         fs::write(job.path("role"), "steward-judged").unwrap();
-        assert_eq!(choice(&cfg, &job).unwrap(), Choice::default());
+        assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
         // A scoped role on Claude takes its repo's line.
         fs::write(job.path("engine"), "claude").unwrap();
         fs::write(job.path("role"), "steward-handed").unwrap();

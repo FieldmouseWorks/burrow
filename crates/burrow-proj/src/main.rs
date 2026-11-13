@@ -7,10 +7,13 @@ use burrow_proj::cmd::dispatch;
 use burrow_proj::config::Config;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args_os()
+    let mut args: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
+    if args.is_empty() {
+        args.push("status".into());
+    }
     if args.first().map(String::as_str) == Some("probe")
         && let Some(path) = std::env::var_os("PROJ_PROBE_SOCKET")
     {
@@ -22,13 +25,25 @@ fn main() -> ExitCode {
             }
         };
     }
-    // Inside a job, the host's jobs are the host's to say, whatever the
-    // job's own view of them (a sandbox's has none).
-    if burrow_proj::host_jobs::about_jobs(&args)
-        && std::env::var_os("PROJ_JOB").is_some_and(|j| !j.is_empty())
+    if burrow_proj::host_jobs::remote(&args)
+        && std::env::var_os("PROJ_JOB").is_some_and(|id| !id.is_empty())
     {
-        let socket = std::env::var_os("PROJ_JOBS_SOCKET").filter(|s| !s.is_empty());
-        return burrow_proj::host_jobs::client(socket.as_deref().map(std::path::Path::new), &args);
+        let result = match std::env::var_os("PROJ_HOST_JOBS_SOCKET") {
+            Some(path) => burrow_proj::host_jobs::client(std::path::Path::new(&path), &args),
+            None => Err(burrow_proj::Fail::new(
+                1,
+                "can't reach host jobs: this turn has no host job bridge; restart it on a deployment with host job access",
+            )),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(fail) => {
+                if let Some(say) = fail.say {
+                    eprintln!("proj: {say}");
+                }
+                ExitCode::from(fail.code)
+            }
+        };
     }
     let cfg = match Config::load() {
         Ok(cfg) => cfg,

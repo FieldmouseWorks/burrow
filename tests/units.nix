@@ -39,6 +39,12 @@ pkgs.testers.runNixOSTest {
     };
     environment.etc."burrow-webhook".text = "hook-secret\n";
     burrow.watchdog.units.enable = true;
+    # The state lives under /home, through a symlink: the clear handler
+    # must still reach it.
+    systemd.tmpfiles.settings."00-burrow-home-state" = {
+      "/home/dev/burrow-state".d = { mode = "0755"; user = "dev"; group = "dev"; };
+      "/var/lib/burrow".L.argument = "/home/dev/burrow-state";
+    };
     systemd.services.watchdog-stand-in.serviceConfig = {
       Type = "oneshot";
       ExecStart = "${watchdog}";
@@ -106,7 +112,7 @@ pkgs.testers.runNixOSTest {
         # sleep's own program: coreutils, where it's one binary for all.
         root = next(k for k in cores if k != bash)
 
-    with subtest("a crash cleared once fixed leaves it, everyone else's stay, and a later one is back"):
+    with subtest("an isolated caller clears host crashes, everyone else's stay, and a later one is back"):
         # dev can't read root's crashes itself, so they stay only if the
         # pass that follows its clear is the service's.
         assert root[len("core:"):] not in machine.succeed("su - dev -c 'coredumpctl list --no-pager --json=short' 2>&1 || true")
@@ -115,8 +121,18 @@ pkgs.testers.runNixOSTest {
         machine.fail("su - dev -c 'burrow-units pass'")
         assert machine.succeed(f"cat {watch_file}") == before
         exe = bash[len("core:"):]
-        machine.succeed(f"su - dev -c 'burrow-units clear {exe}'")
+        # The same empty-root boundary as a sandboxed job: system programs
+        # and only the clear socket, with no host state or journals. The
+        # host configuration is loaded by the socket-activated service.
+        isolated = "${pkgs.bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store --ro-bind /run/current-system/sw /run/current-system/sw --ro-bind /run/burrow-units/clear.sock /run/burrow-units/clear.sock --proc /proc --dev /dev --tmpfs /tmp --"
+        machine.succeed(f"su - dev -c '{isolated} /run/current-system/sw/bin/test ! -e /var/lib/burrow/units'")
+        before = json.loads(machine.succeed(f"cat {watch_file}"))["at"]
+        machine.succeed(f"su - dev -c '{isolated} /run/current-system/sw/bin/burrow-units clear {exe}'")
+        acknowledged = json.loads(machine.succeed("cat /var/lib/burrow/units/cleared.json"))
+        assert exe in acknowledged, acknowledged
+        assert acknowledged[exe] >= before, acknowledged
         machine.wait_until_succeeds(f"! grep -qF '\"{bash}\"' {watch_file}", timeout=60)
+        assert json.loads(machine.succeed(f"cat {watch_file}"))["at"] > before
         assert root in watch(), watch()
         machine.succeed("sleep 1")
         dev_crash()

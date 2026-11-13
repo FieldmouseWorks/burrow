@@ -55,12 +55,31 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 continue 'jobs;
             }
             if !paused && !stopped {
+                // Commit recovered asks and one-way upgrades before an old
+                // reversible deadline can execute, and before visibility and
+                // durable notification processing below.
+                if crate::planning::admit(&job).is_ok() {
+                    match crate::github_quota::reconcile(&job) {
+                        Ok(Some(due)) if due > now() => retry.push((String::new(), due)),
+                        Ok(_) => (),
+                        Err(e) => {
+                            eprintln!("proj: quota recovery: {:?}", e.say);
+                            retry.push((String::new(), now() + RETRY));
+                            continue 'jobs;
+                        }
+                    }
+                }
                 match crate::ask::expire(cfg, &job) {
                     Ok(Some(at)) => retry.push((String::new(), at)),
                     Ok(None) => (),
                     Err(e) => {
                         eprintln!("proj question: {e}");
-                        retry.push((String::new(), now() + RETRY));
+                        if !job
+                            .turns()
+                            .is_some_and(|n| job.turn(&n, "stopped").exists())
+                        {
+                            retry.push((String::new(), now() + RETRY));
+                        }
                     }
                 }
             }
@@ -103,20 +122,6 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         let f = job.path("await");
         if crate::planning::admit(&job).is_err() {
             continue;
-        }
-        {
-            let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-            match crate::github_quota::reconcile(&job) {
-                Ok(Some(due)) if due > now() => retry.push((String::new(), due)),
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("proj: quota recovery: {:?}", e.say);
-                    retry.push((String::new(), now() + RETRY));
-                    drop(held);
-                    continue;
-                }
-            }
-            drop(held);
         }
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
             continue;
@@ -285,6 +290,12 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             };
             if let Err(e) = started {
                 eprintln!("{e}");
+                if job
+                    .turns()
+                    .is_some_and(|n| job.turn(&n, "stopped").exists())
+                {
+                    continue 'jobs;
+                }
                 // By repo; "" (every repo's look) for one that's no repo's.
                 for a in awaits(&waits) {
                     let repo = target(&a.target).map(|(r, _)| r).unwrap_or_default();

@@ -129,11 +129,14 @@ fn full() -> Snapshot {
                 lead: vec!["sam/burrow".into()],
                 slots: 1,
             },
-            triage: Some(Triage {
-                drain: Some(Engine::Codex),
-                drain_jobs: 3,
-                sorting_at_once: 2,
-            }),
+            triage: Some(
+                serde_json::from_value(serde_json::json!({
+                    "drain": "codex",
+                    "drainJobs": 3,
+                    "sortingAtOnce": 2,
+                }))
+                .unwrap(),
+            ),
         },
         jobs: vec![JobRow {
             id: "j1".into(),
@@ -203,7 +206,10 @@ fn an_idle_machine() {
     // One heavy slot is busy, held by nothing of proj's.
     let busy = fs::File::open(burrow_heavy::config::slot_file(&heavy, 2)).unwrap();
     busy.lock().unwrap();
-    let json: Value = serde_json::from_str(&crate::cmd::state_json(&cfg, 15).unwrap()).unwrap();
+    let json: Value = serde_json::from_str(
+        &crate::cmd::state_json(&cfg, 15, crate::host_jobs::View::Owner).unwrap(),
+    )
+    .unwrap();
     validates(&json).unwrap();
     let snap: Snapshot = serde_json::from_value(json).unwrap();
     assert_eq!(snap.version, VERSION);

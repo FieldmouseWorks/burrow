@@ -7,12 +7,7 @@ fn main() -> ExitCode {
         .and_then(|p| {
             let args = env::args().skip(1).collect::<Vec<_>>();
             let path = PathBuf::from(p);
-            if burrow_proj::host_jobs::about_jobs(&args) {
-                Err(burrow_proj::host_jobs::unreachable(
-                    &args,
-                    "a VM job has no socket of the host's",
-                ))
-            } else if args.first().map(String::as_str) == Some("probe") {
+            if args.first().map(String::as_str) == Some("probe") {
                 burrow_proj::probe::guest_client(&path, &args[1..])
             } else {
                 burrow_proj::guest::declare(&path, &args)
@@ -20,10 +15,6 @@ fn main() -> ExitCode {
         });
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) if e.starts_with("proj ") => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
-        }
         Err(e) => {
             eprintln!("proj: {e}");
             ExitCode::FAILURE

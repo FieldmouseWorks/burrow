@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{CUT_OFF, Pass, dirs, key, raw, say, seconds, trimmed};
-use crate::cmd::{halt, reply, reply_answer, stop, told, unstick};
+use crate::cmd::{halt, reply, reply_answer, unstick};
 use crate::github::api;
 use crate::job::Job;
 use crate::{Fail, filled, io_fail, now, read};
@@ -39,13 +39,6 @@ impl Pass<'_> {
             if of != repo {
                 continue;
             }
-            if d.join("unannounced").exists() {
-                if self.post(repo, n, &format!("On it: `proj` job `{id}` in {p}.")) {
-                    let _ = fs::remove_file(d.join("unannounced"));
-                } else {
-                    self.miss(repo);
-                }
-            }
             // A job dir removed by hand: that job is over. The issue's record
             // goes with it, and one still open is taken up afresh next pass.
             let job = Job::new(self.cfg, &id);
@@ -53,8 +46,30 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
-            if crate::policy::parked(&job) {
+            let fetched;
+            let observed = match listed.iter().find(|i| raw(&i["number"]) == n) {
+                Some(issue) => issue,
+                None => {
+                    fetched = api(self.cfg, &format!("repos/{repo}/issues/{n}"));
+                    let Some(issue) = fetched.as_ref() else {
+                        self.miss(repo);
+                        continue;
+                    };
+                    issue
+                }
+            };
+            if self.stop_parked(repo, n, &id, &d, observed)? {
                 continue;
+            }
+            if self.cfg.paused(repo) || crate::policy::parked(&job) {
+                continue;
+            }
+            if d.join("unannounced").exists() {
+                if self.post(repo, n, &format!("On it: `proj` job `{id}` in {p}.")) {
+                    let _ = fs::remove_file(d.join("unannounced"));
+                } else {
+                    self.miss(repo);
+                }
             }
             {
                 let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
@@ -94,16 +109,11 @@ impl Pass<'_> {
             // issue the list hasn't (closed, or its label taken off), as
             // GitHub says now: closing it lets the turn finish only while
             // its issue may still be read.
-            let mine = listed.iter().find(|i| raw(&i["number"]) == n);
             let split_pending = crate::planning::admit(&job).is_err();
-            if (mine.is_some() || busy) && {
-                let Some(barred) = self.barred(repo, n, mine) else {
-                    self.miss(repo);
-                    continue;
-                };
-                barred
-            } {
-                if let Err(f) = stop(self.cfg, &id, false) {
+            if !self.eligible(repo, observed) {
+                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+                if let Err(f) = halt(self.cfg, &job, false) {
                     say(f);
                     self.retry(repo);
                     continue;
@@ -150,40 +160,10 @@ impl Pass<'_> {
                     }
                 }
             }
-            while k < last {
-                k += 1;
-                let why = if k == turns {
-                    format!(" ({st})")
-                } else {
-                    String::new()
-                };
-                let body = if rv.0 == Some(k + 1) {
-                    format!(
-                        "The job's turn {k} was cut off before it answered (its whole unit was killed, out of memory as a rule): it carries on where it left off."
-                    )
-                } else {
-                    told(self.cfg, &id, &k.to_string())
-                        .map(|t| trimmed(&t))
-                        .unwrap_or_else(|_| {
-                            format!(
-                                "The job's turn {k} ended without an answer{why}. `proj log {id} --turn {k} --raw` on {} has what it did.",
-                                self.inbox.host
-                            )
-                        })
-                };
-                // GitHub takes 65536 characters a comment.
-                let engine = job.engine_label(&k.to_string());
-                let body: String = format!("**{engine} job**\n\n{body}")
-                    .chars()
-                    .take(60000)
-                    .collect();
-                if !self.post(repo, n, &body) {
-                    self.miss(repo);
-                    continue 'jobs;
-                }
-                fs::write(d.join("answered"), format!("{k}\n"))
-                    .map_err(|e| io_fail(&d.join("answered"), e))?;
+            if !self.answers(repo, n, &job, &d, last, Some(&st))? {
+                continue 'jobs;
             }
+            k = k.max(last);
             if let Err(error) = crate::ask::visibility(self.cfg, &job) {
                 eprintln!("proj question: {error}");
                 self.retry(repo);
@@ -266,16 +246,7 @@ impl Pass<'_> {
                 }
                 // Children no longer need their parent's worker or drain slot.
                 // Keep the plan/receipts independently of the retired record.
-                let root = self
-                    .inbox
-                    .state
-                    .join(".retired")
-                    .join(key(repo).to_lowercase())
-                    .join(n);
-                fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
-                let retired = root.join(&id);
-                fs::rename(&d, &retired).map_err(|e| io_fail(&retired, e))?;
-                self.retire(repo, n, &id, &retired)?;
+                self.retire_record(repo, n, &id, &d)?;
                 continue;
             }
             if split_pending && now_open.is_some() {
@@ -287,16 +258,7 @@ impl Pass<'_> {
             // be stopped (proj stop says why) is tried again in five minutes;
             // the rest are still seen to.
             let Some(listed_now) = now_open else {
-                let root = self
-                    .inbox
-                    .state
-                    .join(".retired")
-                    .join(key(repo).to_lowercase())
-                    .join(n);
-                fs::create_dir_all(&root).map_err(|e| io_fail(&root, e))?;
-                let retired = root.join(&id);
-                fs::rename(&d, &retired).map_err(|e| io_fail(&retired, e))?;
-                self.retire(repo, n, &id, &retired)?;
+                self.retire_record(repo, n, &id, &d)?;
                 continue;
             };
 
@@ -389,6 +351,9 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 };
+                if self.stop_parked(repo, n, &id, &d, &now_issue)? {
+                    continue;
+                }
                 // A later REST read may have observed an edit after our verified
                 // snapshot. Never overwrite that signal and close stale work.
                 if !written.matches(&now_issue) {
@@ -398,8 +363,7 @@ impl Pass<'_> {
                 let mut now_issue = now_issue;
                 now_issue["title"] = safe_issue["title"].clone();
                 now_issue["body"] = safe_issue["body"].clone();
-                let labelled = self.engine(&now_issue).is_some();
-                if now_issue["state"] != "open" || !labelled || !self.eligible(repo, &now_issue) {
+                if now_issue["state"] != "open" || !self.eligible(repo, &now_issue) {
                     continue;
                 }
                 // Not what the job's record says it was handed (the title or
@@ -421,6 +385,7 @@ impl Pass<'_> {
                         && job.state() == "done"
                         && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                     {
+                        super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
                         if !self.close(repo, n, "completed") {
                             drop(held);
                             self.miss(repo);
@@ -469,7 +434,18 @@ impl Pass<'_> {
                     }
                     // No session to continue (the first turn never got
                     // going): start over, from the issue as it stands,
-                    // replies and all.
+                    // replies and all. Retire the old worker before replacing
+                    // its record so neither a legacy reply nor an old await
+                    // can start it alongside the replacement.
+                    {
+                        let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                        super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+                        if let Err(f) = halt(self.cfg, &job, false) {
+                            say(f);
+                            self.retry(repo);
+                            continue;
+                        }
+                    }
                     id = match self.start(repo, &now_issue, &comments) {
                         Ok(id) => id,
                         Err(f) => {

@@ -249,8 +249,13 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
             "{path} takes `edited`: {:?}",
             caller["on"]
         );
-        for (_, j) in &mine {
-            assert!(j.get("if").is_none(), "{path} skips: {:?}", j["if"]);
+        // A call skips only where another call takes the run: burrow's own,
+        // whose train candidates `train` gates rather than `check` (train.rs
+        // holds which runs each takes). A project's never does.
+        if path != CALLERS[0].0 {
+            for (_, j) in &mine {
+                assert!(j.get("if").is_none(), "{path} skips: {:?}", j["if"]);
+            }
         }
 
         let twin = workflow(retarget);
@@ -266,13 +271,19 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
         assert_eq!(twin["permissions"], caller["permissions"], "{retarget}");
         let its = calls(&twin);
         assert_eq!(its.len(), mine.len(), "{retarget}");
-        // Only a new base, and otherwise the same call: the same check.
+        // Only a new base, and otherwise the same call: the same check, and
+        // the same runs taken.
         for ((name, j), (their_name, theirs)) in mine.iter().zip(&its) {
             assert_eq!(name, their_name, "{retarget}");
-            assert_eq!(theirs["if"], "github.event.changes.base", "{retarget}");
-            let mut same = (*theirs).clone();
+            let only = match j.get("if").and_then(|c| c.as_str()) {
+                Some(c) => format!("github.event.changes.base && ({c})"),
+                None => "github.event.changes.base".to_owned(),
+            };
+            assert_eq!(theirs["if"], only.as_str(), "{retarget}: {name:?}");
+            let (mut same, mut mine) = ((*theirs).clone(), (*j).clone());
             same.as_mapping_mut().unwrap().remove("if");
-            assert_eq!(&same, *j, "{retarget}: {name:?}");
+            mine.as_mapping_mut().unwrap().remove("if");
+            assert_eq!(same, mine, "{retarget}: {name:?}");
         }
     }
     // Autoland knows the pair by these files (modules/autoland/prs.py's FLAKE).
@@ -293,6 +304,34 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
                 .is_some_and(|d| !d.is_empty())),
         "burrow's caller lists no docs"
     );
+}
+
+/// burrow's docs lane, a retargeted PR's too, builds the guidance check: a
+/// PR that changes only README.md, AGENTS.md or CLAUDE.md is still held to
+/// what the guidance may say, and AGENTS.md to the house blocks.
+#[test]
+fn burrows_docs_lane_runs_the_guidance_check() {
+    let (flake, retarget) = CALLERS[0];
+    for caller in [flake, retarget] {
+        let wf = workflow(caller);
+        let jobs = wf["jobs"].as_mapping().unwrap();
+        assert!(!jobs.is_empty(), "{caller}");
+        for (name, job) in jobs {
+            let docs = job["with"]["docs-paths"].as_str().unwrap_or("");
+            if docs.is_empty() {
+                continue;
+            }
+            let checks: Vec<_> = job["with"]["docs-checks"]
+                .as_str()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            assert!(
+                checks.contains(&"guidance"),
+                "{caller}: {name:?}'s docs lane ({docs}) doesn't run the guidance check"
+            );
+        }
+    }
 }
 
 /// The base step's word on a PR to `base`, in a repo whose default branch is

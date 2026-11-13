@@ -190,8 +190,10 @@ in
             default = null;
             description = ''
               A JSON file, {"OWNER/REPO": epoch}, the handler's passes write:
-              when each repo next needs a pass. Read after each pass, and when
-              burrow-events starts.
+              when each repo next needs a pass. Every handler's file is read
+              after any handler's pass ends (including failures), and when
+              burrow-events starts. One handler can publish another's wakes
+              without an HTTP kick; their saved deadlines are preserved.
             '';
           };
           gap = mkOption {

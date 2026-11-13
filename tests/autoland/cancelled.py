@@ -20,7 +20,7 @@ def stopped(*names):
 
 def state(*checks, base="main"):
     with C.acting_for("sam/r"):
-        return ci_state(clean(checks=[c for run in checks for c in run], base=base), repo="sam/r")[:2]
+        return ci_state(clean(checks=[c for run in checks for c in run], base=base), repo="sam/r", moved=())[:2]
 
 
 def going(suite):

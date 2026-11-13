@@ -327,17 +327,13 @@ fn run_with_cgroup(
     }
     let id = if reply {
         let usage = "usage: proj reply [--first] [--cut-off N] ID \"message\"";
-        let id = super::job_arg(cfg, args, i, usage)?;
+        let id = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
-        let from_job = std::env::var_os(crate::host_jobs::FROM_JOB).is_some_and(|j| !j.is_empty());
-        reply_command(
-            cfg,
-            id,
-            &args[i + 1],
-            new.first,
-            cutoff.as_deref(),
-            from_job,
-        )?;
+        if let Some(n) = cutoff.as_deref() {
+            self::reply(cfg, id, &args[i + 1], new.first, Some(n))?;
+        } else {
+            reply_answer(cfg, id, &args[i + 1], new.first)?;
+        }
         id.to_owned()
     } else {
         let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] [--role NAME] PROJECT \"task\"";
@@ -526,24 +522,6 @@ pub fn reply(
     cutoff: Option<&str>,
 ) -> Result<(), Fail> {
     resume(cfg, id, msg, first, cutoff, false)
-}
-
-/// `proj reply`: a person's answer, unless it's a cut-off turn's retry or a
-/// job's reply through its jobs socket, which are news for the job it
-/// resumes and leave its question to a person.
-pub(crate) fn reply_command(
-    cfg: &Config,
-    id: &str,
-    msg: &str,
-    first: bool,
-    cutoff: Option<&str>,
-    from_job: bool,
-) -> Result<(), Fail> {
-    if cutoff.is_some() || from_job {
-        reply(cfg, id, msg, first, cutoff)
-    } else {
-        reply_answer(cfg, id, msg, first)
-    }
 }
 
 /// A person's explicit answer, rather than a machinery update or retry.

@@ -66,6 +66,9 @@ pub struct Config {
     pub ask_timeout: u64,
     #[serde(default)]
     pub probe: Option<burrow_probe::Config>,
+    /// Only the crash acknowledgement socket, never host units state.
+    #[serde(default)]
+    pub units_clear_socket: Option<PathBuf>,
     #[serde(default = "waiting_owner_label")]
     pub waiting_owner_label: String,
     #[serde(default = "needs_owner_label")]
@@ -367,8 +370,13 @@ impl Config {
     /// already parses the module's JSON; engine and choice validate every
     /// external role and models line, including unused scopes and overflow
     /// choices. Runtime state (meters, usage holds and individual jobs) is
-    /// not machine configuration.
+    /// not machine configuration. The sandbox controller, when agents are
+    /// on, must be a program proj can run: pause and release call it.
     pub fn check_config(&self) -> Result<(), String> {
+        if let Some(tool) = &self.agent_tool {
+            burrow_process::executable(tool)
+                .map_err(|e| format!("agentTool {}: {e}", tool.display()))?;
+        }
         self.engine("", None)?;
         self.choice("", None, Engine::Claude).map(|_| ())
     }
@@ -490,6 +498,37 @@ pub(crate) mod tests {
             cfg.check_config()
                 .unwrap_err()
                 .contains(&cfg.roles.display().to_string())
+        );
+    }
+
+    #[test]
+    fn check_config_requires_a_runnable_agent_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = dir.path().join("roles");
+        cfg.models = dir.path().join("models");
+        cfg.check_config().unwrap(); // No agents, no controller to check.
+        // The package's bin/agent that was never built (#711).
+        let tool = dir.path().join("agent");
+        cfg.agent_tool = Some(tool.clone());
+        let err = cfg.check_config().unwrap_err();
+        assert!(
+            err.contains(&format!("agentTool {}", tool.display())),
+            "{err}"
+        );
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        assert!(
+            cfg.check_config()
+                .unwrap_err()
+                .contains("not an executable file")
+        );
+        burrow_test::executable(&tool, "#!/bin/sh\n");
+        cfg.check_config().unwrap();
+        cfg.agent_tool = Some(dir.path().to_owned());
+        assert!(
+            cfg.check_config()
+                .unwrap_err()
+                .contains("not an executable file")
         );
     }
 

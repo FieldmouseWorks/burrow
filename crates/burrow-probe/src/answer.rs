@@ -5,6 +5,7 @@
 //! (pass.rs); here it's as the machine said it.
 
 mod contains;
+mod crashes;
 mod memory;
 mod system;
 #[cfg(test)]
@@ -149,7 +150,7 @@ impl Machine<'_> {
     pub fn answer(&self, q: &Query) -> Result<String, String> {
         match q {
             Query::Memory => memory::memory(self),
-            Query::Usage { since } => usage::answer(self, since.at(self.now)),
+            Query::Usage { since, totals } => usage::answer(self, since.at(self.now), *totals),
             Query::Units => system::units(self),
             Query::Journal { unit, since, until } => {
                 system::journal(self, unit, since.at(self.now), until.at(self.now))
@@ -159,6 +160,7 @@ impl Machine<'_> {
             Query::Contains { repo, commit } => contains::answer(self, repo, commit),
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),
+            Query::Crashes { exe, since } => crashes::answer(self, exe, since.at(self.now)),
         }
     }
 

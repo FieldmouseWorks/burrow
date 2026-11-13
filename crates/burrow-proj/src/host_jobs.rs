@@ -1,214 +1,367 @@
-//! Other jobs, from inside a job. The commands a job runs about the host's
-//! jobs ([`COMMANDS`]) go through its turn's jobs socket to the proj its
-//! turn runs, on the host, so every engine sees and continues the same jobs,
-//! sandboxed or not. A job with no socket says it can't reach them: never
-//! its sandbox's own view of the jobs dir ("has no turns", "no session").
-use crate::{config::Config, job::Job, scratch};
+//! Host job operations through a per-turn socket, never host filesystem access.
+//! Only the ordinary inspection and recovery CLI is accepted. The host keeps
+//! its executable, configuration, credentials and job admission authority.
+use crate::{Fail, config::Config, job::Job, scratch};
 use serde::{Deserialize, Serialize};
 use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::Command,
     time::{Duration, Instant},
 };
 
-/// What a job asks of the host's jobs; bare `proj` is `proj status`.
-pub const COMMANDS: &[&str] = &["status", "state", "lifecycle", "log", "reply", "stop"];
-/// How long one command may take on the host; the client waits a little
-/// longer, so the host's own limit is what it hears.
-const TIME: Duration = Duration::from_secs(300);
-const MAX_REQUEST: u64 = 1 << 20;
-const MAX_OUTPUT: usize = 16 << 20;
+pub(crate) const MAX_REQUEST: u64 = 65536;
+const MAX_OUTPUT: usize = 8 * 1024 * 1024;
+// JSON escaping can expand each output byte sixfold.
+const MAX_RESPONSE: u64 = (MAX_OUTPUT * 12 + 1024) as u64;
 
-/// Set by the host on each command a job sends: which job asked. Only the
-/// host's side of the socket sets it, so a reply carrying it is a job's.
-pub const FROM_JOB: &str = "PROJ_FROM_JOB";
+/// Who a job view is rendered for. The owner's own commands, and everything
+/// the host stores, posts or hands on, keep every byte; only what the bridge
+/// sends back to a sandboxed caller is redacted, field by field, before any
+/// truncation or joining could hide a secret's boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Owner,
+    Bridge,
+}
+impl View {
+    /// One independent piece of text, as this view shows it.
+    pub(crate) fn plain(self, text: &str) -> String {
+        match self {
+            View::Owner => text.to_owned(),
+            View::Bridge => burrow_probe::scrub::Redactor::default().plain(text),
+        }
+    }
+}
 
 pub(crate) fn socket(cfg: &Config, job: &Job, n: &str) -> PathBuf {
-    scratch::dir(cfg, job.id).join(format!("jobs-{n}.sock"))
+    scratch::dir(cfg, job.id).join(format!("host-jobs-{n}.sock"))
 }
 
-/// Whether `args` is about the host's jobs.
-pub fn about_jobs(args: &[String]) -> bool {
-    args.first()
-        .is_none_or(|a| a.is_empty() || COMMANDS.contains(&a.as_str()))
-}
-
-fn name(args: &[String]) -> &str {
-    args.first()
-        .map(String::as_str)
-        .filter(|a| !a.is_empty())
-        .unwrap_or("status")
-}
-
-/// What a sandbox with no way to the host's jobs says, for each command of
-/// [`COMMANDS`].
-pub fn unreachable(args: &[String], why: &str) -> String {
-    format!(
-        "proj {}: this job can't reach the host's jobs ({why}), so it can't see or continue them from here",
-        name(args)
+/// Commands which must use the host's view when run inside a job. Other
+/// commands (await/ask/done in particular) keep their local declarations.
+pub fn remote(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some(
+            "status"
+                | "state"
+                | "lifecycle"
+                | "log"
+                | "reply"
+                | "stop"
+                | "withdraw"
+                | "list"
+                | "find"
+        )
     )
 }
 
-#[derive(Serialize, Deserialize)]
-struct Answer {
-    code: u8,
-    out: String,
-    err: String,
+fn number(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
 }
-
-/// `proj COMMAND...` inside a job: the host's answer, said as the host said
-/// it, or a loud failure when the host can't be reached.
-pub fn client(socket: Option<&Path>, args: &[String]) -> ExitCode {
-    let answer = match socket {
-        None => Err(unreachable(args, "its turn gave it no jobs socket")),
-        Some(path) => exchange(path, args).map_err(|e| unreachable(args, &e)),
+fn id(s: &str) -> bool {
+    // The launcher retains punctuation, whitespace and Unicode, and prefixes
+    // dot/option-like project names. Reserve hidden host state and refuse
+    // path traversal/options without imposing another naming policy.
+    !s.is_empty() && !s.starts_with(['.', '-']) && !s.contains(['/', '\0'])
+}
+fn validate(args: &[String]) -> Result<(), String> {
+    let words: Vec<_> = args.iter().map(String::as_str).collect();
+    let valid = match words.as_slice() {
+        ["status" | "list"] => true,
+        ["find", key] => crate::cmd::key_name(key),
+        ["status", n] => *n == "--line" || number(n),
+        ["state", "--schema" | "--json"] => true,
+        ["state", "--json", n] => number(n),
+        ["state" | "lifecycle" | "stop" | "withdraw", target] => id(target),
+        ["log", target, rest @ ..] if id(target) => {
+            let mut rest = rest;
+            let mut valid = true;
+            while !rest.is_empty() {
+                rest = match rest {
+                    ["--raw", tail @ ..] => tail,
+                    ["--turn", n, tail @ ..] if number(n) => tail,
+                    _ => {
+                        valid = false;
+                        break;
+                    }
+                };
+            }
+            valid
+        }
+        ["reply", rest @ ..] => {
+            let mut rest = rest;
+            loop {
+                rest = match rest {
+                    ["--first", tail @ ..] => tail,
+                    ["--cut-off", n, tail @ ..] if number(n) => tail,
+                    _ => break,
+                };
+            }
+            matches!(rest, [target, text] if id(target) && !text.is_empty())
+        }
+        _ => false,
     };
-    match answer {
-        Ok(answer) => {
-            let _ = std::io::stdout().lock().write_all(answer.out.as_bytes());
-            let _ = std::io::stderr().lock().write_all(answer.err.as_bytes());
-            ExitCode::from(answer.code)
-        }
-        Err(say) => {
-            eprintln!("{say}");
-            ExitCode::FAILURE
-        }
+    if valid {
+        Ok(())
+    } else {
+        Err("host jobs: unsupported command or invalid arguments".into())
     }
 }
 
-fn exchange(path: &Path, args: &[String]) -> Result<Answer, String> {
-    let (_directory, address) = crate::probe::address(path)?;
-    let mut stream = UnixStream::connect(address).map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(TIME + Duration::from_secs(30)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .write_all(&serde_json::to_vec(args).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    stream
-        .shutdown(std::net::Shutdown::Write)
-        .map_err(|e| e.to_string())?;
-    let mut answer = Vec::new();
-    stream
-        .take(2 * MAX_OUTPUT as u64 + 4096)
-        .read_to_end(&mut answer)
-        .map_err(|e| e.to_string())?;
-    serde_json::from_slice(&answer).map_err(|e| format!("the host's answer: {e}"))
+#[derive(Serialize, Deserialize)]
+struct Response {
+    code: u8,
+    stdout: String,
+    stderr: String,
 }
 
-/// One request on the host: run as the proj the turn runs, outside the
-/// job's environment, so it is the host's own answer.
-pub(crate) fn serve(cfg: &Config, job: &str, mut stream: UnixStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-    let mut request = Vec::new();
-    if (&mut stream)
-        .take(MAX_REQUEST)
-        .read_to_end(&mut request)
-        .is_err()
-    {
-        return;
+pub fn client(path: &Path, args: &[String]) -> Result<(), Fail> {
+    validate(args).map_err(|e| Fail::new(2, e))?;
+    let request = serde_json::to_vec(args).expect("host job request");
+    if request.len() > MAX_REQUEST as usize {
+        return Err(Fail::new(2, "host jobs: request exceeds 65536 bytes"));
     }
-    let answer = answer(cfg, job, &request).unwrap_or_else(|err| Answer {
-        code: 1,
-        out: String::new(),
-        err: format!("{err}\n"),
-    });
-    let _ = stream.write_all(&serde_json::to_vec(&answer).expect("jobs answer"));
+    let response = crate::probe::request(path, &request, MAX_RESPONSE)
+        .and_then(|s| {
+            serde_json::from_str::<Result<Response, String>>(&s).map_err(|e| e.to_string())
+        })
+        .and_then(|r| r)
+        .map_err(|e| Fail::new(1, format!("can't reach host jobs: {e}")))?;
+    let _ = io::stdout().lock().write_all(response.stdout.as_bytes());
+    let _ = io::stderr().lock().write_all(response.stderr.as_bytes());
+    if response.code == 0 {
+        Ok(())
+    } else {
+        Err(Fail::quiet(response.code))
+    }
 }
 
-fn answer(cfg: &Config, job: &str, request: &[u8]) -> Result<Answer, String> {
-    let args: Vec<String> = serde_json::from_slice(request).map_err(|e| e.to_string())?;
-    if !about_jobs(&args) {
-        return Err(format!(
-            "proj {}: only {} reach the host's jobs",
-            name(&args),
-            COMMANDS.join(", ")
-        ));
-    }
-    let mut command = Command::new(&cfg.me);
-    command
-        .args(&args)
-        .env_remove("PROJ_JOB")
-        .env_remove("PROJ_JOBS_SOCKET")
-        .env_remove("PROJ_PROBE_SOCKET")
-        .env(FROM_JOB, job);
-    let out = burrow_process::output(&mut command, None, Instant::now() + TIME, MAX_OUTPUT)
-        .map_err(|e| format!("proj {}: {e}", name(&args)))?;
-    Ok(Answer {
-        code: out
+pub(crate) fn answer(cfg: &Config, request: &str) -> String {
+    let result = (|| -> Result<Response, String> {
+        let args: Vec<String> = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        validate(&args)?;
+        let mut command = Command::new(&cfg.me);
+        command
+            // The child renders the bridge's view: redacted, with recovery
+            // replies that retain open owner questions.
+            .arg("_host-view")
+            .args(&args)
+            .env("PROJ_CONFIG", &cfg.path)
+            .env("PROJ_SELF", &cfg.me)
+            .env_remove("PROJ_JOB")
+            .env_remove("PROJ_HOST_JOBS_SOCKET")
+            .env_remove("PROJ_PROBE_SOCKET");
+        let output = burrow_process::output(
+            &mut command,
+            None,
+            Instant::now() + Duration::from_secs(90),
+            MAX_OUTPUT,
+        )?;
+        let code = output
             .status
             .code()
-            .and_then(|c| u8::try_from(c).ok())
-            .unwrap_or(1),
-        out: String::from_utf8_lossy(&out.stdout).into_owned(),
-        err: String::from_utf8_lossy(&out.stderr).into_owned(),
-    })
+            .and_then(|c| c.try_into().ok())
+            .unwrap_or(1);
+        Ok(Response {
+            code,
+            stdout: scrub_child_output(
+                &String::from_utf8_lossy(&output.stdout),
+                output_contract(&args),
+                output.status.success(),
+            )?,
+            stderr: scrub_child_output(
+                &String::from_utf8_lossy(&output.stderr),
+                if output_contract(&args) == Output::Records {
+                    Output::Records
+                } else {
+                    Output::Literal
+                },
+                output.status.success(),
+            )?,
+        })
+    })();
+    serde_json::to_string(&result).expect("host job response")
+}
+
+/// A failed child may stop before completing its document. Keep its native
+/// verdict and diagnostics; successful children must meet their contract.
+fn scrub_child_output(text: &str, mut output: Output, success: bool) -> Result<String, String> {
+    if !success
+        && output == Output::Json
+        && serde_json::from_str::<serde_json::Value>(text).is_err()
+    {
+        // Incomplete JSON can conceal field boundaries behind escapes or
+        // nested objects. Preserve the verdict and stderr, but fail closed
+        // for that document; plain failure diagnostics remain readable.
+        if text.trim_start().starts_with(['{', '[', '"']) {
+            return Ok("[redacted incomplete JSON]\n".into());
+        }
+        output = Output::Literal;
+    }
+    match scrub_output(text, output) {
+        Ok(clean) => Ok(clean),
+        Err(_) if !success => Ok("[redacted]\n".into()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Structured views, raw records, literal values and already rendered
+/// presentations have different boundaries. Never infer these from content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Output {
+    Json,
+    Records,
+    Literal,
+    Rendered,
+}
+fn output_contract(args: &[String]) -> Output {
+    let words: Vec<_> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["state", "--schema" | "--json", ..] => Output::Json,
+        ["log", _, rest @ ..] if rest.contains(&"--raw") => Output::Records,
+        ["status" | "list" | "lifecycle", ..] | ["log", ..] => Output::Rendered,
+        _ => Output::Literal,
+    }
+}
+
+fn scrub_output(text: &str, output: Output) -> Result<String, String> {
+    match output {
+        // Their owners redact independent fields before joining them, and
+        // redact complete payloads before summary/tail truncation.
+        Output::Rendered => Ok(text.to_owned()),
+        Output::Literal => Ok(burrow_probe::scrub::Redactor::default().plain(text)),
+        Output::Records => burrow_probe::scrub::Jsonl::default().text(text),
+        Output::Json => {
+            let value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+            let value = burrow_probe::scrub::independent_json(&value)?;
+            let mut clean = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+            if text.ends_with('\n') {
+                clean.push('\n');
+            }
+            Ok(clean)
+        }
+    }
+}
+
+/// `proj _host-view ARGS...`: the broker's child. The validated grammar,
+/// rendered as [`View::Bridge`].
+pub(crate) fn view(cfg: &Config, args: &[String]) -> Result<(), Fail> {
+    validate(args).map_err(|e| Fail::new(2, e))?;
+    if args[0] != "reply" {
+        return crate::cmd::dispatch_as(cfg, args, View::Bridge);
+    }
+    // A machinery continuation is not an owner's answer. Retain open
+    // questions just as the watchdog's native reply does.
+    let args = &args[1..];
+    let (mut i, mut first, mut cutoff) = (0, false, None);
+    while args[i].starts_with("--") {
+        match args[i].as_str() {
+            "--first" => first = true,
+            "--cut-off" => {
+                cutoff = Some(args[i + 1].as_str());
+                i += 1;
+            }
+            _ => unreachable!("validated recovery flags"),
+        }
+        i += 1;
+    }
+    crate::cmd::reply(cfg, &args[i], &args[i + 1], first, cutoff)?;
+    crate::cmd::put(&format!("{}\n", args[i]));
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn words(s: &[&str]) -> Vec<String> {
-        s.iter().map(|w| (*w).to_owned()).collect()
-    }
+    use super::{Output, output_contract, scrub_output};
 
     #[test]
-    fn only_commands_about_jobs_cross() {
-        assert!(about_jobs(&[]));
-        for c in COMMANDS {
-            assert!(about_jobs(&words(&[c, "x"])));
-        }
-        for c in ["run", "await", "ask", "done", "probe", "_codex", "engines"] {
-            assert!(!about_jobs(&words(&[c])), "{c}");
-        }
-    }
-
-    #[test]
-    fn the_host_answers_with_its_own_output_and_exit_status() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.scratch = dir.path().join("scratch");
-        // A host proj that says what it was asked and what of the job's
-        // environment it was given.
-        cfg.me = dir.path().join("proj");
-        burrow_test::executable(
-            &cfg.me,
-            "#!/bin/sh\necho \"host: $*\" \"job=${PROJ_JOB-unset}\" \"socket=${PROJ_JOBS_SOCKET-unset}\" \"from=${PROJ_FROM_JOB-unset}\"\necho said >&2\nexit 3\n",
-        );
-        let job = Job::new(&cfg, "asking");
-        let _bridge = crate::probe::Bridge::start(&cfg, &job, "1", None).unwrap();
-        let path = socket(&cfg, &job, "1");
-        let got = exchange(&path, &words(&["reply", "other", "carry on"])).unwrap();
+    fn formatted_json_jsonl_and_mixed_diagnostics_keep_their_structure() {
+        let record = serde_json::json!({"message":"Authorization: credential\npublic \"quotes\"",
+            "password":"escaped \"credential\"\nsecond line", "count":3});
+        let pretty = format!("{}\n", serde_json::to_string_pretty(&record).unwrap());
+        let output = scrub_output(&pretty, Output::Records).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(decoded["count"], 3);
+        assert_eq!(decoded["password"], "[redacted]");
         assert_eq!(
-            got.out,
-            "host: reply other carry on job=unset socket=unset from=asking\n"
+            decoded["message"],
+            "Authorization: [redacted]\npublic \"quotes\""
         );
-        assert_eq!(got.err, "said\n");
-        assert_eq!(got.code, 3);
-        // Anything else is refused on the host, whatever the client sends.
-        let refused = exchange(&path, &words(&["run", "web", "go"])).unwrap();
-        assert_eq!(refused.code, 1);
-        assert!(refused.err.contains("only status"), "{}", refused.err);
-        assert!(refused.out.is_empty());
+        assert!(!output.contains("credential"));
+        let lines = format!("{record}\r\n{record}\n");
+        let clean = scrub_output(&lines, Output::Records).unwrap();
+        assert!(clean.contains("\r\n"));
+        assert_eq!(
+            clean
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>(),
+            vec![decoded.clone(), decoded]
+        );
+        let key = format!(
+            "-----BEGIN RSA {} KEY-----\ncredential payload\n-----END RSA {} KEY-----\n",
+            "PRIVATE", "PRIVATE"
+        );
+        let mixed = scrub_output(
+            &format!("diagnostic\n{key}{record}\npartial password=\"credential"),
+            Output::Records,
+        )
+        .unwrap();
+        assert!(!mixed.contains("credential"));
+        assert!(mixed.contains("[redacted private key]"));
+        assert!(mixed.contains("\"count\":3"));
     }
 
     #[test]
-    fn a_job_without_the_socket_says_it_cant_reach_the_hosts_jobs() {
-        let said = unreachable(
-            &words(&["reply", "x", "go"]),
-            "its turn gave it no jobs socket",
+    fn literal_names_keep_every_byte_and_only_structured_commands_parse_json() {
+        let name = "my\n 42 \napp\n{\"a\": 1}\n";
+        assert_eq!(scrub_output(name, Output::Literal).unwrap(), name);
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(output_contract(&words(&["state", "--json"])), Output::Json);
+        assert_eq!(
+            output_contract(&words(&["log", "j", "--raw"])),
+            Output::Records
         );
-        assert!(said.starts_with("proj reply: this job can't reach the host's jobs"));
-        assert_eq!(client(None, &words(&["log", "x"])), ExitCode::FAILURE);
-        let dir = tempfile::tempdir().unwrap();
-        let gone = dir.path().join("jobs-1.sock");
-        assert!(exchange(&gone, &words(&["status"])).is_err());
+        for plain in [
+            &["find", "k"][..],
+            &["list"],
+            &["reply", "j", "x"],
+            &["log", "j"],
+        ] {
+            assert!(!matches!(
+                output_contract(&words(plain)),
+                Output::Json | Output::Records
+            ));
+        }
+    }
+
+    #[test]
+    fn interleaved_metadata_and_other_calls_cannot_close_an_outputs_secret() {
+        let records = [
+            serde_json::json!({"call_id":"a", "output":"password=\"first"}),
+            serde_json::json!({"call_id":"b", "output":"public output \"quoted\""}),
+            serde_json::json!({"call_id":"a", "command":"cat \"$file\""}),
+            serde_json::json!({"call_id":"a", "output":"second\" public suffix"}),
+        ];
+        let text = records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        let out = scrub_output(&text, Output::Records).unwrap();
+        let values: Vec<serde_json::Value> = out
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(values[1]["output"], records[1]["output"]);
+        assert_eq!(values[2]["command"], records[2]["command"]);
+        assert!(!out.contains("first") && !out.contains("second"), "{out}");
+        assert!(
+            values[3]["output"]
+                .as_str()
+                .unwrap()
+                .contains("public suffix")
+        );
     }
 }

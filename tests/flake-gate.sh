@@ -163,9 +163,18 @@ refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared | sed 
   "a step that isn't bash" "isn't shell: bash"
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(tools_wf)")" \
   "a gate whose files aren't there" "there's no .github/flake-check/gate.sh beside it"
-refused "$(repo "$(caller ./.github/workflows/flake-check.yml)
-  again:
-    uses: ./.github/workflows/flake-check.yml" "$(shared)")" "two gates" "2 jobs calling flake-check.yml"
+refused "$(repo "$(printf 'jobs:\n  one:\n    uses: %s\n  two:\n    uses: %s\n' \
+  ./.github/workflows/flake-check.yml ./.github/workflows/flake-check.yml)" "$(shared)")" \
+  "two gates, neither of them check" "several and none of them named check"
+refused "$(repo "jobs: {}" "$(shared)")" "no gate" "no one job calling flake-check.yml"
+# Of several calls, check's: the gate a repo's PRs and default branch run,
+# whatever its train's call beside it passes.
+d=$(repo "$(caller ./.github/workflows/flake-check.yml '    with: { eval-apart: true }')
+  train:
+    uses: ./.github/workflows/flake-check.yml
+    with: { build-skip: other }" "$(shared)")
+(cd "$d" && GATE_OUT=$tmp/out flake-gate) || fail "check's gate of two failed"
+[ "$(cat "$tmp/out")" = "true||false|$d" ] || fail "ran another call's gate: $(cat "$tmp/out")"
 
 # burrow's own: CI's inputs, and the shared workflow's gate step as it is.
 d=$(mktemp -d "$tmp/burrow.XXXXXX")

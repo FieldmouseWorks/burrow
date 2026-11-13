@@ -1,7 +1,7 @@
 //! The same executable runs as a tool inside each engine's job.
 use std::{
     env, fs,
-    io::{BufRead, Write},
+    io::{BufRead, Read, Write},
     net::TcpStream,
     os::unix::{net::UnixStream, process::CommandExt},
     path::PathBuf,
@@ -28,7 +28,6 @@ fn main() {
     }
     if args.first().is_some_and(|s| s == "github") {
         if args.iter().any(|s| s == "--input") {
-            use std::io::Read;
             let mut body = Vec::new();
             std::io::stdin().read_to_end(&mut body).unwrap();
         }
@@ -55,22 +54,26 @@ fn main() {
             Command::new(env::args().nth(2).unwrap()).args(args).exec()
         );
     }
-    if args.first().is_some_and(|s| s == "drop-jobs") {
-        // The jobs grant is its socket's address: gone from the profile and
-        // from what Codex hands its commands.
+    if args.first().is_some_and(|s| s == "drop-host-jobs") {
         let mut forwarded = Vec::new();
-        for arg in &args[2..] {
-            if arg.starts_with("shell_environment_policy.set.PROJ_JOBS_SOCKET=") {
-                forwarded.pop();
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "-c"
+                && args.get(i + 1).is_some_and(|s| {
+                    s.starts_with("shell_environment_policy.set.PROJ_HOST_JOBS_SOCKET=")
+                })
+            {
+                i += 2;
             } else {
-                forwarded.push(arg);
+                forwarded.push(args[i].clone());
+                i += 1;
             }
         }
         panic!(
             "{}",
             Command::new(&args[1])
                 .args(forwarded)
-                .env_remove("PROJ_JOBS_SOCKET")
+                .env_remove("PROJ_HOST_JOBS_SOCKET")
                 .exec()
         );
     }
@@ -106,12 +109,6 @@ fn main() {
     }
     let job = PathBuf::from(format!("/data/dev/jobs/{}", env::var("PROJ_JOB").unwrap()));
     let scratch = PathBuf::from(env::var("PROJ_SCRATCH").unwrap());
-    // The job another replies to: the one given a turn limit, held until it
-    // times out.
-    if job.join("timeout").exists() {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-        return;
-    }
     let declared = env::var("PROJ_CAPABILITIES").unwrap();
     fs::write(job.join("capabilities-declared"), &declared).unwrap();
     let mut passed = Vec::new();
@@ -134,45 +131,57 @@ fn main() {
                     &["await", "https://github.com/test/project/issues/1"],
                 );
                 run("proj", &["ask", "--default", "continue the test"]);
-            }
-            "jobs" => {
-                let target = fs::read_to_string("/data/dev/src/web/reply-target").unwrap();
-                let target = target.trim();
-                let proj = |args: &[&str]| {
-                    let out = Command::new("proj").args(args).output().unwrap();
-                    let said = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
+                let target = env::var("PROJ_RECOVERY_TARGET").unwrap();
+                if fs::read_to_string(job.join("1.engine")).unwrap().trim() == "codex" {
+                    assert!(
+                        fs::read_dir(format!("/data/dev/jobs/{target}")).is_err(),
+                        "the sandbox must use the broker, not host job paths"
                     );
-                    (out.status.success(), said)
-                };
-                let state = || proj(&["state", target]).1.trim().to_owned();
-                // What the host says of it, not this job's own view.
-                assert!(state().starts_with("timed out"), "{}", state());
-                let (listed, status) = proj(&["status"]);
-                assert!(listed && status.contains(target), "{status}");
-                let (_, log) = proj(&["log", target]);
-                assert!(log.contains("timed out"), "{log}");
-                let (replied, said) = proj(&["reply", target, "carry on"]);
-                assert!(replied, "{said}");
-                // Its next turn starts, in the same conversation, and ends.
-                let mut started = false;
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
-                while std::time::Instant::now() < until {
-                    let now = state();
-                    if now == "queued" || now == "running" {
-                        started = true;
-                    } else if started {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                let ended = state();
+                let history = Command::new("proj")
+                    .args(["log", &target, "--turn", "1", "--raw"])
+                    .output()
+                    .unwrap();
                 assert!(
-                    started && ended != "queued" && ended != "running",
-                    "{ended}"
+                    history.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&history.stderr)
                 );
+                assert!(
+                    String::from_utf8_lossy(&history.stdout).contains("host recovery transcript")
+                );
+                run("proj", &["reply", &target, "continue after timeout"]);
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+                loop {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "target did not finish its resumed turn"
+                    );
+                    let state = Command::new("proj")
+                        .args(["state", &target])
+                        .output()
+                        .unwrap();
+                    assert!(state.status.success());
+                    match String::from_utf8_lossy(&state.stdout).trim() {
+                        "queued" | "running" => {
+                            std::thread::sleep(std::time::Duration::from_millis(100))
+                        }
+                        "done" => break,
+                        other => panic!("resumed target failed: {other}"),
+                    }
+                }
+                let answer = Command::new("proj")
+                    .args(["log", &target])
+                    .output()
+                    .unwrap();
+                assert!(
+                    answer.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&answer.stderr)
+                );
+                assert!(String::from_utf8_lossy(&answer.stdout).starts_with("done\n"));
+                run("proj", &["stop", &target]);
+                fs::write(job.join("host-job-recovered"), "ok").unwrap();
             }
             "git-metadata" => {
                 let tree = scratch.join("tree");
@@ -237,6 +246,16 @@ fn main() {
                 );
                 assert!(!answer.stdout.is_empty());
                 fs::write(job.join("host-probe"), answer.stdout).unwrap();
+            }
+            "units-clear" => {
+                // The host's handler answers, here with its refusal of an
+                // empty list, which changes nothing on the host.
+                let mut door = UnixStream::connect("/run/burrow-units/clear.sock").unwrap();
+                door.write_all(b"[]").unwrap();
+                door.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut answer = String::new();
+                door.read_to_string(&mut answer).unwrap();
+                assert!(answer.contains("clear takes"), "{answer}");
             }
             "github" => {
                 UnixStream::connect(env::var("GH_TOKEN_SOCKET").unwrap()).unwrap();

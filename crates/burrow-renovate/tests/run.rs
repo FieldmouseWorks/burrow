@@ -66,6 +66,9 @@ if [ "$1" = api ]; then
   fi
   case "$path" in
     rate_limit)
+      if [ -e "$FAKE/quota-response" ]; then
+        printf 'HTTP/2.0 200 OK\n\n'; cat "$FAKE/quota-response"; exit 0
+      fi
       # gh as the App (burrow.github's appGh) sets GH_TOKEN empty over
       # whatever it's given, so a token handed to it is no token.
       [ -z "${GH_TOKEN_SOCKET-}" ] || GH_TOKEN=
@@ -121,6 +124,11 @@ if [ -e "$FAKE/renovate-outlives" ]; then
   while [ -e "/proc/$PPID" ] && [ "$(cut -d' ' -f3 "/proc/$PPID/stat")" != Z ]; do sleep 0.05; done
   locked "renovate after renovate-run"
 fi
+if [ -n "${RENOVATE_LOG_FILE-}" ] && [ -e "$FAKE/renovate-errors" ]; then
+  [ "$RENOVATE_LOG_FILE_LEVEL $RENOVATE_LOG_FILE_FORMAT" = 'error json' ] || exit 2
+  cat "$FAKE/renovate-errors" >>"$RENOVATE_LOG_FILE"
+fi
+[ ! -e "$FAKE/renovate-exit" ] || exit "$(cat "$FAKE/renovate-exit")"
 [ ! -e "$FAKE/renovate-fails" ] || case "$*" in *"$(cat "$FAKE/renovate-fails")"*) exit 1 ;; esac
 "#,
     ),
@@ -680,6 +688,13 @@ fn a_wait_it_cant_book_is_a_failure() {
     assert!(err.starts_with("renovate-run: "), "{err}");
 }
 
+const QUOTA_ERRORS: &str = concat!(
+    r#"{"level":50,"msg":"GitHub getRepos error","err":{"message":"rate-limit-exceeded"}}"#,
+    "\n",
+    r#"{"level":60,"msg":"Unknown error","err":{"message":"rate-limit-exceeded"}}"#,
+    "\n",
+);
+
 #[test]
 fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     // Renovate meets the limit mid-run and fails; GitHub's rate_limit says
@@ -694,6 +709,7 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     // The owner as GitHub spells it, whose installation the token is for.
     let m = Machine::new(Some(&["sam"]));
     m.set("Sam-spent", &at.to_string());
+    m.set("renovate-errors", QUOTA_ERRORS);
     m.set("renovate-fails", "Sam/R");
     // Started in another owner's checkout, which gh-token would go by,
     // whose allowance isn't spent.
@@ -713,6 +729,7 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     m.set("sam-repos", "sam/a\nsam/b\n");
     m.set("kim-repos", "kim/c\n");
     m.set("sam-spent", &at.to_string());
+    m.set("renovate-errors", QUOTA_ERRORS);
     m.set("renovate-fails", "sam/a");
     assert_eq!(
         m.run(&[]),
@@ -724,6 +741,7 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     // As the user, the one run over everything, by the login's allowance.
     let m = Machine::new(None);
     m.set("user-spent", &at.to_string());
+    m.set("renovate-errors", QUOTA_ERRORS);
     m.set("renovate-fails", "");
     assert_eq!(m.run(&[]), ok(&met("every repo")));
     assert_eq!(m.booked(), serde_json::json!({"": at}));
@@ -746,5 +764,84 @@ fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
     let m = Machine::new(Some(&["sam"]));
     m.set("renovate-fails", "Sam/R");
     assert_eq!(m.run(&["sam/r"]), (Some(1), String::new(), String::new()));
+    assert_eq!(m.booked(), serde_json::json!({}));
+}
+
+#[test]
+fn an_unrelated_subprocess_failure_is_not_excused_by_a_spent_allowance() {
+    for errors in [
+        "",
+        r#"{"level":60,"err":{"message":"bad-credentials"}}"#,
+        concat!(
+            r#"{"level":50,"err":{"message":"rate-limit-exceeded"}}"#,
+            "\n",
+            r#"{"level":60,"err":{"message":"configuration-error"}}"#
+        ),
+        r#"{"level":60,"msg":"rate-limit-exceeded"}"#,
+        "invalid json",
+    ] {
+        let m = Machine::new(Some(&["sam"]));
+        m.set("Sam-spent", &in_an_hour().to_string());
+        m.set("renovate-fails", "Sam/R");
+        m.set("renovate-errors", errors);
+        assert_eq!(
+            m.run(&["sam/r"]),
+            (Some(1), String::new(), String::new()),
+            "{errors}"
+        );
+        assert_eq!(m.booked(), serde_json::json!({}), "{errors}");
+    }
+}
+
+#[test]
+fn subprocess_quota_evidence_needs_a_live_reset_and_a_normal_failure_exit() {
+    for response in [
+        r#"{"resources":{"core":{"remaining":0,"reset":1}}}"#,
+        r#"{"resources":{"core":{"remaining":1,"reset":9999999999}}}"#,
+        r#"{"resources":{"core":{"remaining":0}}}"#,
+        "invalid json",
+    ] {
+        let m = Machine::new(None);
+        m.set("renovate-fails", "");
+        m.set("renovate-errors", QUOTA_ERRORS);
+        m.set("quota-response", response);
+        assert_eq!(
+            m.run(&[]),
+            (Some(1), String::new(), String::new()),
+            "{response}"
+        );
+        assert_eq!(m.booked(), serde_json::json!({}));
+    }
+    let m = Machine::new(None);
+    let at = in_an_hour();
+    m.set("renovate-fails", "");
+    m.set("renovate-errors", QUOTA_ERRORS);
+    m.set(
+        "quota-response",
+        &serde_json::json!({"resources":{
+            "core":{"remaining":20,"reset":at - 100},
+            "graphql":{"remaining":0,"reset":at},
+        }})
+        .to_string(),
+    );
+    assert_eq!(m.run(&[]).0, Some(0));
+    assert_eq!(m.booked(), serde_json::json!({"": at}));
+
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    m.set("renovate-exit", "2");
+    m.set("renovate-errors", QUOTA_ERRORS);
+    assert_eq!(m.run(&[]), (Some(2), String::new(), String::new()));
+    assert_eq!(m.booked(), serde_json::json!({}));
+
+    // The run couldn't be noted: infrastructure failures remain failures.
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    m.set("renovate-fails", "");
+    m.set("renovate-errors", QUOTA_ERRORS);
+    fs::write(m.path("runs"), "not a directory").unwrap();
+    let (code, _, err) = m.run(&[]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("renovate-run: "), "{err}");
     assert_eq!(m.booked(), serde_json::json!({}));
 }

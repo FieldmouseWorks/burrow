@@ -68,7 +68,7 @@ fn the_11_11_stall() {
     for (i, n) in [11u64, 12, 13].into_iter().enumerate() {
         parked(&b, &format!("job-{n}"), n, 100 + n, 600 * (i as i64 + 1));
     }
-    let json = crate::cmd::state_json(&b.cfg, 15).unwrap();
+    let json = crate::cmd::state_json(&b.cfg, 15, crate::host_jobs::View::Owner).unwrap();
     let json: Value = serde_json::from_str(&json).unwrap();
     crate::snapshot::tests::validates(&json).unwrap();
     let snap: Snapshot = serde_json::from_value(json).unwrap();

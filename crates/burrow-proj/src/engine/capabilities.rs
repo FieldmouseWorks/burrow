@@ -19,11 +19,11 @@ use std::{
 pub enum Capability {
     Workspace,
     JobState,
-    Jobs,
     GitMetadata,
     Toolchains,
     System,
     Probe,
+    UnitsClear,
     Github,
     Heavy,
     Nix,
@@ -197,7 +197,6 @@ pub fn resolve(
             ],
         ),
         Grant::new(Capability::JobState, vec![(job.dir.clone(), true)]),
-        Grant::new(Capability::Jobs, vec![]),
         Grant::new(Capability::GitMetadata, vec![(metadata, true)]),
         Grant::new(Capability::Toolchains, vec![(cargo, true)]),
         Grant::new(
@@ -205,6 +204,13 @@ pub fn resolve(
             system.into_iter().map(|p| (p, false)).collect(),
         ),
         Grant::new(Capability::Probe, vec![]),
+        Grant::new(
+            Capability::UnitsClear,
+            cfg.units_clear_socket
+                .iter()
+                .map(|p| (p.clone(), false))
+                .collect(),
+        ),
         Grant::new(
             Capability::Github,
             github.into_iter().map(|p| (p, false)).collect(),
@@ -226,20 +232,29 @@ pub fn resolve(
         Grant::new(Capability::Network, vec![]),
         Grant::new(Capability::Environment, vec![]),
     ];
-    // The host transports live in Workspace's scratch. Their addresses belong
-    // to the contract even though they need no additional filesystem grant.
-    for (capability, name) in [
-        (Capability::Probe, "PROJ_PROBE_SOCKET"),
-        (Capability::Jobs, "PROJ_JOBS_SOCKET"),
-    ] {
-        if let Some(socket) = var(env, name) {
-            items
-                .iter_mut()
-                .find(|g| g.capability == capability)
-                .unwrap()
-                .env
-                .insert(name.into(), socket.to_string_lossy().into_owned());
-        }
+    // The host transport lives in Workspace's scratch. Its address belongs
+    // to the contract even though it needs no additional filesystem grant.
+    if let Some(socket) = var(env, "PROJ_PROBE_SOCKET") {
+        items
+            .iter_mut()
+            .find(|g| g.capability == Capability::Probe)
+            .unwrap()
+            .env
+            .insert(
+                "PROJ_PROBE_SOCKET".into(),
+                socket.to_string_lossy().into_owned(),
+            );
+    }
+    if let Some(socket) = var(env, "PROJ_HOST_JOBS_SOCKET") {
+        items
+            .iter_mut()
+            .find(|g| g.capability == Capability::JobState)
+            .unwrap()
+            .env
+            .insert(
+                "PROJ_HOST_JOBS_SOCKET".into(),
+                socket.to_string_lossy().into_owned(),
+            );
     }
     items
         .iter_mut()
@@ -288,6 +303,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
+        cfg.units_clear_socket = Some(dir.path().join("units/clear.sock"));
         cfg.tools.git = "git".into();
         let project = dir.path().join("project");
         let socket = dir.path().join("server-socket");
@@ -312,7 +328,9 @@ mod tests {
             "HOME" => Some(home.clone().into_os_string()),
             "SETTING" | "EXTRA" => Some("inherited".into()),
             "PROJ_PROBE_SOCKET" => Some(dir.path().join("scratch/probe.sock").into_os_string()),
-            "PROJ_JOBS_SOCKET" => Some(dir.path().join("scratch/jobs.sock").into_os_string()),
+            "PROJ_HOST_JOBS_SOCKET" => {
+                Some(dir.path().join("scratch/host-jobs.sock").into_os_string())
+            }
             _ => None,
         };
         let machine = sandbox::tests::machine_in(dir.path());
@@ -351,6 +369,14 @@ mod tests {
         assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
         assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
         assert!(profile.contains(r#""/dev/kvm"="write""#));
+        let clear_socket = cfg.units_clear_socket.as_ref().unwrap();
+        assert!(profile.contains(&format!("\"{}\"=\"read\"", clear_socket.display())));
+        let clear = grants
+            .items
+            .iter()
+            .find(|g| g.capability == Capability::UnitsClear)
+            .unwrap();
+        assert_eq!(clear.paths, vec![(clear_socket.clone(), false)]);
         assert_eq!(grants.environment()["NIX_REMOTE"], "daemon");
         // Both adapters take their environment from the same resolved contract.
         let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
@@ -363,14 +389,14 @@ mod tests {
                 .as_ref()
         );
         assert!(profile.contains("shell_environment_policy.set.PROJ_PROBE_SOCKET="));
-        assert!(profile.contains("shell_environment_policy.set.PROJ_JOBS_SOCKET="));
         assert_eq!(
-            settings["env"]["PROJ_JOBS_SOCKET"],
+            settings["env"]["PROJ_HOST_JOBS_SOCKET"],
             dir.path()
-                .join("scratch/jobs.sock")
+                .join("scratch/host-jobs.sock")
                 .to_string_lossy()
                 .as_ref()
         );
+        assert!(profile.contains("shell_environment_policy.set.PROJ_HOST_JOBS_SOCKET="));
         assert!(profile.contains("shell_environment_policy.set.PROJ_CAPABILITIES="));
     }
 }

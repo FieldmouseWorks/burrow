@@ -19,6 +19,12 @@ sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
 subprocess.run([sys.executable, str(Path(__file__).with_name("timeouts.py")),
                 *sys.argv[1:]], check=True)
 
+subprocess.run([sys.executable, str(Path(__file__).with_name("batches.py")),
+                *sys.argv[1:]], check=True)
+
+subprocess.run([sys.executable, str(Path(__file__).with_name("continuations.py")),
+                *sys.argv[1:]], check=True)
+
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
     cfg.write_text(json.dumps(dict(context='test', stateDir=tmp, jobsDir=tmp, owner='Sam', proj=f'{tmp}/proj',

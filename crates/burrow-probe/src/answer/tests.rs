@@ -100,6 +100,188 @@ fn sizes() {
 }
 
 #[test]
+fn crash_reports_use_the_host_journal_and_only_diagnostic_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let entry = serde_json::json!({
+        "COREDUMP_EXE": "/nix/store/example-godot/libexec/godot",
+        "COREDUMP_PID": "2168633",
+        "COREDUMP_SIGNAL": "6",
+        "COREDUMP_USER_UNIT": "proj-example.service",
+        "COREDUMP_CGROUP": "/user.slice/proj-example.service",
+        "MESSAGE": "Process dumped core.\nStack trace of thread 2168633:\n#0 abort (libc.so.6)",
+        "COREDUMP_ENVIRON": "PRIVATE_ENV_VALUE",
+        "COREDUMP_CMDLINE": "PRIVATE_ARGUMENT_VALUE",
+        "COREDUMP_PROC_MAPS": "PRIVATE_MEMORY_MAP",
+        "__CURSOR": "PRIVATE_CURSOR"
+    })
+    .to_string();
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        0,
+        &entry,
+    );
+    let q = Query::parse("crashes /nix/store/example-godot/libexec/godot -1h").unwrap();
+    let got = machine(&cfg, dir.path(), &fake).answer(&q).unwrap();
+    assert!(got.contains("COREDUMP_PID: 2168633"));
+    assert!(got.contains("COREDUMP_SIGNAL: 6"));
+    assert!(got.contains("proj-example.service"));
+    assert!(got.contains("#0 abort (libc.so.6)"));
+    assert!(!got.contains("PRIVATE_"));
+    let asked = fake.asked.borrow();
+    let (_, args, user) = &asked[0];
+    assert!(!user);
+    assert!(args.contains(&"COREDUMP_EXE=/nix/store/example-godot/libexec/godot".into()));
+    assert!(args.contains(&"@1793496400".into()));
+    assert!(args.contains(&"--reverse".into()));
+    assert!(args.windows(2).any(|a| a == ["-n", "5"]));
+    assert!(!args.iter().any(|a| a.contains("COREDUMP_ENVIRON")));
+}
+
+#[test]
+fn crash_queries_reject_commands_and_report_an_empty_span() {
+    for text in [
+        "crashes",
+        "crashes godot",
+        "crashes --all",
+        "crashes /bin/*",
+        "crashes /bin/../secret",
+        "crashes /bin/godot;id",
+        "crashes /bin/godot --all",
+        "crashes /bin/godot -1h now",
+        "crashes /",
+        "crashes /bin//godot",
+    ] {
+        assert!(Query::parse(text).is_err(), "{text}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        0,
+        "",
+    );
+    let q = Query::parse("crashes /bin/godot").unwrap();
+    assert_eq!(q.to_string(), "crashes /bin/godot -1d");
+    assert!(
+        machine(&cfg, dir.path(), &fake)
+            .answer(&q)
+            .unwrap()
+            .ends_with("none\n")
+    );
+    let bad = Query::parse("crashes /bin/godot now").unwrap();
+    assert!(machine(&cfg, dir.path(), &fake).answer(&bad).is_err());
+    assert_eq!(fake.asked.borrow().len(), 1);
+}
+
+#[test]
+fn crash_reports_keep_complete_fields_and_reject_bad_journal_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let q = Query::parse("crashes /bin/godot").unwrap();
+    for bad in ["not json", r#"{"COREDUMP_EXE":"/bin/other"}"#] {
+        let fake = Fake::default().on(
+            "journalctl",
+            "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+            0,
+            bad,
+        );
+        assert!(machine(&cfg, dir.path(), &fake).answer(&q).is_err());
+    }
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        1,
+        "",
+    );
+    assert!(machine(&cfg, dir.path(), &fake).answer(&q).is_err());
+    let entry =
+        serde_json::json!({"COREDUMP_EXE":"/bin/godot", "MESSAGE":"x".repeat(12001)}).to_string();
+    let fake = Fake::default().on(
+        "journalctl",
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+        0,
+        &entry,
+    );
+    let got = machine(&cfg, dir.path(), &fake).answer(&q).unwrap();
+    assert!(got.contains(&"x".repeat(12001)));
+}
+
+#[test]
+fn crash_comments_scrub_credentials_across_old_field_boundaries() {
+    use burrow_github::fake::{Fake as Github, actor, ok};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    for (field, limit) in [("COREDUMP_CGROUP", 1024), ("MESSAGE", 12000)] {
+        for credential in [
+            "reader:opaque-value".to_string(),
+            format!("gh{}_{}", "p", "x".repeat(36)),
+        ] {
+            // The URL's @ or the token's twentieth payload character falls
+            // just beyond the old cut, defeating recognition after cutting.
+            let (value, hidden) = if credential.starts_with("reader:") {
+                let url = format!("https://{credential}");
+                (
+                    format!(
+                        "Authorization: {}\n{url}@example.org/path",
+                        "x".repeat(limit - url.len() - 16)
+                    ),
+                    credential,
+                )
+            } else {
+                (
+                    format!(
+                        "Authorization: {}\n{credential} end",
+                        "x".repeat(limit - 4 - 19 - 16)
+                    ),
+                    credential[..23].to_string(),
+                )
+            };
+            let mut entry = json!({"COREDUMP_EXE":"/bin/example", "COREDUMP_PID":"123"});
+            entry[field] = json!(value);
+            let fake = Fake::default().on(
+                "journalctl",
+                "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+                0,
+                &entry.to_string(),
+            );
+            let m = machine(&cfg, dir.path(), &fake);
+            let q = Query::parse("crashes /bin/example -1h").unwrap();
+            assert!(
+                m.answer(&q).unwrap().contains(&hidden),
+                "local ask remains unscrubbed"
+            );
+            let body = "crashes /bin/example -1h";
+            let author = actor("sam");
+            let mut gh = Github::default();
+            gh.on("GET", "repos/sam/box/issues", vec![ok(200, json!([{"number":1,"user":author,"title":"probe","body":body}]), &[])])
+                .on("GET", "repos/sam/box", vec![ok(200, json!({"private":true}), &[])])
+                .on("POST", "graphql", vec![ok(200, json!({"data":{"repository":{"issue":{
+                    "author": {"login":"sam","databaseId":author["id"]}, "title":"probe", "body":body,
+                    "userContentEdits":{"totalCount":0,"nodes":[]}, "timelineItems":{"totalCount":0,"nodes":[]}
+                }}}}), &[])])
+                .on("POST", "repos/sam/box/issues/1/comments", vec![ok(201,json!({}), &[])])
+                .on("PATCH", "repos/sam/box/issues/1", vec![ok(200,json!({}), &[])]);
+            crate::pass::pass(&mut gh, &cfg, &mut |q| m.answer(q), "now").unwrap();
+            let posted = gh
+                .asked("POST")
+                .into_iter()
+                .find(|a| a.1.ends_with("/comments"))
+                .unwrap();
+            let text = posted.2.as_ref().unwrap()["body"].as_str().unwrap();
+            assert!(text.contains("[redacted]"), "{field}");
+            assert!(
+                !text.contains(&hidden),
+                "{field}: credential crossed GitHub boundary"
+            );
+        }
+    }
+}
+
+#[test]
 fn memory_lists_the_biggest_cgroups() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -403,6 +585,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     fs::create_dir_all(&job).unwrap();
     fs::write(job.join("role"), "repair").unwrap();
     fs::write(job.join("usage-kind"), "inbox labels=codex opener=owner").unwrap();
+    fs::write(job.join("project"), "/data/src/web\n").unwrap();
     let put = |n: u64, engine: &str, at: u64, text: &str| {
         fs::write(job.join(format!("{n}.engine")), engine).unwrap();
         fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
@@ -461,16 +644,51 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     assert!(answer.contains("codex / no role; starter=operator-session: 1 turns"));
     assert!(!answer.contains("99%"));
     assert!(!answer.contains("SECRET"));
+    // Totals come first, the turns after the meters.
+    let at = |s: &str| answer.find(s).unwrap_or_else(|| panic!("{s}: {answer}"));
+    assert!(at("By engine:") < at("Meter readings:"));
+    assert!(at("Meter readings:") < at("Each turn:"));
+    let table: Vec<String> = answer
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    for row in [
+        "engine role project turns input output cache-read cache-write cost unread missing-runs recovered-runs outside-span partial-tokens",
+        "claude all all 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "codex all all 2 - - - - - 2 0 0 0 0",
+        "claude repair all 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "codex (none) all 1 - - - - - 1 0 0 0 0",
+        "codex all web 1 - - - - - 1 0 0 0 0",
+        "codex all (unknown) 1 - - - - - 1 0 0 0 0",
+        "claude repair web 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "Cost: $0.00 recorded over 4 turns; 1 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside the selected turns whose cost may be included; 2 turns whose engine's cost and tokens aren't read.",
+    ] {
+        assert!(table.iter().any(|l| l == row), "{row}: {answer}");
+    }
+    let totals = m
+        .answer(&Query::parse("usage @150 --totals").unwrap())
+        .unwrap();
+    assert!(totals.contains("By engine, role and project:"), "{totals}");
+    assert!(
+        !totals.contains("Meter readings") && !totals.contains("Each turn"),
+        "{totals}"
+    );
+    assert!(answer.starts_with(&totals), "{totals}");
     let full = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
     assert!(
         full.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$1.500000"),
+        "{full}"
+    );
+    assert!(
+        full.contains("Cost: $1.50 recorded over 5 turns; 1 runs with cost still missing"),
         "{full}"
     );
     assert!(fake.asked.borrow().is_empty());
     assert_eq!(
         Query::parse("usage").unwrap(),
         Query::Usage {
-            since: crate::query::When::Ago(18000)
+            since: crate::query::When::Ago(18000),
+            totals: false,
         }
     );
     assert!(Query::parse("usage -1h extra").is_err());
@@ -624,3 +842,6 @@ fn usage_first_start_survives_slot_recreation_and_unknown_history_is_explicit() 
             .contains("claude: 1 turns")
     );
 }
+
+#[path = "usage_tests.rs"]
+mod usage_tests;

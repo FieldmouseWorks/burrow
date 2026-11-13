@@ -25,7 +25,7 @@ pub(crate) fn socket(cfg: &Config, job: &Job, n: &str) -> PathBuf {
 // Resolve through an open directory rather than putting the full scratch
 // path in sockaddr_un's small sun_path. The socket still lives only in this
 // job's scratch and remains subject to the same filesystem permissions.
-pub(crate) fn address(path: &Path) -> Result<(fs::File, PathBuf), String> {
+fn address(path: &Path) -> Result<(fs::File, PathBuf), String> {
     let directory = fs::File::open(path.parent().ok_or("probe socket has no parent")?)
         .map_err(|e| e.to_string())?;
     let name = path.file_name().ok_or("probe socket has no name")?;
@@ -39,6 +39,11 @@ pub fn client(path: &Path, words: &[String]) -> Result<(), String> {
     Ok(())
 }
 fn exchange(path: &Path, words: &[String]) -> Result<String, String> {
+    result(&request(path, words.join(" ").as_bytes(), 65536)?)
+}
+
+/// Shared bounded Unix transport; each endpoint supplies its own grammar.
+pub(crate) fn request(path: &Path, request: &[u8], max: u64) -> Result<String, String> {
     let (_directory, address) = address(path)?;
     let mut stream = UnixStream::connect(address).map_err(|e| e.to_string())?;
     stream
@@ -47,18 +52,19 @@ fn exchange(path: &Path, words: &[String]) -> Result<String, String> {
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
-    stream
-        .write_all(words.join(" ").as_bytes())
-        .map_err(|e| e.to_string())?;
+    stream.write_all(request).map_err(|e| e.to_string())?;
     stream
         .shutdown(std::net::Shutdown::Write)
         .map_err(|e| e.to_string())?;
     let mut answer = String::new();
     stream
-        .take(65536)
+        .take(max + 1)
         .read_to_string(&mut answer)
         .map_err(|e| e.to_string())?;
-    result(&answer)
+    if answer.len() as u64 > max {
+        return Err(format!("host response exceeded {max} bytes"));
+    }
+    Ok(answer)
 }
 
 fn result(answer: &str) -> Result<String, String> {
@@ -154,17 +160,14 @@ fn answer(cfg: &Config, question: &str) -> String {
     serde_json::to_string(&answer.map(clean).map_err(clean)).expect("probe answer")
 }
 
-pub(crate) struct Bridge {
+/// Host transports kept alive for one engine invocation. The VM gets only
+/// the read-only probe mailbox; local jobs also get the host recovery socket.
+pub struct Bridge {
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Bridge {
-    pub(crate) fn start(
-        cfg: &Config,
-        job: &Job,
-        n: &str,
-        agent: Option<&str>,
-    ) -> Result<Self, String> {
+    pub fn start(cfg: &Config, job: &Job, n: &str, agent: Option<&str>) -> Result<Self, String> {
         Self::start_with(cfg, job, n, agent, PathBuf::from("agent"))
     }
     fn start_with(
@@ -183,21 +186,19 @@ impl Bridge {
         let (_directory, address) = address(&path)?;
         let listener = UnixListener::bind(address).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let vm = agent.map(|a| (a.to_owned(), PathBuf::from(guest::path(job, n))));
-        // The host's jobs, beside its answers: a VM's guest has no socket of
-        // the host's to reach them by, and its proj says so.
+        // Host jobs have a separate endpoint: the probe grammar stays read-only.
         let jobs_path = crate::host_jobs::socket(&cfg, job, n);
-        let asking = job.id.to_owned();
-        let jobs = match vm {
-            Some(_) => None,
-            None => {
-                let _ = fs::remove_file(&jobs_path);
-                let (_held, at) = self::address(&jobs_path)?;
-                let jobs = UnixListener::bind(at).map_err(|e| e.to_string())?;
-                jobs.set_nonblocking(true).map_err(|e| e.to_string())?;
-                Some(jobs)
-            }
+        let jobs_listener = if agent.is_none() {
+            let _ = fs::remove_file(&jobs_path);
+            let (_directory, address) = self::address(&jobs_path)?;
+            let listener = UnixListener::bind(address).map_err(|e| e.to_string())?;
+            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+            Some(listener)
+        } else {
+            None
         };
+        let uid = rustix::process::geteuid().as_raw();
+        let vm = agent.map(|a| (a.to_owned(), PathBuf::from(guest::path(job, n))));
         let thread = thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 if let Some((agent, path)) = &vm {
@@ -240,36 +241,54 @@ impl Bridge {
                             Duration::from_secs(30),
                         );
                     }
-                } else if let Ok((mut stream, _)) = listener.accept() {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                    let mut request = String::new();
-                    if (&mut stream)
-                        .take(4096)
-                        .read_to_string(&mut request)
-                        .is_ok()
-                    {
-                        let _ = stream.write_all(answer(&cfg, &request).as_bytes());
+                } else {
+                    serve(&listener, 4096, uid, |request| answer(&cfg, request));
+                    if let Some(listener) = &jobs_listener {
+                        serve(listener, crate::host_jobs::MAX_REQUEST, uid, |request| {
+                            crate::host_jobs::answer(&cfg, request)
+                        });
                     }
-                }
-                // Each on its own, so a slow `proj stop` holds up no probe.
-                if let Some(jobs) = &jobs
-                    && let Ok((stream, _)) = jobs.accept()
-                {
-                    let (cfg, asking) = (cfg.clone(), asking.clone());
-                    thread::spawn(move || crate::host_jobs::serve(&cfg, &asking, stream));
                 }
                 thread::sleep(Duration::from_millis(if vm.is_some() { 1000 } else { 100 }));
             }
             let _ = fs::remove_file(path);
-            if jobs.is_some() {
-                let _ = fs::remove_file(jobs_path);
-            }
+            let _ = fs::remove_file(jobs_path);
         });
         Ok(Self {
             stop,
             thread: Some(thread),
         })
+    }
+}
+
+fn serve(listener: &UnixListener, max: u64, uid: u32, answer: impl FnOnce(&str) -> String) {
+    if let Ok((mut stream, _)) = listener.accept() {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+        // The kernel authenticates the caller; no chmod of a pathname in
+        // writable scratch, and no uid supplied in the request, is trusted.
+        if !rustix::net::sockopt::socket_peercred(&stream)
+            .is_ok_and(|peer| peer.uid.as_raw() == uid)
+        {
+            let denied =
+                serde_json::to_string(&Err::<String, _>("host transport refuses a different user"))
+                    .unwrap();
+            let _ = stream.write_all(denied.as_bytes());
+            return;
+        }
+        let mut request = String::new();
+        if (&mut stream)
+            .take(max + 1)
+            .read_to_string(&mut request)
+            .is_ok()
+        {
+            let response = if request.len() as u64 > max {
+                serde_json::to_string(&Err::<String, _>("host request too large")).unwrap()
+            } else {
+                answer(&request)
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
     }
 }
 impl Drop for Bridge {
@@ -284,6 +303,24 @@ impl Drop for Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_foreign_peer_is_refused_before_dispatch_even_on_a_reachable_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.sock");
+        let (_directory, address) = address(&path).unwrap();
+        let listener = UnixListener::bind(&address).unwrap();
+        let mut stream = UnixStream::connect(&address).unwrap();
+        stream.write_all(b"[\"stop\",\"target\"]").unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let foreign_owner = rustix::process::geteuid().as_raw().wrapping_add(1);
+        serve(&listener, 4096, foreign_owner, |_| {
+            panic!("foreign request dispatched")
+        });
+        let mut response = String::new();
+        // A refusal may reset the unread request; the denial itself is still delivered.
+        let _ = stream.read_to_string(&mut response);
+        assert!(result(&response).unwrap_err().contains("different user"));
+    }
     fn fixture(dir: &Path) -> Config {
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.join("jobs");
@@ -360,6 +397,87 @@ mod tests {
         .unwrap();
         assert!(!got.contains(&token));
         assert!(got.contains("[redacted]"));
+    }
+    #[test]
+    fn sandbox_gets_scrubbed_host_crash_metadata_without_core_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let journal = dir.path().join("journalctl");
+        let token = format!("ghp_{}", "x".repeat(36));
+        let entry = serde_json::json!({
+            "COREDUMP_EXE":"/bin/example", "COREDUMP_PID":"123",
+            "COREDUMP_USER_UNIT":"proj-example.service",
+            "MESSAGE":format!("Stack trace of thread 123:\n#0 abort\nAuthorization: Bearer {token}"),
+            "COREDUMP_ENVIRON":"plain private environment"
+        });
+        burrow_test::executable(
+            &journal,
+            format!("#!/bin/sh\ncat <<'ENTRY'\n{entry}\nENTRY\n"),
+        );
+        cfg.probe.as_mut().unwrap().tools.journalctl = journal;
+        let job = Job::new(&cfg, "crashes");
+        let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+        let got = exchange(
+            &socket(&cfg, &job, "1"),
+            &["crashes /bin/example -1h".into()],
+        )
+        .unwrap();
+        assert!(got.contains("COREDUMP_PID: 123"));
+        assert!(got.contains("proj-example.service"));
+        assert!(got.contains("#0 abort"));
+        assert!(got.contains("[redacted]"));
+        assert!(!got.contains(&token));
+        assert!(!got.contains("plain private environment"));
+    }
+    #[test]
+    fn crash_bridge_scrubs_complete_fields_before_output_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let journal = dir.path().join("journalctl");
+        cfg.probe.as_mut().unwrap().tools.journalctl = journal.clone();
+        let job = Job::new(&cfg, "crash-boundaries");
+        let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+        for (field, limit) in [("COREDUMP_CGROUP", 1024), ("MESSAGE", 12000)] {
+            for token in [false, true] {
+                let (value, hidden) = if token {
+                    let credential = format!("gh{}_{}", "p", "x".repeat(36));
+                    (
+                        format!(
+                            "Authorization: {}\n{credential} end",
+                            "x".repeat(limit - 4 - 19 - 16)
+                        ),
+                        credential[..23].to_string(),
+                    )
+                } else {
+                    let credential = "reader:opaque-value";
+                    let url = format!("https://{credential}");
+                    (
+                        format!(
+                            "Authorization: {}\n{url}@example.org/path",
+                            "x".repeat(limit - url.len() - 16)
+                        ),
+                        credential.to_string(),
+                    )
+                };
+                let mut entry =
+                    serde_json::json!({"COREDUMP_EXE":"/bin/example","COREDUMP_PID":"123"});
+                entry[field] = serde_json::json!(value);
+                burrow_test::executable(
+                    &journal,
+                    format!("#!/bin/sh\ncat <<'ENTRY'\n{entry}\nENTRY\n"),
+                );
+                let got = exchange(
+                    &socket(&cfg, &job, "1"),
+                    &["crashes /bin/example -1h".into()],
+                )
+                .unwrap();
+                assert!(
+                    !got.contains(&hidden),
+                    "{field}: credential crossed sandbox boundary"
+                );
+                assert!(got.contains("[redacted]") || got.contains("[answer truncated]"));
+            }
+        }
     }
     #[test]
     fn vm_mailbox_returns_host_deployed_result_without_config_or_credentials() {
