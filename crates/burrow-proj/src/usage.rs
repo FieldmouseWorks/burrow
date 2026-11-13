@@ -44,8 +44,11 @@ pub(crate) const FILE: &str = ".usage.json";
 const RELEASED: &str = ".usage.released";
 const OWNER: &str = ".usage-owner-";
 const ADMISSION_REF: &str = ".usage-release-";
-/// Marks a login hold in the record's `job`, an opaque string to earlier proj.
-const LOGIN_REF: &str = ".usage-login-";
+/// A login hold's record, apart from [`FILE`]: an earlier proj never reads
+/// it, so a rollback leaves the machine with no login hold, as before it
+/// existed, and none of its writes or releases reaches one. At most one of
+/// the two records is kept: each new refusal replaces the other's.
+const LOGIN_FILE: &str = ".usage-login.json";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
@@ -89,9 +92,8 @@ pub struct Spent {
     /// from before it was kept, which `at` stands for.
     #[serde(default)]
     pub last: Option<i64>,
-    /// Refused for Claude Code's login, not its usage ([`login`]). Kept on
-    /// disk in `job`'s prefix ([`LOGIN_REF`]), so a binary from before it
-    /// still reads, and writes back, the record as a usage hold.
+    /// Refused for Claude Code's login, not its usage ([`login`]). Kept in
+    /// [`LOGIN_FILE`], so which record it is says it.
     #[serde(skip)]
     pub login: bool,
 }
@@ -202,7 +204,8 @@ fn admission_cutoff_locked(cfg: &Config) -> std::io::Result<Option<i64>> {
             return Ok(None);
         }
         if s.back.is_some() {
-            let raw: Spent = serde_json::from_slice(&fs::read(cfg.jobs.join(FILE))?)?;
+            let name = if s.login { LOGIN_FILE } else { FILE };
+            let raw: Spent = serde_json::from_slice(&fs::read(cfg.jobs.join(name))?)?;
             if !raw.job.starts_with(ADMISSION_REF) {
                 // Adopt an old writer's release once, while holding its lock.
                 // Later legacy notice writes preserve this reference instead
@@ -259,9 +262,20 @@ pub fn kept(cfg: &Config) -> Option<Spent> {
     read(cfg).ok().flatten()
 }
 
-/// Its record, None when there's none, or why it couldn't be read.
+/// Its record, None when there's none, or why it couldn't be read: the
+/// usage record, or the login's ([`LOGIN_FILE`]), the later refusal's if a
+/// crash between replacing one and removing the other left both.
 fn read(cfg: &Config) -> Result<Option<Spent>, String> {
-    let path = cfg.jobs.join(FILE);
+    let usage = read_file(cfg, FILE)?;
+    let login = read_file(cfg, LOGIN_FILE)?;
+    Ok(match (usage, login) {
+        (Some(u), Some(l)) => Some(if l.at > u.at { l } else { u }),
+        (u, l) => u.or(l),
+    })
+}
+
+fn read_file(cfg: &Config, name: &str) -> Result<Option<Spent>, String> {
+    let path = cfg.jobs.join(name);
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Spent>(&text)
             .map(|mut s| {
@@ -275,10 +289,7 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                     s.admission = Some(cutoff);
                     s.job = job.to_owned();
                 }
-                if let Some(job) = s.job.strip_prefix(LOGIN_REF) {
-                    s.login = true;
-                    s.job = job.to_owned();
-                }
+                s.login = name == LOGIN_FILE;
                 if let Some(back) = s.back
                     && s.admission.is_none()
                 {
@@ -470,14 +481,29 @@ fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
     if s.owner {
         mirror.last = Some(s.until - 1);
     }
-    if s.login {
-        mirror.job = format!("{LOGIN_REF}{}", s.job);
-    }
     if let Some(cutoff) = s.admission {
         mirror.job = format!("{ADMISSION_REF}{cutoff}-{}", mirror.job);
     }
     let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
-    swap(&cfg.jobs.join(FILE), &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
+    let (name, other) = if s.login {
+        (LOGIN_FILE, FILE)
+    } else {
+        (FILE, LOGIN_FILE)
+    };
+    swap(&cfg.jobs.join(name), &format!("{text}\n")).map_err(|e| format!("proj: {name}: {e}"))?;
+    // The other cause's record is replaced: written first, so a crash
+    // between leaves both, and the later refusal wins ([`read`]).
+    match fs::remove_file(cfg.jobs.join(other)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("proj: {other}: {e}")),
+        _ => Ok(()),
+    }
+}
+
+/// The record gone, whichever kind it is.
+fn forget(cfg: &Config) {
+    for name in [FILE, LOGIN_FILE] {
+        let _ = fs::remove_file(cfg.jobs.join(name));
+    }
 }
 
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
@@ -842,7 +868,7 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
     }
     let settled = !pending(cfg);
     if settled && now >= s.release() + cfg.stall_queued() {
-        let _ = fs::remove_file(cfg.jobs.join(FILE));
+        forget(cfg);
     } else if !settled && now - s.told >= RETELL / 12 {
         s.told = now;
         if keep(cfg, &s).is_ok() {

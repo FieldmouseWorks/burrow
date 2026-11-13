@@ -136,44 +136,51 @@ fn a_usage_limit_and_a_refused_login_each_keep_their_own_hold() {
 }
 
 #[test]
-fn a_login_hold_stays_readable_by_the_previous_record_schema() {
-    // The previous binary's record refuses unknown fields: the cause lives
-    // in `job`, so it reads a login hold as a usage hold and writes it back.
-    #[derive(serde::Deserialize, serde::Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct Previous {
-        until: i64,
-        said: String,
-        job: String,
-        at: i64,
-        #[serde(default)]
-        back: Option<i64>,
-        #[serde(default)]
-        told: i64,
-        #[serde(default)]
-        last: Option<i64>,
-    }
-    let (_d, cfg) = rig();
+fn a_login_hold_is_invisible_to_the_previous_binary() {
+    // An earlier proj reads only the usage record, so it neither holds for
+    // a login nor can its refusal updates, meter releases, reminders or
+    // settlement alter one: rolled back, there is simply no login hold.
+    let (d, cfg) = rig();
     let t = now();
     login(&cfg, "web-1", SAID, t).unwrap();
-    let text = fs::read_to_string(cfg.jobs.join(FILE)).unwrap();
+    assert!(!cfg.jobs.join(FILE).exists());
+    let text = fs::read_to_string(cfg.jobs.join(LOGIN_FILE)).unwrap();
     assert!(!text.contains("\"login\""), "{text}");
-    let old: Previous = serde_json::from_str(&text).unwrap();
-    // It writes it back as it knows it, and the cause survives that.
-    fs::write(cfg.jobs.join(FILE), serde_json::to_string(&old).unwrap()).unwrap();
     assert!(kept(&cfg).unwrap().login);
-    // Released and settled, too.
-    back(&cfg, Some(now() + 1));
-    let text = fs::read_to_string(cfg.jobs.join(FILE)).unwrap();
-    serde_json::from_str::<Previous>(&text).unwrap();
+    // The earlier binary's usage refusal lands in the usage record, later
+    // than the login's: the usage hold wins, as the later refusal.
+    let old = Spent {
+        owner: false,
+        until: t + 7200,
+        said: "weekly limit".into(),
+        job: "web-2".into(),
+        at: t + 1,
+        back: None,
+        admission: None,
+        told: t + 1,
+        last: Some(t + 1),
+        login: false,
+    };
+    fs::write(cfg.jobs.join(FILE), serde_json::to_string(&old).unwrap()).unwrap();
     let s = kept(&cfg).unwrap();
-    assert!(s.login && s.back.is_some() && s.job == "web-1", "{s:?}");
-    // An ordinary usage refusal is still held, and read as one.
-    let (_d, cfg) = rig();
-    record(&cfg, "web-2", Some(t + 7200), "weekly limit", t).unwrap();
-    let text = fs::read_to_string(cfg.jobs.join(FILE)).unwrap();
-    serde_json::from_str::<Previous>(&text).unwrap();
-    assert!(!kept(&cfg).unwrap().login);
+    assert!(!s.login && s.job == "web-2", "{s:?}");
+    // A usage refusal by this binary replaces the login hold outright and
+    // is told at once.
+    let (d2, cfg2) = rig();
+    login(&cfg2, "web-1", SAID, t).unwrap();
+    let s = record(&cfg2, "web-2", Some(t + 7200), "weekly limit", t + 1).unwrap();
+    assert!(!s.login && s.until == t + 7200);
+    assert!(!cfg2.jobs.join(LOGIN_FILE).exists());
+    assert_eq!(opens(&d2).len(), 1);
+    // And a login hold replaces a settled usage record, so the old record
+    // can't be released, reminded or settled under it.
+    let (_d, cfg3) = rig();
+    record(&cfg3, "web-2", Some(t + 7200), "weekly limit", t).unwrap();
+    back(&cfg3, Some(t + 1));
+    login(&cfg3, "web-3", SAID, t + 2).unwrap();
+    assert!(!cfg3.jobs.join(FILE).exists());
+    assert!(out(&cfg3).is_some_and(|s| s.login));
+    drop(d);
 }
 
 #[test]
