@@ -242,7 +242,10 @@ fn one_repo_cannot_hold_up_the_drain() {
     p.drain().unwrap();
     assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
     assert_eq!(
-        b.log().matches("api repos/sam/box/issues/").count(),
+        b.log()
+            .lines()
+            .filter(|l| l.starts_with("api repos/sam/box/issues/") && !l.contains("/dependencies/"))
+            .count(),
         1,
         "{}",
         b.log()
@@ -282,7 +285,7 @@ fn a_label_refused_does_not_hold_up_the_drain() {
     assert!(log.contains("issues/8/labels -f labels[]=codex"), "{log}");
     assert!(!state.join("sam_box-8").exists(), "its record goes");
     assert!(p.wake.contains_key("sam/box"), "{:?}", p.wake);
-    assert!(!log.contains("api repos/sam/box/issues/9"), "{log}");
+    assert!(!log.contains("api repos/sam/box/issues/9\n"), "{log}");
     assert!(log.contains("issues/4/labels -f labels[]=codex"), "{log}");
     assert!(state.join("sam_game-4/drained").exists());
     assert_eq!(log.matches("labels[]=codex").count(), 2, "{log}");
@@ -980,3 +983,4 @@ fn full_drain_only_fetches_cached_repair_candidates() {
 }
 
 mod admission;
+mod deps;

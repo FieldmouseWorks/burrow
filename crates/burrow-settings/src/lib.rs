@@ -37,6 +37,26 @@ struct Overlay {
     pipeline_until: Option<i64>,
     #[serde(default)]
     receipts: BTreeMap<String, String>,
+    /// `proj.inbox.drainOrder`; absent leaves the schema's default.
+    #[serde(default)]
+    drain_order: Option<Vec<String>>,
+    /// `proj.inbox.drainUrgentBranches`; absent leaves the schema's default.
+    #[serde(default)]
+    drain_urgent_branches: Option<Vec<String>>,
+}
+
+/// The drain's live ordering settings as the overlay holds them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DrainSettings {
+    pub order: Option<Vec<String>>,
+    pub urgent_branches: Option<Vec<String>>,
+}
+
+fn schema_list(name: &str) -> Result<Vec<String>, String> {
+    schema::find(name)
+        .and_then(schema::Setting::default_value)
+        .and_then(|v| serde_json::from_value(v).ok())
+        .ok_or_else(|| format!("{name}: no default in the schema"))
 }
 
 pub fn now() -> i64 {
@@ -70,6 +90,41 @@ impl Config {
             overlay.repos,
             overlay.pipeline_until.filter(|until| *until > now()),
         ))
+    }
+
+    /// The drain's ordering settings as the overlay holds them (None where it
+    /// leaves the schema's default), read again at every call.
+    pub fn drain_settings(&self) -> Result<DrainSettings, String> {
+        let overlay = self.read()?;
+        Ok(DrainSettings {
+            order: overlay.drain_order,
+            urgent_branches: overlay.drain_urgent_branches,
+        })
+    }
+
+    /// The drain's rules in force, first rule first: the overlay's, checked
+    /// against the schema, or its default. An unknown or repeated rule fails.
+    pub fn drain_order(&self) -> Result<Vec<String>, String> {
+        let rules = self
+            .drain_settings()?
+            .order
+            .map_or_else(|| schema_list("proj.inbox.drainOrder"), Ok)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for rule in &rules {
+            if !schema::DRAIN_RULES.contains(&rule.as_str()) || !seen.insert(rule) {
+                return Err(format!(
+                    "proj.inbox.drainOrder: bad or repeated rule {rule:?}"
+                ));
+            }
+        }
+        Ok(rules)
+    }
+
+    /// Head-branch prefixes whose open PRs make what blocks them urgent.
+    pub fn drain_urgent_branches(&self) -> Result<Vec<String>, String> {
+        self.drain_settings()?
+            .urgent_branches
+            .map_or_else(|| schema_list("proj.inbox.drainUrgentBranches"), Ok)
     }
 
     fn read(&self) -> Result<Overlay, String> {
@@ -284,6 +339,31 @@ mod tests {
             cfg.allows("sam/box").is_err(),
             "read errors cannot enable work"
         );
+    }
+
+    #[test]
+    fn the_drain_settings_are_live_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            overlay: dir.path().join("overlay.json"),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.drain_order().unwrap(),
+            ["blockers", "priority", "pipeline", "age"]
+        );
+        assert_eq!(cfg.drain_urgent_branches().unwrap(), ["autoland/red-"]);
+        fs::write(
+            &cfg.overlay,
+            r#"{"drainOrder":["priority","blockers"],"drainUrgentBranches":["x-update"]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.drain_order().unwrap(), ["priority", "blockers"]);
+        assert_eq!(cfg.drain_urgent_branches().unwrap(), ["x-update"]);
+        for bad in [r#"["age","age"]"#, r#"["newest"]"#] {
+            fs::write(&cfg.overlay, format!(r#"{{"drainOrder":{bad}}}"#)).unwrap();
+            assert!(cfg.drain_order().is_err(), "{bad}");
+        }
     }
 
     #[test]

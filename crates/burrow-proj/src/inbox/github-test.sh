@@ -49,6 +49,17 @@ if [ "$method" != GET ]; then
 fi
 page=1; case "$path" in *\?page=*|*\&page=*) page=${path##*page=} ;; esac
 path=${path%%\?*}
+case "$path" in
+  */dependencies/*)
+    # A list of pages in $TEST/PATH (with / as _); without the file the API
+    # isn't there.
+    file="$TEST/$(printf '%s' "$path" | tr / _)"
+    [ -f "$file" ] || { printf 'HTTP/2.0 404 Not Found\n\n{}'; exit 1; }
+    pages=$(cat "$file"); count=$(printf '%s' "$pages" | jq length)
+    printf 'HTTP/2.0 200 OK\n'
+    if [ "$page" -lt "$count" ]; then printf 'Link: <https://api.github.com/%s?page=%s>; rel="next"\n' "$path" "$((page+1))"; fi
+    printf '\n'; printf '%s' "$pages" | jq ".[$((page-1))] // []"; exit 0 ;;
+esac
 printf 'HTTP/2.0 200 OK\n'
 case "$path" in
   */comments)

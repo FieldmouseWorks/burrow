@@ -148,6 +148,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
                 ("sam/box".to_owned(), "box".to_owned()),
                 ("sam/burrow".to_owned(), "burrow".to_owned()),
                 ("sam/game".to_owned(), "game".to_owned()),
+                ("sam/web".to_owned(), "web".to_owned()),
             ]),
             wake: BTreeMap::new(),
             unreached: Vec::new(),

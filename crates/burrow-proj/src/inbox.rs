@@ -958,6 +958,7 @@ fn say(f: Fail) {
 }
 
 mod claims;
+mod deps;
 mod drain;
 pub(crate) use drain::job_paused;
 mod jobs;

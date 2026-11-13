@@ -28,7 +28,7 @@ machine, named beside it). What it covers today:
 | `autoland.rounds`, its waits and limits, `repos` (per-repo overrides) | `burrow.autoland` in the flake |
 | `autoland.reviewers.*` | `burrow.autoland.reviewers` in the flake |
 | `settings.allowed` | `burrow.settings` in the flake |
-| `settings.repositoryOverrides`, `settings.pipelineUntil` | the one runtime settings overlay |
+| `settings.repositoryOverrides`, `settings.pipelineUntil`, `proj.inbox.drainOrder`, `proj.inbox.drainUrgentBranches` | the one runtime settings overlay |
 | `proj.roles` | the roles file (`~/.config/proj/roles`) |
 | `proj.models` | the models file beside it |
 | `proj.engineSetups` | the saved setups, `roles.d/`, and the one in force |
