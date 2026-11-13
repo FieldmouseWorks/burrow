@@ -94,8 +94,10 @@ Each has an entry below, and each can be imported on its own.
   new kernel, initrd or command line once when idle and makes it the
   default only after it came up; one that panics or hangs resets into the last
   good one and is never tried again. Trials wait for project jobs, sandboxes,
-  runner jobs, updates and steward passes. Completion events retry promptly;
-  `trialBoot.at` is the daily backstop, overriding busy work after two days.
+  runner jobs, updates and steward passes. Completion events retry promptly
+  and always wait for work; `trialBoot.at` is the daily backstop, and only it
+  overrides busy work, once a trial has waited two days. A kernel that failed
+  is unqueued, never trialled.
   An unconfirmed switch always blocks a trial.
 - **`updates`** (`burrow.updates`): Everything current, unattended.
   `HOST-update` (on each push to the flake's main or a watched input, and
