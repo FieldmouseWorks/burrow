@@ -133,6 +133,45 @@ fn an_issue_events_pass_keeps_what_it_has_of_the_rest() {
     }
 }
 
+// Absence-based cleanup of planner waits covers only the issues a pass
+// asked for: a scoped pass keeps the waits of the rest (admission and
+// verdict alike), retires those of its own issues that are gone or closed,
+// and a full listing retires every vanished one.
+#[test]
+fn a_scoped_pass_keeps_the_planner_waits_of_the_rest() {
+    let b = Box::new();
+    let dir = b.cfg.inbox.as_ref().unwrap().state.join(".triage-waiting");
+    fs::create_dir_all(&dir).unwrap();
+    let wait = |n: u64| dir.join(format!("sam_box-{n}"));
+    let seed = || {
+        for (n, why) in [
+            (7, "planner slot"),
+            (8, "pending verdict"),
+            (9, "planner slot"),
+        ] {
+            fs::write(wait(n), format!("sam/box#{n}: {why}")).unwrap();
+        }
+    };
+    seed();
+    // Scope {7, 8}: 7 closed (absent from the open list), 8 still open; 9
+    // is outside the scope and not listed.
+    let mut p = b.pass();
+    p.scope = Some(BTreeSet::from([7, 8]));
+    p.reconcile_planner_waits("sam/box", &[scoped_issue(8)])
+        .unwrap();
+    assert!(!wait(7).exists());
+    assert!(wait(8).exists());
+    assert!(wait(9).exists());
+    // A full listing with only 8 retires 9 too.
+    seed();
+    b.pass()
+        .reconcile_planner_waits("sam/box", &[scoped_issue(8)])
+        .unwrap();
+    assert!(!wait(7).exists());
+    assert!(wait(8).exists());
+    assert!(!wait(9).exists());
+}
+
 // What burrow-events tells it: numbers, one a line; anything else, or
 // none, is a look at every issue.
 #[test]
