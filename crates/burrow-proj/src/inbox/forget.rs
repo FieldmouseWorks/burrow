@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use super::{drain, key};
-use crate::{Fail, io_fail};
+use super::{drain, enrollment, key};
+use crate::config::Config;
+use crate::job::Job;
+use crate::{Fail, io_fail, read};
 
 /// The lock, once whoever holds it lets go, if that's within `wait`.
 pub(super) fn lock_within(f: &File, wait: Duration) -> io::Result<bool> {
@@ -31,7 +33,27 @@ pub(super) fn lock_within(f: &File, wait: Duration) -> io::Result<bool> {
 /// the deleted repo it was. Its issue N isn't the deleted one's N, and none of
 /// the old job's answers, or its session, are its. The old jobs are the
 /// steward's to stop. Run under the pass's lock, so no pass is under way.
-pub(super) fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
+pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail> {
+    // A legacy worker stays terminal even after every record of the old
+    // repository is forgotten. Sorting records carry no worker association.
+    for d in enrollment::worker_records(state) {
+        let Some(issue) = read(&d.join("issue")) else {
+            continue;
+        };
+        let Some((of, n)) = issue.rsplit_once('#') else {
+            continue;
+        };
+        if !of.eq_ignore_ascii_case(repo) {
+            continue;
+        }
+        if let Some(id) = read(&d.join("job")) {
+            let job = Job::new(cfg, &id);
+            if job.dir.is_dir() {
+                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                enrollment::remember(&job, of, n).map_err(|e| Fail::new(1, e))?;
+            }
+        }
+    }
     // GitHub's names are case-blind: the inbox kept the clone's spelling.
     let want = key(repo).to_lowercase();
     let names = |dir: &Path| -> Vec<(String, PathBuf)> {
@@ -83,9 +105,11 @@ pub(super) fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
         }
     }
-    for (name, path) in names(&state.join(".retired")) {
-        if name.eq_ignore_ascii_case(&want) {
-            fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+    for namespace in [".retired", ".parked"] {
+        for (name, path) in names(&state.join(namespace)) {
+            if name.eq_ignore_ascii_case(&want) {
+                fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
+            }
         }
     }
     for dir in [".unreached", drain::READY_LISTS] {

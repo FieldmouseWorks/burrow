@@ -585,6 +585,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     fs::create_dir_all(&job).unwrap();
     fs::write(job.join("role"), "repair").unwrap();
     fs::write(job.join("usage-kind"), "inbox labels=codex opener=owner").unwrap();
+    fs::write(job.join("project"), "/data/src/web\n").unwrap();
     let put = |n: u64, engine: &str, at: u64, text: &str| {
         fs::write(job.join(format!("{n}.engine")), engine).unwrap();
         fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
@@ -643,16 +644,51 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     assert!(answer.contains("codex / no role; starter=operator-session: 1 turns"));
     assert!(!answer.contains("99%"));
     assert!(!answer.contains("SECRET"));
+    // Totals come first, the turns after the meters.
+    let at = |s: &str| answer.find(s).unwrap_or_else(|| panic!("{s}: {answer}"));
+    assert!(at("By engine:") < at("Meter readings:"));
+    assert!(at("Meter readings:") < at("Each turn:"));
+    let table: Vec<String> = answer
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    for row in [
+        "engine role project turns input output cache-read cache-write cost unread missing-runs recovered-runs outside-span partial-tokens",
+        "claude all all 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "codex all all 2 - - - - - 2 0 0 0 0",
+        "claude repair all 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "codex (none) all 1 - - - - - 1 0 0 0 0",
+        "codex all web 1 - - - - - 1 0 0 0 0",
+        "codex all (unknown) 1 - - - - - 1 0 0 0 0",
+        "claude repair web 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "Cost: $0.00 recorded over 4 turns; 1 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside the selected turns whose cost may be included; 2 turns whose engine's cost and tokens aren't read.",
+    ] {
+        assert!(table.iter().any(|l| l == row), "{row}: {answer}");
+    }
+    let totals = m
+        .answer(&Query::parse("usage @150 --totals").unwrap())
+        .unwrap();
+    assert!(totals.contains("By engine, role and project:"), "{totals}");
+    assert!(
+        !totals.contains("Meter readings") && !totals.contains("Each turn"),
+        "{totals}"
+    );
+    assert!(answer.starts_with(&totals), "{totals}");
     let full = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
     assert!(
         full.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$1.500000"),
+        "{full}"
+    );
+    assert!(
+        full.contains("Cost: $1.50 recorded over 5 turns; 1 runs with cost still missing"),
         "{full}"
     );
     assert!(fake.asked.borrow().is_empty());
     assert_eq!(
         Query::parse("usage").unwrap(),
         Query::Usage {
-            since: crate::query::When::Ago(18000)
+            since: crate::query::When::Ago(18000),
+            totals: false,
         }
     );
     assert!(Query::parse("usage -1h extra").is_err());
@@ -806,3 +842,6 @@ fn usage_first_start_survives_slot_recreation_and_unknown_history_is_explicit() 
             .contains("claude: 1 turns")
     );
 }
+
+#[path = "usage_tests.rs"]
+mod usage_tests;

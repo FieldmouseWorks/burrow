@@ -37,6 +37,7 @@ jobs:
       legs: 4
       keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-checks: guidance
   # GitHub expression equality ignores case; git branch names do not.
   # Route using the event's exact refs, without checking out PR code.
   train-route:
@@ -74,4 +75,5 @@ jobs:
       legs: 4
       keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-checks: guidance
       pr-gate: false

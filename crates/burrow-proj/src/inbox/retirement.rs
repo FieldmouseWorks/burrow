@@ -1,32 +1,30 @@
 //! Retirement is independent of notification delivery and of a reopened issue.
 use std::{fs, path::Path};
 
-use super::{Pass, dirs, key, say};
-use crate::{Fail, cmd::stop, github::api, io_fail, read};
+use super::{Pass, dirs, say};
+use crate::{Fail, cmd::halt, github::api, io_fail, read};
+
+pub(super) fn records(state: &Path) -> Vec<std::path::PathBuf> {
+    dirs(&state.join(".retired"), "")
+        .into_iter()
+        .flat_map(|repo| dirs(&repo, ""))
+        .flat_map(|issue| dirs(&issue, ""))
+        .collect()
+}
 
 impl Pass<'_> {
     pub(super) fn retired(&mut self, repo: &str) -> Result<(), Fail> {
-        for repository in dirs(&self.inbox.state.join(".retired"), "") {
-            if !repository
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&key(repo)))
-            {
+        for d in records(&self.inbox.state) {
+            let Some(issue) = read(&d.join("issue")) else {
                 continue;
-            }
-            for issue_dir in dirs(&repository, "") {
-                for d in dirs(&issue_dir, "") {
-                    let Some(issue) = read(&d.join("issue")) else {
-                        continue;
-                    };
-                    let Some((of, n)) = issue.rsplit_once('#') else {
-                        continue;
-                    };
-                    if of.eq_ignore_ascii_case(repo)
-                        && let Some(id) = read(&d.join("job"))
-                    {
-                        self.retire(repo, n, &id, &d)?;
-                    }
-                }
+            };
+            let Some((of, n)) = issue.rsplit_once('#') else {
+                continue;
+            };
+            if of.eq_ignore_ascii_case(repo)
+                && let Some(id) = read(&d.join("job"))
+            {
+                self.retire(repo, n, &id, &d)?;
             }
         }
         Ok(())
@@ -37,7 +35,10 @@ impl Pass<'_> {
         let stopped = if !self.cfg.jobs.join(id).is_dir() {
             true
         } else {
-            match stop(self.cfg, id, false) {
+            let job = crate::job::Job::new(self.cfg, id);
+            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+            match halt(self.cfg, &job, false) {
                 Ok(()) => true,
                 Err(f) => {
                     say(f);
@@ -48,8 +49,26 @@ impl Pass<'_> {
         if !stopped {
             self.retry(repo);
         }
-        if !d.join("reported").exists() {
+        let job = crate::job::Job::new(self.cfg, id);
+        let turns = job.turns().and_then(|n| n.parse::<i64>().ok()).unwrap_or(0);
+        let answered = read(&d.join("answered"))
+            .and_then(|n| n.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut snapshot = None;
+        if stopped && answered < turns {
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{n}")) else {
+                self.miss(repo);
+                return Ok(());
+            };
+            if self.eligible(repo, &issue) && !self.answers(repo, n, &job, d, turns, None)? {
+                return Ok(());
+            }
+            snapshot = Some(issue);
+        }
+        if !d.join("reported").exists() {
+            let Some(issue) =
+                snapshot.or_else(|| api(self.cfg, &format!("repos/{repo}/issues/{n}")))
+            else {
                 self.miss(repo);
                 return Ok(());
             };
@@ -73,8 +92,8 @@ impl Pass<'_> {
                 // Include post()'s signature in the limit, leaving room below
                 // GitHub's 65,536-character maximum. IDs, never bodies, are posted.
                 let signature = self.signed("").chars().count();
-                let header = "The job ended because this issue was closed or its job label was removed, with unread author replies:\n\n";
-                let footer = "\nReopen the issue and restore its job label to have them picked up.";
+                let header = "The job ended because this issue was closed or parked, with unread author replies:\n\n";
+                let footer = "\nReopen the issue, remove `later` and restore an engine label to have them picked up.";
                 let mut at = 0;
                 while at < unread.len() {
                     let mut body = header.to_owned();

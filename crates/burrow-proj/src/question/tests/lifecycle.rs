@@ -273,9 +273,10 @@ fn paused_inbox(kind: &str) -> Fixture {
     });
     fs::create_dir_all(&record).unwrap();
     fs::write(record.join("job"), "j1").unwrap();
-    if kind == "ordinary" {
+    if matches!(kind, "ordinary" | "drained") {
         fs::write(record.join("issue"), "sam/r#7").unwrap();
-    } else if kind == "drained" {
+    }
+    if kind == "drained" {
         fs::write(record.join("drained"), "sam/r#7").unwrap();
     }
     // Sorting records intentionally have no source metadata, as on old jobs.
@@ -285,7 +286,7 @@ fn paused_inbox(kind: &str) -> Fixture {
     let gh = f.dir.path().join("gh");
     burrow_test::executable(
         &gh,
-        "#!/bin/sh\ncase \"$*\" in\n*comments*) printf 'HTTP/2.0 200 OK\\n\\n[]' ;;\n*) printf 'HTTP/2.0 200 OK\\n\\n{\"state\":\"open\",\"labels\":[]}' ;;\nesac\n",
+        "#!/bin/sh\ncase \"$*\" in\n*comments*) printf 'HTTP/2.0 200 OK\\n\\n[]' ;;\n*) printf 'HTTP/2.0 200 OK\\n\\n{\"state\":\"open\",\"labels\":[{\"name\":\"claude\"}]}' ;;\nesac\n",
     );
     f.cfg.tools.gh = gh;
     f

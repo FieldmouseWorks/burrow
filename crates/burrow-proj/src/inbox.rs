@@ -2,9 +2,10 @@
 //! inbox's label, opened by one of its authors in a project's repo, becomes a
 //! job in that project. The job's answer goes back to the issue as a comment,
 //! and a reply there from one of the authors continues the same job (proj
-//! reply). Closing the issue or taking the label off ends it; a turn still
-//! running gets its answer posted first. A turn cut off before it answered,
-//! its whole unit killed, carries on in its own conversation, twice in a row
+//! reply). Closing the issue lets its running turn answer first. Removing
+//! its last engine label or adding `later` stops its job and cancels waits.
+//! A turn cut off before it answered, its whole unit killed, carries on in
+//! its own conversation, twice in a row
 //! at most. `proj-inbox [OWNER/REPO]` looks at that repo's issues, or every
 //! project's; burrow-events runs it on the repo's issue events, each time one
 //! of its jobs' turns ends (proj run --kick), and when a wait it booked in its
@@ -88,7 +89,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             ));
         }
         let _permit = resumption::Permit::new(pass);
-        return forget(&inbox.state, repo);
+        return forget(cfg, &inbox.state, repo);
     }
     pass.lock().map_err(|e| io_fail(&lock, e))?;
     let pass = resumption::Permit::new(pass);
@@ -308,6 +309,11 @@ impl Pass<'_> {
     /// job of an issue GitHub identifies as opened by a bot acts as the
     /// machine's App.
     fn start(&self, repo: &str, issue: &Value, comments: &[Value]) -> Result<String, Fail> {
+        if let Some(why) = enrollment::parked(self.inbox, issue).map_err(|e| Fail::new(1, e))? {
+            return Err(Fail::new(1, format!("proj-inbox: no worker: {why}")));
+        }
+        let (_enrollment, enrolled) = self.enroll(repo, issue)?;
+        let issue = &enrolled;
         let pipeline = self
             .cfg
             .pipeline_repos
@@ -624,8 +630,8 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             };
             if !self.cfg.paused(&repo) {
                 self.new_issues(&repo, &open)?;
-                self.jobs(&repo, &p, &open)?;
             }
+            self.jobs(&repo, &p, &open)?;
             if self.inbox.triage.is_some() {
                 let Some(all) = all.or_else(|| {
                     every(
@@ -642,76 +648,6 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
         }
         self.drain()
-    }
-
-    /// New issues become jobs.
-    fn new_issues(&mut self, repo: &str, open: &[Value]) -> Result<(), Fail> {
-        for issue in open {
-            let n = raw(&issue["number"]);
-            let d = self.inbox.state.join(format!("{}-{n}", key(repo)));
-            if d.join("job").exists() {
-                continue;
-            }
-            let opener = raw(&issue["user"]["login"]);
-            if !self.opened_by_ours(issue) && !self.generated_child(repo, issue) {
-                let said = format!(
-                    "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
-                    self.inbox.host,
-                    burrow_github::author_names(&self.inbox.authors, ", "),
-                );
-                self.refuse(repo, &n, &said, &d)?;
-                continue;
-            }
-            if self.outside(issue) {
-                let said = format!(
-                    "No job for this issue: it's labelled `{}`, so it carries text from outside {}'s authors, whoever opened it, and no agent reads it. To hand the work on, open an issue of your own that says what to do.",
-                    self.inbox.outside_label, self.inbox.host,
-                );
-                self.refuse(repo, &n, &said, &d)?;
-                continue;
-            }
-            // Comments already there are part of the task; replies after
-            // this are turns.
-            let Some(written::Written {
-                issue: safe,
-                comments,
-                ..
-            }) = self.written(repo, issue)
-            else {
-                self.miss(repo);
-                continue;
-            };
-            let issue = &safe;
-            if self.inbox.planning
-                && (!self.approved_input(repo, &n, &self.issue_text(repo, issue, &comments))
-                    || !self.child_admissible(repo, &n))
-            {
-                continue;
-            }
-            let id = match self.start(repo, issue, &comments) {
-                Ok(id) => id,
-                Err(f) => {
-                    say(f);
-                    self.retry(repo);
-                    continue;
-                }
-            };
-            let seen = comments.iter().filter_map(|c| c["id"].as_i64()).max();
-            let write = |name: &str, text: String| {
-                fs::write(d.join(name), text).map_err(|e| io_fail(&d.join(name), e))
-            };
-            fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;
-            write("issue", format!("{repo}#{n}\n"))?;
-            write("job", format!("{id}\n"))?;
-            write("answered", "0\n".into())?;
-            write("seen", format!("{}\n", seen.unwrap_or(0)))?;
-            // What it was handed, so it's closed with the issue only as long
-            // as the issue is still that (jobs.rs).
-            Self::hand(&d, &self.issue_text(repo, issue, &comments))?;
-            // Said on the issue, or tried again next pass.
-            write("unannounced", String::new())?;
-        }
-        Ok(())
     }
 
     /// Whether an agent may read the issue: one of the authors opened it,
@@ -878,8 +814,10 @@ fn say(f: Fail) {
     }
 }
 
+mod answers;
 mod claims;
 mod drain;
+pub(crate) mod enrollment;
 pub(crate) use drain::job_paused;
 mod jobs;
 mod plans;
@@ -896,7 +834,11 @@ mod write;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
+mod enrollment_review_tests;
+#[cfg(test)]
 mod handed_tests;
+#[cfg(test)]
+mod parking_tests;
 #[cfg(test)]
 mod question_tests;
 #[cfg(test)]

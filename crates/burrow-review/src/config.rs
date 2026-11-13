@@ -142,6 +142,28 @@ impl Config {
             .is_some_and(|d| fs::read_to_string(d.config()).map_or(true, |now| now != d.ran))
     }
 
+    /// What `burrow-review check` holds a generation to: an admission
+    /// policy to look to, and, where a run can outlive a switch, a deployed
+    /// generation that is this one, its program there to take the queue.
+    pub fn check(&self) -> Result<(), String> {
+        if self.settings.is_none() {
+            return Err("the config has no admission settings".into());
+        }
+        let Some(d) = &self.deployed else {
+            return Ok(());
+        };
+        let now =
+            fs::read_to_string(d.config()).map_err(|e| format!("{}: {e}", d.config().display()))?;
+        if now != d.ran {
+            return Err(format!(
+                "{} isn't this generation's config",
+                d.config().display()
+            ));
+        }
+        burrow_process::executable(&d.program())
+            .map_err(|e| format!("{}: {e}", d.program().display()))
+    }
+
     /// The config REVIEW_CONFIG names, its own generation's, and the
     /// generation deployed now, in REVIEW_DEPLOYED.
     pub fn load() -> Result<Config, String> {

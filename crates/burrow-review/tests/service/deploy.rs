@@ -158,3 +158,45 @@ fn the_new_generation_runs_its_agents_with_its_own_tools() {
     assert_eq!(runs[0]["env"]["PATH"], tools.as_str());
     assert_eq!(rig.back(&name)["result"], "review");
 }
+
+/// `check` holds a generation to what a run that outlives a switch needs:
+/// admission settings, and a deployed generation that is its own, with the
+/// program that takes the queue (#711).
+#[test]
+fn check_needs_the_deployed_generation_a_retained_run_hands_over_to() {
+    let mut rig = Rig::new();
+    let own = rig.path("own.json");
+    let check = |deployed: Option<&std::path::Path>| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_burrow-review"));
+        cmd.arg("check")
+            .env("REVIEW_CONFIG", &own)
+            .env_remove("REVIEW_DEPLOYED");
+        if let Some(dir) = deployed {
+            cmd.env("REVIEW_DEPLOYED", dir);
+        }
+        let out = cmd.output().unwrap();
+        out.status
+            .success()
+            .then_some(())
+            .ok_or_else(|| String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    fs::write(&own, rig.cfg.to_string()).unwrap();
+    check(None).unwrap();
+    let dir = rig.deploy();
+    let err = check(Some(&dir)).unwrap_err();
+    assert!(err.contains("burrow-review: No such file"), "{err}");
+    burrow_test::executable(dir.join("burrow-review"), "#!/bin/sh\n");
+    check(Some(&dir)).unwrap();
+    // Another generation's config deployed: not the one this run hands to.
+    rig.cfg["timeoutMinutes"] = json!(31);
+    rig.deploy();
+    assert!(
+        check(Some(&dir))
+            .unwrap_err()
+            .contains("isn't this generation's config")
+    );
+    // No admission settings: every look would wait forever.
+    rig.cfg["settings"] = Value::Null;
+    fs::write(&own, rig.cfg.to_string()).unwrap();
+    assert!(check(None).unwrap_err().contains("no admission settings"));
+}

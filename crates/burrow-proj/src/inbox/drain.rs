@@ -111,15 +111,15 @@ impl Pass<'_> {
             let mark = d.join("drained");
             if d.join("job").exists() {
                 going += 1;
+            } else if !self.still_handed(&mark, &label) {
+                let _ = fs::remove_dir_all(&d);
             } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
                 going += 1;
                 if let Some(repo) = self.wake_repo() {
                     self.book(&repo, m + 2 * RETRY);
                 }
-            } else if self.still_handed(&mark, &label) {
-                going += 1;
             } else {
-                let _ = fs::remove_dir_all(&d);
+                going += 1;
             }
         }
         let ranked = self.next_ready(&t);
@@ -272,6 +272,21 @@ impl Pass<'_> {
             self.miss(repo);
             return true;
         };
+        match super::enrollment::parked(self.inbox, &issue) {
+            Ok(Some(_)) => {
+                if let Err(error) = super::enrollment::mark_parked(self.inbox, repo, n) {
+                    eprintln!("proj-inbox: {error}");
+                    self.retry(repo);
+                    return true;
+                }
+                return false;
+            }
+            Err(_) => {
+                self.miss(repo);
+                return true;
+            }
+            Ok(None) => (),
+        }
         issue["state"] == "open"
             && issue["labels"]
                 .as_array()
@@ -387,7 +402,10 @@ impl Pass<'_> {
                     .keys()
                     .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
                     .clone();
-                if !self.eligible(&repo, i) || self.cfg.paused(&repo) {
+                if !self.eligible(&repo, i)
+                    || self.cfg.paused(&repo)
+                    || super::enrollment::automatic_parked(self.inbox, &repo, i)
+                {
                     return None;
                 }
                 let labels: Vec<&str> = i["labels"]

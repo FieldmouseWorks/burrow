@@ -37,6 +37,8 @@
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
     [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+    # check-config also holds the sandbox controller proj pauses and
+    # releases VM jobs with to a program it can run (#711).
     ${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj check-config
     touch $out
   ''
