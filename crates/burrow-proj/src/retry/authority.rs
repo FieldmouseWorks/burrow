@@ -62,9 +62,34 @@ impl Identity {
         )
         .map_err(|e| e.to_string())
     }
-    /// What an earlier proj captured of the job's request files, if anything.
-    pub fn legacy_files(&self) -> &BTreeMap<String, Option<String>> {
-        &self.files
+    /// What an earlier proj captured of the job's request files, from the
+    /// earliest turn that has any. Every execution record on the host is
+    /// searched, never just the one the (job-writable) turn selector names,
+    /// so advancing or rewriting `turns` cannot hide a capture.
+    pub fn legacy_files(job: &Job) -> Result<Option<BTreeMap<String, Option<String>>>, String> {
+        let dir = crate::ask::host_path(job, "request");
+        let entries = match fs::read_dir(dir.parent().unwrap_or(&dir)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut turns: Vec<u64> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".execution")?.parse().ok()
+            })
+            .filter(|n| *n > 0)
+            .collect();
+        turns.sort_unstable();
+        for n in turns {
+            if let Some(identity) = Self::load(job, &n.to_string())? {
+                if !identity.files.is_empty() {
+                    return Ok(Some(identity.files));
+                }
+            }
+        }
+        Ok(None)
     }
     pub fn restore(job: &Job, n: &str) -> Result<(), String> {
         let Some(identity) = Self::load(job, n)? else {

@@ -817,6 +817,11 @@ fn retained_handover_rejects_rollback_to_startup_that_would_truncate_its_stream(
         &old,
         "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 3\n",
     );
+    assert!(!slot::retry_compatible(&old));
+    burrow_test::executable(
+        &old,
+        "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 4\n",
+    );
     assert!(slot::retry_compatible(&old));
 }
 
