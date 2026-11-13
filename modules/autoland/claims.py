@@ -43,33 +43,26 @@ def handed(st, kind, jid, pr):
     st.pop(kind + "Unposted", None)
 
 
-def stand_down(tag, st):
-    """Before a new fix job is handed the PR, each earlier one claims keeps
-    on it (`waits`: between turns, proj would resume it on the PR's next
-    change; or one already marked to stop) is stopped. True once every one
-    is confirmed stopped; False while proj won't stop one (it stays marked
-    for stopping.py, and no new job is handed the branch meanwhile). Which
-    jobs wait is claims.rs's to say: this only stops them."""
-    held = set(st.get("stopping", []))
-    clear = True
-    for jid, rec in (st.get("answering") or {}).items():
-        if not (rec.get("waits") or jid in held):
-            continue
-        if C.stop_job(jid):
-            log(f"{tag}: stopped Claude job {jid}, between turns on the PR a new fix job is handed")
-            if jid in held:
-                st["stopping"] = [j for j in st["stopping"] if j != jid]
-        else:
-            st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [jid]))
-            clear = False
-    if not st.get("stopping"):
-        st.pop("stopping", None)
-    return clear
+def stand_down(repo, pr, st, tag, strike, cleared, after):
+    """Before a new fix job is handed the PR: claims retires the jobs it
+    keeps between turns on it (it names them to stop, and keeps them until
+    proj says each is over). True once none may still push to the branch;
+    False while any may (a stop proj refused, one resumed meanwhile): no new
+    job is handed the branch meanwhile. Which jobs those are is claims.rs's
+    to say: this only runs what it names."""
+    _, out = see(repo, pr, st, tag, strike, cleared, after, retire=True)
+    return out is None or out["clear"]
 
 
 def look(repo, pr, st, tag, strike, cleared, after):
+    """The PR's fix jobs, seen to by `claims` (see)."""
+    return see(repo, pr, st, tag, strike, cleared, after)[0]
+
+
+def see(repo, pr, st, tag, strike, cleared, after, retire=False):
     """The PR's fix jobs, seen to by `claims`. The PR's status when the
-    pass is to stop here, or None: answers went up (what it read of the PR
+    pass is to stop here, or None (and what claims said, for `see`): answers
+    went up (what it read of the PR
     is stale; a pass is booked for now), or GitHub turned them away (tried
     again on a later pass, a strike each time, and nothing else is handed
     out meanwhile). A job it names to stop that proj won't is left to
@@ -77,11 +70,11 @@ def look(repo, pr, st, tag, strike, cleared, after):
     for want of a push or of answers is kept by its kind (KIND +
     "Unposted"), for its next job's brief."""
     if DRY or not st.get("answering"):
-        return None
+        return None, None
     out = C.upkeep("claims", repo, input=json.dumps({
         "number": pr["number"], "head": pr["headRefOid"], "branch": pr["headRefName"],
         "machinery": CFG.get("machineryLogin"), "jobs": CFG["jobsDir"], "answering": st["answering"],
-        "pushedBy": st.get("pushedBy")}))
+        "pushedBy": st.get("pushedBy"), "retire": retire}))
     st["answering"], st["pushedBy"] = out["answering"], out["pushedBy"]
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: claims.rs's next look for who pushed the head, LOOKS at most
@@ -112,7 +105,7 @@ def look(repo, pr, st, tag, strike, cleared, after):
             # is told why, and a second such fails the PR for the owner.
             log(f"{tag}: Claude job {jid}'s answers not posted: {why}")
             st[a["kind"] + "Unposted"] = {"at": pr["headRefOid"], "why": why}
-    return status
+    return status, out
 
 
 def unposted(st, kind, at):

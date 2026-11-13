@@ -60,10 +60,10 @@ class Jobs:
         snapshot = C.lifecycle(jid)
         state, target = C.job_lifecycle(jid, self.tag, snapshot)
         if (not target and kind in claims.KINDS and state not in (None, "queued", "running")
-                and (self.st.get("answering") or {}).get(jid, {}).get("resumes")):
-            # A fix job between turns on this PR whose turn's answers just
-            # went up (claims.rs): what went up resumes it, so it's still at
-            # work on the branch, and none other is handed it meanwhile.
+                and (self.st.get("answering") or {}).get(jid, {}).get("owns")):
+            # A fix job claims.rs says may still push to the branch (resumed
+            # by what its answers put up, or retiring until proj confirms
+            # it's over): none other is handed the branch meanwhile.
             target = OWN
         usage = C.job_usage(jid, snapshot)
         records = self.st.setdefault("usageJobs", {})
@@ -131,7 +131,7 @@ class Jobs:
         those."""
         if at is _HEAD:
             at = self.head
-        if kind in claims.KINDS and not claims.stand_down(self.tag, self.st):
+        if kind in claims.KINDS and not claims.stand_down(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
             log(f"{self.tag}: no new {kind} job while an earlier one on the branch won't stop")
             self.after(C.NOW, 1)  # ends: the next try to stop it
             return False

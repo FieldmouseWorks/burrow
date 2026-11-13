@@ -807,15 +807,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     {
         crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?;
     }
-    // The answers file as this turn left it, kept apart: the next turn
-    // rewrites it, and whoever collects a job's answers (the steward's
-    // claims) may not have looked before then.
-    if let Some(n) = job.turns()
-        && let Some(text) = read(&job.path("answers.json"))
-    {
-        crate::state_reads::write(job.turn(&n, "answers"), &text)
-            .map_err(|e| Fail::new(1, e.to_string()))?;
-    }
+    job.capture().map_err(|e| Fail::new(1, e))?;
     job.mark_ended();
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);

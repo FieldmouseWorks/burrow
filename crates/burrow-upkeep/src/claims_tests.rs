@@ -1,5 +1,7 @@
 //! Which of a PR's fix jobs are stopped, kept or answered for.
 
+use std::path::PathBuf;
+
 use serde_json::{Value, json};
 
 use super::*;
@@ -11,6 +13,19 @@ const PUSHED: &str = "2a4e3e43eb0e039064eee1416e0d8a0a6a91c901";
 const THEIRS: &str = "de738d4af1623f058ab3a2fbd3318fbd3d9e7de0";
 const ACTIVITY: &str = "repos/sam/r/activity?ref=refs%2Fheads%2Ffeat&per_page=30$";
 
+/// A job at work, as `claims` keeps it: the same, owning the branch.
+fn owning(mut h: Handing) -> Handing {
+    h.owns = true;
+    h
+}
+
+/// A job named to stop, as `claims` keeps it until proj says it's over.
+fn retiring(mut h: Handing) -> Handing {
+    h.retiring = true;
+    h.owns = true;
+    h
+}
+
 fn handing() -> Handing {
     Handing {
         kind: "handed".into(),
@@ -19,9 +34,11 @@ fn handing() -> Handing {
         at: 1_793_558_866.0,
         looked: BTreeMap::new(),
         taken: Vec::new(),
-        posted: None,
+        woke_at: None,
         waits: false,
         resumes: false,
+        retiring: false,
+        owns: false,
     }
 }
 
@@ -36,6 +53,7 @@ fn at(head: &str, jobs: &std::path::Path, machinery: bool) -> Look {
         jobs: jobs.into(),
         answering: BTreeMap::from([("job-1".into(), handing())]),
         pushed_by: None,
+        retire: false,
     }
 }
 
@@ -73,7 +91,8 @@ fn a_job_on_a_head_someone_else_pushed_is_stopped() {
             why: "de738d4, the PR's head now, is sam's push, not its own".into()
         }]
     );
-    assert!(s.answering.is_empty() && s.answered.is_empty());
+    assert_eq!(s.answering["job-1"], retiring(handing()));
+    assert!(s.answered.is_empty() && !s.clear);
     assert_eq!(s.pushed_by, Some((THEIRS.into(), "sam".into())));
     // Who pushed it is kept for the head: not asked again.
     let mut l = at(THEIRS, jobs.path(), true);
@@ -91,7 +110,7 @@ fn a_job_whose_own_push_the_head_is_carries_on() {
     hub.on("GET", ACTIVITY, reply(200, pushes("workers[bot]", PUSHED)));
     let (s, _) = seen(&mut hub, "running", &at(PUSHED, jobs.path(), true));
     assert!(s.stop.is_empty());
-    assert_eq!(s.answering["job-1"], handing());
+    assert_eq!(s.answering["job-1"], owning(handing()));
     // Nor is one on the head it was handed asked about at all.
     let mut hub = Hub::default();
     let (s, _) = seen(&mut hub, "running", &at(HANDED, jobs.path(), true));
@@ -155,7 +174,13 @@ fn a_job_thats_over_is_answered_for_once() {
     // It left nothing: forgotten, nothing to say.
     let mut hub = Hub::default();
     let (s, _) = seen(&mut hub, "done", &at(HANDED, jobs.path(), true));
-    assert_eq!(s, Seen::default());
+    assert_eq!(
+        s,
+        Seen {
+            clear: true,
+            ..Seen::default()
+        }
+    );
     // It left answers on a push someone else's head is past: forgotten,
     // and why.
     std::fs::create_dir_all(jobs.path().join("job-1")).unwrap();
@@ -495,7 +520,7 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
     // What went up resumes it: still at work, for the steward.
     let kept = &s.answering["job-1"];
     assert!(kept.taken.len() == 1 && kept.head == HANDED);
-    assert!(kept.waits && kept.resumes && kept.posted == Some(1));
+    assert!(kept.waits && kept.resumes);
     // The same answers, looked at again: nothing asked, nothing posted.
     let mut hub = Hub::default();
     let s = pass(&mut l, &mut hub, "done");
@@ -535,16 +560,17 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
         (kept.head.as_str(), kept.body.as_str()),
         (PUSHED, "Does it, fixed.")
     );
-    assert!(kept.waits && kept.resumes && kept.posted == Some(2));
+    assert!(kept.waits && kept.resumes);
     // Turn 3 leaves its answers as they were: none replayed, and nothing
     // of its resumes it, so for the steward it has ended (a new fix job
     // stops it first).
     std::fs::write(dir.join("turns"), "3").unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t1800000001\t{}\n").unwrap();
     let mut hub = Hub::default();
     let s = pass(&mut l, &mut hub, "done");
     assert!(s.answered.is_empty() && hub.asked.is_empty());
     let kept = &s.answering["job-1"];
-    assert!(kept.waits && !kept.resumes && kept.posted == Some(2));
+    assert!(kept.waits && !kept.resumes);
     // Turn 4 says one more thing on the PR as its description now is, and
     // ends holding nothing: that goes up, and its claim is over.
     std::fs::write(dir.join("turns"), "4").unwrap();
@@ -722,7 +748,8 @@ fn a_job_awaiting_its_own_pr_stops_for_another_authors_push() {
     hub.on("GET", ACTIVITY, reply(200, pushes("sam", THEIRS)));
     let (s, _) = seen(&mut hub, "done", &at(THEIRS, jobs.path(), true));
     assert_eq!(s.stop.len(), 1, "{s:?}");
-    assert!(s.answering.is_empty() && s.answered.is_empty());
+    assert_eq!(s.answering["job-1"], retiring(handing()));
+    assert!(s.answered.is_empty());
     assert!(writes(&hub).is_empty());
 }
 
@@ -744,7 +771,8 @@ fn externally_awaiting_jobs_still_stop_for_another_authors_push() {
                 std::fs::write(jobs.path().join("job-1/turns"), "2").unwrap();
                 let (s, _) = seen(&mut hub, state, &l);
                 assert_eq!(s.stop.len(), 1);
-                assert!(s.answering.is_empty() && s.answered.is_empty());
+                assert_eq!(s.answering["job-1"], retiring(l.answering["job-1"].clone()));
+                assert!(s.answered.is_empty());
             }
         }
     }
@@ -810,7 +838,7 @@ fn a_resume_cannot_clear_awaits_between_state_and_claim_completion() {
         let (_, got) = look(&cfg, &mut hub, &mut jobs, 0.0, |p| Ok(claims(p, &l)));
         let s = got.unwrap();
         jobs.resume.take().unwrap().join().unwrap();
-        assert_eq!(s.answering, l.answering);
+        assert_eq!(s.answering["job-1"], owning(l.answering["job-1"].clone()));
         assert!(s.answered.is_empty() && s.stop.is_empty() && hub.asked.is_empty());
     }
 }
@@ -834,7 +862,7 @@ fn a_question_keeps_the_claim_until_its_final_answers() {
         let mut hub = Hub::default();
         let (_, got) = look(&cfg, &mut hub, &mut states, 0.0, |p| Ok(claims(p, &l)));
         let s = got.unwrap();
-        assert_eq!(s.answering, l.answering, "{held}");
+        assert_eq!(s.answering["job-1"], owning(handing()), "{held}");
         assert!(
             s.answered.is_empty() && s.stop.is_empty() && hub.asked.is_empty(),
             "{held}"
@@ -849,3 +877,6 @@ fn a_question_keeps_the_claim_until_its_final_answers() {
         );
     }
 }
+
+#[path = "claims_lifecycle_tests.rs"]
+mod lifecycle;

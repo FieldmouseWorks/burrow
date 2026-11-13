@@ -9,9 +9,13 @@
 //! stays claimed, so each later turn's new answers go up in their turn and
 //! the ones already taken never again (PSIV#459's second turn pushed the
 //! fix, and its answers were never read: its claim had gone with its
-//! first's); and each still at work on a head someone else has moved the PR past,
-//! named to be stopped, since whatever it does next is for a head the PR no
-//! longer has. One still waiting for its slot can't have pushed. One at
+//! first's); each turn's answers are eligible by what that turn held open
+//! (proj's N.holds), apart from what the latest turn is doing; and each
+//! still at work on a head someone else has moved the PR past, named to be
+//! stopped, since whatever it does next is for a head the PR no longer has.
+//! A job named to stop (that, or retired for a new fix job: `Look::retire`)
+//! stays kept, retiring, and named again each pass until proj says it's
+//! over; `Seen::clear` says when no kept job may still push. One still waiting for its slot can't have pushed. One at
 //! work is named once GitHub's record of the branch says the head is
 //! someone else's push, not the machinery App's its jobs push as
 //! (answer.rs's `pusher`). Without that App its jobs push as the user, as
@@ -49,6 +53,11 @@ pub struct Look {
     pub answering: BTreeMap<String, Handing>,
     /// Who pushed a head, as last found.
     pub pushed_by: Option<(String, String)>,
+    /// A new fix job is about to be handed the PR: every job kept between
+    /// turns is retired first (marked, and named to stop), and `clear` says
+    /// when none is left.
+    #[serde(default)]
+    pub retire: bool,
 }
 
 /// A job, as it was handed the PR.
@@ -69,29 +78,52 @@ pub struct Handing {
     /// wrong), by its SHA-256: never again, whatever came between.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taken: Vec<String>,
-    /// The turn whose answers last went up with a comment, the one change
-    /// of theirs that proj's fingerprint sees (github.rs), so the one that
-    /// wakes it.
+    /// When (Unix seconds) its answers last made a write that proj's
+    /// fingerprint sees (github.rs: a reply on a thread, a comment), or may
+    /// have (one whose answer was lost): what wakes a job awaiting the PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub posted: Option<u64>,
+    pub woke_at: Option<f64>,
     /// Its turn is over, awaiting this PR: proj resumes it on the PR's next
-    /// change. A new fix job handed the PR stops it first (claims.py).
+    /// change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waits: bool,
-    /// It waits, and that turn's answers went up: what went up is the
-    /// change that resumes it, so it's still at work, and no other fix job
-    /// is handed the PR meanwhile (step_jobs.py's look). One whose turn left
-    /// nothing new has ended for the steward, as before.
+    /// It waits, and a write of its answers since that await began is the
+    /// change that resumes it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resumes: bool,
+    /// To be retired: stopped, and kept (named to stop on every pass) until
+    /// proj says it's over, so no job is handed the branch while it may
+    /// still push. Set for a job someone else's push made stale, and for
+    /// each waiting one when a new fix job is about to be handed the PR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retiring: bool,
+    /// The job may still push to the branch: at work, resumed by what went
+    /// up, or retiring. The steward hands the branch to no other fix job
+    /// while any does (step_jobs.py's look); it is the one word on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns: bool,
 }
 
 impl Handing {
-    /// Kept for its next turn, awaiting the PR as of `turn` (if it can be
+    /// Kept for its next turn, awaiting the PR since `since` (if it can be
     /// read).
-    fn between(mut self, turn: Option<u64>) -> Handing {
+    fn between(mut self, since: Option<f64>) -> Handing {
         self.waits = true;
-        self.resumes = turn.is_some() && self.posted == turn;
+        self.resumes = match (self.woke_at, since) {
+            (Some(w), Some(s)) => w >= s,
+            // Wrote, and the await can't be read: it may have woken it.
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        self
+    }
+
+    fn retire(&mut self) {
+        self.retiring = true;
+    }
+
+    fn settle(mut self, at_work: bool) -> Handing {
+        self.owns = at_work || self.resumes || self.retiring;
         self
     }
 }
@@ -105,6 +137,8 @@ pub struct Seen {
     pub pushed_by: Option<(String, String)>,
     pub stop: Vec<Stop>,
     pub answered: Vec<Answered>,
+    /// No kept job may still push to the branch (none owns it).
+    pub clear: bool,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -129,21 +163,34 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         pushed_by: l.pushed_by.clone(),
         ..Seen::default()
     };
+    let own = format!("{}#{}", p.repo, l.number);
     for (jid, rec) in &l.answering {
         let mut rec = rec.clone();
         rec.waits = false;
         rec.resumes = false;
+        rec.owns = false;
         // proj starts turns under this lock. Keep state, turn identity,
         // awaits and final answer collection in the same lifecycle snapshot.
         let opened = burrow_process::state_reads::Dir::open(&l.jobs)
             .and_then(|root| root.dir(std::path::Path::new(jid)))
             .and_then(|dir| dir.read_lock("lock").map(|lock| (dir, lock)));
         let Ok((dir, lock)) = opened else {
-            seen.answering.insert(jid.clone(), rec);
+            keep(&mut seen, jid, rec, true);
             continue;
         };
         if lock.lock_shared().is_err() {
-            seen.answering.insert(jid.clone(), rec);
+            keep(&mut seen, jid, rec, true);
+            continue;
+        }
+        let life = p.jobs.lifecycle(jid);
+        if rec.retiring {
+            // Kept, and named again, until proj says the job is over: a
+            // stop that failed (or a job resumed meanwhile) is never taken
+            // for a retired owner of the branch.
+            if life.at_work(None) {
+                rec.retire();
+                retire(&mut seen, jid, rec, "it is retiring from the branch");
+            }
             continue;
         }
         let resumed = dir
@@ -151,36 +198,16 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .is_some_and(|n| n > 1);
-        let life = p.jobs.lifecycle(jid);
         let state = life.state.clone();
         // A completed turn that holds something open (awaiting upstream, or
         // a person's answer to its question) is still an active job. Keep
         // its original claim (including ownership checks) until its final
         // turn; intermediate answers may be replaced when proj resumes it.
-        let own = format!("{}#{}", p.repo, l.number);
-        if life.at_work(Some(&own)) {
-            if rec.head != l.head
-                && let Some(why) = stale(
-                    p,
-                    l,
-                    &mut seen,
-                    if resumed { None } else { state.as_deref() },
-                    &mut rec,
-                )
-            {
-                seen.stop.push(Stop {
-                    jid: jid.clone(),
-                    why,
-                });
-            } else {
-                seen.answering.insert(jid.clone(), rec);
-            }
-            continue;
-        }
+        let at_work = life.at_work(Some(&own));
         // Its turn is over. Awaiting this PR, it's resumed on the PR's next
         // change: between turns, still at work on the branch, so a head
         // someone else pushed stops it as it would a running one.
-        let between = life.awaits(&own);
+        let between = !at_work && life.awaits(&own);
         let number = dir.text("turns").ok().and_then(|t| {
             let t = t.trim();
             (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
@@ -188,37 +215,60 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 .flatten()
                 .filter(|n| *n > 0)
         });
-        if between
+        if (at_work || between)
             && rec.head != l.head
-            && let Some(why) = stale(p, l, &mut seen, None, &mut rec)
+            && let Some(why) = stale(
+                p,
+                l,
+                &mut seen,
+                if at_work && !resumed {
+                    state.as_deref()
+                } else {
+                    None
+                },
+                &mut rec,
+            )
         {
-            seen.stop.push(Stop {
-                jid: jid.clone(),
-                why,
-            });
+            rec.retire();
+            retire(&mut seen, jid, rec, &why);
             continue;
         }
-        // Every turn's answers, each as its turn ended (proj keeps them in
-        // N.answers, since its next turn rewrites answers.json before this
-        // pass can look); a latest turn with none kept is read from the
-        // file itself. In turn order, each on the claim the one before left.
+        // Every turn's answers that may go up, each as its turn ended (proj
+        // keeps them in N.answers beside N.holds, what the turn held open,
+        // since its next turn rewrites answers.json before this pass can
+        // look): those of a turn that held nothing, or only this PR. A
+        // turn that held a question, an owner's call or something upstream
+        // left its answers for the turn that replaces them. A latest turn
+        // with none kept that is over is read from the file itself. In turn
+        // order, each on the claim the one before left, whatever the latest
+        // turn is doing now.
         let latest = number.unwrap_or(0);
         let mut found: Vec<(String, String, String)> = Vec::new();
         let mut unreadable = None;
         for n in 1..=latest {
             let name = format!("{n}.answers");
-            let name = if dir.text(&name).is_ok() || n < latest {
-                name
-            } else {
-                "answers.json".to_owned()
+            let kept = dir.text(&name);
+            let final_turn = n == latest && !at_work;
+            let text = match kept {
+                Ok(text) => {
+                    let holds = dir.text(&format!("{n}.holds")).unwrap_or_default();
+                    if !final_turn && !holds_only(&holds, &own) {
+                        continue;
+                    }
+                    Ok(text)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && final_turn => {
+                    dir.text("answers.json")
+                }
+                Err(e) => Err(e),
             };
-            match dir.text(&name) {
+            match text {
                 Ok(text) => found.push((n.to_string(), digest(&text), text)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => unreadable = Some(e),
             }
         }
-        if number.is_none() {
+        if number.is_none() && !at_work {
             match dir.text("answers.json") {
                 Ok(text) => found.push(("invalid-turn".into(), digest(&text), text)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -253,16 +303,10 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 at: rec.at,
                 answers: Some(text),
             };
-            let (outcome, why) = match answer::answer(p, &h) {
-                Ok(Posted::Answers(Took {
-                    head,
-                    description,
-                    woke,
-                })) => {
+            let mut wrote = false;
+            let (outcome, why) = match answer::answer(p, &h, &mut wrote) {
+                Ok(Posted::Answers(Took { head, description })) => {
                     rec.head = head;
-                    if woke {
-                        rec.posted = turn.parse().ok();
-                    }
                     if let Some(d) = description {
                         rec.body = d;
                     }
@@ -275,6 +319,9 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 Err(Unposted::Refused(why)) => ("refused", Some(why)),
                 Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
             };
+            if wrote {
+                rec.woke_at = Some(p.now);
+            }
             let again = matches!(outcome, "refused" | "unanswered");
             if !again && outcome != "nothing" {
                 rec.taken.push(sum);
@@ -292,17 +339,68 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 retry = true;
                 break;
             }
-            if outcome == "moved" {
-                break;
-            }
+            // A turn whose head the PR has left (outcome "moved") says
+            // nothing of the later turns, each checked on its own.
         }
-        if between {
-            seen.answering.insert(jid.clone(), rec.between(number));
+        if at_work {
+            keep(&mut seen, jid, rec, true);
+        } else if between {
+            let since = await_since(&dir, &own);
+            let mut rec = rec.between(since);
+            if l.retire && !rec.resumes {
+                rec.retire();
+                retire(&mut seen, jid, rec, "a new fix job is to be handed the PR");
+            } else {
+                let owns = rec.resumes;
+                keep(&mut seen, jid, rec, owns);
+            }
         } else if retry {
-            seen.answering.insert(jid.clone(), rec);
+            keep(&mut seen, jid, rec, false);
         }
     }
+    seen.clear = !seen.answering.values().any(|r| r.owns);
     seen
+}
+
+/// A job kept, whether it may still push or not.
+fn keep(seen: &mut Seen, jid: &str, rec: Handing, owns: bool) {
+    seen.answering.insert(jid.to_owned(), rec.settle(owns));
+}
+
+/// A job to retire: kept, retiring, and named to stop.
+fn retire(seen: &mut Seen, jid: &str, rec: Handing, why: &str) {
+    seen.stop.push(Stop {
+        jid: jid.to_owned(),
+        why: why.to_owned(),
+    });
+    keep(seen, jid, rec, true);
+}
+
+/// Whether a turn's holds (proj's `N.holds`, a line each) are none, or only
+/// the PR itself awaited.
+fn holds_only(holds: &str, own: &str) -> bool {
+    holds
+        .lines()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .all(|h| {
+            matches!(h.split_once(' '),
+            Some(("await", target)) if target.trim().eq_ignore_ascii_case(own))
+        })
+}
+
+/// When, in Unix seconds, the job's await of `own` began (proj's `await`
+/// file: TARGET, since and its fingerprint then, a tab apart).
+fn await_since(dir: &burrow_process::state_reads::Dir, own: &str) -> Option<f64> {
+    dir.text("await")
+        .ok()?
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            let (target, since) = (f.next()?, f.next()?);
+            target.trim().eq_ignore_ascii_case(own).then_some(since)
+        })
+        .find_map(|s| s.trim().parse::<f64>().ok())
 }
 
 fn digest(text: &str) -> String {

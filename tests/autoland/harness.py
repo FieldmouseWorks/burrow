@@ -126,6 +126,7 @@ with open(UPKEEP_FAKE, "w") as f:
 if sys.argv[2] == "claims":
     look = json.load(sys.stdin)
     print(json.dumps({{"answering": look["answering"], "pushedBy": look["pushedBy"], "stop": [], "answered": [],
+                      "clear": not any(r.get("owns") for r in look["answering"].values()),
                       "wake": None, "limited": None}}))
     sys.exit(0)
 with open({UPKEEP_RAN!r}, "a") as f:

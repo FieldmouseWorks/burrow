@@ -79,9 +79,6 @@ pub enum Posted {
 pub struct Took {
     pub head: String,
     pub description: Option<String>,
-    /// A new comment went up on the PR: the one write of theirs proj's
-    /// fingerprint sees (github.rs), so the one that wakes a job awaiting it.
-    pub woke: bool,
 }
 
 /// Why nothing (more) went up.
@@ -187,7 +184,12 @@ fn unposted(e: Error) -> Unposted {
 /// The job's answers, posted if the PR is still where the job left it.
 /// Everything is checked before anything goes up: a thread that isn't the
 /// PR's, or a fix claimed with no new commit, posts none of it.
-pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
+///
+/// `wrote` is set before each write of theirs that proj's fingerprint sees
+/// (github.rs: a reply on a thread, a new comment), so it says a job
+/// awaiting the PR may have been woken, even when the write's answer was
+/// lost, or a later one failed.
+pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut bool) -> Result<Posted, Unposted> {
     let Some(text) = &h.answers else {
         return Ok(Posted::Nothing);
     };
@@ -283,6 +285,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         let text = reply_text(r, pushed, &h.engine);
         let last = t["comments"]["nodes"][0]["body"].as_str();
         if !last.is_some_and(|l| same(l, &text)) {
+            *wrote = true;
             mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}))
                 .map_err(|e| unposted(p.noted(e)))?;
         }
@@ -306,7 +309,6 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         call_once(p.api, "PATCH", &path, Some(&json!({"body": new})))
             .map_err(|e| unposted(p.noted(e)))?;
     }
-    let mut woke = false;
     if let Some(c) = &a.comment {
         let text = comment_text(c, &h.engine);
         let since = jiff::Timestamp::from_second(h.at as i64)
@@ -322,9 +324,9 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         });
         if !had {
             let path = format!("repos/{repo}/issues/{n}/comments");
+            *wrote = true;
             call(p.api, "POST", &path, Some(&json!({"body": text})), None)
                 .map_err(|e| unposted(p.noted(e)))?;
-            woke = true;
         }
     }
     eprintln!(
@@ -336,7 +338,6 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
     Ok(Posted::Answers(Took {
         head: want.to_owned(),
         description: a.description,
-        woke,
     }))
 }
 
