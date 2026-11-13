@@ -10,7 +10,7 @@ impl Pass<'_> {
     }
 
     /// Whether a sorting record holds one of the `at_once` slots: its job's,
-    /// unless its record is settled ([`super::settle`]), its question has
+    /// unless its job is settled ([`super::settle`]), its question has
     /// been left for the owner, or it has ended with no outstanding holds.
     /// The pass, proj's queue and the live snapshot all count with this, so
     /// none of them can see a slot the others don't. `settle` first
@@ -23,7 +23,7 @@ impl Pass<'_> {
             // snapshots. The running turn itself publishes without this lock.
             let held = if settle { job.lock() } else { job.read_lock() };
             let Ok(_held) = held else { return true };
-            if super::settle::settled(d, &job).is_some() {
+            if super::settle::settled(&job).is_some() {
                 return false;
             }
             if settle && crate::question::recover(&job).is_err() {

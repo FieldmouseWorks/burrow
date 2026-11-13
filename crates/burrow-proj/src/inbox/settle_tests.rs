@@ -13,9 +13,11 @@ use super::sorting_tests::{Box, issue, on_github, sorting};
 use crate::job::Job;
 use crate::snapshot::SlotKind;
 
-/// One sorting slot; systemctl says s1's end unit is still running while
-/// `s1-ending` is there (as it is inside that unit's own `proj _ended`), and
-/// s2's turn is running once systemd-run has started it.
+/// One sorting slot; systemctl says s1's (or s3's) end unit is still running
+/// while `s1-ending` (`s3-ending`) is there, as it is inside that unit's own
+/// `proj _ended`, and s2's turn is running once systemd-run has started it.
+/// While `pause` is there, a look at s1's turn unit waits for it to go,
+/// saying so in `paused`.
 fn machine() -> Box {
     let mut b = Box::new();
     let dir = b.path("");
@@ -25,9 +27,14 @@ fn machine() -> Box {
         format!(
             r#"#!/bin/sh
 for a in "$@"; do unit=$a; done
+if [ "$unit" = proj-s1.service ] && [ -e '{dir}/pause' ]; then
+  touch '{dir}/paused'
+  while [ -e '{dir}/pause' ]; do sleep 0.05; done
+fi
 active=no
 case "$unit" in
   proj-ended@s1.service) [ -e '{dir}/s1-ending' ] && active=yes ;;
+  proj-ended@s3.service) [ -e '{dir}/s3-ending' ] && active=yes ;;
   proj-s2.service) [ -e '{dir}/s2-running' ] && active=yes ;;
 esac
 case "$*" in
@@ -139,7 +146,7 @@ fn a_sorting_jobs_end_frees_its_slot_and_keeps_its_verdict_while_github_refuses(
         "the end asks GitHub nothing: {}",
         fs::read_to_string(b.path("refused")).unwrap_or_default()
     );
-    let kept = settled(&d, &Job::new(&b.cfg, "s1")).expect("its verdict is kept");
+    let kept = settled(&Job::new(&b.cfg, "s1")).expect("its verdict is kept");
     assert!(
         kept.answer.as_deref().unwrap().starts_with("ready high"),
         "{kept:?}"
@@ -180,22 +187,119 @@ fn a_sorting_jobs_end_frees_its_slot_and_keeps_its_verdict_while_github_refuses(
 #[test]
 fn a_pass_settles_a_missed_end_before_it_asks_github() {
     let mut b = machine();
-    let d = sorting(&b, "later\nWaits on #4.");
+    sorting(&b, "later\nWaits on #4.");
     fs::write(b.path("s1-ending"), "").unwrap();
     b.cfg.tools.gh = quota_spent(&b);
     // Its end unit hasn't finished: its holds may not all be written yet.
     b.pass().run("sam/box").unwrap();
-    assert!(settled(&d, &Job::new(&b.cfg, "s1")).is_none());
+    assert!(settled(&Job::new(&b.cfg, "s1")).is_none());
     assert_eq!(slots(&b).0, ["sam/box#7"]);
     // It was killed before it settled anything: the next pass does, though
     // GitHub refuses that pass everything.
     fs::remove_file(b.path("s1-ending")).unwrap();
     b.pass().run("sam/box").unwrap();
     let job = Job::new(&b.cfg, "s1");
-    let kept = settled(&d, &job).expect("settled by the pass");
+    let kept = settled(&job).expect("settled by the pass");
     assert!(kept.answer.unwrap().starts_with("later"));
     assert_eq!(slots(&b), (vec![], vec![]));
     // A later turn's answer isn't the kept one's.
     job.set_turns(2).unwrap();
-    assert!(settled(&d, &job).is_none());
+    assert!(settled(&job).is_none());
+}
+
+/// Run `f` on another thread: whether it finished within ten seconds.
+fn finishes(f: impl FnOnce() + Send + 'static) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok()
+}
+
+// A stop finishing the turn (a retained retry's cancellation) holds the job's
+// lock, as does a reply waiting out this end unit: the end never waits for
+// it, and leaves the settling to the next pass.
+#[test]
+fn an_end_never_waits_for_the_jobs_lock() {
+    let b = machine();
+    sorting(&b, "ready high\nA pipeline blocker.");
+    fs::write(b.path("s1-ending"), "").unwrap();
+    let job = Job::new(&b.cfg, "s1");
+    let held = job.lock().unwrap();
+    let cfg = b.cfg.clone();
+    assert!(
+        finishes(move || super::settle::ended(&cfg, "s1")),
+        "the end waited for the job's lock"
+    );
+    assert!(settled(&job).is_none());
+    drop(held);
+    assert_eq!(slots(&b).0, ["sam/box#7"]);
+    // Once its end unit has stopped, the next pass settles it.
+    fs::remove_file(b.path("s1-ending")).unwrap();
+    b.pass().settle();
+    assert!(settled(&job).is_some());
+    assert_eq!(slots(&b).0, Vec::<String>::new());
+}
+
+// A reply's turn is published before it's queued or launched: a turn with no
+// end of its own on record is never settled, so its coming answer isn't
+// dropped as none, nor its slot given up once it runs.
+#[test]
+fn a_turn_being_started_is_never_settled() {
+    let b = machine();
+    sorting(&b, "ready high\nA pipeline blocker.");
+    let job = Job::new(&b.cfg, "s1");
+    fs::write(job.path("prompt.2"), "A person answered.").unwrap();
+    job.set_turns(2).unwrap();
+    b.pass().settle();
+    super::settle::ended(&b.cfg, "s1");
+    assert!(settled(&job).is_none(), "settled a turn that hasn't run");
+    // The turn runs and answers: that answer is the one kept.
+    fs::write(job.turn("2", "outcome"), "done\n").unwrap();
+    fs::write(job.turn("2", "end"), "done\n").unwrap();
+    fs::write(
+        job.turn("2", "jsonl"),
+        format!(
+            "{}\n",
+            json!({"type": "result", "result": "later\nWaits on #4."})
+        ),
+    )
+    .unwrap();
+    b.pass().settle();
+    let kept = settled(&job).expect("settled once it ended");
+    assert_eq!(kept.turn, "2");
+    assert!(kept.answer.unwrap().starts_with("later"));
+}
+
+// The issue is sorted again while an old job's end is still settling: the
+// record now names the new job s3, whose own end hasn't run. What the old end
+// keeps is its own job's, so s3 keeps its slot and its own verdict.
+#[test]
+fn a_late_end_never_settles_the_job_that_replaced_it() {
+    let b = machine();
+    let d = sorting(&b, "ready high\nA pipeline blocker.");
+    b.job("s3", "done", "later\nWaits on #4.");
+    fs::write(b.path("s3-ending"), "").unwrap();
+    fs::write(b.path("pause"), "").unwrap();
+    let cfg = b.cfg.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        super::settle::ended(&cfg, "s1");
+        let _ = tx.send(());
+    });
+    let paused = b.path("paused");
+    let start = std::time::Instant::now();
+    while !paused.exists() {
+        assert!(start.elapsed().as_secs() < 10, "the end never looked at s1");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    fs::remove_dir_all(&d).unwrap();
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("job"), "s3\n").unwrap();
+    fs::remove_file(b.path("pause")).unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert!(settled(&Job::new(&b.cfg, "s3")).is_none());
+    assert_eq!(slots(&b).0, ["sam/box#7"]);
+    assert!(settled(&Job::new(&b.cfg, "s1")).is_some());
 }

@@ -194,6 +194,17 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// [`Job::read_lock`], unless a turn is starting or being stopped right
+    /// now: None then, without waiting.
+    pub(crate) fn try_read_lock(&self) -> io::Result<Option<JobLock>> {
+        let f = self.lock_file()?;
+        match f.try_lock_shared() {
+            Ok(()) => Ok(Some(JobLock(f))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
     fn lock_file(&self) -> io::Result<File> {
         crate::state_reads::append(&self.path("lock"))
     }

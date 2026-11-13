@@ -26,11 +26,12 @@
 //! state, a folder an issue holding the job's id, the issue's `updated_at`
 //! when it started and what the job read of it (`input`: a verdict on an
 //! issue whose text or authors' comments changed since is dropped, and the
-//! issue sorted again), the job's answer as its end kept it (`ended`, with
-//! no GitHub call: [`super::settle`]), then the verdict's steps (`plan`) and
-//! how many of them GitHub has taken (`did`). A job whose issue an agent may no longer
-//! read (labelled outside text, or its opener no longer an author) is
-//! stopped wherever it is, queued or running. A job that ends with no answer at all (its
+//! issue sorted again), then the verdict's steps (`plan`) and how many of
+//! them GitHub has taken (`did`). The verdict itself is read from what the
+//! job's end kept of its answer, with no GitHub call ([`super::settle`]).
+//! A job whose issue an agent may no longer read (labelled outside text, or
+//! its opener no longer an author) is stopped wherever it is, queued or
+//! running. A job that ends with no answer at all (its
 //! engine refused it, say) leaves `failed` there instead: the issue is
 //! sorted again once it changes, or once another issue's verdict shows
 //! sorting works again, and nothing is said on it meanwhile.
@@ -262,7 +263,7 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
             }
             if d.exists() {
-                let why = ((d.join("plan").is_file() || d.join(super::settle::ENDED).is_file())
+                let why = ((d.join("plan").is_file() || self.record_settled(&d))
                     && !self.sorting_slot(&d))
                 .then_some("its verdict's steps are still being carried out");
                 self.planner_wait(repo, &n, why);
@@ -476,7 +477,7 @@ impl Pass<'_> {
             if !barred && !stale && open.is_some_and(|i| !self.sorted(repo, t, i, &claimed)) {
                 // The answer as its end kept it, with no GitHub call
                 // ([`super::settle`]); read now if it was never settled.
-                let answer = match super::settle::settled(&d, &job) {
+                let answer = match super::settle::settled(&job) {
                     Some(kept) => kept.answer.ok_or(()),
                     None => told(self.cfg, &id, &job.turns().unwrap_or_else(|| "1".into()))
                         .map_err(drop),
