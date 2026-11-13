@@ -83,7 +83,7 @@ current scope, allowed repositories, and paused repositories. Every
 unlisted repository, including a newly discovered one, is paused.
 
 To keep the off switch available when pipeline services are stopped,
-enable `burrow.settings.door` and set its `repo` and authorized `authors`.
+enable `burrow.settings.door` and set its `repo`; it takes issues from `burrow.authors`.
 An issue with its configured label (default `settings`) takes one command
 line from above, omitting the `settings` prefix. Use `pipeline TIMESTAMP`
 and `back` for scoped mode. The separate `burrow-settings-door` unit checks

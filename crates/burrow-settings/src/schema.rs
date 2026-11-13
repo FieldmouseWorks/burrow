@@ -170,6 +170,16 @@ const TUNING: Kind = Kind::Record(&[
     },
 ]);
 const MODELS: Kind = Kind::Map(&TUNING);
+const AUTHORS: Kind = Kind::List(&Kind::Record(&[
+    Field {
+        name: "login",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "id",
+        kind: &Kind::Count { min: 1 },
+    },
+]));
 const WORDS: Kind = Kind::List(&Kind::Text);
 const OFFERS: Kind = Kind::Map(&Kind::Record(&[
     Field {
@@ -324,6 +334,13 @@ pub static SETTINGS: &[Setting] = &[
         Is("false"),
         "proj",
         "Whether paid extra usage is on; otherwise a usage limit means waiting for its reset.",
+    ),
+    flake(
+        "authors",
+        &AUTHORS,
+        Is("[]"),
+        "proj",
+        "The GitHub accounts, by login and immutable numeric ID, whose issues and replies the inbox, engines door, probe, undo door and settings door act on.",
     ),
     flake(
         "settings.allowed",

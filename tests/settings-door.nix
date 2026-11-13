@@ -34,6 +34,7 @@ in pkgs.testers.runNixOSTest {
   nodes.machine = { config, lib, ... }: {
     imports = [ self.nixosModules.autoland self.nixosModules.updates ((import ../examples/machine.nix { inherit lib; }) // { nixpkgs = { }; fileSystems = { }; boot = { }; }) ];
     burrow.claude.package = pkgs.hello;
+    burrow.authors = [ { login = "sam"; id = 1; } ];
     burrow.events = { host = "example.org"; secretFile = "/run/secrets/webhook"; };
     burrow.autoland = {
       enable = true;
@@ -52,11 +53,11 @@ in pkgs.testers.runNixOSTest {
     burrow.proj = {
       enable = true;
       inherit gh;
-      inbox = { enable = true; authors = [ { login = "sam"; id = 1; } ]; };
+      inbox.enable = true;
     };
     burrow.settings = {
       allowed = [ "sam/code" "sam/box" ];
-      door = { enable = true; repo = "sam/box"; authors = [ { login = "sam"; id = 1; } ]; inherit gh; };
+      door = { enable = true; repo = "sam/box"; inherit gh; };
     };
     environment.etc."settings-tracked".source = config.burrow.settings.file;
     environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-settings ];

@@ -5,14 +5,15 @@
   let
     inbox = self.nixosConfigurations.example.extendModules {
       modules = [ {
-        burrow.proj.inbox = { enable = true; authors = [ { login = "octocat"; id = 1; } ]; };
+        burrow.authors = [ { login = "octocat"; id = 1; } ];
+        burrow.proj.inbox.enable = true;
         burrow.proj.engines.door = { enable = true; repo = "sam/homelab"; label = "switch-engines"; };
         burrow.proj.inbox.triage.skip = [ "custom" ];
       } ];
     };
     excludesMachinery = authors:
       builtins.all (author: author.id != inbox.config.burrow.github.machineApp.accountId) authors;
-    injected = inbox.config.burrow.proj.inbox.authors ++ [ {
+    injected = inbox.config.burrow.authors ++ [ {
       login = "renamed-machinery";
       id = inbox.config.burrow.github.machineApp.accountId;
     } ];
@@ -24,7 +25,7 @@
   assert builtins.elem "switch-engines" inbox.config.burrow.proj.inbox.triage.skip;
   assert builtins.elem "custom" inbox.config.burrow.proj.inbox.triage.skip;
   assert inbox.config.burrow.proj.inbox.planning;
-  assert excludesMachinery inbox.config.burrow.proj.inbox.authors;
+  assert excludesMachinery inbox.config.burrow.authors;
   assert !(excludesMachinery injected);
   assert builtins.elem "pull_request" inbox.config.burrow.events.handlers.proj-inbox.events;
   pkgs.runCommand "proj-config-check" { } ''

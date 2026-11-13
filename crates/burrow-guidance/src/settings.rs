@@ -62,7 +62,8 @@ fn path(file: &str) -> Regex {
 
 /// How the guidance names the option: its name or a dotted tail of it of
 /// two parts or more, `burrow.` before it or not, or its last part alone
-/// when that's a word of its own making (`maxJobs`, not `rounds`).
+/// when that's a word of its own making (`maxJobs`, not `rounds`). A name of
+/// one part needs `burrow.`.
 fn names(s: &Setting) -> Regex {
     let parts: Vec<_> = s.name.split('.').collect();
     let mut tails: Vec<String> = (0..parts.len().saturating_sub(1))
@@ -72,8 +73,16 @@ fn names(s: &Setting) -> Regex {
     if last.chars().any(|c| c.is_ascii_uppercase()) {
         tails.push(escape(last));
     }
+    // A name of one part is a common word (`authors`): only `burrow.` before
+    // it names the option.
+    let prefix = if parts.len() == 1 {
+        tails.push(escape(last));
+        r"burrow\."
+    } else {
+        r"(?:burrow\.)?"
+    };
     Regex::new(&format!(
-        r"(?:^|[^\w.])(?:burrow\.)?(?:{})(?:$|[^\w.]|\.(?:\s|$))",
+        r"(?:^|[^\w.]){prefix}(?:{})(?:$|[^\w.]|\.(?:\s|$))",
         tails.join("|")
     ))
     .expect("an option's names are a regex")
