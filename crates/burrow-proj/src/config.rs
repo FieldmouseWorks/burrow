@@ -199,6 +199,11 @@ pub struct Inbox {
     /// The label that, with an engine label, makes an issue's job one that waits in no
     /// line (proj run --unstick): the steward's stuck issue's.
     pub unstick_label: String,
+    /// The steward's `first` label (burrow.autoland.labels.first): an issue an
+    /// author marked with it is drained, started and kept ahead of the rest
+    /// (inbox/first.rs).
+    #[serde(default = "first_label")]
+    pub first_label: String,
     /// Whose issues and replies it acts on.
     pub authors: Vec<burrow_github::Author>,
     /// Its jobs run in agent sandboxes (proj run --vm).
@@ -215,6 +220,10 @@ pub struct Inbox {
     /// slots; None when it's off.
     #[serde(default)]
     pub triage: Option<Triage>,
+}
+
+fn first_label() -> String {
+    "first".into()
 }
 
 /// proj-inbox's triage and drain ([`crate::inbox`]'s triage and drain).

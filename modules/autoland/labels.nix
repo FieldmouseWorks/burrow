@@ -26,8 +26,13 @@ in
       default = "first";
       description = ''
         A PR with this label goes ahead of every PR without it in its repo's
-        line for proofSlots, and the oldest first among those with it: for a
-        fix the rest of the line waits on, opened after them.
+        line for proofSlots and in each pass, and the oldest first among
+        those with it: for a fix the rest of the line waits on, opened after
+        them. It counts only when one of proj's inbox authors (or the
+        steward) put it on, as GitHub's labelled event says by account id. A
+        PR closing an issue an author labelled with it gets it from the
+        steward, and proj-inbox puts that issue ahead in its drain and its
+        job ahead for a slot (docs/front-door.md).
       '';
     };
     batch = mkOption {

@@ -73,6 +73,7 @@ import sys
 
 import common as C
 from batch import Batch
+import firsts as F
 import proofs as P
 import repos as R
 import reviewers as V
@@ -315,11 +316,9 @@ def run_pass(kick, continuing=False):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
-                # The PRs labelled to go first in the proof line. One whose
-                # labels can't be read isn't, and fails in its own step below:
-                # one bad PR mustn't stop the rest.
-                first = {pr["number"] for pr in prs if CFG["labels"]["first"] in
-                         {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
+                # The PRs that go first in the proof line and this pass: an
+                # author's `first` on them or on an issue they close.
+                first = F.firsts(repo, prs)
                 P.begin(repo, (pr["number"] for pr in prs), first)
                 T.begin(repo)
                 waits.read(repo, prs)

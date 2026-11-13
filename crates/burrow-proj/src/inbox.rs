@@ -305,11 +305,13 @@ impl Pass<'_> {
     /// An issue in one of the pipeline's own repos is work on the pipeline
     /// itself: ahead of everything, in a slot kept for it. Anyone else's goes
     /// ahead of the line all the same, since someone's waiting on it, unless
-    /// the drain handed it on. The
+    /// the drain handed it on and no author marked it first. The
     /// job of an issue GitHub identifies as opened by a bot acts as the
     /// machine's App.
     fn start(&self, repo: &str, issue: &Value, comments: &[Value]) -> Result<String, Fail> {
-        if let Some(why) = enrollment::parked(self.inbox, issue).map_err(|e| Fail::new(1, e))? {
+        if let Some(why) =
+            enrollment::parked(self.cfg, self.inbox, repo, issue).map_err(|e| Fail::new(1, e))?
+        {
             return Err(Fail::new(1, format!("proj-inbox: no worker: {why}")));
         }
         let (_enrollment, enrolled) = self.enroll(repo, issue)?;
@@ -326,8 +328,12 @@ impl Pass<'_> {
             .filter(|m| !m.is_empty() && !self.inbox.vm)
             .filter(|_| issue["user"]["type"] == "Bot");
         // Handed on by the drain, nobody's waiting on it: it takes its place
-        // in line.
+        // in line, unless an author marked it first.
         let drained = self.drained(repo, &raw(&issue["number"]));
+        let marked = drained
+            && !pipeline
+            && first::marked(self.cfg, self.inbox, repo, issue)
+                .map_err(|e| Fail::new(1, format!("proj-inbox: no worker yet: {e}")))?;
         let (role, engine) = self.routing(issue);
         let new = New {
             admission: Some(crate::policy::Identity::Repository(repo.to_owned())),
@@ -336,7 +342,7 @@ impl Pass<'_> {
             vm: self.inbox.vm,
             engine,
             role,
-            first: !pipeline && !drained,
+            first: !pipeline && (!drained || marked),
             pipeline,
             unstick: self.lane(issue),
             kicks: vec![format!("proj-inbox/{repo}")],
@@ -818,6 +824,7 @@ mod answers;
 mod claims;
 mod drain;
 pub(crate) mod enrollment;
+mod first;
 pub(crate) use drain::job_paused;
 mod jobs;
 mod plans;
@@ -835,6 +842,8 @@ mod write;
 mod drain_tests;
 #[cfg(test)]
 mod enrollment_review_tests;
+#[cfg(test)]
+mod first_tests;
 #[cfg(test)]
 mod handed_tests;
 #[cfg(test)]

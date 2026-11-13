@@ -127,7 +127,7 @@ fn the_drain_picks_across_every_repo() {
         .collect();
     game.push(found("sam/game", 4, "sam", &["ready"], old));
     let boxed = found("sam/box", 8, "sam", &["ready"], "2026-11-01T00:00:00Z");
-    let p = b.pass();
+    let mut p = b.pass();
     p.note_ready("sam/game", &game).unwrap();
     p.note_ready(
         "sam/box",
@@ -149,7 +149,7 @@ fn the_drain_picks_across_every_repo() {
     );
     // Its repo's list without it: the next picks from the rest.
     let b = Box::new();
-    let p = b.pass();
+    let mut p = b.pass();
     p.note_ready("sam/game", &game).unwrap();
     p.note_ready("sam/box", &[]).unwrap();
     on_github(&b, &game[game.len() - 1]);
@@ -238,7 +238,7 @@ fn one_repo_cannot_hold_up_the_drain() {
     let old = "2026-10-01T00:00:00Z";
     let boxed = found("sam/box", 8, "sam", &["ready"], old);
     let game = found("sam/game", 4, "sam", &["ready"], old);
-    let p = b.pass();
+    let mut p = b.pass();
     p.note_ready(
         "sam/box",
         &[boxed.clone(), found("sam/box", 9, "sam", &["ready"], old)],
@@ -276,7 +276,7 @@ fn a_label_refused_does_not_hold_up_the_drain() {
     let box_too = found("sam/box", 9, "sam", &["ready"], old);
     let game = found("sam/game", 4, "sam", &["ready"], old);
     let game_too = found("sam/game", 5, "sam", &["ready"], old);
-    let p = b.pass();
+    let mut p = b.pass();
     p.note_ready("sam/box", &[boxed.clone(), box_too.clone()])
         .unwrap();
     p.note_ready("sam/game", &[game.clone(), game_too.clone()])
@@ -732,7 +732,7 @@ fn paused_records_keep_results_without_holding_shared_capacity() {
         .as_mut()
         .unwrap()
         .at_once = 1;
-    let p = b.pass();
+    let mut p = b.pass();
     assert!(!p.sorting_slot(&sorting));
     assert!(!p.record_uses_capacity(&drained));
     // A genuinely active paused turn still consumes shared capacity.
