@@ -8,6 +8,7 @@ members = [
     "burrow-agent",
     "burrow-backup",
     "burrow-boot",
+    "burrow-compat",
     "burrow-browser-close",
     "burrow-codex",
     "burrow-dashboard",
