@@ -697,6 +697,7 @@ fn machine_question_notifications_include_the_default_deadline_and_policy_once()
         let recommendation = crate::ask::Recommendation {
             default: "keep the old release".into(),
             one_way,
+            about: None,
         };
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&f.cfg, &job, "ask").unwrap();
@@ -811,7 +812,18 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
         notify(&f.cfg, &f.job()).unwrap();
         crate::ask::ensure(&f.job()).unwrap();
         for name in METADATA {
-            fs::write(crate::ask::host_path(&f.job(), name), "old question").unwrap();
+            // Preparation now refuses unreadable authority. Seed an actual
+            // publication so this still tests every accepted cleanup prefix.
+            let value = if matches!(*name, "question" | "question-released") {
+                serde_json::json!({
+                    "recommendation":{"default":"old question", "one_way":true},
+                    "due":crate::now()+3600,
+                })
+                .to_string()
+            } else {
+                "old question".to_owned()
+            };
+            fs::write(crate::ask::host_path(&f.job(), name), value).unwrap();
         }
         let pending = Resume::prepare(&f.job(), true).unwrap();
         std::mem::forget(pending);
@@ -826,6 +838,7 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
                 clear: true,
                 accepted: true,
                 applied: false,
+                question: None,
             },
         )
         .unwrap();

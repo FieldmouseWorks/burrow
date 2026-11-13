@@ -20,8 +20,15 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
+    handlers = lib.mapAttrs (name: h: {
+      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap;
+      issueDir = if h.issueNumbers then "${issueDir}/${name}" else null;
+    }) cfg.handlers;
   });
+  # Where a pass is told its issues (`issueNumbers`): burrow-events' own
+  # runtime directory, gone with it, so nothing it told outlives it.
+  issueDir = "/run/burrow-events";
+  told = lib.filterAttrs (_: h: h.issueNumbers) cfg.handlers;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-events;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
   # Each one best-effort: burrow-events down (restarting, say) runs every
@@ -153,6 +160,20 @@ in
               Comments are `issue_comment`, which this doesn't touch.
             '';
           };
+          issueNumbers = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Whether the repo's pass is told which issues its `issues` and
+              `issue_comment` events were about, so it can look at those
+              alone rather than list every issue. While such a pass runs,
+              the file its unit's BURROW_EVENTS_ISSUES names holds their
+              numbers, one a line; it isn't there for a pass that looks at
+              everything (a kick, a wake-up, a retry, an issue deleted or
+              moved, another event due with them, a hand run). Needs
+              `perRepo`.
+            '';
+          };
           ownStatuses = mkOption {
             type = types.listOf types.str;
             default = [ ];
@@ -246,7 +267,10 @@ in
     assertions = [{
       assertion = (cfg.host == null) == (cfg.secretFile == null);
       message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
-    }];
+    }] ++ lib.mapAttrsToList (name: h: {
+      assertion = h.perRepo;
+      message = "burrow.events.handlers.${name}: issueNumbers tells a pass over one repo its issues, so it needs perRepo.";
+    }) told;
 
     # The repos' hooks are the steward's to keep (burrow-upkeep's hook.rs).
     warnings = lib.optional (!(lib.attrByPath [ "burrow" "autoland" "enable" ] false config)) ''
@@ -272,6 +296,10 @@ in
         ExecStart = "${package}/bin/burrow-events";
         Restart = "always";
         RestartSec = 5;
+        # Each told handler's DIR/INSTANCE, which its pass (another user)
+        # reads.
+        RuntimeDirectory = lib.mkIf (told != { }) "burrow-events";
+        RuntimeDirectoryMode = lib.mkIf (told != { }) "0755";
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
@@ -356,6 +384,11 @@ in
     # have the switch wait out a pass of minutes, or one ordered after another
     # pass (renovate-sweep after renovate), past its deadline, and revert.
     systemd.services = lib.mkMerge [
+      # A told handler's pass over a repo finds its issues in its instance's
+      # file (%i, as burrow-events escapes the repo), when there are some.
+      (lib.mapAttrs' (name: h: lib.nameValuePair "${h.unit}@" {
+        environment.BURROW_EVENTS_ISSUES = "${issueDir}/${name}/%i";
+      }) told)
       (lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
       description = "burrow-events: a full pass of ${name} when a switch changes it";
       wantedBy = [ "multi-user.target" ];

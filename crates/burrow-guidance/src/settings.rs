@@ -49,7 +49,8 @@ pub fn facts() -> Vec<Fact> {
 }
 
 /// A file's path, whole: `roles` isn't `roles-old`, but a directory's
-/// path (`roles.d/`) takes any name in it.
+/// path (`roles.d/`) takes any name in it. No live option is kept in a
+/// directory today; the tests below hold the rule for the next one.
 fn path(file: &str) -> Regex {
     let end = if file.ends_with('/') {
         ""
@@ -149,5 +150,20 @@ fn words(kind: &Kind) -> &'static [&'static str] {
         Kind::OneOf(words) => words,
         Kind::Maybe(kind) | Kind::List(kind) => words(kind),
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path;
+
+    #[test]
+    fn a_file_is_whole_and_a_directory_takes_any_name_in_it() {
+        let file = path("roles");
+        assert!(file.is_match("in `roles`: one line"));
+        assert!(!file.is_match("the `roles-old` file"));
+        let dir = path("roles.d/");
+        assert!(dir.is_match("beside it in `roles.d/NAME`:"));
+        assert!(!dir.is_match("the `roles.d` link"));
     }
 }

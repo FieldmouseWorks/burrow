@@ -182,9 +182,30 @@ pub fn fetch_pr(
     Ok(m)
 }
 
+/// How long, in seconds, a fetch may hear nothing from GitHub before git
+/// gives it up. A pass waits on its fetches with no deadline of its own
+/// (a big repo's first one takes as long as it takes), so a connection
+/// that goes quiet would otherwise hold the pass until its unit's deadline
+/// kills it, as one did on 2026-11-11 (burrow#634). Under a second byte a
+/// second is nothing at all: the keepalives GitHub sends while it packs
+/// keep a slow fetch going.
+pub const STALL: u64 = 120;
+
 /// The repo's mirror, with `refs` fetched into it from GitHub, as the token
 /// in GH_TOKEN (gh is git's only credential helper). Made the first time.
+/// It fails once GitHub has said nothing for STALL seconds.
 pub fn fetch(cfg: &Config, state: &Path, repo: &str, refs: &[String]) -> Result<PathBuf, String> {
+    fetch_within(cfg, state, repo, refs, STALL)
+}
+
+/// `fetch`, given up after `stall` seconds of silence.
+fn fetch_within(
+    cfg: &Config,
+    state: &Path,
+    repo: &str,
+    refs: &[String],
+    stall: u64,
+) -> Result<PathBuf, String> {
     let mirror = path(state, repo);
     if let Some(r) = refs.iter().find(|r| !refspec(r)) {
         return Err(format!("{r:?} isn't a refspec of refs"));
@@ -199,10 +220,18 @@ pub fn fetch(cfg: &Config, state: &Path, repo: &str, refs: &[String]) -> Result<
             "credential.helper=",
             "-c",
             "credential.helper=!gh auth git-credential",
+            "-c",
+            "http.lowSpeedLimit=1",
+            "-c",
         ])
+        .arg(format!("http.lowSpeedTime={stall}"))
         .args(["fetch", "-q", "--no-tags"])
         .arg(url)
         .args(refs)
         .run()?;
     Ok(mirror)
 }
+
+#[cfg(test)]
+#[path = "mirror_tests.rs"]
+mod tests;

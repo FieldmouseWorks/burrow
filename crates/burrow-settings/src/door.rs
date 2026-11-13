@@ -125,6 +125,7 @@ mod tests {
                 overlay: dir.path().join("overlay.json"),
                 allowed: vec!["sam/code".into()],
                 pipeline_repos: vec![],
+                ..Default::default()
             },
         };
         for (author, editor) in [("outsider", None), ("sam", Some("outsider"))] {

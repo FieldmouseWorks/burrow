@@ -120,7 +120,7 @@ pub(crate) fn repository(job: &Job) -> Option<String> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Park {
     pub state: String,
     pub turn: String,
@@ -377,11 +377,10 @@ fn reconcile_job(
                 return Ok(());
             }
         }
-        let crate::inbox::resumption::Resume::Ready(_capacity) =
-            crate::inbox::resumption::admission(cfg, &job)?
-        else {
+        let capacity = crate::inbox::resumption::admission(cfg, &job)?;
+        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
             return Ok(());
-        };
+        }
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
@@ -391,8 +390,7 @@ fn reconcile_job(
         if !systemd::gone(cfg, &job.unit()) {
             return Ok(());
         }
-        shift_waits(&job, now().saturating_sub(rec.at))?;
-        rec.at = now();
+        shift_waits(&job, &mut rec)?;
         swap(
             &path(&job, "park"),
             &serde_json::to_string(&rec).map_err(|e| e.to_string())?,
@@ -423,7 +421,7 @@ fn reconcile_job(
                     read(&job.path(&format!("prompt.{}", rec.turn))).unwrap_or_default()
                 )
             };
-            crate::turn::start_admitted(cfg, id, &prompt, rec.first, &_capacity)
+            crate::turn::start_admitted(cfg, id, &prompt, rec.first, &capacity)
         } else {
             Ok(())
         };
@@ -470,15 +468,13 @@ pub(crate) fn kill(cfg: &Config, unit: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn shift_waits(job: &Job, elapsed: i64) -> Result<(), String> {
-    if let Some(mut question) = crate::ask::load(job) {
-        question.due = question.due.saturating_add(elapsed);
-        swap(
-            &crate::ask::host_path(job, "question"),
-            &serde_json::to_string(&question).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    }
+/// Credit paused time with the question's current deadline authority. The
+/// authority retains interval receipts, so retries and overlapping members
+/// cannot credit the same time again, including across a move.
+pub(crate) fn shift_waits(job: &Job, rec: &mut Park) -> Result<(), String> {
+    let at = now();
+    let elapsed = at.saturating_sub(rec.at);
+    crate::ask::restore(job, rec.at, at)?;
     if let Some(text) = read(&job.path("await")) {
         let shifted: String = crate::job::awaits(&text)
             .into_iter()
@@ -491,6 +487,7 @@ fn shift_waits(job: &Job, elapsed: i64) -> Result<(), String> {
             .collect();
         swap(&job.path("await"), &shifted).map_err(|e| e.to_string())?;
     }
+    rec.at = at;
     Ok(())
 }
 

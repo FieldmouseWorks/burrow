@@ -284,7 +284,7 @@ pkgs.testers.runNixOSTest {
     # A key the job mustn't read.
     dev("install -d -m 0700 ~/.ssh && echo secret-key-material >~/.ssh/id_test")
     jobs.fail("test -e /tmp/tmux-1001")
-    dev("mkdir -p ~/.config/proj && echo 'coder codex' >~/.config/proj/roles")
+    dev("proj settings role coder codex")
     jobs.succeed("echo ordinary-confidential-probe-text >/var/lib/burrow/proj-questions/probe-private")
     j = dev('proj run --local-work --role coder --app workers web "go"')
     # Once a command is running, the user starts two more: in tmux's default

@@ -173,11 +173,12 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
         &crate::ask::Recommendation {
             default: "keep it".into(),
             one_way: false,
+            about: None,
         },
     )
     .unwrap();
     crate::ask::finish(&cfg, &job, "ask").unwrap();
-    assert!(crate::ask::load(&job).is_some());
+    assert!(crate::ask::load(&job).unwrap().is_some());
     assert!(
         crate::cmd::told(&cfg, job.id, "1")
             .unwrap()

@@ -19,7 +19,7 @@ mod sandbox;
 mod stream;
 pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
 pub use handoff::first_prompt;
-pub(crate) use role::{RoleKey, role};
+pub(crate) use role::route;
 pub use stream::{
     Said, answer, last_result, names_session, results, stream_names_session, stream_tail,
 };
@@ -60,7 +60,7 @@ impl Engine {
 }
 
 /// What one turn runs on: the engine its role gives it, and the model and
-/// effort the models file gives that role on that engine. None leaves the
+/// effort the settings give that role on that engine. None leaves the
 /// engine's own setting.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
@@ -69,7 +69,7 @@ pub struct Choice {
     pub effort: Option<String>,
 }
 
-/// Inbox jobs pin their label's engine; role jobs resolve the file each turn.
+/// Inbox jobs pin their label's engine; role jobs resolve the settings each turn.
 /// Both read the job's protected request ([`crate::job::Request`]), never
 /// the files a job may write.
 pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
@@ -108,19 +108,19 @@ pub(crate) fn resolve(
     repo: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<Choice, String> {
-    let mut engine = cfg.engine_default(
-        role,
-        repo,
-        if role == "planner" {
-            Engine::Codex
-        } else {
-            Engine::Claude
-        },
-    )?;
+    // One version of the settings: the engine and its tuning can't come
+    // from either side of an `engines use`.
+    let settings = cfg.role_settings()?;
+    let mut engine = cfg.engine_in(&settings, role, repo)?;
     if let Some(e) = pinned {
         engine = Engine::parse(e)?;
     }
-    let choice = cfg.choice(role, repo, engine)?;
+    let tuning = settings.tuning(role, repo, engine.name());
+    let choice = Choice {
+        engine,
+        model: tuning.model,
+        effort: tuning.effort,
+    };
     if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
         return Err(
             "the planner role requires an explicit small model on Claude; its default is Codex"
@@ -223,27 +223,80 @@ pub fn ended(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::tests::set;
+
     #[test]
     fn planning_defaults_to_codex_and_never_falls_through_to_the_claude_default() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.roles = tmp.path().join("roles");
-        cfg.models = tmp.path().join("models");
         assert_eq!(
             resolve(&cfg, "planner", None, None).unwrap().engine,
             Engine::Codex
         );
-        fs::write(&cfg.roles, "planner claude\n").unwrap();
+        set(&mut cfg, tmp.path(), &["role planner claude"]);
         assert!(
             resolve(&cfg, "planner", None, None)
                 .unwrap_err()
                 .contains("explicit small model")
         );
-        fs::write(&cfg.models, "planner claude selected\n").unwrap();
+        set(
+            &mut cfg,
+            tmp.path(),
+            &[
+                "offer claude models selected",
+                "model planner claude selected",
+            ],
+        );
         let chosen = resolve(&cfg, "planner", None, None).unwrap();
         assert_eq!(chosen.engine, Engine::Claude);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
     }
+
+    #[test]
+    fn the_next_job_of_a_role_runs_on_the_model_the_door_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.jobs = dir.path().join("jobs");
+        set(&mut cfg, dir.path(), &[]);
+        let job = |cfg: &Config, id: &str| {
+            let job = Job::new(cfg, id);
+            fs::create_dir_all(&job.dir).unwrap();
+            fs::write(job.path("role"), "triage").unwrap();
+            choice(cfg, &job).unwrap()
+        };
+        // No model set: the engine's own, as the schema declares it.
+        assert_eq!(job(&cfg, "one"), Choice::default());
+        set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer claude models small mid",
+                "model triage claude small low",
+            ],
+        );
+        let c = job(&cfg, "two");
+        assert_eq!(
+            (c.engine, c.model.as_deref(), c.effort.as_deref()),
+            (Engine::Claude, Some("small"), Some("low"))
+        );
+        // One change through the door, and the next job of the role takes it.
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(
+                &["model", "triage", "claude", "mid"].map(String::from),
+                "test",
+            )
+            .unwrap();
+        let c = job(&cfg, "three");
+        assert_eq!((c.model.as_deref(), c.effort), (Some("mid"), None));
+        // Another role's is its own still.
+        let other = Job::new(&cfg, "four");
+        fs::create_dir_all(&other.dir).unwrap();
+        fs::write(other.path("role"), "fix").unwrap();
+        assert_eq!(choice(&cfg, &other).unwrap(), Choice::default());
+    }
+
     #[test]
     fn a_judge_job_starts_fresh_without_a_writer_or_reviewer_session() {
         // Exercise the steward's actual creation path without its service imports.
@@ -311,8 +364,6 @@ for session in ('writer-session', 'reviewer-session'):
     fn a_judge_overflows_when_claudes_five_hour_window_is_short() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
         cfg.meters = Some(dir.path().to_owned());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -330,8 +381,16 @@ for session in ('writer-session', 'reviewer-session'):
             )
             .unwrap();
         }
-        fs::write(&cfg.roles, "steward-judged claude over 95 codex\n").unwrap();
-        fs::write(&cfg.models, "steward-judged codex selected high\n").unwrap();
+        set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer codex models selected",
+                "offer codex efforts high",
+                "role steward-judged claude over 95 codex",
+                "model steward-judged codex selected high",
+            ],
+        );
         let chosen = resolve(&cfg, "steward-judged", None, None).unwrap();
         assert_eq!(chosen.engine, Engine::Codex);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
@@ -340,7 +399,7 @@ for session in ('writer-session', 'reviewer-session'):
         let recorded = serde_json::to_value(&chosen).unwrap();
         assert_eq!(recorded["engine"], "codex");
         assert_eq!(recorded["model"], "selected");
-        fs::write(&cfg.roles, "steward-judged claude\n").unwrap();
+        set(&mut cfg, dir.path(), &["role steward-judged claude"]);
         assert_eq!(
             resolve(&cfg, "steward-judged", None, None).unwrap().engine,
             Engine::Claude
@@ -351,25 +410,30 @@ for session in ('writer-session', 'reviewer-session'):
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
-        fs::write(&cfg.roles, "steward-judged codex\n").unwrap();
+        set(&mut cfg, dir.path(), &["role steward-judged codex"]);
         let job = Job::new(&cfg, "judge");
         fs::create_dir_all(&job.dir).unwrap();
         fs::write(job.path("role"), "steward-judged").unwrap();
         assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
-        fs::write(&cfg.roles, "steward-judged claude\n").unwrap();
+        set(&mut cfg, dir.path(), &["role steward-judged claude"]);
+        let job = Job::new(&cfg, "judge");
         assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Claude);
         // Pinned by its starter (an inbox label), not by a file it writes.
         let mut request = crate::job::Request::load(&job).unwrap();
         request.engine = Some(Engine::Codex);
         request.save(&job).unwrap();
         // Model and effort follow the engine the judge runs on.
-        fs::write(
-            &cfg.models,
-            "steward-judged codex other low\nsteward-judged claude chosen max\n",
-        )
-        .unwrap();
+        set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "offer codex models other",
+                "offer claude models chosen",
+                "model steward-judged codex other low",
+                "model steward-judged claude chosen max",
+            ],
+        );
+        let job = Job::new(&cfg, "judge");
         let c = choice(&cfg, &job).unwrap();
         assert_eq!(
             (c.engine, c.model.as_deref(), c.effort.as_deref()),
@@ -411,8 +475,6 @@ mod scoped_tests {
         let project = dir.path().join("project");
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
-        cfg.roles = dir.path().join("roles");
-        cfg.models = dir.path().join("models");
         cfg.tools.git = "git".into();
         let git = |args: &[&str]| {
             assert!(
@@ -429,16 +491,18 @@ mod scoped_tests {
         fs::create_dir(&project).unwrap();
         git(&["init", "-q"]);
         git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
-        fs::write(
-            &cfg.roles,
-            "steward-handed claude\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n",
-        )
-        .unwrap();
-        fs::write(
-            &cfg.models,
-            "steward-handed claude bare\nsteward-handed@sam/code claude scoped\n",
-        )
-        .unwrap();
+        crate::config::tests::set(
+            &mut cfg,
+            dir.path(),
+            &[
+                "role steward-handed claude",
+                "role steward-handed@sam/code codex",
+                "role steward-judged@sam/code codex",
+                "offer claude models bare scoped",
+                "model steward-handed claude bare",
+                "model steward-handed@sam/code claude scoped",
+            ],
+        );
         for (id, url) in [
             ("https", "https://github.com/Sam/Code.git"),
             ("scp", "git@github.com:SAM/CODE.git"),

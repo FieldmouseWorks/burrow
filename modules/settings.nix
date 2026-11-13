@@ -9,6 +9,9 @@ let
   settings = {
     overlay = "${stateDir}/settings/overlay.json";
     inherit (cfg) allowed;
+    legacyRoles = if config.burrow.proj.enable or false then "${config.users.users.${user}.home}/.config/proj" else null;
+    legacyEnginesLock = if (config.burrow.proj.enable or false) && (config.burrow.proj.engines.door.enable or false)
+      then "${stateDir}/proj-engines/${lib.toLower (builtins.replaceStrings [ "/" ] [ "--" ] config.burrow.proj.engines.door.repo)}/lock" else null;
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);

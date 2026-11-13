@@ -19,8 +19,6 @@ fn fixture() -> Fixture {
     cfg.jobs = root.join("jobs");
     cfg.projects = root.join("projects");
     cfg.scratch = root.join("scratch");
-    cfg.roles = root.join("roles");
-    cfg.models = root.join("models");
     cfg.waits = None;
     cfg.meters = None;
     cfg.tools.git = "git".into();
@@ -31,7 +29,7 @@ fn fixture() -> Fixture {
     cfg.apps = [("workers".to_owned(), root.join("workers.env"))].into();
     let project = cfg.projects.join("project");
     fs::create_dir_all(&project).unwrap();
-    fs::write(&cfg.roles, "work codex\nwide claude\n").unwrap();
+    crate::config::tests::set(&mut cfg, &root, &["role work codex", "role wide claude"]);
     Fixture {
         project,
         home: root.join("home"),
@@ -136,7 +134,7 @@ fn a_jobs_own_writes_never_change_what_it_runs_as() {
 
 #[test]
 fn host_authorized_changes_and_machine_settings_still_apply() {
-    let f = fixture();
+    let mut f = fixture();
     let new = crate::cmd::New {
         engine: Some(Engine::Codex),
         local_work: true,
@@ -156,8 +154,17 @@ fn host_authorized_changes_and_machine_settings_still_apply() {
     crate::cmd::reply(&f.cfg, &id, "again", false, None).unwrap();
     assert_eq!(choice(&f.cfg, &job).unwrap().engine, Engine::Claude);
     assert_eq!(crate::read(&job.path("role")).as_deref(), Some("wide"));
-    fs::write(&f.cfg.roles, "work codex\nwide codex\n").unwrap();
-    fs::write(&f.cfg.models, "wide codex chosen high\n").unwrap();
+    let root = f.root.clone();
+    crate::config::tests::set(
+        &mut f.cfg,
+        &root,
+        &[
+            "role wide codex",
+            "offer codex models chosen",
+            "model wide codex chosen high",
+        ],
+    );
+    let job = Job::new(&f.cfg, &id);
     crate::cmd::reply(&f.cfg, &id, "once more", false, None).unwrap();
     let c = choice(&f.cfg, &job).unwrap();
     assert_eq!(
@@ -209,7 +216,7 @@ fn a_job_from_before_the_record_adopts_its_request_once() {
 
 #[test]
 fn a_role_is_scoped_to_the_bound_repository_not_a_rewritten_origin() {
-    let f = fixture();
+    let mut f = fixture();
     let git = |args: &[&str]| {
         assert!(
             std::process::Command::new("git")
@@ -223,7 +230,12 @@ fn a_role_is_scoped_to_the_bound_repository_not_a_rewritten_origin() {
     };
     git(&["init", "-q"]);
     git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
-    fs::write(&f.cfg.roles, "work claude\nwork@sam/code codex\n").unwrap();
+    let root = f.root.clone();
+    crate::config::tests::set(
+        &mut f.cfg,
+        &root,
+        &["role work claude", "role work@sam/code codex"],
+    );
     let new = crate::cmd::New {
         role: Some("work".into()),
         ..Default::default()

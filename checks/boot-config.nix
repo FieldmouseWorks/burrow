@@ -12,6 +12,8 @@ let
   };
   cfg = machine.config;
   trial = cfg.systemd.services.burrow-boot-trial;
+  deadline = cfg.systemd.services.burrow-boot-trial-deadline;
+  timer = cfg.systemd.timers.burrow-boot-trial;
   watch = cfg.systemd.services.burrow-boot-trial-watch;
   path = cfg.systemd.paths.burrow-boot-trial;
   withRunner = machine.extendModules {
@@ -25,6 +27,7 @@ let
   names = [
     "burrow-boot-check.service"
     "burrow-boot-trial.service"
+    "burrow-boot-trial-deadline.service"
     "burrow-boot-trial-watch.service"
     "burrow-boot-trial.path"
     "burrow-boot-trial.timer"
@@ -55,7 +58,12 @@ assert watch.restartIfChanged && changedWatch.restartIfChanged;
 assert watch.serviceConfig.ExecStart != changedWatch.serviceConfig.ExecStart;
 assert path.pathConfig.Unit == "burrow-boot-trial.service";
 assert builtins.elem "/run/burrow-switch" path.pathConfig.PathChanged;
-assert cfg.systemd.timers.burrow-boot-trial.timerConfig.OnCalendar == "*-*-* 05:15:00";
+assert timer.timerConfig.OnCalendar == "*-*-* 05:15:00";
+# Only the timer's start may go over work running; every event's waits.
+assert timer.timerConfig.Unit == "burrow-boot-trial-deadline.service";
+assert lib.hasSuffix " trial --deadline" deadline.serviceConfig.ExecStart;
+assert lib.hasSuffix " trial" trial.serviceConfig.ExecStart;
+assert builtins.elem "burrow-boot-check.service" deadline.after;
 pkgs.runCommand "boot-config" { nativeBuildInputs = [ pkgs.systemd ]; } ''
   mkdir units
   cp ${files}/* units/
@@ -78,7 +86,7 @@ pkgs.runCommand "boot-config" { nativeBuildInputs = [ pkgs.systemd ]; } ''
   # files inside the build sandbox instead of trying to create /run/systemd.
   export XDG_RUNTIME_DIR="$PWD/runtime"
   export SYSTEMD_UNIT_PATH="$PWD/units" SYSTEMD_LOG_TARGET=console
-  systemd-analyze --user verify --generators=no --man=no multi-user.target burrow-boot-trial.service >verify.log 2>&1 || {
+  systemd-analyze --user verify --generators=no --man=no multi-user.target burrow-boot-trial.service burrow-boot-trial-deadline.service >verify.log 2>&1 || {
     cat verify.log
     exit 1
   }
