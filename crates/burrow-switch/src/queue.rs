@@ -10,23 +10,26 @@
 //! switch reverts with nothing wrong in it.
 //!
 //! So while an activation runs, whatever runs it looks at systemd's own
-//! queue every second. A job of a listed unit that waits, directly or
-//! through other waiting jobs, on a job that was already running when the
-//! activation began is cancelled and queued again, with nothing waiting
-//! for it: the unit still starts after that run, as it would have, and the
-//! activation goes on. systemd says which job waits on which
-//! (org.freedesktop.systemd1.Job.GetBefore), so nothing here models its
-//! ordering, and units from packages count as much as the flake's own.
+//! queue every second. A job the activation waits on (one of a unit it
+//! lists, or a new one that such a job waits for) that waits, directly or
+//! through other waiting jobs, on nothing but starts that were already
+//! running when the activation began is cancelled and queued again, with
+//! nothing waiting for it: the unit still starts after that run, as it
+//! would have, and the activation goes on. systemd says which job waits on
+//! which (org.freedesktop.systemd1.Job.GetBefore), so nothing here models
+//! its ordering, and units from packages count as much as the flake's own.
 //! What the activation started itself is still waited for: a start that
-//! hangs still reverts the switch.
+//! hangs still reverts the switch. A job queued again that turns out not to
+//! wait behind the run after all is waited for here, as the activation
+//! would have.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io;
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -39,8 +42,19 @@ const LOOK: Duration = Duration::from_secs(1);
 /// of the units it starts, restarts and reloads, until it has.
 const LISTS: [&str; 3] = ["start-list", "restart-list", "reload-list"];
 
+/// The list switch-to-configuration reads back as it starts, the revert's
+/// included, of units to start (or restart) whatever else it does. It reads
+/// and removes it before it queues any job, so what goes in while it waits
+/// on its jobs is the next activation's.
+const RECOVERY: &str = "activation-restart-list";
+
 /// What it restarts besides, and waits for, without listing it.
 const REACTIVATION: &str = "sysinit-reactivation.target";
+
+/// How a job is queued again: ordered as before, but without pulling in what
+/// its unit requires again. Its first queuing did that, and doing it again
+/// would run a oneshot it pulls in that has already finished once more.
+const MODE: &str = "ignore-requirements";
 
 const SYSTEMD: [&str; 2] = ["org.freedesktop.systemd1", "/org/freedesktop/systemd1"];
 const MANAGER: &str = "org.freedesktop.systemd1.Manager";
@@ -95,12 +109,30 @@ fn queued_by(kind: &str) -> Option<&'static str> {
     })
 }
 
-/// The jobs to let go: waiting jobs of the activation's own work (a unit it
-/// lists, or a job that wasn't queued before it began) that wait, directly
-/// or through other waiting jobs, on nothing but jobs of `running`, the ones
-/// that were running as it began; each with a run it waits on. A job that
-/// also waits, on any branch, for a job of anything else (a new unit that
-/// is starting, say) is kept whole, so that wait still counts and still
+/// A unit's invocation, as systemd says it, if it names one: an empty or
+/// all-zero id is none, and none is never the same run as another.
+pub fn known(invocation: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    invocation.filter(|i| i.iter().any(|b| *b != 0))
+}
+
+/// Whether a job running now is the run `then` was, as the activation
+/// began: a start then and now, of the same known invocation. Only a start
+/// counts. A start merged with anything but a start changes its kind, and
+/// one merged with a start is the same startup; a reload merged into a
+/// running reload keeps its id, kind and invocation, so a later reload
+/// can't be told from the first.
+pub fn same_run(then: Option<&Vec<u8>>, kind: &str, now: Option<Vec<u8>>) -> bool {
+    kind == "start" && then.is_some() && then == known(now).as_ref()
+}
+
+/// The jobs to let go: waiting jobs the activation waits on that wait,
+/// directly or through other waiting jobs, on nothing but jobs of
+/// `running`, the runs that were going as it began; each with a run it
+/// waits on. The activation waits on a job of a unit it lists, and on a job
+/// queued since it began that one of those waits for: a job of anything
+/// else is someone else's, however new, and is left be. A job that also
+/// waits, on any branch, for a job of anything else (a new unit that is
+/// starting, say) is kept whole, so that wait still counts and still
 /// reverts a start that hangs. `waits_for` says what a job waits for, as
 /// systemd does.
 pub fn held<'j>(
@@ -108,60 +140,110 @@ pub fn held<'j>(
     touched: &HashSet<String>,
     existing: &HashSet<u32>,
     running: &HashSet<u32>,
-    mut waits_for: impl FnMut(&Job) -> Vec<Job>,
+    waits_for: impl FnMut(&Job) -> Vec<Job>,
 ) -> Vec<(&'j Job, Job)> {
-    // For each job, the run it ends up waiting on if all it waits for is
-    // waiting jobs that do, or such a run: `None` if anything else.
-    let mut memo: HashMap<u32, Option<Job>> = HashMap::new();
+    let mut graph = Graph::new(running, waits_for);
+    let reached = graph.reached(jobs, touched);
     let mut held = Vec::new();
     for job in jobs {
-        let ours = touched.contains(job.unit()) || !existing.contains(&job.id());
+        let ours = touched.contains(job.unit())
+            || (reached.contains(&job.id()) && !existing.contains(&job.id()));
         if !job.waiting() || !ours || queued_by(job.kind()).is_none() {
             continue;
         }
-        if let Some(run) = only_behind(job, running, &mut memo, &mut waits_for, &mut HashSet::new())
-        {
+        if let Some(run) = graph.behind(job) {
             held.push((job, run));
         }
     }
     held
 }
 
-fn only_behind(
-    job: &Job,
-    running: &HashSet<u32>,
-    memo: &mut HashMap<u32, Option<Job>>,
-    waits_for: &mut impl FnMut(&Job) -> Vec<Job>,
-    path: &mut HashSet<u32>,
-) -> Option<Job> {
-    if let Some(known) = memo.get(&job.id()) {
-        return known.clone();
-    }
-    // A wait that goes round holds on to nothing new.
-    if !path.insert(job.id()) {
-        return None;
-    }
-    let ahead = waits_for(job);
-    let mut run = None;
-    let mut pure = !ahead.is_empty();
-    for other in &ahead {
-        if other.running() && running.contains(&other.id()) {
-            run.get_or_insert_with(|| other.clone());
-        } else if other.waiting() {
-            match only_behind(other, running, memo, waits_for, path) {
-                Some(r) => {
-                    run.get_or_insert(r);
-                }
-                None => pure = false,
-            }
-        } else {
-            pure = false;
+/// What waits on what, as systemd says it, each job asked once.
+pub struct Graph<'r, F> {
+    running: &'r HashSet<u32>,
+    waits_for: F,
+    before: HashMap<u32, Vec<Job>>,
+    /// For each job, the run it ends up waiting on if all it waits for is
+    /// waiting jobs that do, or such a run: `None` if anything else.
+    memo: HashMap<u32, Option<Job>>,
+}
+
+impl<'r, F: FnMut(&Job) -> Vec<Job>> Graph<'r, F> {
+    pub fn new(running: &'r HashSet<u32>, waits_for: F) -> Self {
+        Graph {
+            running,
+            waits_for,
+            before: HashMap::new(),
+            memo: HashMap::new(),
         }
     }
-    path.remove(&job.id());
-    let result = run.filter(|_| pure);
-    memo.insert(job.id(), result.clone());
-    result
+
+    fn ahead(&mut self, job: &Job) -> Vec<Job> {
+        if let Some(known) = self.before.get(&job.id()) {
+            return known.clone();
+        }
+        let ahead = (self.waits_for)(job);
+        self.before.insert(job.id(), ahead.clone());
+        ahead
+    }
+
+    /// The jobs of `touched` units, and the waiting jobs they wait for,
+    /// through waiting jobs.
+    fn reached(&mut self, jobs: &[Job], touched: &HashSet<String>) -> HashSet<u32> {
+        let mut seen = HashSet::new();
+        let mut next: Vec<Job> = jobs
+            .iter()
+            .filter(|j| touched.contains(j.unit()))
+            .cloned()
+            .collect();
+        while let Some(j) = next.pop() {
+            if !seen.insert(j.id()) || !j.waiting() {
+                continue;
+            }
+            next.extend(self.ahead(&j).into_iter().filter(Job::waiting));
+        }
+        seen
+    }
+
+    /// The run `job` waits behind, if it is waiting and all it waits for,
+    /// on every branch, is such runs.
+    pub fn behind(&mut self, job: &Job) -> Option<Job> {
+        if !job.waiting() {
+            return None;
+        }
+        self.only_behind(job, &mut HashSet::new())
+    }
+
+    fn only_behind(&mut self, job: &Job, path: &mut HashSet<u32>) -> Option<Job> {
+        if let Some(known) = self.memo.get(&job.id()) {
+            return known.clone();
+        }
+        // A wait that goes round holds on to nothing new.
+        if !path.insert(job.id()) {
+            return None;
+        }
+        let ahead = self.ahead(job);
+        let mut run = None;
+        let mut pure = !ahead.is_empty();
+        for other in &ahead {
+            if other.running() && self.running.contains(&other.id()) {
+                run.get_or_insert_with(|| other.clone());
+            } else if other.waiting() {
+                match self.only_behind(other, path) {
+                    Some(r) => {
+                        run.get_or_insert(r);
+                    }
+                    None => pure = false,
+                }
+            } else {
+                pure = false;
+            }
+        }
+        path.remove(&job.id());
+        let result = run.filter(|_| pure);
+        self.memo.insert(job.id(), result.clone());
+        result
+    }
 }
 
 /// Whether every job in `after`, and every one that waits on those, is a
@@ -189,41 +271,66 @@ pub fn only_targets_follow(job: &Job, mut after: impl FnMut(&Job) -> Option<Vec<
 }
 
 /// `c` run, as an activation, with its jobs kept from waiting behind a run
-/// that was going before it started: how it exited. A job it let go and
-/// couldn't queue again is an error: that start would be lost.
-pub fn activate(cfg: &Config, c: &mut Command) -> io::Result<ExitStatus> {
+/// that was going before it started: how it exited. A job queued again
+/// that doesn't wait behind the run after all is waited for once it has
+/// exited, until `deadline`. A job it let go and couldn't queue again, or
+/// one it waited for that failed or outlasted the deadline, is an error, as
+/// it would have been for the activation.
+pub fn activate(
+    cfg: &Config,
+    c: &mut Command,
+    deadline: Option<Instant>,
+) -> io::Result<ExitStatus> {
     let mut queue = Queue::now(cfg);
     let mut child: Child = c.spawn()?;
-    loop {
+    let status = loop {
         if let Some(status) = child.try_wait()? {
-            return match queue.lost.as_slice() {
-                [] => Ok(status),
-                lost => {
-                    let text = format!(
-                        "{} was let go and could not be queued again: its start would be lost",
-                        lost.join(", ")
-                    );
-                    complain(&text);
-                    cfg.journal("err", &text);
-                    Err(io::Error::other(text))
-                }
-            };
+            break status;
         }
-        queue.look();
+        queue.look(true);
         thread::sleep(LOOK);
+    };
+    while !queue.tracked.is_empty() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            let late = queue.tracked.drain(..).map(|t| t.unit);
+            queue.wrong.extend(
+                late.map(|u| format!("{u} was let go and queued again, and didn't finish in time")),
+            );
+            break;
+        }
+        thread::sleep(LOOK);
+        queue.look(false);
     }
+    match queue.wrong.as_slice() {
+        [] => Ok(status),
+        wrong => {
+            let text = wrong.join("; ");
+            complain(&text);
+            cfg.journal("err", &text);
+            Err(io::Error::other(text))
+        }
+    }
+}
+
+/// A job queued again that has to be waited for: one that didn't wait
+/// behind the run when it was read back.
+struct Tracked {
+    id: u32,
+    unit: String,
+    unit_path: String,
 }
 
 /// systemd's queue as an activation began.
 struct Queue<'c> {
     cfg: &'c Config,
-    /// Every job there was, and the ones that were running, each with its
-    /// kind and its unit's invocation then: a run is the same one only while
-    /// both hold (a restart or start merged into the job keeps its id).
+    /// Every job there was, and the starts that were running, each with
+    /// its unit's invocation then (`same_run`).
     existing: HashSet<u32>,
-    running: HashMap<u32, (String, Option<Vec<u8>>)>,
-    /// Units whose job was let go and not queued again.
-    lost: Vec<String>,
+    running: HashMap<u32, Vec<u8>>,
+    /// Jobs queued again that are waited for here.
+    tracked: Vec<Tracked>,
+    /// What went wrong with what it let go: a start lost, or failed.
+    wrong: Vec<String>,
     /// Units already said to be let go.
     said: HashSet<String>,
 }
@@ -236,50 +343,70 @@ impl<'c> Queue<'c> {
             existing: jobs.iter().map(Job::id).collect(),
             running: jobs
                 .iter()
-                .filter(|j| j.running())
-                .map(|j| (j.id(), (j.kind().to_string(), Queue::invocation(cfg, j))))
+                .filter(|j| j.running() && j.kind() == "start")
+                .filter_map(|j| known(Queue::invocation(cfg, j)).map(|i| (j.id(), i)))
                 .collect(),
-            lost: Vec::new(),
+            tracked: Vec::new(),
+            wrong: Vec::new(),
             said: HashSet::new(),
         }
     }
 
-    /// One look: what's held is let go and queued again. A queue it can't
-    /// read is left as it is.
-    fn look(&mut self) {
-        if self.running.is_empty() {
+    /// One look: what's held is let go and queued again (with `release`),
+    /// and what's tracked is followed. A queue it can't read is left as it
+    /// is.
+    fn look(&mut self, release: bool) {
+        if self.running.is_empty() && self.tracked.is_empty() {
             return;
         }
         let Some(jobs) = Queue::jobs_of(self.cfg) else {
             return;
         };
-        let touched = self.touched();
-        let held = self.held_in(&jobs, &touched);
-        for (job, run) in held {
-            self.release(&touched, &job, &run);
+        if release && !self.running.is_empty() {
+            let touched = self.touched();
+            for (job, run) in self.held_in(&jobs, &touched) {
+                self.release(&touched, &job, &run);
+            }
         }
+        self.follow();
     }
 
-    /// The jobs to let go among `jobs`, as `held` finds them, with the runs
-    /// still the ones that were going as the activation began.
-    fn held_in(&self, jobs: &[Job], touched: &HashSet<String>) -> Vec<(Job, Job)> {
-        let cfg = self.cfg;
-        let same: HashSet<u32> = jobs
-            .iter()
+    /// The jobs among `jobs` that are runs from before the activation.
+    fn runs(&self, jobs: &[Job]) -> HashSet<u32> {
+        jobs.iter()
             .filter(|j| j.running())
             .filter(|j| {
-                self.running.get(&j.id()).is_some_and(|(kind, inv)| {
-                    kind == j.kind() && *inv == Queue::invocation(cfg, j)
-                })
+                same_run(
+                    self.running.get(&j.id()),
+                    j.kind(),
+                    Queue::invocation(self.cfg, j),
+                )
             })
             .map(Job::id)
-            .collect();
-        held(jobs, touched, &self.existing, &same, |j| {
+            .collect()
+    }
+
+    /// The jobs to let go among `jobs`, as `held` finds them.
+    fn held_in(&self, jobs: &[Job], touched: &HashSet<String>) -> Vec<(Job, Job)> {
+        let cfg = self.cfg;
+        let runs = self.runs(jobs);
+        held(jobs, touched, &self.existing, &runs, |j| {
             call(cfg, &[j.path(), JOB, "GetBefore"]).unwrap_or_default()
         })
         .into_iter()
         .map(|(j, r)| (j.clone(), r))
         .collect()
+    }
+
+    /// The run `job` waits behind among `jobs`, if all it waits for is runs
+    /// from before the activation.
+    fn behind(&self, jobs: &[Job], job: &Job) -> Option<Job> {
+        let cfg = self.cfg;
+        let runs = self.runs(jobs);
+        Graph::new(&runs, |j: &Job| {
+            call(cfg, &[j.path(), JOB, "GetBefore"]).unwrap_or_default()
+        })
+        .behind(job)
     }
 
     /// The invocation of a job's unit: a new run of it has another.
@@ -288,48 +415,70 @@ impl<'c> Queue<'c> {
     }
 
     /// One held job, let go and queued again, unless something would be
-    /// lost by it or it isn't held any more. Everything is read again, just
-    /// before Cancel: new blockers, new consumers and a run that ended or
-    /// was replaced show in that read. What's left is the gap between that
-    /// read and Cancel (D-Bus has no cancel-if-waiting), and in it the unit
-    /// that starts anyway still has the new job to wait for.
+    /// lost by it or it isn't held any more. Everything is read again just
+    /// before Cancel: new blockers, new consumers, a job whose kind changed
+    /// and a run that ended or was replaced show in that read and keep it.
+    /// The unit is put where the next activation starts it again before the
+    /// job is cancelled, and taken out once it is queued again. What's left
+    /// is the gap between the last read and Cancel (D-Bus has no
+    /// cancel-if-waiting): the job queued again is read back, and if it
+    /// doesn't wait behind the run it is waited for here (`follow`).
     fn release(&mut self, touched: &HashSet<String>, job: &Job, run: &Job) {
         let cfg = self.cfg;
-        let Some(method) = queued_by(job.kind()) else {
-            return;
-        };
         let Some(jobs) = Queue::jobs_of(cfg) else {
             return;
         };
-        let still = self
+        let Some((job, run)) = self
             .held_in(&jobs, touched)
             .into_iter()
-            .any(|(j, r)| j.id() == job.id() && r.id() == run.id());
+            .find(|(j, r)| j.id() == job.id() && j.kind() == job.kind() && r.id() == run.id())
+        else {
+            return;
+        };
+        let Some(method) = queued_by(job.kind()) else {
+            return;
+        };
         // What requires it, or must follow it, would fail or run early.
-        if !still
-            || self.required(&jobs, job)
-            || !only_targets_follow(job, |j| call(cfg, &[j.path(), JOB, "GetAfter"]))
+        if self.bound(&jobs, &job)
+            || !only_targets_follow(&job, |j| call(cfg, &[j.path(), JOB, "GetAfter"]))
         {
             return;
         }
-        let state = |j: &Job| property::<String>(cfg, j.path(), JOB, "State");
-        if state(job).as_deref() != Some("waiting") || state(run).as_deref() != Some("running") {
+        let read = |j: &Job, p: &str| property::<String>(cfg, j.path(), JOB, p);
+        if read(&job, "State").as_deref() != Some("waiting")
+            || read(&job, "JobType").as_deref() != Some(job.kind())
+            || read(&run, "State").as_deref() != Some("running")
+        {
             return;
         }
+        let recovery = cfg.activation_lists.join(RECOVERY);
+        let added = match record(&recovery, job.unit()) {
+            Ok(added) => added,
+            Err(e) => {
+                let line = format!(
+                    "{} kept waiting: it could not be kept for recovery in {}: {e}",
+                    job.unit(),
+                    recovery.display()
+                );
+                complain(&line);
+                cfg.journal("err", &line);
+                return;
+            }
+        };
         // A job that ended meanwhile is left be.
         if call::<()>(cfg, &[job.path(), JOB, "Cancel"]).is_none() {
+            if added {
+                let _ = unrecord(&recovery, job.unit());
+            }
             return;
         }
-        let queued = (0..3).any(|_| {
-            call::<String>(
-                cfg,
-                &[SYSTEMD[1], MANAGER, method, "ss", job.unit(), "replace"],
-            )
-            .as_deref()
-            .and_then(job_id)
-            .is_some()
+        let again = (0..3).find_map(|_| {
+            call::<String>(cfg, &[SYSTEMD[1], MANAGER, method, "ss", job.unit(), MODE])
+                .as_deref()
+                .and_then(job_id)
         });
-        if !queued {
+        let Some(again) = again else {
+            // It stays in the recovery list.
             let line = format!(
                 "{} {} was let go and could not be queued again",
                 job.unit(),
@@ -337,9 +486,32 @@ impl<'c> Queue<'c> {
             );
             complain(&line);
             cfg.journal("err", &line);
-            self.keep_for_recovery(job.unit());
-            self.lost.push(job.unit().to_string());
+            self.wrong.push(format!(
+                "{} was let go and could not be queued again: its start would be lost",
+                job.unit()
+            ));
             return;
+        };
+        // Read back: still behind the run, or waited for here.
+        let behind = Queue::jobs_of(cfg).and_then(|jobs| {
+            let now = jobs.iter().find(|j| j.id() == again)?.clone();
+            self.behind(&jobs, &now)
+        });
+        if behind.is_none() {
+            self.tracked.push(Tracked {
+                id: again,
+                unit: job.unit().to_string(),
+                unit_path: job.unit_path().to_string(),
+            });
+        }
+        if added && let Err(e) = unrecord(&recovery, job.unit()) {
+            let line = format!(
+                "{} could not be taken out of {}: {e}",
+                job.unit(),
+                recovery.display()
+            );
+            complain(&line);
+            cfg.journal("warning", &line);
         }
         if self.said.insert(job.unit().to_string()) {
             let line = format!(
@@ -354,33 +526,58 @@ impl<'c> Queue<'c> {
         }
     }
 
-    /// A unit whose start is lost goes in the list switch-to-configuration
-    /// reads back as it starts (also in the rollback), so the next
-    /// activation starts it again, not only this process remembers it.
-    fn keep_for_recovery(&self, unit: &str) {
-        use std::io::Write;
-        let path = self.cfg.activation_lists.join("activation-restart-list");
-        let written = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut f| writeln!(f, "{unit}"));
-        if let Err(e) = written {
-            let line = format!(
-                "{unit} could not be kept for recovery in {}: {e}",
-                path.display()
-            );
-            complain(&line);
-            self.cfg.journal("err", &line);
+    /// The jobs queued again that didn't wait behind the run, followed: one
+    /// that waits behind a run from before again is let be, as any let go;
+    /// one that has ended is done, unless its unit failed; one whose unit is
+    /// still starting is waited for.
+    fn follow(&mut self) {
+        if self.tracked.is_empty() {
+            return;
+        }
+        let Some(jobs) = Queue::jobs_of(self.cfg) else {
+            return;
+        };
+        let tracked = std::mem::take(&mut self.tracked);
+        for t in tracked {
+            if let Some(job) = jobs.iter().find(|j| j.id() == t.id) {
+                if self.behind(&jobs, job).is_none() {
+                    self.tracked.push(t);
+                }
+                continue;
+            }
+            match property::<String>(self.cfg, &t.unit_path, UNIT, "ActiveState").as_deref() {
+                Some("failed") => self.wrong.push(format!(
+                    "{} was let go and queued again, and failed",
+                    t.unit
+                )),
+                Some("activating" | "deactivating" | "reloading" | "refreshing") | None => {
+                    self.tracked.push(t)
+                }
+                Some(_) => {}
+            }
         }
     }
 
-    /// Whether a unit that requires the job's, or is bound to it, has a job
-    /// of its own: it would fail with this one's cancelling.
-    fn required(&self, jobs: &[Job], job: &Job) -> bool {
+    /// Whether systemd keeps a link between the job and another one that
+    /// letting it go would break: a unit that requires its unit, is bound to
+    /// it or has it as requisite has a job queued, and would fail with this
+    /// one's cancelling; or a unit its unit requires, is bound to or has as
+    /// requisite has a job queued, which this one fails with, and which it
+    /// wouldn't be linked to once queued again without its requirements. A
+    /// list that can't be read counts as one.
+    fn bound(&self, jobs: &[Job], job: &Job) -> bool {
         let queued: HashSet<&str> = jobs.iter().map(Job::unit).collect();
         let unit = job.unit_path();
-        ["RequiredBy", "BoundBy", "RequisiteOf"].iter().any(|p| {
+        [
+            "RequiredBy",
+            "BoundBy",
+            "RequisiteOf",
+            "Requires",
+            "BindsTo",
+            "Requisite",
+        ]
+        .iter()
+        .any(|p| {
             property::<Vec<String>>(self.cfg, unit, UNIT, p)
                 .is_none_or(|by| by.iter().any(|u| queued.contains(u.as_str())))
         })
@@ -401,6 +598,39 @@ impl<'c> Queue<'c> {
     fn jobs_of(cfg: &Config) -> Option<Vec<Job>> {
         call(cfg, &[SYSTEMD[1], MANAGER, "ListJobs"])
     }
+}
+
+/// `unit` put in the recovery list at `path`, unless it is there already:
+/// whether it was put there.
+pub fn record(path: &Path, unit: &str) -> io::Result<bool> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    if text.lines().any(|l| l == unit) {
+        return Ok(false);
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{unit}")?;
+    f.sync_all()?;
+    Ok(true)
+}
+
+/// `unit` taken back out of the recovery list at `path`, the rest left.
+pub fn unrecord(path: &Path, unit: &str) -> io::Result<()> {
+    let text = fs::read_to_string(path)?;
+    let mut lines: Vec<&str> = text.lines().collect();
+    if let Some(i) = lines.iter().rposition(|l| *l == unit) {
+        lines.remove(i);
+    }
+    let rest: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    let tmp: PathBuf = path.with_extension("burrow-switch");
+    fs::write(&tmp, rest)?;
+    fs::rename(&tmp, path)
 }
 
 /// A job's id, from its object's path.
@@ -463,256 +693,4 @@ fn reply<T: for<'de> Deserialize<'de>>(out: &[u8]) -> Option<T> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn job(id: u32, unit: &str, kind: &str, state: &str) -> Job {
-        Job(
-            id,
-            unit.into(),
-            kind.into(),
-            state.into(),
-            format!("/org/freedesktop/systemd1/job/{id}"),
-            String::new(),
-        )
-    }
-
-    fn set<T: Clone + Eq + std::hash::Hash>(items: &[T]) -> HashSet<T> {
-        items.iter().cloned().collect()
-    }
-
-    /// What `held` finds, as (held unit, run's unit) pairs. `existing` are
-    /// the ids there were as the activation began, `running` the running ones.
-    fn found(
-        jobs: &[Job],
-        touched: &[&str],
-        existing: &[u32],
-        running: &[u32],
-        waits: &[(u32, &[u32])],
-    ) -> Vec<(String, String)> {
-        let by_id: HashMap<u32, Job> = jobs.iter().map(|j| (j.id(), j.clone())).collect();
-        let waits: HashMap<u32, Vec<u32>> = waits.iter().map(|(k, v)| (*k, v.to_vec())).collect();
-        let touched = touched.iter().map(|t| t.to_string()).collect();
-        held(jobs, &touched, &set(existing), &set(running), |j| {
-            waits
-                .get(&j.id())
-                .into_iter()
-                .flatten()
-                .map(|id| by_id[id].clone())
-                .collect()
-        })
-        .into_iter()
-        .map(|(j, r)| (j.unit().to_string(), r.unit().to_string()))
-        .collect()
-    }
-
-    fn sweep_behind_a_run() -> [Job; 2] {
-        [
-            job(1, "renovate.service", "start", "running"),
-            job(9, "renovate-sweep.service", "restart", "waiting"),
-        ]
-    }
-
-    #[test]
-    fn a_restart_behind_a_run_from_before_the_activation_is_held() {
-        assert_eq!(
-            found(
-                &sweep_behind_a_run(),
-                &["renovate-sweep.service"],
-                &[1],
-                &[1],
-                &[(9, &[1])]
-            ),
-            [("renovate-sweep.service".into(), "renovate.service".into())]
-        );
-    }
-
-    #[test]
-    fn a_target_waiting_only_behind_the_run_is_let_go_with_what_it_waits_on() {
-        // multi-user.target waits on a sweep queued before the switch,
-        // which waits on the run.
-        let jobs = [
-            job(1, "renovate.service", "start", "running"),
-            job(2, "renovate-sweep.service", "start", "waiting"),
-            job(9, "multi-user.target", "start", "waiting"),
-        ];
-        let mut got = found(
-            &jobs,
-            &["multi-user.target", "renovate-sweep.service"],
-            &[1, 2],
-            &[1],
-            &[(9, &[2]), (2, &[1])],
-        );
-        got.sort();
-        assert_eq!(
-            got,
-            [
-                ("multi-user.target".into(), "renovate.service".into()),
-                ("renovate-sweep.service".into(), "renovate.service".into())
-            ]
-        );
-    }
-
-    #[test]
-    fn a_job_the_activation_queued_behind_the_run_is_let_go_though_not_listed() {
-        // `pass` came with the target: not listed, a job of this activation.
-        let jobs = [
-            job(1, "renovate.service", "start", "running"),
-            job(10, "pass.service", "start", "waiting"),
-        ];
-        assert_eq!(
-            found(&jobs, &["multi-user.target"], &[1], &[1], &[(10, &[1])]),
-            [("pass.service".into(), "renovate.service".into())]
-        );
-        // One that was queued before, and isn't listed, is someone else's.
-        assert!(found(&jobs, &["multi-user.target"], &[1, 10], &[1], &[(10, &[1])]).is_empty());
-    }
-
-    #[test]
-    fn what_the_activation_started_itself_is_still_waited_for() {
-        // A new unit the target pulled in that hangs starting: the
-        // switch reverts, as it should.
-        let jobs = [
-            job(1, "renovate.service", "start", "running"),
-            job(10, "hung.service", "start", "running"),
-            job(11, "multi-user.target", "start", "waiting"),
-        ];
-        assert!(found(&jobs, &["multi-user.target"], &[1], &[1], &[(11, &[10])]).is_empty());
-    }
-
-    #[test]
-    fn a_job_that_also_waits_on_something_else_is_kept_whole() {
-        // The target waits on the sweep behind the run and on a new unit
-        // that hangs: the target keeps both waits, the sweep alone goes.
-        let jobs = [
-            job(1, "renovate.service", "start", "running"),
-            job(2, "sweep.service", "start", "waiting"),
-            job(10, "hung.service", "start", "running"),
-            job(11, "multi-user.target", "start", "waiting"),
-        ];
-        assert_eq!(
-            found(
-                &jobs,
-                &["multi-user.target", "sweep.service"],
-                &[1, 2],
-                &[1],
-                &[(11, &[2, 10]), (2, &[1])]
-            ),
-            [("sweep.service".into(), "renovate.service".into())]
-        );
-        // Through an intermediate waiting job, too, and when the other
-        // branch is a job with nothing it could be waiting for.
-        let jobs = [
-            job(1, "renovate.service", "start", "running"),
-            job(2, "sweep.service", "start", "waiting"),
-            job(3, "mid.target", "start", "waiting"),
-            job(10, "late.service", "start", "waiting"),
-            job(11, "multi-user.target", "start", "waiting"),
-        ];
-        let got = found(
-            &jobs,
-            &["multi-user.target", "sweep.service"],
-            &[1, 2, 3],
-            &[1],
-            &[(11, &[3, 10]), (3, &[2]), (2, &[1])],
-        );
-        assert_eq!(got, [("sweep.service".into(), "renovate.service".into())]);
-    }
-
-    #[test]
-    fn a_waiting_job_that_started_later_is_not_a_run_from_before() {
-        // Job 2 was queued before the activation and waiting; it runs now
-        // with the new configuration. It isn't a run to let go behind.
-        let jobs = [
-            job(2, "slow.service", "start", "running"),
-            job(9, "app.service", "restart", "waiting"),
-        ];
-        assert!(found(&jobs, &["app.service"], &[2, 9], &[], &[(9, &[2])]).is_empty());
-    }
-
-    #[test]
-    fn only_the_activations_own_work_and_kinds_are_let_go() {
-        let jobs = [
-            job(1, "renovate.service", "start", "running"),
-            // Someone else's, queued behind it.
-            job(2, "other.service", "start", "waiting"),
-            // Not a kind the activation queues.
-            job(3, "sweep.service", "verify-active", "waiting"),
-            // Running, not waiting.
-            job(4, "app.service", "start", "running"),
-        ];
-        assert!(
-            found(
-                &jobs,
-                &["sweep.service", "app.service"],
-                &[1, 2, 3, 4],
-                &[1, 4],
-                &[(2, &[1]), (3, &[1])]
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn a_wait_that_goes_round_ends() {
-        let jobs = [
-            job(5, "a.service", "start", "waiting"),
-            job(6, "b.service", "start", "waiting"),
-        ];
-        assert!(found(&jobs, &["a.service"], &[5, 6], &[], &[(5, &[6]), (6, &[5])]).is_empty());
-    }
-
-    #[test]
-    fn only_targets_may_follow_a_job_let_go() {
-        let sweep = job(2, "sweep.service", "start", "waiting");
-        let all = [
-            job(3, "multi-user.target", "start", "waiting"),
-            job(4, "consumer.service", "start", "waiting"),
-            job(5, "late.target", "start", "waiting"),
-        ];
-        let follow_err = |_: &Job| -> Option<Vec<Job>> { None };
-        let follow = |ids: &'static [(u32, &'static [usize])]| {
-            let all = all.clone();
-            move |j: &Job| {
-                ids.iter()
-                    .filter(|(k, _)| *k == j.id())
-                    .flat_map(|(_, v)| v.iter().map(|i| all[*i].clone()))
-                    .collect::<Vec<_>>()
-                    .into()
-            }
-        };
-        // A follower list that can't be read keeps the job.
-        assert!(!only_targets_follow(&sweep, follow_err));
-        assert!(only_targets_follow(&sweep, follow(&[(2, &[0])])));
-        assert!(only_targets_follow(&sweep, follow(&[])));
-        // A service ordered after it would run before it, in the gap.
-        assert!(!only_targets_follow(&sweep, follow(&[(2, &[0, 1])])));
-        // Through a target to a service.
-        assert!(!only_targets_follow(
-            &sweep,
-            follow(&[(2, &[2]), (5, &[1])])
-        ));
-    }
-
-    #[test]
-    fn busctl_says_a_call_returned_its_one_value() {
-        let jobs: Option<Vec<Job>> = reply(
-            br#"{"type":"a(usssoo)","data":[[[7,"a.service","start","waiting","/org/freedesktop/systemd1/job/7","/u"]]]}"#,
-        );
-        assert_eq!(
-            jobs,
-            Some(vec![job(7, "a.service", "start", "waiting")]).map(|mut v| {
-                v[0].5 = "/u".into();
-                v
-            })
-        );
-        let none: Option<Vec<Job>> = reply(br#"{"type":"a(usssoo)","data":[[]]}"#);
-        assert_eq!(none, Some(vec![]));
-        assert_eq!(reply::<()>(b""), Some(()));
-        assert_eq!(reply::<Vec<Job>>(b"nonsense"), None);
-        let path: Option<String> =
-            reply(br#"{"type":"o","data":["/org/freedesktop/systemd1/job/42"]}"#);
-        assert_eq!(path.as_deref().and_then(job_id), Some(42));
-        assert_eq!(job_id("/org/freedesktop/systemd1/unit/x"), None);
-    }
-}
+mod tests;

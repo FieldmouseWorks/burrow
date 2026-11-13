@@ -125,13 +125,20 @@ PATH=$path exec "$@"
     (
         // systemd's job queue: FAKE/jobs is what ListJobs says, FAKE/before-ID
         // what job ID waits for and FAKE/after-ID what waits for it (nothing,
-        // when they aren't there; FAKE/jobs-later replaces FAKE/jobs after the first
-        // ListJobs). A job's state is FAKE/state-ID, else the
-        // one FAKE/jobs says; a unit's RequiredBy and the like are
-        // FAKE/RequiredBy-UNIT (a JSON list). A job's Cancel and a unit's job
-        // queued again are kept in FAKE/busctl; FAKE/fail-cancel fails a
-        // cancel, as for a job that just ended, FAKE/fail-requeue the job
-        // queued again.
+        // when they aren't there; FAKE/jobs-later replaces FAKE/jobs at the
+        // second ListJobs, FAKE/jobs-once-asked once a GetBefore is). A job's state is FAKE/state-ID, else the one
+        // FAKE/jobs says, and its type FAKE/type-ID, else FAKE/jobs's; a
+        // unit's RequiredBy, Requires, ActiveState and the like are
+        // FAKE/PROPERTY-UNIT (JSON), its InvocationID [1] when not there
+        // (FAKE/InvocationID-UNIT-later from the second ListJobs on). A
+        // job's Cancel and a unit's job queued again are kept in FAKE/busctl,
+        // and the recovery list as it was at the Cancel in
+        // FAKE/recovery-at-cancel;
+        // FAKE/fail-cancel fails a cancel, as for a job that just ended,
+        // FAKE/fail-requeue the job queued again. The job queued again, 900,
+        // takes the cancelled one's place, waiting for what it waited for,
+        // unless FAKE/requeued-ran says it ran at once (then it isn't there)
+        // or FAKE/requeued-state says it's in that state, waiting on nothing.
         "busctl",
         r#"#!/bin/sh
 PATH='@PATH@'
@@ -139,13 +146,21 @@ PATH='@PATH@'
 verb=$2
 shift 3
 reply() { printf '{"type":"a(usssoo)","data":[[%s]]}\n' "$1"; }
+field() { tr '[' '\n' <"$FAKE/jobs" | grep "^$1," | cut -d, -f"$2" | tr -d '"'; }
 if [ "$verb" = get-property ]; then
   case "$1 $2 $3" in
     /org/freedesktop/systemd1/job/*" org.freedesktop.systemd1.Job State")
       id=${1##*/}
-      state=$(cat "$FAKE/state-$id" 2>/dev/null || tr '[' '\n' <"$FAKE/jobs" | grep "^$id," | cut -d, -f4 | tr -d '"')
-      printf '{"type":"s","data":"%s"}\n' "$state" ;;
+      printf '{"type":"s","data":"%s"}\n' "$(cat "$FAKE/state-$id" 2>/dev/null || field "$id" 4)" ;;
+    /org/freedesktop/systemd1/job/*" org.freedesktop.systemd1.Job JobType")
+      id=${1##*/}
+      printf '{"type":"s","data":"%s"}\n' "$(cat "$FAKE/type-$id" 2>/dev/null || field "$id" 3)" ;;
+    /unit/*" org.freedesktop.systemd1.Unit InvocationID")
+      f=$FAKE/$3-${1##*/}
+      if [ -e "$f-later" ] && [ "$(cat "$FAKE/listed" 2>/dev/null || echo 0)" -ge 2 ]; then f=$f-later; fi
+      printf '{"type":"ay","data":%s}\n' "$(cat "$f" 2>/dev/null || echo '[1]')" ;;
     /unit/*" org.freedesktop.systemd1.Unit "*)
+      [ "$3" != ActiveState ] || [ -e "$FAKE/$3-${1##*/}" ] || exit 1
       printf '{"type":"as","data":%s}\n' "$(cat "$FAKE/$3-${1##*/}" 2>/dev/null || echo '[]')" ;;
     *) exit 1 ;;
   esac
@@ -155,17 +170,34 @@ fi
 case "$2 $3" in
   "org.freedesktop.systemd1.Manager ListJobs")
     # FAKE/jobs-later is what it says from the second look on.
-    if [ -e "$FAKE/jobs-later" ] && [ -e "$FAKE/listed" ]; then cp "$FAKE/jobs-later" "$FAKE/jobs"; fi
-    touch "$FAKE/listed"
+    n=$(($(cat "$FAKE/listed" 2>/dev/null || echo 0) + 1))
+    echo $n >"$FAKE/listed"
+    if [ -e "$FAKE/jobs-later" ] && [ $n -ge 2 ]; then mv "$FAKE/jobs-later" "$FAKE/jobs"; fi
     reply "$(cat "$FAKE/jobs" 2>/dev/null)" ;;
-  "org.freedesktop.systemd1.Job GetBefore") reply "$(cat "$FAKE/before-${1##*/}" 2>/dev/null)" ;;
+  "org.freedesktop.systemd1.Job GetBefore")
+    # FAKE/jobs-once-asked is what ListJobs says once one job's waits are read.
+    if [ -e "$FAKE/jobs-once-asked" ]; then mv "$FAKE/jobs-once-asked" "$FAKE/jobs"; fi
+    reply "$(cat "$FAKE/before-${1##*/}" 2>/dev/null)" ;;
   "org.freedesktop.systemd1.Job GetAfter") reply "$(cat "$FAKE/after-${1##*/}" 2>/dev/null)" ;;
   "org.freedesktop.systemd1.Job Cancel")
     if [ -e "$FAKE/fail-cancel" ]; then echo "$1" >"$FAKE/cancel-failed"; exit 1; fi
+    echo "${1##*/}" >"$FAKE/cancelled"
+    # What the recovery list held as it was cancelled.
+    cp "$LISTS/activation-restart-list" "$FAKE/recovery-at-cancel" 2>/dev/null
     echo "cancel ${1##*/}" >>"$FAKE/busctl" ;;
   "org.freedesktop.systemd1.Manager "*Unit)
     if [ -e "$FAKE/fail-requeue" ]; then echo "$3 $5 failed" >>"$FAKE/busctl"; touch "$FAKE/requeue-failed"; exit 1; fi
     echo "$3 $5 $6" >>"$FAKE/busctl"
+    old=$(cat "$FAKE/cancelled")
+    case $3 in StartUnit) kind=start ;; RestartUnit) kind=restart ;; ReloadUnit) kind=reload ;; *) kind=try-restart ;; esac
+    rest=$(tr '[' '\n' <"$FAKE/jobs" | grep -v "^$old," | grep . | sed 's/^/[/; s/,$//' | paste -sd, -)
+    if [ -e "$FAKE/requeued-ran" ]; then
+      printf '%s' "$rest" >"$FAKE/jobs"
+    else
+      state=$(cat "$FAKE/requeued-state" 2>/dev/null || echo waiting)
+      [ -e "$FAKE/requeued-state" ] || cp "$FAKE/before-$old" "$FAKE/before-900" 2>/dev/null
+      printf '%s%s[900,"%s","%s","%s","/org/freedesktop/systemd1/job/900","/unit/%s"]' "$rest" "${rest:+,}" "$5" "$kind" "$state" "$5" >"$FAKE/jobs"
+    fi
     echo '{"type":"o","data":["/org/freedesktop/systemd1/job/900"]}' ;;
   *) exit 1 ;;
 esac

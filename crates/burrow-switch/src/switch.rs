@@ -18,6 +18,7 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use rustix::fs::{Access, FlockOperation, access, flock};
 
@@ -190,6 +191,7 @@ fn switch(
     // activation, and tests/switch.nix holds them to that. A job it waits on
     // behind a run that was already going is let go (queue.rs, and
     // tests/switch-queue.nix).
+    let deadline = Instant::now() + Duration::from_micros(window * 3 / 4);
     let activated = queue::activate(
         cfg,
         Command::new(&cfg.tools.systemd_run)
@@ -204,6 +206,7 @@ fn switch(
             .arg(new.join("bin/switch-to-configuration"))
             .arg("test")
             .stdin(Stdio::null()),
+        Some(deadline),
     );
     let prev = prev.display();
     // The timer's gone once the revert has fired or the deadline started
@@ -498,6 +501,7 @@ fn revert_to(cfg: &Config, prev: &Path) -> Result<u8, Broke> {
             Command::new(prev.join("bin/switch-to-configuration"))
                 .arg("test")
                 .stdin(Stdio::null()),
+            None,
         ));
         if rc != LOCKED {
             break rc;
