@@ -139,6 +139,31 @@ impl Dir {
         child_name(Path::new(name))?;
         Ok(fs::unlinkat(&self.0, name, fs::AtFlags::empty())?)
     }
+    /// Create a fresh, uniquely named subdirectory and return it pinned.
+    pub fn mkdir_unique(&self, prefix: &str) -> io::Result<(String, Self)> {
+        child_name(Path::new(prefix))?;
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        for i in 0..1000u32 {
+            let name = format!("{prefix}{:x}{:x}{i}", std::process::id(), seed);
+            match fs::mkdirat(&self.0, name.as_str(), Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                Ok(()) => {
+                    let dir = self.dir(Path::new(&name))?;
+                    return Ok((name, dir));
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(io::Error::other("no free directory name"))
+    }
+    /// Move a child into another pinned directory; both ends stay confined.
+    pub fn rename_into(&self, name: &str, to: &Self, to_name: &str) -> io::Result<()> {
+        child_name(Path::new(name))?;
+        child_name(Path::new(to_name))?;
+        Ok(fs::renameat(&self.0, name, &to.0, to_name)?)
+    }
     /// Commit absence before a caller retires another recovery record. An
     /// already absent name still needs the pinned directory synced.
     pub fn remove_durable(&self, name: &str) -> io::Result<()> {
@@ -301,6 +326,26 @@ pub fn remove_durable(path: impl AsRef<Path>) -> io::Result<()> {
             .and_then(|n| n.to_str())
             .ok_or_else(|| io::Error::other("invalid state name"))?,
     )
+}
+
+/// Rename within or across job directories, each end through its pinned
+/// parent, so a planted link at either parent or name is never followed.
+pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+    let (from, to) = (from.as_ref(), to.as_ref());
+    let split = |p: &Path| -> io::Result<(Dir, String)> {
+        let dir = Dir::open(
+            p.parent()
+                .ok_or_else(|| io::Error::other("state has no parent"))?,
+        )?;
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid state name"))?;
+        Ok((dir, name.to_owned()))
+    };
+    let (fd, fname) = split(from)?;
+    let (td, tname) = split(to)?;
+    fd.rename_into(&fname, &td, &tname)
 }
 
 pub fn directory(path: &Path) -> io::Result<Dir> {

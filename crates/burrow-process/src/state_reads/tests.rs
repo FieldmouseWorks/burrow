@@ -110,3 +110,45 @@ fn durable_removal_uses_the_pinned_directory_and_reports_unlink_failures() {
     fs::create_dir(root.join("retained/pending")).unwrap();
     assert!(job.remove_durable("pending").is_err());
 }
+
+#[test]
+fn quarantine_primitives_refuse_planted_links_and_stay_beneath_their_pins() {
+    let t = tempfile::tempdir().unwrap();
+    let host = t.path().join("host");
+    fs::create_dir(&host).unwrap();
+    let job = t.path().join("job");
+    fs::create_dir(&job).unwrap();
+    symlink(&host, job.join(".unstarted")).unwrap();
+    fs::write(job.join("2.result"), "x").unwrap();
+    assert!(directory(&job.join(".unstarted")).is_err());
+    assert_eq!(fs::read_dir(&host).unwrap().count(), 0);
+    fs::remove_file(job.join(".unstarted")).unwrap();
+    let root = directory(&job.join(".unstarted")).unwrap();
+    let (name, attempt) = root.mkdir_unique("attempt-").unwrap();
+    let pinned = Dir::open(&job).unwrap();
+    // The attempt is replaced by a link after pinning: the move still lands
+    // in the pinned inode, never in the host directory.
+    let moved = job.join(".unstarted").join(&name);
+    fs::rename(&moved, job.join(".unstarted").join("gone")).unwrap();
+    symlink(&host, &moved).unwrap();
+    pinned.rename_into("2.result", &attempt, "2.result").unwrap();
+    assert_eq!(fs::read_dir(&host).unwrap().count(), 0);
+    assert!(job.join(".unstarted/gone/2.result").exists());
+    assert!(pinned.rename_into("../x", &attempt, "y").is_err());
+}
+
+#[test]
+fn rename_refuses_a_planted_link_as_either_parent() {
+    let t = tempfile::tempdir().unwrap();
+    let host = t.path().join("host");
+    fs::create_dir(&host).unwrap();
+    fs::write(host.join("a"), "secret").unwrap();
+    let job = t.path().join("job");
+    fs::create_dir(&job).unwrap();
+    fs::write(job.join("a"), "x").unwrap();
+    symlink(&host, job.join("d")).unwrap();
+    assert!(rename(job.join("a"), job.join("d/a")).is_err());
+    assert!(rename(job.join("d/a"), job.join("b")).is_err());
+    rename(job.join("a"), job.join("b")).unwrap();
+    assert!(job.join("b").exists() && host.join("a").exists());
+}

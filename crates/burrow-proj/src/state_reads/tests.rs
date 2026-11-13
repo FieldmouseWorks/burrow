@@ -374,7 +374,15 @@ fn host_writes_into_job_directories_go_through_the_confined_writer() {
                     aliases.push(name.to_owned());
                 }
             }
-            for writer in ["fs::write(", "swap(", "File::create(", ".open("] {
+            for writer in [
+                "fs::write(",
+                "swap(",
+                "File::create(",
+                ".open(",
+                "create_dir_all(",
+                "fs::rename(",
+                "tempdir_in(",
+            ] {
                 for (at, _) in flat.match_indices(writer) {
                     let args = &flat[at + writer.len()..];
                     let args = args.strip_prefix('&').unwrap_or(args);

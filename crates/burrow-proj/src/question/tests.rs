@@ -855,3 +855,15 @@ fn accepted_reply_cleanup_recovers_after_every_interrupted_write() {
 mod recovery;
 
 mod lifecycle;
+
+#[test]
+fn quarantine_does_not_follow_a_planted_unstarted_link_into_the_host() {
+    let f = Fixture::new();
+    f.ending(1, "done");
+    let host = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(host.path(), f.job().path(".unstarted")).unwrap();
+    fs::write(f.job().turn("2", "result"), "future").unwrap();
+    assert!(f.job().quarantine_unstarted(1).is_err());
+    assert_eq!(fs::read_dir(host.path()).unwrap().count(), 0);
+    assert!(f.job().turn("2", "result").exists());
+}
