@@ -29,6 +29,8 @@ fn config(root: &Path) -> Config {
 
 struct Rig {
     tmp: TempDir,
+    /// The old generation's `burrow-proj`: this test binary under that name.
+    old: TempDir,
     cfg: Config,
     children: Vec<Child>,
 }
@@ -54,11 +56,14 @@ fn rig() -> Rig {
     let jobs = root.join("jobs");
     fs::create_dir_all(jobs.join(".queue")).unwrap();
     fs::create_dir_all(jobs.join(".slots")).unwrap();
-    fs::create_dir(root.join("old")).unwrap();
-    burrow_test::executable(
-        root.join("old/burrow-proj"),
-        fs::read(std::env::current_exe().unwrap()).unwrap(),
-    );
+    // A hard link, not a copy: a debug test binary is over 100M, and copying
+    // it into every rig wrote gigabytes while the retry tests ran together,
+    // enough to stall a runner's disk past their waits (#865). Its directory
+    // sits beside the binary, so the link never crosses a filesystem; the
+    // parent's /proc exe still reads as the link's own path.
+    let exe = std::env::current_exe().unwrap();
+    let old = TempDir::new_in(exe.parent().unwrap()).unwrap();
+    fs::hard_link(&exe, old.path().join("burrow-proj")).unwrap();
     let systemctl = root.join("systemctl");
     burrow_test::executable(
         &systemctl,
@@ -123,6 +128,7 @@ echo $! >'{jobs}'/$id/pid
     let cfg = config(root);
     Rig {
         tmp,
+        old,
         cfg,
         children: Vec::new(),
     }
@@ -171,7 +177,7 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     .unwrap();
     Identity::capture(&job, "1").unwrap();
     let exe = if mode.starts_with("old") || mode.starts_with("nb") {
-        r.tmp.path().join("old/burrow-proj")
+        r.old.path().join("burrow-proj")
     } else {
         std::env::current_exe().unwrap()
     };
