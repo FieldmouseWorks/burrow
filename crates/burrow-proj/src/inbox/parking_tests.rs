@@ -4,13 +4,13 @@ use crate::{ask, job::Job, read};
 use serde_json::json;
 use std::fs;
 
-fn on_github(b: &Box, issue: &serde_json::Value) {
+pub(super) fn on_github(b: &Box, issue: &serde_json::Value) {
     let mut issue = issue.clone();
     issue["repository_url"] = json!("https://api.github.com/repos/sam/box");
     super::sorting_tests::on_github(b, &issue);
 }
 
-fn fixture() -> Box {
+pub(super) fn fixture() -> Box {
     let mut b = Box::new();
     b.cfg.kick.clear();
     b.cfg.notify = None;
@@ -232,10 +232,15 @@ fn a_repository_release_cannot_launch_a_parked_issues_queued_turn() {
     let job = Job::new(&b.cfg, "j1");
     crate::policy::mark(&job, "queued", false).unwrap();
     on_github(&b, &issue(7, "sam", &["later"]));
-    assert!(crate::policy::reconcile(&b.cfg).is_err());
+    crate::policy::reconcile(&b.cfg).unwrap();
     assert!(!b.path("launched").exists());
     assert!(job.turn("1", "stopped").exists());
     assert!(!crate::policy::parked(&job));
+    crate::policy::reconcile(&b.cfg).unwrap();
+    assert!(
+        !b.path("launched").exists(),
+        "terminal parking must not retry a release"
+    );
 }
 
 #[test]

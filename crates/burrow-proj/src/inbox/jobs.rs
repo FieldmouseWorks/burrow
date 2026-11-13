@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{CUT_OFF, Pass, dirs, key, raw, say, seconds, trimmed};
-use crate::cmd::{halt, reply, reply_answer, stop, unstick};
+use crate::cmd::{halt, reply, reply_answer, unstick};
 use crate::github::api;
 use crate::job::Job;
 use crate::{Fail, filled, io_fail, now, read};
@@ -46,8 +46,19 @@ impl Pass<'_> {
                 let _ = fs::remove_dir_all(&d);
                 continue;
             }
-            let mine = listed.iter().find(|i| raw(&i["number"]) == n);
-            if self.stop_parked(repo, n, &id, &d, mine)? {
+            let fetched;
+            let observed = match listed.iter().find(|i| raw(&i["number"]) == n) {
+                Some(issue) => issue,
+                None => {
+                    fetched = api(self.cfg, &format!("repos/{repo}/issues/{n}"));
+                    let Some(issue) = fetched.as_ref() else {
+                        self.miss(repo);
+                        continue;
+                    };
+                    issue
+                }
+            };
+            if self.stop_parked(repo, n, &id, &d, observed)? {
                 continue;
             }
             if self.cfg.paused(repo) || crate::policy::parked(&job) {
@@ -99,14 +110,10 @@ impl Pass<'_> {
             // GitHub says now: closing it lets the turn finish only while
             // its issue may still be read.
             let split_pending = crate::planning::admit(&job).is_err();
-            if (mine.is_some() || busy) && {
-                let Some(barred) = self.barred(repo, n, mine) else {
-                    self.miss(repo);
-                    continue;
-                };
-                barred
-            } {
-                if let Err(f) = stop(self.cfg, &id, false) {
+            if !self.eligible(repo, observed) {
+                let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+                if let Err(f) = halt(self.cfg, &job, false) {
                     say(f);
                     self.retry(repo);
                     continue;
@@ -344,6 +351,9 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 };
+                if self.stop_parked(repo, n, &id, &d, &now_issue)? {
+                    continue;
+                }
                 // A later REST read may have observed an edit after our verified
                 // snapshot. Never overwrite that signal and close stale work.
                 if !written.matches(&now_issue) {
@@ -353,8 +363,7 @@ impl Pass<'_> {
                 let mut now_issue = now_issue;
                 now_issue["title"] = safe_issue["title"].clone();
                 now_issue["body"] = safe_issue["body"].clone();
-                let labelled = self.engine(&now_issue).is_some();
-                if now_issue["state"] != "open" || !labelled || !self.eligible(repo, &now_issue) {
+                if now_issue["state"] != "open" || !self.eligible(repo, &now_issue) {
                     continue;
                 }
                 // Not what the job's record says it was handed (the title or
@@ -376,6 +385,7 @@ impl Pass<'_> {
                         && job.state() == "done"
                         && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                     {
+                        super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
                         if !self.close(repo, n, "completed") {
                             drop(held);
                             self.miss(repo);

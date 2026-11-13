@@ -22,6 +22,32 @@ pub(super) fn parked(inbox: &Inbox, issue: &Value) -> Result<Option<&'static str
     }
 }
 
+/// A stopped issue is excluded from automatic admission until an explicit
+/// engine enrollment is observed. `ready` alone cannot undo the owner's park.
+fn parking_path(inbox: &Inbox, repo: &str, n: &str) -> std::path::PathBuf {
+    inbox
+        .state
+        .join(".parked")
+        .join(key(repo).to_lowercase())
+        .join(n)
+}
+pub(super) fn mark_parked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> {
+    let path = parking_path(inbox, repo, n);
+    fs::create_dir_all(path.parent().expect("issue parking directory"))
+        .map_err(|e| e.to_string())?;
+    fs::write(path, "").map_err(|e| e.to_string())
+}
+pub(super) fn automatic_parked(inbox: &Inbox, repo: &str, issue: &Value) -> bool {
+    parking_path(inbox, repo, &raw(&issue["number"])).exists()
+        || issue["labels"].as_array().is_none_or(|labels| {
+            labels.iter().any(|l| {
+                l["name"]
+                    .as_str()
+                    .is_none_or(|name| name == super::triage::LATER)
+            })
+        })
+}
+
 /// Only inbox workers are governed by engine labels. Sorting workers and
 /// standalone jobs have their own admission. The record covers old workers
 /// that predate the inbox-issue marker; modern ones keep their source after
@@ -44,8 +70,8 @@ fn source(job: &Job) -> Result<Option<(String, String)>, String> {
     let Some(inbox) = &job.cfg.inbox else {
         return Ok(None);
     };
-    let source = dirs(&inbox.state, "")
-        .iter()
+    let source = worker_records(&inbox.state)
+        .into_iter()
         .find(|d| read(&d.join("job")).as_deref() == Some(job.id))
         .and_then(|d| read(&d.join("issue")))
         .as_deref()
@@ -56,35 +82,60 @@ fn source(job: &Job) -> Result<Option<(String, String)>, String> {
     Ok(source)
 }
 
+pub(super) fn worker_records(state: &Path) -> Vec<std::path::PathBuf> {
+    dirs(state, "")
+        .into_iter()
+        .chain(super::retirement::records(state))
+        .collect()
+}
+
 /// Preserve legacy association after the inbox record is retired.
-fn remember(job: &Job, repo: &str, n: &str) -> Result<(), String> {
+pub(super) fn remember(job: &Job, repo: &str, n: &str) -> Result<(), String> {
     crate::ask::ensure(job)?;
+    let source = format!("{repo}#{n}");
+    if read(&crate::ask::host_path(job, "inbox-issue")).as_deref() == Some(source.as_str()) {
+        return Ok(());
+    }
     crate::swap(
         &crate::ask::host_path(job, "inbox-issue"),
-        &format!("{repo}#{n}\n"),
+        &format!("{source}\n"),
     )
     .map_err(|e| e.to_string())
 }
 
+pub(crate) enum Admission {
+    Ready,
+    Stopped(String),
+}
+
+/// Turn callers report terminal parking as a refusal; repository release
+/// treats it as success. A failed read or failed stop stays an error to retry.
+pub(crate) fn admit(job: &Job) -> Result<(), String> {
+    match check(job)? {
+        Admission::Ready => Ok(()),
+        Admission::Stopped(message) => Err(message),
+    }
+}
+
 /// Under the turn-start lock, before writing a prompt or consuming a question.
 /// Stopping here closes the race with an inbox label event not yet processed.
-pub(crate) fn admit(job: &Job) -> Result<(), String> {
+pub(crate) fn check(job: &Job) -> Result<Admission, String> {
     // The inbox admits the initial verified snapshot. Only resumptions need
     // another label read; never replace the worker's approved text with it.
     if job.turns().is_none() {
-        return Ok(());
+        return Ok(Admission::Ready);
     }
     let Some((repo, n)) = source(job)? else {
-        return Ok(());
+        return Ok(Admission::Ready);
     };
     if job
         .turns()
         .is_some_and(|n| job.turn(&n, "stopped").exists())
     {
-        return Err(format!(
+        return Ok(Admission::Stopped(format!(
             "proj: {} is stopped; relabelling starts a fresh job",
             job.id
-        ));
+        )));
     }
     let inbox = job
         .cfg
@@ -99,15 +150,17 @@ pub(crate) fn admit(job: &Job) -> Result<(), String> {
             job.id
         );
         eprintln!("{message}");
+        mark_parked(inbox, &repo, &n)?;
         crate::ask::ensure(job)?;
         crate::swap(&crate::ask::host_path(job, "inbox-parked"), why).map_err(|e| e.to_string())?;
         crate::cmd::halt(job.cfg, job, false).map_err(|e| {
             e.say
                 .unwrap_or_else(|| format!("proj stop failed (exit {})", e.code))
         })?;
-        return Err(message);
+        crate::job::kick(job.cfg, [format!("proj-inbox/{repo}")]);
+        return Ok(Admission::Stopped(message));
     }
-    Ok(())
+    Ok(Admission::Ready)
 }
 
 impl Pass<'_> {
@@ -120,29 +173,13 @@ impl Pass<'_> {
         n: &str,
         id: &str,
         d: &Path,
-        listed: Option<&Value>,
+        issue: &Value,
     ) -> Result<bool, Fail> {
-        let fetched;
-        let issue = match listed {
-            Some(issue) => issue,
-            None => {
-                fetched = api(self.cfg, &format!("repos/{repo}/issues/{n}"));
-                let Some(issue) = fetched.as_ref() else {
-                    self.miss(repo);
-                    return Ok(true);
-                };
-                issue
-            }
-        };
         match parked(self.inbox, issue) {
             Ok(None) => Ok(false),
             Ok(Some(why)) => {
                 eprintln!("proj-inbox: stopping {id}: {why} ({repo}#{n})");
-                {
-                    let job = Job::new(self.cfg, id);
-                    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-                    remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
-                }
+                mark_parked(self.inbox, repo, n).map_err(|e| Fail::new(1, e))?;
                 self.retire_record(repo, n, id, d)?;
                 Ok(true)
             }
@@ -161,6 +198,11 @@ impl Pass<'_> {
         id: &str,
         d: &Path,
     ) -> Result<(), Fail> {
+        let job = Job::new(self.cfg, id);
+        if job.dir.is_dir() {
+            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+        }
         let root = self
             .inbox
             .state
@@ -178,8 +220,26 @@ impl Pass<'_> {
         for issue in open {
             let n = raw(&issue["number"]);
             let d = self.inbox.state.join(format!("{}-{n}", key(repo)));
-            if !matches!(parked(self.inbox, issue), Ok(None)) {
-                continue;
+            match parked(self.inbox, issue) {
+                Ok(None) => {
+                    let mark = parking_path(self.inbox, repo, &n);
+                    match fs::remove_file(&mark) {
+                        Ok(()) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(e) => return Err(io_fail(&mark, e)),
+                    }
+                }
+                Ok(Some(_)) => {
+                    if d.join("drained").exists() && !d.join("job").exists() {
+                        mark_parked(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
+                        fs::remove_dir_all(&d).map_err(|e| io_fail(&d, e))?;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    self.miss(repo);
+                    continue;
+                }
             }
             let retiring = self
                 .inbox

@@ -124,6 +124,12 @@ and that
 // What forget drops is the repo's own, whatever its case: each issue's record,
 // that it has the label, that it's out of reach. A repo whose key only starts
 // the same (o_rx, o_r-x) keeps all of its.
+fn forget_config(state: &Path) -> Config {
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.jobs = state.join("jobs");
+    cfg
+}
+
 #[test]
 fn forgets_a_repo() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -155,7 +161,7 @@ fn forgets_a_repo() {
     ] {
         fs::write(state.join(f), "").unwrap();
     }
-    forget(state, "o/R").unwrap();
+    forget(&forget_config(state), state, "o/R").unwrap();
     let left = |dir: &Path| -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
@@ -180,7 +186,7 @@ fn forgets_a_repo() {
     assert_eq!(left(&state.join(".ready")), ["o_rx"]);
     assert_eq!(left(&state.join(".triage")), ["o_rx-6"]);
     // Nothing kept of it: nothing to do.
-    forget(state, "o/r").unwrap();
+    forget(&forget_config(state), state, "o/r").unwrap();
 }
 
 // forget waits for a pass under way, but not past its wait.
@@ -394,7 +400,7 @@ fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identit
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join(progress), "progress").unwrap();
     }
-    forget(state, "o/R").unwrap();
+    forget(&forget_config(state), state, "o/R").unwrap();
     let mut remaining: Vec<String> = fs::read_dir(state.join(".retired"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -414,7 +420,7 @@ fn forgetting_a_repository_removes_all_pending_retirements_only_for_that_identit
             "progress"
         );
     }
-    forget(state, "O/r").unwrap();
+    forget(&forget_config(state), state, "O/r").unwrap();
 }
 
 #[test]
@@ -456,7 +462,7 @@ fn forgetting_a_repository_removes_every_plan_artifact_for_only_that_identity() 
             .unwrap();
         }
     }
-    forget(tmp.path(), "o/R").unwrap();
+    forget(&forget_config(tmp.path()), tmp.path(), "o/R").unwrap();
     for repo in ["O_R-7", "o_r-8"] {
         assert!(!tmp.path().join(".plans").join(repo).exists());
     }

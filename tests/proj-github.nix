@@ -30,6 +30,9 @@
 #   nix build .#checks.x86_64-linux.proj-github -L
 { self, pkgs }:
 import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
+  with subtest("repository release admission retries transient failures"):
+      assert machine.succeed("systemctl --user -M dev@ show proj-policy.service -P Restart").strip() == "on-failure"
+
   with subtest("a look with nothing awaited succeeds, and books nothing"):
       proj("_watch")
       assert json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json")) == {}
@@ -746,10 +749,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
       posted = machine.succeed("cat /tmp/gh/posted")
       assert "turn 3 was cut off" in posted and "turn 4 was cut off" in posted and "turn 5 ended without an answer" in posted, posted
-      # proj carries on only the latest turn, and never one stopped since.
+      # proj carries on only the latest turn.
       machine.fail(f"su - dev -c 'proj reply --cut-off 4 {cj} x'")
-      proj(f"stop {cj}")
-      machine.fail(f"su - dev -c 'proj reply --cut-off 5 {cj} x'")
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
       # A turn a reply started is no third in a row, though no pass saw a
       # turn end between. One whose next turn can't start (its prompt can't
@@ -778,6 +779,17 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.succeed("su - dev -c 'proj-inbox o/c'")
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "8"
       assert "waiting on CI" in machine.succeed("cat /tmp/gh/posted")
+      # A stopped worker is terminal, including an explicit reply. Test this
+      # after the continuation cases, without reviving a stopped conversation.
+      proj(f'reply {cj} "inbox-hang"')
+      machine.wait_until_succeeds(f"grep -q hang /data/dev/jobs/{cj}/9.jsonl", timeout=120)
+      machine.succeed(f"systemctl --user -M dev@ kill --signal=KILL '{unit(cj)}'")
+      machine.wait_until_fails(f"systemctl --user -M dev@ is-active -q '{unit(cj)}'", timeout=60)
+      assert state(cj) == "failed", state(cj)
+      proj(f"stop {cj}")
+      machine.fail(f"su - dev -c 'proj reply --cut-off 9 {cj} x'")
+      machine.fail(f"su - dev -c 'proj reply {cj} x'")
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "9"
       github("repos/o/c/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/c'")
 

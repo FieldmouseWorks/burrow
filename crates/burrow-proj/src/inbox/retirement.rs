@@ -1,32 +1,30 @@
 //! Retirement is independent of notification delivery and of a reopened issue.
 use std::{fs, path::Path};
 
-use super::{Pass, dirs, key, say};
-use crate::{Fail, cmd::stop, github::api, io_fail, read};
+use super::{Pass, dirs, say};
+use crate::{Fail, cmd::halt, github::api, io_fail, read};
+
+pub(super) fn records(state: &Path) -> Vec<std::path::PathBuf> {
+    dirs(&state.join(".retired"), "")
+        .into_iter()
+        .flat_map(|repo| dirs(&repo, ""))
+        .flat_map(|issue| dirs(&issue, ""))
+        .collect()
+}
 
 impl Pass<'_> {
     pub(super) fn retired(&mut self, repo: &str) -> Result<(), Fail> {
-        for repository in dirs(&self.inbox.state.join(".retired"), "") {
-            if !repository
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&key(repo)))
-            {
+        for d in records(&self.inbox.state) {
+            let Some(issue) = read(&d.join("issue")) else {
                 continue;
-            }
-            for issue_dir in dirs(&repository, "") {
-                for d in dirs(&issue_dir, "") {
-                    let Some(issue) = read(&d.join("issue")) else {
-                        continue;
-                    };
-                    let Some((of, n)) = issue.rsplit_once('#') else {
-                        continue;
-                    };
-                    if of.eq_ignore_ascii_case(repo)
-                        && let Some(id) = read(&d.join("job"))
-                    {
-                        self.retire(repo, n, &id, &d)?;
-                    }
-                }
+            };
+            let Some((of, n)) = issue.rsplit_once('#') else {
+                continue;
+            };
+            if of.eq_ignore_ascii_case(repo)
+                && let Some(id) = read(&d.join("job"))
+            {
+                self.retire(repo, n, &id, &d)?;
             }
         }
         Ok(())
@@ -37,7 +35,10 @@ impl Pass<'_> {
         let stopped = if !self.cfg.jobs.join(id).is_dir() {
             true
         } else {
-            match stop(self.cfg, id, false) {
+            let job = crate::job::Job::new(self.cfg, id);
+            let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+            super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+            match halt(self.cfg, &job, false) {
                 Ok(()) => true,
                 Err(f) => {
                     say(f);
