@@ -3,10 +3,20 @@
 # setup, which ran every language on every PR push and held a hosted runner
 # for each, whatever the PR changed.
 #
-# A PR scans only the languages its changed files are in (`pick` below); a
-# language with no pattern there is always scanned, so none goes unscanned by
-# omission. A push to the default branch scans every language, so each merged
-# tree is scanned whole and the code-scanning alerts stay current.
+# A PR scans only the languages its changed files are in (`pick` below). A
+# push to the default branch scans every language, so each merged tree is
+# scanned whole and the code-scanning alerts stay current.
+#
+# It takes only the languages CodeQL analyzes on Linux with no build
+# (`build-mode: none`): actions, c-cpp, javascript-typescript, python, ruby
+# and rust. Any other language fails `pick` rather than being analyzed wrong;
+# one that needs a build or another runner (Go, Java/Kotlin, Swift, C#)
+# gets its own setup when a project has it.
+#
+# The caller cancels a PR's superseded run whole when its new run is made
+# (workflow-level `concurrency`, keyed as burrow's code-scanning.yml keys
+# it), and reruns on a retarget (`edited` with a base change), so an older
+# run's analysis never outlives or cancels a newer one's.
 name: codeql
 on:
   workflow_call:
@@ -35,14 +45,32 @@ jobs:
           LANGUAGES: ${{ inputs.languages }}
         run: |
           set -euo pipefail
+          # The files each language's extractor reads, matched without
+          # regard to case. A pattern errs wide: a file it might read
+          # counts.
+          declare -A match=(
+            [actions]='(^|/)\.github/(workflows|actions)/.*\.ya?ml$|(^|/)action\.ya?ml$'
+            [c-cpp]='\.(c|cc|cp|cpp|cxx|c\+\+|h|hh|hp|hpp|hxx|h\+\+|inl|ipp|tcc|tpp|ixx|cppm|ii|i)$|(^|/)(cmakelists\.txt|makefile|meson\.build)$'
+            [javascript-typescript]='\.(js|jsx|mjs|cjs|es|es6|ts|tsx|mts|cts|vue|svelte|html?|xhtml?|xht|ejs|hbs|handlebars|njk|json|jsonc|json5|ya?ml|raml)$|(^|/)(\.babelrc|\.eslintrc|\.npmrc|tsconfig[^/]*|jsconfig[^/]*)$'
+            [python]='\.(py|pyi|pyw)$|(^|/)(pyproject\.toml|setup\.cfg|requirements[^/]*\.txt|pipfile(\.lock)?)$'
+            [ruby]='\.(rb|erb|rake|gemspec|ru|rbw|builder|jbuilder|thor)$|(^|/)(gemfile(\.lock)?|rakefile|guardfile|vagrantfile)$'
+            [rust]='\.rs$|(^|/)(cargo\.(toml|lock)|rust-toolchain(\.toml)?)$'
+          )
           all=$(jq -c . <<<"$LANGUAGES")
+          while read -r lang; do
+            if [ -z "${match[$lang]:-}" ]; then
+              echo "::error::$lang: this workflow doesn't analyze it (it takes $(printf '%s ' "${!match[@]}")); give it a setup of its own."
+              exit 1
+            fi
+          done < <(jq -r '.[]' <<<"$all")
           if [ "$EVENT" != pull_request ]; then
             echo "Not a PR: every language, $all."
             echo "languages=$all" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Every path the PR touches, a rename's old one included. GitHub
-          # lists at most 3000; a PR that big scans everything.
+          # Every path the PR touches, deleted ones and renames' old paths
+          # included. GitHub lists at most 3000; a PR that big scans
+          # everything.
           files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
             --jq '.[] | .filename, (.previous_filename // empty)')
           if [ "$(grep -c . <<<"$files" || true)" -ge 3000 ]; then
@@ -50,24 +78,9 @@ jobs:
             echo "languages=$all" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          declare -A match=(
-            [actions]='^\.github/(workflows|actions)/|(^|/)action\.ya?ml$'
-            [c-cpp]='\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
-            [csharp]='\.(cs|csproj|sln)$'
-            [go]='\.go$|(^|/)go\.(mod|sum)$'
-            [java-kotlin]='\.(java|kt|kts)$|(^|/)(pom\.xml|build\.gradle(\.kts)?)$'
-            [javascript-typescript]='\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|svelte|html?)$|(^|/)package(-lock)?\.json$'
-            [python]='\.pyi?$|(^|/)(pyproject\.toml|setup\.(py|cfg)|requirements[^/]*\.txt)$'
-            [ruby]='\.(rb|erb|rake)$|(^|/)Gemfile(\.lock)?$'
-            [rust]='\.rs$|(^|/)Cargo\.(toml|lock)$'
-          )
           picked=()
           while read -r lang; do
-            re=${match[$lang]:-}
-            if [ -z "$re" ]; then
-              echo "$lang: no pattern for its files, so scanned on every PR."
-              picked+=("$lang")
-            elif grep -Eq "$re" <<<"$files"; then
+            if grep -Eiq "${match[$lang]}" <<<"$files"; then
               echo "$lang: the PR changes its files."
               picked+=("$lang")
             else
@@ -89,9 +102,6 @@ jobs:
       matrix:
         language: ${{ fromJSON(needs.pick.outputs.languages) }}
     name: analyze (${{ matrix.language }})
-    concurrency:
-      group: ${{ format('codeql {0} {1}', matrix.language, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3

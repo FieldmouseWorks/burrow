@@ -3,12 +3,23 @@
 name: code-scanning
 on:
   pull_request:
+    # `edited` for a retarget: the PR's files, and so its languages, change
+    # with its base. A title or body edit runs nothing (the job's `if`).
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
+# A PR's new run (a push, a reopen or a retarget) cancels its last one, every
+# job of it, the moment it's made, so an older run's analysis never outlives
+# or cancels a newer one's. A push's run, and a title or body edit's, are
+# their own. The same key as flake.yml's.
+concurrency:
+  group: ${{ format('{0} {1}', github.workflow, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   codeql:
+    if: github.event.action != 'edited' || github.event.changes.base
     uses: ./.github/workflows/codeql.yml
     permissions:
       contents: read

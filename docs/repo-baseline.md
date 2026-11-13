@@ -277,11 +277,13 @@ owner, since nothing else merges it.
   describes: a `flake.nix` from burrow's template, the workflow that calls
   `nix flake check`, and the template's house workflow beside it. Jobs
   the flake can't hold stay alongside it.
-- **Code scanning** in a public repo: a `code-scanning.yml` that calls
-  burrow's shared [`codeql.yml`](../.github/workflows/codeql.yml) with the
-  repo's CodeQL languages, and GitHub's default setup off (the two can't
-  both upload). A PR scans the languages its files are in; a push to the
-  default branch scans them all.
+- **Code scanning** in a public repo: a `code-scanning.yml` like
+  [burrow's](../.github/workflows/code-scanning.yml) (its triggers and
+  `concurrency` included) that calls the shared
+  [`codeql.yml`](../.github/workflows/codeql.yml) with the repo's CodeQL
+  languages, and GitHub's default setup off (the two can't both upload). A
+  PR scans the languages its files are in; a push to the default branch
+  scans them all.
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
   existing text.

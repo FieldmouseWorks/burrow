@@ -1,6 +1,7 @@
 //! The shared code scanning's `pick` step, its own script run with gh stood in
 //! for: a PR scans the languages its files are in, a push scans them all, and
-//! a language the step has no pattern for is never left out.
+//! a language the workflow can't analyze fails it. Also burrow's caller: a
+//! retarget reruns it, and a PR's new run cancels its last one whole.
 
 use serde_json::{Value as Json, json};
 
@@ -104,7 +105,31 @@ fn a_pr_scans_the_languages_it_touches() {
         ]),
         false,
     );
-    assert_eq!(picked(&ran), ["actions", "python", "rust"]);
+    // A workflow is YAML, which the JavaScript extractor reads too.
+    assert_eq!(
+        picked(&ran),
+        ["actions", "javascript-typescript", "python", "rust"]
+    );
+}
+
+/// The patterns err wide and ignore case: a file an extractor might read
+/// counts, an `.es6` or `.ejs` file and a `.gemspec` included.
+#[test]
+fn the_patterns_cover_what_the_extractors_read() {
+    let langs = r#"["c-cpp", "javascript-typescript", "python", "ruby", "rust"]"#;
+    for (file, lang) in [
+        ("src/widget.es6", "javascript-typescript"),
+        ("views/index.ejs", "javascript-typescript"),
+        ("web/App.TSX", "javascript-typescript"),
+        ("lib/thing.gemspec", "ruby"),
+        ("Gemfile", "ruby"),
+        ("native/Vec.HPP", "c-cpp"),
+        ("tools/run.PYW", "python"),
+        ("rust-toolchain.toml", "rust"),
+    ] {
+        let ran = run("pull_request", langs, changed(&[file]), false);
+        assert_eq!(picked(&ran), [lang], "{file}");
+    }
 }
 
 /// A PR that touches no scanned language's files scans nothing, and the
@@ -137,17 +162,36 @@ fn a_rename_counts_its_old_path() {
     assert_eq!(picked(&ran), ["python"]);
 }
 
-/// A language the step has no pattern for is scanned on every PR, never
-/// dropped.
+/// A language the workflow can't analyze with no build on Linux fails `pick`,
+/// on a push as on a PR, rather than being analyzed wrong or skipped.
 #[test]
-fn a_language_without_a_pattern_is_always_scanned() {
-    let ran = run(
-        "pull_request",
-        r#"["swift", "rust"]"#,
-        changed(&["README.md"]),
-        false,
+fn a_language_it_cannot_analyze_fails() {
+    for event in ["pull_request", "push"] {
+        let ran = run(event, r#"["rust", "go"]"#, changed(&["a.rs"]), false);
+        assert_ne!(ran.code, 0, "{}", ran.said());
+        assert!(ran.said().contains("go: this workflow doesn't analyze it"));
+        assert!(!ran.outputs.contains("languages="), "{}", ran.outputs);
+    }
+}
+
+/// burrow's caller reruns on a retarget, not on a title or body edit, and a
+/// PR's new run cancels its last one whole when it's made: the analysis jobs
+/// have no group of their own that an older run could cancel a newer one by.
+#[test]
+fn the_caller_reruns_on_a_retarget_and_cancels_whole_runs() {
+    let caller = workflow(".github/workflows/code-scanning.yml");
+    let types = caller["on"]["pull_request"]["types"].as_sequence().unwrap();
+    assert!(types.iter().any(|t| t == "edited"), "{types:?}");
+    assert_eq!(
+        caller["jobs"]["codeql"]["if"],
+        "github.event.action != 'edited' || github.event.changes.base"
     );
-    assert_eq!(picked(&ran), ["swift"]);
+    assert_eq!(caller["concurrency"]["cancel-in-progress"], true);
+    let group = caller["concurrency"]["group"].as_str().unwrap();
+    assert!(group.contains("github.event.changes.base"), "{group}");
+    assert!(group.contains("format('pr-{0}', github.event.pull_request.number)"));
+    assert!(group.contains("format('run-{0}', github.run_id)"));
+    assert!(jobs()["analyze"].get("concurrency").is_none());
 }
 
 /// When GitHub can't say what changed, the step fails rather than scan
