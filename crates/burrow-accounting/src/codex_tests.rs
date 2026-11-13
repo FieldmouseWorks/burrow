@@ -17,19 +17,11 @@ fn a_resumed_thread_counts_each_turn_once() {
     // Turn 1 runs twice (a retry): its last total covers both runs.
     let mut first = run("t", completed(100, 60, 10));
     first.extend(run("t", completed(150, 90, 12)));
-    let a = decode(first.into_iter(), &mut threads, "turn-1");
+    let a = decode(first, &mut threads, "turn-1");
     // Turn 2 resumes the thread: its total includes turn 1's.
-    let b = decode(
-        run("t", completed(400, 300, 30)).into_iter(),
-        &mut threads,
-        "turn-2",
-    );
+    let b = decode(run("t", completed(400, 300, 30)), &mut threads, "turn-2");
     // Turn 3 starts a thread of its own.
-    let c = decode(
-        run("u", completed(50, 0, 5)).into_iter(),
-        &mut threads,
-        "turn-3",
-    );
+    let c = decode(run("u", completed(50, 0, 5)), &mut threads, "turn-3");
     assert_eq!(a.tokens, [60, 12, 90, 0]);
     assert_eq!(b.tokens, [40, 18, 210, 0]);
     assert_eq!(c.tokens, [50, 5, 0, 0]);
@@ -39,12 +31,11 @@ fn a_resumed_thread_counts_each_turn_once() {
         .collect();
     assert_eq!(sum, [100 + 50, 30 + 5, 300, 0]);
     for r in [&a, &b, &c] {
-        assert!(r.unpriced && !r.tokens_partial && !r.prior_gap);
-        assert_eq!(r.cost, 0.0);
+        assert!(r.cost.is_none() && r.context.is_none() && !r.tokens_partial && !r.prior_gap);
     }
     assert_eq!(
-        b.show(),
-        "input=40 output=18 cache-read=210 cache-write=0 cost unpriced"
+        b.show(None),
+        "input=40 output=18 cache-read=210 cache-write=0 cost unpriced context unavailable"
     );
 }
 #[test]
@@ -54,8 +45,7 @@ fn cache_writes_are_part_of_input() {
         run(
             "t",
             json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":30,"cache_write_input_tokens":20,"output_tokens":5}}),
-        )
-        .into_iter(),
+        ),
         &mut threads,
         "turn-1",
     );
@@ -64,32 +54,23 @@ fn cache_writes_are_part_of_input() {
 #[test]
 fn an_unreported_run_marks_the_next_total() {
     let mut threads = BTreeMap::new();
-    decode(
-        run("t", completed(100, 0, 10)).into_iter(),
-        &mut threads,
-        "turn-1",
-    );
+    decode(run("t", completed(100, 0, 10)), &mut threads, "turn-1");
     // Killed mid-turn: no total.
     let killed = decode(
         vec![
             json!({"type":"burrow.run","at":1}),
             json!({"type":"thread.started","thread_id":"t"}),
             json!({"type":"turn.started"}),
-        ]
-        .into_iter(),
+        ],
         &mut threads,
         "turn-2",
     );
     assert_eq!(killed.tokens, [0; 4]);
     assert_eq!(
-        killed.show(),
-        "input=0 output=0 cache-read=0 cache-write=0 cost unpriced; partial tokens (a run reported no total)"
+        killed.show(None),
+        "input=0 output=0 cache-read=0 cache-write=0 cost unpriced context unavailable; partial tokens (a run reported no total)"
     );
-    let next = decode(
-        run("t", completed(300, 0, 20)).into_iter(),
-        &mut threads,
-        "turn-3",
-    );
+    let next = decode(run("t", completed(300, 0, 20)), &mut threads, "turn-3");
     assert_eq!(next.tokens, [200, 10, 0, 0]);
     assert!(next.prior_gap && !next.tokens_partial);
     // The killed run's gap is matched to the total that recovers it.
@@ -97,7 +78,7 @@ fn an_unreported_run_marks_the_next_total() {
     assert_eq!(next.recovered, killed.missing);
     assert!(next.missing.is_empty());
     assert!(
-        next.show()
+        next.show(None)
             .ends_with("; tokens may include unreported earlier runs")
     );
     // A run cut off before its total, then retried within the same turn.
@@ -108,7 +89,7 @@ fn an_unreported_run_marks_the_next_total() {
             json!({"type":"turn.started"}),
         ];
         v.extend(run("t", completed(350, 0, 25)));
-        decode(v.into_iter(), &mut threads, "turn-4")
+        decode(v, &mut threads, "turn-4")
     };
     assert_eq!(retried.tokens, [50, 5, 0, 0]);
     assert!(retried.tokens_partial);
@@ -116,45 +97,32 @@ fn an_unreported_run_marks_the_next_total() {
 #[test]
 fn a_regressed_or_missing_total_keeps_the_last_one() {
     let mut threads = BTreeMap::new();
-    decode(
-        run("t", completed(100, 0, 10)).into_iter(),
-        &mut threads,
-        "turn-1",
-    );
-    let regressed = decode(
-        run("t", completed(40, 0, 2)).into_iter(),
-        &mut threads,
-        "turn-2",
-    );
+    decode(run("t", completed(100, 0, 10)), &mut threads, "turn-1");
+    let regressed = decode(run("t", completed(40, 0, 2)), &mut threads, "turn-2");
     assert_eq!(regressed.tokens, [0; 4]);
     assert!(regressed.tokens_partial);
     let missing = decode(
-        run("t", json!({"type":"turn.completed"})).into_iter(),
+        run("t", json!({"type":"turn.completed"})),
         &mut threads,
         "turn-3",
     );
     assert_eq!(missing.tokens, [0; 4]);
     assert!(missing.tokens_partial);
-    let next = decode(
-        run("t", completed(130, 0, 13)).into_iter(),
-        &mut threads,
-        "turn-4",
-    );
+    let next = decode(run("t", completed(130, 0, 13)), &mut threads, "turn-4");
     assert_eq!(next.tokens, [30, 3, 0, 0]);
     assert!(next.prior_gap);
 }
 #[test]
 fn a_stream_with_no_total_is_partial() {
     let mut threads = BTreeMap::new();
-    let r = decode(vec![json!({})].into_iter(), &mut threads, "turn-1");
-    assert!(r.tokens_partial && r.unpriced);
+    let r = decode(vec![json!({})], &mut threads, "turn-1");
+    assert!(r.tokens_partial && r.cost.is_none());
     let failed = decode(
         vec![
             json!({"type":"thread.started","thread_id":"t"}),
             json!({"type":"turn.started"}),
             json!({"type":"turn.failed","error":{"message":"x"}}),
-        ]
-        .into_iter(),
+        ],
         &mut threads,
         "turn-2",
     );

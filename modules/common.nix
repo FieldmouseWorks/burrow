@@ -100,6 +100,27 @@ inputs:
             '';
           };
 
+          usagePrices = mkOption {
+            type = types.attrsOf (types.submodule {
+              options = lib.genAttrs [ "input" "output" "cacheRead" "cacheWrite" ] (kind: mkOption {
+                type = types.number;
+                description = "USD per million ${kind} tokens.";
+              });
+            });
+            default = { };
+            example = lib.literalExpression ''
+              { codex = { input = INPUT; output = OUTPUT; cacheRead = CACHED; cacheWrite = WRITTEN; }; }
+            '';
+            description = ''
+              The host's assumed token prices, keyed `ENGINE/MODEL` or `ENGINE`
+              (the more specific key wins), for estimating cost where an
+              engine's stream carries none (crates/burrow-accounting). An
+              estimate is always labelled with the key it used, and reports
+              print these prices; measured cost is never replaced. Empty
+              leaves such cost unavailable.
+            '';
+          };
+
           claude.manifest = mkOption {
             type = types.nullOr types.path;
             default = null;

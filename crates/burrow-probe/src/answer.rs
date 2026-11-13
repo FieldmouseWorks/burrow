@@ -11,6 +11,7 @@ mod system;
 #[cfg(test)]
 mod tests;
 mod usage;
+pub(crate) use usage::DETAIL as USAGE_DETAIL;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

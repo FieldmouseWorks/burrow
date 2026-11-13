@@ -164,12 +164,12 @@ fn answers(
                 let heading = clip(&echo(before, &q.to_string()), MAX_ECHO).replace('`', "'");
                 let text = if matches!(q, Query::Usage { .. }) {
                     // --totals has no optional suffix. Otherwise only the
-                    // meter readings and per-turn details share the budget.
-                    match text.split_once("Meter readings:\n") {
+                    // jobs, meter readings and per-turn details share the budget.
+                    match text.split_once(crate::answer::USAGE_DETAIL) {
                         Some((required, rest)) => format!(
                             "{required}{}",
                             fit(
-                                &format!("Meter readings:\n{rest}"),
+                                &format!("{}{rest}", crate::answer::USAGE_DETAIL),
                                 each.saturating_sub(required.len()),
                                 false
                             )

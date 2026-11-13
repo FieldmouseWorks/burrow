@@ -5,14 +5,41 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-mod accounting;
-mod codex;
 mod totals;
-use accounting::Session;
+use burrow_accounting::{Job, Meta, Tail, Tally, describe_prices};
 use burrow_process::state_reads::Dir;
 use totals::Totals;
 fn read(dir: &Dir, name: &str) -> String {
     dir.text(name).unwrap_or_default().trim().into()
+}
+/// Where the usage answer's optional detail starts: what a comment cuts
+/// to fit, after the required totals.
+pub(crate) const DETAIL: &str = "By job, the most money first (lifetime: every turn, unfinished ones to their last complete record; span: turns started in it):\n";
+/// One job's lifetime and span totals: context is the latest turn's
+/// session occupancy, apart from the token traffic summed over every call.
+fn job_line(name: &str, life: &Tally, span: &Tally) -> String {
+    let unfinished = if life.unfinished > 0 {
+        format!(", {} unfinished", life.unfinished)
+    } else {
+        String::new()
+    };
+    let context = match (life.context, life.context_peak) {
+        (Some(now), peak) => format!("context={now} peak={}", peak.unwrap_or(now)),
+        (None, Some(peak)) => format!("context unavailable peak={peak}"),
+        (None, None) => "context unavailable".into(),
+    };
+    format!(
+        "  {name}: {} turns ({} in span{unfinished}), {} sessions; input={} output={} cache-read={} cache-write={} {}; span {}; {context}\n",
+        life.turns,
+        span.turns,
+        life.sessions.len(),
+        life.tokens[0],
+        life.tokens[1],
+        life.tokens[2],
+        life.tokens[3],
+        life.money(),
+        span.money(),
+    )
 }
 fn records(file: Option<File>) -> impl Iterator<Item = Value> {
     file.into_iter()
@@ -39,6 +66,8 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
     let mut unstarted: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_job: Vec<(f64, String)> = Vec::new();
+    let prices = &m.cfg.prices;
     if let Some(jobs) = &m.cfg.jobs {
         let root = m.path(&jobs.to_string_lossy());
         let root = Dir::open(&root).map_err(|e| e.to_string())?;
@@ -119,30 +148,54 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
             {
                 continue;
             }
-            let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
-            let mut threads: BTreeMap<String, codex::Thread> = BTreeMap::new();
+            // Every turn of the job is replayed, in the span or not, so a
+            // resumed one counts only what it added and the job's lifetime
+            // reconciles with its turns.
+            let mut ledger = Job::new(prices.clone());
+            let mut span = Tally::default();
+            let last = turns.last().copied();
             for n in turns {
                 let at = turn_time(&dir, n);
                 let engine = read(&dir, &format!("{n}.engine"));
                 let engine = if engine.is_empty() { "claude" } else { &engine };
-                // Every turn of the job is decoded, in the span or not, so a
-                // resumed one counts only what it added.
-                let stream = || records(dir.file(Path::new(&format!("{n}.jsonl"))).ok());
-                let identity = format!("{}/{n}", name.to_string_lossy());
-                let report = match engine {
-                    "claude" => Some(accounting::decode(stream(), &mut sessions, &identity)),
-                    "codex" => Some(codex::decode(stream(), &mut threads, &identity)),
-                    _ => None,
-                };
+                let model = Some(read(&dir, &format!("{n}.model"))).filter(|m| !m.is_empty());
+                // The latest turn with no outcome is under way, or stopped
+                // without saying: a snapshot to its last complete record.
+                let unfinished = Some(n) == last
+                    && ["outcome", "ended"]
+                        .iter()
+                        .all(|f| dir.file(Path::new(&format!("{n}.{f}"))).is_err());
+                ledger.begin(Meta {
+                    identity: format!("{}/{n}", name.to_string_lossy()),
+                    engine: engine.into(),
+                    model,
+                    started: at,
+                });
+                if let Ok(mut stream) = dir.file(Path::new(&format!("{n}.jsonl"))) {
+                    for v in Tail::default()
+                        .read(&mut stream, !unfinished)
+                        .unwrap_or_default()
+                    {
+                        ledger.feed(&v);
+                    }
+                }
+                if !unfinished {
+                    ledger.end();
+                }
                 let Some(at) = at else {
                     continue;
                 };
                 if at < since || at > m.now {
                     continue;
                 }
+                let turn = ledger.last().expect("the turn just begun");
                 *counts.entry(engine.into()).or_default() += 1;
-                table.add(engine, &role_key, &project, report.as_ref());
-                let detail = report.map(|r| r.show()).unwrap_or_default();
+                table.add(engine, &role_key, &project, &turn);
+                span.add_turn(&turn);
+                let detail = turn
+                    .report
+                    .map(|r| r.show(turn.estimate.as_ref()))
+                    .unwrap_or_default();
                 groups
                     .entry((engine.into(), kind.clone()))
                     .or_default()
@@ -152,6 +205,15 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
                         utc(at)
                     ));
             }
+            let life = ledger.totals();
+            by_job.push((
+                life.cost + life.estimate,
+                job_line(
+                    &format!("{}{reference}", name.to_string_lossy()),
+                    &life,
+                    &span,
+                ),
+            ));
         }
     }
     let mut out = format!(
@@ -172,9 +234,17 @@ pub(super) fn answer(m: &Machine, since: i64, only_totals: bool) -> Result<Strin
             "{engine}: {n} turns without recorded execution (empty stream; excluded from span totals)\n"
         );
     }
+    out += &format!("Prices: {}.\n", describe_prices(prices));
     out += &table.show();
     if only_totals {
         return Ok(out);
+    }
+    // A day can hold hundreds of jobs: they lead the optional detail, the
+    // most money first, so a cut leaves out the cheapest.
+    out += DETAIL;
+    by_job.sort_by(|(a, x), (b, y)| b.total_cmp(a).then_with(|| x.cmp(y)));
+    for (_, job) in by_job {
+        out += &job;
     }
     out += "Meter readings:\n";
     let log = m.path(

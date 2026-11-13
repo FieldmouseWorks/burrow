@@ -99,6 +99,18 @@ own, say), in seconds and without starting a Claude.
     tokens partial and the thread's next turn as possibly including it. In
     the table, Codex rows' cost reads `-`, and their missing, recovered and
     outside-span runs count tokens rather than cost.
+    Money comes three ways and never mixes: `cost` is measured by the engine,
+    `estimate` is the host's `burrow.usagePrices` times tokens (only where a
+    stream carries no cost, labelled with the price key it used, the prices
+    printed in a `Prices:` line), and the rest is unavailable.
+    `By job` gives each job in the span its lifetime (every turn, in or out
+    of the span) and its span alone, with its sessions and threads, its
+    money, and its context: the latest main-conversation prompt (input plus
+    cache read and written), apart from the tokens summed over every call.
+    Codex's stream reports no calls, so its context is unavailable. A job's
+    latest turn with no outcome yet is a snapshot to its last complete
+    stream line, marked `unfinished`. The accounting is
+    `crates/burrow-accounting`, shared with proj.
     Meter readings over the same span show five-hour and weekly utilization, including readings at 100%.
     No prompts or issue titles are reported. Attribution predating structured
     job metadata is marked unknown where unavailable. Filtering uses immutable

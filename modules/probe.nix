@@ -34,6 +34,7 @@ let
     proj = null;
     projects = config.burrow.projectsDir;
     jobs = if config.burrow.proj.enable or false then config.burrow.proj.jobsDir else null;
+    prices = config.burrow.usagePrices;
     tools = {
       git = lib.getExe config.programs.git.package;
       journalctl = "${config.systemd.package}/bin/journalctl";

@@ -12,6 +12,7 @@ use crate::{Config, Journal, Tools};
 fn config() -> Config {
     Config {
         jobs: None,
+        prices: Default::default(),
         projects: None,
         machinery: None,
         repo: "sam/box".into(),
@@ -784,6 +785,7 @@ fn usage_totals_survive(role_count: usize, project_count: usize, multiple: bool)
                     "total_cost_usd":n as f64 * 0.25});
                 fs::write(job.join(format!("{n}.jsonl")), usage.to_string()).unwrap();
                 fs::write(job.join(format!("{n}.started")), (100 + n).to_string()).unwrap();
+                fs::write(job.join(format!("{n}.outcome")), "done\n").unwrap();
                 turns += 1;
             }
         }
@@ -855,7 +857,7 @@ fn usage_totals_survive(role_count: usize, project_count: usize, multiple: bool)
         let row = |r: &str| rows.iter().any(|l| l == r);
         assert!(
             row(&format!(
-                "claude all all {turns} {turns} {} {} {} ${:.2} 0 0 0 0 0",
+                "claude all all {turns} {turns} {} {} {} ${:.2} - 0 0 0 0 0",
                 2 * turns,
                 3 * turns,
                 4 * turns,
@@ -866,7 +868,7 @@ fn usage_totals_survive(role_count: usize, project_count: usize, multiple: bool)
         for role in &roles {
             assert!(
                 row(&format!(
-                    "claude {role} all {} {} {} {} {} ${:.2} 0 0 0 0 0",
+                    "claude {role} all {} {} {} {} {} ${:.2} - 0 0 0 0 0",
                     per_job * project_count,
                     per_job * project_count,
                     2 * per_job * project_count,
@@ -879,7 +881,7 @@ fn usage_totals_survive(role_count: usize, project_count: usize, multiple: bool)
             for project in &projects {
                 assert!(
                     row(&format!(
-                        "claude {role} {project} {per_job} {per_job} {} {} {} ${:.2} 0 0 0 0 0",
+                        "claude {role} {project} {per_job} {per_job} {} {} {} ${:.2} - 0 0 0 0 0",
                         2 * per_job,
                         3 * per_job,
                         4 * per_job,

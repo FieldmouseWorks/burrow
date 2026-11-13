@@ -54,6 +54,7 @@ impl Run for Fake {
 fn config(state: &Path) -> Config {
     Config {
         jobs: None,
+        prices: Default::default(),
         projects: None,
         machinery: None,
         repo: "sam/box".into(),
@@ -590,6 +591,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         fs::write(job.join(format!("{n}.engine")), engine).unwrap();
         fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
         fs::write(job.join(format!("{n}.started")), at.to_string()).unwrap();
+        fs::write(job.join(format!("{n}.outcome")), "done\n").unwrap();
         let f = fs::File::create(job.join(format!("{n}.slot"))).unwrap();
         f.set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(at)))
             .unwrap();
@@ -625,6 +627,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     fs::write(other.join("1.engine"), "codex").unwrap();
     fs::write(other.join("1.jsonl"), "{}\n").unwrap();
     fs::write(other.join("1.started"), "275").unwrap();
+    fs::write(other.join("1.outcome"), "done\n").unwrap();
     fs::File::create(other.join("1.slot"))
         .unwrap()
         .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(275)))
@@ -652,14 +655,20 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     assert!(answer.contains("role repair; inbox labels=codex opener=owner"));
     assert!(answer.contains("input=10 output=20 cache-read=30 cache-write=40 cost=$0.000000"));
     assert!(answer.contains(
-        "input=7 output=0 cache-read=0 cache-write=0 known-cost=$0.000000; partial tokens (output counts completed runs only); additional cost unavailable"
+        "input=7 output=0 cache-read=0 cache-write=0 known-cost=$0.000000 context=7 peak=7; partial tokens (output counts completed runs only); additional cost unavailable"
     ));
     assert!(answer.contains(
-        "example turn 5 1970-01-01 00:05:50Z input=60 output=15 cache-read=90 cache-write=0 cost unpriced\n"
+        "example turn 5 1970-01-01 00:05:50Z input=60 output=15 cache-read=90 cache-write=0 cost unpriced context unavailable\n"
     ));
     assert!(answer.contains(
-        "manual turn 1 1970-01-01 00:04:35Z input=0 output=0 cache-read=0 cache-write=0 cost unpriced; partial tokens (a run reported no total)\n"
+        "manual turn 1 1970-01-01 00:04:35Z input=0 output=0 cache-read=0 cache-write=0 cost unpriced context unavailable; partial tokens (a run reported no total)\n"
     ));
+    // The job's lifetime: session s's repeated total counts once, and the
+    // span leaves out turn 1, which grew it.
+    assert!(answer.contains(
+        "  example: 5 turns (4 in span), 2 sessions; input=127 output=65 cache-read=210 cache-write=80 known-cost=$1.50 2 turns cost unavailable; span known-cost=$0.00 2 turns cost unavailable; context unavailable peak=7\n"
+    ), "{answer}");
+    assert!(answer.contains("Prices: no prices configured"));
     assert!(answer.contains("claude five_hour: 100% HIT 100%"));
     assert!(answer.contains("codex seven_day: 40%"));
     assert!(answer.contains("codex / no role; starter=operator-session: 1 turns"));
@@ -667,22 +676,23 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
     assert!(!answer.contains("SECRET"));
     // Totals come first, the turns after the meters.
     let at = |s: &str| answer.find(s).unwrap_or_else(|| panic!("{s}: {answer}"));
-    assert!(at("By engine:") < at("Meter readings:"));
+    assert!(at("By engine:") < at("By job"));
+    assert!(at("By job") < at("Meter readings:"));
     assert!(at("Meter readings:") < at("Each turn:"));
     let table: Vec<String> = answer
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect();
     for row in [
-        "engine role project turns input output cache-read cache-write cost unread missing-runs recovered-runs outside-span partial-tokens",
-        "claude all all 2 17 20 30 40 $0.00 0 1 0 0 1",
-        "codex all all 3 100 25 150 0 - 0 1 0 0 1",
-        "claude repair all 2 17 20 30 40 $0.00 0 1 0 0 1",
-        "codex (none) all 1 0 0 0 0 - 0 1 0 0 1",
-        "codex repair all 2 100 25 150 0 - 0 0 0 0 0",
-        "codex all web 2 100 25 150 0 - 0 0 0 0 0",
-        "codex all (unknown) 1 0 0 0 0 - 0 1 0 0 1",
-        "claude repair web 2 17 20 30 40 $0.00 0 1 0 0 1",
+        "engine role project turns input output cache-read cache-write cost estimate unread missing-runs recovered-runs outside-span partial-tokens",
+        "claude all all 2 17 20 30 40 $0.00 - 0 1 0 0 1",
+        "codex all all 3 100 25 150 0 - - 0 1 0 0 1",
+        "claude repair all 2 17 20 30 40 $0.00 - 0 1 0 0 1",
+        "codex (none) all 1 0 0 0 0 - - 0 1 0 0 1",
+        "codex repair all 2 100 25 150 0 - - 0 0 0 0 0",
+        "codex all web 2 100 25 150 0 - - 0 0 0 0 0",
+        "codex all (unknown) 1 0 0 0 0 - - 0 1 0 0 1",
+        "claude repair web 2 17 20 30 40 $0.00 - 0 1 0 0 1",
         "Cost: $0.00 recorded over 5 turns; 2 runs with cost still missing; 0 runs with cost recovered in this span; 0 earlier runs outside the selected turns whose cost may be included; 3 turns whose engine's stream carries tokens but no cost (their runs' missing and recovered tokens count above); 0 turns whose engine's cost and tokens aren't read.",
     ] {
         assert!(table.iter().any(|l| l == row), "{row}: {answer}");
@@ -692,7 +702,9 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         .unwrap();
     assert!(totals.contains("By engine, role and project:"), "{totals}");
     assert!(
-        !totals.contains("Meter readings") && !totals.contains("Each turn"),
+        !totals.contains("By job")
+            && !totals.contains("Meter readings")
+            && !totals.contains("Each turn"),
         "{totals}"
     );
     assert!(answer.starts_with(&totals), "{totals}");
@@ -706,7 +718,7 @@ fn usage_accounts_for_engines_resumes_and_missing_results_without_text() {
         .collect();
     assert!(
         late.iter()
-            .any(|l| l == "codex repair web 1 60 15 90 0 - 0 0 0 0 0"),
+            .any(|l| l == "codex repair web 1 60 15 90 0 - - 0 0 0 0 0"),
         "{late:?}"
     );
     let full = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
@@ -740,6 +752,7 @@ fn usage_cannot_read_symlinked_metadata_transcripts_or_job_directories() {
     fs::write(root.join("secret"), secret).unwrap();
     fs::write(root.join("stream-secret"), "{\"type\":\"result\",\"session_id\":\"s\",\"usage\":{\"input_tokens\":9999},\"total_cost_usd\":9999}\n").unwrap();
     fs::write(job.join("1.started"), "200").unwrap();
+    fs::write(job.join("1.outcome"), "done\n").unwrap();
     fs::File::create(job.join("1.slot"))
         .unwrap()
         .set_times(
@@ -788,6 +801,7 @@ fn usage_retains_baselines_outside_the_span_and_marks_a_later_unfinished_run() {
     };
     let put = |n, at, text: String| {
         fs::write(job.join(format!("{n}.started")), format!("{at}")).unwrap();
+        fs::write(job.join(format!("{n}.outcome")), "done\n").unwrap();
         fs::write(job.join(format!("{n}.jsonl")), text).unwrap();
     };
     put(1, 100, result(100, 1.5));
@@ -840,6 +854,7 @@ fn usage_first_start_survives_slot_recreation_and_unknown_history_is_explicit() 
     let job = jobs.join("job");
     fs::create_dir_all(&job).unwrap();
     fs::write(job.join("1.started"), "100").unwrap();
+    fs::write(job.join("1.outcome"), "done\n").unwrap();
     fs::write(job.join("1.jsonl"), "{}\n").unwrap();
     fs::write(job.join("2.jsonl"), "{}\n").unwrap();
     fs::File::options()

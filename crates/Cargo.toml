@@ -5,6 +5,7 @@
 [workspace]
 members = [
     "advisory-watch",
+    "burrow-accounting",
     "burrow-agent",
     "burrow-backup",
     "burrow-boot",

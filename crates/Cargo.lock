@@ -369,6 +369,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "burrow-accounting"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-agent"
 version = "0.0.0"
 dependencies = [
@@ -627,6 +636,7 @@ dependencies = [
 name = "burrow-probe"
 version = "0.0.0"
 dependencies = [
+ "burrow-accounting",
  "burrow-door",
  "burrow-events",
  "burrow-github",

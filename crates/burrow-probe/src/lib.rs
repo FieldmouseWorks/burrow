@@ -57,6 +57,10 @@ pub struct Config {
     pub projects: Option<PathBuf>,
     #[serde(default)]
     pub jobs: Option<PathBuf>,
+    /// The host's assumed prices (burrow.usagePrices), for the usage
+    /// answer's estimates where a stream carries no cost.
+    #[serde(default)]
+    pub prices: burrow_accounting::Prices,
     pub tools: Tools,
 }
 
