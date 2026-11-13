@@ -166,7 +166,7 @@ def failing(repo, why):
     """What of burrow-upkeep's look failed: logged, and the stall watchdog
     watches the repo."""
     log(f"{repo}: {why}")
-    waits.failed(repo)
+    waits.failed(repo, after_prs=True)
     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
 
@@ -280,6 +280,7 @@ def run_pass(kick, continuing=False):
         seen.add(repo)
         deferred.add(repo)
         operations_complete = True
+        after_prs = False  # past its PRs: what fails from here on, a yielding batch defers
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
             try:
@@ -371,6 +372,7 @@ def run_pass(kick, continuing=False):
                     complete = False
                     batch.left = True
                     continue
+                after_prs = True
                 # A partial traversal leaves all reviewer files alone. Once
                 # complete, include the snapshots carried from earlier batches
                 # before sweeping, just as a single complete pass does.
@@ -399,12 +401,12 @@ def run_pass(kick, continuing=False):
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
-                        waits.failed(repo)
+                        waits.failed(repo, after_prs=True)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
             except Exception as e:
                 log(f"{repo}: {e}")
-                waits.failed(repo)
+                waits.failed(repo, after_prs=after_prs)
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
             upkeep(repo, mine)
             if had := C.taken(repo):

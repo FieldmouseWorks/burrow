@@ -123,15 +123,17 @@ def overdue(repo, pr, why, said=None):
     return True
 
 
-def failed(repo, pr=None):
+def failed(repo, pr=None, after_prs=False):
     """The pass failed on the PR, or on the repo. Whatever its head, it's the
-    steward's pass that fails: no rev."""
+    steward's pass that fails: no rev. after_prs: the repo's step that failed
+    comes after its PRs (its train, branches, upkeep), which a batch that
+    yields among the PRs doesn't reach, so its failure is kept meanwhile."""
     minutes, kick = repo_cfg(repo)["stallAfter"], f"autoland/{repo}"
     if pr:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, FAILS, minutes, kick, None)
     else:
         FAILED[repo] = {"repo": repo, "what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
-                        "kick": kick, "rev": None}
+                        "kick": kick, "rev": None, **({"after_prs": True} if after_prs else {})}
 
 
 def publish(seen, digest, full, inventory=None, deferred=()):
@@ -147,9 +149,12 @@ def publish(seen, digest, full, inventory=None, deferred=()):
     items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full
              and (inventory is None or repo_of(k) in inventory)}
     for repo in seen:
-        if repo in deferred and repo in was:
-            # The operation that failed has not been retried by this batch.
-            # Its clock belongs to that operation, not the PR traversal.
+        if repo in deferred and was.get(repo, {}).get("after_prs"):
+            # The operation that failed comes after the PRs, which this batch
+            # yielded among, so it hasn't been retried. Its clock belongs to
+            # that operation, not the PR traversal. One that failed before
+            # the PRs (reading them) was retried on the way in: had it failed
+            # again it would be in FAILED, so it's over.
             items[repo] = was[repo]
         noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
@@ -180,7 +185,7 @@ def publish(seen, digest, full, inventory=None, deferred=()):
                           "kick": it["kick"],
                           # A step that keeps failing is the steward's, whatever job it has.
                           "claude": it.get("claude", False) and key not in FAILING,
-                          "rev": it["rev"]}
+                          "rev": it["rev"], **({"after_prs": True} if it.get("after_prs") else {})}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:
         log(f"waits changed: {len(items)} watched")

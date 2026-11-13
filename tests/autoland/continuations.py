@@ -189,7 +189,8 @@ with tempfile.TemporaryDirectory() as tmp:
     for operation in ('train', 'train unavailable', 'branches', 'upkeep'):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
-                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None,
+                       after_prs=True)
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             original = S.step.handle
 
@@ -215,10 +216,36 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             current = C.load('watch.json', {})['items']['sam/r']
             assert current['since'] == 10 and current['due'] == 7210, (operation, current)
+            assert current.get('after_prs') or operation == 'train unavailable', (operation, current)
             C.NOW += 600
             S.run_pass(['sam/r'])
             assert 'sam/r' not in C.load('watch.json', {})['items'], operation
     print('deferred operation failures keep their original watchdog clocks: passed')
+
+    # A failure before the PRs (reading them, say) is retried by the next
+    # batch on its way in. Once that read succeeds, a batch that yields among
+    # the PRs must not keep the old failure: no batch would ever clear it.
+    for stage in ('open_prs', 'settle_repo', 'watch_default'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            def broken(*args, **kwargs):
+                raise RuntimeError('gh api graphql -f: unexpected end of JSON input')
+
+            with patch.object(S if stage == 'open_prs' else S.R, stage, broken):
+                S.run_pass(['sam/r'])
+            failure = C.load('watch.json', {})['items']['sam/r']
+            assert failure['phase'] == W.FAILS and not failure.get('after_prs'), (stage, failure)
+            original = S.step.handle
+
+            def long(*args):
+                original(*args)
+                clock[0] += 9 * 60
+
+            with patch.object(S.step, 'handle', long):
+                C.NOW += 600
+                S.run_pass(['sam/r'])
+            assert C.load('pass-progress.json', {})['repos'], stage  # it yielded among the PRs
+            assert 'sam/r' not in C.load('watch.json', {})['items'], (stage, C.load('watch.json', {})['items'])
+    print('failures before the PRs clear once a yielding batch reads them: passed')
 
     # Exhausting the work slice on the final PR still defers repository
     # operations; the continuation can run them without repeating the PR.
@@ -433,7 +460,8 @@ with tempfile.TemporaryDirectory() as tmp:
     for initial in (None, ['sam/r']):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
-                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None,
+                       after_prs=True)
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             attempts = []
 
