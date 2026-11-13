@@ -94,8 +94,10 @@ Each has an entry below, and each can be imported on its own.
   new kernel, initrd or command line once when idle and makes it the
   default only after it came up; one that panics or hangs resets into the last
   good one and is never tried again. Trials wait for project jobs, sandboxes,
-  runner jobs, updates and steward passes. Completion events retry promptly;
-  `trialBoot.at` is the daily backstop, overriding busy work after two days.
+  runner jobs, updates and steward passes. Completion events retry promptly
+  and always wait for work; `trialBoot.at` is the daily backstop, and only it
+  overrides busy work, once a trial has waited two days. A kernel that failed
+  is unqueued, never trialled.
   An unconfirmed switch always blocks a trial.
 - **`updates`** (`burrow.updates`): Everything current, unattended.
   `HOST-update` (on each push to the flake's main or a watched input, and
@@ -281,7 +283,9 @@ Each has an entry below, and each can be imported on its own.
   repo: the steward's, `proj-watch`'s, `proj-inbox`'s, `HOST-update`'s,
   Renovate's and `renovate-sweep`'s. A handler can take only some repos, only
   pushes to the default branch, only the other events about some branches, and
-  only the issue events about issues with some titles. A turn ending, a review
+  only the issue events about issues with some titles; one told issues has an
+  issue's event's pass look at that issue alone (`issueNumbers`, the inbox's),
+  rather than list every one. A turn ending, a review
   coming back and the passes' own wake-ups (a settle delay, a reviewer's
   timeout) kick them locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never

@@ -27,5 +27,6 @@ jobs:
     # What the shared workflow needs to attest its result.
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
