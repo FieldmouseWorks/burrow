@@ -124,8 +124,11 @@ fn an_ask_deadline_on_a_parked_issue_takes_no_turn() {
             recommendation: ask::Recommendation {
                 default: "continue".into(),
                 one_way,
+                about: None,
             },
             due: crate::now() - 1,
+            id: None,
+            pauses: Default::default(),
         };
         fs::write(ask::host_path(&job, "question"), json!(q).to_string()).unwrap();
         on_github(&b, &issue(7, "sam", &["claude", "later"]));
@@ -134,7 +137,7 @@ fn an_ask_deadline_on_a_parked_issue_takes_no_turn() {
         assert_eq!(job.turns().as_deref(), Some("1"));
         assert!(!b.path("launched").exists());
         assert!(job.turn("1", "stopped").exists());
-        assert!(ask::load(&job).is_none());
+        assert!(ask::load(&job).unwrap().is_none());
     }
 }
 

@@ -251,6 +251,15 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("merge-questions") => {
+            let key = arg(args, 1, MERGE_USAGE)?;
+            if args.len() < 3 {
+                return Err(Fail::new(2, MERGE_USAGE));
+            }
+            let leader = crate::ask::merge(cfg, key, &args[2..]).map_err(|e| Fail::new(1, e))?;
+            put(&format!("merged under {leader}'s notice\n"));
+            Ok(())
+        }
         Some("_policy") => crate::policy::reconcile(cfg).map_err(|e| Fail::new(1, e)),
         Some("_questions") => {
             put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
@@ -277,7 +286,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|merge-questions",
         )),
     }
 }
@@ -364,10 +373,14 @@ fn told_as(cfg: &Config, id: &str, n: &str, view: View) -> Result<String, String
         .map(|r| view.plain(r))
         .collect::<Vec<_>>()
         .join("\n\n");
-    if read(&job.turn(n, "end")).as_deref() == Some("ask")
-        && let Some(q) = crate::ask::load(&job)
-    {
-        said.push_str(&view.plain(&q.notice()));
+    if read(&job.turn(n, "end")).as_deref() == Some("ask") {
+        match crate::ask::load(&job) {
+            Ok(Some(q)) => said.push_str(&view.plain(&q.notice())),
+            Ok(None) => (),
+            Err(e) => said.push_str(&format!(
+                "\n\nThis question's deadline and default can't be read now: {e}"
+            )),
+        }
     }
     let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
@@ -711,6 +724,8 @@ pub(crate) fn baselines(
     Ok(text)
 }
 
+const MERGE_USAGE: &str = "usage: proj merge-questions KEY JOB... (open questions about one subject: the newest keeps its notice)";
+
 /// `proj ask` and `proj done`, from inside a job: how its turn ends, said
 /// before it does. The last of proj await, ask and done stands; neither of
 /// these waits on GitHub any longer.
@@ -811,7 +826,8 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
-    if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {
+    if !matches!(crate::ask::load(&job), Ok(None)) || crate::ask::host_path(&job, "label").exists()
+    {
         names.extend(["proj-watch".into(), "autoland".into()]);
     }
     if crate::question::needs_watch(&job) {

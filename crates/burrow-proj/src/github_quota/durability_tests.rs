@@ -20,6 +20,7 @@ fn ask(job: &Job) {
         &crate::ask::Recommendation {
             default: "Keep the archive".into(),
             one_way: true,
+            about: None,
         },
     )
     .unwrap();
@@ -60,7 +61,7 @@ fn quota_cleanup_unlink_failures_preserve_the_superseding_marker() {
         assert!(park(&job, 1).is_err(), "cleanup ignored an unlink failure");
         assert_eq!(read(&job.path("end.next")).as_deref(), Some(end));
         assert!(crate::ask::pending(&job).unwrap().is_none());
-        assert!(crate::ask::load(&job).is_none());
+        assert!(crate::ask::load(&job).unwrap().is_none());
     }
 }
 
@@ -110,7 +111,7 @@ fn all_safe_cleanup_intermediate_states_remain_retired_during_recovery() {
                     _ => unreachable!(),
                 }
                 assert!(
-                    crate::ask::load(&job).is_none(),
+                    crate::ask::load(&job).unwrap().is_none(),
                     "{end}/{removed}/{recovery} revived an obsolete ask"
                 );
             }

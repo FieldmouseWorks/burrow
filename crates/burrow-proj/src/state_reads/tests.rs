@@ -85,6 +85,7 @@ fn status_snapshots_and_notices_do_not_read_outside_job_state() {
         &crate::ask::Recommendation {
             default: "continue".into(),
             one_way: false,
+            about: None,
         },
     )
     .unwrap();
