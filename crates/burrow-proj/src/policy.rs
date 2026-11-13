@@ -362,6 +362,16 @@ fn reconcile_job(
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
+        match crate::inbox::enrollment::check(&job)? {
+            crate::inbox::enrollment::Admission::Ready => (),
+            crate::inbox::enrollment::Admission::Stopped(message) => {
+                // A terminal worker has no release to retry. Also clear any
+                // park left by a stop interrupted before policy cleanup.
+                cancel(&job)?;
+                eprintln!("{message}");
+                return Ok(());
+            }
+        }
         let capacity = crate::inbox::resumption::admission(cfg, &job)?;
         if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
             return Ok(());

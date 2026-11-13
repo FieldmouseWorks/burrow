@@ -1,6 +1,6 @@
 //! Result usage is per invocation; only cost is cumulative across resumes.
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 pub const FIELDS: [&str; 4] = [
     "input_tokens",
     "output_tokens",
@@ -10,7 +10,7 @@ pub const FIELDS: [&str; 4] = [
 #[derive(Default)]
 pub struct Session {
     cost: f64,
-    gap: bool,
+    gaps: BTreeSet<String>,
 }
 #[derive(Default)]
 pub struct Report {
@@ -19,6 +19,10 @@ pub struct Report {
     pub tokens_partial: bool,
     pub cost_partial: bool,
     pub prior_gap: bool,
+    /// Run identities allow aggregates to match missing costs to later recovery.
+    pub missing: BTreeSet<String>,
+    pub recovered: BTreeSet<String>,
+    identity: String,
 }
 impl Report {
     fn add(&mut self, tokens: [u64; 4]) {
@@ -61,9 +65,14 @@ fn partial(
     report: &mut Report,
 ) {
     report.cost_partial = true;
-    sessions.entry(session.into()).or_default().gap = true;
+    missing(session, sessions, report);
     partial_tokens(run, report);
     *run = Run::default();
+}
+fn missing(session: &str, sessions: &mut BTreeMap<String, Session>, report: &mut Report) {
+    let id = format!("{}:{}", report.identity, report.missing.len());
+    report.missing.insert(id.clone());
+    sessions.entry(session.into()).or_default().gaps.insert(id);
 }
 fn partial_tokens(run: &mut Run, report: &mut Report) {
     report.tokens_partial = true;
@@ -78,7 +87,10 @@ pub fn decode(
     sessions: &mut BTreeMap<String, Session>,
     fallback: &str,
 ) -> Report {
-    let mut report = Report::default();
+    let mut report = Report {
+        identity: fallback.into(),
+        ..Report::default()
+    };
     let mut run = Run::default();
     let mut session = fallback.to_owned();
     let mut any = false;
@@ -130,14 +142,14 @@ pub fn decode(
                 && !(execution_crash && total == 0.0)
             {
                 report.cost += (total - previous.cost).max(0.0);
-                report.prior_gap |= previous.gap;
+                report.prior_gap |= !previous.gaps.is_empty();
+                report.recovered.append(&mut previous.gaps);
                 previous.cost = total;
-                previous.gap = false;
             } else {
                 // Missing or zeroed crash fields and regressed counters never
                 // erase the last trustworthy cumulative total.
                 report.cost_partial = true;
-                previous.gap = true;
+                missing(&session, sessions, &mut report);
             }
             run = Run::default();
         }

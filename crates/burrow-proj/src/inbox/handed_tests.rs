@@ -396,13 +396,16 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
         let d = finished(&mut b, &now, 5, &comments, &now);
         let mut ended = now.clone();
         ended["state"] = json!(state);
+        fs::write(b.path("repos_sam_box_issues_7"), ended.to_string()).unwrap();
+        if state == "closed" {
+            // Closing while retaining enrollment lets a running turn finish.
+            b.cfg.tools.systemctl = "true".into();
+            b.pass().jobs("sam/box", "box", &[]).unwrap();
+            assert!(d.exists());
+            assert!(!b.posted().contains("unread author replies"));
+        }
         ended["labels"] = json!([]);
         fs::write(b.path("repos_sam_box_issues_7"), ended.to_string()).unwrap();
-        // A running turn defers the notice and keeps the unread cursor.
-        b.cfg.tools.systemctl = "true".into();
-        b.pass().jobs("sam/box", "box", &[]).unwrap();
-        assert!(d.exists());
-        assert!(!b.posted().contains("unread author replies"));
         b.cfg.tools.systemctl = b.path("systemctl");
         fs::write(
             b.cfg.jobs.join("j1/await"),
@@ -410,6 +413,11 @@ fn retiring_an_issue_reports_unread_author_replies_and_retries_failed_notices() 
         )
         .unwrap();
         fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();
+        b.pass().jobs("sam/box", "box", &[]).unwrap();
+        // No label snapshot: defer without consuming the job's waits.
+        assert!(d.exists());
+        assert!(b.cfg.jobs.join("j1/await").exists());
+        fs::write(b.path("fail"), "api graphql").unwrap();
         b.pass().jobs("sam/box", "box", &[]).unwrap();
         assert!(!d.exists());
         let retired = b
@@ -552,6 +560,7 @@ fn long_repository_issue_and_job_names_retire_without_combining_components() {
     let owner = "o".repeat(31);
     let project = "p".repeat(100);
     let repo = format!("{owner}/{project}");
+    b.cfg.settings.as_mut().unwrap().allowed.push(repo.clone());
     let key = super::key(&repo);
     let number = i64::MAX;
     let mut now = issue(number as u64, "sam", &["claude"]);

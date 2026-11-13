@@ -150,7 +150,7 @@ impl Machine<'_> {
     pub fn answer(&self, q: &Query) -> Result<String, String> {
         match q {
             Query::Memory => memory::memory(self),
-            Query::Usage { since } => usage::answer(self, since.at(self.now)),
+            Query::Usage { since, totals } => usage::answer(self, since.at(self.now), *totals),
             Query::Units => system::units(self),
             Query::Journal { unit, since, until } => {
                 system::journal(self, unit, since.at(self.now), until.at(self.now))

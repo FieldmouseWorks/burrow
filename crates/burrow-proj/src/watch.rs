@@ -74,7 +74,12 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                     Ok(None) => (),
                     Err(e) => {
                         eprintln!("proj question: {e}");
-                        retry.push((String::new(), now() + RETRY));
+                        if !job
+                            .turns()
+                            .is_some_and(|n| job.turn(&n, "stopped").exists())
+                        {
+                            retry.push((String::new(), now() + RETRY));
+                        }
                     }
                 }
             }
@@ -285,6 +290,12 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             };
             if let Err(e) = started {
                 eprintln!("{e}");
+                if job
+                    .turns()
+                    .is_some_and(|n| job.turn(&n, "stopped").exists())
+                {
+                    continue 'jobs;
+                }
                 // By repo; "" (every repo's look) for one that's no repo's.
                 for a in awaits(&waits) {
                     let repo = target(&a.target).map(|(r, _)| r).unwrap_or_default();

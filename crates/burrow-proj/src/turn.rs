@@ -85,6 +85,7 @@ fn start_with(
     permit: Option<&crate::inbox::resumption::Resume>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
+    crate::inbox::enrollment::admit(&job)?;
     crate::planning::admit(&job)?;
     let unit = job.unit();
     if job

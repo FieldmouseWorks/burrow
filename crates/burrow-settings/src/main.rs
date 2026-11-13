@@ -3,8 +3,13 @@ use std::{fs, process::ExitCode};
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let result = (|| {
+        if args == ["reference"] {
+            return Ok(burrow_settings::reference::markdown());
+        }
         if args.len() < 2 {
-            return Err("usage: burrow-settings CONFIG COMMAND...".into());
+            return Err(
+                "usage: burrow-settings CONFIG COMMAND... | burrow-settings reference".into(),
+            );
         }
         let path = args.remove(0);
         if args == ["door"] {

@@ -267,7 +267,7 @@ fn forgetting_waits_is_case_insensitive_and_preserves_other_repositories() {
     let b = single_slot();
     let gone = seed_wait(&b, "SAM/Box", "7");
     let kept = seed_wait(&b, "sam/box-other", "7");
-    inbox::forget(&b.cfg.inbox.as_ref().unwrap().state, "sam/box").unwrap();
+    inbox::forget(&b.cfg, &b.cfg.inbox.as_ref().unwrap().state, "sam/box").unwrap();
     assert!(!gone.exists());
     assert!(kept.exists());
 }
