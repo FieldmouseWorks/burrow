@@ -100,6 +100,7 @@ let
     machineryAccount = if machineApp == null then null else { login = "${machineApp.slug}[bot]"; id = machineApp.accountId; };
     notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     inherit (config.burrow) mcpServers;
+    inherit (cfg) plugins;
     codexSlots = cfg.codex.slots;
     codexHooks = hooks;
     heavyDir = if config.burrow.cpu.enable or false then config.burrow.cpu.heavy.dir else null;
@@ -283,6 +284,22 @@ in
         steward job: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
+      '';
+    };
+    plugins = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.listOf (lib.types.enum [
+        "workspace" "job-state" "git-metadata" "toolchains" "system" "probe"
+        "heavy" "nix" "kvm" "mcp" "network"
+      ]));
+      default = { };
+      example = { example-engine = [ "workspace" "job-state" "git-metadata" "system" "probe" ]; };
+      description = ''
+        Engine plugins by name, each with the job capabilities the owner
+        approves for it. A plugin gets a capability only if its `describe`
+        also declares it; `github` and `environment` (the App token and the
+        login environment) are not choices and are never given. Its code,
+        `describe` and conformance runs included, runs in the agent sandbox
+        on the egress allowlist. A plugin not listed gets nothing.
       '';
     };
     maxJobsPerProject = lib.mkOption {

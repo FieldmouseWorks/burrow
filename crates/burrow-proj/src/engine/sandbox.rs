@@ -408,7 +408,22 @@ pub fn flags(
     env: Env,
     machine: &Machine,
 ) -> io::Result<Sandbox> {
-    let capabilities = super::capabilities::resolve(cfg, job, scratch, env, machine)?;
+    flags_with(cfg, job, scratch, env, machine, |c| c)
+}
+
+/// [`flags`] over the contract as `narrow` leaves it: how an engine that
+/// brings no sandbox of its own gets this one, with only what it was granted.
+pub fn flags_with(
+    cfg: &Config,
+    job: &Job,
+    scratch: &Path,
+    env: Env,
+    machine: &Machine,
+    narrow: impl FnOnce(super::capabilities::Capabilities) -> super::capabilities::Capabilities,
+) -> io::Result<Sandbox> {
+    let capabilities = narrow(super::capabilities::resolve(
+        cfg, job, scratch, env, machine,
+    )?);
     let mut flags = capabilities.codex_flags();
     let mut entries = BTreeMap::new();
     let grant = |entries: &mut BTreeMap<PathBuf, Access>, path: PathBuf, access: Access| {

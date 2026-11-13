@@ -134,6 +134,10 @@ pub struct Config {
     /// Machine MCP servers, shared by every job engine.
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServer>,
+    /// Engine plugins' owner approvals (burrow.proj.plugins): the
+    /// capabilities each may be granted, if it also declares them.
+    #[serde(default)]
+    pub plugins: BTreeMap<String, Vec<crate::engine::plugin::Capability>>,
     pub tools: Tools,
     /// proj-inbox's settings; None when it's off.
     pub inbox: Option<Inbox>,
