@@ -250,6 +250,10 @@ pub struct Window {
 pub struct UsageHold {
     /// The owner paused it (`proj usage hold`), rather than a refusal.
     pub owner: bool,
+    /// Refused for the engine's login, not its usage: the next turn after
+    /// `until` tests it again.
+    #[serde(default)]
+    pub login: bool,
     pub since: i64,
     pub until: i64,
     /// The owner's reason, or the engine's own words when it refused.
@@ -357,7 +361,7 @@ impl Snapshot {
             .find(|m| m.engine == Engine::Claude)
             .and_then(|m| m.hold.as_ref())
         {
-            out += &usage::hold_line(h.owner, h.until, &h.reason);
+            out += &usage::hold_line(h.owner, h.login, h.until, &h.reason);
             out.push('\n');
         }
         for j in &self.jobs {
@@ -630,6 +634,7 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
                 .flatten()
                 .map(|s| UsageHold {
                     owner: s.owner,
+                    login: s.login,
                     since: s.at,
                     until: s.until,
                     reason: s.said,

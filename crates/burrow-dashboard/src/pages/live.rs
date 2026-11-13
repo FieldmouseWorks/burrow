@@ -305,7 +305,7 @@ fn engine_meter(m: &EngineMeter, at: i64) -> Markup {
             }
             @if let Some(h) = &m.hold {
                 p.hold {
-                    strong.warn { @if h.owner { "Held by the owner" } @else { "Held: refused" } }
+                    strong.warn { @if h.owner { "Held by the owner" } @else if h.login { "Held: login refused" } @else { "Held: refused" } }
                     " for " (span(h.until.saturating_sub(at).max(0) as u64)) " more: " (h.reason)
                 }
             }

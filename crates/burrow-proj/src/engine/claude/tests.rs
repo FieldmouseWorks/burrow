@@ -17,11 +17,15 @@ fn v(s: &str) -> Value {
 #[test]
 fn a_refused_run_says_when_its_limit_resets() {
     let stream = format!("{ALLOWED}\n{ASSISTANT}\n{RESULT}\n");
-    let (until, said) = refused(&v(RESULT), &stream, NOW).unwrap();
+    let super::Refusal { until, said, login } = refused(&v(RESULT), &stream, NOW).unwrap();
+    assert!(!login);
     // Nov 4, 12pm PST.
     assert_eq!(until, Some(1_793_822_400));
     // Its words say so too, for a stream that has no timestamp.
-    assert_eq!(refused(&v(RESULT), "", NOW).unwrap().0, Some(1_793_822_400));
+    assert_eq!(
+        refused(&v(RESULT), "", NOW).unwrap().until,
+        Some(1_793_822_400)
+    );
     assert!(said == "Claude reached its weekly allowance", "{said}");
     // Claude Code's other limits, by their words alone, the older one with
     // its reset after a bar, one with its zone read by those words.
@@ -41,7 +45,7 @@ fn a_refused_run_says_when_its_limit_resets() {
         let r = json!({"type": "result", "is_error": true, "result": said});
         assert_eq!(
             refused(&r, "", NOW),
-            Some((
+            Some(super::Refusal::usage(
                 until,
                 format!("Claude reached its {}", super::limit_name(said))
             )),
@@ -67,10 +71,44 @@ fn structured_limit_names_override_billing_words() {
     ] {
         let event = json!({"rate_limit_info": {"status": "rejected", "resetsAt": NOW + 100,
             "rateLimitType": kind, "overageStatus": overage, "isUsingOverage": false}});
-        let (until, said) = refused(&v(RESULT), &event.to_string(), NOW).unwrap();
+        let super::Refusal { until, said, .. } =
+            refused(&v(RESULT), &event.to_string(), NOW).unwrap();
         assert_eq!(until, Some(NOW + 100));
         assert_eq!(said, format!("Claude reached its {name}"));
         assert!(!said.contains("raise"));
         assert!(!said.contains("https://"));
     }
+}
+
+/// A run refused for its login, as Claude Code wrote it on 2026-11-12 (cut
+/// down to what's read): the API's refusal as a message of its own, with the
+/// stream's `error`, then the run's result.
+pub(crate) const LOGIN: &str = concat!(
+    r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired and could not be refreshed"}]},"session_id":"d1bb1794","error":"authentication_failed","is_api_error_message":true}"#,
+    "\n",
+    r#"{"type":"result","subtype":"success","is_error":true,"num_turns":1,"api_error_status":null,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"d1bb1794"}"#,
+    "\n"
+);
+
+// A login refused is told by the stream's own `error`, never by its words.
+#[test]
+fn a_refused_login_is_told_by_its_error() {
+    let result = v(LOGIN.lines().last().unwrap());
+    assert_eq!(
+        refused(&result, LOGIN, NOW),
+        Some(super::Refusal {
+            until: None,
+            said: "Failed to authenticate: OAuth session expired and could not be refreshed".into(),
+            login: true,
+        })
+    );
+    // The same words with no such error: an answer, not a refusal.
+    assert_eq!(refused(&result, "", NOW), None);
+    // The error on a run that went on to answer: that run got through.
+    let answered = json!({"type": "result", "is_error": false, "result": "done"});
+    assert_eq!(refused(&answered, LOGIN, NOW), None);
+    // A usage limit refused with it is a usage limit: it says when it resets.
+    let both = format!("{LOGIN}{ASSISTANT}\n");
+    let r = refused(&v(RESULT), &both, NOW).unwrap();
+    assert_eq!((r.until, r.login), (Some(1_793_822_400), false));
 }

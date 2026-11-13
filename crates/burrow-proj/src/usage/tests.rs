@@ -740,6 +740,7 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
         admission: None,
         told: t - RETELL,
         last: Some(t - 5),
+        login: false,
     };
     // Simulate the previous binary's disk record, bypassing record().
     fs::write(
@@ -833,6 +834,8 @@ fn a_reminder_waits_out_a_moments_hold_and_not_a_stalled_one() {
 }
 
 mod admission;
+
+mod refused_login;
 #[test]
 fn scheduling_releases_only_a_fresh_meter_after_the_refusal() {
     use burrow_usage_reset::meter::{FRESH, Snapshot, Window};

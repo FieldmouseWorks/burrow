@@ -143,18 +143,36 @@ pub fn is_error(result: &Value) -> bool {
     )
 }
 
-pub fn refused(
-    engine: Engine,
-    last: &Value,
-    stream: &str,
-    now: i64,
-) -> Option<(Option<i64>, String)> {
+/// A run its engine refused before it could work: every other run is
+/// refused the same way until what refused it changes (usage.rs holds them).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refusal {
+    /// When the engine says the limit resets; None when it doesn't say.
+    pub until: Option<i64>,
+    /// What it said, normalized ([`claude::normalize_refusal`]).
+    pub said: String,
+    /// Refused for its login, not its usage: nothing says when that's back,
+    /// so it's tried again ([`crate::usage::login`]).
+    pub login: bool,
+}
+
+impl Refusal {
+    pub(crate) fn usage(until: Option<i64>, said: String) -> Self {
+        Self {
+            until,
+            said,
+            login: false,
+        }
+    }
+}
+
+pub fn refused(engine: Engine, last: &Value, stream: &str, now: i64) -> Option<Refusal> {
     match engine {
         Engine::Claude => claude::refused(last, stream, now),
         Engine::Codex => {
             let said = last["result"].as_str().unwrap_or_default();
             (is_error(last) && burrow_codex::spent(said)).then(|| {
-                (
+                Refusal::usage(
                     Some(now.saturating_add(burrow_codex::wait_for(said) as i64)),
                     said.to_owned(),
                 )
@@ -170,7 +188,7 @@ pub fn refused_file(
     path: &Path,
     from: u64,
     now: i64,
-) -> Option<(Option<i64>, String)> {
+) -> Option<Refusal> {
     match engine {
         Engine::Claude => claude::refused_records(
             last,

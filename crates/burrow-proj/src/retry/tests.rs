@@ -987,6 +987,8 @@ fn an_initial_waiter_keeps_no_deadline_but_a_retained_retry_does() {
     assert!(moved >= dl);
 }
 
+mod login;
+
 mod review2;
 
 mod review3;

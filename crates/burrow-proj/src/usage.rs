@@ -14,7 +14,8 @@
 //! ordinary usage holds through `back` when a fresh meter read after the last
 //! refusal has room. An explicit owner hold (`proj usage hold`) instead lasts
 //! until its deadline or `usage back`; running turns and fresh meters cannot
-//! release it early.
+//! release it early. A run refused for Claude Code's login holds the same
+//! way, a few minutes at a time, so the next run tests it ([`login`]).
 //!
 //! Every change to it goes under jobs/.usage.lock, so turns refused at once,
 //! and runs that finish meanwhile, each see the last one's. Its record
@@ -27,10 +28,7 @@
 //! books its next for it ([`tend`]), so neither waits on a run to come.
 
 use std::fs::{self, File};
-use std::process::{Command, Stdio};
 
-use jiff::Timestamp;
-use jiff::tz::TimeZone;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -89,6 +87,9 @@ pub struct Spent {
     /// from before it was kept, which `at` stands for.
     #[serde(default)]
     pub last: Option<i64>,
+    /// Refused for Claude Code's login, not its usage ([`login`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub login: bool,
 }
 
 impl Spent {
@@ -152,7 +153,8 @@ pub fn metered(cfg: &Config) {
 
 fn meter_start(cfg: &Config) -> Option<i64> {
     use burrow_usage_reset::meter::{FRESH, Snapshot};
-    let s = out(cfg)?;
+    // A meter says nothing of this login: only a run that isn't refused does.
+    let s = out(cfg).filter(|s| !s.login)?;
     let dir = cfg.meters.as_ref()?;
     let now = now() as f64;
     let meter = Snapshot::read(dir, "claude", now)?;
@@ -496,7 +498,35 @@ pub fn record(
         return read(cfg)?
             .ok_or_else(|| "proj: expired owner record disappeared under its lock".into());
     }
-    put(cfg, id, until, said, at, at)
+    put(cfg, id, until, said, at, at, false)
+}
+
+/// Job `id`'s run was refused at `at` for Claude Code's login (`said`, its
+/// words): every other run would be too, so none starts for
+/// [`login::RETRY`], and then the next run tests it again, refused once more
+/// or ending the hold ([`back`]). The owner is told only once it's been
+/// refused for [`login::DEADLINE`], with no run getting through between:
+/// signing in again is theirs, and a login that refreshes by itself needs no
+/// one. What it's held until, as recorded, or why it couldn't be.
+pub fn login(cfg: &Config, id: &str, said: &str, at: i64) -> Result<Spent, String> {
+    let _lock = lock(cfg)?;
+    reconcile_expiry(cfg)?;
+    put(cfg, id, None, said, at, at, true)
+}
+
+/// A run refused, held by what refused it: its usage ([`record`]) or its
+/// login ([`login`]).
+pub fn refused(
+    cfg: &Config,
+    id: &str,
+    r: &crate::engine::Refusal,
+    at: i64,
+) -> Result<Spent, String> {
+    if r.login {
+        login(cfg, id, &r.said, at)
+    } else {
+        record(cfg, id, r.until, &r.said, at)
+    }
 }
 
 /// A fresh owner pause, independent of releases of earlier usage limits.
@@ -517,6 +547,7 @@ pub fn hold(cfg: &Config, until: i64, reason: &str) -> Result<(), String> {
         admission: None,
         told: at,
         last: Some(at),
+        login: false,
     };
     keep(cfg, &spent)?;
     tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
@@ -525,7 +556,10 @@ pub fn hold(cfg: &Config, until: i64, reason: &str) -> Result<(), String> {
 }
 
 /// [`record`], under the lock, with `last` when it was refused: only a run
-/// started after that ends it.
+/// started after that ends it. A `login` refusal ([`login`]) is held for
+/// [`login::RETRY`] and told only once it's [`login::due`]. A login refused
+/// while a usage limit holds moves that on; any other change of cause
+/// starts a hold of its own.
 fn put(
     cfg: &Config,
     id: &str,
@@ -533,20 +567,31 @@ fn put(
     said: &str,
     at: i64,
     last: i64,
+    login: bool,
 ) -> Result<Spent, String> {
-    let until = until.filter(|&t| t > at).unwrap_or(at + UNSAID);
+    let unsaid = if login { login::RETRY } else { UNSAID };
+    let until = until.filter(|&t| t > at).unwrap_or(at + unsaid);
     if let Some(owner) = kept(cfg).filter(|w| w.owner && w.holds(at)) {
         return Ok(owner);
     }
-    let was = kept(cfg).filter(|w| w.back.is_none() && !w.owner);
+    let unended = kept(cfg).filter(|w| w.back.is_none() && !w.owner);
+    // A usage limit while a login holds replaces it, as long at least: it
+    // says when it resets, and the owner hears of it at once.
+    let until = unended
+        .as_ref()
+        .filter(|w| w.holds(at))
+        .map_or(until, |w| w.until.max(until));
+    let was = unended.filter(|w| w.login == login || (login && w.holds(at)));
     let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
-    let spent = match &was {
+    let mut spent = match &was {
         // Every running turn is refused at once: the first tells the owner,
-        // the rest move the reset on, and when it was last refused.
+        // the rest move the reset on, and when it was last refused. A login
+        // refused again keeps when it was first, which its notice counts
+        // from, and when the owner was told of it.
         Some(w) => Spent {
             until: w.until.max(until),
             last: Some(w.refused().max(last)),
-            told: if lapsed { now() } else { w.told },
+            told: if lapsed && !w.login { now() } else { w.told },
             ..w.clone()
         },
         None => Spent {
@@ -557,15 +602,25 @@ fn put(
             at,
             back: None,
             admission: None,
-            told: now(),
+            // Not told yet, for a login: 0 is before any refusal.
+            told: if login { 0 } else { now() },
             last: Some(last),
+            login,
         },
     };
+    let open = if spent.login {
+        login::due(&spent, now())
+    } else {
+        lapsed
+    };
+    if open {
+        spent.told = now();
+    }
     if was.as_ref() == Some(&spent) {
         return Ok(spent);
     }
     keep(cfg, &spent)?;
-    if lapsed {
+    if open {
         tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
     }
     if lapsed || was.as_ref().is_some_and(|w| w.until != spent.until) {
@@ -591,7 +646,14 @@ fn changed(cfg: &Config) {
 /// didn't take is sent again. Cheap when there's nothing to do, so every
 /// turn in line can ask.
 pub fn remind(cfg: &Config) {
-    let due = |s: &Spent| s.holds(now()) && now() - s.told >= RETELL;
+    let due = |s: &Spent| {
+        s.holds(now())
+            && if s.login {
+                login::due(s, now())
+            } else {
+                now() - s.told >= RETELL
+            }
+    };
     if !kept(cfg).is_some_and(|s| due(&s)) {
         return;
     }
@@ -657,8 +719,15 @@ pub fn back(cfg: &Config, started: Option<i64>) {
             // The compatible record is the commit point. A failed journal
             // acknowledgement leaves it intact for settlement to retry.
             let _ = admission_release(cfg, &s);
-            eprintln!("proj: Claude has usage again (out since {})", when(s.at));
-            tell(cfg, &["close", NOTICE, CLOSED]);
+            if s.login {
+                eprintln!(
+                    "proj: Claude's login works again (refused since {})",
+                    when(s.at)
+                );
+            } else {
+                eprintln!("proj: Claude has usage again (out since {})", when(s.at));
+            }
+            tell(cfg, &["close", NOTICE, closed(&s)]);
             changed(cfg);
         }
         Some(s) => {
@@ -714,6 +783,8 @@ pub fn tend(cfg: &Config) -> Option<i64> {
         kept(cfg).map(|s| {
             if s.owner {
                 (s.told + RETELL).min(s.until)
+            } else if s.login {
+                login::next(&s)
             } else {
                 s.told + RETELL
             }
@@ -751,7 +822,7 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
     } else if !settled && now - s.told >= RETELL / 12 {
         s.told = now;
         if keep(cfg, &s).is_ok() {
-            tell(cfg, &["close", NOTICE, CLOSED]);
+            tell(cfg, &["close", NOTICE, closed(&s)]);
         }
     }
 }
@@ -784,7 +855,16 @@ fn earlier_locked(cfg: &Config, id: &str, reset: i64, written: Option<i64>) -> R
     if reset <= now() || ended {
         return Ok(());
     }
-    put(cfg, id, Some(reset), EARLIER, now(), written.unwrap_or(0)).map(|_| ())
+    put(
+        cfg,
+        id,
+        Some(reset),
+        EARLIER,
+        now(),
+        written.unwrap_or(0),
+        false,
+    )
+    .map(|_| ())
 }
 
 /// The holds an earlier proj (#428's) kept apart from this one, each taken
@@ -827,101 +907,10 @@ pub fn adopt(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-const CLOSED: &str = "Claude has usage again, and proj's jobs are running.";
-
-/// Whether HOST-notify may still have the notice open: a close that didn't
-/// get through. Only its exit 1 says it's closed (or was never opened); one
-/// that couldn't run, was killed or answered anything else may still have
-/// it. Without HOST-notify, nothing is.
-fn pending(cfg: &Config) -> bool {
-    cfg.notify.as_ref().is_some_and(|n| {
-        !Command::new(n)
-            .args(["pending", NOTICE])
-            .stdout(Stdio::null())
-            .status()
-            .is_ok_and(|st| st.code() == Some(1))
-    })
-}
-
-/// It, in a line: `proj status`'s, and the turn's journal's.
-pub fn line(s: &Spent) -> String {
-    hold_line(s.owner, s.until, &s.said)
-}
-
-/// A hold in a line, from what the live snapshot keeps of it: the owner's
-/// pause or a refusal, until when, and its reason or Claude Code's words.
-pub fn hold_line(owner: bool, until: i64, said: &str) -> String {
-    if owner {
-        return format!(
-            "Claude work is paused by the owner until {}: {said}",
-            when(until)
-        );
-    }
-    format!(
-        "Claude is out of usage until {}: no Claude turn starts till then (\"{said}\")",
-        when(until)
-    )
-}
-
-fn title(s: &Spent) -> String {
-    if s.owner {
-        return format!("Claude work paused by the owner until {}", when(s.until));
-    }
-    format!("Claude is out of usage until {}", when(s.until))
-}
-
-fn body(cfg: &Config, s: &Spent) -> String {
-    if s.owner {
-        return format!(
-            "The owner paused Claude work until {}. Reason: {}. Running turns continue; Codex work remains eligible. Use `proj usage back` to release this pause early.",
-            when(s.until),
-            s.said
-        );
-    }
-    format!(
-        "Since {}, Claude Code refuses every Claude job here. It answered job {}:\n\n> {}\n\n\
-         proj starts no Claude turn until {}. The turns that were refused wait in line and run again then, by themselves, \
-         and the stall watchdog holds what waits on them. {} \
-         This closes once a job runs again.",
-        when(s.at),
-        s.job,
-        s.said,
-        when(s.until),
-        policy(cfg)
-    )
-}
-
-pub fn policy(cfg: &Config) -> &'static str {
-    if cfg.usage_paid {
-        "If usage is available sooner, `proj usage back` releases the hold."
-    } else {
-        "Paid extra usage is disabled. A usage limit means waiting until reset; never ask the owner to raise a spend cap or enable paid usage."
-    }
-}
-
-/// A moment as the machine's clock (its time zone) says it.
-pub fn when(t: i64) -> String {
-    Timestamp::from_second(t).map_or_else(
-        |_| t.to_string(),
-        |at| {
-            at.to_zoned(TimeZone::system())
-                .strftime("%a %b %-d, %-I:%M %p %Z")
-                .to_string()
-        },
-    )
-}
-
-/// HOST-notify, which never fails its caller; without it, the journal has
-/// it.
-fn tell(cfg: &Config, args: &[&str]) {
-    let Some(notify) = &cfg.notify else {
-        eprintln!("proj: {}", args.join(": "));
-        return;
-    };
-    if let Err(e) = Command::new(notify).args(args).status() {
-        eprintln!("proj: {}: {e}", notify.display());
-    }
-}
+mod login;
+mod notice;
+use notice::{CLOSED, body, closed, pending, tell, title};
+pub use notice::{hold_line, line, policy, when};
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -263,7 +263,7 @@ fn checkpoint(cfg: &Config, job: &Job, n: &str, pid: u32, first: bool) -> io::Re
         .and_then(|last| {
             engine::refused_file(engine::Engine::Claude, &last, &stream, 0, crate::now())
         })
-        .map(|(_, said)| said);
+        .map(|r| r.said);
     // A legacy parent can be preempted after refusal but before it publishes
     // its place. Publication after reset must not turn that retained refusal
     // into fresh work that can bypass the draining cohort.

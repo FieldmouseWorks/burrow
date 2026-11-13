@@ -176,7 +176,11 @@ Each has an entry below, and each can be imported on its own.
   or extra-usage cap) holds Claude's queue until the limit
   resets: no Claude turn takes a slot till then, the refused turn waits in line and
   runs again by itself after, `proj status` says why and until when, and
-  `HOST-notify` tells you once. With paid extra usage off
+  `HOST-notify` tells you once. A run whose login Claude Code refuses (the
+  stream's `authentication_failed`) holds the queue the same way, five minutes
+  at a time, each next run testing the login, and `HOST-notify` tells you to
+  sign Claude Code in again only once it's been refused for thirty minutes.
+  With paid extra usage off
   (`burrow.proj.usage.paid`, in the [settings reference](docs/settings-reference.md)),
   limits mean waiting for reset, never asking the owner to raise a cap. A fresh engine meter requested after the latest refusal
   releases an ordinary usage hold and closes its notice when every window is below
