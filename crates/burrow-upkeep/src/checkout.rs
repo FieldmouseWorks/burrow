@@ -93,7 +93,9 @@ pub fn clone_with(program: &str, repo: &str, path: &Path, until: f64) -> Result<
     // even for a repository whose name begins with a dot.
     let tree = staging.path().join("tree");
     let result = burrow_process::output(
-        Command::new(program).args(["repo", "clone", repo]).arg(&tree),
+        Command::new(program)
+            .args(["repo", "clone", repo])
+            .arg(&tree),
         None,
         until,
         1024 * 1024,
