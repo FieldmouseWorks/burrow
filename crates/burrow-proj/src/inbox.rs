@@ -42,6 +42,7 @@ use serde_json::Value;
 use crate::cmd::{New, start_job};
 use crate::config::{Config, Inbox};
 use crate::github::every;
+use crate::held::Held;
 use crate::job::Job;
 use crate::pick::origin;
 use crate::{Fail, io_fail, now, read, swap};
@@ -82,17 +83,17 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             .get(1)
             .filter(|r| r.contains('/'))
             .ok_or_else(|| Fail::new(2, "usage: proj-inbox forget OWNER/REPO"))?;
-        if !lock_within(&pass, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? {
+        let Some(held) = Held::lock_within(pass, FORGET_WAIT).map_err(|e| io_fail(&lock, e))?
+        else {
             return Err(Fail::new(
                 1,
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
-        }
-        let _permit = resumption::Permit::new(pass);
+        };
+        let _permit = resumption::Permit::new(held);
         return forget(cfg, &inbox.state, repo);
     }
-    pass.lock().map_err(|e| io_fail(&lock, e))?;
-    let pass = resumption::Permit::new(pass);
+    let pass = resumption::Permit::new(Held::lock(pass).map_err(|e| io_fail(&lock, e))?);
     let mut p = Pass {
         cfg,
         inbox,
@@ -139,7 +140,7 @@ fn status(cfg: &Config, inbox: &Inbox) {
 mod dirs;
 use dirs::dirs;
 mod forget;
-use forget::{forget, lock_within};
+use forget::forget;
 mod scope;
 use scope::told;
 

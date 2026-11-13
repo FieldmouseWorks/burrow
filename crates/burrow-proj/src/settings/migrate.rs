@@ -173,7 +173,7 @@ fn read(dir: &Path) -> Result<Migration, String> {
     })
 }
 
-fn lock(path: &Path) -> Result<File, String> {
+fn lock(path: &Path) -> Result<crate::held::Held, String> {
     fs::create_dir_all(path.parent().ok_or("lock has no parent")?).map_err(|e| e.to_string())?;
     let file = File::options()
         .create(true)
@@ -181,9 +181,7 @@ fn lock(path: &Path) -> Result<File, String> {
         .write(true)
         .open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    file.lock()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(file)
+    crate::held::Held::lock(file).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Both locks remain held for the deployed generation with --fence. A retained

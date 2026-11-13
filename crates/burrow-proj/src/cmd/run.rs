@@ -74,7 +74,7 @@ fn key_path(cfg: &Config, key: &str) -> std::path::PathBuf {
 /// held while its link is read and judged, let go or taken: so a link a
 /// starter has just taken over is never let go on a judgment of the job it
 /// pointed at before.
-fn key_lock(cfg: &Config, key: &str) -> Result<File, Fail> {
+fn key_lock(cfg: &Config, key: &str) -> Result<crate::held::Held, Fail> {
     let dir = cfg.jobs.join(".keys").join(".locks");
     fs::create_dir_all(&dir).map_err(|e| io_fail(&dir, e))?;
     let path = dir.join(key.replace('/', "+"));
@@ -83,8 +83,7 @@ fn key_lock(cfg: &Config, key: &str) -> Result<File, Fail> {
         .create(true)
         .open(&path)
         .map_err(|e| io_fail(&path, e))?;
-    f.lock().map_err(|e| io_fail(&path, e))?;
-    Ok(f)
+    crate::held::Held::lock(f).map_err(|e| io_fail(&path, e))
 }
 
 /// The job holding the key, once it has started a turn. One that never

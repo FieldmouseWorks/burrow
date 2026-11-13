@@ -1,9 +1,9 @@
 //! Issue labels govern both enrollment and every later turn.
 use super::{Pass, dirs, key, raw, say, written};
-use crate::{Fail, config::Inbox, github::api, io_fail, job::Job, read};
+use crate::{Fail, config::Inbox, github::api, held::Held, io_fail, job::Job, read};
 use serde_json::Value;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     path::Path,
 };
 
@@ -41,7 +41,7 @@ pub(super) fn mark_parked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), Stri
 
 /// Job locks precede this lock. Admission of a fresh worker holds only this
 /// issue's lock until its first turn starts; it never locks an older worker.
-fn lock(inbox: &Inbox, repo: &str, n: &str) -> Result<File, String> {
+fn lock(inbox: &Inbox, repo: &str, n: &str) -> Result<Held, String> {
     let path = inbox
         .state
         .join(".enrollment-locks")
@@ -54,8 +54,7 @@ fn lock(inbox: &Inbox, repo: &str, n: &str) -> Result<File, String> {
         .append(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    held.lock().map_err(|e| e.to_string())?;
-    Ok(held)
+    Held::lock(held).map_err(|e| e.to_string())
 }
 
 fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> {
@@ -208,7 +207,7 @@ impl Pass<'_> {
     /// A list or a previous REST read cannot restore enrollment. Serialize a
     /// fresh label read and restoration with resume-side parking, retaining
     /// the verified task text. The caller holds the guard through first launch.
-    pub(super) fn enroll(&self, repo: &str, issue: &Value) -> Result<(File, Value), Fail> {
+    pub(super) fn enroll(&self, repo: &str, issue: &Value) -> Result<(Held, Value), Fail> {
         let n = raw(&issue["number"]);
         let held = lock(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
         let current = api(self.cfg, &format!("repos/{repo}/issues/{n}"))

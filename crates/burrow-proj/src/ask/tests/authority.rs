@@ -155,6 +155,26 @@ fn a_default_waits_on_the_registry_and_takes_the_policy_it_has_then() {
 }
 
 #[test]
+fn letting_go_of_the_registry_frees_it_while_a_forked_child_shares_it() {
+    use std::os::fd::AsFd;
+    let (_dir, cfg) = fixture();
+    let held = about::locked(&cfg).unwrap();
+    // A dup shares the open file description just as a descriptor in a
+    // concurrently forked child does, until that child reaches exec.
+    let inherited = held.as_fd().try_clone_to_owned().unwrap();
+    drop(held);
+    let probe = fs::File::options()
+        .append(true)
+        .open(registry(&cfg).with_file_name("lock"))
+        .unwrap();
+    probe
+        .try_lock()
+        .expect("the registry stayed locked after its holder let go");
+    probe.unlock().unwrap();
+    drop(inherited);
+}
+
+#[test]
 fn default_admission_releases_the_registry_for_concurrent_publication() {
     use std::fs::{OpenOptions, TryLockError};
     use std::time::{Duration, Instant};
@@ -204,7 +224,11 @@ fn default_admission_releases_the_registry_for_concurrent_publication() {
                 // A blocked sorting scan must leave the registry available to
                 // the publisher holding the job it is inspecting. Observe the
                 // locks themselves, and release z even on the broken ordering.
-                let until = Instant::now() + Duration::from_secs(3);
+                // The scan blocks on z until we drop it, so wait for that
+                // state, not a time: a thread that finished never blocked on
+                // z. The bound only turns a scan stuck elsewhere into a
+                // failure instead of a hang, and is far past any load.
+                let until = Instant::now() + Duration::from_secs(300);
                 let scans_first = loop {
                     match authority.try_lock() {
                         Ok(()) => authority.unlock().unwrap(),
@@ -227,7 +251,7 @@ fn default_admission_releases_the_registry_for_concurrent_publication() {
                         }
                         Err(e) => panic!("{e}"),
                     }
-                    if Instant::now() >= until {
+                    if running.is_finished() || Instant::now() >= until {
                         break false;
                     }
                     std::thread::sleep(Duration::from_millis(10));
