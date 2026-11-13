@@ -3,7 +3,6 @@
 use burrow_upkeep::checkout::{Stop, clone_with};
 use rustix::time::{ClockId, clock_gettime};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -19,8 +18,7 @@ fn alive(pid: &str) -> bool {
 
 fn fake(dir: &Path, body: &str) -> String {
     let path = dir.join("gh");
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&path, format!("#!/bin/sh\n{body}\n"));
     path.display().to_string()
 }
 
