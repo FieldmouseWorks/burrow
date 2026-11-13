@@ -246,7 +246,8 @@ in
     example = "workers";
     description = ''
       The App, one of `apps`, the machine's own jobs act as on GitHub:
-      Renovate, the ledger's sync, house-sync, notify, proj-inbox's and
+      Renovate (unless burrow.updates.renovate.app names an App of its
+      own), the ledger's sync, house-sync, notify, proj-inbox's and
       proj-watch's own calls, the pipeline dispatcher, and the Claude jobs
       the steward, the stall watchdog, renovate-sweep, advisory-watch,
       firmware-check and HOST-update start.

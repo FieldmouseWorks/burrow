@@ -89,6 +89,10 @@ pub struct Config {
     pub covered: Option<PathBuf>,
     /// The machine's own App, when the jobs act as it.
     pub app: Option<App>,
+    /// Who Renovate comments as, as REST spells it: its own App's bot
+    /// (burrow.updates.renovate.app), which needn't be the jobs'. None:
+    /// Renovate runs as the user, whose gh login the sweep's is too.
+    pub renovate: Option<String>,
     /// The longest a Renovate run goes on, in seconds: a refresh request
     /// taken back waits that long before a job may push.
     pub renovate_run: u64,
@@ -172,18 +176,23 @@ impl Config {
         // Who the jobs post as, whose verdicts are read: the App's bot, or
         // the user's own login. A user can hold the bot's name in GraphQL's
         // spelling, but not the seal. Who Renovate comments as, as REST
-        // spells it: it runs as the same App, or user, and an App's bot is
-        // SLUG[bot] there, a name no person's can be.
-        let (me, renovate) = match &self.app {
-            Some(app) => (app.bot.clone(), format!("{}[bot]", app.bot)),
-            None => {
-                let me = burrow_github::call(&mut self.github(), "GET", "user", None, None)
-                    .ok()
-                    .and_then(|r| r.json().ok())
-                    .and_then(|v| v["login"].as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                (me.clone(), me)
-            }
+        // spells it: its App's bot, SLUG[bot] there, a name no person's can
+        // be, or the user's own login when it runs as them.
+        let user = || {
+            burrow_github::call(&mut self.github(), "GET", "user", None, None)
+                .ok()
+                .and_then(|r| r.json().ok())
+                .and_then(|v| v["login"].as_str().map(str::to_owned))
+                .unwrap_or_default()
+        };
+        let me = match &self.app {
+            Some(app) => app.bot.clone(),
+            None => user(),
+        };
+        let renovate = match &self.renovate {
+            Some(bot) => bot.clone(),
+            None if self.app.is_none() => me.clone(),
+            None => user(),
         };
         let limits = self.limits()?;
         let who = Who {

@@ -186,6 +186,20 @@ fn only_renovates_own_word_on_a_refresh_makes_it_wait() {
     let m = Machine::as_app();
     m.prs(&[m.refresh(23, later, "sam-workers", LOCK)]);
     assert!(m.pass().task().contains("#23 "));
+    // Renovate as an App of its own: its bot's word counts, and the jobs'
+    // App's, which is no longer Renovate, doesn't.
+    let m = Machine::renovate_apart();
+    m.prs(&[m.refresh(23, later, "sam-renovate[bot]", LOCK)]);
+    let p = m.pass();
+    assert!(p.jobs.is_empty() && p.asked().is_empty(), "{:#?}", p.jobs);
+    assert!(
+        p.log.contains(&"lock-wait sam-renovate[bot]".to_string()),
+        "{:#?}",
+        p.log
+    );
+    let m = Machine::renovate_apart();
+    m.prs(&[m.refresh(23, later, "sam-workers[bot]", LOCK)]);
+    assert!(m.pass().task().contains("#23 "));
     // Anything lock-wait doesn't take (someone else's comment, no comment,
     // a failure that isn't age), or another red check: red CI, a job's to
     // fix.

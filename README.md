@@ -112,7 +112,10 @@ Each has an entry below, and each can be imported on its own.
   checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
-  repo, and all of them run hourly), `advisory-watch` (CISA KEV, vulnix,
+  repo, and all of them run hourly; it acts as `burrow.updates.renovate.app`,
+  the machinery's App unless it names one of its own, so its GitHub allowance
+  stalls only Renovate, and its commits are that App's bot, whose PRs the
+  steward knows as Renovate's), `advisory-watch` (CISA KEV, vulnix,
   osv-scanner; new CVEs become Claude jobs the same hour), `firmware-check`
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as
