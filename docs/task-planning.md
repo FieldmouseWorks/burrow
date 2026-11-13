@@ -33,9 +33,23 @@ normal event pass makes only the first unfinished child `ready`. The normal
 drain and worker admission both check the parent list. A child is offered
 once; a later deferral is retained instead of repeatedly paying to replan
 unchanged work. A manually applied
-engine label cannot admit a later child. Completion requires a merged PR,
-not merely a closed issue. Nested splits complete through their own lists.
-Issue, PR and turn-completion events advance the list without a parent job.
+engine label cannot admit a later child. Nested splits complete through
+their own lists. Issue, PR and turn-completion events advance the list
+without a parent job.
+
+A child is done when a merged PR is tied to it, whatever the PR's body
+said. Tied means a merged PR from any repository that closes it by a
+closing reference, or a merged PR the child's own job awaited (`proj
+await`) before it ended with `proj done`. The inbox records that PR as the
+child's landed PR (`.plans/OWNER_REPO-N/landed`) when the job finishes, and
+closes the child with it. A closed child with neither is not done: a hand
+close stays a no-op, but the checklist says once that the list waits on it,
+and the owner gets one notice, cleared once the list moves on. When the
+work provably landed some other way, an author records it from the host
+with `proj plan done OWNER/REPO#N PR-URL`, which refuses inside a job,
+refuses a GitHub account outside `inbox.authors` and a PR that hasn't
+merged, then records it as the child's landed PR; the next pass advances
+the list and closes the child if it's still open.
 
 Generated children are admitted only through local durable creation receipts;
 reused issues still require a configured author. Planning never changes

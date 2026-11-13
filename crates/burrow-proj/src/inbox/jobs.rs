@@ -334,7 +334,7 @@ impl Pass<'_> {
                 && st == "done"
                 && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                 && !self.lane(listed_now)
-                && self.child_can_close(repo, n);
+                && self.child_can_close(repo, n, Some(&job));
             // Stopped, with a conversation no turn continues again: no reply
             // is handed on, the issue hears why once, and no pass retries it.
             // One with no session is started over below, as ever.

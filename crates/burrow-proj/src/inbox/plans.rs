@@ -2,6 +2,7 @@
 use super::{Pass, dirs, key, raw};
 use crate::{
     github::{api, every},
+    job::Job,
     planning::Task,
     swap,
 };
@@ -20,6 +21,9 @@ struct Child {
     offered: bool,
     #[serde(default)]
     marker: Option<String>,
+    /// Closed with no merged PR tied to it: the list waits, and has said so.
+    #[serde(default)]
+    waits: bool,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct Retained {
@@ -57,6 +61,14 @@ impl List {
                 .as_ref()
                 .map_or(String::new(), |pr| format!(" — {pr}"));
             text.push_str(&format!("\n- [{check}] {number}: {}{pr}", task.title));
+        }
+        if let Some(child) = self.next().map(|i| &self.children[i])
+            && child.waits
+            && let Some(n) = child.number
+        {
+            text.push_str(&format!(
+                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`."
+            ));
         }
         text
     }
@@ -316,7 +328,9 @@ impl Pass<'_> {
         }
         true
     }
-    pub(super) fn child_can_close(&mut self, repo: &str, n: &str) -> bool {
+    /// A child's issue closes with its job only once a merged PR is tied to
+    /// it: one that closes it, or one its job awaited ([`Pass::record_awaited`]).
+    pub(super) fn child_can_close(&mut self, repo: &str, n: &str, job: Option<&Job>) -> bool {
         if !self.inbox.planning {
             return true;
         }
@@ -332,7 +346,12 @@ impl Pass<'_> {
                 .iter()
                 .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
             {
-                return match n.parse().ok().and_then(|n| self.merged_child(repo, n)) {
+                let Ok(n) = n.parse() else { return false };
+                let landed = match self.landed_child(repo, n) {
+                    Some(None) => job.map_or(Some(None), |job| self.record_awaited(repo, n, job)),
+                    landed => landed,
+                };
+                return match landed {
                     Some(pr) => pr.is_some(),
                     None => {
                         self.miss(repo);
@@ -733,18 +752,57 @@ impl Pass<'_> {
                 continue;
             }
             let mut advanced = false;
-            if issue["state"] == "closed" {
-                let Some(merged) = self.merged_child(repo, child) else {
+            // A child is done when a merged PR is tied to it, whatever its
+            // issue's state: an open one recorded so is closed with it.
+            let landed = if issue["state"] == "closed" {
+                let Some(landed) = self.landed_child(repo, child) else {
                     self.miss(repo);
                     continue;
                 };
-                if let Some(pr) = merged {
-                    list.children[index].merged_pr = Some(pr);
+                landed
+            } else {
+                self.recorded_landing(repo, child)
+            };
+            if let Some(pr) = landed {
+                if issue["state"] == "open" && !self.close(repo, &child.to_string(), "completed") {
+                    self.miss(repo);
+                    continue;
+                }
+                let waited = list.children[index].waits;
+                list.children[index].merged_pr = Some(pr);
+                list.children[index].waits = false;
+                if !self.save_list(repo, n, &list) {
+                    self.retry(repo);
+                    continue;
+                }
+                if waited {
+                    self.notify(&[
+                        "close",
+                        &Self::waits_key(repo, n),
+                        "The task list moved on.",
+                    ]);
+                }
+                advanced = true;
+            } else if issue["state"] == "closed" {
+                // Closed by hand: a no-op, said once on the checklist and to
+                // the owner, never left to wait in silence.
+                if !list.children[index].waits {
+                    list.children[index].waits = true;
                     if !self.save_list(repo, n, &list) {
                         self.retry(repo);
                         continue;
                     }
-                    advanced = true;
+                    if !self.render_list(repo, n, &mut list) {
+                        self.miss(repo);
+                    }
+                    self.notify(&[
+                        "open",
+                        &Self::waits_key(repo, n),
+                        &format!("{repo}#{n}'s task list waits on #{child}"),
+                        &format!(
+                            "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{n} waits and its next child doesn't start. If its work landed, record the PR with `proj plan done {repo}#{child} PR-URL`; otherwise reopen it."
+                        ),
+                    ]);
                 }
             } else if !list.children[index].offered
                 && self.engine(&issue).is_none()
@@ -771,39 +829,33 @@ impl Pass<'_> {
             }
         }
     }
-    fn merged_child(&self, repo: &str, n: u64) -> Option<Option<String>> {
-        if let Ok(bytes) = fs::read(self.plan_dir(repo, &n.to_string()).join("tasks.json"))
-            && let Ok(list) = serde_json::from_slice::<List>(&bytes)
-            && !list.children.is_empty()
+    fn waits_key(repo: &str, parent: &str) -> String {
+        format!("proj-plan-{}-{parent}", key(repo))
+    }
+    /// Tell the owner (burrow.tools.notify), where there's a notifier.
+    fn notify(&self, args: &[&str]) {
+        if let Some(notify) = &self.cfg.notify
+            && !std::process::Command::new(notify)
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
         {
-            return Some(
-                list.next()
-                    .is_none()
-                    .then(|| format!("https://github.com/{repo}/issues/{n}")),
-            );
+            eprintln!("proj-inbox: couldn't tell the owner: {}", args.join(" "));
         }
-        let (owner, name) = repo.split_once('/')?;
-        let query = "query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){closedByPullRequestsReferences(first:100,includeClosedPrs:true){nodes{merged url}}}}}";
-        let got = crate::github::query_for(
-            self.cfg,
-            repo,
-            query,
-            json!({"owner":owner,"name":name,"n":n}),
-        )?;
-        Some(
-            got["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"]
-                .as_array()?
-                .iter()
-                .find(|pr| pr["merged"] == true)
-                .and_then(|pr| pr["url"].as_str())
-                .map(str::to_owned),
-        )
     }
 }
+
+#[path = "landed.rs"]
+mod landed;
+pub(super) use landed::PLAN_USAGE;
 
 #[cfg(test)]
 #[path = "plans_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "landed_tests.rs"]
+mod landed_tests;
 
 #[cfg(test)]
 #[path = "plans_review_tests.rs"]
