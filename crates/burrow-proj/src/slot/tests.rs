@@ -125,7 +125,7 @@ fn child() {
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let mut cfg = config(Path::new(&jobs), max_jobs);
     if what == "codex-pool-release" {
-        pools::release_codex_pool();
+        codex::release_codex_pool();
         return;
     }
     let mut held = None;
@@ -935,8 +935,6 @@ mod usage;
 mod admission;
 
 mod codex;
-
-mod pools;
 
 mod github;
 

@@ -1,7 +1,36 @@
 use super::*;
 
+// Run in a child of its own (test `child`): the slot is open across exec
+// (slot.rs, `held`), so a child another test's thread starts while it's
+// held keeps the lock after the drop, and the drop's release can be seen only
+// where nothing else forks.
 #[test]
 fn codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage() {
+    let tmp = TempDir::new().unwrap();
+    let out = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "slot::tests::child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_ENV, "codex-pool-release")
+        .env(JOBS_ENV, tmp.path())
+        .env(MAX_JOBS_ENV, "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && said.contains("test result: ok. 1 passed"),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// What codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage runs in
+/// its child.
+pub(super) fn release_codex_pool() {
     use crate::engine::Engine;
     let d = tempfile::tempdir().unwrap();
     let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
