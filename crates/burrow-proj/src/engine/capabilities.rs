@@ -4,7 +4,6 @@ use super::sandbox::{self, Env, Machine};
 use crate::{
     config::{Config, McpServer},
     job::Job,
-    read,
 };
 use serde::Serialize;
 use std::{
@@ -154,7 +153,11 @@ pub fn resolve(
     env: Env,
     machine: &Machine,
 ) -> io::Result<Capabilities> {
-    let project = PathBuf::from(read(&job.path("project")).unwrap_or_default());
+    let project = PathBuf::from(
+        crate::job::Request::load(job)
+            .map_err(io::Error::other)?
+            .project,
+    );
     let git = Command::new(&cfg.tools.git)
         .arg("-C")
         .arg(&project)
