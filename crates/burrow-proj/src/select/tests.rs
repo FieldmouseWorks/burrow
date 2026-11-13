@@ -89,7 +89,8 @@ fn codex_weekly_exhausted_on_credits_yields_to_claudes_plan() {
     );
 
     // The old path, with the same meters: the regression.
-    let (_, old) = crate::engine::role("work codex over 90 claude", Some(dir), false, NOW).unwrap();
+    let route = burrow_settings::roles::route(&["codex", "over", "90", "claude"]).unwrap();
+    let old = crate::engine::route(&route, Some(dir), false, NOW).unwrap();
     assert_eq!(old, Engine::Codex, "old overflow stays on Codex's credits");
 
     let d = select(
