@@ -290,7 +290,8 @@ jobs:
   # request, naming a run of this repository, sets it; this job failing,
   # cancelled or never run leaves it unset, so the gate runs. A push of
   # another branch (a train's candidate, which the train counts the
-  # attestation of) and a PR never ask.
+  # attestation of) and a PR never ask; the runner holds the ref to the
+  # default branch's exact name, which an expression's == can't.
   reuse:
     if: ${{ inputs.gate-reuse && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ${{ inputs.runner }}
@@ -355,6 +356,7 @@ jobs:
         shell: bash
         env:
           LOOKUP: ${{ inputs.gate-reuse-lookup }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           COMMIT: ${{ github.sha }}
           HEAD_ID: ${{ github.event.head_commit.id }}
           TREE: ${{ github.event.head_commit.tree_id }}

@@ -112,11 +112,13 @@ which then takes this field as given.
 ```
 
 Its query digest is the SHA-256 of those exact bytes, in lowercase hex.
-When the job can get one, it carries `Authorization: Bearer <token>`: the
-job's GitHub OIDC token, whose audience is
-`burrow-gate-reuse:v1:sha256:<query digest>`, so the lookup can tell which
-repository and workflow ask, and that they asked this. The URL is https, or
-http on the runner's own machine (127.0.0.1, localhost or [::1]).
+It carries `Authorization: Bearer <token>`: the job's GitHub OIDC token,
+whose audience is `burrow-gate-reuse:v1:sha256:<query digest>`, so the
+lookup can tell which repository and workflow ask, and that they asked this;
+a job that can't get one asks nothing. The URL is https, or http on the
+runner's own machine (127.0.0.1, localhost or [::1]), its authority a bare
+host and port, with no user information. Only a push to the default branch
+by its exact name asks; any other ref builds, as without gate-reuse.
 
 **The answer** is HTTP 200 with one JSON object:
 
@@ -132,6 +134,13 @@ with the same tree are the same files, so `workflow.tree` stands for the
 commit. burrow's own main push runs the workflow at the pushed commit, which
 no earlier run used, so only the tree can match it. `run` names the run
 whose evidence it is (`/attempts/N` or `/job/N` may follow).
+
+Equal trees are the whole match for the checked source, as Conary's rule
+that evidence is about the tree it ran on says (its DESIGN, section 4.3,
+rule 3): a landing is always a new commit, so nothing could be reused
+otherwise. A check that reads the source's commit metadata (the flake's
+`self.rev`, `revCount` or `lastModified`) saw the commit the pass was
+attested on, not the push's.
 
 Only a hit, read whole, for this request (its `query`), naming a run of this
 repository on this server, skips the gate: the job named check (the gate

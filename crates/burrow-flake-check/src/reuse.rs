@@ -21,6 +21,9 @@ pub enum Answer {
     Miss,
     /// It couldn't say, or its answer can't be read: build, and say so.
     Unknown(String),
+    /// Not a push to the default branch, by its exact name: build, as
+    /// without gate-reuse.
+    NotAsked(String),
 }
 
 /// The step: ask, and say what the answer was. A miss is a success, as the
@@ -38,6 +41,11 @@ pub fn reuse() -> Result<bool> {
         }
         Answer::Miss => {
             println!("gate-reuse: no attested pass of this gate on this tree, so it runs");
+            append_output("hit", "false")?;
+            Ok(true)
+        }
+        Answer::NotAsked(why) => {
+            println!("gate-reuse: nothing to ask ({why}), so the gate runs");
             append_output("hit", "false")?;
             Ok(true)
         }
@@ -69,6 +77,14 @@ fn ask(work: &Path) -> Result<Answer> {
             "gate-reuse-lookup is {lookup:?}, not an https URL (or http on this machine)"
         )));
     }
+    // Only the default branch, by its exact name: an expression's == ignores
+    // case, and git's branch names don't.
+    let (git_ref, default) = (var("GITHUB_REF"), var("DEFAULT_BRANCH"));
+    if default.is_empty() || git_ref != format!("refs/heads/{default}") {
+        return Ok(Answer::NotAsked(format!(
+            "{git_ref} isn't the default branch, {default}"
+        )));
+    }
     let (repository, commit, tree) = (var("GITHUB_REPOSITORY"), var("COMMIT"), var("TREE"));
     // The push's own commit and its tree, as the event names them: the tree
     // the gate would check.
@@ -85,9 +101,7 @@ fn ask(work: &Path) -> Result<Answer> {
     let request = work.join("request.json");
     fs::write(&request, &body)?;
     let mut headers = String::from("Content-Type: application/json\n");
-    if let Some(token) = token(work, &query)? {
-        headers.push_str(&format!("Authorization: Bearer {token}\n"));
-    }
+    headers.push_str(&format!("Authorization: Bearer {}\n", token(work, &query)?));
     let header_file = work.join("headers");
     fs::write(&header_file, headers)?;
     let reply = work.join("reply");
@@ -95,10 +109,14 @@ fn ask(work: &Path) -> Result<Answer> {
         "curl",
         &[
             "-sS",
+            "--proto",
+            "=https,http",
             "--max-time",
             "60",
             "--retry",
             "2",
+            "--retry-max-time",
+            "120",
             "-X",
             "POST",
             "-H",
@@ -138,13 +156,40 @@ fn ask(work: &Path) -> Result<Answer> {
 }
 
 /// An https URL, or an http one on this machine itself.
+/// The authority (up to the first `/`, `?` or `#`) is a bare host and maybe
+/// a port: no user information, nothing curl could read as another host. An
+/// http one's host is a loopback name, spelled one of three ways.
 fn lookup_url(url: &str) -> bool {
-    let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"];
-    let after = |prefix: &str| url.strip_prefix(prefix).map(|r| r.chars().next());
-    url.strip_prefix("https://").is_some_and(|r| !r.is_empty())
-        || local
-            .iter()
-            .any(|p| matches!(after(p), Some(None | Some('/' | ':'))))
+    let (local, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
+        (Some(rest), _) => (false, rest),
+        (_, Some(rest)) => (true, rest),
+        _ => return false,
+    };
+    if !url.bytes().all(|b| b.is_ascii_graphic()) || url.contains('\\') {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port))
+            if !host.ends_with(':')
+                && (host.starts_with('[') == host.ends_with(']'))
+                && !port.contains(']') =>
+        {
+            (host, Some(port))
+        }
+        _ => (authority, None),
+    };
+    let port_ok =
+        port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()));
+    let host_ok = if local {
+        matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    } else {
+        !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+    };
+    port_ok && host_ok
 }
 
 /// A git object id, SHA-1's or SHA-256's, in lowercase hex.
@@ -194,17 +239,16 @@ fn sha256(bytes: &[u8]) -> Result<String> {
     }
 }
 
-/// This job's OIDC token for the request whose digest is `query`, when the
-/// job can ask for one: the lookup can tell from it which repository and
-/// workflow ask, and that they asked this.
-fn token(work: &Path, query: &str) -> Result<Option<String>> {
+/// This job's OIDC token for the request whose digest is `query`: the
+/// lookup can tell from it which repository and workflow ask, and that they
+/// asked this. A job that can't get one asks nothing.
+fn token(work: &Path, query: &str) -> Result<String> {
     let (url, bearer) = (
         var("ACTIONS_ID_TOKEN_REQUEST_URL"),
         var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
     );
-    if url.is_empty() {
-        println!("gate-reuse: no OIDC token in this job, so the request goes unsigned");
-        return Ok(None);
+    if url.is_empty() || bearer.is_empty() {
+        return Err(err("no OIDC token in this job to sign the request with"));
     }
     let header = work.join("token-headers");
     fs::write(&header, format!("Authorization: bearer {bearer}\n"))?;
@@ -212,8 +256,12 @@ fn token(work: &Path, query: &str) -> Result<Option<String>> {
         "curl",
         &[
             "-fsS",
+            "--max-time",
+            "30",
             "--retry",
             "4",
+            "--retry-max-time",
+            "90",
             "-H",
             &format!("@{}", s(&header)),
             "--",
@@ -228,7 +276,7 @@ fn token(work: &Path, query: &str) -> Result<Option<String>> {
     if token.is_empty() || token.contains(char::is_whitespace) {
         return Err(err("the OIDC token isn't one"));
     }
-    Ok(Some(token))
+    Ok(token)
 }
 
 /// What the lookup's reply to the request whose digest is `query` says,
@@ -391,6 +439,8 @@ mod tests {
             "http://127.0.0.1:8080/gate",
             "http://localhost/gate",
             "http://[::1]:9/gate",
+            "http://[::1]",
+            "https://conary.example:8443/gate?x=1",
         ] {
             assert!(lookup_url(url), "{url}");
         }
@@ -402,6 +452,20 @@ mod tests {
             "http://127.0.0.10/gate",
             "file:///etc/passwd",
             "ftp://x",
+            "http://localhost:80@lookup.example/gate",
+            "http://localhost@lookup.example/gate",
+            "http://127.0.0.1:x/gate",
+            "http://127.0.0.1:/gate",
+            "http://127.0.0.1:123456/gate",
+            "http://[::1]x/gate",
+            "http://[::1/gate",
+            "http://localhost\\@lookup.example/gate",
+            "http://localhost /gate",
+            "https://user@conary.example/gate",
+            "https://user:pw@conary.example/gate",
+            "https://conary.example:/gate",
+            "https://:443/gate",
+            "HTTP://localhost/gate",
         ] {
             assert!(!lookup_url(url), "{url}");
         }
