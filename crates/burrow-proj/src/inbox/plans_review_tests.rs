@@ -872,7 +872,11 @@ fn unplanned_trackers_remain_eligible_without_ready_enrollment() {
             );
             fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
             let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-            assert!(!b.pass().sorted("sam/box", t, &parent, &Default::default()));
+            let parked = labels.contains(&"later");
+            assert_eq!(
+                b.pass().sorted("sam/box", t, &parent, &Default::default()),
+                parked
+            );
             b.job("planner", "done", "ready");
             let record = b
                 .cfg
@@ -886,7 +890,7 @@ fn unplanned_trackers_remain_eligible_without_ready_enrollment() {
             Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
             b.pass().verdicts("sam/box", t, &[parent]).unwrap();
             assert!(!record.exists());
-            assert!(b.log().contains("labels[]=ready"), "{}", b.log());
+            assert_eq!(b.log().contains("labels[]=ready"), !parked, "{}", b.log());
         }
     }
 }

@@ -434,7 +434,18 @@ impl Pass<'_> {
                     }
                     // No session to continue (the first turn never got
                     // going): start over, from the issue as it stands,
-                    // replies and all.
+                    // replies and all. Retire the old worker before replacing
+                    // its record so neither a legacy reply nor an old await
+                    // can start it alongside the replacement.
+                    {
+                        let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+                        super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+                        if let Err(f) = halt(self.cfg, &job, false) {
+                            say(f);
+                            self.retry(repo);
+                            continue;
+                        }
+                    }
                     id = match self.start(repo, &now_issue, &comments) {
                         Ok(id) => id,
                         Err(f) => {

@@ -232,6 +232,35 @@ fn sorting_and_standalone_conversations_are_exempt_from_worker_labels() {
 }
 
 #[test]
+fn missing_session_replacement_retires_the_old_worker_and_its_await() {
+    let b = fixture();
+    let old = Job::new(&b.cfg, "j1");
+    for path in ["inbox-issue", "link", "session"] {
+        fs::remove_file(old.path(path)).unwrap();
+    }
+    fs::write(
+        b.path("comments"),
+        json!([[{
+            "id":42,"user":burrow_github::fake::actor("sam"),
+            "body":"continue","created_at":"2020-01-01T00:00:00Z"
+        }]])
+        .to_string(),
+    )
+    .unwrap();
+    let active = listed(7, &["claude"]);
+    on_github(&b, &active);
+    b.pass().jobs("sam/box", "box", &[active]).unwrap();
+    let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
+    let fresh = read(&record.join("job")).unwrap();
+    assert_ne!(fresh, "j1");
+    assert_eq!(Job::new(&b.cfg, &fresh).turns().as_deref(), Some("1"));
+    assert!(old.turn("1", "stopped").exists());
+    assert!(!old.path("await").exists());
+    let _held = old.lock().unwrap();
+    assert!(crate::turn::start(&b.cfg, "j1", "late await", false).is_err());
+}
+
+#[test]
 fn repository_release_survives_label_errors_without_other_wakes() {
     for state in ["queued", "running"] {
         for unavailable in [false, true] {
