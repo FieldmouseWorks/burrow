@@ -537,6 +537,7 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
     ] {
         let job = Job::new(&cfg, id);
         fs::create_dir_all(&job.dir).unwrap();
+        swap(job.path("app"), app).unwrap();
         crate::policy::bind(
             &job,
             crate::policy::Identity::Local,
@@ -545,7 +546,6 @@ fn queued_watchdog_records_follow_installation_holds_and_release_grace() {
         .unwrap();
         job.set_turns(1).unwrap();
         swap(job.path("link"), "sam/r#7").unwrap();
-        swap(job.path("app"), app).unwrap();
         swap(job.turn("1", "engine"), engine.name()).unwrap();
         swap(job.path("prompt.1"), "queued").unwrap();
         fs::File::open(job.path("prompt.1"))

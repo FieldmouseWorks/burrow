@@ -12,14 +12,14 @@ fn github_quota_excludes_only_its_installation_from_admission() {
     cfg.tools.git = git;
     let job = Job::new(&cfg, "limited");
     fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("app"), "workers").unwrap();
+    fs::write(job.path("project"), tmp.path().to_str().unwrap()).unwrap();
     crate::policy::bind(
         &job,
         crate::policy::Identity::Local,
         crate::policy::Kind::Automated,
     )
     .unwrap();
-    fs::write(job.path("app"), "workers").unwrap();
-    fs::write(job.path("project"), tmp.path().to_str().unwrap()).unwrap();
     let name = "2-100-limited";
     fs::write(
         jobs.join(".queue").join(name),
@@ -38,7 +38,12 @@ fn github_quota_excludes_only_its_installation_from_admission() {
             .is_empty()
     );
     // The same repository under another App still has its own budget.
-    fs::write(job.path("app"), "other").unwrap();
+    let app = |name: &str| {
+        let mut request = crate::job::Request::load(&job).unwrap();
+        request.app = Some(name.into());
+        request.save(&job).unwrap();
+    };
+    app("other");
     assert_eq!(
         look(&cfg, name, &job.dir, Class::Normal)
             .unwrap()
@@ -46,7 +51,7 @@ fn github_quota_excludes_only_its_installation_from_admission() {
             .len(),
         1
     );
-    fs::write(job.path("app"), "workers").unwrap();
+    app("workers");
     // At the reset it rejoins without a correction, owner action or API call.
     meter.at += 1;
     meter.retry_at = Some(now().saturating_sub(1) as u64);
