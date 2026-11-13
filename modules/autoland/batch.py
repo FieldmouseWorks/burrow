@@ -70,6 +70,9 @@ class Batch:
                 C.wake(r["repo"], at)  # ends: retry's deadline
             else:
                 ready.append(r)
+        # A slow failure can be due again by the next batch. Ready work
+        # that has not failed gets its turn before another retry attempt.
+        ready.sort(key=lambda r: self.state["retry"].get(r["repo"].lower(), 0))
         return ready
 
     def active(self, kick):

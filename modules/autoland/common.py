@@ -94,7 +94,8 @@ def pass_deadline(seconds):
 
 def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
     if REMOTE_DEADLINE is not None:
-        timeout = min(timeout, REMOTE_DEADLINE - time.monotonic())
+        remaining = REMOTE_DEADLINE - time.monotonic()
+        timeout = remaining if timeout is None else min(timeout, remaining)
         if timeout <= 0:
             raise Unavailable("pass remote-call deadline reached")
     try:
@@ -102,7 +103,7 @@ def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
     except subprocess.TimeoutExpired:
         # Command arguments can contain API bodies or credentials. Only
         # identify the executable here, never captured output or the env.
-        raise Unavailable(f"{os.path.basename(command[0])} timed out after {timeout}s") from None
+        raise Unavailable(f"{os.path.basename(command[0])} timed out after {timeout:g} seconds") from None
 
 
 def limited(stderr, env):
@@ -153,7 +154,7 @@ def token(owner):
     have = _tokens.get(owner)
     if have and have[1] - time.time() > 600:
         return have[0]
-    p = subprocess.run([*CFG["upkeep"], "token", owner], capture_output=True, text=True, timeout=UPKEEP_TIMEOUT)
+    p = remote([*CFG["upkeep"], "token", owner], capture_output=True, text=True, timeout=UPKEEP_TIMEOUT)
     said = p.stderr.strip()
     if p.returncode:
         raise (Unavailable if p.returncode == 75 else RuntimeError)(said.splitlines()[-1] if said else
@@ -189,11 +190,11 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
     Not `as_app`, it's handed no token: `hooks` mints its own, for each
     owner it's about, and `sweep` asks GitHub nothing. What it says of
     itself goes to the journal; one that fails, or runs past UPKEEP_TIMEOUT
-    while it's `bounded`, raises. A fetch into the steward's mirror isn't:
-    it takes as long as git does, as it always has."""
-    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
-                       stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
-                       timeout=UPKEEP_TIMEOUT if bounded else None)
+    while it's `bounded`, raises. Mirror fetches have no individual timeout,
+    but every call still shares the pass's remote-call deadline."""
+    p = remote([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
+               stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
+               timeout=UPKEEP_TIMEOUT if bounded else None)
     if p.returncode:
         raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)

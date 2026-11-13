@@ -265,6 +265,27 @@ with tempfile.TemporaryDirectory() as tmp:
         due = C.load('continue.json', {})['sam/r']
         assert due >= C.NOW + 5 * 60, (due, C.NOW)
 
+    # A slow failed retry may already be due again when a batch finishes.
+    # It must yield to ready repositories instead of repeatedly taking the
+    # entire next slice at the head of the discovery order.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        repos.append({'repo': 'sam/s', 'default': 'main'})
+        attempts = []
+
+        def slow_retry(repo):
+            attempts.append(repo)
+            if repo == 'sam/r':
+                clock[0] += 9 * 60
+                raise C.Unavailable('slow failure')
+
+        with patch.object(S.T, 'step', slow_retry):
+            S.run_pass(None)
+            assert attempts == ['sam/r'], attempts
+            C.WAKE.clear()
+            C.NOW += 600
+            S.run_pass(None, continuing=True)
+        assert attempts[:2] == ['sam/r', 'sam/s'], attempts
+
     with fixture() as (clock, *_):
         seen = []
         with C.pass_deadline(18 * 60):
@@ -280,6 +301,15 @@ with tempfile.TemporaryDirectory() as tmp:
             else:
                 raise AssertionError('external work outlived the checkpoint reserve')
         assert C.REMOTE_DEADLINE is None
+        # Upkeep subprocesses must share the same publication reserve as
+        # GitHub calls; operation-only continuations cannot bypass it.
+        clock[0] = 0
+        with C.pass_deadline(18 * 60), patch.dict(C.CFG, {'upkeep': ['upkeep']}), patch.object(C, 'gh_env', return_value={}):
+            clock[0] = 17 * 60
+            for bounded in (True, False):
+                with patch.object(C.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{"limited": null}')) as ran:
+                    C.upkeep('branches', 'sam/r', bounded=bounded)
+                assert ran.call_args.kwargs['timeout'] == 60, ran.call_args.kwargs
 
     # Contending units requeue on their own line, without a blocking lock or
     # rewriting wake files owned by the current pass.
