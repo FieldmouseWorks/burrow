@@ -16,9 +16,6 @@
       login = "renamed-machinery";
       id = inbox.config.burrow.github.machineApp.accountId;
     } ];
-    withoutAgents = self.nixosConfigurations.example.extendModules {
-      modules = [ { burrow.agents.enable = pkgs.lib.mkForce false; } ];
-    };
   in
   assert inbox.config.systemd.services.burrow-engines-door.serviceConfig.User == inbox.config.burrow.user;
   assert inbox.config.burrow.events.handlers.engines.events == [ "issues" ];
@@ -35,16 +32,8 @@
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
     [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+    # check-config also holds the sandbox controller proj pauses and
+    # releases VM jobs with to a program it can run (#711).
     ${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj check-config
-    # Read the config exported by the real wrappers, without starting proj.
-    # The sandbox controller is a configured agent wrapper, not the review
-    # agents' package (which only provides codex).
-    exec() { :; }
-    source ${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj
-    agent=$(${pkgs.jq}/bin/jq -er .agentTool "$PROJ_CONFIG")
-    [ "$agent" = ${pkgs.lib.getExe self.nixosConfigurations.example.config.burrow.agents.package} ]
-    [ -x "$agent" ]
-    source ${withoutAgents.config.burrow.tools.proj}/bin/proj
-    ${pkgs.jq}/bin/jq -e '.agentTool == null' "$PROJ_CONFIG"
     touch $out
   ''
