@@ -8,6 +8,8 @@ mod contains;
 mod crashes;
 #[cfg(test)]
 mod facts_tests;
+#[cfg(test)]
+mod guard_tests;
 mod issue;
 mod memory;
 mod runners;
@@ -77,7 +79,8 @@ pub trait Run {
             owner: Some(owner.to_owned()),
             ..Default::default()
         };
-        burrow_github::query(&mut api, owner, query, variables).map_err(|e| e.why)
+        // The whole diagnostic: the callers scrub it before they shorten it.
+        burrow_github::query(&mut api, owner, query, variables).map_err(|e| e.whole)
     }
 }
 

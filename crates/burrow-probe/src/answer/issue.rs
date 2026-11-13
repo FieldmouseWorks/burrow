@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::Machine;
+use crate::scrub::scrub;
 
 /// GitHub's retention of an issue's body edits.
 const RETAINED: usize = 100;
@@ -52,7 +53,9 @@ pub fn answer(m: &Machine, repo: &str, number: u64) -> Result<String, String> {
             json!({"owner": owner, "name": name, "n": number}),
         )
         .map_err(|e| {
-            let e: String = e.chars().take(MAX_ERROR).collect();
+            // Scrubbed whole, then cut: a cut first can take the part of a
+            // credential that makes it one.
+            let e: String = scrub(&e).as_str().chars().take(MAX_ERROR).collect();
             format!("GitHub didn't say: {e}")
         })?;
     let issue = &data["repository"]["issue"];

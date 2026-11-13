@@ -209,9 +209,9 @@ impl Config {
         meter.budget(&budget);
         let lifts = meter.until(at)?;
         Some(burrow_github::Error {
-            why: "Renovate's run met GitHub's rate limit".into(),
             unanswered: true,
             retry_at: Some(lifts),
+            ..burrow_github::Error::said("Renovate's run met GitHub's rate limit")
         })
     }
 

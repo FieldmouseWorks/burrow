@@ -628,3 +628,41 @@ fn runs_gh_under_its_via() {
     let r = gh.request("GET", "a", None, None).unwrap();
     assert_eq!(r.body, "/configured/gh api -i -X GET a|/configured/socket");
 }
+
+#[test]
+fn an_error_keeps_the_whole_of_what_github_said_beside_the_cut_one() {
+    let long = format!("{} tail-of-a-credential", "x".repeat(400));
+    // An HTTP error's message.
+    let mut gh = Fake::default();
+    gh.on(
+        "POST",
+        "graphql",
+        vec![ok(422, json!({ "message": long }), &[])],
+    );
+    let e = query(&mut gh, "sam", "q", json!({})).unwrap_err();
+    assert_eq!(
+        e.why.chars().count(),
+        "POST graphql: HTTP 422: ".len() + 300
+    );
+    assert_eq!(e.whole, format!("POST graphql: HTTP 422: {long}"));
+    // GraphQL's own errors, joined.
+    let mut gh = Fake::default();
+    gh.on(
+        "POST",
+        "graphql",
+        vec![ok(
+            200,
+            json!({"data": null, "errors": [{"message": long}, {"message": "second"}]}),
+            &[],
+        )],
+    );
+    let e = query(&mut gh, "sam", "q", json!({})).unwrap_err();
+    assert_eq!(e.why.chars().count(), "POST graphql: ".len() + 300);
+    assert_eq!(e.whole, format!("POST graphql: {long}; second"));
+    // A short one is the same both ways, and context goes on both.
+    let e = Error::said("short").context("ctx");
+    assert_eq!(
+        (e.why.as_str(), e.whole.as_str()),
+        ("ctx: short", "ctx: short")
+    );
+}

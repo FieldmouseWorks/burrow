@@ -147,7 +147,7 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
     // What systemd has loaded: the unit, or each fresh instance there is.
     let loaded = loaded(m, r);
     let first = match &loaded {
-        Ok(units) if units.is_empty() => {
+        Ok((units, _)) if units.is_empty() => {
             out += &match r.kind {
                 RunnerKind::Fresh => {
                     "  loaded: no instance is loaded now, so only its configuration says\n"
@@ -159,7 +159,14 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
             };
             None
         }
-        Ok(units) => {
+        Ok((units, omitted)) => {
+            if *omitted > 0 {
+                out += &format!(
+                    "  loaded: {omitted} more instance{} not inspected (at most {MAX_INSTANCES} are read); the found facts below describe {} only\n",
+                    if *omitted == 1 { "" } else { "s" },
+                    units.first().map_or("none", |u| u.id.as_str())
+                );
+            }
             for u in units {
                 out += &format!(
                     "  loaded: {} {}{}{}{}\n",
@@ -204,19 +211,27 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
         }
     };
 
-    // The environment found facts are read in: the loaded one's, where
-    // there's one, and the configuration's where it says nothing.
-    let mut env = r.environment.clone();
-    if let Some(u) = &first {
-        for (k, v) in &u.environment {
-            env.insert(k.clone(), v.clone());
+    // The environment found facts are read in: the loaded unit's when
+    // there is one, as it is (a key it lacks is absent, whatever the newer
+    // configuration says), else the configuration's. The implicit HOME
+    // (the user's own) is only the configured user's.
+    let (env, home) = match &first {
+        Some(u) => {
+            out += &format!("  found: read in the environment loaded for {}\n", u.id);
+            let same_user =
+                !u.dynamic_user && !r.dynamic_user && u.user == r.user.clone().unwrap_or_default();
+            (
+                u.environment.clone(),
+                same_user.then(|| r.home.clone()).flatten(),
+            )
         }
-    }
+        None => (r.environment.clone(), r.home.clone()),
+    };
     let path = env
         .get("PATH")
         .cloned()
         .unwrap_or_else(|| SYSTEMD_PATH.to_string());
-    let dirs: Vec<&str> = path.split(':').filter(|d| !d.is_empty()).collect();
+    let dirs: Vec<&str> = path.split(':').collect();
 
     // Each PATH directory as it is.
     let mut there = 0;
@@ -226,7 +241,12 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
     for dir in &dirs {
         if !dir.starts_with('/') {
             missing.push(format!(
-                "{dir} (not absolute: never searched by these lines)"
+                "{} (not absolute: depends on a working directory, never searched by these lines)",
+                if dir.is_empty() {
+                    "an empty entry"
+                } else {
+                    dir
+                }
             ));
             continue;
         }
@@ -254,11 +274,7 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
                         } else {
                             String::new()
                         },
-                        if listing.hidden > 0 {
-                            format!("; {} left out as hidden", listing.hidden)
-                        } else {
-                            String::new()
-                        }
+                        left_out(&listing)
                     );
                 }
             }
@@ -290,7 +306,7 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
     out += &format!(
         "  found rust: {}; default toolchain: {}\n",
         RUST.iter().map(|t| say(t)).collect::<Vec<_>>().join(", "),
-        default_toolchain(m, r, &env, &found)
+        default_toolchain(m, home.as_ref(), &env, &found)
     );
     if full {
         out += &format!(
@@ -301,10 +317,26 @@ fn runner(m: &Machine, r: &Runner, full: bool) -> String {
     out
 }
 
+/// What a listing left out, said.
+fn left_out(l: &super::shown::Listing) -> String {
+    let mut out = String::new();
+    if l.hidden > 0 {
+        out += &format!("; {} left out as hidden", l.hidden);
+    }
+    if l.unread > 0 {
+        out += &format!(
+            "; {} left out as unknown: the probe could not tell",
+            l.unread
+        );
+    }
+    out
+}
+
 /// The units systemd has loaded for `r`: the named one, or each fresh
 /// instance there is (at most MAX_INSTANCES).
-fn loaded(m: &Machine, r: &Runner) -> Result<Vec<Loaded>, String> {
+fn loaded(m: &Machine, r: &Runner) -> Result<(Vec<Loaded>, usize), String> {
     let ctl = &m.cfg.tools.systemctl;
+    let mut omitted = 0;
     let units: Vec<String> = match r.kind {
         RunnerKind::Named => vec![format!("{}.service", r.name)],
         RunnerKind::Fresh => {
@@ -324,17 +356,20 @@ fn loaded(m: &Machine, r: &Runner) -> Result<Vec<Loaded>, String> {
                 false,
                 &[],
             )?;
-            listed
+            let all: Vec<&str> = listed
                 .lines()
                 .filter_map(|l| l.split_whitespace().next())
                 .filter(|u| u.starts_with(&r.name) && u.ends_with(".service"))
+                .collect();
+            omitted = all.len().saturating_sub(MAX_INSTANCES);
+            all.into_iter()
                 .take(MAX_INSTANCES)
                 .map(str::to_owned)
                 .collect()
         }
     };
     if units.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], 0));
     }
     let mut args = vec![
         "show",
@@ -344,12 +379,13 @@ fn loaded(m: &Machine, r: &Runner) -> Result<Vec<Loaded>, String> {
     ];
     args.extend(units.iter().map(String::as_str));
     let text = m.output(ctl, &args, false, &[])?;
-    Ok(text
+    let shown = text
         .split("\n\n")
         .filter(|b| !b.trim().is_empty())
         .map(show)
         .filter(|u| !u.id.is_empty())
-        .collect())
+        .collect();
+    Ok((shown, omitted))
 }
 
 /// One unit's block of `systemctl show`.
@@ -455,38 +491,66 @@ impl Found {
 }
 
 /// The first PATH directory with a command named `name`, as PATH finds it:
-/// None for none; Err where the first one there is is, or leads to, a path
-/// the reviewers never read (a directory the probe can't read is passed,
-/// as `found:` already says).
+/// None for none. A directory that isn't there is passed; one the probe
+/// couldn't search (hidden, unreadable, a relative or empty entry) leaves
+/// the answer unknown, whether or not a later directory has the command,
+/// since an earlier one it couldn't search may. Err says so, or where the
+/// first command there is is, or leads to, a path the reviewers never read.
 fn find(m: &Machine, dirs: &[&str], name: &str) -> Option<Result<Found, String>> {
-    for dir in dirs.iter().filter(|d| d.starts_with('/')) {
-        let Ok(real) = m.resolve(dir) else {
+    let mut unsearched: Vec<String> = Vec::new();
+    for dir in dirs {
+        if !dir.starts_with('/') {
+            unsearched.push(if dir.is_empty() {
+                "an empty entry".to_owned()
+            } else {
+                short(dir, false)
+            });
             continue;
-        };
-        match m.entry(&real, name) {
+        }
+        match m.entry(dir, name) {
             Ok(None) | Err(Unread::Missing) => continue,
             Ok(Some(entry)) => {
                 let package = entry
                     .link
                     .as_deref()
                     .and_then(store_name)
-                    .or_else(|| store_name(&real));
-                return Some(Ok(Found {
+                    .or_else(|| m.resolve(dir).ok().as_deref().and_then(store_name));
+                let found = Found {
                     dir: short(dir, false),
                     package,
-                }));
+                };
+                return Some(if unsearched.is_empty() {
+                    Ok(found)
+                } else {
+                    Err(format!(
+                        "unknown: {}, unless an earlier PATH directory holds one, which the probe could not search: {}",
+                        found.say(),
+                        unsearched.join(", ")
+                    ))
+                });
             }
-            Err(why) => return Some(Err(format!("in {}, {}", short(dir, false), why.say()))),
+            Err(Unread::Hidden) => {
+                unsearched.push(format!("{} ({})", short(dir, false), Unread::Hidden.say()));
+            }
+            Err(why) if matches!(why, Unread::Denied | Unread::Other(_)) => {
+                unsearched.push(format!("{} ({})", short(dir, false), why.say()));
+            }
+            Err(_) => continue,
         }
     }
-    None
+    (!unsearched.is_empty()).then(|| {
+        Err(format!(
+            "unknown: not found in the directories searched; the probe could not search {}",
+            unsearched.join(", ")
+        ))
+    })
 }
 
 /// What decides the default toolchain `rustc` and `cargo` get, as far as
 /// the runner's environment and HOME say.
 fn default_toolchain(
     m: &Machine,
-    r: &Runner,
+    home: Option<&String>,
     env: &BTreeMap<String, String>,
     found: &BTreeMap<&str, Option<Result<Found, String>>>,
 ) -> String {
@@ -508,7 +572,7 @@ fn default_toolchain(
             _ => "none: neither rustc nor rustup is on PATH".into(),
         };
     }
-    let home = env.get("HOME").or(r.home.as_ref());
+    let home = env.get("HOME").or(home);
     let settings = match (env.get("RUSTUP_HOME"), home) {
         (Some(h), _) => format!("{}/settings.toml", h.trim_end_matches('/')),
         (None, Some(h)) => format!("{}/.rustup/settings.toml", h.trim_end_matches('/')),

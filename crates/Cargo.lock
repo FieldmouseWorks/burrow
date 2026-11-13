@@ -632,6 +632,7 @@ dependencies = [
  "burrow-github",
  "burrow-process",
  "burrow-test",
+ "burrow-upkeep",
  "jiff",
  "regex",
  "rustix",

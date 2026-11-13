@@ -13,16 +13,16 @@ use super::{Machine, Ran, Run};
 use crate::query::Query;
 use crate::{App, Config, Inbox, Journal, Runner, RunnerKind, Tools, Trust};
 
-const HASH: &str = "0123456789abcdfghijklmnpqrsvwxyz";
+pub(super) const HASH: &str = "0123456789abcdfghijklmnpqrsvwxyz";
 
 /// systemctl's answers by verb, and GitHub's one answer.
 #[derive(Default)]
-struct Fake {
-    show: String,
-    list: String,
-    github: RefCell<Option<Result<Value, String>>>,
-    asked: RefCell<Vec<Vec<String>>>,
-    queries: RefCell<Vec<(String, String, Value)>>,
+pub(super) struct Fake {
+    pub(super) show: String,
+    pub(super) list: String,
+    pub(super) github: RefCell<Option<Result<Value, String>>>,
+    pub(super) asked: RefCell<Vec<Vec<String>>>,
+    pub(super) queries: RefCell<Vec<(String, String, Value)>>,
 }
 
 impl Run for Fake {
@@ -59,7 +59,7 @@ impl Run for Fake {
     }
 }
 
-fn config(root: &Path) -> Config {
+pub(super) fn config(root: &Path) -> Config {
     Config {
         jobs: None,
         projects: None,
@@ -94,7 +94,7 @@ fn config(root: &Path) -> Config {
     }
 }
 
-fn named() -> Runner {
+pub(super) fn named() -> Runner {
     Runner {
         name: "ci-runner".into(),
         kind: RunnerKind::Named,
@@ -117,7 +117,7 @@ fn named() -> Runner {
     }
 }
 
-fn fresh() -> Runner {
+pub(super) fn fresh() -> Runner {
     Runner {
         name: "burrow-fresh-runner@".into(),
         kind: RunnerKind::Fresh,
@@ -141,7 +141,7 @@ fn fresh() -> Runner {
     }
 }
 
-fn machine<'a>(cfg: &'a Config, root: &Path, run: &'a Fake) -> Machine<'a> {
+pub(super) fn machine<'a>(cfg: &'a Config, root: &Path, run: &'a Fake) -> Machine<'a> {
     Machine {
         cfg,
         root: root.to_path_buf(),
@@ -152,7 +152,7 @@ fn machine<'a>(cfg: &'a Config, root: &Path, run: &'a Fake) -> Machine<'a> {
 }
 
 /// A store package's command, and a link to it from `dir`.
-fn command(root: &Path, dir: &str, package: &str, name: &str) {
+pub(super) fn command(root: &Path, dir: &str, package: &str, name: &str) {
     let store = root.join(format!("nix/store/{HASH}-{package}/bin"));
     fs::create_dir_all(&store).unwrap();
     let file = store.join(name);
@@ -169,7 +169,7 @@ fn command(root: &Path, dir: &str, package: &str, name: &str) {
 
 /// The machine both runners share: a system profile with git and coreutils,
 /// the named runner's own bin with git, and no Rust anywhere.
-fn base(root: &Path) {
+pub(super) fn base(root: &Path) {
     command(root, "/run/current-system/sw/bin", "coreutils-9.8", "ls");
     command(root, "/run/current-system/sw/bin", "git-2.51.0", "git");
     command(
@@ -189,7 +189,7 @@ fn base(root: &Path) {
     fs::create_dir_all(git).unwrap();
 }
 
-fn show(path: &str) -> String {
+pub(super) fn show(path: &str) -> String {
     format!(
         "Id=ci-runner.service\nLoadState=loaded\nActiveState=active\nSubState=running\nActiveEnterTimestamp=Fri 2026-11-13 01:00:00 UTC\nUser=ci\nDynamicUser=no\nNeedDaemonReload=no\nEnvironment=PATH={path} LOCALE_ARCHIVE=/x \"TOKEN=ghp_notreported\"\n"
     )
@@ -344,6 +344,21 @@ fn rustup_on_path_reads_the_default_its_home_holds() {
         got.contains("loaded: no RUSTUP_TOOLCHAIN, though one is configured"),
         "{got}"
     );
+    // The loaded unit lacks it: the newer configuration doesn't restore it.
+    assert!(
+        got.contains(
+            "default toolchain: stable-x86_64-unknown-linux-gnu (/var/lib/ci/.rustup/settings.toml)"
+        ),
+        "{got}"
+    );
+    assert!(!got.contains("1.91.0 (RUSTUP_TOOLCHAIN"), "{got}");
+    // Not loaded at all: the configuration is all there is.
+    let quiet = Fake::default();
+    let got = machine(&cfg, root, &quiet)
+        .answer(&Query::Runners {
+            name: Some("ci-runner".into()),
+        })
+        .unwrap();
     assert!(
         got.contains("default toolchain: 1.91.0 (RUSTUP_TOOLCHAIN in its environment)"),
         "{got}"
@@ -502,7 +517,7 @@ fn hidden_paths_are_never_listed_resolved_or_read() {
         "{got}"
     );
     assert!(got.contains("1 left out as hidden"), "{got}");
-    assert!(got.contains("rustc in /etc/actions-runner/ci-runner/bin, not read: it is, or leads to, a path the reviewers never read"), "{got}");
+    assert!(got.contains("rustc unknown: not found in the directories searched; the probe could not search /etc/actions-runner/ci-runner/bin (not read: it is, or leads to, a path the reviewers never read)"), "{got}");
     assert!(
         got.contains("default toolchain: /var/lib/ci/.rustup/settings.toml: not read: it is, or leads to, a path the reviewers never read"),
         "{got}"

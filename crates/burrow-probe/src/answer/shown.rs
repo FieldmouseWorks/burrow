@@ -1,18 +1,23 @@
 //! What an answer may open, list or resolve on the machine's disk: never a
 //! path the steward's reviewers are kept from (`Config::hidden`, their
 //! skipPaths), whether it's named directly or reached through a link. A path
-//! is walked one component at a time without following anything: each step,
-//! and the target of each link on the way, is held to the hidden patterns
-//! before it's looked at, so a link can't lead a read into a hidden file
-//! and a hidden directory is never listed. A file is opened at its resolved
-//! path with O_NOFOLLOW, and only when it's a regular file of a bounded
-//! size.
+//! is walked one component at a time, each directory held open and the
+//! next step taken relative to it with O_NOFOLLOW, so nothing swapped in
+//! behind a checked directory can redirect a later step. The patterns are
+//! the snapshot's own (`burrow_upkeep::snapshot::Hide`: a trailing newline
+//! tried bare, a directory matched with a trailing slash and so its
+//! descendants), applied to the path as asked, to each step, and to every
+//! path a link makes (its target with the rest still to walk), so a name
+//! that is hidden is hidden however a link would spell it. A hidden
+//! directory is never listed. A file is opened relative to its directory
+//! with O_NOFOLLOW, and only when it's a regular file of a bounded size.
 
 use std::fs;
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::OwnedFd;
 
 use regex::Regex;
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
 use super::Machine;
 
@@ -41,6 +46,10 @@ impl Unread {
         }
     }
 
+    fn errno(e: rustix::io::Errno) -> Unread {
+        Unread::of(&std::io::Error::from(e))
+    }
+
     /// As an answer says it.
     pub fn say(&self) -> String {
         match self {
@@ -54,31 +63,106 @@ impl Unread {
     }
 }
 
-/// One entry of a directory: its name and, for a link, where it points.
+/// One command of a directory: its name and, for a link, the file it
+/// leads to once every link on the way is followed.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub link: Option<String>,
 }
 
-/// A directory's entries, and how many were left out as hidden.
+/// A directory's commands, and how many entries were left out.
 #[derive(Debug, Clone, Default)]
 pub struct Listing {
     /// The directory's resolved path.
     pub real: String,
     pub entries: Vec<Entry>,
+    /// Left out as hidden, itself or by where a link leads.
     pub hidden: usize,
+    /// Left out because the probe could not tell what they are.
+    pub unread: usize,
+}
+
+/// The reviewers' hidden patterns, compiled.
+pub(super) struct Guard(Vec<Regex>);
+
+impl Guard {
+    /// Whether a pattern finds the path. A pattern's `$` matches only at
+    /// the very end, and git allows a name that ends in a newline, so such
+    /// a path is tried without it too (the snapshot's own rule).
+    fn skipped(&self, path: &str) -> bool {
+        let bare = path.strip_suffix('\n');
+        self.0
+            .iter()
+            .any(|r| r.is_match(path) || bare.is_some_and(|b| r.is_match(b)))
+    }
+
+    /// The snapshot's rule for one path: matched itself, or in a directory
+    /// that is (a directory matches with a trailing slash).
+    fn snapshot(&self, path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').collect();
+        self.skipped(path)
+            || (1..parts.len()).any(|i| self.skipped(&format!("{}/", parts[..i].join("/"))))
+    }
+
+    /// Whether `path` is one the reviewers never read; `dir` for a path
+    /// that is a directory (so held to a pattern's trailing slash too). A
+    /// skipPath is written for a repo's paths, so it's held to the absolute
+    /// path, the path without its leading slash, and each tail that starts
+    /// after a slash: whatever directory a repo's root would be.
+    pub(super) fn hidden(&self, path: &str, dir: bool) -> bool {
+        let tails = std::iter::once(path).chain(
+            path.match_indices('/')
+                .map(|(i, _)| &path[i + 1..])
+                .filter(|t| !t.is_empty()),
+        );
+        tails.into_iter().any(|t| {
+            self.snapshot(t) || (dir && !t.ends_with('/') && self.snapshot(&format!("{t}/")))
+        })
+    }
+
+    /// For a path whose kind isn't known yet: hidden as either.
+    fn hidden_any(&self, path: &str) -> bool {
+        self.hidden(path, false) || self.hidden(path, true)
+    }
+}
+
+/// A path walked to its end.
+pub(super) struct Resolved {
+    /// The path with every link resolved.
+    pub real: String,
+    /// The last directory on the way, held open: the path's own when it
+    /// is one, else the one holding `leaf`.
+    pub(super) dir: OwnedFd,
+    /// The last component, when it isn't a directory.
+    pub(super) leaf: Option<String>,
+}
+
+/// `path` with `.` and `..` taken out, lexically.
+fn normal<'a>(done: &[String], more: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out: Vec<&str> = done.iter().map(String::as_str).collect();
+    for p in more {
+        match p {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            p => out.push(p),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 impl Machine<'_> {
     /// The hidden patterns, compiled; an error if any doesn't compile,
     /// so nothing is read rather than read past a pattern meant to hide it.
-    fn patterns(&self) -> Result<Vec<Regex>, Unread> {
+    pub(super) fn guard(&self) -> Result<Guard, Unread> {
         self.cfg
             .hidden
             .iter()
             .map(|p| Regex::new(p))
             .collect::<Result<_, _>>()
+            .map(Guard)
             .map_err(|_| {
                 Unread::Other(
                     "the reviewers' hidden paths don't all compile, so no file is read".into(),
@@ -86,159 +170,212 @@ impl Machine<'_> {
             })
     }
 
-    /// Whether `path` is one the reviewers never read. A skipPath is
-    /// written for a repo's paths, so it's held to the absolute path, the
-    /// path without its leading slash, and each tail that starts after a
-    /// slash: whatever directory a repo's root would be.
-    pub(super) fn hidden(&self, path: &str) -> Result<bool, Unread> {
-        let patterns = self.patterns()?;
-        let tails = std::iter::once(path).chain(
-            path.match_indices('/')
-                .map(|(i, _)| &path[i + 1..])
-                .filter(|t| !t.is_empty()),
-        );
-        let tails: Vec<&str> = tails.collect();
-        Ok(patterns
-            .iter()
-            .any(|re| tails.iter().any(|t| re.is_match(t))))
+    /// `path` (absolute, as the machine names it) with every link along it
+    /// resolved, none of them followed by the system.
+    pub(super) fn resolve(&self, path: &str) -> Result<String, Unread> {
+        Ok(self.resolve_with(&self.guard()?, path)?.real)
     }
 
-    /// `path` (absolute, as the machine names it) with every link along it
-    /// resolved, none of them followed by the system: each component, and
-    /// each link's target, held to the hidden patterns first.
-    pub(super) fn resolve(&self, path: &str) -> Result<String, Unread> {
+    pub(super) fn resolve_with(&self, g: &Guard, path: &str) -> Result<Resolved, Unread> {
         if !path.starts_with('/') {
             return Err(Unread::Other(format!("{path:?} isn't an absolute path")));
         }
-        let mut todo: Vec<String> = parts(path);
+        if g.hidden_any(&normal(&[], path.split('/'))) {
+            return Err(Unread::Hidden);
+        }
+        let root = rustix::fs::open(
+            &self.root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(Unread::errno)?;
+        let mut fds = vec![root];
+        let mut todo: Vec<String> = path.split('/').map(str::to_owned).collect();
         todo.reverse();
         let mut done: Vec<String> = Vec::new();
+        let mut leaf = None;
         let mut links = 0;
         while let Some(part) = todo.pop() {
-            match part.as_str() {
-                "" | "." => continue,
-                ".." => {
-                    done.pop();
-                    continue;
-                }
-                _ => {}
+            if part.is_empty() || part == "." {
+                continue;
             }
-            let next = format!(
-                "/{}",
-                done.iter()
-                    .chain([&part])
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("/")
-            );
-            if self.hidden(&next)? {
+            if leaf.is_some() {
+                // Something below a file.
+                return Err(Unread::Missing);
+            }
+            if part == ".." {
+                if done.pop().is_some() {
+                    fds.pop();
+                }
+                continue;
+            }
+            let at = fds.last().expect("the root is held");
+            let next = normal(&done, [part.as_str()]);
+            let below = todo.iter().any(|p| !p.is_empty() && p != ".");
+            if g.hidden(&next, below) {
                 return Err(Unread::Hidden);
             }
-            let meta = fs::symlink_metadata(self.path(&next)).map_err(|e| Unread::of(&e))?;
-            if meta.file_type().is_symlink() {
-                links += 1;
-                if links > MAX_LINKS {
-                    return Err(Unread::Other(format!("{path}: too many links")));
+            let st = rustix::fs::statat(at, part.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(Unread::errno)?;
+            match FileType::from_raw_mode(st.st_mode) {
+                FileType::Symlink => {
+                    links += 1;
+                    if links > MAX_LINKS {
+                        return Err(Unread::Other(format!("{path}: too many links")));
+                    }
+                    let target = rustix::fs::readlinkat(at, part.as_str(), Vec::new())
+                        .map_err(Unread::errno)?;
+                    let target = target.to_string_lossy().into_owned();
+                    let base: &[String] = if target.starts_with('/') { &[] } else { &done };
+                    // The path this link makes, with the rest still to
+                    // walk: held to the patterns before it's resolved away.
+                    let rest = todo.iter().rev().map(String::as_str);
+                    let made = normal(base, target.split('/').chain(rest));
+                    if g.hidden_any(&target) || g.hidden_any(&made) {
+                        return Err(Unread::Hidden);
+                    }
+                    if target.starts_with('/') {
+                        done.clear();
+                        fds.truncate(1);
+                    }
+                    todo.extend(target.split('/').rev().map(str::to_owned));
                 }
-                let target = fs::read_link(self.path(&next)).map_err(|e| Unread::of(&e))?;
-                let target = target.to_string_lossy().into_owned();
-                if self.hidden(&target)? {
-                    return Err(Unread::Hidden);
+                FileType::Directory => {
+                    if g.hidden(&next, true) {
+                        return Err(Unread::Hidden);
+                    }
+                    let fd = rustix::fs::openat(
+                        at,
+                        part.as_str(),
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(Unread::errno)?;
+                    fds.push(fd);
+                    done.push(part);
                 }
-                if target.starts_with('/') {
-                    done.clear();
+                _ => {
+                    leaf = Some(part.clone());
+                    done.push(part);
                 }
-                let mut more = parts(&target);
-                more.reverse();
-                todo.extend(more);
-            } else {
-                done.push(part);
             }
         }
-        Ok(format!("/{}", done.join("/")))
+        Ok(Resolved {
+            real: format!("/{}", done.join("/")),
+            dir: fds.pop().expect("the root is held"),
+            leaf,
+        })
     }
 
-    /// A directory's entries, by name, with each link's target as it reads
-    /// (never followed): any entry, or target, that's hidden is left out
-    /// and counted.
+    /// Whether `full` is a command PATH would run: an executable regular
+    /// file once every link on the way is followed. None for a dangling
+    /// link, a directory or a file that isn't executable; the file's real
+    /// path otherwise.
+    fn command(&self, g: &Guard, full: &str) -> Result<Option<String>, Unread> {
+        let r = match self.resolve_with(g, full) {
+            Ok(r) => r,
+            Err(Unread::Missing) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let Some(leaf) = &r.leaf else {
+            return Ok(None);
+        };
+        let st = match rustix::fs::statat(&r.dir, leaf.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => st,
+            Err(e) => {
+                return match Unread::errno(e) {
+                    Unread::Missing => Ok(None),
+                    e => Err(e),
+                };
+            }
+        };
+        Ok(
+            (FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
+                && st.st_mode & 0o111 != 0)
+                .then_some(r.real),
+        )
+    }
+
+    /// A directory's commands, by name, each link's file as it resolves
+    /// (every step held to the patterns): any entry, or target, that's
+    /// hidden is left out and counted, and so is one the probe can't tell.
     pub(super) fn list(&self, dir: &str) -> Result<Listing, Unread> {
-        let real = self.resolve(dir)?;
+        let g = self.guard()?;
+        let r = self.resolve_with(&g, dir)?;
+        if r.leaf.is_some() {
+            return Err(Unread::Other(format!("{dir} isn't a directory")));
+        }
         let mut listing = Listing {
-            real: real.clone(),
+            real: r.real.clone(),
             ..Listing::default()
         };
-        let read = fs::read_dir(self.path(&real)).map_err(|e| Unread::of(&e))?;
+        let read = rustix::fs::Dir::read_from(&r.dir).map_err(Unread::errno)?;
         for entry in read {
-            let entry = entry.map_err(|e| Unread::of(&e))?;
+            let entry = entry.map_err(Unread::errno)?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let full = format!("{}/{name}", real.trim_end_matches('/'));
-            if self.hidden(&full)? {
+            if name == "." || name == ".." {
+                continue;
+            }
+            let full = format!("{}/{name}", r.real.trim_end_matches('/'));
+            let kind = entry.file_type();
+            let hidden = match kind {
+                FileType::Directory => g.hidden(&full, true),
+                FileType::RegularFile => g.hidden(&full, false),
+                _ => g.hidden_any(&full),
+            };
+            if hidden {
                 listing.hidden += 1;
                 continue;
             }
-            let link = match entry.file_type() {
-                Ok(t) if t.is_symlink() => {
-                    let target = fs::read_link(entry.path())
-                        .map(|t| t.to_string_lossy().into_owned())
-                        .ok();
-                    match target {
-                        Some(t) if self.hidden(&t)? => {
-                            listing.hidden += 1;
-                            continue;
-                        }
-                        t => t,
-                    }
-                }
-                _ => None,
-            };
-            listing.entries.push(Entry { name, link });
+            match self.command(&g, &full) {
+                Ok(Some(real)) => listing.entries.push(Entry {
+                    name,
+                    link: (kind == FileType::Symlink).then_some(real),
+                }),
+                Ok(None) => {}
+                Err(Unread::Hidden) => listing.hidden += 1,
+                Err(_) => listing.unread += 1,
+            }
         }
         listing.entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(listing)
     }
 
-    /// Whether `name` is in the directory `real` (resolved already) as a
-    /// command, an entry of its own (never followed): its link's target, if
-    /// it's a link. One that is, or leads to, a hidden path is Hidden.
-    pub(super) fn entry(&self, real: &str, name: &str) -> Result<Option<Entry>, Unread> {
+    /// Whether `name` is a command in the directory `dir`, as PATH would
+    /// run it: the file it leads to, if it's a link. One that is, or leads
+    /// to, a hidden path is Hidden. None where nothing there would run.
+    pub(super) fn entry(&self, dir: &str, name: &str) -> Result<Option<Entry>, Unread> {
+        let g = self.guard()?;
+        let real = self.resolve_with(&g, dir)?.real;
         let full = format!("{}/{name}", real.trim_end_matches('/'));
-        if self.hidden(&full)? {
+        if g.hidden_any(&full) {
             return Err(Unread::Hidden);
         }
-        let meta = match fs::symlink_metadata(self.path(&full)) {
-            Ok(m) => m,
-            Err(e) if Unread::of(&e) == Unread::Missing => return Ok(None),
-            Err(e) => return Err(Unread::of(&e)),
-        };
-        let link = if meta.file_type().is_symlink() {
-            let target = fs::read_link(self.path(&full)).map_err(|e| Unread::of(&e))?;
-            let target = target.to_string_lossy().into_owned();
-            if self.hidden(&target)? {
-                return Err(Unread::Hidden);
-            }
-            Some(target)
-        } else if meta.is_dir() || meta.permissions().mode() & 0o111 == 0 {
-            // Not a command PATH would run.
+        let Some(file) = self.command(&g, &full)? else {
             return Ok(None);
-        } else {
-            None
         };
         Ok(Some(Entry {
             name: name.to_owned(),
-            link,
+            link: (file != full).then_some(file),
         }))
     }
 
-    /// A small regular file's text: at `path` resolved, opened without
-    /// following a link, and no more than `max` bytes.
+    /// A small regular file's text: at `path` resolved, opened relative to
+    /// the directory that was checked, without following a link, and no
+    /// more than `max` bytes.
     pub(super) fn read_small(&self, path: &str, max: u64) -> Result<String, Unread> {
-        let real = self.resolve(path)?;
-        let flags = rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC
-            | rustix::fs::OFlags::NONBLOCK;
-        let fd = rustix::fs::open(self.path(&real), flags, rustix::fs::Mode::empty())
-            .map_err(|e| Unread::of(&std::io::Error::from(e)))?;
+        let g = self.guard()?;
+        let r = self.resolve_with(&g, path)?;
+        let Some(leaf) = &r.leaf else {
+            return Err(Unread::Other(format!("{path} isn't a regular file")));
+        };
+        let fd = rustix::fs::openat(
+            &r.dir,
+            leaf.as_str(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(Unread::errno)?;
         let file = fs::File::from(fd);
         let meta = file.metadata().map_err(|e| Unread::of(&e))?;
         if !meta.is_file() {
@@ -253,8 +390,4 @@ impl Machine<'_> {
             .map_err(|e| Unread::of(&e))?;
         Ok(text)
     }
-}
-
-fn parts(path: &str) -> Vec<String> {
-    path.split('/').map(str::to_owned).collect()
 }

@@ -601,6 +601,66 @@ mod tests {
         }
     }
     #[test]
+    fn github_errors_are_scrubbed_whole_before_the_cut_on_both_transports() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = fixture(dir.path());
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let key = format!("-----BEGIN RSA {} KEY-----", "PRIVATE");
+        let end = format!("-----END RSA {} KEY-----", "PRIVATE");
+        // Each credential straddles the 500-character cut.
+        let said = [
+            (token.clone(), format!("{}{token} after", "x".repeat(490))),
+            (
+                "hunter2hunter2".to_string(),
+                format!("{}https://ci:hunter2hunter2@example.com/x", "y".repeat(480)),
+            ),
+            (
+                "MIIEvQIBADANBgkqhkiG".to_string(),
+                format!(
+                    "{}{key}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n{end}",
+                    "z".repeat(480)
+                ),
+            ),
+        ];
+        let id = format!(
+            "probe-cut-{}",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+        for (n, (secret, text)) in said.iter().enumerate() {
+            let failing = serde_json::json!({"errors":[{"message":text}]});
+            cfg.probe.as_mut().unwrap().tools.gh = Some(gh(dir.path(), &failing));
+            let words: Vec<String> = ["issue", "sam/box", "210"].map(String::from).to_vec();
+            // The host socket.
+            let socket_id = format!("{id}-s{n}");
+            let job = Job::new(&cfg, &socket_id);
+            let _bridge = Bridge::start(&cfg, &job, "1", None).unwrap();
+            let err = exchange(&socket(&cfg, &job, "1"), &words).unwrap_err();
+            assert!(
+                !err.contains(&secret[..12]) && !err.contains("hunter2"),
+                "{err}"
+            );
+            // The VM mailbox.
+            let mailbox_id = format!("{id}-m{n}");
+            let job = Job::new(&cfg, &mailbox_id);
+            let executable = dir.path().join("agent");
+            burrow_test::executable(
+                &executable,
+                "#!/bin/sh\n[ \"$1\" = sh ] || exit 1\nshift 2\nexec \"$@\"\n",
+            );
+            let path = PathBuf::from(guest::path(&job, "1"));
+            let bridge = Bridge::start_with(&cfg, &job, "1", Some("vm"), executable).unwrap();
+            let err = guest_exchange(&path, &words).unwrap_err();
+            assert!(
+                !err.contains(&secret[..12]) && !err.contains("hunter2"),
+                "{err}"
+            );
+            drop(bridge);
+            for extension in ["probe", "answer", "probe-lock"] {
+                let _ = fs::remove_file(path.with_extension(extension));
+            }
+        }
+    }
+    #[test]
     fn vm_mailbox_returns_host_deployed_result_without_config_or_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = fixture(dir.path());
