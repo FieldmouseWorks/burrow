@@ -39,11 +39,18 @@ with (root / 'pids').open('a') as f:
 phase = os.environ['CLONE_PHASE']
 if sys.argv[1] == 'repo':
     repo, path = sys.argv[3:5]
-    if phase == 'success':
+    if phase in ('success', 'success-daemon'):
+        if phase == 'success-daemon':
+            subprocess.Popen([sys.executable, __file__, 'daemon', repo, path], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            while not (root / 'ready').exists():
+                time.sleep(.005)
         subprocess.run(['git', 'init', '-q', path], check=True)
         subprocess.run(['git', '-C', path, 'remote', 'add', 'origin', 'https://github.com/' + repo], check=True)
         pathlib.Path(path, 'completed').write_text('ready')
         sys.exit(0)
+    if phase == 'gh-fails':
+        sys.exit(1)
     child = subprocess.Popen([sys.executable, __file__, 'git', repo, path])
     if phase == 'failed-parent':
         while not (root / 'ready').exists():
@@ -52,9 +59,16 @@ if sys.argv[1] == 'repo':
 elif sys.argv[1] == 'git':
     repo, path = sys.argv[2:4]
     child = subprocess.Popen([sys.executable, __file__, 'transport', repo, path])
+elif sys.argv[1] == 'daemon':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    (root / 'ready').touch()
+    time.sleep(60)
+    sys.exit(0)
 else:
     repo, path = sys.argv[2:4]
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if phase == 'detached':
+        os.setsid()
     if phase != 'before-directory':
         subprocess.run(['git', 'init', '-q', path], check=True)
         subprocess.run(['git', '-C', path, 'remote', 'add', 'origin', 'https://github.com/' + repo], check=True)
@@ -96,8 +110,8 @@ print('job-1')
         for name in ('pids', 'ready', 'jobs', 'release'):
             (root / name).unlink(missing_ok=True)
 
-    def no_children():
-        assert len(pids()) >= 3, pids()
+    def no_children(least=3):
+        assert len(pids()) >= least, pids()
         # Absence, rather than merely a zombie state, proves reaping too.
         assert not [pid for pid in pids() if Path(f'/proc/{pid}').exists()], pids()
 
@@ -114,8 +128,15 @@ print('job-1')
                         final = Path(C.destination(repo))
                         if empty:
                             final.mkdir()
-                        with patch.dict(os.environ, CLONE_PHASE=phase), C.pass_deadline(.5):
-                            assert C.job(repo, 'task', clone=True, role=role) is None, (role, phase)
+                        with patch.dict(os.environ, CLONE_PHASE=phase), C.pass_deadline(1.5):
+                            # The deadline stays a temporary failure end to end, even
+                            # when gh exits while its children keep the pipes.
+                            try:
+                                C.job(repo, 'task', clone=True, role=role)
+                            except C.Unavailable:
+                                pass
+                            else:
+                                raise AssertionError((role, phase))
                         assert not (root / 'jobs').exists(), (role, phase)
                         assert C.project_dir(repo) is None, (role, phase)
                         assert C.job(repo, 'task', role=role) is None
@@ -185,13 +206,53 @@ print('job-1')
             assert (final / 'keep').read_text() == 'local data'
             assert not (final / 'completed').exists()
 
-            # An exhausted pass starts no clone and leaves an empty folder.
+            # gh itself failing is the repository's failure, not the pass's.
+            reset()
+            repo = 'sam/gh-fails'
+            with patch.dict(os.environ, CLONE_PHASE='gh-fails'), C.pass_deadline(2):
+                assert C.job(repo, 'task', clone=True, role='baseline') is None
+            assert C.project_dir(repo) is None and not list(src.glob('.autoland-clone-*'))
+
+            # A descendant in a session of its own, ignoring TERM, is killed and
+            # reaped within the cleanup bound, whether gh timed out or succeeded.
+            for role in ('baseline', 'flaky'):
+                reset()
+                repo = f'sam/detached-{role}'
+                final = Path(C.destination(repo))
+                started = time.monotonic()
+                with patch.dict(os.environ, CLONE_PHASE='detached'), C.pass_deadline(1.5):
+                    try:
+                        C.job(repo, 'task', clone=True, role=role)
+                    except C.Unavailable:
+                        pass
+                    else:
+                        raise AssertionError('detached timeout')
+                assert time.monotonic() - started < 3, time.monotonic() - started
+                no_children()
+                assert not final.exists() and not list(src.glob('.autoland-clone-*')), list(src.iterdir())
+                reset()
+                repo = f'sam/daemon-{role}'
+                final = Path(C.destination(repo))
+                started = time.monotonic()
+                with patch.dict(os.environ, CLONE_PHASE='success-daemon'), C.pass_deadline(3):
+                    assert C.job(repo, 'task', clone=True, role=role) == 'job-1'
+                assert time.monotonic() - started < 3, time.monotonic() - started
+                no_children(2)
+                assert (final / 'completed').exists()
+
+            # An exhausted pass starts no clone, leaves an empty folder, and is
+            # a temporary failure, not the repo's.
             reset()
             repo = 'sam/expired'
             final = Path(C.destination(repo))
             final.mkdir()
             with C.pass_deadline(0):
-                assert C.checkout(repo) is None
+                try:
+                    C.checkout(repo)
+                except C.Unavailable:
+                    pass
+                else:
+                    raise AssertionError('expired pass')
             assert not (root / 'pids').exists() and not list(final.iterdir())
         finally:
             # Clean up real descendants if this test is run on buggy code.

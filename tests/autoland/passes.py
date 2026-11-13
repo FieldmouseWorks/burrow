@@ -224,6 +224,42 @@ assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open o
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
 
+# A baseline job whose clone met the pass's deadline is the pass's shortfall,
+# not the repo's failure: no day's wait in baseline-failed.json, no known.json
+# entry, and the repo is booked to be looked at again.
+fresh_pr_state()
+C.NOW = T
+C.save("known.json", [])
+C.save("baseline-failed.json", {})
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs)
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
+S.R.restart = lambda r, known, failed: None
+S.R.settle_repo = lambda r, known: r["repo"] not in known
+S.R.publish = lambda *a: None
+S.open_prs = lambda owner, name: (info, [mkpr()])
+tried = []
+
+
+def deadline_job(repo, task, clone=False, *, role):
+    tried.append(role)
+    raise C.Unavailable(f"{repo}: its clone reached the pass deadline")
+
+
+C.job, job = deadline_job, C.job
+S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
+sys.argv = ["steward", "kick", "sam/r"]
+try:
+    S.main()
+finally:
+    S.CFG["baselineJobs"] = False
+    del S.CFG["baselineTask"]
+    C.job = job
+    sys.argv = argv
+    S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
+assert tried == ["baseline"], tried
+assert C.load("baseline-failed.json", None) == {} and C.load("known.json", None) == []
+print("baseline clone deadline: ok")
+
 # Each repo whose PRs a pass read is swept of what its reviewers left, with
 # the snapshots of its open PRs' heads, once its look has them all: sam/q's,
 # which failed before then (its branch watch), isn't, as the sweep would

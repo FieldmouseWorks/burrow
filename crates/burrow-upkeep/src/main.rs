@@ -44,7 +44,8 @@ const USAGE: &str = "usage:
   burrow-upkeep CONFIG checkout OWNER/REPO PATH UNTIL
       clone privately as the machine user, kill and reap clone descendants
       at UNTIL (CLOCK_MONOTONIC seconds), and publish PATH only on success;
-      exit status 75 leaves the checkout retryable
+      exit status 75 is the deadline: nothing was published, ask again
+      next pass; any other failure exits 1
   burrow-upkeep CONFIG token OWNER
       a token of the App's installation on OWNER, minted with its key
       (systemd's credential app-key), and when it expires, as JSON on
@@ -222,7 +223,10 @@ fn run(args: &[String]) -> Result<(), Stop> {
             .ok()
             .filter(|n| n.is_finite() && *n > 0.0)
             .ok_or_else(|| Stop::Usage("checkout needs a monotonic deadline".into()))?;
-        return burrow_upkeep::checkout::clone(repo, Path::new(path), until).map_err(Stop::Later);
+        return burrow_upkeep::checkout::clone(repo, Path::new(path), until).map_err(|e| match e {
+            burrow_upkeep::checkout::Stop::Later(why) => Stop::Later(why),
+            burrow_upkeep::checkout::Stop::Failed(why) => Stop::Failed(why),
+        });
     }
     if let [word, owner] = words
         && word == "token"
