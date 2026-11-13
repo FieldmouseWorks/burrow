@@ -45,6 +45,7 @@ fn command(args: &[OsString]) -> Result<u8, String> {
         }
         Some("check") if args.len() == 1 => {
             let cfg = Config::load()?;
+            cfg.check()?;
             println!(
                 "burrow-review: Codex, {} at a time, {} minutes a look; queue {}",
                 cfg.reviewers.codex.parallel,

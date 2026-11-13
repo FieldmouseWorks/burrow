@@ -9,7 +9,8 @@
 //! base in (carry.rs), and what they leave, swept once nothing
 //! needs it (sweep.rs); and for its Claude jobs that settle a PR (claims.rs),
 //! their answers, posted only once the PR's head is their push (answer.rs);
-//! and a PR's commits, read whole for who made them (commits.rs). A job's
+//! and a PR's commits, read whole for who made them (commits.rs); and its
+//! CI verdict and cancelled workflow recovery (ci.rs, ci_runs.rs). A job's
 //! first clone is supervised and published by checkout.rs. A
 //! pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
@@ -26,6 +27,9 @@ pub mod branches;
 pub mod brief;
 pub mod carry;
 pub mod checkout;
+pub mod ci;
+mod ci_runs;
+mod ci_unstarted;
 pub mod claims;
 pub mod commits;
 pub mod config;

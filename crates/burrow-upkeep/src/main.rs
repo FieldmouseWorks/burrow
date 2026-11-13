@@ -8,7 +8,8 @@
 //! `fetch`, which fetches refs into the steward's mirror of a
 //! repo; `carry`, which works out from it which of a PR's earlier heads'
 //! looks cover its head; `commits`, which reads a PR's commits whole for
-//! who made them; and `sweep`, which deletes what the reviewers leave of its closed
+//! who made them; `ci`, which owns the CI verdict and cancelled workflow
+//! recovery; and `sweep`, which deletes what the reviewers leave of its closed
 //! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
@@ -23,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::carry;
+use burrow_upkeep::ci;
 use burrow_upkeep::claims;
 use burrow_upkeep::commits::{self, Read as Commits};
 use burrow_upkeep::config::Config;
@@ -112,6 +114,11 @@ const USAGE: &str = "usage:
       committers' that aren't an edit: whether a Codex job wrote one and
       whether anyone but the bots made one, or why GitHub won't list them
       all (short), or why they couldn't be read this time, as JSON on stdout
+  burrow-upkeep CONFIG ci OWNER/REPO --now SECONDS [--dry]
+      the head's CI verdict and cancelled workflow recovery; a JSON object
+      on stdin supplies the PR's GraphQL nodes, proof names, moved paths,
+      and whether to read remotely and recover: the verdict (state, names,
+      docs lane) and rate limit as JSON; exit 75 on unanswered GitHub calls
   burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
       what the reviewers leave of the repo's PRs, deleted once nothing needs
       it, a JSON list on stdin giving the snapshots of its open PRs' heads:
@@ -250,7 +257,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
     }
     if ![
         "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "carry",
-        "sweep", "commits",
+        "sweep", "commits", "ci",
     ]
     .contains(&word)
     {
@@ -338,6 +345,11 @@ fn run(args: &[String]) -> Result<(), Stop> {
         )?),
         _ => None,
     };
+    let ci = if word == "ci" {
+        Some(stdin::<ci::Ask>("the PR's CI, as a JSON object on stdin")?)
+    } else {
+        None
+    };
     let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
     let mut proj = Proj {
         bin: cfg.proj.clone(),
@@ -354,6 +366,19 @@ fn run(args: &[String]) -> Result<(), Stop> {
         out: Out::default(),
     };
     let out = match (word, open) {
+        ("ci", _) => {
+            let ask = ci
+                .as_ref()
+                .ok_or_else(|| Stop::Usage("no CI to classify".into()))?;
+            let verdict = ci::check(&mut p, ask).map_err(|e| {
+                if e.unanswered {
+                    Stop::Later(e.why)
+                } else {
+                    Stop::Failed(e.why)
+                }
+            })?;
+            json!({"ci": verdict, "limited": p.out.limited})
+        }
         ("settle", _) => {
             let repo = Repo {
                 private: f.private,

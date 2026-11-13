@@ -111,15 +111,15 @@ impl Pass<'_> {
             let mark = d.join("drained");
             if d.join("job").exists() {
                 going += 1;
+            } else if !self.still_handed(&mark, &label) {
+                let _ = fs::remove_dir_all(&d);
             } else if let Some(m) = mtime(&mark).filter(|m| now() - m < 2 * RETRY) {
                 going += 1;
                 if let Some(repo) = self.wake_repo() {
                     self.book(&repo, m + 2 * RETRY);
                 }
-            } else if self.still_handed(&mark, &label) {
-                going += 1;
             } else {
-                let _ = fs::remove_dir_all(&d);
+                going += 1;
             }
         }
         let ranked = self.next_ready(&t);
@@ -272,6 +272,21 @@ impl Pass<'_> {
             self.miss(repo);
             return true;
         };
+        match super::enrollment::parked(self.inbox, &issue) {
+            Ok(Some(_)) => {
+                if let Err(error) = super::enrollment::mark_parked(self.inbox, repo, n) {
+                    eprintln!("proj-inbox: {error}");
+                    self.retry(repo);
+                    return true;
+                }
+                return false;
+            }
+            Err(_) => {
+                self.miss(repo);
+                return true;
+            }
+            Ok(None) => (),
+        }
         issue["state"] == "open"
             && issue["labels"]
                 .as_array()
@@ -290,11 +305,23 @@ impl Pass<'_> {
     }
 
     /// A repo's ready issues, from its pass's list of every open one, kept
-    /// for the drain: what [`Pass::pick_ready`] reads of each.
+    /// for the drain: what [`Pass::pick_ready`] reads of each. A pass that
+    /// looked at some issues alone changes only theirs.
     pub(super) fn note_ready(&self, repo: &str, all: &[Value]) -> Result<(), Fail> {
         let dir = self.inbox.state.join(READY_LISTS);
         let f = dir.join(key(repo));
-        let ready: Vec<Value> = all
+        let others: Vec<Value> = if self.scope.is_some() {
+            fs::read(&f)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Vec<Value>>(&b).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|i| !self.in_scope(&raw(&i["number"])))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let fresh = all
             .iter()
             .filter(|i| i.get("pull_request").is_none())
             .filter(|i| {
@@ -310,8 +337,8 @@ impl Pass<'_> {
                     "labels": i["labels"],
                     "repository_url": i["repository_url"],
                 })
-            })
-            .collect();
+            });
+        let ready: Vec<Value> = others.into_iter().chain(fresh).collect();
         if ready.is_empty() {
             let _ = fs::remove_file(&f);
             return Ok(());
@@ -375,7 +402,10 @@ impl Pass<'_> {
                     .keys()
                     .find(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")))?
                     .clone();
-                if !self.eligible(&repo, i) || self.cfg.paused(&repo) {
+                if !self.eligible(&repo, i)
+                    || self.cfg.paused(&repo)
+                    || super::enrollment::automatic_parked(self.inbox, &repo, i)
+                {
                     return None;
                 }
                 let labels: Vec<&str> = i["labels"]

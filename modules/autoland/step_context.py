@@ -37,6 +37,8 @@ STRIKES = {
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
+# What a status run takes from the live passes' state of a PR (Context).
+LIVE_FACTS = ("strikes", "proofOutputs", "mergedOutputs")
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 CHECKS_START = 5 * 60  # how long GitHub gets to show a new head's first check
 # What the steward's own proofs are doing while they're at work.
@@ -83,6 +85,17 @@ class Context:
         if self.st.get("head") != self.head:
             stopping.moved(self.repo, self.pr, self.st)  # its jobs on the last head, to be stopped below
             self.st.update(head=self.head, seen=C.NOW, handed=None, strikes={}, rv={})
+        if DRY:
+            # A status run keeps state of its own, but takes what the live
+            # passes found on this head from theirs: their failures in a row,
+            # not the status runs' own, and what its proof builds, which a
+            # status run never works out (proofs.outputs).
+            live = load(self.key, {}, live=True)
+            for k in LIVE_FACTS:
+                if live.get("head") == self.head and k in live:
+                    self.st[k] = live[k]
+                else:
+                    self.st.pop(k, None)
         self.st.setdefault("rv", {})
         self.labels = {x["name"] for x in self.pr["labels"]["nodes"]}
         self.merging = MERGE_STEPS.get(self.pr.get("mergeStateStatus"), "refused")

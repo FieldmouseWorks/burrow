@@ -27,11 +27,18 @@
   assert excludesMachinery inbox.config.burrow.proj.inbox.authors;
   assert !(excludesMachinery injected);
   assert builtins.elem "pull_request" inbox.config.burrow.events.handlers.proj-inbox.events;
+  # An issue's event tells the inbox's pass that issue alone, in burrow-events'
+  # runtime directory, under the unit's instance.
+  assert inbox.config.burrow.events.handlers.proj-inbox.issueNumbers;
+  assert inbox.config.systemd.services."proj-inbox@".environment.BURROW_EVENTS_ISSUES == "/run/burrow-events/proj-inbox/%i";
+  assert inbox.config.systemd.services.burrow-events.serviceConfig.RuntimeDirectory == "burrow-events";
   pkgs.runCommand "proj-config-check" { } ''
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
     got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
     [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+    # check-config also holds the sandbox controller proj pauses and
+    # releases VM jobs with to a program it can run (#711).
     ${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj check-config
     touch $out
   ''

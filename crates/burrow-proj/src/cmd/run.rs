@@ -537,6 +537,63 @@ fn resume(
     cutoff: Option<&str>,
     answered: bool,
 ) -> Result<(), Fail> {
+    let sharing = resume_one(cfg, id, msg, first, cutoff, answered)?;
+    // The jobs that were waiting on this answer's notice, each given it once,
+    // after the first job's lock is let go: each is checked and started under
+    // its own, and none passes the answer on again.
+    for (other, question) in sharing.jobs {
+        let note = format!(
+            "The owner answered a question you share with job {id}. Their answer:\n\n{msg}"
+        );
+        if let Err(e) = deliver(cfg, &other, &sharing.key, &question, &note, first) {
+            // Still waiting, it leads its own notice next.
+            eprintln!(
+                "proj: couldn't pass the answer on to {other}: {}",
+                e.say.unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}
+
+struct Sharing {
+    key: String,
+    jobs: Vec<(String, String)>,
+}
+
+fn deliver(
+    cfg: &Config,
+    id: &str,
+    key: &str,
+    question: &str,
+    msg: &str,
+    first: bool,
+) -> Result<(), Fail> {
+    let job = Job::new(cfg, id);
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    crate::question::recover(&job).map_err(|e| Fail::new(1, e))?;
+    if crate::question::acceptance_pending(&job).map_err(|e| Fail::new(1, e))? {
+        return Ok(());
+    }
+    if !crate::ask::still_waiting(&job, key, question).map_err(|e| Fail::new(1, e))? {
+        return Ok(());
+    }
+    let st = job.state();
+    crate::planning::admit(&job).map_err(|e| Fail::new(1, e))?;
+    if st == "queued" || st == "running" {
+        return Err(Fail::new(1, format!("{id} is still {st}")));
+    }
+    crate::turn::start_answer(cfg, id, msg, first).map_err(|e| Fail::new(1, e))
+}
+
+fn resume_one(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    first: bool,
+    cutoff: Option<&str>,
+    answered: bool,
+) -> Result<Sharing, Fail> {
     let job = Job::new(cfg, id);
     let no = if cutoff.is_some() { 3 } else { 1 };
     if !filled(&job.path("session")) {
@@ -548,6 +605,7 @@ fn resume(
     // A job's turns start one at a time, and a look by proj-watch writes
     // back a wait only under the same lock.
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    crate::question::recover(&job).map_err(|e| Fail::new(no, e))?;
     let st = job.state();
     crate::planning::admit(&job).map_err(|e| Fail::new(no, e))?;
     if st == "queued" || st == "running" {
@@ -558,12 +616,25 @@ fn resume(
     {
         return Err(Fail::new(3, format!("{id}'s turn {n} wasn't cut off")));
     }
+    // A registry that can't name the cohort refuses the reply: resuming the
+    // leader alone would leave the others waiting on an answer already given.
+    let sharing = Sharing {
+        key: crate::ask::key_of(&job)
+            .map_err(|e| Fail::new(no, e))?
+            .unwrap_or_default(),
+        jobs: if answered {
+            crate::ask::cohort(&job).map_err(|e| Fail::new(no, e))?
+        } else {
+            vec![]
+        },
+    };
     if answered {
         crate::turn::start_answer(cfg, id, msg, first)
     } else {
         start(cfg, id, msg, first)
     }
-    .map_err(|e| Fail::new(1, e))
+    .map_err(|e| Fail::new(1, e))?;
+    Ok(sharing)
 }
 
 /// A new job's dir, named for its project and when it started, unique even

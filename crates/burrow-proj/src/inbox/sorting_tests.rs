@@ -153,6 +153,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
             unreached: Vec::new(),
             looked: Vec::new(),
             observe: false,
+            scope: None,
         }
     }
 
@@ -201,6 +202,14 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
     /// The inbox's record of issue 7's job, nothing of it answered yet,
     /// handed the issue as [`issue`] has it and no comments.
     pub(super) fn record(&self, id: &str) -> PathBuf {
+        // An absent open-list entry can be a closed issue that retains its
+        // engine label. Live enrollment checks need an actual label snapshot.
+        let remote = self.path("repos_sam_box_issues_7");
+        if !remote.exists() {
+            let mut closed = issue(7, "sam", &["claude"]);
+            closed["state"] = json!("closed");
+            fs::write(remote, closed.to_string()).unwrap();
+        }
         let d = self.cfg.inbox.as_ref().unwrap().state.join("sam_box-7");
         fs::create_dir_all(&d).unwrap();
         for (f, v) in [
@@ -771,91 +780,6 @@ pub(super) fn on_github(b: &Box, i: &Value) {
     .unwrap();
 }
 
-// A job, a sorting job's included, whose issue an agent may no longer read
-// is stopped even while its turn waits for a slot, before it reads any.
-#[test]
-fn a_queued_job_is_stopped_once_its_issue_is_barred() {
-    for barred in [
-        issue(7, "sam", &["claude", "outside text"]),
-        issue(7, "former", &["claude"]),
-    ] {
-        let b = Box::new();
-        b.job("j1", "done", "");
-        fs::remove_file(b.cfg.jobs.join("j1/1.outcome")).unwrap();
-        fs::write(b.path("active"), "").unwrap();
-        let d = b.record("j1");
-        b.pass()
-            .jobs("sam/box", "box", std::slice::from_ref(&barred))
-            .unwrap();
-        assert!(!d.exists(), "{barred}");
-        assert!(b.cfg.jobs.join("j1/1.stopped").exists(), "{barred}");
-
-        let b = Box::new();
-        let d = sorting(&b, "");
-        fs::remove_file(b.cfg.jobs.join("s1/1.outcome")).unwrap();
-        fs::write(b.path("active"), "").unwrap();
-        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-        let mut unlabelled = barred.clone();
-        unlabelled["labels"] = json!(
-            barred["labels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|l| l["name"] != "claude")
-                .collect::<Vec<_>>()
-        );
-        b.pass()
-            .verdicts("sam/box", &t, std::slice::from_ref(&unlabelled))
-            .unwrap();
-        assert!(!d.exists(), "{unlabelled}");
-        assert!(b.cfg.jobs.join("s1/1.stopped").exists(), "{unlabelled}");
-    }
-}
-
-// Barred while its label comes off or it closes, so the pass's list no
-// longer has it: GitHub is asked, and a job still to finish is stopped. One
-// closed that may still be read finishes, as before.
-#[test]
-fn a_barred_issue_off_the_list_stops_its_job() {
-    let seven = |labels: &[&str]| issue(7, "sam", labels);
-    for (now, stopped) in [
-        (seven(&["outside text"]), true),
-        (issue(7, "former", &[]), true),
-        (seven(&[]), false),
-    ] {
-        let mut now = now;
-        now["repository_url"] = json!("https://api.github.com/repos/sam/box");
-        let b = Box::new();
-        b.job("j1", "done", "");
-        fs::remove_file(b.cfg.jobs.join("j1/1.outcome")).unwrap();
-        fs::write(b.path("active"), "").unwrap();
-        on_github(&b, &now);
-        let d = b.record("j1");
-        b.pass().jobs("sam/box", "box", &[]).unwrap();
-        assert_eq!(!d.exists(), stopped, "{now}");
-        assert_eq!(b.cfg.jobs.join("j1/1.stopped").exists(), stopped, "{now}");
-
-        let b = Box::new();
-        let d = sorting(&b, "");
-        fs::remove_file(b.cfg.jobs.join("s1/1.outcome")).unwrap();
-        fs::write(b.path("active"), "").unwrap();
-        on_github(&b, &now);
-        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
-        b.pass().verdicts("sam/box", &t, &[]).unwrap();
-        assert_eq!(!d.exists(), stopped, "{now}");
-    }
-    // GitHub doesn't say: kept, and asked again.
-    let b = Box::new();
-    b.job("j1", "done", "");
-    fs::remove_file(b.cfg.jobs.join("j1/1.outcome")).unwrap();
-    fs::write(b.path("active"), "").unwrap();
-    let d = b.record("j1");
-    fs::write(b.path("fail"), "repos/sam/box/issues/7\n").unwrap();
-    let mut p = b.pass();
-    p.jobs("sam/box", "box", &[]).unwrap();
-    assert!(d.exists() && p.wake.contains_key("sam/box"));
-}
-
 // An already finished sorting verdict must not change a running lane's work.
 #[test]
 fn a_handed_issue_url_blocks_triage_and_its_completed_verdict() {
@@ -986,3 +910,6 @@ fn the_machinery_apps_issues_are_sorted_and_ranked() {
 
 #[path = "sorting_slot_tests.rs"]
 mod slot_tests;
+
+#[path = "sorting_authority_tests.rs"]
+mod authority_tests;

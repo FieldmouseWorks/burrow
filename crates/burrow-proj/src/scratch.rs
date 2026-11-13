@@ -33,7 +33,8 @@ pub fn over(job: &Job) -> bool {
     if crate::policy::parked(job) || crate::policy::path(job, "restoring").exists() {
         return false;
     }
-    if crate::ask::load(job).is_some() {
+    // A question whose authority can't be read is still a question.
+    if !matches!(crate::ask::load(job), Ok(None)) {
         return false;
     }
     let Some(n) = job.turns().filter(|n| !n.is_empty()) else {

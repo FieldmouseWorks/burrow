@@ -18,6 +18,7 @@ members = [
     "burrow-firmware",
     "burrow-flake-check",
     "burrow-github",
+    "burrow-guidance",
     "burrow-guard",
     "burrow-health",
     "burrow-heartbeat",

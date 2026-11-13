@@ -2,7 +2,7 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE]`, `oom [SINCE]`): the
+# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
@@ -103,11 +103,26 @@ in
           # Updates dispatches a full pass or one repository's pass.
           "renovate.service"
           "renovate@*.service"
+          "renovate-sweep.service"
+          "renovate-sweep@*.service"
           "proj-*.service"
+          # The rest of burrow's own (checks/probe-journals.nix holds every
+          # unit its modules define to this list), but gh-token's.
+          "house-sync.service"
+          "house-sync@*.service"
+          "conaryd.service"
+          "advisory-watch.service"
+          "firmware-*.service"
+          "agent-*.service"
+          "agents-*.service"
+          "prune-pre-snapshots.service"
+          "zfs-delegate-*.service"
+          "rust-cache-*.service"
+          "hardware-watchdog-link.service"
           "nix-daemon.service"
           "systemd-oomd.service"
         ];
-        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "renovate.service" "renovate@*.service" "proj-*.service" "nix-daemon.service" "systemd-oomd.service" ]'';
+        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "renovate.service" "renovate@*.service" "renovate-sweep.service" "renovate-sweep@*.service" "proj-*.service" "house-sync.service" "house-sync@*.service" "conaryd.service" "advisory-watch.service" "firmware-*.service" "agent-*.service" "agents-*.service" "prune-pre-snapshots.service" "zfs-delegate-*.service" "rust-cache-*.service" "hardware-watchdog-link.service" "nix-daemon.service" "systemd-oomd.service" ]'';
         description = ''
           The system units whose journals a probe may read (globs: `*`, `?`,
           `[...]`). Keep off any whose log can hold a secret: the scrubber only
@@ -116,7 +131,7 @@ in
       };
       userUnits = mkOption {
         type = types.listOf types.str;
-        default = [ "claude-rc@*.service" "claude-rc-*.service" "proj-*.service" "autoland-*.service" ];
+        default = [ "claude-rc@*.service" "claude-rc-*.service" "proj-*.service" "autoland-*.service" "rustup-update.service" ];
         description = "The same, for `burrow.user`'s own units (`journalctl --user-unit`).";
       };
     };
@@ -193,7 +208,7 @@ in
       Read-only questions about this machine need no Claude: open an issue in
       ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
       (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
-      `usage [SINCE]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
+      `usage [SINCE] [--totals]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.
     '';
   };

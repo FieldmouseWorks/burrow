@@ -1,6 +1,6 @@
 //! One handler's line: the passes due, and when.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -49,10 +49,23 @@ impl std::fmt::Display for Pass {
     }
 }
 
+/// What a pass looks at: everything it covers, or only the issues its events
+/// were about (a handler told them, `issueDir`, whose pass had nothing but
+/// issue events booked).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    Issues(BTreeSet<u64>),
+}
+
 #[derive(Default)]
 struct State {
-    /// When each pass is due.
+    /// When each pass is due to look at everything.
     due: HashMap<Pass, f64>,
+    /// When each pass is due to look at only some issues, and which: kept
+    /// apart from `due`, so a look at everything booked for later (a
+    /// wake-up) doesn't turn an issue's event into one now.
+    issues: HashMap<Pass, (f64, BTreeSet<u64>)>,
     /// When each pass last started.
     last: HashMap<Pass, f64>,
     /// Passes in a row that failed, by pass.
@@ -95,10 +108,22 @@ impl Line {
         *due = due.min(at);
     }
 
-    /// An event for this pass came in.
+    /// An event for this pass came in: it looks at everything.
     pub fn event(&self, pass: Pass, now: f64) {
         let mut s = self.lock();
         Self::book(&mut s, pass, now + DEBOUNCE);
+        s.news = true;
+        self.cond.notify_all();
+    }
+
+    /// An event about issue `n` came in for this pass: unless a look at
+    /// everything is due first, the pass looks at the burst's issues alone.
+    pub fn issue(&self, pass: Pass, n: u64, now: f64) {
+        let mut s = self.lock();
+        let at = now + DEBOUNCE;
+        let (due, ns) = s.issues.entry(pass).or_insert((at, BTreeSet::new()));
+        *due = due.min(at);
+        ns.insert(n);
         s.news = true;
         self.cond.notify_all();
     }
@@ -122,53 +147,65 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// The passes that start now, the full pass first, and how long until
-    /// the next one is due (None: nothing is).
-    pub fn take(&self, now: f64) -> (Vec<Pass>, Option<f64>) {
+    /// The passes that start now, the full pass first, each with what it
+    /// looks at, and how long until the next one is due (None: nothing is).
+    /// A pass due to look at everything sees to its issues' events as well.
+    pub fn take(&self, now: f64) -> (Vec<(Pass, Scope)>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;
         let gap = self.gap;
         let ready_at = |s: &State, pass: &Pass, at: f64| {
             at.max(s.last.get(pass).copied().unwrap_or(0.0) + gap)
         };
-        let mut ready: Vec<Pass> = s
-            .due
-            .iter()
-            .filter(|&(p, &at)| ready_at(&s, p, at) <= now)
-            .map(|(p, _)| p.clone())
+        let passes: BTreeSet<Pass> = s.due.keys().chain(s.issues.keys()).cloned().collect();
+        let mut ready: Vec<(Pass, Scope)> = passes
+            .into_iter()
+            .filter_map(|p| {
+                if s.due.get(&p).is_some_and(|&at| ready_at(&s, &p, at) <= now) {
+                    Some((p, Scope::All))
+                } else {
+                    let (at, ns) = s.issues.get(&p)?;
+                    (ready_at(&s, &p, *at) <= now).then(|| (p, Scope::Issues(ns.clone())))
+                }
+            })
             .collect();
-        ready.sort();
-        if ready.first() == Some(&Pass::Full) {
+        if ready.first().is_some_and(|(p, _)| *p == Pass::Full) {
             // It sees to every repo whose event has come in as well, GAP or
             // not.
             let seen: Vec<Pass> = s
                 .due
                 .iter()
+                .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
                 .filter(|&(p, &at)| *p != Pass::Full && at <= now)
                 .map(|(p, _)| p.clone())
                 .collect();
             for pass in seen {
                 s.due.remove(&pass);
+                s.issues.remove(&pass);
                 s.last.insert(pass, now);
             }
-            ready = vec![Pass::Full];
+            ready = vec![(Pass::Full, Scope::All)];
         }
-        for pass in &ready {
-            s.due.remove(pass);
+        for (pass, scope) in &ready {
+            if *scope == Scope::All {
+                s.due.remove(pass);
+            }
+            s.issues.remove(pass);
             s.last.insert(pass.clone(), now);
         }
         let next = s
             .due
             .iter()
+            .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
             .map(|(p, &at)| ready_at(&s, p, at))
             .fold(None, |m: Option<f64>, at| Some(m.map_or(at, |m| m.min(at))));
         (ready, next.map(|at| at - now))
     }
 
     /// A pass ended. One that failed (or never started) runs again a minute
-    /// later, then two, up to an hour: no other event may come for it, and
-    /// once one goes through its unit isn't failed any more. Returns when it
-    /// runs again.
+    /// later, then two, up to an hour, looking at everything: no other event
+    /// may come for it, and once one goes through its unit isn't failed any
+    /// more. Returns when it runs again.
     pub fn done(&self, pass: &Pass, ok: bool, now: f64) -> Option<f64> {
         let mut s = self.lock();
         if ok {
@@ -208,7 +245,14 @@ impl Line {
 
     #[cfg(test)]
     pub fn clear(&self) {
-        self.lock().due.clear();
+        let mut s = self.lock();
+        s.due.clear();
+        s.issues.clear();
+    }
+
+    #[cfg(test)]
+    pub fn issues(&self) -> HashMap<Pass, (f64, BTreeSet<u64>)> {
+        self.lock().issues.clone()
     }
 }
 
@@ -221,7 +265,20 @@ mod tests {
 
     use serde_json::{Map, Value, json};
 
-    use super::{DEBOUNCE, Line, Pass};
+    use super::{DEBOUNCE, Line, Pass, Scope};
+
+    /// The passes that start now, every one looking at everything.
+    fn took(line: &Line, now: f64) -> (Vec<Pass>, Option<f64>) {
+        let (ready, next) = line.take(now);
+        let passes = ready
+            .into_iter()
+            .map(|(p, scope)| {
+                assert_eq!(scope, Scope::All, "{p}");
+                p
+            })
+            .collect();
+        (passes, next)
+    }
 
     fn booked(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
@@ -242,19 +299,19 @@ mod tests {
         let line = Line::default();
         line.event(r("sam/r"), 100.0);
         line.event(r("sam/r"), 102.0);
-        assert_eq!(line.take(104.0), (vec![], Some(1.0)));
-        assert_eq!(line.take(105.0), (vec![r("sam/r")], None));
-        assert_eq!(line.take(106.0), (vec![], None));
+        assert_eq!(took(&line, 104.0), (vec![], Some(1.0)));
+        assert_eq!(took(&line, 105.0), (vec![r("sam/r")], None));
+        assert_eq!(took(&line, 106.0), (vec![], None));
         line.event(r("sam/r"), 110.0);
-        assert_eq!(line.take(115.0), (vec![], Some(10.0)));
-        assert_eq!(line.take(125.0).0, vec![r("sam/r")]);
+        assert_eq!(took(&line, 115.0), (vec![], Some(10.0)));
+        assert_eq!(took(&line, 125.0).0, vec![r("sam/r")]);
         line.wakes(&booked(
             json!({"sam/r": 120, "sam/other": 200, "--bad": 130, "sam/q": "soon", "sam/t": true}),
         ));
         assert_eq!(line.due(), due(&[(r("sam/other"), 200.0)]));
         line.wakes(&booked(json!({"sam/r": 160})));
-        assert_eq!(line.take(159.0), (vec![], Some(1.0)));
-        assert_eq!(line.take(160.0).0, vec![r("sam/r")]);
+        assert_eq!(took(&line, 159.0), (vec![], Some(1.0)));
+        assert_eq!(took(&line, 160.0).0, vec![r("sam/r")]);
     }
 
     // A handler's own gap holds its passes apart, wake-ups and all.
@@ -262,12 +319,12 @@ mod tests {
     fn own_gap() {
         let line = Line::new(120.0);
         line.event(Pass::Full, 1000.0);
-        assert_eq!(line.take(1005.0).0, vec![Pass::Full]);
+        assert_eq!(took(&line, 1005.0).0, vec![Pass::Full]);
         line.event(Pass::Full, 1010.0);
-        assert_eq!(line.take(1025.0), (vec![], Some(100.0)));
+        assert_eq!(took(&line, 1025.0), (vec![], Some(100.0)));
         line.wakes(&booked(json!({"": 1050})));
-        assert_eq!(line.take(1124.0), (vec![], Some(1.0)));
-        assert_eq!(line.take(1125.0).0, vec![Pass::Full]);
+        assert_eq!(took(&line, 1124.0), (vec![], Some(1.0)));
+        assert_eq!(took(&line, 1125.0).0, vec![Pass::Full]);
     }
 
     // A full pass sees to every repo whose event has come in, GAP or not.
@@ -275,14 +332,14 @@ mod tests {
     fn full_pass_first() {
         let line = Line::default();
         line.event(r("sam/r"), 100.0);
-        line.take(105.0);
+        took(&line, 105.0);
         line.event(r("sam/r"), 106.0);
         line.event(r("sam/q"), 106.0);
         line.event(Pass::Full, 106.0 - DEBOUNCE);
         line.wakes(&booked(json!({"sam/s": 500})));
-        assert_eq!(line.take(111.0), (vec![Pass::Full], Some(389.0)));
+        assert_eq!(took(&line, 111.0), (vec![Pass::Full], Some(389.0)));
         assert_eq!(line.due(), due(&[(r("sam/s"), 500.0)]));
-        assert_eq!(line.take(120.0), (vec![], Some(380.0)));
+        assert_eq!(took(&line, 120.0), (vec![], Some(380.0)));
     }
 
     // GitHub's names are case-blind: two spellings are one repo's pass.
@@ -292,7 +349,7 @@ mod tests {
         line.event(r("Sam/R"), 100.0);
         line.event(r("sam/r"), 101.0);
         line.wakes(&booked(json!({"SAM/r": 103})));
-        assert_eq!(line.take(106.0), (vec![r("sam/r")], None));
+        assert_eq!(took(&line, 106.0), (vec![r("sam/r")], None));
     }
 
     // A pass can book its handler's full pass too ("": the steward's, after
@@ -302,7 +359,7 @@ mod tests {
         let line = Line::default();
         line.wakes(&booked(json!({"": 300})));
         assert_eq!(line.due(), due(&[(Pass::Full, 300.0)]));
-        assert_eq!(line.take(300.0).0, vec![Pass::Full]);
+        assert_eq!(took(&line, 300.0).0, vec![Pass::Full]);
     }
 
     // An event between a take that found nothing and the wait after it isn't
@@ -310,7 +367,7 @@ mod tests {
     #[test]
     fn no_lost_news() {
         let line = Arc::new(Line::default());
-        assert_eq!(line.take(0.0), (vec![], None));
+        assert_eq!(took(&line, 0.0), (vec![], None));
         line.event(r("sam/r"), 0.0);
         let waiting = {
             let line = line.clone();
@@ -327,7 +384,7 @@ mod tests {
     #[test]
     fn woken() {
         let line = Arc::new(Line::default());
-        line.take(0.0);
+        took(&line, 0.0);
         let waiting = {
             let line = line.clone();
             thread::spawn(move || line.wait(Some(60.0)))
@@ -356,5 +413,44 @@ mod tests {
         assert_eq!(line.done(&Pass::Full, true, 0.0), None);
         assert_eq!(line.done(&Pass::Full, false, 0.0), Some(60.0));
         assert_eq!(line.done(&r("sam/r"), false, 0.0), Some(60.0));
+    }
+
+    // An issue's events are a look at those issues alone, a burst's
+    // together; a look at everything booked for later (a wake-up) stays
+    // booked, and one due now, the repo's or the full pass, takes them in. A
+    // pass that failed runs again looking at everything.
+    #[test]
+    fn issues() {
+        let line = Line::default();
+        line.wakes(&booked(json!({"sam/r": 500})));
+        line.issue(r("sam/r"), 7, 100.0);
+        line.issue(r("Sam/R"), 9, 102.0);
+        line.issue(r("sam/q"), 7, 102.0);
+        assert_eq!(line.take(104.0), (vec![], Some(1.0)));
+        assert_eq!(
+            line.take(105.0),
+            (vec![(r("sam/r"), Scope::Issues([7, 9].into()))], Some(2.0))
+        );
+        assert_eq!(line.due(), due(&[(r("sam/r"), 500.0)]));
+        assert_eq!(
+            line.take(107.0).0,
+            vec![(r("sam/q"), Scope::Issues([7].into()))]
+        );
+        line.issue(r("sam/r"), 3, 200.0);
+        line.event(r("sam/r"), 200.0);
+        assert_eq!(line.take(205.0), (vec![(r("sam/r"), Scope::All)], None));
+        assert!(line.issues().is_empty());
+        line.issue(r("sam/r"), 4, 300.0);
+        line.event(Pass::Full, 300.0);
+        assert_eq!(line.take(305.0), (vec![(Pass::Full, Scope::All)], None));
+        assert!(line.issues().is_empty());
+        line.issue(r("sam/r"), 5, 400.0);
+        assert_eq!(
+            line.take(405.0).0,
+            vec![(r("sam/r"), Scope::Issues([5].into()))]
+        );
+        line.done(&r("sam/r"), false, 406.0);
+        assert_eq!(line.due(), due(&[(r("sam/r"), 466.0)]));
+        assert!(line.issues().is_empty());
     }
 }

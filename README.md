@@ -106,7 +106,7 @@ Each has an entry below, and each can be imported on its own.
   on); anything that breaks reverts and goes to a Claude job. It deploys main
   too, so a merged PR goes live the same way. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
-  and every line of the machine’s roles and models files before confirmation. Failed
+  and the role settings every turn reads before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
@@ -174,9 +174,9 @@ Each has an entry below, and each can be imported on its own.
   or extra-usage cap) holds Claude's queue until the limit
   resets: no Claude turn takes a slot till then, the refused turn waits in line and
   runs again by itself after, `proj status` says why and until when, and
-  `HOST-notify` tells you once. `burrow.proj.usage.paid` defaults to false:
-  paid extra usage is off, so limits mean waiting for reset, never asking
-  the owner to raise a cap. A fresh engine meter requested after the latest refusal
+  `HOST-notify` tells you once. With paid extra usage off
+  (`burrow.proj.usage.paid`, in the [settings reference](docs/settings-reference.md)),
+  limits mean waiting for reset, never asking the owner to raise a cap. A fresh engine meter requested after the latest refusal
   releases an ordinary usage hold and closes its notice when every window is below
   100% (or credits are available). Missing, stale or ambiguously ordered readings
   keep the hold. `proj usage back` also releases it once usage is available.
@@ -194,16 +194,13 @@ Each has an entry below, and each can be imported on its own.
   generated children without widening `inbox.authors`. A worker can
   use `proj split FILE` when its task needs another split. See
   [task planning](docs/task-planning.md) for the state and retry protocol.
-  After a reset, `burrow.proj.usageTrickle` (default 2) caps concurrent Claude
+  After a reset, `burrow.proj.usageTrickle` caps concurrent Claude
   turns while the pre-reset queue drains, including pipeline turns. The emergency
   `--unstick` slot and Codex remain independent; ordinary concurrency returns
   once no pre-reset turn remains queued.
-  Roles in `~/.config/proj/roles` pick `claude` or `codex`, and an
-  overflow to the other engine when its own is short and the other has
-  room; `~/.config/proj/models` gives each role its model and effort on
-  each engine, and keeps them when an engine setup switches
-  ([front door](docs/front-door.md)). A `ROLE@OWNER/REPO` key overrides
-  the bare role for that repo, matched case-insensitively.
+  Each role's engine (`claude` or `codex`, with an overflow to the other
+  when its own is short), model and effort are live settings
+  ([settings](docs/settings.md#engines-models-and-efforts-per-role)).
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
   `red-main`, `renovate-sweep`, `watchdog`, `triage`, `planner`, and the
@@ -214,9 +211,9 @@ Each has an entry below, and each can be imported on its own.
   career drift), including machines without an App; the unstick label
   wins over that map. Engine labels enroll
   these issues but their roles choose
-  the engine each turn, defaulting to Claude when no line matches.
+  the engine each turn, at the declared default when no setting matches.
   The authors' own issues run as `burrow.proj.inbox.ownerRole` when it's
-  set, so the models file can tune them; their engine label still picks
+  set, so the settings can tune them; their engine label still picks
   the engine.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
@@ -230,28 +227,43 @@ Each has an entry below, and each can be imported on its own.
   (`burrow.mcpServers`, including each server's socket and output paths), and
   the network and login/App environment. The [parity check](tests/proj-capabilities.nix) runs the same
   capability probes inside a job on each engine and removes a Codex grant to
-  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`, two)
+  prove a mismatch fails. Codex uses its own slot pool (`codex.slots`)
   and command sandbox; log it in with `autoland-codex-login job`, separately
   from `autoland-codex-login review`. A turn on a different engine receives
   the preceding turns' questions and answers.
   The deliberate authorship exception: a Codex-written head is judged by
   Claude, so its author never grades its own head.
+  Local jobs inspect and recover other host jobs with the ordinary
+  `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop` and `withdraw`
+  commands through a per-turn host socket. The broker keeps host paths,
+  configuration and credentials outside the command sandbox, validates the
+  recovery arguments and scrubs both output streams of what it sends back;
+  the host's own commands, and the answers it stores, posts and hands on,
+  are never redacted. A recovery reply retains
+  open owner questions. Missing host access is an explicit error, rather than
+  a claim that another job has no history. VM jobs have only the read-only
+  probe mailbox and local lifecycle declarations.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
   Retained retries follow the deployed scheduler too;
   [the deployment protocol](docs/proj-deploy.md) keeps their turn and legacy
   usage records intact.
 
-  Saved engine setups live beside the roles file in `roles.d/NAME`:
-  `proj engines save NAME`, `proj engines use NAME` and `use back` check and
-  switch them; `proj engines` lists them. `proj check-config` uses the turn's
-  parser and must pass the update's health check before confirmation.
+  Saved engine setups are named sets of those settings: `proj engines save
+  NAME`, `proj engines use NAME` and `use back` check and switch them;
+  `proj engines` lists them. `proj check-config` reads them as a turn does
+  and must pass the update's health check before confirmation.
   With `engines.door.enable`, an author's `engines` issue in `engines.door.repo`
   switches setups without an agent ([engines door](docs/front-door.md#engines-with-no-agent)).
 
   `proj settings show [--json]` prints every pipeline option in effect, its
   value and where it came from (default, flake or live file), each declared
-  once in burrow-settings' schema ([settings](docs/settings.md)).
+  once in burrow-settings' schema ([settings](docs/settings.md)). The
+  [settings reference](docs/settings-reference.md) is written from that
+  schema (`burrow-settings reference`, and a test fails when it's stale), and
+  `burrow-guidance` fails the gate when other Markdown gives an option's
+  value or file rather than linking it (its table of owned facts:
+  crates/burrow-guidance).
 
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
@@ -269,7 +281,9 @@ Each has an entry below, and each can be imported on its own.
   repo: the steward's, `proj-watch`'s, `proj-inbox`'s, `HOST-update`'s,
   Renovate's and `renovate-sweep`'s. A handler can take only some repos, only
   pushes to the default branch, only the other events about some branches, and
-  only the issue events about issues with some titles. A turn ending, a review
+  only the issue events about issues with some titles; one told issues has an
+  issue's event's pass look at that issue alone (`issueNumbers`, the inbox's),
+  rather than list every one. A turn ending, a review
   coming back and the passes' own wake-ups (a settle delay, a reviewer's
   timeout) kick them locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never
@@ -330,7 +344,10 @@ Each has an entry below, and each can be imported on its own.
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The
   watchdog's job clears a crash whose cause it fixed with
-  `burrow-units clear EXE`, and a later one is back. With
+  `burrow-units clear EXE`, and a later one is back. Clear uses a host
+  acknowledgement socket, so sandboxed jobs need no host state or journal
+  access: the host holds the units lock, records the clearance and requests
+  a pass. Only executable names cross the socket. With
   `degradations.enable`, repeated soft CI failures feed the same ladder:
   [workflow degradations](docs/degradations.md) describes the signal and options.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits

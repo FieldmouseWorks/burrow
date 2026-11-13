@@ -1,11 +1,14 @@
 """A run GitHub queued and never started (no job, and it can't be cancelled)
 leaves its head without CI: past UNSTARTED_AFTER it's dead, so CI is pending
-on it and dead_runs names it to run again. A run that started is left alone,
+on it and the Rust CI owner asks to run it again. A run that started is left alone,
 and a cancelled check nothing ran through since is named by the same check."""
 
 from docs import whole
-from harness import ANNOTATIONS, C, T0, clean
-from prs import FLAKE, UNSTARTED_AFTER, ci_state as _ci_state, dead_runs as _dead_runs
+from harness import ANNOTATIONS, C, T0, clean, CI_ASKED, RERUNS, RERUN_FAILS, RUN_INFO
+from prs import ci_state as _ci_state
+
+FLAKE = (".github/workflows/flake.yml", ".github/workflows/flake-retarget.yml")
+UNSTARTED_AFTER = 15 * 60
 
 NOW = C.ts(T0) + 700  # where the step's pass (docs.at) puts the clock
 
@@ -21,8 +24,23 @@ def suite(id, age, jobs=0, status="QUEUED", run=77):
 
 
 def dead_runs(pr, repo, now=None, moved=None):
-    with C.acting_for(repo):
-        return _dead_runs(pr, repo, now, moved)
+    # Exercise the real recovery command against the transport fixture;
+    # keep each classification case independent of previous rerun attempts.
+    import copy
+    prior_info, prior_reruns, prior_now = copy.deepcopy(RUN_INFO), RERUNS[:], C.NOW
+    RUN_INFO.clear()
+    RERUNS.clear()
+    if now is not None:
+        C.NOW = now
+    try:
+        with C.acting_for(repo):
+            _ci_state(pr, repo=repo, moved=moved, recover=True)
+        return [int(key) for key in RERUNS]
+    finally:
+        RUN_INFO.clear()
+        RUN_INFO.update(prior_info)
+        RERUNS[:] = prior_reruns
+        C.NOW = prior_now
 
 
 def ci_state(pr, repo=None):
@@ -31,7 +49,11 @@ def ci_state(pr, repo=None):
 
 
 def head(suites=(), checks=()):
-    return clean(checks=list(checks), suites=list(suites))
+    import copy
+    checks = copy.deepcopy(list(checks))
+    for index, c in enumerate(checks):
+        c.setdefault("databaseId", 2000 + index)
+    return clean(checks=checks, suites=list(suites))
 
 
 C.NOW = NOW
@@ -229,54 +251,58 @@ for i in range(40):
     many.append(extra)
 for c in many:
     c["checkSuite"]["workflowRun"]["databaseId"] = 66
-reads = []
-with C.acting_for("sam/r"):
-    real = C.gh
-    C.gh = lambda *a, **k: (reads.append(a), real(*a, **k))[1]
-    try:
-        assert _dead_runs(head(checks=many), "sam/r") == [66]
-    finally:
-        C.gh = real
-ids = [a[3] for a in reads if "annotations" in a[3]]
+assert dead_runs(head(checks=many), "sam/r") == [66]
+ids = [path for method, path in CI_ASKED if "annotations" in path]
 assert len(ids) == len(set(ids)) <= 41, len(ids)
 
 # The step's ask, on the PR's head: once per run, and not counted when GitHub
 # didn't answer or in status mode.
 from docs import at
-from harness import ATTEMPTS, FAIL, WROTE
+from harness import run as one_pass, fresh_pr_state
 
 
 def asked(pr):
+    RUN_INFO.clear()
+    RERUNS.clear()
     at(pr)
-    return [w for w in WROTE if w.endswith("/rerun")]
+    return RERUNS[:]
 
 
-RERUN = "api -X POST repos/sam/r/actions/runs/77/rerun"
-assert asked(head([suite("s1", old)])) == [RERUN], WROTE
+assert asked(head([suite("s1", old)])) == ["77"], CI_ASKED
+assert [path for method, path in CI_ASKED if method == "POST"] == ["repos/sam/r/actions/runs/77/rerun"]
 assert asked(head(checks=whole(suite="s9"))) == []
-FAIL.append("/rerun")
-assert asked(head([suite("s1", old)])) == [RERUN]  # refused: said, not raised
-FAIL.clear()
+RERUN_FAILS["77"] = RuntimeError("HTTP 403: refused")
+assert asked(head([suite("s1", old)])) == []  # refused: said, not raised
+RERUN_FAILS.clear()
 
-# A request GitHub took without our hearing (it didn't answer), whose attempt
-# then finished cancelled again: the run's attempt number moved, so it isn't
-# asked a second time. One it didn't take is asked again.
-from harness import SILENT, run as one_pass, fresh_pr_state
+# An unanswered ask that wasn't taken is retried; one taken without our
+# hearing is reconciled by GitHub's attempt, across fresh PR state too.
 lost = head([suite("s1", old)])
 fresh_pr_state()
-SILENT.append("/rerun")
-one_pass(lost, 700)
-assert [w for w in WROTE if w.endswith("/rerun")] == [RERUN]
-SILENT.clear()
-one_pass(lost, 760)  # not taken: attempt still 1
-assert [w for w in WROTE if w.endswith("/rerun")] == [RERUN]
-one_pass(lost, 820)  # taken: counted, so no more
-assert [w for w in WROTE if w.endswith("/rerun")] == []
-fresh_pr_state()
-SILENT.append("/rerun")
-one_pass(lost, 700)
-SILENT.clear()
-ATTEMPTS[77] = 2  # the lost ask was taken and has finished
+RUN_INFO.clear()
+RERUNS.clear()
+RERUN_FAILS["77"] = C.Unavailable("HTTP 503: unavailable")
+try:
+    one_pass(lost, 700)
+    raise AssertionError("unanswered recovery must retain its retry type")
+except C.Unavailable:
+    pass
+assert RERUNS == []
+RERUN_FAILS.clear()
 one_pass(lost, 760)
-assert [w for w in WROTE if w.endswith("/rerun")] == [], WROTE
-ATTEMPTS.clear()
+assert RERUNS == ["77"]
+one_pass(lost, 820)
+assert RERUNS == ["77"]
+fresh_pr_state()
+RUN_INFO["77"] = {"run_attempt": 2, "status": "completed", "conclusion": "cancelled"}
+one_pass(lost, 880)
+assert RERUNS == ["77"], CI_ASKED
+RUN_INFO.clear()
+RERUNS.clear()
+
+# Status mode cannot submit or consume a recovery allowance.
+C.DRY = True
+assert asked(head([suite("s1", old)])) == []
+C.DRY = False
+RUN_INFO.clear()
+print("unstarted runs: ok")

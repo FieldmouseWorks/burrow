@@ -16,9 +16,11 @@
 
 use std::path::{Path, PathBuf};
 
+use burrow_upkeep::ci::{DOCS, LANE, gate_job, workflow as ci_workflow};
+use serde_json::json;
 use yaml_serde::Value;
 
-use crate::harness::{Scratch, read, repo_file, script, step, steps, workflow, write, yaml};
+use crate::harness::{Scratch, read, script, step, steps, workflow, write, yaml};
 
 const FLAKE_CHECK: &str = ".github/workflows/flake-check.yml";
 /// Every caller, and what runs it again for a new base: burrow's own, and the
@@ -33,36 +35,6 @@ pub(crate) const CALLERS: [(&str, &str); 2] = [
         "templates/project/.github/workflows/flake-retarget.yml",
     ),
 ];
-
-/// The names autoland gives the lane's and the docs lane's check runs
-/// (modules/autoland/prs.py's LANE and DOCS_LANE).
-fn autoland_names() -> (String, String) {
-    let prs = read(&repo_file("modules/autoland/prs.py"));
-    let line = prs
-        .lines()
-        .find_map(|l| l.strip_prefix("LANE, DOCS_LANE = \""))
-        .expect("autoland names no lane");
-    let (lane, docs) = line
-        .strip_suffix('"')
-        .and_then(|l| l.split_once("\", \""))
-        .expect("LANE, DOCS_LANE as two strings");
-    (lane.to_owned(), docs.to_owned())
-}
-
-/// The name autoland knows the gate's job by, and the pattern of its legs'
-/// (modules/autoland/prs.py's GATE and LEG).
-fn autoland_gate_names() -> (String, String) {
-    let prs = read(&repo_file("modules/autoland/prs.py"));
-    let line = prs
-        .lines()
-        .find_map(|l| l.strip_prefix("GATE, LEG = \""))
-        .expect("autoland names no gate or legs");
-    let (gate, leg) = line
-        .strip_suffix("\")")
-        .and_then(|l| l.split_once("\", re.compile(\""))
-        .expect("GATE, LEG as a string and a compiled pattern");
-    (gate.to_owned(), leg.to_owned())
-}
 
 #[test]
 fn the_jobs_are_wired_as_autoland_reads_them() {
@@ -90,10 +62,9 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
         )
     );
     // Both check runs are named after what autoland looks for.
-    let (lane_name, docs_name) = autoland_names();
     assert_eq!(
         lane["name"],
-        format!("{lane_name}${{{{ github.event.pull_request.base.ref }}}}").as_str()
+        format!("{LANE}${{{{ github.event.pull_request.base.ref }}}}").as_str()
     );
     assert_eq!(
         step(lane, "base")["env"],
@@ -170,24 +141,19 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
         check["name"],
         "${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}"
     );
-    let (gate, leg) = autoland_gate_names();
-    assert_eq!(gate, "check");
-    let leg = regex::Regex::new(&format!("^(?:{leg})$")).expect("LEG, a regex");
+    assert!(gate_job("check"));
     for n in 2..=8 {
         for k in 1..=n {
-            assert!(
-                leg.is_match(&format!("leg {k} of {n}")),
-                "{leg}: {k} of {n}"
-            );
+            assert!(gate_job(&format!("leg {k} of {n}")), "{k} of {n}");
         }
     }
-    for not in ["leg 1 of 1", "leg 0 of 2", "leg 9 of 9", "check"] {
-        assert!(!leg.is_match(not), "{leg}: {not}");
+    for not in ["leg 1 of 1", "leg 0 of 2", "leg 9 of 9", "check again"] {
+        assert!(!gate_job(not), "{not}");
     }
     assert_eq!(
         docs["name"],
         format!(
-            "{docs_name}${{{{ github.event.pull_request.base.ref }}}} from ${{{{ needs.lane.outputs.fork }}}}"
+            "{DOCS}${{{{ github.event.pull_request.base.ref }}}} from ${{{{ needs.lane.outputs.fork }}}}"
         )
         .as_str()
     );
@@ -286,13 +252,21 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
             assert_eq!(same, mine, "{retarget}: {name:?}");
         }
     }
-    // Autoland knows the pair by these files (modules/autoland/prs.py's FLAKE).
-    let prs = read(&repo_file("modules/autoland/prs.py"));
+    // Exercise the CI owner's actual workflow identity, rather than the
+    // source representation of a constant in a replaced classifier.
     let (flake, retarget) = CALLERS[0];
-    assert!(
-        prs.contains(&format!("FLAKE = (\"{flake}\", \"{retarget}\")")),
-        "autoland doesn't know {flake} and {retarget} as a pair"
-    );
+    let check = |path: &str, id: &str| {
+        json!({"checkSuite": {"workflowRun": {
+            "file": {"path": path}, "workflow": {"id": id}
+        }}})
+    };
+    let push = check(flake, "push");
+    let edited = check(retarget, "edited");
+    assert!(ci_workflow(&push).is_some());
+    assert_eq!(ci_workflow(&push), ci_workflow(&edited));
+    let other = check(".github/workflows/other.yml", "other");
+    assert_eq!(ci_workflow(&other), Some("other"));
+    assert_ne!(ci_workflow(&push), ci_workflow(&other));
     let burrow = workflow(CALLERS[0].0);
     assert!(
         burrow["jobs"]
@@ -304,6 +278,34 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
                 .is_some_and(|d| !d.is_empty())),
         "burrow's caller lists no docs"
     );
+}
+
+/// burrow's docs lane, a retargeted PR's too, builds the guidance check: a
+/// PR that changes only README.md, AGENTS.md or CLAUDE.md is still held to
+/// what the guidance may say, and AGENTS.md to the house blocks.
+#[test]
+fn burrows_docs_lane_runs_the_guidance_check() {
+    let (flake, retarget) = CALLERS[0];
+    for caller in [flake, retarget] {
+        let wf = workflow(caller);
+        let jobs = wf["jobs"].as_mapping().unwrap();
+        assert!(!jobs.is_empty(), "{caller}");
+        for (name, job) in jobs {
+            let docs = job["with"]["docs-paths"].as_str().unwrap_or("");
+            if docs.is_empty() {
+                continue;
+            }
+            let checks: Vec<_> = job["with"]["docs-checks"]
+                .as_str()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            assert!(
+                checks.contains(&"guidance"),
+                "{caller}: {name:?}'s docs lane ({docs}) doesn't run the guidance check"
+            );
+        }
+    }
 }
 
 /// The base step's word on a PR to `base`, in a repo whose default branch is
