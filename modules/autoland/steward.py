@@ -415,16 +415,9 @@ def run_pass(kick, continuing=False):
             else:
                 complete = False
     # This pass's wake-ups and owner's lines replace the ones it had for the
-    # repos it saw; a full pass's, all of them.
-    if kick is None and not continuing:
-        # Line.take consumed the full pass's repository requests. Any repo
-        # this batch skipped still owes a fresh look, for events, local
-        # completions and retries alike. Do not let the continuation line
-        # acknowledge those obligations.
-        for r in all_repos:
-            if r["repo"] not in seen or r["repo"] in deferred:
-                retry = batch.state["retry"].get(r["repo"].lower(), 0)
-                C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
+    # repos it saw; a full pass's, all of them. A repo this batch didn't
+    # reach keeps its own requests: burrow-events runs a repo's pass beside
+    # the full one (its line.rs), and keeps the wake-ups below.
     inventory = {r["repo"] for r in all_repos}
     names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
     visited.update(r.lower() for r in kick or () if r.lower() not in names)

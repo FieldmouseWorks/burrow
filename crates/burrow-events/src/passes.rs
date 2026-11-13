@@ -1,5 +1,6 @@
 //! Starting a handler's passes as they come due.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -88,20 +89,40 @@ fn tell(name: &str, h: &Handler, pass: &Pass, scope: &Scope) -> Option<PathBuf> 
 /// owning line directly, preserving the recorded deadlines. No HTTP kick
 /// can fail between the durable write and this notification; failed units
 /// are refreshed too, and startup recovers files left before a restart.
+/// A line held off by another (`yieldTo`) hears each pass end too, so it
+/// looks again once that one is idle.
 pub fn refresh(handlers: &Handlers, lines: &Lines) {
     for (name, h) in handlers.iter() {
         if let Some(wake) = &h.wake {
             lines[name].wakes(&booked(wake));
+        } else if h.yield_to.is_some() {
+            lines[name].nudge();
         }
     }
 }
 
+/// Each handler that yields (`yieldTo`) yields to another handler that
+/// yields to none itself, so no two hold each other off.
+pub fn check_yields(handlers: &BTreeMap<String, Handler>) -> Result<(), String> {
+    for (name, h) in handlers {
+        let Some(first) = &h.yield_to else { continue };
+        match handlers.get(first) {
+            Some(f) if first != name && f.yield_to.is_none() => {}
+            Some(_) => return Err(format!("{name} yields to {first}, which yields itself")),
+            None => return Err(format!("{name} yields to {first}, which isn't a handler")),
+        }
+    }
+    Ok(())
+}
+
 /// Start each of the handler's due passes, for as long as the service runs
-/// (`once`: one round, for the tests).
+/// (`once`: one round, for the tests). None start while `first`, the line
+/// it yields to, has a pass running or due.
 pub fn serve(
     name: &str,
     h: &Handler,
     line: &Line,
+    first: Option<&Line>,
     units: &impl Units,
     once: bool,
     refresh: impl Fn(),
@@ -110,6 +131,14 @@ pub fn serve(
         line.wakes(&booked(wake));
     }
     loop {
+        if let Some(first) = first {
+            if once && first.busy(now()) {
+                return;
+            }
+            if !once && line.hold(first, now()) {
+                continue;
+            }
+        }
         let (ready, wait) = line.take(now());
         for (pass, scope) in &ready {
             let unit = h.unit(pass);
@@ -225,18 +254,85 @@ mod tests {
         let (_dir, h, fake) = setup();
         let line = Line::default();
         line.event(Pass::Full, -100.0);
-        serve("autoland", &h, &line, &fake, true, || {
+        serve("autoland", &h, &line, None, &fake, true, || {
             line.wakes(&super::booked(h.wake.as_ref().unwrap()));
         });
         assert_eq!(*fake.started.borrow(), ["autoland.service"]);
         assert_eq!(line.due(), HashMap::from([(Pass::repo("sam/next"), 1.0)]));
-        serve("autoland", &h, &line, &fake, true, || {
+        serve("autoland", &h, &line, None, &fake, true, || {
             line.wakes(&super::booked(h.wake.as_ref().unwrap()));
         });
         assert_eq!(
             *fake.started.borrow(),
             ["autoland.service", "autoland@sam-next.service"]
         );
+    }
+
+    // A repo's pass due with the full one starts first, and the full pass
+    // starts too: the steward's full pass yields after a slice, so it never
+    // stands in for a repo's.
+    #[test]
+    fn repo_beside_full() {
+        let (_dir, h, fake) = setup();
+        let line = Line::default();
+        line.event(Pass::Full, -100.0);
+        line.event(Pass::repo("FieldmouseWorks/Conary"), -100.0);
+        serve("autoland", &h, &line, None, &fake, true, || {});
+        assert_eq!(
+            *fake.started.borrow(),
+            [
+                "autoland@fieldmouseworks-conary.service",
+                "autoland.service"
+            ]
+        );
+    }
+
+    // A handler that yields to another starts nothing while that one has a
+    // pass due or running, and its own pass once that one is idle.
+    #[test]
+    fn yields() {
+        let (_dir, mut h, fake) = setup();
+        h.unit = "autoland-continue".into();
+        let (first, line) = (Line::default(), Line::default());
+        line.event(Pass::Full, -100.0);
+        first.event(Pass::repo("sam/r"), -100.0);
+        serve("continue", &h, &line, Some(&first), &fake, true, || {});
+        assert!(fake.started.borrow().is_empty());
+        let (ready, _) = first.take(crate::now());
+        assert_eq!(ready.len(), 1);
+        serve("continue", &h, &line, Some(&first), &fake, true, || {});
+        assert!(fake.started.borrow().is_empty(), "its pass is running");
+        first.done(&Pass::repo("sam/r"), true, crate::now());
+        serve("continue", &h, &line, Some(&first), &fake, true, || {});
+        assert_eq!(*fake.started.borrow(), ["autoland-continue.service"]);
+    }
+
+    // Yielding goes one step, to a handler there is: none holds another off
+    // for good.
+    #[test]
+    fn checked_yields() {
+        use std::collections::BTreeMap;
+
+        let with = |pairs: &[(&str, Option<&str>)]| -> BTreeMap<String, Handler> {
+            pairs
+                .iter()
+                .map(|(n, y)| {
+                    let h = Handler {
+                        yield_to: y.map(str::to_owned),
+                        ..Handler::default()
+                    };
+                    (n.to_string(), h)
+                })
+                .collect()
+        };
+        assert!(super::check_yields(&with(&[("a", None), ("b", Some("a"))])).is_ok());
+        for bad in [
+            with(&[("a", Some("a"))]),
+            with(&[("a", Some("b")), ("b", Some("a"))]),
+            with(&[("a", Some("none"))]),
+        ] {
+            assert!(super::check_yields(&bad).is_err(), "{bad:?}");
+        }
     }
 
     // A pass already running when its turn comes (from before a restart)
@@ -248,7 +344,7 @@ mod tests {
         fake.running.insert("autoland.service".into());
         let line = Line::default();
         line.event(Pass::Full, -100.0);
-        serve("autoland", &h, &line, &fake, true, || {
+        serve("autoland", &h, &line, None, &fake, true, || {
             line.wakes(&super::booked(h.wake.as_ref().unwrap()));
         });
         assert_eq!(
@@ -266,7 +362,7 @@ mod tests {
         let line = Line::default();
         line.event(Pass::Full, -100.0);
         let before = crate::now();
-        serve("autoland", &h, &line, &fake, true, || {
+        serve("autoland", &h, &line, None, &fake, true, || {
             line.wakes(&super::booked(h.wake.as_ref().unwrap()));
         });
         let at = line.due()[&Pass::Full];
@@ -280,7 +376,7 @@ mod tests {
         line.event(Pass::repo("sam/a"), -100.0);
         line.event(Pass::repo("sam/b"), -100.0);
         let notifications = RefCell::new(Vec::new());
-        serve("autoland", &h, &line, &fake, true, || {
+        serve("autoland", &h, &line, None, &fake, true, || {
             notifications.borrow_mut().push(fake.started.borrow().len());
         });
         assert_eq!(*notifications.borrow(), [1, 2]);
@@ -330,6 +426,7 @@ mod tests {
                     source,
                     &handlers[source],
                     &lines[source],
+                    None,
                     &fake,
                     true,
                     || {
@@ -360,7 +457,15 @@ mod tests {
                 let recovered = Line::default();
                 fake.contents = json!({"sam/limited": future + 600.0}).to_string();
                 fs::write(&fake.wake, &fake.contents).unwrap();
-                serve(target, &handlers[target], &recovered, &fake, true, || {});
+                serve(
+                    target,
+                    &handlers[target],
+                    &recovered,
+                    None,
+                    &fake,
+                    true,
+                    || {},
+                );
                 assert_eq!(recovered.take(future + 599.0).0, []);
                 assert_eq!(
                     recovered
@@ -399,11 +504,11 @@ mod tests {
         let line = Line::new(0.0);
         line.issue(Pass::repo("sam/r"), 9, -100.0);
         line.issue(Pass::repo("Sam/R"), 7, -100.0);
-        serve("autoland", &h, &line, &fake, true, || {});
+        serve("autoland", &h, &line, None, &fake, true, || {});
         assert!(!told.join("sam-r").exists());
         fs::write(told.join("sam-r"), "3\n").unwrap();
         line.event(Pass::repo("sam/r"), -100.0);
-        serve("autoland", &h, &line, &fake, true, || {});
+        serve("autoland", &h, &line, None, &fake, true, || {});
         assert_eq!(
             *fake.seen.borrow(),
             [

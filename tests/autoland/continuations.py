@@ -90,11 +90,13 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert (state / 'watch.json').exists(), (kick, name)
     print('slow preparation makes durable progress: passed')
 
-    # A normal full pass consumes repository events in Line.take. Finished
-    # and unvisited repos, including expired retries, must get ordinary work
-    # requests back, separate from the internal continuation line.
+    # A full pass that yields keeps the wake-ups of the repos it didn't
+    # reach, finished and unvisited alike, and its rest goes to the
+    # continuation line. burrow-events keeps each repo's own requests beside
+    # the full pass (its line.rs), so it books none for a repo that had none:
+    # that would be a pass over every repo after each slice.
     with fixture() as (clock, handled, facts, repos, prs, info):
-        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arb']
+        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arbc']
         C.save('pass-progress.json', {'full': True, 'finished': ['sam/a'], 'repos': {}})
         C.save('wake.json', {'sam/a': C.NOW - 50, 'sam/b': C.NOW - 40, '': C.NOW - 30})
         original = S.step.handle
@@ -107,9 +109,10 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(None)
         wakes = C.load('wake.json', {})
         assert wakes['sam/a'] > C.NOW and wakes['sam/b'] > C.NOW, wakes
+        assert 'sam/c' not in wakes, wakes
         assert '' not in wakes, wakes
         assert '' in C.load('continue.json', {}), C.load('continue.json', {})
-    print('full passes preserve skipped event and deadline obligations: passed')
+    print('a yielding full pass keeps wake-ups and books none for the rest: passed')
 
     # Local completions/availability, lifecycle/held answers and sibling PR
     # changes all arrive on the ordinary line. Invalidate decisions on that

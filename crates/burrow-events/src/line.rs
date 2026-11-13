@@ -18,7 +18,7 @@ pub const RETRY_MAX: f64 = 3600.0;
 
 /// A pass: the handler's full one, or its pass over one repo. GitHub's
 /// names are case-blind, so a repo is kept in lower case: two spellings are
-/// one repo's pass. The full pass sorts first.
+/// one repo's pass.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Pass {
     Full,
@@ -73,6 +73,8 @@ struct State {
     /// Something came in since the last take: the wait after it returns at
     /// once instead of sleeping through what it missed.
     news: bool,
+    /// Passes taken and not yet done.
+    running: usize,
 }
 
 pub struct Line {
@@ -147,9 +149,13 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// The passes that start now, the full pass first, each with what it
-    /// looks at, and how long until the next one is due (None: nothing is).
-    /// A pass due to look at everything sees to its issues' events as well.
+    /// The passes that start now, each with what it looks at, and how long
+    /// until the next one is due (None: nothing is). A pass due to look at
+    /// everything sees to its issues' events as well. Each repo's pass comes
+    /// before the full one: a full pass may stop short of a repo (the
+    /// steward's yields after a slice and resumes), so it never stands in
+    /// for one, and however often it's due, a repo's pass waits for no more
+    /// than the passes this take starts.
     pub fn take(&self, now: f64) -> (Vec<(Pass, Scope)>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;
@@ -169,23 +175,7 @@ impl Line {
                 }
             })
             .collect();
-        if ready.first().is_some_and(|(p, _)| *p == Pass::Full) {
-            // It sees to every repo whose event has come in as well, GAP or
-            // not.
-            let seen: Vec<Pass> = s
-                .due
-                .iter()
-                .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
-                .filter(|&(p, &at)| *p != Pass::Full && at <= now)
-                .map(|(p, _)| p.clone())
-                .collect();
-            for pass in seen {
-                s.due.remove(&pass);
-                s.issues.remove(&pass);
-                s.last.insert(pass, now);
-            }
-            ready = vec![(Pass::Full, Scope::All)];
-        }
+        ready.sort_by_key(|(p, _)| *p == Pass::Full);
         for (pass, scope) in &ready {
             if *scope == Scope::All {
                 s.due.remove(pass);
@@ -193,6 +183,7 @@ impl Line {
             s.issues.remove(pass);
             s.last.insert(pass.clone(), now);
         }
+        s.running += ready.len();
         let next = s
             .due
             .iter()
@@ -202,12 +193,22 @@ impl Line {
         (ready, next.map(|at| at - now))
     }
 
+    /// Whether a pass is running, or due by now: a handler that yields to
+    /// this one (`yieldTo`) starts none of its own meanwhile.
+    pub fn busy(&self, now: f64) -> bool {
+        let s = self.lock();
+        s.running > 0
+            || s.due.values().any(|&at| at <= now)
+            || s.issues.values().any(|&(at, _)| at <= now)
+    }
+
     /// A pass ended. One that failed (or never started) runs again a minute
     /// later, then two, up to an hour, looking at everything: no other event
     /// may come for it, and once one goes through its unit isn't failed any
     /// more. Returns when it runs again.
     pub fn done(&self, pass: &Pass, ok: bool, now: f64) -> Option<f64> {
         let mut s = self.lock();
+        s.running = s.running.saturating_sub(1);
         if ok {
             s.fails.remove(pass);
             return None;
@@ -218,6 +219,26 @@ impl Line {
         let at = now + after;
         Self::book(&mut s, pass.clone(), at);
         Some(at)
+    }
+
+    /// Hear news: a line that yields to another hears each of that one's
+    /// passes end.
+    pub fn nudge(&self) {
+        self.lock().news = true;
+        self.cond.notify_all();
+    }
+
+    /// Whether `first`, the line this one yields to, holds it off now; if
+    /// so, wait for news (one of its passes ending, say). The news is
+    /// cleared before `first` is asked, so a pass of its ending after that
+    /// is never slept through.
+    pub fn hold(&self, first: &Line, now: f64) -> bool {
+        self.lock().news = false;
+        let held = first.busy(now);
+        if held {
+            self.wait(None);
+        }
+        held
     }
 
     /// Wait for news, or this long (None: until news comes).
@@ -327,9 +348,11 @@ mod tests {
         assert_eq!(took(&line, 1125.0).0, vec![Pass::Full]);
     }
 
-    // A full pass sees to every repo whose event has come in, GAP or not.
+    // A full pass may stop short of a repo (the steward's yields after a
+    // slice and resumes), so it never stands in for one: a repo's pass due
+    // runs beside it, first, and one held off by its GAP stays booked.
     #[test]
-    fn full_pass_first() {
+    fn full_pass_stands_in_for_none() {
         let line = Line::default();
         line.event(r("sam/r"), 100.0);
         took(&line, 105.0);
@@ -337,9 +360,77 @@ mod tests {
         line.event(r("sam/q"), 106.0);
         line.event(Pass::Full, 106.0 - DEBOUNCE);
         line.wakes(&booked(json!({"sam/s": 500})));
-        assert_eq!(took(&line, 111.0), (vec![Pass::Full], Some(389.0)));
-        assert_eq!(line.due(), due(&[(r("sam/s"), 500.0)]));
-        assert_eq!(took(&line, 120.0), (vec![], Some(380.0)));
+        assert_eq!(
+            took(&line, 111.0),
+            (vec![r("sam/q"), Pass::Full], Some(14.0))
+        );
+        assert_eq!(
+            line.due(),
+            due(&[(r("sam/r"), 106.0 + DEBOUNCE), (r("sam/s"), 500.0)])
+        );
+        assert_eq!(took(&line, 125.0), (vec![r("sam/r")], Some(375.0)));
+    }
+
+    // The steward's full pass, kicked again during each of its slices (a
+    // job's turn, a stall's notice), is due at every take. A repo kicked or
+    // woken meanwhile still gets its pass in the next take, not once the
+    // traversal is through: no swallowed kick leaves it unvisited for hours.
+    #[test]
+    fn full_pass_due_again_holds_off_no_repo() {
+        let line = Line::default();
+        line.event(Pass::Full, 100.0);
+        let mut t = 100.0 + DEBOUNCE;
+        assert_eq!(took(&line, t).0, vec![Pass::Full]);
+        let slice = 480.0;
+        for n in 0..6 {
+            line.event(Pass::Full, t + 10.0);
+            if n % 2 == 0 {
+                // A review came back: its repo's kick.
+                line.event(r("sam/c"), t + 20.0);
+            } else {
+                // A wake-up the last pass booked for just after it.
+                line.wakes(&booked(json!({"sam/c": t + slice + 1.0})));
+            }
+            t += slice + 1.0;
+            assert_eq!(took(&line, t).0, vec![r("sam/c"), Pass::Full], "slice {n}");
+        }
+    }
+
+    // A handler that yields to this line holds off while one of its passes
+    // runs or is due, and not once it has none.
+    #[test]
+    fn busy_while_due_or_running() {
+        let line = Line::default();
+        assert!(!line.busy(100.0));
+        line.wakes(&booked(json!({"sam/r": 200})));
+        assert!(!line.busy(199.0));
+        assert!(line.busy(200.0));
+        assert_eq!(took(&line, 200.0).0, vec![r("sam/r")]);
+        assert!(line.busy(200.0), "its pass is running");
+        line.done(&r("sam/r"), true, 300.0);
+        assert!(!line.busy(300.0));
+        line.issue(r("sam/r"), 7, 300.0);
+        assert!(line.busy(300.0 + DEBOUNCE));
+    }
+
+    // A line held off by another sleeps until news comes, and isn't held
+    // once that one is idle; news from before the hold isn't news.
+    #[test]
+    fn held() {
+        let first = Arc::new(Line::default());
+        let line = Arc::new(Line::default());
+        line.event(r("sam/r"), 0.0);
+        assert!(!line.hold(&first, 100.0));
+        first.event(r("sam/q"), 0.0);
+        line.event(r("sam/r"), 1.0);
+        let waiting = {
+            let (first, line) = (first.clone(), line.clone());
+            thread::spawn(move || line.hold(&first, 100.0))
+        };
+        thread::sleep(Duration::from_millis(200));
+        assert!(!waiting.is_finished(), "old news ended the hold");
+        line.nudge();
+        assert!(waiting.join().unwrap());
     }
 
     // GitHub's names are case-blind: two spellings are one repo's pass.
@@ -417,8 +508,9 @@ mod tests {
 
     // An issue's events are a look at those issues alone, a burst's
     // together; a look at everything booked for later (a wake-up) stays
-    // booked, and one due now, the repo's or the full pass, takes them in. A
-    // pass that failed runs again looking at everything.
+    // booked, and the repo's own due now takes them in, which a full pass
+    // doesn't stand in for. A pass that failed runs again looking at
+    // everything.
     #[test]
     fn issues() {
         let line = Line::default();
@@ -442,7 +534,16 @@ mod tests {
         assert!(line.issues().is_empty());
         line.issue(r("sam/r"), 4, 300.0);
         line.event(Pass::Full, 300.0);
-        assert_eq!(line.take(305.0), (vec![(Pass::Full, Scope::All)], None));
+        assert_eq!(
+            line.take(305.0),
+            (
+                vec![
+                    (r("sam/r"), Scope::Issues([4].into())),
+                    (Pass::Full, Scope::All)
+                ],
+                None
+            )
+        );
         assert!(line.issues().is_empty());
         line.issue(r("sam/r"), 5, 400.0);
         assert_eq!(
