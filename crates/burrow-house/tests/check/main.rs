@@ -7,6 +7,7 @@
 //! was judged; a fork's PR, which can't post them, gets them as the run's
 //! result.
 
+mod branch;
 mod file_size;
 mod guide_size;
 mod model_names;
@@ -213,6 +214,8 @@ pub struct Case {
     /// The files of other comparisons, (base, head, files).
     pub compares: Vec<(&'static str, &'static str, Vec<Value>)>,
     pub pr_head: &'static str,
+    /// The head's branch.
+    pub branch: &'static str,
     pub down: bool,
 }
 
@@ -232,6 +235,7 @@ pub fn case(files: Vec<Value>) -> Case {
         restless: false,
         compares: vec![],
         pr_head: "4ead",
+        branch: "tools/plain",
         down: false,
     }
 }
@@ -244,6 +248,11 @@ impl Case {
 
     pub fn title(mut self, title: &str) -> Self {
         self.title = title.into();
+        self
+    }
+
+    pub fn branch(mut self, branch: &'static str) -> Self {
+        self.branch = branch;
         self
     }
 
@@ -276,7 +285,7 @@ impl Case {
         };
         let pr = json!({
             "title": self.title, "body": self.body,
-            "head": {"sha": self.pr_head, "repo": head_repo},
+            "head": {"sha": self.pr_head, "ref": self.branch, "repo": head_repo},
             "base": {"sha": "ba5e", "ref": "main"},
         });
         let mut comparisons = vec![("ba5e", "4ead", self.files.clone())];
@@ -334,12 +343,11 @@ impl Case {
         }
     }
 
-    fn rules(&self) -> &'static [&'static str] {
-        if self.model_names {
-            &RULES
-        } else {
-            &RULES[..5]
-        }
+    fn rules(&self) -> Vec<&'static str> {
+        RULES
+            .into_iter()
+            .filter(|r| self.model_names || *r != "model-names")
+            .collect()
     }
 }
 
@@ -359,13 +367,14 @@ impl Outcome {
     }
 }
 
-pub const RULES: [&str; 6] = [
+pub const RULES: [&str; 7] = [
     "title",
     "rust-first",
     "timers",
     "file-size",
     "guide-size",
     "model-names",
+    "branch",
 ];
 
 /// What each rule's error is titled, and the line its body wants.
@@ -377,6 +386,7 @@ pub fn wants(rule: &str) -> (&'static str, &'static str) {
         "file-size" => ("Why not split?", "Why not split:"),
         "guide-size" => ("Why a longer guide?", "Why a longer guide:"),
         "model-names" => ("Why a model name?", "Why a model name:"),
+        "branch" => ("Renovate's branch", "outside 'renovate/'"),
         _ => unreachable!("{rule}"),
     }
 }
@@ -426,7 +436,7 @@ pub fn fails(c: &Case, rule: &str) -> String {
     );
     if c.fork == Fork::No {
         assert_eq!(o.result, Ok(true), "{}", o.out);
-        status(&o.posted, &[rule], c.rules());
+        status(&o.posted, &[rule], &c.rules());
     } else {
         assert_eq!(o.result, Ok(false), "{}", o.out);
         assert!(o.posted.is_empty(), "{:#?}", o.posted);
@@ -444,7 +454,7 @@ pub fn passes(c: &Case) -> Outcome {
         o.out
     );
     if c.fork == Fork::No {
-        status(&o.posted, &[], c.rules());
+        status(&o.posted, &[], &c.rules());
     } else {
         assert!(o.posted.is_empty(), "{:#?}", o.posted);
     }

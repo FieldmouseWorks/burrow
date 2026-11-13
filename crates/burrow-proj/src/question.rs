@@ -40,14 +40,20 @@ struct Receipt {
     accepted: bool,
     // Reconciled: accepted cleanup applied, or unaccepted intent abandoned.
     applied: bool,
+    /// The question this resume answers: once accepted it is retired, even
+    /// before its cleanup is applied. Receipts from before this name none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    question: Option<String>,
 }
 
 const METADATA: &[&str] = &[
     "question",
     "question-needs-owner",
+    "question-released",
     "question-text",
     "question-since",
     "question-id",
+    crate::ask::ABOUT_FILE,
 ];
 
 fn receipt_path(job: &Job, n: &str) -> PathBuf {
@@ -92,6 +98,28 @@ fn apply_receipt(path: &Path, job_dir: &Path) -> Result<(), String> {
     }
     r.applied = true;
     save_receipt(path, &r)
+}
+
+/// Whether an accepted answer, a person's or the deadline's default, has
+/// retired `question` though its cleanup hasn't been applied yet. A receipt
+/// that can't be read retires nothing: the question stays held.
+pub(crate) fn retiring(job: &Job, question: &str) -> bool {
+    let Ok(entries) = fs::read_dir(crate::ask::host_path(job, "")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name().to_string_lossy().starts_with("resume-")
+            && read_state(&e.path())
+                .ok()
+                .flatten()
+                .and_then(|text| serde_json::from_str::<Receipt>(&text).ok())
+                .is_some_and(|r| {
+                    r.accepted
+                        && r.clear
+                        && !r.applied
+                        && r.question.as_deref().is_none_or(|q| q == question)
+                })
+    })
 }
 
 /// Caller holds the job lock. Only accepted receipts can retire a question.
@@ -224,9 +252,11 @@ impl Resume {
 
     pub(crate) fn prepare_as(job: &Job, answer: Answer) -> Result<Self, String> {
         recover(job)?;
+        // An unreadable question is an error, not a one-way one: the resume
+        // is retried rather than kept as an update that leaves it open.
         let answer = match answer {
             Answer::Closed(_)
-                if !crate::ask::load(job).is_some_and(|q| !q.recommendation.one_way) =>
+                if !crate::ask::load(job)?.is_some_and(|q| !q.recommendation.one_way) =>
             {
                 Answer::Update
             }
@@ -240,7 +270,7 @@ impl Resume {
         let before = read_state(&path)?;
         let end = job.turns().and_then(|n| read(&job.turn(&n, "end")));
         let asking = !answered
-            && (crate::ask::load(job).is_some()
+            && (crate::ask::load(job)?.is_some()
                 || (end.as_deref() != Some("done")
                     && (before.is_some() || end.as_deref() == Some("ask"))));
         // Validate existing authority before publishing any intent. Leave it
@@ -270,6 +300,11 @@ impl Resume {
                 },
                 accepted: false,
                 applied: false,
+                question: if asking {
+                    None
+                } else {
+                    crate::ask::identity(job)?
+                },
             },
         )?;
         let state = Self {
@@ -393,7 +428,13 @@ fn lapse(
     if marker.exists() {
         return Ok(true);
     }
-    if stopped || pending_owner || end != Some("ask") || crate::ask::load(job).is_some() {
+    // An unreadable shared registry does not turn a recorded question into a
+    // legacy one. Keep its notice until its authority can be recovered.
+    if stopped
+        || pending_owner
+        || end != Some("ask")
+        || crate::ask::host_path(job, "question").exists()
+    {
         return Ok(false);
     }
     let old = fs::metadata(job.turn(n, "end"))
@@ -473,6 +514,42 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
     }
 }
 
+/// New outbox records keep text structurally separate from rendered policy.
+/// A question can itself quote a policy paragraph without losing its words.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NoticeBody {
+    text: String,
+}
+
+impl NoticeBody {
+    fn original(job: &Job, turn: &str) -> Self {
+        let mut body = crate::engine::answer(&job.turn(turn, "jsonl"));
+        // Keep argv below Linux's per-argument limit, on a UTF-8 boundary.
+        if body.len() > 32_000 {
+            let mut at = 32_000;
+            while !body.is_char_boundary(at) {
+                at -= 1;
+            }
+            body.truncate(at);
+            body.push_str("\n[Full answer: proj log]");
+        }
+        Self {
+            text: format!(
+                "Job {} needs your answer. Reply with proj reply {}.\n\n{}",
+                job.id, job.id, body
+            ),
+        }
+    }
+
+    fn write(&self, path: &Path) -> Result<(), String> {
+        crate::state_reads::write(
+            path,
+            serde_json::to_string(self).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// Durable per-question outbox. An open is replayed idempotently because the
 /// notifier's zero exit is not delivery acknowledgement. A close is forgotten
 /// only when `pending` explicitly returns 1. Keys belong to turns, never reused
@@ -497,6 +574,10 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
     // while its original question still needs the owner's decision.
     let lapsed = lapse(cfg, job, &n, stopped, end.as_deref(), pending_owner)?;
     let finished = stopped || lapsed || (end.as_deref() == Some("done") && !pending_owner);
+    // A question another job's notice already carries is hidden here, never
+    // posted: the leader's names this job and its answer resumes it too. Hiding
+    // is not closing, so the notice comes back if this job takes the lead.
+    let leader = crate::ask::follows(job)?;
     let marker = read(&job.path("open-question"));
     let answered = read_state(&job.path("question-answered-through"))?
         .and_then(|s| s.trim_end_matches('\n').parse::<u64>().ok())
@@ -587,31 +668,19 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // pass reconstructs the same operation, with the same idempotency key.
         let path = job.turn(&source, "question");
         if !path.exists() {
-            let mut body = crate::engine::answer(&job.turn(&source, "jsonl"));
-            // Keep argv below Linux's per-argument limit, on a UTF-8 boundary.
-            if body.len() > 32_000 {
-                let mut at = 32_000;
-                while !body.is_char_boundary(at) {
-                    at -= 1;
-                }
-                body.truncate(at);
-                body.push_str("\n[Full answer: proj log]");
-            }
-            if let Some(question) = crate::ask::load(job) {
-                body.push_str(&question.notice());
-            }
-            crate::state_reads::write(
-                &path,
-                format!(
-                    "Job {} needs your answer. Reply with proj reply {}.\n\n{}",
-                    job.id, job.id, body
-                ),
-            )
-            .map_err(|e| e.to_string())?;
+            // The policy paragraph is not kept: each send renders the
+            // effective one (below), which joins, merges and shifts change.
+            NoticeBody::original(job, &source).write(&path)?;
         }
         crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
             .map_err(|e| e.to_string())?;
     }
+    // The open question's current policy (a released one's included) and
+    // who else waits on it, rendered fresh for every send of its notice.
+    let policy = crate::ask::open(job)?
+        .map(|q| q.notice())
+        .unwrap_or_default();
+    let footer = crate::ask::footer(job)?;
     let mut retry = false;
     let mut errors = Vec::new();
     for entry in committed_entries(job, latest)? {
@@ -625,6 +694,38 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
             continue;
         }
         let key = format!("proj-question-{}-{turn}", job.id);
+        let hidden = job.turn(turn, "question-hidden");
+        let outstanding = !finished && active.as_deref() == Some(turn);
+        if outstanding && let Some(leader) = &leader {
+            if read(&hidden).as_deref() == Some("closed") {
+                continue;
+            }
+            retry = true;
+            let note = format!(
+                "The same question is asked in job {leader}'s notice, which one reply answers for all."
+            );
+            let sent = Command::new(notifier).args(["close", &key, &note]).status();
+            if !sent.as_ref().is_ok_and(|s| s.success()) {
+                errors.push(format!("question notification: {sent:?}"));
+                continue;
+            }
+            if Command::new(notifier)
+                .args(["pending", &key])
+                .stdout(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.code() == Some(1))
+                && let Err(e) = crate::state_reads::write(&hidden, "closed\n")
+            {
+                errors.push(e.to_string());
+            }
+            continue;
+        }
+        if hidden.exists()
+            && let Err(e) = crate::state_reads::remove(&hidden)
+        {
+            errors.push(e.to_string());
+            continue;
+        }
         // Only an accepted human resume clears the marker. Preparatory
         // writes preserve the question even when the starter dies. VM done doesn't
         // clear the marker, so completion is also checked independently.
@@ -660,6 +761,39 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                     errors.push(e.to_string());
                     continue;
                 }
+            };
+            let body = match serde_json::from_str::<NoticeBody>(&body) {
+                Ok(body) => body,
+                Err(e) if body.starts_with('{') => {
+                    errors.push(format!("unreadable question notice: {e}"));
+                    continue;
+                }
+                Err(_) => {
+                    // Upgrade a plain legacy entry once. The immediately
+                    // preceding writer also cached policy-free text: when
+                    // it matches the original, none of it is generated policy.
+                    let original = NoticeBody::original(job, turn);
+                    let known_original = body.strip_prefix(&original.text).is_some_and(|tail| {
+                        tail.is_empty() || crate::ask::without_policy(tail) != tail
+                    });
+                    let body = NoticeBody {
+                        text: if known_original {
+                            original.text
+                        } else {
+                            crate::ask::without_policy(&body).to_owned()
+                        },
+                    };
+                    if let Err(e) = body.write(&entry.path()) {
+                        errors.push(e);
+                        continue;
+                    }
+                    body
+                }
+            };
+            let body = if active.as_deref() == Some(turn) {
+                format!("{}{policy}{footer}", body.text)
+            } else {
+                body.text
             };
             Command::new(notifier)
                 .args(["ensure", &key, "A project job needs an answer", &body])

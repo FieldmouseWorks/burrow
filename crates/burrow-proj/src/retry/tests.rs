@@ -1,6 +1,7 @@
 use super::*;
 use crate::{config::tests::example, pick::Class, slot, usage};
 use std::fs::File;
+use std::os::fd::AsFd;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Instant;
@@ -469,13 +470,21 @@ fn transfer_checkpoint_survives_failed_launch_and_preserves_paused_deadline() {
     let launcher = fs::read(&r.cfg.tools.systemd_run).unwrap();
     burrow_test::executable(&r.cfg.tools.systemd_run, "#!/bin/sh\nexit 1\n");
     native_waits(&r);
+    let before = now_nanos();
     assert!(pass(&r.cfg).is_err());
     let job = Job::new(&r.cfg, "retry");
+    // The failed launch published its attempt before starting the unit.
+    let attempt = job.turn("1", "retry-attempt");
+    let at: i64 = read(&attempt).unwrap().parse().unwrap();
+    assert!((before..=now_nanos()).contains(&at));
     let state = Checkpoint::load(&job, "1").unwrap().unwrap();
     let original_deadline = state.deadline.unwrap();
     // Restarting the consumer resumes the committed transfer; it never
     // creates another turn or replaces the conversation or original stream.
     burrow_test::executable(&r.cfg.tools.systemd_run, launcher);
+    // A fresh attempt defers the relaunch. Stamp it now: on a loaded machine
+    // the failed pass's own stamp can already be 2s old by this point.
+    swap(&attempt, &now_nanos().to_string()).unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     sleep(Duration::from_secs(2));
     native_waits(&r);
@@ -664,8 +673,8 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
 #[test]
 fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape() {
     let mut r = rig();
-    r.cfg.roles = r.tmp.path().join("roles");
-    fs::write(&r.cfg.roles, "work codex\n").unwrap();
+    let dir = r.tmp.path().join("settings");
+    crate::config::tests::routes(&mut r.cfg, &dir, "work codex");
     let job = Job::new(&r.cfg, "queued");
     fs::create_dir(&job.dir).unwrap();
     fs::write(job.path("role"), "work\n").unwrap();
@@ -951,10 +960,9 @@ fn busy_job_lock_is_reported_for_retry_and_a_stopped_checkpoint_is_not_launched(
     let job = Job::new(&r.cfg, "p");
     pending(&r, "p", true);
     let held = job.lock().unwrap();
-    let _inherited_copy = held.try_clone().unwrap();
+    let _inherited_copy = held.as_fd().try_clone_to_owned().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     // A concurrent fork may still hold its copy when recovery runs again.
-    held.unlock().unwrap();
     drop(held);
     fs::write(job.turn("1", "stopped"), "").unwrap();
     assert!(pass(&r.cfg).is_ok());

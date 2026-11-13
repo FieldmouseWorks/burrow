@@ -170,6 +170,17 @@ fn main() {
             }
         }
     }
+    // The wait step runs its own plan and prints to the step's log.
+    if mode == "cold" {
+        match gate::plan() {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if mode == "--worker" {
         let result = match env::args().nth(2).as_deref() {
             Some("gate") => gate::gate(),

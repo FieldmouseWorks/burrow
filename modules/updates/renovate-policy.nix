@@ -15,6 +15,9 @@ lib.recursiveUpdate ({
   autodiscover = true;
   autodiscoverFilter = rcfg.autodiscoverFilter;
   onboarding = false;
+  # branchPrefix stays Renovate's default, renovate/: Renovate takes every
+  # branch under it as its own, so the house check fails any other PR whose
+  # head is there (crates/burrow-house/src/rules.rs, RENOVATE_PREFIX).
   requireConfig = "optional";
   # Each repo's issue listing what Renovate hasn't opened a PR for, and
   # why: the autoland steward reads it for what's stuck there (its

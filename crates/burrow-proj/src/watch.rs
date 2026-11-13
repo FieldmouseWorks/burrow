@@ -110,7 +110,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         if paused {
             if filled(&job.path("await"))
                 || job.path(crate::github_quota::PENDING).exists()
-                || crate::ask::load(&job).is_some()
+                || !matches!(crate::ask::load(&job), Ok(None))
             {
                 retry.push((String::new(), now() + RETRY));
             }

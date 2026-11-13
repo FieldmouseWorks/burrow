@@ -132,7 +132,7 @@ in pkgs.testers.runNixOSTest {
     queued=dev("proj run --first "+opts+"ib hold")
     eventually(queued,"queued")
     queued_turn=machine.succeed("cat /data/dev/jobs/"+queued+"/turns")
-    dev("mkdir -p ~/.config/proj && printf 'coding codex\\n' >~/.config/proj/roles")
+    dev("proj settings role coding codex")
     code=dev("proj run --role coding "+baseopts+"ib hold")
     eventually(code,"running")
     for j in [run,code]: machine.wait_until_succeeds("test -s /data/dev/jobs/"+j+"/session")

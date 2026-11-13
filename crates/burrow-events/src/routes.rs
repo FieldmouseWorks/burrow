@@ -41,7 +41,10 @@ pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request)
     }
     for (name, h) in handlers.iter() {
         if h.takes(event, &payload) {
-            lines[name].event(h.place(repo), now());
+            match h.issue(event, &payload) {
+                Some(n) => lines[name].issue(h.place(repo), n, now()),
+                None => lines[name].event(h.place(repo), now()),
+            }
         }
     }
     202
@@ -99,7 +102,10 @@ mod tests {
             ),
             (
                 "inbox".into(),
-                h(&["issues", "pull_request", "status"], "proj-inbox"),
+                Handler {
+                    issue_dir: Some("/run/burrow-events/inbox".into()),
+                    ..h(&["issues", "pull_request", "status"], "proj-inbox")
+                },
             ),
             (
                 "update".into(),
@@ -208,6 +214,24 @@ mod tests {
             (repos(&["sam/r"]), repos(&["sam/r"]))
         );
         assert_eq!(due(&lines, "update"), repos(&[]));
+    }
+
+    // An issue's or a comment's event books the inbox a look at that issue
+    // alone, a burst's together; anything else, a look at everything.
+    #[test]
+    fn issue_events() {
+        let (_h, lines, hooks, _k) = setup();
+        let issue = |n: u64| json!({"repository": {"full_name": "Sam/R"}, "action": "edited", "issue": {"number": n}});
+        assert_eq!(signed_delivery(hooks, issue(7), "issues"), 202);
+        assert_eq!(signed_delivery(hooks, issue(9), "issues"), 202);
+        assert_eq!(due(&lines, "inbox"), repos(&[]));
+        assert_eq!(
+            lines["inbox"].issues()[&Pass::repo("sam/r")].1,
+            BTreeSet::from([7, 9])
+        );
+        let pr = json!({"repository": {"full_name": "sam/r"}});
+        assert_eq!(signed_delivery(hooks, pr, "pull_request"), 202);
+        assert_eq!(due(&lines, "inbox"), repos(&["sam/r"]));
     }
 
     // A push to the default branch of a repo the update handler takes is

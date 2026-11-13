@@ -198,7 +198,7 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
                stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
                timeout=UPKEEP_TIMEOUT if bounded else None)
     if p.returncode:
-        raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
+        raise (Unavailable if p.returncode == 75 else RuntimeError)(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
     if out["limited"] is not None and not LIMITED:
         LIMITED.append(out["limited"])
@@ -440,9 +440,11 @@ def poke(url):
         return False
 
 
-def load(name, default):
+def load(name, default, live=False):
+    """A state file, from this run's state; live: from the steward's own,
+    which a status run (DRY) reads and never writes."""
     try:
-        return json.load(open(os.path.join(STATE, name)))
+        return json.load(open(os.path.join(CFG["stateDir"] if live else STATE, name)))
     except (OSError, ValueError):
         return default
 
