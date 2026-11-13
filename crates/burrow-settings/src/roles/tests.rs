@@ -477,3 +477,90 @@ fn a_recovered_receipt_and_its_routing_are_one_durable_document() {
         Some(said)
     );
 }
+
+#[test]
+fn new_requests_and_all_answer_lookups_share_one_receipt_identity() {
+    let (d, cfg) = rig();
+    let receipts = d.path().join("receipts");
+    fs::create_dir(&receipts).unwrap();
+    let alias = d.path().join("alias");
+    std::os::unix::fs::symlink(&receipts, &alias).unwrap();
+    for command in [
+        "role work claude",
+        "engines save one",
+        "role work codex",
+        "engines save two",
+    ] {
+        set(&cfg, command).unwrap();
+    }
+    let canonical = receipts.join("cycle.operation");
+    let linked = alias.join("./cycle.operation");
+    let answer = cfg
+        .request(
+            &linked,
+            &["engines".into(), "use".into(), "one".into()],
+            "test",
+        )
+        .unwrap();
+    set(&cfg, "engines use two").unwrap();
+    assert_eq!(
+        cfg.request(
+            &canonical,
+            &["engines".into(), "use".into(), "back".into()],
+            "retry"
+        )
+        .unwrap(),
+        answer
+    );
+    assert_eq!(cfg.answered(&linked).unwrap(), Some(answer.clone()));
+    assert_eq!(cfg.legacy_answer(&canonical, None).unwrap(), Some(answer));
+    assert_eq!(cfg.roles().unwrap().route("work", None).engine, "codex");
+    let document = overlay(&cfg);
+    assert_eq!(document["receipts"].as_object().unwrap().len(), 1);
+    assert!(
+        document["receipts"]
+            .get(crate::receipt_key(&canonical).unwrap())
+            .is_some()
+    );
+    assert!(!canonical.exists(), "no filesystem receipt is needed");
+}
+
+#[test]
+fn imports_collapse_identical_receipt_aliases_and_refuse_conflicting_answers() {
+    for conflicting in [false, true] {
+        let (d, cfg) = rig();
+        let alias = d.path().join("alias");
+        std::os::unix::fs::symlink(d.path(), &alias).unwrap();
+        let receipts = [
+            (
+                d.path().join("cycle").to_string_lossy().into_owned(),
+                "original".into(),
+            ),
+            (
+                alias.join("cycle").to_string_lossy().into_owned(),
+                if conflicting { "different" } else { "original" }.into(),
+            ),
+        ]
+        .into();
+        let result = cfg.migrate(
+            Migration {
+                receipts,
+                ..Default::default()
+            },
+            "test",
+        );
+        if conflicting {
+            assert!(result.unwrap_err().contains("conflicting answers"));
+            assert!(!cfg.roles_file().exists());
+        } else {
+            assert!(result.unwrap());
+            assert_eq!(overlay(&cfg)["receipts"].as_object().unwrap().len(), 1);
+            assert_eq!(
+                cfg.legacy_answer(&alias.join("cycle"), None)
+                    .unwrap()
+                    .as_deref(),
+                Some("original")
+            );
+        }
+    }
+}

@@ -3,7 +3,7 @@
 //! to change it. Other settings can join this document without another store.
 pub mod door;
 mod live;
-pub use live::path_exists;
+pub use live::{path_exists, receipt_key};
 pub mod roles;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -173,7 +173,7 @@ impl Config {
         args: &[String],
         actor: &str,
     ) -> Result<String, String> {
-        self.change(args, actor, Some(receipt.to_string_lossy().as_ref()))
+        self.change(args, actor, Some(&receipt_key(receipt)?))
     }
 
     fn change(

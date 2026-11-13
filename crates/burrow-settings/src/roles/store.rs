@@ -152,7 +152,7 @@ impl Config {
         Ok(self
             .roles_doc()?
             .receipts
-            .get(receipt.to_string_lossy().as_ref())
+            .get(&crate::receipt_key(receipt)?)
             .cloned())
     }
 
@@ -164,12 +164,13 @@ impl Config {
         receipt: &Path,
         answer: Option<&str>,
     ) -> Result<Option<String>, String> {
+        let receipt = crate::receipt_key(receipt)?;
         live::write(
             &self.roles_file(),
             &self.overlay.with_extension("lock"),
             &self.overlay.with_extension("log"),
             "legacy engines door",
-            Some(receipt.to_string_lossy().as_ref()),
+            Some(&receipt),
             &["legacy receipt".into()],
             |doc: &mut Document| {
                 self.ready(doc, true)?;
@@ -249,7 +250,13 @@ impl Config {
                 // Only what differs from the declared default is set.
                 let declared = default_offers();
                 offers.retain(|engine, offer| declared.get(engine) != Some(offer));
-                doc.receipts.extend(from.receipts);
+                for (receipt, answer) in from.receipts {
+                    let key = crate::receipt_key(Path::new(&receipt))?;
+                    if doc.receipts.get(&key).is_some_and(|old| old != &answer) {
+                        return Err("conflicting answers for the same receipt".into());
+                    }
+                    doc.receipts.insert(key, answer);
+                }
                 doc.offers = offers;
                 doc.routing = routing;
                 doc.setups = setups;

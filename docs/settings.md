@@ -209,8 +209,10 @@ Recovery finishes a journalled switch in the legacy inputs, retaining named,
 plain unsaved and absent predecessors. Its completed journal and synced receipt
 remain readable by the previous generation. The live routing and the request's
 receipt are then published together; the new door waits for cutover and syncs
-stored answers before acknowledging them. Retrying a cycle after a CLI change
-or loss of its filesystem receipt returns the original answer without switching
+stored answers before acknowledging them. Imports and lookups identify a receipt
+by its canonical parent plus filename, independent of symlink or relative path
+spelling and whether the receipt file still exists. Retrying a cycle after a CLI
+change or loss of its filesystem receipt returns the original answer without switching
 again. Migration retries after publication sync the live document and never
 reread the retired inputs.
 

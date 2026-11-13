@@ -400,3 +400,96 @@ fn a_legacy_request_waits_for_cutover_and_unsynced_receipts_stay_open() {
         "retry only answered the recovered receipt"
     );
 }
+
+#[test]
+fn migrated_receipts_survive_alternate_paths_loss_and_intervening_switches() {
+    use burrow_settings::roles::{Migration, Roles, Route, Setups};
+    use std::path::{Component, Path, PathBuf};
+    let routing = |engine: &str| Roles {
+        roles: [(
+            "work".into(),
+            Route {
+                engine: engine.into(),
+                over: None,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let relative = |absolute: &Path| {
+        let cwd = std::env::current_dir().unwrap();
+        let depth = cwd
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .count();
+        PathBuf::from("../".repeat(depth)).join(absolute.strip_prefix("/").unwrap())
+    };
+    for imported in ["canonical", "symlink", "relative", "equivalent"] {
+        for lookup in ["canonical", "symlink", "relative", "equivalent"] {
+            let d = tempfile::tempdir().unwrap();
+            let mut cfg = door(d.path(), &[]);
+            let state = cfg.state.join("sam--box");
+            fs::create_dir_all(&state).unwrap();
+            let alias = d.path().join("alias");
+            std::os::unix::fs::symlink(&cfg.state, &alias).unwrap();
+            let paths = |kind| match kind {
+                "symlink" => alias.clone(),
+                "relative" => relative(&cfg.state),
+                "equivalent" => cfg.state.join("sam--box/../."),
+                _ => cfg.state.clone(),
+            };
+            let hash: String = Sha256::digest(b"issue-one:initial")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let filename = format!("1-{hash}.operation");
+            let original = "Was active: two\nActive: one\n";
+            let import_path = paths(imported).join("sam--box").join(&filename);
+            fs::write(&import_path, json!({"result": original}).to_string()).unwrap();
+            cfg.settings
+                .migrate(
+                    Migration {
+                        routing: routing("claude"),
+                        setups: Setups {
+                            saved: [
+                                ("one".into(), routing("claude")),
+                                ("two".into(), routing("codex")),
+                            ]
+                            .into(),
+                            active: Some("one".into()),
+                            previous: Some(routing("codex")),
+                        },
+                        receipts: [(import_path.to_string_lossy().into_owned(), original.into())]
+                            .into(),
+                        ..Default::default()
+                    },
+                    "migration",
+                )
+                .unwrap();
+            fs::remove_file(import_path).unwrap();
+            set(&cfg, "engines use two");
+            let lookup_path = paths(lookup);
+            cfg.state = lookup_path;
+            let mut gh = github("sam", "use back", None);
+            pass(&mut gh, &cfg).unwrap();
+            assert_eq!(
+                work(&cfg),
+                "codex",
+                "{imported} -> {lookup}: cycle replayed"
+            );
+            let comment = gh
+                .asked("POST")
+                .last()
+                .unwrap()
+                .2
+                .as_ref()
+                .unwrap()
+                .to_string();
+            assert!(
+                comment.contains("Active: one"),
+                "{imported} -> {lookup}: {comment}"
+            );
+            assert!(!gh.asked("PATCH").is_empty());
+        }
+    }
+}

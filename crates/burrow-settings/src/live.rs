@@ -31,6 +31,20 @@ pub fn path_exists(path: &Path) -> Result<bool, String> {
     }
 }
 
+/// Identity of one receipt, independent of path spelling or receipt-file
+/// existence. Legacy requests canonicalized the parent, never the file itself;
+/// import and every subsequent lookup must use that same rule.
+pub fn receipt_key(path: &Path) -> Result<String, String> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or("receipt has no filename")?;
+    fs::canonicalize(parent)
+        .map(|parent| parent.join(name).to_string_lossy().into_owned())
+        .map_err(|e| format!("{}: {e}", parent.display()))
+}
+
 /// The document at PATH; its default when there's none yet.
 pub(crate) fn read<D: DeserializeOwned + Default>(path: &Path) -> Result<D, String> {
     match fs::read(path) {
