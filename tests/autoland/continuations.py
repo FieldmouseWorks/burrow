@@ -264,6 +264,54 @@ with tempfile.TemporaryDirectory() as tmp:
         assert kept == ['sam/r'] * 3, kept
     print('a busy repo still watches its branches every batch: passed')
 
+    # What each run lists replaces what it listed in an earlier batch of the
+    # traversal: a resolved notice goes, one still true isn't doubled, and
+    # PR lines and the other operation's stay. A failure of the branch watch
+    # alone is over once it runs clean, though the traversal isn't; one that
+    # fails again keeps its clock.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(n) for n in range(1, 6)]
+        said = {'branches': [('Stuck', 'sam/r: `old`', '')], 'upkeep': [('Stuck', 'sam/r: dashboard', '')]}
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            args[3].append(('Owner', f"[sam/r#{args[1]['number']}](url)", 'waiting'))
+            clock[0] += 9 * 60
+
+        def watch(repo, default, in_use, lines, full):
+            if said['branches'] is None:
+                S.failing(repo, 'its branches: GitHub said no', 'branches')
+                return False
+            lines.extend(said['branches'])
+
+        def listed():
+            return [x[1] for x in C.load('digest-repos.json', {})['sam/r']]
+
+        with patch.object(S, 'branches', watch), patch.object(S, 'upkeep', lambda repo, lines: lines.extend(said['upkeep'])), \
+                patch.object(S.step, 'handle', long):
+            S.run_pass(['sam/r'])
+            assert sorted(listed()) == ['[sam/r#1](url)', 'sam/r: `old`', 'sam/r: dashboard'], listed()
+            said['branches'] = [('Stuck', 'sam/r: `new`', '')]
+            S.run_pass(['sam/r'], continuing=True)
+            assert sorted(listed()) == ['[sam/r#1](url)', '[sam/r#2](url)', 'sam/r: `new`', 'sam/r: dashboard'], listed()
+            said['branches'] = None
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            assert 'sam/r: `new`' in listed(), listed()  # a failed look leaves what it listed last
+            failure = C.load('watch.json', {})['items']['sam/r']
+            assert failure['ops'] == ['branches'], failure
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            assert C.load('watch.json', {})['items']['sam/r']['since'] == failure['since']
+            said['branches'] = []
+            C.NOW += 600
+            S.run_pass(['sam/r'], continuing=True)
+            assert 'sam/r' not in C.load('watch.json', {})['items'], C.load('watch.json', {})['items']
+            assert 'sam/r: `new`' not in listed() and listed().count('sam/r: dashboard') == 1, listed()
+            assert len(handled) == 5 and C.load('pass-progress.json', {})['repos'], handled
+    print('repo operations replace their own notices and failures each batch: passed')
+
     # A bounded multi-repo kick owes the repo it never entered, and an
     # unavailable train is retried at its own deadline, not at once.
     with fixture() as (clock, handled, facts, repos, prs, info):

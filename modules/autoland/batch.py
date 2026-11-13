@@ -166,6 +166,18 @@ class Batch:
         st["wake"] = C.WAKE.get(repo)
         self.advanced = True
 
+    def listed(self, repo, op, mine, lines):
+        """What the repo's operation op lists now replaces, in mine, what it
+        listed in an earlier batch of this traversal (kept here until the
+        traversal ends)."""
+        st = self.state["repos"].setdefault(repo.lower(), {"done": {}})
+        ops = st.setdefault("operations", {})
+        old = {tuple(x) for x in ops.get(op, ())}
+        lines = list(dict.fromkeys(tuple(x) for x in lines))
+        mine[:] = [x for x in mine if tuple(x) not in old and tuple(x) not in lines] + lines
+        ops[op] = [list(x) for x in lines]
+        st["digest"] = mine
+
     def finish(self, repo):
         self.advanced = True
         self.done.add(repo.lower())
