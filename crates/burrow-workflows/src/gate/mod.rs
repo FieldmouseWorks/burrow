@@ -475,10 +475,14 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
     );
     assert_eq!(s["run"], r#"bash "$TOOLS/gate.sh""#);
     // Its files, as the workflow's own commit has them (whatever ref its
-    // caller named), checked out where TOOLS says, just before it.
+    // caller named), checked out where TOOLS says, before it.
     let steps = crate::harness::steps(check);
     let at = steps.iter().position(|x| x["id"] == "gate").unwrap();
-    let tools = &steps[at - 1];
+    // (The wait for a base's kept builds, if any, runs between them.)
+    let tools = steps[..at]
+        .iter()
+        .rfind(|x| x["with"]["path"] == ".flake-check")
+        .unwrap();
     assert!(
         text(&tools["uses"]).starts_with("actions/checkout@"),
         "{tools:?}"

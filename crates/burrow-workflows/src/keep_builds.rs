@@ -320,3 +320,32 @@ fn a_negative_restores_every_legs_kept_builds() {
         }
     }
 }
+
+/// A PR leg that would build cold waits for the base's push to keep the
+/// builds, then restores them (#863): only a PR of this repo, only when the
+/// restore didn't find the base's own kept builds, before the gate.
+#[test]
+fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert!(at("kept-restore") < at("kept-wait") && at("kept-wait") < at("kept-rewait"));
+    assert!(at("kept-rewait") < at("gate"));
+    let wait = &all[at("kept-wait")];
+    assert_eq!(wait["continue-on-error"], true);
+    let c = |event: &str, head: &str, hit: &str| {
+        ctx(&[
+            ("inputs.keep-builds", true.into()),
+            ("inputs.install-nix", true.into()),
+            ("github.event_name", event.into()),
+            ("github.repository", "o/r".into()),
+            ("github.event.pull_request.head.repo.full_name", head.into()),
+            ("steps.kept-restore.outputs.cache-hit", hit.into()),
+        ])
+    };
+    let on = |c: &Ctx| value(text(&wait["if"]), c).truthy();
+    assert!(on(&c("pull_request", "o/r", "")));
+    assert!(!on(&c("pull_request", "o/r", "true")));
+    assert!(!on(&c("pull_request", "someone/r", "")));
+    assert!(!on(&c("push", "", "")));
+}

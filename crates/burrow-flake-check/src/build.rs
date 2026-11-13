@@ -91,13 +91,13 @@ pub fn cold_names(dry_run_stderr: &str) -> Vec<String> {
 }
 /// Say by name what this leg will compile because no cache has it, so a long
 /// quiet build isn't mistaken for a hang. Informational: it never fails a leg.
-fn announce_cold(targets: &[String]) {
+fn announce_cold(targets: &[String]) -> Vec<String> {
     let mut c = cmd("nix-store", &["--realise", "--dry-run"]);
     c.args(targets.iter().map(|t| t.trim_end_matches("^*")));
-    let Ok(o) = output(c) else { return };
+    let Ok(o) = output(c) else { return Vec::new() };
     let names = cold_names(&String::from_utf8_lossy(&o.stderr));
     if names.is_empty() {
-        return;
+        return names;
     }
     let mut msg = format!(
         "cold build: {} derivations no cache has will be built here, not restored: {}",
@@ -118,12 +118,18 @@ fn announce_cold(targets: &[String]) {
     {
         let _ = writeln!(f, "{msg}");
     }
+    names
 }
 pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
     if targets.is_empty() {
         return Ok(true);
     }
-    announce_cold(targets);
+    let cold = announce_cold(targets);
+    // The wait step (wait.rs) only plans: it says what is cold and stops.
+    if env::var_os("COLD_ONLY").is_some() {
+        fs::write(temp().join("cold.txt"), cold.join("\n"))?;
+        return Ok(true);
+    }
     let args = |ts: &[String], vm: bool| {
         let mut a = vec!["build".to_owned(), "-L".into()];
         if let Some(p) = link {

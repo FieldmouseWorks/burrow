@@ -386,6 +386,41 @@ jobs:
           sparse-checkout: |
             .github/flake-check
             crates/burrow-flake-check
+      # keep-builds, on a PR: a leg that would compile something cold while
+      # the push to the default branch it is merged onto is still building
+      # (and will keep) it waits for that push's kept builds and restores them,
+      # rather than build the same thing in parallel (#863). Only a push to
+      # the default branch saves where a PR can read, so this is the one
+      # place a derivation is built once per change of its inputs. It plans
+      # as the gate does, stopped before building, with a nix cache of its
+      # own so the substituter's misses it saw aren't remembered by the gate.
+      # It reads the runs and caches APIs, so a caller that grants `actions:
+      # read` gets the wait; without it the step fails softly and the leg
+      # builds cold, as before.
+      - id: kept-wait
+        name: soft/kept-wait
+        if: ${{ inputs.keep-builds && inputs.install-nix && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.kept-restore.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKIP: ${{ inputs.build-skip }}
+          APART: ${{ inputs.eval-apart }}
+          LEGS: ${{ inputs.legs }}
+          LEG: ${{ matrix.leg }}
+          TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
+          COLD_ONLY: '1'
+          XDG_CACHE_HOME: ${{ runner.temp }}/kept-wait-cache
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
+        run: bash "$TOOLS/run.sh" wait
+      - id: kept-rewait
+        if: ${{ steps.kept-wait.outputs.saved == 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kept
+          key: ${{ steps.kept-wait.outputs.key }}
+          fail-on-cache-miss: true
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       - id: gate
         shell: bash
@@ -502,6 +537,10 @@ jobs:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
+      - name: degraded/kept-wait
+        if: ${{ always() && steps.kept-wait.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/kept-wait' >> "$GITHUB_STEP_SUMMARY"
       - name: degraded/kept-restore
         if: ${{ always() && steps.kept-lookup.outputs.cache-hit != '' && steps.kept-restore.outputs.cache-hit == '' }}
         shell: bash
