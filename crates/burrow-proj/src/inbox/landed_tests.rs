@@ -213,7 +213,15 @@ fn plan_done_records_only_an_authors_merged_pr() {
 fn a_list_whose_child_is_still_open_is_unchanged() {
     let (b, parent, before) = parent_fixture();
     child(&b, "open");
-    pr(&b, "sam/box", 10, true);
+    // Even a merged PR that references it (merged to another branch, say)
+    // doesn't move it on while it's open with nothing recorded.
+    fs::write(
+        b.path("merged-8"),
+        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+            {"merged":true,"url":"https://github.com/sam/box/pull/10"}]}}}}})
+        .to_string(),
+    )
+    .unwrap();
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(!advanced(&b));
