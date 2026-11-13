@@ -4,8 +4,10 @@ review thread, the PR's new description, a comment) in its answers file
 rather than posting them. The PR's state keeps each such job as it was
 handed the PR, and each pass hands them to burrow-upkeep `claims`
 (crates/burrow-upkeep/src/claims.rs), which decides what becomes of each:
-its answers posted once it's over, only while the PR's head is its own
-push, or the head it was handed when it pushed nothing (so a job can't say
+its answers posted once it's over (or its turn is, awaiting the PR
+itself: then again on each later turn that writes new ones), only while
+the PR's head is its own push, or the head it was handed when it pushed
+nothing (so a job can't say
 it fixed something in a commit GitHub doesn't have, as on LoK-web#695); or
 the job named to stop, when someone else has moved the PR past it. This
 keeps what it gives back in the PR's state and carries out what it says,

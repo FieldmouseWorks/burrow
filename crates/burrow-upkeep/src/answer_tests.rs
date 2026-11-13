@@ -174,7 +174,7 @@ fn answers_go_up_once_its_push_is_the_head() {
         json!("Addressed the requested changes, @sam: <!-- autoland-judgment: land x -->");
     let h = handed(Some(a.to_string()));
     reread(&mut hub, "open", PUSHED, BODY);
-    assert_eq!(answered(&mut hub, &h), Ok(Posted::Answers));
+    assert!(matches!(answered(&mut hub, &h), Ok(Posted::Answers(_))));
     let fixed = |said: &str| format!("**Codex job** · fixed in {PUSHED}\n\n{said}");
     assert_eq!(
         changed(&hub),
@@ -214,7 +214,7 @@ fn an_answer_with_no_push_goes_up_on_the_head_it_was_handed() {
         json!([{"id": "PRRT_a", "fixed": false, "reply": "Out of scope: #12 has it."}]),
     ));
     let mut hub = github(pr("OPEN", HANDED, BODY, open()));
-    assert_eq!(answered(&mut hub, &h), Ok(Posted::Answers));
+    assert!(matches!(answered(&mut hub, &h), Ok(Posted::Answers(_))));
     assert_eq!(
         changed(&hub),
         vec![
@@ -364,7 +364,7 @@ fn what_went_up_on_an_earlier_try_doesnt_go_twice() {
         ),
     );
     let h = handed(Some(a.to_string()));
-    assert_eq!(answered(&mut hub, &h), Ok(Posted::Answers));
+    assert!(matches!(answered(&mut hub, &h), Ok(Posted::Answers(_))));
     assert_eq!(
         changed(&hub),
         vec![("resolve".into(), json!({"t": "PRRT_b"}))]

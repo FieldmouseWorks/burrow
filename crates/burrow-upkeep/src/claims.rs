@@ -4,7 +4,12 @@
 //! a done turn holding something open (awaiting upstream, or a person's
 //! answer to its question) stays claimed until its final turn, with
 //! any intermediate answers left unposted for that turn to replace;
-//! and each still at work on a head someone else has moved the PR past,
+//! a done turn awaiting the PR itself has its answers posted, since that
+//! PR's next change (what went up, CI, a review) is what resumes it, and
+//! stays claimed, so each later turn's new answers go up in their turn and
+//! the ones already taken never again (PSIV#459's second turn pushed the
+//! fix, and its answers were never read: its claim had gone with its
+//! first's); and each still at work on a head someone else has moved the PR past,
 //! named to be stopped, since whatever it does next is for a head the PR no
 //! longer has. One still waiting for its slot can't have pushed. One at
 //! work is named once GitHub's record of the branch says the head is
@@ -17,8 +22,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::answer::{self, Handed, Head, Posted, Unposted};
+use crate::answer::{self, Handed, Head, Posted, Took, Unposted};
 use crate::pass::Pass;
 
 /// Each looked for the push behind a head this many times at most, a few
@@ -51,13 +57,19 @@ pub struct Look {
 pub struct Handing {
     /// The steward's kind of fix job (handed, redFixed ...).
     pub kind: String,
-    /// The PR's head, its description, and when, in Unix seconds.
+    /// The PR's head, its description, and when, in Unix seconds; once
+    /// answers of its went up, the head and description they left.
     pub head: String,
     pub body: String,
     pub at: f64,
     /// How many times its pass has looked for who pushed each head.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub looked: BTreeMap<String, u32>,
+    /// The answers file whose answers were last dealt with (posted, or
+    /// found wrong), by its SHA-256: a later turn's go up only once that
+    /// turn has written new ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken: Option<String>,
 }
 
 /// What `claims` gives back: the jobs to keep, who pushed the head, the
@@ -139,6 +151,20 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             }
             continue;
         }
+        // Its turn is over. Awaiting this PR, it's resumed on the PR's next
+        // change: between turns, still at work on the branch, so a head
+        // someone else pushed stops it as it would a running one.
+        let between = life.awaits(&own);
+        if between
+            && rec.head != l.head
+            && let Some(why) = stale(p, l, &mut seen, None, &mut rec)
+        {
+            seen.stop.push(Stop {
+                jid: jid.clone(),
+                why,
+            });
+            continue;
+        }
         let answers = match dir.text("answers.json") {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -149,9 +175,25 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                     outcome: "wrong",
                     why: Some(format!("its answers file can't be read: {e}")),
                 });
+                if between {
+                    seen.answering.insert(jid.clone(), rec);
+                }
                 continue;
             }
         };
+        let digest = answers.as_deref().map(|t| {
+            Sha256::digest(t.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        });
+        if digest.is_some() && digest == rec.taken {
+            // What it left is what an earlier turn's answers already were.
+            if between {
+                seen.answering.insert(jid.clone(), rec);
+            }
+            continue;
+        }
         let turn = dir.text("turns").unwrap_or_default();
         let turn = turn.trim();
         let turn = if !turn.is_empty()
@@ -178,7 +220,13 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             answers,
         };
         let (outcome, why) = match answer::answer(p, &h) {
-            Ok(Posted::Answers) => ("posted", None),
+            Ok(Posted::Answers(Took { head, description })) => {
+                rec.head = head;
+                if let Some(d) = description {
+                    rec.body = d;
+                }
+                ("posted", None)
+            }
             Ok(Posted::Nothing) => ("nothing", None),
             Err(Unposted::Wrong(why)) => ("wrong", Some(why)),
             Err(Unposted::Unpushed(why)) => ("unpushed", Some(why)),
@@ -186,7 +234,11 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             Err(Unposted::Refused(why)) => ("refused", Some(why)),
             Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
         };
-        if matches!(outcome, "refused" | "unanswered") {
+        let again = matches!(outcome, "refused" | "unanswered");
+        if !again && outcome != "nothing" {
+            rec.taken = digest;
+        }
+        if again || between {
             seen.answering.insert(jid.clone(), rec.clone());
         }
         if outcome != "nothing" {

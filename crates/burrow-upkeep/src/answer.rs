@@ -1,8 +1,8 @@
 //! What a job of the steward's that settles a PR leaves for the
 //! steward to post (tasks.py `fix_task`): its replies on the PR's review
 //! threads, each resolved after it, the PR's new description and a comment.
-//! The job pushes and writes them to its answers file; once the job is over
-//! the PR's pass reads it (claims.rs), and they go up as the steward's App
+//! The job pushes and writes them to its answers file; once the job is over,
+//! or a turn of its that awaits the PR is, the PR's pass reads it (claims.rs), and they go up as the steward's App
 //! only while the PR's head is the job's own push, or the head it was handed
 //! when it pushed nothing. So a job can't say it fixed something in a commit
 //! GitHub doesn't have, and a job whose PR someone else moved on meanwhile
@@ -65,10 +65,20 @@ struct Reply {
 /// What went up.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Posted {
-    /// Its answers, every one.
-    Answers,
+    /// Its answers, every one: on the head they were checked against, and
+    /// with the description they wrote, if any.
+    Answers(Took),
     /// Nothing: it left no answers file.
     Nothing,
+}
+
+/// Where a job's answers left the PR: the head they went up on (its push,
+/// or the head it was handed), and its description if they wrote one. A
+/// job that goes on to another turn is checked against these next.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Took {
+    pub head: String,
+    pub description: Option<String>,
 }
 
 /// Why nothing (more) went up.
@@ -314,7 +324,10 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         a.threads.len(),
         pushed.map_or(String::new(), |c| format!(", on its push of {}", short(c)))
     );
-    Ok(Posted::Answers)
+    Ok(Posted::Answers(Took {
+        head: want.to_owned(),
+        description: a.description,
+    }))
 }
 
 /// A branch and its head.

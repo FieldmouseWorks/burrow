@@ -18,6 +18,7 @@ fn handing() -> Handing {
         body: "Does it.".into(),
         at: 1_793_558_866.0,
         looked: BTreeMap::new(),
+        taken: None,
     }
 }
 
@@ -338,8 +339,9 @@ fn external_awaits_keep_every_fix_claim_until_its_final_answers() {
                         }
                     }
                 }
-                // Final answers replace any intermediate file, and go up.
-                std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+                // Final answers replace any intermediate file, and go up
+                // once its last turn holds nothing.
+                std::fs::remove_file(dir.join("await")).unwrap();
                 std::fs::write(dir.join("answers.json"), json!({
                     "pushed": own_push.then_some(head), "threads": [], "comment": "Finished the fix."
                 }).to_string()).unwrap();
@@ -375,6 +377,201 @@ fn external_awaits_keep_every_fix_claim_until_its_final_answers() {
             }
         }
     }
+}
+
+/// GitHub with PR 5 at `head`, its description `body` and `threads`,
+/// taking replies, resolves, a description and a comment.
+fn github(head: &str, body: &str, threads: Value) -> Hub {
+    let mut hub = Hub {
+        graphql: vec![
+            (
+                "reviewThreads(first: 100)".into(),
+                reply(
+                    200,
+                    json!({"data": {"repository": {"pullRequest": {
+                        "state": "OPEN", "headRefOid": head, "headRefName": "feat", "body": body,
+                        "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": threads},
+                    }}}}),
+                ),
+            ),
+            (
+                "addPullRequestReviewThreadReply".into(),
+                reply(
+                    200,
+                    json!({"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "c"}}}}),
+                ),
+            ),
+            (
+                "resolveReviewThread".into(),
+                reply(
+                    200,
+                    json!({"data": {"resolveReviewThread": {"thread": {"isResolved": true}}}}),
+                ),
+            ),
+        ],
+        ..Hub::default()
+    };
+    hub.on(
+        "GET",
+        "repos/sam/r/pulls/5$",
+        reply(
+            200,
+            json!({"state": "open", "head": {"sha": head}, "body": body}),
+        ),
+    );
+    hub.on("PATCH", "repos/sam/r/pulls/5$", reply(200, json!({})));
+    hub.on(
+        "GET",
+        "repos/sam/r/issues/5/comments?",
+        reply(200, json!([])),
+    );
+    hub.on(
+        "POST",
+        "repos/sam/r/issues/5/comments$",
+        reply(201, json!({"id": 1})),
+    );
+    hub.on("GET", ACTIVITY, reply(200, pushes("workers[bot]", PUSHED)));
+    hub
+}
+
+/// What the pass wrote to GitHub: each mutation's name, or a REST call.
+fn writes(hub: &Hub) -> Vec<String> {
+    hub.asked
+        .iter()
+        .filter_map(|(method, path, _, body)| {
+            let q = body
+                .as_ref()
+                .and_then(|b| b["query"].as_str())
+                .unwrap_or_default();
+            if path == "graphql" {
+                q.starts_with("mutation").then(|| {
+                    if q.contains("addPullRequestReviewThreadReply") {
+                        "reply"
+                    } else {
+                        "resolve"
+                    }
+                    .into()
+                })
+            } else {
+                (method != "GET").then(|| format!("{method} {path}"))
+            }
+        })
+        .collect()
+}
+
+// PSIV#459: a fix job ends each turn awaiting its own PR, which proj
+// resumes it on. Its first turn's answers (a blocker, no push) went up and
+// its claim went with them, so its second turn's push and answers were
+// never read. Each turn's new answers go up now, on the head its own push
+// left, and none twice.
+#[test]
+fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = jobs.path().join("job-1");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+    let mut l = at(HANDED, jobs.path(), true);
+    let pass = |l: &mut Look, hub: &mut Hub, state: &str| {
+        let (s, _) = seen(hub, state, l);
+        l.answering = s.answering.clone();
+        l.pushed_by = s.pushed_by.clone();
+        s
+    };
+    // Turn 1: blocked, nothing pushed, a comment.
+    std::fs::write(dir.join("turns"), "1").unwrap();
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": null, "threads": [], "description": null, "comment": "Blocked."})
+            .to_string(),
+    )
+    .unwrap();
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    let s = pass(&mut l, &mut hub, "done");
+    assert_eq!(s.answered[0].outcome, "posted");
+    assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
+    let kept = &s.answering["job-1"];
+    assert!(kept.taken.is_some() && kept.head == HANDED);
+    // The same answers, looked at again: nothing asked, nothing posted.
+    let mut hub = Hub::default();
+    let s = pass(&mut l, &mut hub, "done");
+    assert!(s.answered.is_empty() && hub.asked.is_empty());
+    assert_eq!(s.answering.len(), 1);
+    // Turn 2, at work: it pushes, then writes its new answers.
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    l.head = PUSHED.into();
+    let mut hub = github(PUSHED, "Does it.", json!([]));
+    let s = pass(&mut l, &mut hub, "running");
+    assert!(s.answered.is_empty() && s.stop.is_empty());
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": PUSHED, "threads": [{"id": "T1", "fixed": true, "reply": "Fixed."}],
+               "description": "Does it, fixed.", "comment": "Done."})
+        .to_string(),
+    )
+    .unwrap();
+    // Its turn over, awaiting the PR again: they go up, and its claim now
+    // stands on its own push and the description it wrote.
+    let open = json!([{"id": "T1", "isResolved": false, "comments": {"nodes": [{"body": "**Codex · P1** a race"}]}}]);
+    let mut hub = github(PUSHED, "Does it.", open);
+    let s = pass(&mut l, &mut hub, "done");
+    assert_eq!(s.answered[0].outcome, "posted", "{:?}", s.answered);
+    assert_eq!(
+        writes(&hub),
+        [
+            "reply",
+            "resolve",
+            "PATCH repos/sam/r/pulls/5",
+            "POST repos/sam/r/issues/5/comments"
+        ]
+    );
+    let kept = &s.answering["job-1"];
+    assert_eq!(
+        (kept.head.as_str(), kept.body.as_str()),
+        (PUSHED, "Does it, fixed.")
+    );
+    // Turn 3 leaves its answers as they were: none replayed.
+    std::fs::write(dir.join("turns"), "3").unwrap();
+    let mut hub = Hub::default();
+    let s = pass(&mut l, &mut hub, "done");
+    assert!(s.answered.is_empty() && hub.asked.is_empty());
+    // Turn 4 says one more thing on the PR as its description now is, and
+    // ends holding nothing: that goes up, and its claim is over.
+    std::fs::write(dir.join("turns"), "4").unwrap();
+    std::fs::remove_file(dir.join("await")).unwrap();
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": PUSHED, "threads": [], "description": "Does it, fixed.", "comment": "CI is green."})
+            .to_string(),
+    )
+    .unwrap();
+    let mut hub = github(PUSHED, "Does it, fixed.", json!([]));
+    let s = pass(&mut l, &mut hub, "done");
+    assert_eq!(s.answered[0].outcome, "posted", "{:?}", s.answered);
+    assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
+    assert!(s.answering.is_empty());
+}
+
+// Between turns, a job awaiting its own PR is still at work on the branch:
+// someone else's push stops it, as it would a running one, and nothing of
+// its goes up.
+#[test]
+fn a_job_awaiting_its_own_pr_stops_for_another_authors_push() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = jobs.path().join("job-1");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("await"), "sam/r#5\t0\t{}\n").unwrap();
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": null, "comment": "Hm."}).to_string(),
+    )
+    .unwrap();
+    let mut hub = Hub::default();
+    hub.on("GET", ACTIVITY, reply(200, pushes("sam", THEIRS)));
+    let (s, _) = seen(&mut hub, "done", &at(THEIRS, jobs.path(), true));
+    assert_eq!(s.stop.len(), 1, "{s:?}");
+    assert!(s.answering.is_empty() && s.answered.is_empty());
+    assert!(writes(&hub).is_empty());
 }
 
 #[test]

@@ -8,6 +8,9 @@ import waits
 from common import CFG, MIN, log, ts
 from step_context import STRIKES, STRIKE_LIMIT, ON, VERB, clock, _HEAD
 
+# What a fix job between turns on its own PR awaits, as its status says it.
+OWN = "this PR's next change"
+
 
 class Jobs:
     def usage_grace(self):
@@ -56,6 +59,13 @@ class Jobs:
         """running's look at the job: what proj says of it, once."""
         snapshot = C.lifecycle(jid)
         state, target = C.job_lifecycle(jid, self.tag, snapshot)
+        if (not target and kind in claims.KINDS and jid in self.st.get("answering", {})
+                and state not in (None, "queued", "running") and C.awaits(snapshot[1], self.tag)):
+            # A fix job claims still keeps, between turns on this PR: what
+            # goes up of its answers, or CI or a review, resumes it, and
+            # each turn's new answers go up in their turn (claims.rs). Still
+            # at work on the branch, so none other is handed it meanwhile.
+            target = OWN
         usage = C.job_usage(jid, snapshot)
         records = self.st.setdefault("usageJobs", {})
         self.st.pop("usageRelease", None)  # replaced by job-scoped releases
