@@ -2,6 +2,9 @@
 //! and its content, with nothing for a script to fill in.
 
 use maud::{DOCTYPE, Markup, html};
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::assets::Assets;
 use crate::core::{Enrolled, Live};
@@ -200,6 +203,117 @@ pub fn home(
     )
 }
 
+/// Render `settings show --json` using its JSON Schema. Neither option names
+/// nor their owners are known to the page; the schema owns both.
+pub fn settings(f: &Frame, document: &Value, schema: &Value) -> Result<Markup, String> {
+    Ok(page(
+        f,
+        "settings",
+        "Settings",
+        true,
+        settings_body(document, schema)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct SettingsDocument {
+    options: BTreeMap<String, SettingReading>,
+}
+
+#[derive(Deserialize)]
+struct SettingReading {
+    value: Value,
+    origin: String,
+    file: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SettingDescription {
+    description: String,
+    #[serde(rename = "x-owner")]
+    owner: String,
+    #[serde(rename = "x-change")]
+    change: String,
+}
+
+fn settings_body(document: &Value, schema: &Value) -> Result<Markup, String> {
+    let document: SettingsDocument =
+        serde_json::from_value(document.clone()).map_err(|e| format!("Settings values: {e}"))?;
+    let descriptions: BTreeMap<String, SettingDescription> = serde_json::from_value(
+        schema
+            .pointer("/properties/options/properties")
+            .ok_or("Settings schema has no options")?
+            .clone(),
+    )
+    .map_err(|e| format!("Settings schema: {e}"))?;
+    let mut owners = BTreeMap::<_, Vec<_>>::new();
+    for (name, description) in &descriptions {
+        let reading = document
+            .options
+            .get(name)
+            .ok_or_else(|| format!("Settings value missing: {name}"))?;
+        owners
+            .entry(&description.owner)
+            .or_default()
+            .push((name, description, reading));
+    }
+    if let Some(name) = document
+        .options
+        .keys()
+        .find(|name| !descriptions.contains_key(*name))
+    {
+        return Err(format!("Settings schema missing: {name}"));
+    }
+    Ok(html! {
+        section.hero {
+            div.shaft aria-hidden="true" {}
+            div.hero-inner {
+                p.eyebrow { "Configuration" }
+                h1 { "Settings" }
+                p.lede { "Every setting in effect, grouped by the part of the pipeline that reads it." }
+                p { "Read only. Live settings take effect at the next decision; other settings need a deploy." }
+            }
+        }
+        div.panels {
+            @for (index, (owner, options)) in owners.iter().enumerate() {
+                section.settings-group.panel aria-labelledby=(format!("settings-owner-{index}")) {
+                    h2 id=(format!("settings-owner-{index}")) { (owner) }
+                    @for (name, description, reading) in options {
+                        article.setting data-setting=(name) {
+                            h3 { code { (setting_text(name)) } }
+                            dl.facts {
+                                div { dt { "Value" } dd { code data-setting-value { (setting_text(&reading.value.to_string())) } } }
+                                div { dt { "Source" } dd {
+                                    (reading.origin)
+                                    @if let Some(file) = &reading.file {
+                                        @if reading.origin == "live" { " · " code { (setting_text(file)) } }
+                                    }
+                                } }
+                                div { dt { "Changes" } dd {
+                                    @if description.change == "live" { "Live · next decision" }
+                                    @else { "Deploy required" }
+                                } }
+                            }
+                            p { (setting_text(&description.description)) }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+// Break opportunities keep arbitrary JSON and option names within a phone's
+// width, using the shell's existing styles and no inline CSS.
+fn setting_text(text: &str) -> Markup {
+    html! {
+        @for (index, character) in text.chars().enumerate() {
+            (character)
+            @if index % 16 == 15 { wbr; }
+        }
+    }
+}
+
 pub fn offline(f: &Frame) -> Markup {
     page(
         f,
@@ -269,7 +383,6 @@ pub fn until(now: u64, then: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn times_read_plainly() {
         assert_eq!(span(1), "1 second");

@@ -30,7 +30,8 @@
 //!   - A wake-up the handler's last pass booked in its wake file,
 //!     {repo: epoch} ("" for its full pass), for when a wait it saw ends (a
 //!     new head's settle delay, a reviewer's timeout, a reply old enough to
-//!     hand on). Read after each pass the service starts, and when it starts.
+//!     hand on). Read for every handler after any pass ends, including a failed pass,
+//!     and when the service starts.
 //!
 //! A repo's pass starts DEBOUNCE seconds after its first event, so a push and
 //! the events that follow it get one pass, and one repo's passes are GAP

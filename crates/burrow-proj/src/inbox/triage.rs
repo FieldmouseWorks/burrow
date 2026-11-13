@@ -219,6 +219,7 @@ impl Pass<'_> {
     /// carried out, then a job for each issue nobody has sorted, while there's
     /// room.
     pub(super) fn triage(&mut self, repo: &str, all: &[Value]) -> Result<(), Fail> {
+        self.reconcile_planner_waits(repo, all)?;
         let Some(t) = self.sorting().cloned() else {
             return Ok(());
         };
@@ -239,12 +240,11 @@ impl Pass<'_> {
             .filter(|d| self.sorting_slot(d))
             .count();
         let mut room = t.at_once.saturating_sub(going);
+        let mut launch_failed = false;
         for issue in all {
-            if room == 0 && !self.lane(issue) {
-                continue;
-            }
             let n = raw(&issue["number"]);
             if self.sorted(repo, &t, issue, &claimed) || handled.contains(&n) {
+                self.planner_wait(repo, &n, None);
                 continue;
             }
             let d = root.join(format!("{}-{n}", key(repo)));
@@ -254,11 +254,27 @@ impl Pass<'_> {
             // works again.
             if let Some(failed) = read(&d.join("failed")) {
                 if failed == updated {
+                    self.planner_wait(repo, &n, None);
                     continue;
                 }
                 let _ = fs::remove_dir_all(&d);
             }
             if d.exists() {
+                let why = (d.join("plan").is_file() && !self.sorting_slot(&d))
+                    .then_some("its verdict's steps are still being carried out");
+                self.planner_wait(repo, &n, why);
+                continue;
+            }
+            if room == 0 && !self.lane(issue) {
+                self.planner_wait(
+                    repo,
+                    &n,
+                    Some("waiting for a planner slot: all atOnce sorting slots are held"),
+                );
+                continue;
+            }
+            self.planner_wait(repo, &n, None);
+            if launch_failed {
                 continue;
             }
             let (id, input, seen) = match self.sort(repo, issue) {
@@ -266,7 +282,8 @@ impl Pass<'_> {
                 Err(f) => {
                     say(f);
                     self.retry(repo);
-                    break;
+                    launch_failed = true;
+                    continue;
                 }
             };
             fs::create_dir_all(&d).map_err(|e| io_fail(&d, e))?;

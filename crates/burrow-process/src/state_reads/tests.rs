@@ -83,3 +83,30 @@ fn replacement_is_confined_after_directory_rename_and_staging_link_attacks() {
     assert!(append(&root.join("job/value")).is_err());
     assert!(directory(&root.join("job/new")).is_err());
 }
+
+#[test]
+fn durable_removal_uses_the_pinned_directory_and_reports_unlink_failures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("direct"), "obsolete").unwrap();
+    remove_durable(root.join("direct")).unwrap();
+    remove_durable(root.join("direct")).unwrap();
+    assert!(!root.join("direct").exists());
+    fs::create_dir(root.join("job")).unwrap();
+    fs::create_dir(root.join("outside")).unwrap();
+    fs::write(root.join("job/pending"), "obsolete").unwrap();
+    fs::write(root.join("outside/pending"), "untouched").unwrap();
+    let job = Dir::open(&root.join("job")).unwrap();
+    fs::rename(root.join("job"), root.join("retained")).unwrap();
+    symlink(root.join("outside"), root.join("job")).unwrap();
+    job.remove_durable("pending").unwrap();
+    job.remove_durable("pending").unwrap();
+    assert!(!root.join("retained/pending").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("outside/pending")).unwrap(),
+        "untouched"
+    );
+    assert!(remove_durable(root.join("job/pending")).is_err());
+    fs::create_dir(root.join("retained/pending")).unwrap();
+    assert!(job.remove_durable("pending").is_err());
+}

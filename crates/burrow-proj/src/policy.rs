@@ -231,9 +231,15 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     ids.sort_by_key(|id| read(&path(&Job::new(cfg, id), "order")).unwrap_or_else(|| id.clone()));
+    // One look at which job units are up, not one per job: a denied job
+    // with nothing up and nothing held has nothing to vacate. Taken after
+    // this pass's generation, so a unit started under an earlier policy is
+    // either listed here or ends this pass with a changed generation.
+    let up =
+        systemd::up(cfg, "proj-*.service").ok_or("could not list the job units that are up")?;
     let mut errors = Vec::new();
     for id in ids {
-        if let Err(error) = reconcile_job(cfg, &id, release_generation) {
+        if let Err(error) = reconcile_job(cfg, &id, release_generation, &up) {
             errors.push(format!("{id}: {error}"));
         }
     }
@@ -293,7 +299,12 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
     }
 }
 
-fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Result<(), String> {
+fn reconcile_job(
+    cfg: &Config,
+    id: &str,
+    release_generation: &Generation,
+    up: &std::collections::HashSet<String>,
+) -> Result<(), String> {
     let job = Job::new(cfg, id);
     if path(&job, "restoring").exists() && !parked(&job) && systemd::gone(cfg, &job.unit()) {
         let rec: Park =
@@ -311,14 +322,17 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
         return Ok(());
     }
     if denied(&job) {
+        if !parked(&job) && !up.contains(&job.unit()) && job.holds()?.is_empty() {
+            return Ok(());
+        }
         // Activating and deactivating units can still hold descendants and
         // inherited locks; only a known gone unit has vacated.
         let active = !systemd::gone(cfg, &job.unit());
         if !parked(&job) {
-            let state = job.state();
             if !active && job.holds()?.is_empty() {
                 return Ok(());
             }
+            let state = job.state();
             let first = job
                 .turns()
                 .is_some_and(|n| read(&job.turn(&n, "priority")).as_deref() == Some("first"));

@@ -121,16 +121,16 @@ fn its_pr_is_its_own_branchs_open_one() {
 }
 
 #[test]
-fn its_pr_says_what_the_commit_passed_and_that_its_live() {
+fn its_pr_says_what_the_commit_passed_and_that_its_not_live() {
     let m = Machine::new();
     m.commit("flake.lock", "v2");
     let (title, body) = said(&m.cfg).unwrap();
     assert_eq!(title, "flake.lock: v2");
     assert_eq!(
         body,
-        "Pushed by box-update after the build, the VM tests and the health check passed.\n\n\
-         It is live on box. The steward settles this PR and the merge train lands it; until then \
-         box-update brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it."
+        "Pushed by box-update after the build and the VM tests passed.\n\n\
+         It is not live: box runs main. The steward settles this PR and the merge train lands it; until then \
+         box-update brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it. Only main goes live: box-update deploys this after it lands."
     );
 }
 
@@ -187,82 +187,11 @@ fn proposing_puts_head_up_as_a_new_pr() {
 }
 
 #[test]
-fn riding_is_main_with_its_own_head_on_top() {
-    // Main where the PR left it: HEAD is the PR's head.
-    let m = Machine::new();
-    let pr = m.pushed_before("v2");
-    m.at_main();
-    assert_eq!(ride(&m.cfg, m.t(), &pr), Ok(()));
-    assert_eq!(m.head(), pr.head);
-
-    // Main moved on: main with the PR on top.
-    m.landed("README", "new");
-    let main = m.at_main();
-    assert_eq!(ride(&m.cfg, m.t(), &pr), Ok(()));
-    m.work(&["merge-base", "--is-ancestor", &main, "HEAD"]);
-    m.work(&["merge-base", "--is-ancestor", &pr.head, "HEAD"]);
-    let read = |f: &str| fs::read_to_string(m.cfg.work.join(f)).unwrap();
-    assert_eq!(
-        (read("flake.lock"), read("README")),
-        ("v2\n".into(), "new\n".into())
-    );
-    assert_eq!(m.work(&["log", "-1", "--format=%s"]), "Ride #7 on main");
-}
-
-#[test]
-fn it_rides_only_its_own_head_as_it_was_listed_and_only_onto_main() {
-    // Someone else's head on it (a fix job's): no riding, HEAD still main.
-    let m = Machine::new();
-    m.pushed_before("v2");
-    let fix = Pr {
-        number: 7,
-        head: m.pushed("fix", BRANCH, "flake.lock", "v3"),
-    };
-    let main = m.at_main();
-    assert_eq!(
-        ride(&m.cfg, m.t(), &fix),
-        Err(format!(
-            "its PR #7 has a head it didn't push ({}); holding until that lands",
-            fix.head
-        ))
-    );
-    assert!(m.left_at(&main));
-    // Nothing proposed at all: the same.
-    fs::remove_file(m.cfg.state.join("proposed")).unwrap();
-    let e = ride(&m.cfg, m.t(), &fix).unwrap_err();
-    assert!(e.contains("a head it didn't push"), "{e}");
-
-    // GitHub's branch moved since it was listed: no riding what wasn't read.
-    let m = Machine::new();
-    let listed = m.pushed_before("v2");
-    m.pushed("fix", BRANCH, "flake.lock", "v3");
-    let main = m.at_main();
-    assert_eq!(
-        ride(&m.cfg, m.t(), &listed),
-        Err(format!("couldn't fetch its PR #7's head ({})", listed.head))
-    );
-    assert!(m.left_at(&main));
-
-    // A PR that no longer merges onto main: no riding, and no merge left
-    // half done.
-    let m = Machine::new();
-    let pr = m.pushed_before("v2");
-    m.landed("flake.lock", "other");
-    let main = m.at_main();
-    assert_eq!(
-        ride(&m.cfg, m.t(), &pr),
-        Err("its PR #7 doesn't merge onto main; holding until it's fixed".into())
-    );
-    assert!(m.left_at(&main));
-}
-
-#[test]
 fn red_is_ci_as_the_steward_reads_it_on_its_own_head() {
     let m = Machine::new();
     let pr = m.pushed_before("v2");
     // Green, pending, rerunning, the steward's own status, the train's error
-    // (a merge GitHub refused), its failure from anyone else: not red, so
-    // it's ridden as before.
+    // (a merge GitHub refused), its failure from anyone else: not red.
     for green in [
         vec![],
         vec![run("IN_PROGRESS", None)],

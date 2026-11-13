@@ -111,9 +111,10 @@
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"
             "modules/autoland/lock_wait.py"
+            "modules/autoland/step_jobs.py"
             "house"
           ];
-          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl ];
+          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

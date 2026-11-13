@@ -69,10 +69,61 @@ fn unbuilt_vms(targets: &[String], roots: &Path) -> Result<Vec<String>> {
     }
     Ok(pending)
 }
+/// Derivation names a `nix build --dry-run` says it will build, not fetch.
+pub fn cold_names(dry_run_stderr: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut building = false;
+    for line in dry_run_stderr.lines() {
+        let l = line.trim();
+        if l.contains("will be built:") {
+            building = true;
+        } else if l.contains("will be fetched") || l.contains("don't know how to build") {
+            building = false;
+        } else if building && l.starts_with("/nix/store/") {
+            let name = l.rsplit('/').next().unwrap_or(l);
+            let name = name.split_once('-').map_or(name, |(_, n)| n);
+            names.push(name.trim_end_matches(".drv").to_owned());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+/// Say by name what this leg will compile because no cache has it, so a long
+/// quiet build isn't mistaken for a hang. Informational: it never fails a leg.
+fn announce_cold(targets: &[String]) {
+    let mut c = cmd("nix-store", &["--realise", "--dry-run"]);
+    c.args(targets.iter().map(|t| t.trim_end_matches("^*")));
+    let Ok(o) = output(c) else { return };
+    let names = cold_names(&String::from_utf8_lossy(&o.stderr));
+    if names.is_empty() {
+        return;
+    }
+    let mut msg = format!(
+        "cold build: {} derivations no cache has will be built here, not restored: {}",
+        names.len(),
+        names
+            .iter()
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if names.len() > 40 {
+        msg.push_str(&format!(", and {} more", names.len() - 40));
+    }
+    println!("{msg}");
+    if let Some(path) = env::var_os("GITHUB_STEP_SUMMARY")
+        && let Ok(mut f) = fs::OpenOptions::new().append(true).create(true).open(path)
+    {
+        let _ = writeln!(f, "{msg}");
+    }
+}
 pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
     if targets.is_empty() {
         return Ok(true);
     }
+    announce_cold(targets);
     let args = |ts: &[String], vm: bool| {
         let mut a = vec!["build".to_owned(), "-L".into()];
         if let Some(p) = link {
@@ -132,4 +183,13 @@ pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<b
         ok = in_slot(&args(&vms, true))? && ok;
     }
     Ok(ok)
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn names_only_what_will_be_built() {
+        let out = "this derivation will be built:\n  /nix/store/aaa-codex-1.0.drv\nthese 2 derivations will be built:\n  /nix/store/bbb-x.drv\n  /nix/store/ccc-y.drv\nthese 3 paths will be fetched (1 MiB download):\n  /nix/store/ddd-z\n";
+        assert_eq!(super::cold_names(out), ["codex-1.0", "x", "y"]);
+        assert!(super::cold_names("this path will be fetched:\n  /nix/store/d-z\n").is_empty());
+    }
 }

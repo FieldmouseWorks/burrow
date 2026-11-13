@@ -306,3 +306,22 @@ fn a_rustup_proxy_with_no_default_is_not_used() {
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(r.build().contains("-a.drv^*"), "{}", r.out);
 }
+
+/// The bootstrap compiles the runner with rustc directly, so it must name the
+/// workspace's edition: Cargo and Clippy check the source under that one, and
+/// syntax only it accepts would otherwise break every gate before it starts.
+#[test]
+fn the_runner_compiles_under_the_workspaces_edition() {
+    let cargo = read(&crate::harness::repo_file("crates/Cargo.toml"));
+    let edition = cargo
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("edition = "))
+        .expect("crates/Cargo.toml names an edition")
+        .trim_matches('"');
+    let run = read(&crate::harness::repo_file(".github/flake-check/run.sh"));
+    let named: Vec<_> = run
+        .split_whitespace()
+        .filter_map(|w| w.strip_prefix("--edition="))
+        .collect();
+    assert_eq!(named, [edition], "run.sh's rustc editions");
+}

@@ -129,11 +129,14 @@ fn full() -> Snapshot {
                 lead: vec!["sam/burrow".into()],
                 slots: 1,
             },
-            triage: Some(Triage {
-                drain: Some(Engine::Codex),
-                drain_jobs: 3,
-                sorting_at_once: 2,
-            }),
+            triage: Some(
+                serde_json::from_value(serde_json::json!({
+                    "drain": "codex",
+                    "drainJobs": 3,
+                    "sortingAtOnce": 2,
+                }))
+                .unwrap(),
+            ),
         },
         jobs: vec![JobRow {
             id: "j1".into(),

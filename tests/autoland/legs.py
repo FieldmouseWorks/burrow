@@ -28,7 +28,7 @@ def legs(done="COMPLETED", verdict="SUCCESS", leg="SUCCESS", suite="s1", n=4, ba
 
 def state(*runs):
     with C.acting_for("sam/r"):
-        return ci_state(clean(checks=[c for run in runs for c in run]), repo="sam/r")[:2]
+        return ci_state(clean(checks=[c for run in runs for c in run]), repo="sam/r", moved=())[:2]
 
 
 # Every leg passed and the check job hasn't started: CI is still going, and
