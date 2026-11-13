@@ -199,9 +199,10 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
     })();
     // A planner cannot use the gate's build-capable fallbacks. Leave a
     // failed plan (including nixConfig) to the actual gate.
-    if mode == Mode::Plan && plan.is_err() {
-        return Err(plan.unwrap_err());
-    }
+    let plan = match plan {
+        Err(e) if mode == Mode::Plan => return Err(e),
+        plan => plan,
+    };
     if let Ok(args) = plan {
         let mut c = cmd(
             "nix-instantiate",

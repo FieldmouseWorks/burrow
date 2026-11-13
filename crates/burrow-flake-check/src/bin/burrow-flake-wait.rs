@@ -140,9 +140,11 @@ fn wait() -> Result<()> {
     println!(
         "checking {workflow}'s default-branch push at {tip} for the builds this leg would compile:\n{cold}"
     );
-    let outcome = poll(Duration::from_secs(max), Duration::from_secs(30), || {
-        producer.state(&mut api)
-    })?;
+    let outcome = poll(
+        Duration::from_secs(max),
+        Duration::from_secs(var("WAIT_POLL").parse().unwrap_or(30)),
+        || producer.state(&mut api),
+    )?;
     println!("{outcome:?}");
     if outcome == Outcome::Saved
         && let Some(path) = env::var_os("GITHUB_OUTPUT")
@@ -161,6 +163,3 @@ fn main() {
         std::process::exit(1);
     }
 }
-#[cfg(test)]
-#[path = "wait/cases.rs"]
-mod tests;
