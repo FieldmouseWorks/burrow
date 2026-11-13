@@ -43,6 +43,14 @@ FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
 OPEN = {}  # the keys of each repo's open PRs, as this pass read them
 FAILED = {}  # the repos this pass failed on, before, between or after their PRs
+# The repo's steps that come after its PRs, which a batch that yields among
+# the PRs never reaches. A failure of one stays watched until a pass tries
+# that step again, whatever fails before the PRs meanwhile; one before the
+# PRs (restart, settle, reading them, the default branch's watch) is tried
+# again by every batch on its way in, so FAILED alone says whether it's over.
+AFTER_PRS = ("train", "branches", "upkeep")
+REACHED = {}  # by repo: the steps after its PRs this pass tried
+STEPS = {}  # by repo: the steps after its PRs this pass failed in
 FAILING = {}  # the PRs whose step keeps failing, by key: what fails, which is the stall
 SAID = {}  # what GitHub said to the latest try of each, by key: shown, but not the stall
 
@@ -51,6 +59,8 @@ def begin():
     NOTED.clear()
     OPEN.clear()
     FAILED.clear()
+    REACHED.clear()
+    STEPS.clear()
     FAILING.clear()
     SAID.clear()
 
@@ -123,20 +133,33 @@ def overdue(repo, pr, why, said=None):
     return True
 
 
-def failed(repo, pr=None, after_prs=False):
+def reached(repo, step):
+    """The pass tried the repo's step after its PRs: whatever failed of it
+    before is over, unless it failed again (failed's step)."""
+    assert step in AFTER_PRS, step
+    REACHED.setdefault(repo, set()).add(step)
+
+
+def failed(repo, pr=None, step=None):
     """The pass failed on the PR, or on the repo. Whatever its head, it's the
-    steward's pass that fails: no rev. after_prs: the repo's step that failed
-    comes after its PRs (its train, branches, upkeep), which a batch that
-    yields among the PRs doesn't reach, so its failure is kept meanwhile."""
-    minutes, kick = repo_cfg(repo)["stallAfter"], f"autoland/{repo}"
+    steward's pass that fails: no rev. step: which of the repo's steps after
+    its PRs (AFTER_PRS) failed, None for one before them."""
     if pr:
+        minutes, kick = repo_cfg(repo)["stallAfter"], f"autoland/{repo}"
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, FAILS, minutes, kick, None)
-    else:
-        FAILED[repo] = {"repo": repo, "what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
-                        "kick": kick, "rev": None, **({"after_prs": True} if after_prs else {})}
+        return
+    FAILED[repo] = repo_failure(repo)
+    if step:
+        reached(repo, step)
+        STEPS.setdefault(repo, set()).add(step)
 
 
-def publish(seen, digest, full, inventory=None, deferred=()):
+def repo_failure(repo):
+    return {"repo": repo, "what": repo, "link": f"https://github.com/{repo}", "phase": FAILS,
+            "minutes": repo_cfg(repo)["stallAfter"], "kick": f"autoland/{repo}", "rev": None}
+
+
+def publish(seen, digest, full, inventory=None):
     """watch.json: this pass's waits for the repos it saw, and a kicked pass
     keeps the other repos' as they were. An open PR it noted nothing for
     (every one, in a repo whose PRs it couldn't read) keeps the wait it had.
@@ -149,13 +172,17 @@ def publish(seen, digest, full, inventory=None, deferred=()):
     items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full
              and (inventory is None or repo_of(k) in inventory)}
     for repo in seen:
-        if repo in deferred and was.get(repo, {}).get("after_prs"):
-            # The operation that failed comes after the PRs, which this batch
-            # yielded among, so it hasn't been retried. Its clock belongs to
-            # that operation, not the PR traversal. One that failed before
-            # the PRs (reading them) was retried on the way in: had it failed
-            # again it would be in FAILED, so it's over.
-            items[repo] = was[repo]
+        # The repo's steps after its PRs that still fail: the ones that did
+        # before and this pass didn't try (it yielded among the PRs, or
+        # failed before them), and the ones it failed in. While any does,
+        # the repo's failure is watched, one wait whatever else fails
+        # meanwhile, so its clock carries on.
+        old = was.get(repo, {}).get("after_prs")
+        steps = ({s for s in old if s in AFTER_PRS} if isinstance(old, list) else set()) - REACHED.get(repo, set())
+        steps |= STEPS.get(repo, set())
+        failure = FAILED.get(repo) or (repo_failure(repo) if steps else None)
+        if failure and steps:
+            failure = {**failure, "after_prs": sorted(steps)}
         noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
 
@@ -164,7 +191,7 @@ def publish(seen, digest, full, inventory=None, deferred=()):
 
         items.update({k: v for k, v in was.items() if repo_of(k) == repo and k != repo and not theirs(k)
                       and (noted is None or (k in OPEN[repo] and k not in noted))})
-        now = {**{k: v for k, v in (noted or {}).items() if v}, **({repo: FAILED[repo]} if repo in FAILED else {})}
+        now = {**{k: v for k, v in (noted or {}).items() if v}, **({repo: failure} if failure else {})}
         for key, it in now.items():
             if theirs(key):
                 continue
@@ -185,7 +212,7 @@ def publish(seen, digest, full, inventory=None, deferred=()):
                           "kick": it["kick"],
                           # A step that keeps failing is the steward's, whatever job it has.
                           "claude": it.get("claude", False) and key not in FAILING,
-                          "rev": it["rev"], **({"after_prs": True} if it.get("after_prs") else {})}
+                          "rev": it["rev"], **({"after_prs": it["after_prs"]} if it.get("after_prs") else {})}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:
         log(f"waits changed: {len(items)} watched")
