@@ -122,11 +122,11 @@ impl Dir {
     /// Write an immutable first observation; an existing name is never opened.
     pub fn create(&self, name: &str, value: &[u8]) -> io::Result<()> {
         use std::io::Write;
-        child_name(Path::new(name))?;
+        leaf_name(name)?;
         self.create_new(name)?.write_all(value)
     }
     pub fn create_new(&self, name: &str) -> io::Result<File> {
-        child_name(Path::new(name))?;
+        leaf_name(name)?;
         Ok(File::from(fs::openat2(
             &self.0,
             name,
@@ -136,12 +136,12 @@ impl Dir {
         )?))
     }
     pub fn remove(&self, name: &str) -> io::Result<()> {
-        child_name(Path::new(name))?;
+        leaf_name(name)?;
         Ok(fs::unlinkat(&self.0, name, fs::AtFlags::empty())?)
     }
     /// Create a fresh, uniquely named subdirectory and return it pinned.
     pub fn mkdir_unique(&self, prefix: &str) -> io::Result<(String, Self)> {
-        child_name(Path::new(prefix))?;
+        leaf_name(prefix)?;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
@@ -160,8 +160,8 @@ impl Dir {
     }
     /// Move a child into another pinned directory; both ends stay confined.
     pub fn rename_into(&self, name: &str, to: &Self, to_name: &str) -> io::Result<()> {
-        child_name(Path::new(name))?;
-        child_name(Path::new(to_name))?;
+        leaf_name(name)?;
+        leaf_name(to_name)?;
         Ok(fs::renameat(&self.0, name, &to.0, to_name)?)
     }
     /// Commit absence before a caller retires another recovery record. An
@@ -192,6 +192,15 @@ impl Dir {
         std::fs::OpenOptions::new()
             .append(true)
             .open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
+    }
+}
+/// A mutation target is exactly one plain name: nothing nested, so no
+/// intermediate component is ever resolved (or followed) before the change.
+fn leaf_name(name: &str) -> io::Result<()> {
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(_)), None) if !name.ends_with('/') => Ok(()),
+        _ => Err(io::Error::other("state mutation needs a single plain name")),
     }
 }
 fn child_name(path: &Path) -> io::Result<()> {

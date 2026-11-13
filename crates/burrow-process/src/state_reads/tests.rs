@@ -152,3 +152,32 @@ fn rename_refuses_a_planted_link_as_either_parent() {
     rename(job.join("a"), job.join("b")).unwrap();
     assert!(job.join("b").exists() && host.join("a").exists());
 }
+
+#[test]
+fn mutation_helpers_reject_nested_names_and_leave_denied_host_state_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let denied = tmp.path().join("denied");
+    let job = tmp.path().join("job");
+    fs::create_dir_all(&denied).unwrap();
+    fs::create_dir_all(job.join("real")).unwrap();
+    fs::write(denied.join("victim"), b"keep").unwrap();
+    fs::write(job.join("mine"), b"x").unwrap();
+    symlink(&denied, job.join("link")).unwrap();
+    let root = Dir::open(&job).unwrap();
+    let other = Dir::open(&job.join("real")).unwrap();
+
+    assert!(root.mkdir_unique("link/attempt-").is_err());
+    assert!(root.mkdir_unique("real/attempt-").is_err());
+    assert!(root.create("link/new", b"x").is_err());
+    assert!(root.create_new("link/new").is_err());
+    assert!(root.remove("link/victim").is_err());
+    assert!(root.rename_into("link/victim", &other, "stolen").is_err());
+    assert!(root.rename_into("mine", &other, "link/moved").is_err());
+    assert!(root.rename_into("mine", &other, "a/b").is_err());
+
+    let names: Vec<_> = fs::read_dir(&denied).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["victim"]);
+    assert_eq!(fs::read(denied.join("victim")).unwrap(), b"keep");
+    assert!(job.join("mine").exists());
+    assert_eq!(fs::read_dir(job.join("real")).unwrap().count(), 0);
+}
