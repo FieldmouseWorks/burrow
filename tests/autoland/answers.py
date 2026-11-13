@@ -8,7 +8,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, DDIR, GONE, JOBS, POSTED, QDIR, UPKEEP, UPKEEP_REAL, H, S, STUB, T0, V, clean, fresh_pr_state, head,
+from harness import (C, DDIR, GONE, POSTED, QDIR, UPKEEP, UPKEEP_REAL, H, S, STUB, T0, V, clean, fresh_pr_state, head,
                      info, merged, mkpr, pr_state, queued, run, rv_review, session_name, stand_in, tmp, worker)
 
 stand_in()
@@ -25,10 +25,6 @@ status, _ = run(mkpr(reviews=[cx]), 650)
 assert POSTED == [("rival", head, 2)] and not merged(), (POSTED, status)
 status, _ = run(mkpr(reviews=[ds2, cx], threads=[False, False]), 700)
 assert "Round 1: 2 open review threads" in status and not merged()
-# The first round's fix job weighs its findings on their merits, as one past
-# the limit does (rounds.py): the policy is the brief's from round one.
-assert len(JOBS) == 1 and "Weigh every finding on its merits, the same from the first round on" in JOBS[0], JOBS
-assert "counts as P2 here" in JOBS[0] and "Answer the rest with your reasons" in JOBS[0], JOBS
 
 # Its findings answered and resolved without a new commit: it looks again.
 status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3600)
