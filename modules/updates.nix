@@ -598,7 +598,7 @@ in
       settings = lib.mkOption {
         type = lib.types.attrs;
         default = { };
-        description = "Merged into burrow's Renovate settings.";
+        description = "Merged into burrow's Renovate settings; its author is `gitAuthor`, and a different one here fails evaluation.";
       };
       path = lib.mkOption {
         type = lib.types.listOf lib.types.package;
@@ -812,6 +812,17 @@ in
 
     (lib.mkIf rcfg.enable {
       assertions = [{
+        # renovate-policy.nix merges settings over gitAuthor, so a gitAuthor
+        # there would be the author Renovate commits as while the steward
+        # (and renovate-identity.nix's checks) go by the option's: the
+        # option is its one home.
+        assertion = !(rcfg.settings ? gitAuthor) || rcfg.settings.gitAuthor == rcfg.gitAuthor;
+        message = ''
+          burrow.updates.renovate.settings.gitAuthor is ${builtins.toJSON rcfg.settings.gitAuthor or null},
+          but burrow.updates.renovate.gitAuthor, who the steward knows Renovate's
+          commits by, is ${builtins.toJSON rcfg.gitAuthor}. Set it through
+          burrow.updates.renovate.gitAuthor instead.'';
+      } {
         assertion = renovateApp == null || rcfg.owners != [ ];
         message = "burrow.updates.renovate.owners: name the accounts the App ${renovateApp.slug or ""} is installed on, whose repos Renovate looks through.";
       } {

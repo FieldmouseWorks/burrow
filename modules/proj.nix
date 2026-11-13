@@ -219,6 +219,10 @@ in
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
     { key = "burrow/probe"; imports = [ (import ./probe.nix inputs) ]; }
+    # Who Renovate is: its App (updates.renovate.app) is one of the settings
+    # this module renders for `proj settings show` (settings/tracked.nix),
+    # and its default is derived, so it has to be here with proj alone too.
+    (import ./updates/renovate-identity.nix inputs)
   ];
 
   options.burrow.proj = {

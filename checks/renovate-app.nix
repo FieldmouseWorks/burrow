@@ -8,7 +8,8 @@
 # config) knows Renovate's PRs and commits by that bot while still trusting the
 # machinery's. A gitAuthor naming any other bot, or an App that isn't one of
 # burrow.github.apps, fails evaluation, and so does Renovate as the user
-# beside a machinery App.
+# beside a machinery App, and a gitAuthor in Renovate's settings that isn't
+# the option's.
 { self, pkgs, nixpkgs, ... }:
 let
   lib = nixpkgs.lib;
@@ -26,6 +27,18 @@ let
   wrongBot = failed (machine [ own { burrow.updates.renovate.gitAuthor = workersBot; } ]);
   # The address is what Renovate and the steward compare; the name is free.
   renamed = failed (machine [ own { burrow.updates.renovate.gitAuthor = "Renovate <5+sam-renovate[bot]@users.noreply.github.com>"; } ]);
+  # Renovate's settings can't name another author than gitAuthor, the one
+  # the steward knows its commits by: not another bot, not none, and not
+  # beside an App or without one. The same one is no conflict.
+  inSettings = author: failed (machine [ own { burrow.updates.renovate.settings.gitAuthor = author; } ]);
+  settingsForeign = inSettings workersBot;
+  settingsNull = inSettings null;
+  settingsSame = inSettings renovateBot;
+  userSettings = failed (machine [ {
+    burrow.github.machinery = lib.mkForce null;
+    burrow.updates.renovate.gitAuthor = "Renovate <renovate@example.org>";
+    burrow.updates.renovate.settings.gitAuthor = "Other <other@example.org>";
+  } ]);
   unknown = failed (machine [ { burrow.updates.renovate.app = "nope"; } ]);
   # As the user while the machinery is an App: renovate-sweep couldn't tell
   # Renovate's comments.
@@ -46,6 +59,10 @@ let
     apartClean = failed apart == [ ];
     renamedClean = renamed == [ ];
     wrongBotFails = lib.length wrongBot == 1 && lib.hasInfix "gitAuthor" (lib.head wrongBot) && lib.hasInfix renovateBot (lib.head wrongBot);
+    settingsForeignFails = lib.any (lib.hasInfix "settings.gitAuthor is \"${workersBot}\"") settingsForeign;
+    settingsNullFails = lib.any (lib.hasInfix "settings.gitAuthor is null") settingsNull;
+    settingsSameClean = settingsSame == [ ];
+    userSettingsFails = lib.any (lib.hasInfix "settings.gitAuthor is \"Other <other@example.org>\"") userSettings;
     unknownFails = lib.any (lib.hasInfix "renovate.app is nope") unknown;
     asUserFails = lib.any (lib.hasInfix "Renovate acts as the user") asUser;
   };

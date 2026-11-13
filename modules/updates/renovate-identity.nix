@@ -1,9 +1,11 @@
 # Who Renovate is on GitHub, in one place: the App it acts as
 # (burrow.updates.renovate.app), that App's bot, and the author its commits
 # carry (gitAuthor). ../updates.nix runs Renovate as it; ../autoland.nix tells
-# Renovate's PRs, dashboards and commits by it, and trusts its bot. Both
-# import this, so a steward on a machine that doesn't run the updates module
-# reads the same Renovate the machine's flake names.
+# Renovate's PRs, dashboards and commits by it, and trusts its bot; ../proj.nix
+# shows its App among the settings (settings/tracked.nix). Each imports this,
+# so a steward, or proj, on a machine that doesn't run the updates module
+# reads the same Renovate the machine's flake names. renovate.settings can't
+# name another author (../updates.nix): gitAuthor here is the only one.
 #
 # An App's commits are its bot's on GitHub, and Renovate takes a commit by
 # anyone but its gitAuthor for an edit (and stops rebasing that PR), so with
