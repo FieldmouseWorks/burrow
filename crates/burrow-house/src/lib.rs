@@ -19,6 +19,13 @@
 //!     line naming one says why on a `Why a model name:` line. A repo whose
 //!     subject is models (wend records which one wrote each fix) turns it
 //!     off.
+//!   - branch: the PR's head isn't under Renovate's branch prefix,
+//!     `renovate/`, unless Renovate opened the PR (its body ends with
+//!     Renovate's mark: the PR's author can't say, as Renovate and jobs act
+//!     on GitHub as the same App). Renovate takes every branch there as its
+//!     own, and retitles the PR of one it has no update for `... -
+//!     abandoned`, the subject main would get. No line passes it: the work
+//!     moves to a branch of its own. A fork's branch isn't Renovate's.
 //!
 //! Each line goes in the PR's body, starting a line of its own, with a
 //! reason after it (rules.rs says what counts as one). The check reads the
