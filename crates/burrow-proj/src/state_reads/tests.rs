@@ -85,6 +85,7 @@ fn status_snapshots_and_notices_do_not_read_outside_job_state() {
         &crate::ask::Recommendation {
             default: "continue".into(),
             one_way: false,
+            about: None,
         },
     )
     .unwrap();
@@ -215,8 +216,6 @@ fn a_turns_end_never_writes_through_links_the_job_planted() {
     cfg.jobs = p.join("jobs");
     cfg.scratch = p.join("scratch");
     cfg.wake = p.join("wake.json");
-    cfg.roles = p.join("roles");
-    cfg.models = p.join("models");
     cfg.kick.clear();
     cfg.notify = None;
     cfg.meters = None;

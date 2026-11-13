@@ -19,6 +19,7 @@ fn ask(job: &Job, one_way: bool) {
         &crate::ask::Recommendation {
             default: "Keep the archive".into(),
             one_way,
+            about: None,
         },
     )
     .unwrap();
@@ -48,7 +49,7 @@ fn active_one_way_upgrade_precedes_quota_recovery_and_expiry() {
             fs::write(job.turn("1", "result"), "Which archive?").unwrap();
             ask(&job, false);
             crate::ask::finish(&cfg, &job, "ask").unwrap();
-            let mut q = crate::ask::load(&job).unwrap();
+            let mut q = crate::ask::load(&job).unwrap().unwrap();
             q.due = now() + if past { -1 } else { 3600 };
             fs::write(
                 crate::ask::host_path(&job, "question"),
@@ -79,10 +80,14 @@ fn active_one_way_upgrade_precedes_quota_recovery_and_expiry() {
                 assert!(!job.path("prompt.2").exists());
             } else {
                 assert!(
-                    crate::ask::load(&job).unwrap().recommendation.one_way,
+                    crate::ask::load(&job)
+                        .unwrap()
+                        .unwrap()
+                        .recommendation
+                        .one_way,
                     "lost active one-way upgrade"
                 );
-                assert_eq!(crate::ask::load(&job).unwrap().due, q.due);
+                assert_eq!(crate::ask::load(&job).unwrap().unwrap().due, q.due);
             }
             assert_eq!(read(&crate::ask::host_path(&job, "question-id")), id);
             assert_eq!(
@@ -102,7 +107,7 @@ fn pending_recommendations_belong_to_their_turn_and_native_declaration() {
     quota(&job);
     finish(&job, "2").unwrap();
     assert!(
-        crate::ask::load(&job).is_none(),
+        crate::ask::load(&job).unwrap().is_none(),
         "old-turn ask was resurrected"
     );
     ask(&job, true);
@@ -130,7 +135,7 @@ fn superseded_pending_asks_are_not_revived_by_quota() {
         quota(&job);
         finish(&job, "1").unwrap();
         assert!(
-            crate::ask::load(&job).is_none(),
+            crate::ask::load(&job).unwrap().is_none(),
             "revived obsolete ask after {end}"
         );
         assert!(!job.path("ask.next").exists());
@@ -174,7 +179,7 @@ esac
     );
     let id = read(&crate::ask::host_path(&job, "question-id"));
     let wake: serde_json::Value = serde_json::from_str(&read(&cfg.wake).unwrap()).unwrap();
-    assert!(wake[""].as_i64().unwrap() < crate::ask::load(&job).unwrap().due);
+    assert!(wake[""].as_i64().unwrap() < crate::ask::load(&job).unwrap().unwrap().due);
     // A restart after committing authority but before publishing its turn
     // markers must recover the same outbox operation, not create a new ask.
     fs::remove_file(job.turn("1", "end")).unwrap();

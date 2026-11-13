@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeSet, fs, path::PathBuf};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct Child {
@@ -73,6 +73,26 @@ impl Pass<'_> {
                     .is_some_and(|(of, n)| {
                         of.eq_ignore_ascii_case(&key(repo)) && n.parse::<u64>().is_ok()
                     })
+            })
+            .collect()
+    }
+
+    /// The split parents in the repo whose children include any of these
+    /// issues: a child closing moves its parent's list on ([`Pass::sequence`]).
+    pub(super) fn parents_of(&self, repo: &str, children: &BTreeSet<u64>) -> BTreeSet<u64> {
+        if !self.inbox.planning {
+            return BTreeSet::new();
+        }
+        self.plan_dirs(repo)
+            .iter()
+            .filter_map(|d| {
+                let n = d.file_name()?.to_str()?.rsplit_once('-')?.1.parse().ok()?;
+                let list: List =
+                    serde_json::from_slice(&fs::read(d.join("tasks.json")).ok()?).ok()?;
+                list.children
+                    .iter()
+                    .any(|c| c.number.is_some_and(|c| children.contains(&c)))
+                    .then_some(n)
             })
             .collect()
     }

@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+pub mod live;
+
 use crate::assets::Assets;
 use crate::core::{Enrolled, Live};
 use crate::enroll::CODE_TTL;

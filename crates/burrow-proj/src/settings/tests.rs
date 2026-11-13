@@ -42,8 +42,9 @@ fn show(cfg: &Config) -> Value {
 #[test]
 fn every_option_shown_comes_from_the_schema() {
     let (d, mut cfg) = crate::usage::tests::rig();
-    cfg.roles = d.path().join("config/roles");
-    cfg.models = d.path().join("config/models");
+    let overlay = d.path().join("settings/overlay.json");
+    cfg.settings.as_mut().unwrap().overlay = overlay.clone();
+    let roles_file = cfg.settings.as_ref().unwrap().roles_file();
     set(&mut cfg, tracked());
 
     // Nothing live yet: every live option at its default, naming its file.
@@ -61,40 +62,66 @@ fn every_option_shown_comes_from_the_schema() {
         options["autoland.reviewers.codex.effort"],
         json!({"value": "high", "origin": "default"})
     );
+    // A role with nothing set shows the declared default, never an
+    // implicit one: every role on Claude but the planner, each on its
+    // engine's own model.
+    let unset = json!({"engine": "claude", "over": null});
+    assert_eq!(options["proj.roles"]["value"]["*"], unset);
+    assert_eq!(options["proj.roles"]["origin"], "default");
+    assert_eq!(options["proj.roles"]["file"], json!(roles_file));
     assert_eq!(
-        options["proj.roles"],
-        json!({"value": {}, "origin": "default", "file": cfg.roles})
+        options["proj.models"]["value"]["* claude"],
+        json!({"model": null, "effort": null})
+    );
+    assert_eq!(
+        options["proj.engineOffers"]["value"]["claude"]["models"],
+        json!([])
     );
     assert_eq!(options["proj.usageHold"]["value"], Value::Null);
 
-    // Each live file, read with the parser its turns use.
-    fs::create_dir_all(d.path().join("config/roles.d")).unwrap();
-    fs::write(d.path().join("config/roles.d/cheap"), "triage codex\n").unwrap();
-    fs::write(
-        d.path().join("config/roles.d/usual"),
-        "# usual\ntriage claude\nfix@Sam/Box   codex over 80 claude\n",
-    )
-    .unwrap();
-    std::os::unix::fs::symlink(d.path().join("config/roles.d/usual"), &cfg.roles).unwrap();
-    fs::write(&cfg.models, "triage claude small low\nfix codex - high\n").unwrap();
+    // Each live value, set through the door and read as its turns read it.
+    crate::config::tests::set(
+        &mut cfg,
+        d.path(),
+        &[
+            "role triage codex",
+            "engines save cheap",
+            "role triage claude",
+            "role fix@Sam/Box codex over 80 claude",
+            "offer claude models small",
+            "model triage claude small low",
+            "model fix codex - high",
+            "engines save usual",
+        ],
+    );
     crate::usage::hold(&cfg, crate::now() + 3600, "save usage").unwrap();
     let doc = show(&cfg);
     let options = &doc["options"];
+    let usual_roles = json!({
+        "*": {"engine": "claude", "over": null},
+        "planner": {"engine": "codex", "over": null},
+        "triage": {"engine": "claude", "over": null},
+        "fix@sam/box": {"engine": "codex", "over": {"pct": 80.0, "engine": "claude"}},
+    });
     assert_eq!(
         options["proj.roles"],
-        json!({"value": {"triage": "claude", "fix@Sam/Box": "codex over 80 claude"},
-               "origin": "live", "file": cfg.roles})
+        json!({"value": usual_roles, "origin": "live", "file": roles_file})
     );
     assert_eq!(
         options["proj.models"]["value"],
-        json!({"triage claude": {"model": "small", "effort": "low"},
+        json!({"* claude": {"model": null, "effort": null},
+               "* codex": {"model": null, "effort": null},
+               "triage claude": {"model": "small", "effort": "low"},
                "fix codex": {"model": null, "effort": "high"}})
     );
     assert_eq!(
-        options["proj.engineSetups"]["value"],
-        json!({"active": "usual", "saved": {
-            "cheap": {"triage": "codex"},
-            "usual": {"triage": "claude", "fix@Sam/Box": "codex over 80 claude"}}})
+        options["proj.engineOffers"]["value"]["claude"]["models"],
+        json!(["small"])
+    );
+    assert_eq!(options["proj.engineSetups"]["value"]["active"], "usual");
+    assert_eq!(
+        options["proj.engineSetups"]["value"]["saved"]["cheap"],
+        json!({"roles": {"triage": {"engine": "codex", "over": null}}, "models": {}})
     );
     let hold = &options["proj.usageHold"];
     assert_eq!(hold["origin"], "live");
@@ -130,11 +157,13 @@ fn every_option_shown_comes_from_the_schema() {
     let err = command(&cfg, &["show".into()]).unwrap_err();
     assert!(err.contains(".usage.json"), "{err}");
     fs::remove_file(cfg.jobs.join(crate::usage::FILE)).unwrap();
-    // And a live file a turn would refuse.
+    // And an overlay a turn would refuse.
     set(&mut cfg, tracked());
-    fs::write(&cfg.models, "triage claude small enormous\n").unwrap();
+    let mut edited: Value = serde_json::from_slice(&fs::read(&roles_file).unwrap()).unwrap();
+    edited["routing"]["models"]["triage claude"]["effort"] = json!("enormous");
+    fs::write(&roles_file, edited.to_string()).unwrap();
     let err = command(&cfg, &["show".into()]).unwrap_err();
-    assert!(err.contains("takes no effort enormous"), "{err}");
+    assert!(err.contains("doesn't offer effort enormous"), "{err}");
 }
 
 #[test]
@@ -148,12 +177,11 @@ fn the_schema_is_burrow_settings_own() {
 #[test]
 fn admission_reads_the_one_overlay_and_writes_without_a_tracked_document() {
     let (d, mut cfg) = crate::usage::tests::rig();
-    cfg.roles = d.path().join("roles");
-    cfg.models = d.path().join("models");
     let policy = burrow_settings::Config {
         overlay: d.path().join("overlay.json"),
         allowed: vec!["sam/kept".into()],
         pipeline_repos: vec!["sam/pipeline".into()],
+        ..Default::default()
     };
     cfg.settings = Some(policy.clone());
     cfg.tracked_settings = None;

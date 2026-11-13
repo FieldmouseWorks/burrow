@@ -1,5 +1,5 @@
-//! Role overflow end to end: a config as the module writes it, the roles
-//! file, the meters burrow-usage-reset keeps (one file an engine) and the
+//! Role overflow end to end: a config as the module writes it, the role
+//! settings, the meters burrow-usage-reset keeps (one file an engine) and the
 //! machine's usage hold, read the way a job's turn reads them. A role moves
 //! to its overflow engine only when its own is short and the other has room,
 //! and an engine's credits are room whatever its windows say.
@@ -10,7 +10,7 @@ use burrow_proj::config::Config;
 use burrow_proj::engine::Engine;
 use serde_json::{Value, json};
 
-/// The module's config, its jobs, roles and meters in DIR.
+/// The module's config, its jobs, settings and meters in DIR.
 fn config(dir: &Path) -> Config {
     let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
     serde_json::from_value(json!({
@@ -37,8 +37,7 @@ fn config(dir: &Path) -> Config {
         "deployed": path("deployed"),
         "apps": {},
         "notify": "/bin/notify",
-        "roles": path("roles"),
-        "models": path("models"),
+        "settings": {"overlay": path("settings/overlay.json")},
         "meters": path("meters"),
         "codexSlots": 2,
         "codexHooks": "/hooks",
@@ -47,6 +46,22 @@ fn config(dir: &Path) -> Config {
                   "systemctl": "/bin/systemctl", "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
     }))
     .unwrap()
+}
+
+/// Each route in LINES, `ROLE ENGINE [over PCT ENGINE]`, set through the
+/// settings door.
+fn routes(cfg: &Config, lines: &[&str]) {
+    for line in lines {
+        let args: Vec<String> = format!("role {line}")
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        cfg.settings
+            .as_ref()
+            .unwrap()
+            .command(&args, "test")
+            .unwrap();
+    }
 }
 
 /// ENGINE's meter in DIR, read now: each window's percent used, and its credits.
@@ -70,7 +85,7 @@ fn claude_short_overflows_to_codex_while_codex_has_room_or_credits() {
     let dir = d.path();
     let cfg = config(dir);
     fs::create_dir_all(dir.join("jobs")).unwrap();
-    fs::write(dir.join("roles"), "work claude over 90 codex\n").unwrap();
+    routes(&cfg, &["work claude over 90 codex"]);
     let stays = Engine::Claude;
     let moves = Engine::Codex;
 
@@ -119,11 +134,7 @@ fn overflow_belongs_to_the_winning_scoped_line() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path();
     let cfg = config(dir);
-    fs::write(
-        dir.join("roles"),
-        "work codex\nwork@sam/code claude over 80 codex\n",
-    )
-    .unwrap();
+    routes(&cfg, &["work codex", "work@sam/code claude over 80 codex"]);
     meter(dir, "codex", &[("300m", 1.0)], false);
     for (used, expected) in [(79.0, Engine::Claude), (80.0, Engine::Codex)] {
         meter(dir, "claude", &[("seven_day", used)], false);

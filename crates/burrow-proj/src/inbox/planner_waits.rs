@@ -32,10 +32,13 @@ impl Pass<'_> {
         Ok(())
     }
 
-    // Called only with a successful, complete listing, never after an outage.
+    // Called only with a successful listing, never after an outage; a scoped
+    // pass retires only the waits of issues it asked for.
     pub(super) fn reconcile_planner_waits(&self, repo: &str, all: &[Value]) -> Result<(), Fail> {
         for (kept, n, path) in self.planner_wait_records() {
-            if key(repo).eq_ignore_ascii_case(&kept) && !all.iter().any(|i| raw(&i["number"]) == n)
+            if key(repo).eq_ignore_ascii_case(&kept)
+                && self.in_scope(&n)
+                && !all.iter().any(|i| raw(&i["number"]) == n)
             {
                 fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
             }

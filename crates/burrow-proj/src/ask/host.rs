@@ -10,8 +10,14 @@ pub(crate) fn control_root(cfg: &Config) -> PathBuf {
 pub(crate) fn host_path(job: &Job, name: &str) -> PathBuf {
     control_root(job.cfg).join(job.id).join(name)
 }
+pub(crate) fn ensure_root(cfg: &Config) -> Result<(), String> {
+    ensure_dirs([control_root(cfg)])
+}
 pub(crate) fn ensure(job: &Job) -> Result<(), String> {
-    for path in [control_root(job.cfg), host_path(job, "")] {
+    ensure_dirs([control_root(job.cfg), host_path(job, "")])
+}
+fn ensure_dirs(paths: impl IntoIterator<Item = PathBuf>) -> Result<(), String> {
+    for path in paths {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)

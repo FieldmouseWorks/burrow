@@ -33,13 +33,15 @@ fn what_the_guidance_said_before_fails() {
         found("prove a mismatch fails. Codex uses its own slot pool (`codex.slots`, two)"),
         ["1: `proj.codex.slots` with a value"]
     );
+    // One file keeps four options: naming it states where each is kept.
     assert_eq!(
-        found("Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE`, with"),
-        ["1: where `proj.roles` is kept (`~/.config/proj/roles`)"]
-    );
-    assert_eq!(
-        found("- Saved engine setups live beside the roles file in `roles.d/NAME`:"),
-        ["1: where `proj.engineSetups` is kept (`roles.d/`)"]
+        found("Role settings live in `settings/overlay.roles.json`, beside the overlay"),
+        [
+            "1: where `proj.roles` is kept (`settings/overlay.roles.json`)",
+            "1: where `proj.models` is kept (`settings/overlay.roles.json`)",
+            "1: where `proj.engineOffers` is kept (`settings/overlay.roles.json`)",
+            "1: where `proj.engineSetups` is kept (`settings/overlay.roles.json`)",
+        ]
     );
     assert_eq!(
         found("| `proj.usageHold` | proj's usage record, `.usage.json` in its jobs dir |"),
@@ -60,7 +62,7 @@ fn naming_an_option_without_its_value_passes() {
         "every job's turn waiting in line (`proj.stallAfterMinutes`, 30 by default)",
         "the review `rounds` (5 by default)",
         // A path that only starts like a live file's.
-        "the `~/.config/proj/roles-old` file",
+        "the `settings/overlay.roles.json-old` file",
         // A value in a sentence of its own.
         "Set `proj.maxJobs` in the flake. Two of them are Codex's.",
     ] {
@@ -71,7 +73,7 @@ fn naming_an_option_without_its_value_passes() {
 #[test]
 fn the_owner_may_state_its_facts() {
     let text =
-        "| `proj.maxJobs` | integer | 1 or more | `4` |\n| `proj.roles` | `~/.config/proj/roles` |";
+        "| `proj.maxJobs` | integer | 1 or more | `4` |\n| `proj.usageHold` | `.usage.json` |";
     assert!(check_text(PATH, text, &facts()).is_empty());
     assert_eq!(check_text("README.md", text, &facts()).len(), 2);
 }
