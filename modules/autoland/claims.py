@@ -43,6 +43,21 @@ def handed(st, kind, jid, pr):
     st.pop(kind + "Unposted", None)
 
 
+def stand_down(tag, st):
+    """Before a new fix job is handed the PR, each earlier one claims keeps
+    between turns on it (waits: proj would resume it on the PR's next
+    change) is stopped, so two never work one branch. Its claim goes once
+    claims finds it holds nothing. One proj won't stop is left to
+    stopping.py."""
+    for jid, rec in (st.get("answering") or {}).items():
+        if not rec.get("waits"):
+            continue
+        if C.stop_job(jid):
+            log(f"{tag}: stopped Claude job {jid}, between turns on the PR a new fix job is handed")
+        else:
+            st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [jid]))
+
+
 def look(repo, pr, st, tag, strike, cleared, after):
     """The PR's fix jobs, seen to by `claims`. The PR's status when the
     pass is to stop here, or None: answers went up (what it read of the PR

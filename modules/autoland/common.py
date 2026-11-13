@@ -808,8 +808,9 @@ def job_lifecycle(jid, key=None, snapshot=None):
     reversible one's deadline, with its default), the owner's to a one-way
     one whose deadline passed, or a PR or issue it awaits other than key
     (OWNER/REPO#N, the PR it was handed: awaiting only that is ending its
-    turn, except for a fix job claims still keeps, which step_jobs.look
-    takes for between turns). None when it holds nothing: it ended. This is the one word on
+    turn, but for a fix job whose turn's answers just went up, which
+    step_jobs.look takes for one between turns). None when it holds
+    nothing: it ended. This is the one word on
     whether a job ended, for every kind of job and every path that asks
     (at_work; burrow-upkeep's Lifecycle::at_work reads proj the same): one
     that holds a question and is taken for ended gets a second job on its
@@ -831,15 +832,6 @@ def at_work(jid, key=None, snapshot=None):
     (job_lifecycle)."""
     state, held = job_lifecycle(jid, key, snapshot)
     return state != "parked" and (state in (None, "queued", "running") or held is not None)
-
-
-def awaits(lines, key):
-    """Whether lifecycle's lines hold key (OWNER/REPO#N) awaited: a job
-    whose turn is over is resumed on that PR's next change. One awaiting
-    only the PR it was handed has ended for job_lifecycle; a fix job that
-    burrow-upkeep `claims` keeps is between turns (step_jobs.look)."""
-    return any(what == "await" and target.strip().lower() == key.lower()
-               for what, _, target in (line.strip().partition(" ") for line in lines))
 
 
 def holding(lines, key):

@@ -69,26 +69,26 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert reader.fixing() is None
                 assert reader.ends == {kind: 'done'}
 
-    # A fix job claims still keeps (st["answering"]) whose turn ended
-    # awaiting its own PR is between turns: what goes up of its answers, or
-    # CI or a review, resumes it, so it's at work, and no second job is
-    # handed its branch (PSIV#459). Holding nothing, it ended; and a judge
-    # or proof job awaiting its own PR ended, as above.
+    # A fix job between turns on its own PR whose turn's answers just went
+    # up (claims.rs's resumes) is still at work: what went up resumes it, so
+    # no second job is handed its branch (PSIV#459). One whose turn left
+    # nothing new has ended, as above; and a judge or proof job awaiting its
+    # own PR ended whatever claims says.
     for kind in ON:
         for head in ('original', 'own-push'):
-            says('done', 'await SAM/R#5')
-            reader = Reader(kind, head)
-            reader.st['answering'] = {'job': {'kind': kind}}
-            assert reader.fixing() == kind, (kind, head)
-            assert reader.awaits == {kind: "this PR's next change"} and not reader.ends
-            says('done')
-            reader = Reader(kind, head)
-            reader.st['answering'] = {'job': {'kind': kind}}
-            assert reader.fixing() is None and reader.ends == {kind: 'done'}
+            for resumes, at in ((True, kind), (False, None)):
+                says('done', 'await SAM/R#5')
+                reader = Reader(kind, head)
+                reader.st['answering'] = {'job': {'kind': kind, 'waits': True, 'resumes': resumes}}
+                assert reader.fixing() == at, (kind, head, resumes)
+                if resumes:
+                    assert reader.awaits == {kind: "this PR's next change"} and not reader.ends
+                else:
+                    assert reader.ends == {kind: 'done'}
     for kind in ('judged', 'proved'):
         says('done', 'await sam/r#5')
         reader = Reader(kind, 'original')
-        reader.st['answering'] = {'job': {'kind': 'handed'}}
+        reader.st['answering'] = {'job': {'kind': 'handed', 'waits': True, 'resumes': True}}
         assert reader.running(kind, 'original') == '' and reader.ends == {kind: 'done'}
 
     # A job of any kind holding a question (or a one-way one left for the

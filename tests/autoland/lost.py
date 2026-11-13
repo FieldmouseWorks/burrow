@@ -173,9 +173,33 @@ status, _ = run(clean(**threads), 7400)
 assert JOBS == [] and "a Claude job has it since" in status, status
 ends("done")
 awaits("SAM/R#5")  # only this PR, however GitHub's names are cased
-run(clean(**threads), 7500)
-status, digest = run(clean(**threads), 7600)
+
+
+def claimed(**flags):
+    """What claims (burrow-upkeep) says of the latest job between turns."""
+    path = f"{tmp}/state/pr-sam_r-5.json"
+    with open(path) as f:
+        st = json.load(f)
+    st["answering"][ISSUED[-1]].update(flags)
+    with open(path, "w") as f:
+        json.dump(st, f)
+
+
+# Its turn's answers just went up, which resumes it: still at work on the
+# branch, so nothing else is handed it (PSIV#459).
+claimed(waits=True, resumes=True)
+for t in (7500, 7600):
+    status, digest = run(clean(**threads), t)
+    assert JOBS == [] and "its Claude job awaits this PR's next change" in status and digest == [], (t, status, JOBS)
+# Its turn left nothing new: it ended without fixing it, and the second is
+# handed, once the first is stopped, so proj never resumes it on the same
+# branch.
+claimed(waits=True, resumes=False)
+first = ISSUED[-1]
+run(clean(**threads), 7700)
+status, digest = run(clean(**threads), 7800)
 assert len(JOBS) == 1 and "awaits" not in status and digest == [], (status, JOBS)
+assert first in STOPPED, (first, STOPPED)
 STATES.clear()
 HELD.clear()
 

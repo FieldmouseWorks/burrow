@@ -70,6 +70,29 @@ pub struct Handing {
     /// turn has written new ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken: Option<String>,
+    /// The turn whose answers last went up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted: Option<u64>,
+    /// Its turn is over, awaiting this PR: proj resumes it on the PR's next
+    /// change. A new fix job handed the PR stops it first (claims.py).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits: bool,
+    /// It waits, and that turn's answers went up: what went up is the
+    /// change that resumes it, so it's still at work, and no other fix job
+    /// is handed the PR meanwhile (step_jobs.py's look). One whose turn left
+    /// nothing new has ended for the steward, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumes: bool,
+}
+
+impl Handing {
+    /// Kept for its next turn, awaiting the PR as of `turn` (if it can be
+    /// read).
+    fn between(mut self, turn: Option<u64>) -> Handing {
+        self.waits = true;
+        self.resumes = turn.is_some() && self.posted == turn;
+        self
+    }
 }
 
 /// What `claims` gives back: the jobs to keep, who pushed the head, the
@@ -107,6 +130,8 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
     };
     for (jid, rec) in &l.answering {
         let mut rec = rec.clone();
+        rec.waits = false;
+        rec.resumes = false;
         // proj starts turns under this lock. Keep state, turn identity,
         // awaits and final answer collection in the same lifecycle snapshot.
         let opened = burrow_process::state_reads::Dir::open(&l.jobs)
@@ -155,6 +180,13 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         // change: between turns, still at work on the branch, so a head
         // someone else pushed stops it as it would a running one.
         let between = life.awaits(&own);
+        let number = dir.text("turns").ok().and_then(|t| {
+            let t = t.trim();
+            (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| t.parse::<u64>().ok())
+                .flatten()
+                .filter(|n| *n > 0)
+        });
         if between
             && rec.head != l.head
             && let Some(why) = stale(p, l, &mut seen, None, &mut rec)
@@ -176,7 +208,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                     why: Some(format!("its answers file can't be read: {e}")),
                 });
                 if between {
-                    seen.answering.insert(jid.clone(), rec);
+                    seen.answering.insert(jid.clone(), rec.between(number));
                 }
                 continue;
             }
@@ -190,20 +222,11 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         if digest.is_some() && digest == rec.taken {
             // What it left is what an earlier turn's answers already were.
             if between {
-                seen.answering.insert(jid.clone(), rec);
+                seen.answering.insert(jid.clone(), rec.between(number));
             }
             continue;
         }
-        let turn = dir.text("turns").unwrap_or_default();
-        let turn = turn.trim();
-        let turn = if !turn.is_empty()
-            && turn.bytes().all(|b| b.is_ascii_digit())
-            && turn.parse::<u64>().is_ok_and(|n| n > 0)
-        {
-            turn
-        } else {
-            "invalid-turn"
-        };
+        let turn = number.map_or_else(|| "invalid-turn".to_owned(), |n| n.to_string());
         let engine = dir.text(&format!("{turn}.engine")).unwrap_or_default();
         let engine = match engine.trim() {
             "codex" => "Codex",
@@ -222,6 +245,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         let (outcome, why) = match answer::answer(p, &h) {
             Ok(Posted::Answers(Took { head, description })) => {
                 rec.head = head;
+                rec.posted = number;
                 if let Some(d) = description {
                     rec.body = d;
                 }
@@ -238,7 +262,10 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         if !again && outcome != "nothing" {
             rec.taken = digest;
         }
-        if again || between {
+        if between {
+            seen.answering
+                .insert(jid.clone(), rec.clone().between(number));
+        } else if again {
             seen.answering.insert(jid.clone(), rec.clone());
         }
         if outcome != "nothing" {

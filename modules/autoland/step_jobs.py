@@ -59,12 +59,11 @@ class Jobs:
         """running's look at the job: what proj says of it, once."""
         snapshot = C.lifecycle(jid)
         state, target = C.job_lifecycle(jid, self.tag, snapshot)
-        if (not target and kind in claims.KINDS and jid in self.st.get("answering", {})
-                and state not in (None, "queued", "running") and C.awaits(snapshot[1], self.tag)):
-            # A fix job claims still keeps, between turns on this PR: what
-            # goes up of its answers, or CI or a review, resumes it, and
-            # each turn's new answers go up in their turn (claims.rs). Still
-            # at work on the branch, so none other is handed it meanwhile.
+        if (not target and kind in claims.KINDS and state not in (None, "queued", "running")
+                and (self.st.get("answering") or {}).get(jid, {}).get("resumes")):
+            # A fix job between turns on this PR whose turn's answers just
+            # went up (claims.rs): what went up resumes it, so it's still at
+            # work on the branch, and none other is handed it meanwhile.
             target = OWN
         usage = C.job_usage(jid, snapshot)
         records = self.st.setdefault("usageJobs", {})
@@ -132,6 +131,8 @@ class Jobs:
         those."""
         if at is _HEAD:
             at = self.head
+        if kind in claims.KINDS:
+            claims.stand_down(self.tag, self.st)
         jid = begin() if begin else C.job(self.repo, task, since=ts(self.pr["createdAt"]), role=f"steward-{kind}")
         step = "build" if begin else "job"
         if jid:

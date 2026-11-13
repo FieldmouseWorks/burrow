@@ -19,6 +19,9 @@ fn handing() -> Handing {
         at: 1_793_558_866.0,
         looked: BTreeMap::new(),
         taken: None,
+        posted: None,
+        waits: false,
+        resumes: false,
     }
 }
 
@@ -489,8 +492,10 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
     let s = pass(&mut l, &mut hub, "done");
     assert_eq!(s.answered[0].outcome, "posted");
     assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
+    // What went up resumes it: still at work, for the steward.
     let kept = &s.answering["job-1"];
     assert!(kept.taken.is_some() && kept.head == HANDED);
+    assert!(kept.waits && kept.resumes && kept.posted == Some(1));
     // The same answers, looked at again: nothing asked, nothing posted.
     let mut hub = Hub::default();
     let s = pass(&mut l, &mut hub, "done");
@@ -502,6 +507,7 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
     let mut hub = github(PUSHED, "Does it.", json!([]));
     let s = pass(&mut l, &mut hub, "running");
     assert!(s.answered.is_empty() && s.stop.is_empty());
+    assert!(!s.answering["job-1"].waits && !s.answering["job-1"].resumes);
     std::fs::write(
         dir.join("answers.json"),
         json!({"pushed": PUSHED, "threads": [{"id": "T1", "fixed": true, "reply": "Fixed."}],
@@ -529,11 +535,16 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
         (kept.head.as_str(), kept.body.as_str()),
         (PUSHED, "Does it, fixed.")
     );
-    // Turn 3 leaves its answers as they were: none replayed.
+    assert!(kept.waits && kept.resumes && kept.posted == Some(2));
+    // Turn 3 leaves its answers as they were: none replayed, and nothing
+    // of its resumes it, so for the steward it has ended (a new fix job
+    // stops it first).
     std::fs::write(dir.join("turns"), "3").unwrap();
     let mut hub = Hub::default();
     let s = pass(&mut l, &mut hub, "done");
     assert!(s.answered.is_empty() && hub.asked.is_empty());
+    let kept = &s.answering["job-1"];
+    assert!(kept.waits && !kept.resumes && kept.posted == Some(2));
     // Turn 4 says one more thing on the PR as its description now is, and
     // ends holding nothing: that goes up, and its claim is over.
     std::fs::write(dir.join("turns"), "4").unwrap();
