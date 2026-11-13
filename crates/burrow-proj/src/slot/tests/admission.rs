@@ -727,7 +727,9 @@ fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work(
             _ => unreachable!(),
         }
         if id.starts_with("owned") {
-            fs::write(job.path("owned"), "").unwrap();
+            let mut request = crate::job::Request::load(&job).unwrap();
+            request.owned = true;
+            request.save(&job).unwrap();
         }
     }
     // No registry exists on enable, or after disabling and re-enabling.

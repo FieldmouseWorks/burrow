@@ -3,7 +3,9 @@
 //! Set when it's run: `project` (where it runs), `kick` (what each turn's
 //! start and end kick, a line each), `timeout` and `idle`, `pipeline` and
 //! `owned` (there or not), `link`, `app`, and `agent` (its sandbox, with
-//! --vm). Kept across turns: `turns` (the latest turn's number), `session`
+//! --vm). What it runs as (`project`, `engine`, `role`, `app`, `agent`,
+//! `owned`) is its protected request ([`Request`]); those files are its
+//! published copy. Kept across turns: `turns` (the latest turn's number), `session`
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
@@ -27,8 +29,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod request;
 mod start;
 
+pub(crate) use request::Request;
 #[cfg(test)]
 mod locking_tests;
 
@@ -280,7 +284,7 @@ impl<'a> Job<'a> {
             && self.state() == "failed"
             && !filled(&self.turn(n, "outcome"))
             && !self.turn(n, "stopped").exists()
-            && !filled(&self.path("agent"))
+            && Request::load(self).is_ok_and(|r| r.agent.is_none())
             && crate::engine::stream_names_session(&self.turn(n, "jsonl"), 0)
             && last_result(&self.turn(n, "jsonl"), 0).is_none()
     }
@@ -440,7 +444,7 @@ impl<'a> Job<'a> {
         let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
         Some(Facts {
             id: self.id.to_owned(),
-            owned: self.path("owned").exists(),
+            owned: Request::load(self).is_ok_and(|r| r.owned),
             unstick: self.path("unstick").exists(),
             stopped: self.turn(&n, "stopped").exists(),
             end: opt(self.turn(&n, "end")),
@@ -571,7 +575,7 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-fn valid_turn(n: &str) -> bool {
+pub(crate) fn valid_turn(n: &str) -> bool {
     !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok_and(|v| v > 0)
 }
 
@@ -856,11 +860,18 @@ mod tests {
         .unwrap();
         assert!(!job.cut_off("2"), "it ended in a result");
         fs::write(&stream, session).unwrap();
-        for f in [job.turn("2", "stopped"), job.path("agent")] {
-            fs::write(&f, "x\n").unwrap();
-            assert!(!job.cut_off("2"), "{}", f.display());
-            fs::remove_file(&f).unwrap();
-        }
+        fs::write(job.turn("2", "stopped"), "x\n").unwrap();
+        assert!(!job.cut_off("2"), "stopped");
+        fs::remove_file(job.turn("2", "stopped")).unwrap();
+        // A sandbox's, as its starter made it: a file the job writes isn't.
+        fs::write(job.path("agent"), "x\n").unwrap();
+        assert!(job.cut_off("2"), "a written agent file");
+        let mut request = crate::job::Request::load(&job).unwrap();
+        request.agent = Some("x".into());
+        request.save(&job).unwrap();
+        assert!(!job.cut_off("2"), "a sandbox's");
+        request.agent = None;
+        request.save(&job).unwrap();
         fs::write(job.turn("2", "outcome"), "failed\n").unwrap();
         assert!(!job.cut_off("2"), "it has an outcome");
     }

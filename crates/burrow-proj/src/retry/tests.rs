@@ -140,12 +140,6 @@ fn until(mut f: impl FnMut() -> bool) {
 fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
-    crate::policy::bind(
-        &job,
-        crate::policy::Identity::Local,
-        crate::policy::Kind::Automated,
-    )
-    .unwrap();
     fs::write(job.path("project"), format!("{project}\n")).unwrap();
     fs::write(job.path("turns"), "1\n").unwrap();
     fs::write(job.path("prompt.1"), "the original prompt\n").unwrap();
@@ -169,6 +163,12 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     .unwrap();
     fs::write(job.turn("1", "jsonl"), "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your monthly spend limit\"}\n").unwrap();
     fs::write(job.path("engine"), read(&job.turn("1", "engine")).unwrap()).unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
     Identity::capture(&job, "1").unwrap();
     let exe = if mode.starts_with("old") || mode.starts_with("nb") {
         r.tmp.path().join("old/burrow-proj")
@@ -825,6 +825,11 @@ fn retained_handover_rejects_rollback_to_startup_that_would_truncate_its_stream(
     burrow_test::executable(
         &old,
         "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 3\n",
+    );
+    assert!(!slot::retry_compatible(&old));
+    burrow_test::executable(
+        &old,
+        "#!/bin/sh\n[ \"$1\" = _retry_format ] || exit 2\necho 4\n",
     );
     assert!(slot::retry_compatible(&old));
 }
