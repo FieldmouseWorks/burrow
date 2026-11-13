@@ -139,6 +139,16 @@ impl Dir {
         child_name(Path::new(name))?;
         Ok(fs::unlinkat(&self.0, name, fs::AtFlags::empty())?)
     }
+    /// Commit absence before a caller retires another recovery record. An
+    /// already absent name still needs the pinned directory synced.
+    pub fn remove_durable(&self, name: &str) -> io::Result<()> {
+        match self.remove(name) {
+            Ok(()) => (),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e),
+        }
+        File::open(format!("/proc/self/fd/{}", self.0.as_raw_fd()))?.sync_all()
+    }
     /// Open or create a pinned regular lock file; never follow an alias.
     pub fn read_lock(&self, name: &str) -> io::Result<File> {
         match self.create(name, b"") {
@@ -272,6 +282,21 @@ pub fn remove(path: impl AsRef<Path>) -> io::Result<()> {
             .ok_or_else(|| io::Error::other("state has no parent"))?,
     )?;
     parent.remove(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid state name"))?,
+    )
+}
+
+/// Durably unlink a state record without following parent aliases. Missing
+/// records still sync their parent directory before returning.
+pub fn remove_durable(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    Dir::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("state has no parent"))?,
+    )?
+    .remove_durable(
         path.file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| io::Error::other("invalid state name"))?,
