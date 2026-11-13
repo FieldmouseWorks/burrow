@@ -15,15 +15,35 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-/// A staging name no other writer, in this process or another, shares.
-fn staging(path: &Path) -> PathBuf {
+/// Write `bytes` to a staging file created exclusively beside `path`: a name
+/// that exists already (another writer's, or an orphan a crash left, which
+/// may alias the live record) is never opened, and a fresh one is tried.
+fn stage(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    use io::Write;
     static N: AtomicU64 = AtomicU64::new(0);
-    path.with_file_name(format!(
-        "{}.new.{}.{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ))
+    loop {
+        let staged = path.with_file_name(format!(
+            "{}.new.{}.{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(bytes) {
+                    let _ = fs::remove_file(&staged);
+                    return Err(e);
+                }
+                return Ok(staged);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,10 +85,11 @@ impl Request {
     fn adopt(self, job: &Job) -> Result<Self, String> {
         crate::ask::ensure(job)?;
         let path = Self::path(job);
-        let staged = staging(&path);
-        fs::write(
-            &staged,
-            serde_json::to_string(&self).map_err(|e| e.to_string())?,
+        let staged = stage(
+            &path,
+            serde_json::to_string(&self)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
         )
         .map_err(|e| e.to_string())?;
         let linked = fs::hard_link(&staged, &path);
@@ -89,7 +110,7 @@ impl Request {
     fn from(read: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let named = |key| read(key).filter(|s: &String| !s.is_empty());
         Ok(Self {
-            project: read("project").map(|p| p.trim().to_owned()).unwrap_or_default(),
+            project: read("project").unwrap_or_default(),
             engine: named("engine").map(|e| Engine::parse(&e)).transpose()?,
             role: named("role"),
             app: named("app"),
@@ -103,10 +124,11 @@ impl Request {
     pub fn save(&self, job: &Job) -> Result<(), String> {
         crate::ask::ensure(job)?;
         let path = Self::path(job);
-        let staged = staging(&path);
-        fs::write(
-            &staged,
-            serde_json::to_string(self).map_err(|e| e.to_string())?,
+        let staged = stage(
+            &path,
+            serde_json::to_string(self)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
         )
         .map_err(|e| e.to_string())?;
         fs::rename(&staged, &path).map_err(|e| e.to_string())?;
@@ -123,6 +145,26 @@ impl Request {
         request.role = Some(role);
         request.engine = None;
         request.save(job)
+    }
+
+    /// The record as an earlier proj captured a job's files: the values its
+    /// `read` returned, so an older reader restores exactly what this says.
+    pub fn captured_files(&self) -> BTreeMap<String, Option<String>> {
+        let some = |v: &Option<String>| v.clone();
+        BTreeMap::from([
+            (
+                "project".to_owned(),
+                (!self.project.is_empty()).then(|| self.project.clone()),
+            ),
+            (
+                "engine".to_owned(),
+                self.engine.map(|e| e.name().to_owned()),
+            ),
+            ("role".to_owned(), some(&self.role)),
+            ("app".to_owned(), some(&self.app)),
+            ("agent".to_owned(), some(&self.agent)),
+            ("owned".to_owned(), self.owned.then(String::new)),
+        ])
     }
 
     /// The published copy, put back as the record has it.
@@ -171,10 +213,11 @@ mod tests {
         crate::ask::ensure(job).unwrap();
         fs::write(
             job.turn(n, "execution"),
-            format!(
-                r#"{{"choice":{},"files":{{"project":"{project}\n","owned":""}}}}"#,
-                serde_json::to_string(&crate::engine::Choice::default()).unwrap()
-            ),
+            serde_json::json!({
+                "choice": crate::engine::Choice::default(),
+                "files": {"project": project, "owned": ""},
+            })
+            .to_string(),
         )
         .unwrap();
     }
@@ -229,5 +272,91 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".new."))
             .count();
         assert_eq!(stray, 0);
+    }
+
+    #[test]
+    fn project_paths_keep_every_byte_but_the_framing_newline() {
+        let (_tmp, cfg) = rig();
+        let job = Job::new(&cfg, "spaced");
+        fs::create_dir(&job.dir).unwrap();
+        legacy_capture(&job, "1", "/projects/repo \u{3000}\t");
+        let request = Request::load(&job).unwrap();
+        assert_eq!(request.project, "/projects/repo \u{3000}\t");
+        assert_eq!(read(&job.path("project")).unwrap(), request.project);
+        let fresh = Job::new(&cfg, "published");
+        fs::create_dir(&fresh.dir).unwrap();
+        fs::write(fresh.path("project"), "/projects/repo \n").unwrap();
+        assert_eq!(Request::load(&fresh).unwrap().project, "/projects/repo ");
+    }
+
+    #[test]
+    fn padded_turn_captures_are_found_and_later_enrollment_is_kept() {
+        let (_tmp, cfg) = rig();
+        let job = Job::new(&cfg, "padded");
+        fs::create_dir(&job.dir).unwrap();
+        crate::ask::ensure(&job).unwrap();
+        let write = |n: &str, files: &str| {
+            fs::write(
+                job.turn(n, "execution"),
+                format!(
+                    r#"{{"choice":{},"files":{}}}"#,
+                    serde_json::to_string(&crate::engine::Choice::default()).unwrap(),
+                    files
+                ),
+            )
+            .unwrap()
+        };
+        write("001", r#"{"project":"p","engine":"codex","role":null}"#);
+        write("2", r#"{"project":"evil","engine":null,"role":"judge"}"#);
+        let request = Request::load(&job).unwrap();
+        assert_eq!(request.project, "p");
+        assert_eq!(request.role.as_deref(), Some("judge"));
+        assert!(request.engine.is_none());
+    }
+
+    #[test]
+    fn staging_never_opens_an_existing_file() {
+        let (_tmp, cfg) = rig();
+        let job = Job::new(&cfg, "orphan");
+        fs::create_dir(&job.dir).unwrap();
+        let request = Request {
+            project: "p".into(),
+            ..Request::default()
+        };
+        request.save(&job).unwrap();
+        let path = Request::path(&job);
+        // An orphan staging file aliasing the live record, at the very name
+        // the next writer would pick.
+        let next = std::process::id();
+        for i in 0..64 {
+            let orphan = path.with_file_name(format!("request.new.{next}.{i}"));
+            let _ = fs::hard_link(&path, orphan);
+        }
+        request.save(&job).unwrap();
+        assert_eq!(Request::load(&job).unwrap(), request);
+        let bytes = fs::read(&path).unwrap();
+        assert!(serde_json::from_slice::<Request>(&bytes).is_ok());
+    }
+
+    #[test]
+    fn identity_keeps_the_earlier_files_format_for_a_rolled_back_consumer() {
+        let (_tmp, cfg) = rig();
+        let job = Job::new(&cfg, "rollback");
+        fs::create_dir(&job.dir).unwrap();
+        Request {
+            project: "p".into(),
+            role: Some("judge".into()),
+            owned: true,
+            ..Request::default()
+        }
+        .save(&job)
+        .unwrap();
+        Identity::capture_choice(&job, "1", &crate::engine::Choice::default()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&fs::read(job.turn("1", "execution")).unwrap()).unwrap();
+        assert_eq!(v["files"]["project"], "p");
+        assert_eq!(v["files"]["role"], "judge");
+        assert_eq!(v["files"]["owned"], "");
+        assert!(v["files"]["app"].is_null());
     }
 }

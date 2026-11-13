@@ -5,9 +5,12 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Identity {
     pub choice: engine::Choice,
-    /// Earlier proj captured the job's request files here; the protected
-    /// request ([`crate::job::Request`]) is their only home now.
-    #[serde(default, skip_serializing)]
+    /// The job's request files as this record's turn began. The protected
+    /// request ([`crate::job::Request`]) is the authority; this copy is kept
+    /// in the earlier format so a rolled-back proj's transfer consumer can
+    /// still restore a retained retry, and so migration can read captures an
+    /// earlier proj wrote.
+    #[serde(default)]
     files: BTreeMap<String, Option<String>>,
 }
 impl Identity {
@@ -56,16 +59,20 @@ impl Identity {
             &job.turn(n, "execution"),
             &serde_json::to_string(&Self {
                 choice,
-                files: BTreeMap::new(),
+                files: crate::job::Request::load(job)?.captured_files(),
             })
             .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
     }
-    /// What an earlier proj captured of the job's request files, from the
-    /// earliest turn that has any. Every execution record on the host is
-    /// searched, never just the one the (job-writable) turn selector names,
-    /// so advancing or rewriting `turns` cannot hide a capture.
+    /// What an earlier proj captured of the job's request files, across every
+    /// execution record on the host, never just the one the (job-writable)
+    /// turn selector names, so advancing or rewriting `turns` cannot hide a
+    /// capture. Records are read under their actual filenames, padded turn
+    /// numbers included. What the starter fixed (project, app, agent, owned)
+    /// comes from the earliest capture; engine and role, which the host
+    /// changes when the inbox enrolls a job, from the latest, so migration
+    /// keeps a completed enrollment without waiting for an inbox pass.
     pub fn legacy_files(job: &Job) -> Result<Option<BTreeMap<String, Option<String>>>, String> {
         let dir = crate::ask::host_path(job, "request");
         let entries = match fs::read_dir(dir.parent().unwrap_or(&dir)) {
@@ -73,23 +80,35 @@ impl Identity {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.to_string()),
         };
-        let mut turns: Vec<u64> = entries
+        let mut names: Vec<(u64, String)> = entries
             .filter_map(Result::ok)
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                name.strip_suffix(".execution")?.parse().ok()
+                let stem = name.strip_suffix(".execution")?;
+                let n: u64 = stem.parse().ok()?;
+                (n > 0 && crate::job::valid_turn(stem)).then(|| (n, stem.to_owned()))
             })
-            .filter(|n| *n > 0)
             .collect();
-        turns.sort_unstable();
-        for n in turns {
-            if let Some(identity) = Self::load(job, &n.to_string())? {
+        names.sort_unstable();
+        let mut captures = Vec::new();
+        for (_, stem) in names {
+            if let Some(identity) = Self::load(job, &stem)? {
                 if !identity.files.is_empty() {
-                    return Ok(Some(identity.files));
+                    captures.push(identity.files);
                 }
             }
         }
-        Ok(None)
+        let Some(latest) = captures.last().cloned() else {
+            return Ok(None);
+        };
+        let mut files = captures.remove(0);
+        for key in ["engine", "role"] {
+            match latest.get(key) {
+                Some(value) => files.insert(key.into(), value.clone()),
+                None => files.remove(key),
+            };
+        }
+        Ok(Some(files))
     }
     pub fn restore(job: &Job, n: &str) -> Result<(), String> {
         let Some(identity) = Self::load(job, n)? else {

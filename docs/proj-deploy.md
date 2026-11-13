@@ -71,7 +71,10 @@ Only the starter and the inbox's label-to-role enrollment change it. A role is
 scoped to the repository its admission bound, not to its project's current
 origin. The job directory's files of those names are a published copy, put
 back at each turn's start. A job from before the request adopts it once, from
-a retained retry's captured files if it has them, else from its published files.
+a retained retry's captured files if it has them (what the starter fixed from the
+earliest, engine and role from the latest), else from its published files. A
+retry's execution record still carries those files in the earlier format, so a
+rolled-back proj's transfer consumer can restore it.
 
 Each retained turn occupies one queue place, even after promotion or a
 configuration-driven class change. The census and replacement adoption remove
