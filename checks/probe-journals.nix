@@ -45,7 +45,12 @@ let
   wrong = lib.concatLists (lib.mapAttrsToList (scope: s:
     map (u: "${scope} ${u}: not on the probe allowlist")
       (lib.filter (u: !on s.globs u && !on secret u) s.units)) scopes);
-  leaked = lib.filter (on scopes.system.globs) unrelated;
+  # What must stay off, in both scopes: every App's gh-token units as
+  # the modules define them, and the unrelated sentinels.
+  minting = lib.concatMap (s: lib.filter (on secret) s.units) (lib.attrValues scopes);
+  denied = lib.unique (minting ++ unrelated);
+  leaked = lib.concatLists (lib.mapAttrsToList (scope: s:
+    map (u: "${scope} ${u}") (lib.filter (on s.globs) denied)) scopes);
 in
 # The units the steward, Renovate and house-sync hand to jobs on failure,
 # so a change to how units are read can't empty the list unnoticed.
@@ -53,6 +58,9 @@ assert lib.assertMsg (lib.all (u: lib.elem u scopes.system.units) [
   "autoland.service" "autoland@sam-homelab.service" "renovate.service" "renovate@sam-homelab.service"
   "house-sync.service" "house-sync@sam-homelab.service"
 ]) "probe-journals: burrow's units: ${builtins.toJSON scopes.system.units}";
+assert lib.assertMsg (lib.all (u: lib.elem u minting) [
+  "gh-token-workers-access.service" "gh-token-workers@sam-homelab.service"
+]) "probe-journals: gh-token's units: ${builtins.toJSON minting}";
 assert lib.assertMsg (leaked == [ ]) "probe-journals: on the allowlist but must stay off: ${builtins.toJSON leaked}";
 pkgs.runCommand "probe-journals-check" { } ''
   ${lib.concatMapStrings (w: "echo ${lib.escapeShellArg w}\n") wrong}
