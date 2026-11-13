@@ -150,13 +150,22 @@ new one in the same job: the engine is resolved afresh by the usual rules, the
 old turn's identity is left as it was, and the scratch, branch and unfinished
 files stay as they are. Unlike `proj stop` and `proj withdraw`, which end the
 job, it keeps the job's question and awaits and answers nothing. It refuses a
-turn that has a slot (a running engine owns its files). A `handoff` file in the
-job marks it in progress and keeps the scratch from being cleared; if the new
-turn couldn't start, asking again finishes it. Independently, clearing any
-scratch first copies work not yet published (changed tracked files, as
-`tracked.patch`, and new ones, under `untracked/`) to the job's `preserved/`
-directory, and leaves the scratch in place if that fails; ignored build output
-is not kept.
+turn that has a slot (a running engine owns its files). The job's `handoff`
+file names the turn being ended from its first step to its last: that turn's
+stop is no end of the job meanwhile (its question stays open and notified, the
+job is held, inbox admission still takes it, the scratch is not cleared), and
+asking again after any interruption finishes the stop and starts the new turn,
+or, if the new turn was already accepted, adopts it without starting another.
+The new turn takes over the old one's published and pending awaits, quota
+registration and a pending question recommendation, instead of starting clean.
+A `proj stop` in the middle ends the job as usual. Independently, clearing any
+scratch (one clear at a time) first copies work not yet published to the job's
+`preserved/` directory, and leaves the scratch in place if that fails or the
+scratch can't be read in full: the working files against head (`tracked.patch`),
+the index against head (`staged.patch`), new files (`untracked/`), and, when
+the scratch holds the repository's objects, `base.bundle` to apply them to. Git
+runs on a git dir of its own, never the job's config or hooks. Ignored build
+output is not kept.
 
 ## Engines with no agent
 

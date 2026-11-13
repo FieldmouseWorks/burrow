@@ -215,6 +215,19 @@ impl<'a> Job<'a> {
             && !self.retry_completed(n)
     }
 
+    /// Whether turn N is the one `proj handoff` is ending: the job's HANDOFF
+    /// names it, so its stop is no end of the job (nothing is withdrawn or
+    /// closed), a new turn follows.
+    pub(crate) fn handing_off(&self, n: &str) -> bool {
+        read(&self.path(crate::scratch::HANDOFF)).is_some_and(|t| t.trim() == n)
+    }
+
+    /// Whether turn N was stopped for good: by `proj stop` or `withdraw`, not
+    /// by the handoff that replaces it.
+    pub(crate) fn stopped_for_good(&self, n: &str) -> bool {
+        self.turn(n, "stopped").exists() && !self.handing_off(n)
+    }
+
     pub fn state(&self) -> String {
         if crate::policy::parked(self) {
             return "parked".into();
@@ -373,12 +386,15 @@ impl<'a> Job<'a> {
                 .map_err(|e| format!("{}: {e}", path.display()))
         };
         let mut held = Vec::new();
+        if self.turns().is_some_and(|n| self.handing_off(&n)) {
+            held.push("handoff".into());
+        }
         if self.turns().is_some_and(|n| self.retry_pending(&n)) {
             held.push("retry".into());
         }
         let asked = match text(&self.path("turns"))?.filter(|n| valid_turn(n)) {
             Some(n) => {
-                !there(&self.turn(&n, "stopped"))?
+                (!there(&self.turn(&n, "stopped"))? || self.handing_off(&n))
                     && text(&self.turn(&n, "end"))?.as_deref() == Some("ask")
             }
             None => false,
@@ -408,7 +424,7 @@ impl<'a> Job<'a> {
             id: self.id.to_owned(),
             owned: self.path("owned").exists(),
             unstick: self.path("unstick").exists(),
-            stopped: self.turn(&n, "stopped").exists(),
+            stopped: self.stopped_for_good(&n),
             end: opt(self.turn(&n, "end")),
             link: opt(self.path("link")),
             queued: mtime(&prompt).unwrap_or(0),

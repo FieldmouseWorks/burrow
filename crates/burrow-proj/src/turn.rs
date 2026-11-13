@@ -33,6 +33,41 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
     start_with(cfg, id, msg, first, Answer::Update, None)
 }
 
+/// The job's next turn takes a waiting one's place (`proj handoff`): what the
+/// old turn registered carries over, its published and pending waits, their
+/// baselines and quota registration, and a recommendation it left for its
+/// question, none of it cleared as a fresh turn's start does. The old turn
+/// keeps its own record.
+pub(crate) fn start_handoff(cfg: &Config, id: &str, msg: &str) -> Result<(), String> {
+    start_with(cfg, id, msg, false, Answer::Handoff, None)
+}
+
+/// A turn that took over a handed-off one's waits: whose turn it took over.
+pub(crate) const CARRY: &str = "carry";
+
+/// The turn-scoped records that name turn `from`, named `to` instead: the
+/// waits' quota registration and the question recommendation.
+fn retarget(job: &Job, from: &str, to: &str) {
+    if let Some(mut pending) = read(&job.path(crate::github_quota::PENDING))
+        .and_then(|t| serde_json::from_str::<crate::github_quota::Pending>(&t).ok())
+        .filter(|p| p.turn == from)
+    {
+        pending.turn = to.to_owned();
+        if let Ok(text) = serde_json::to_string(&pending) {
+            let _ = crate::swap(&job.path(crate::github_quota::PENDING), &text);
+        }
+    }
+    if let Some(mut ask) = read(&job.path("ask.next"))
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .filter(|v| v["turn"] == from)
+    {
+        ask["turn"] = to.into();
+        if let Ok(text) = serde_json::to_string(&ask) {
+            let _ = crate::swap(&job.path("ask.next"), &text);
+        }
+    }
+}
+
 /// News that what the job awaited closed: that settles a reversible open
 /// question ([`Answer::Closed`]), whose receipt carries `what` as its cause.
 pub(crate) fn start_closed(cfg: &Config, id: &str, msg: &str, what: String) -> Result<(), String> {
@@ -80,6 +115,7 @@ fn start_with(
     permit: Option<&crate::inbox::resumption::Permit>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
+    let carry = matches!(answer, Answer::Handoff);
     crate::inbox::enrollment::admit(&job)?;
     crate::planning::admit(&job)?;
     let unit = job.unit();
@@ -131,6 +167,10 @@ fn start_with(
             let _ = job.set_turns(n - 1);
         }
         let _ = crate::state_reads::remove(&prompt);
+        if carry {
+            let _ = crate::state_reads::remove(job.turn(&n.to_string(), CARRY));
+            retarget(&job, &n.to_string(), &last.to_string());
+        }
     };
     if let Err(e) = write_prompt(&prompt, &msg) {
         // write can leave a truncated or partial prompt even on failure.
@@ -151,6 +191,18 @@ fn start_with(
     if job.set_turns(n).is_err() {
         undo();
         return Err(couldnt());
+    }
+    if carry {
+        if let Err(e) =
+            crate::state_reads::write(job.turn(&n.to_string(), CARRY), format!("{last}\n"))
+        {
+            undo();
+            return Err(format!(
+                "proj: {}: {e}",
+                job.turn(&n.to_string(), CARRY).display()
+            ));
+        }
+        retarget(&job, &last.to_string(), &n.to_string());
     }
     // Claude is what goes first when memory runs out, not whatever it's
     // next to. Past its own cap the kernel kills the job's biggest process
@@ -181,7 +233,9 @@ fn start_with(
     }
     // Accepted resumption owns the previous intent, including an error
     // recovery. A failed launch above leaves it durable for another attempt.
-    let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
+    if !carry {
+        let _ = crate::state_reads::remove(job.path(crate::github_quota::PENDING));
+    }
     // systemd has accepted this turn. Reconciliation errors cannot turn it
     // into a failed start: callers must consume its input exactly once.
     let reconcile_pending = if let Err(e) = question.commit() {
@@ -274,7 +328,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    if !job.turn(&n, "retry-migration").exists() {
+    // A handed-off turn's successor keeps them: they are the old turn's, still
+    // waiting for one that carries on.
+    if !job.turn(&n, "retry-migration").exists() && !job.turn(&n, CARRY).exists() {
         crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
         for f in ["await", "await.next"] {
             let _ = crate::state_reads::remove(job.path(f));

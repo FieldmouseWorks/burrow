@@ -296,7 +296,7 @@ fn clearing_waits_for_a_handoff() {
     let b = Box::new();
     let wt = unfinished(&b);
     let job = Job::new(&b.cfg, "u");
-    fs::write(job.path(super::HANDOFF), "").unwrap();
+    fs::write(job.path(super::HANDOFF), "1\n").unwrap();
     assert!(!over(&job));
     clear(&b.cfg, "u");
     assert_eq!(
@@ -304,4 +304,153 @@ fn clearing_waits_for_a_handoff() {
         "edited\n"
     );
     assert!(!job.path("preserved").exists());
+}
+
+fn kept(b: &Box, name: &str) -> PathBuf {
+    Job::new(&b.cfg, "u").path(&format!("preserved/{name}"))
+}
+
+/// A clone of a repo inside the job's scratch, its own repository there.
+fn clone_in_scratch(b: &Box) -> PathBuf {
+    let repo = b.repo("origin");
+    let at = dir(&b.cfg, "u").join("clone");
+    fs::create_dir_all(at.parent().unwrap()).unwrap();
+    git(
+        b.root.path(),
+        &["clone", "-q", repo.to_str().unwrap(), at.to_str().unwrap()],
+    );
+    fs::create_dir_all(Job::new(&b.cfg, "u").dir).unwrap();
+    at
+}
+
+// The job wrote its repository's config, and keeping its work runs on the
+// host: a `core.fsmonitor` it set must not run there.
+#[test]
+fn keeping_work_runs_nothing_the_job_configured() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    let ran = |what: &str| b.path(what);
+    for (key, what) in [
+        ("core.fsmonitor", "fsmonitor"),
+        ("diff.external", "external"),
+        ("filter.x.clean", "filter"),
+    ] {
+        git(
+            &at,
+            &[
+                "config",
+                key,
+                &format!("touch {}; cat", ran(what).display()),
+            ],
+        );
+    }
+    fs::write(at.join(".gitattributes"), "* filter=x\n").unwrap();
+    fs::write(at.join("f.txt"), "work\n").unwrap();
+    fs::write(at.join("g.txt"), "more\n").unwrap();
+    git(&at, &["add", "-N", "g.txt"]);
+    // What the setup itself ran is not the host's doing.
+    for what in ["fsmonitor", "external", "filter"] {
+        let _ = fs::remove_file(ran(what));
+    }
+    clear(&b.cfg, "u");
+    for what in ["fsmonitor", "external", "filter"] {
+        assert!(!ran(what).exists(), "{what} command ran on the host");
+    }
+    assert_eq!(
+        fs::read_to_string(kept(&b, "clone.1").join("untracked/f.txt")).unwrap(),
+        "work\n"
+    );
+}
+
+// Staged content is kept: before a first commit, and when the working file
+// goes back to head after staging an edit.
+#[test]
+fn keeping_work_keeps_the_index() {
+    let b = Box::new();
+    let at = dir(&b.cfg, "u").join("born");
+    fs::create_dir_all(&at).unwrap();
+    git(&at, &["init", "-q", "-b", "main"]);
+    fs::write(at.join("first.txt"), "staged only\n").unwrap();
+    git(&at, &["add", "first.txt"]);
+    let at2 = clone_in_scratch(&b);
+    fs::write(at2.join("README"), "v1\n").unwrap();
+    git(&at2, &["add", "README"]);
+    git(&at2, &["commit", "-q", "-m", "r"]);
+    fs::write(at2.join("README"), "staged edit\n").unwrap();
+    git(&at2, &["add", "README"]);
+    fs::write(at2.join("README"), "v1\n").unwrap();
+    clear(&b.cfg, "u");
+    let unborn = fs::read_to_string(kept(&b, "born.1").join("staged.patch")).unwrap();
+    assert!(unborn.contains("+staged only"), "{unborn}");
+    let k = kept(&b, "clone.1");
+    let staged = fs::read_to_string(k.join("staged.patch")).unwrap();
+    assert!(staged.contains("+staged edit"), "{staged}");
+    assert_eq!(fs::read_to_string(k.join("tracked.patch")).unwrap(), "");
+}
+
+// A clone's objects go with the scratch, so what its patches apply to is kept
+// as a bundle: an unpushed commit, then further edits.
+#[test]
+fn keeping_work_keeps_the_base_of_a_clone() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join("a.txt"), "committed\n").unwrap();
+    git(&at, &["add", "a.txt"]);
+    git(&at, &["commit", "-q", "-m", "local"]);
+    fs::write(at.join("a.txt"), "edited later\n").unwrap();
+    clear(&b.cfg, "u");
+    let k = kept(&b, "clone.1");
+    let head = fs::read_to_string(k.join("head")).unwrap();
+    let heads = Command::new("git")
+        .arg("-C")
+        .arg(b.path("origin"))
+        .args(["bundle", "list-heads"])
+        .arg(k.join("base.bundle"))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&heads.stdout).contains(head.trim()));
+}
+
+// What can't be looked at is not nothing: a directory that can't be read stops
+// the clearing.
+#[test]
+fn an_unreadable_directory_keeps_the_scratch() {
+    use std::os::unix::fs::PermissionsExt;
+    let b = Box::new();
+    let at = dir(&b.cfg, "u").join("hidden");
+    fs::create_dir_all(&at).unwrap();
+    fs::write(at.join("f"), "x").unwrap();
+    fs::set_permissions(&at, fs::Permissions::from_mode(0o0)).unwrap();
+    if fs::read_dir(&at).is_ok() {
+        return; // as root, nothing is unreadable
+    }
+    clear(&b.cfg, "u");
+    fs::set_permissions(&at, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(at.join("f").exists());
+}
+
+// Clears at once each find a whole copy, one, never another's half of one.
+#[test]
+fn clears_at_once_keep_one_whole_copy() {
+    let b = Box::new();
+    let wt = unfinished(&b);
+    fs::write(wt.join("big"), vec![7u8; 4 << 20]).unwrap();
+    let cfg = &b.cfg;
+    thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| clear(cfg, "u"));
+        }
+    });
+    let base = Job::new(cfg, "u").path("preserved");
+    let names: Vec<_> = fs::read_dir(&base)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["wt.1".to_owned()], "{names:?}");
+    assert_eq!(
+        fs::metadata(base.join("wt.1/untracked/big")).unwrap().len(),
+        4 << 20
+    );
+    assert!(base.join("wt.1/tracked.patch").exists());
 }

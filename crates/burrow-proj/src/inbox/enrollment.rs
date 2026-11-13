@@ -155,10 +155,7 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
     let Some((repo, n)) = source(job)? else {
         return Ok(Admission::Ready);
     };
-    if job
-        .turns()
-        .is_some_and(|n| job.turn(&n, "stopped").exists())
-    {
+    if job.turns().is_some_and(|n| job.stopped_for_good(&n)) {
         return Ok(Admission::Stopped(format!(
             "proj: {} is stopped; relabelling starts a fresh job",
             job.id
@@ -294,10 +291,7 @@ impl Pass<'_> {
             if dirs(&retiring, "").iter().any(|d| {
                 read(&d.join("job")).is_some_and(|id| {
                     let job = Job::new(self.cfg, &id);
-                    job.dir.is_dir()
-                        && !job
-                            .turns()
-                            .is_some_and(|n| job.turn(&n, "stopped").exists())
+                    job.dir.is_dir() && !job.turns().is_some_and(|n| job.stopped_for_good(&n))
                 })
             }) {
                 self.retry(repo);
@@ -307,9 +301,7 @@ impl Pass<'_> {
                 let job = Job::new(self.cfg, &id);
                 if (!crate::ask::host_path(&job, "inbox-parked").exists()
                     && !parking_path(self.inbox, repo, &n).exists())
-                    || !job
-                        .turns()
-                        .is_some_and(|n| job.turn(&n, "stopped").exists())
+                    || !job.turns().is_some_and(|n| job.stopped_for_good(&n))
                 {
                     continue;
                 }

@@ -205,3 +205,37 @@ fn usage_is_one_json_value_with_zero_one_or_multiple_github_readings() {
         assert_eq!(value["github"].as_array().map_or(0, Vec::len), count);
     }
 }
+
+// A handoff's stop of the turn it replaces is no end of the job while the
+// handoff is in progress: nothing reads the turn as stopped for good, the job
+// still holds, and the scratch stays. Once its successor is accepted the turn
+// keeps a marker nothing reads, and a stop (the job's end) retires the record.
+#[test]
+fn a_handoff_in_progress_is_not_a_stop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().to_str().unwrap().into();
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    fs::create_dir(tmp.path().join("j")).unwrap();
+    fs::write(tmp.path().join("j/turns"), "1\n").unwrap();
+    let job = Job::new(&cfg, "j");
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    assert!(job.stopped_for_good("1"), "a stop is final");
+    fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+    assert!(!job.stopped_for_good("1"));
+    assert!(job.holds().unwrap().contains(&"handoff".to_owned()));
+    assert!(!crate::scratch::over(&job));
+
+    // Interrupted before its successor: nothing to settle yet.
+    super::settle_handoff(&job);
+    assert!(job.turn("1", "stopped").exists());
+    assert!(job.path(crate::scratch::HANDOFF).exists());
+
+    // Its successor accepted: the turn's stop is history, not a stop.
+    fs::write(job.path("turns"), "2\n").unwrap();
+    super::settle_handoff(&job);
+    assert!(!job.turn("1", "stopped").exists());
+    assert!(job.turn("1", "handed-off").exists());
+    assert!(!job.stopped_for_good("1"));
+    assert!(!job.path(crate::scratch::HANDOFF).exists());
+}

@@ -25,7 +25,8 @@ pub fn dir(cfg: &Config, id: &str) -> PathBuf {
 }
 
 /// The job's file while `proj handoff` moves its waiting turn to a new one: the
-/// scratch is the new turn's, so nothing clears it in between.
+/// turn it ends, by number. The scratch is the new turn's, so nothing clears it
+/// in between, and that turn's stop is no end of the job ([`Job::handing_off`]).
 pub const HANDOFF: &str = "handoff";
 
 /// Whether the job is over as its latest turn left it, so nothing gives it
@@ -70,7 +71,21 @@ pub fn clear(cfg: &Config, id: &str) {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') {
         return;
     }
-    if Job::new(cfg, id).path(HANDOFF).exists() {
+    let job = Job::new(cfg, id);
+    if job.path(HANDOFF).exists() {
+        return;
+    }
+    // One clear at a time owns the scratch: it keeps what the job didn't
+    // publish and removes the scratch, and another waits for that, then finds
+    // nothing left.
+    let _owner = match Owner::take(cfg, id) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("proj: job {id}'s scratch is kept, its clear lock couldn't be taken: {e}");
+            return;
+        }
+    };
+    if job.path(HANDOFF).exists() {
         return;
     }
     // What the job didn't publish is kept first; one that can't be kept
@@ -112,6 +127,36 @@ pub fn clear(cfg: &Config, id: &str) {
                 common.display()
             );
         }
+    }
+}
+
+/// The right to clear one job's scratch: a lock file beside it, taken whole
+/// (the one a waiter got is the one there still, or it asks again) and removed
+/// by the owner once done.
+struct Owner {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl Owner {
+    fn take(cfg: &Config, id: &str) -> std::io::Result<Owner> {
+        use std::os::unix::fs::MetadataExt;
+        let path = cfg.scratch.join("jobs").join(format!(".clear-{id}.lock"));
+        loop {
+            let file = crate::state_reads::append(&path)?;
+            file.lock()?;
+            let same = fs::metadata(&path)
+                .is_ok_and(|m| m.ino() == file.metadata().map(|f| f.ino()).unwrap_or(0));
+            if same {
+                return Ok(Owner { path, _file: file });
+            }
+        }
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
