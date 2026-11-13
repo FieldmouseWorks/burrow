@@ -65,6 +65,12 @@ fn reap() -> Result<(), String> {
 }
 
 pub fn clone(repo: &str, path: &Path, until: f64) -> Result<(), Stop> {
+    clone_with("gh", repo, path, until)
+}
+
+/// `clone` with the program that stands in for `gh`, so a test can give it
+/// descendants of its own.
+pub fn clone_with(program: &str, repo: &str, path: &Path, until: f64) -> Result<(), Stop> {
     let now = clock_gettime(ClockId::Monotonic);
     let remaining = until - (now.tv_sec as f64 + now.tv_nsec as f64 / 1e9);
     if remaining <= 0.0 {
@@ -87,7 +93,7 @@ pub fn clone(repo: &str, path: &Path, until: f64) -> Result<(), Stop> {
     // even for a repository whose name begins with a dot.
     let tree = staging.path().join("tree");
     let result = burrow_process::output(
-        Command::new("gh").args(["repo", "clone", repo]).arg(&tree),
+        Command::new(program).args(["repo", "clone", repo]).arg(&tree),
         None,
         until,
         1024 * 1024,

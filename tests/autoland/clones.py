@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 from harness import REAL, ACTING, UPKEEP_RAN, C, S, tmp
 
@@ -340,6 +341,34 @@ subprocess.run(["mv", f"{src}/tool", f"{tmp}/clones-moved"], check=True)
 assert full(T + 90100) == []
 assert tried() == ["sam/tool"], tried()
 assert "sam/tool" in C.load("known.json", [])
+
+# A clone that ran out of pass time is temporary, not the repository failing:
+# the supervisor's status 75 and an already-exhausted deadline both reach the
+# caller as C.Unavailable, so the baseline path retries without its day's wait,
+# and a failed clone (any other status) is still None.
+kept_upkeep, kept_deadline = C.CFG.get("upkeep"), C.REMOTE_DEADLINE
+for status, outcome in ((75, C.Unavailable), (1, None)):
+    with open(f"{bin_dir}/upkeep", "w") as f:
+        f.write(f"#!/bin/sh\nexit {status}\n")
+    os.chmod(f"{bin_dir}/upkeep", 0o755)
+    C.CFG["upkeep"] = [f"{bin_dir}/upkeep", "upkeep.json"]
+    with C.acting_for("sam/slow"):
+        try:
+            got = C.job("sam/slow", "t", clone=True, role="baseline")
+        except C.Unavailable:
+            got = C.Unavailable
+    assert got is outcome, (status, got)
+C.REMOTE_DEADLINE = time.monotonic() - 1
+with C.acting_for("sam/slow"):
+    try:
+        C.job("sam/slow", "t", clone=True, role="baseline")
+    except C.Unavailable:
+        pass
+    else:
+        raise AssertionError("an exhausted pass deadline was not temporary")
+C.REMOTE_DEADLINE = kept_deadline
+C.CFG["upkeep"] = kept_upkeep
+assert "sam/slow" not in C.load("baseline-failed.json", {})
 
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 C.gh, C.job, sys.argv = kept_gh, kept_job, kept_argv
