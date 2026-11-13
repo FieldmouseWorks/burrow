@@ -386,7 +386,10 @@ fn a_compare_doesnt_count_what_a_failing_check_explains() {
     let ran = m.run(&env, &["compare", m.path("before").to_str().unwrap(), "0"]);
     assert_eq!(
         (ran.status.code(), stdout(&ran).as_str()),
-        (Some(1), "check:claude-login is failing\n"),
+        (
+            Some(1),
+            "check:claude-login is failing\ncheck:operator is failing\nclaude-rc@web.service failed\n"
+        ),
         "{ran:?}"
     );
 }

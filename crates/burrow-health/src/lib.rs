@@ -12,9 +12,11 @@
 //! A check can explain others (`explains`, from burrow.updates.healthExplains):
 //! while it fails, what can't pass without it (the operator's check and the
 //! Remote Control units while Claude Code isn't logged in) isn't counted as
-//! the change's doing. The check itself still is, as any other, so a change
-//! that breaks the login is still a regression, and a login already gone
-//! before the change doesn't revert it. A compare that passes says what it
+//! the change's doing. Only a cause already failing before the change
+//! explains (or one the snapshot never saw, on the switch that brings the
+//! check in, that no other cause explains), so a change that breaks the login
+//! is still a regression, explanations can't excuse each other in a ring, and
+//! a required check is never excused. A compare that passes says what it
 //! didn't count, after `healthy`.
 //!
 //! The checks are the executables in the config's `dir` (/etc/burrow/health.d,
@@ -175,31 +177,71 @@ fn regressed(before: &[Line], now: &[Line]) -> Vec<(String, String)> {
 
 /// What regressed, split in two: what counts against the change, and what
 /// a check failing in `now` explains (`explains`), said with its cause.
+///
+/// Only a cause the change didn't break explains: one that was already
+/// failing in `before`, or one `before` knows nothing of (the switch that
+/// brings the check in has no earlier state to hold it to) that no other
+/// failing cause explains. So explanations can't excuse each other in a
+/// ring, and a check that passed before and fails now is the change's. A
+/// `required` check is never excused: it must pass whatever else fails.
 pub fn judge(
     before: &[Line],
     now: &[Line],
     explains: &BTreeMap<String, Vec<String>>,
+    required: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    let failing: Vec<&str> = now
+    let failing = |name: &str| {
+        now.iter()
+            .any(|l| l.state == State::Fail && l.check() == Some(name))
+    };
+    let was = |name: &str| before.iter().find(|l| l.check() == Some(name));
+    let explained_by = |key: &str, cause: &str| {
+        key != format!("{CHECK}{cause}")
+            && explains
+                .get(cause)
+                .is_some_and(|keys| keys.iter().any(|p| glob(p, key)))
+    };
+    let failing_now: Vec<&str> = explains
+        .keys()
+        .map(String::as_str)
+        .filter(|c| failing(c))
+        .collect();
+    // Causes that were failing before the change, or that it introduced and
+    // nothing else explains.
+    let causes: Vec<(&str, bool)> = failing_now
         .iter()
-        .filter(|l| l.state == State::Fail)
-        .filter_map(Line::check)
+        .filter_map(|&c| match was(c) {
+            Some(l) if l.state == State::Fail => Some((c, false)),
+            Some(_) => None,
+            None => {
+                let key = format!("{CHECK}{c}");
+                let chained = failing_now.iter().any(|&o| explained_by(&key, o));
+                (!chained).then_some((c, true))
+            }
+        })
         .collect();
     let mut bad = Vec::new();
     let mut excused = Vec::new();
     for (key, said) in regressed(before, now) {
-        // A check never explains itself away.
-        let cause = failing.iter().find(|cause| {
-            key != format!("{CHECK}{cause}")
-                && explains
-                    .get(**cause)
-                    .is_some_and(|keys| keys.iter().any(|p| glob(p, &key)))
-        });
-        match cause {
-            Some(cause) => excused.push(format!(
+        let is_required = key
+            .strip_prefix(CHECK)
+            .is_some_and(|n| required.iter().any(|r| r == n));
+        if is_required {
+            bad.push(said);
+            continue;
+        }
+        if let Some((cause, _)) = causes.iter().find(|(c, _)| explained_by(&key, c)) {
+            excused.push(format!(
                 "{said}, but not counted: check:{cause} is failing, and it can't pass without that"
-            )),
-            None => bad.push(said),
+            ));
+        } else if let Some(name) = key.strip_prefix(CHECK)
+            && causes.iter().any(|&(c, new)| new && c == name)
+        {
+            excused.push(format!(
+                "{said}, but not counted: it's new, so nothing before the change says it passed"
+            ));
+        } else {
+            bad.push(said);
         }
     }
     (bad, excused)
@@ -411,6 +453,7 @@ pub fn require(before: &mut Vec<Line>, required: &[String]) {
 pub fn compare(
     before: &[Line],
     explains: &BTreeMap<String, Vec<String>>,
+    required: &[String],
     within: Duration,
     settle: Duration,
     mut look: impl FnMut() -> Vec<Line>,
@@ -418,7 +461,7 @@ pub fn compare(
     let deadline = Instant::now().checked_add(within);
     loop {
         sleep(settle);
-        let (bad, excused) = judge(before, &look(), explains);
+        let (bad, excused) = judge(before, &look(), explains, required);
         if bad.is_empty() {
             return Ok(excused);
         }
@@ -438,7 +481,7 @@ mod tests {
 
     /// What regressed, nothing explained.
     fn regressions(before: &[Line], now: &[Line]) -> Vec<String> {
-        judge(before, now, &BTreeMap::new()).0
+        judge(before, now, &BTreeMap::new(), &[]).0
     }
 
     #[test]
@@ -605,6 +648,7 @@ mod tests {
         let cleared = compare(
             &before,
             &BTreeMap::new(),
+            &[],
             Duration::from_secs(60),
             Duration::ZERO,
             || {
@@ -622,6 +666,7 @@ mod tests {
         let stuck = compare(
             &before,
             &BTreeMap::new(),
+            &[],
             Duration::ZERO,
             Duration::ZERO,
             || {
@@ -638,6 +683,7 @@ mod tests {
         let cleared = compare(
             &before,
             &BTreeMap::new(),
+            &[],
             Duration::MAX,
             Duration::ZERO,
             || {
@@ -668,7 +714,7 @@ mod tests {
         let now = lines(
             "check:claude-login fail\ncheck:dns ok\ncheck:operator fail\nuser-unit:claude-rc@consolebook.service fail\nuser-unit:claude-rc@web.service fail\n",
         );
-        let (bad, excused) = judge(&before, &now, &explains);
+        let (bad, excused) = judge(&before, &now, &explains, &[]);
         assert_eq!(bad, Vec::<String>::new());
         assert_eq!(
             excused,
@@ -694,29 +740,128 @@ mod tests {
         let now = lines(
             "check:claude-login fail\ncheck:dns fail\ncheck:operator fail\nunit:claude-rc@web.service fail\nuser-unit:claude-rc@web.service fail\n",
         );
-        let (bad, excused) = judge(&before, &now, &explains);
+        let (bad, excused) = judge(&before, &now, &explains, &[]);
         assert_eq!(
             bad,
             [
                 "check:claude-login is failing",
                 "check:dns is failing",
+                "check:operator is failing",
+                "claude-rc@web.service failed",
                 "claude-rc@web.service failed",
             ]
         );
-        assert_eq!(excused.len(), 2, "{excused:?}");
+        assert_eq!(excused, Vec::<String>::new());
         // With the login back, nothing is excused.
         let now = lines("check:claude-login ok\ncheck:dns ok\ncheck:operator fail\n");
         assert_eq!(
-            judge(&before, &now, &explains),
+            judge(&before, &now, &explains, &[]),
             (vec!["check:operator is failing".to_owned()], vec![])
         );
         // A check never explains itself away.
         let explains = BTreeMap::from([("claude-login".to_owned(), vec!["check:*".to_owned()])]);
         let now = lines("check:claude-login fail\ncheck:dns ok\ncheck:operator fail\n");
         assert_eq!(
-            judge(&before, &now, &explains).0,
-            ["check:claude-login is failing"]
+            judge(&before, &now, &explains, &[]).0,
+            ["check:claude-login is failing", "check:operator is failing"]
         );
+    }
+
+    #[test]
+    fn a_required_check_is_never_explained_away() {
+        let explains = BTreeMap::from([("login".to_owned(), vec!["check:operator".to_owned()])]);
+        let before = lines("check:login fail\ncheck:operator fail\n");
+        let now = lines("check:login fail\ncheck:operator fail\n");
+        // Required checks are held to passing, as a compare's `require` does.
+        let mut held = before.clone();
+        require(&mut held, &["operator".to_owned()]);
+        let required = ["operator".to_owned()];
+        assert_eq!(
+            judge(&held, &now, &explains, &required).0,
+            ["check:operator is failing"]
+        );
+        // The same by a wildcard, and when the check is new.
+        let wild = BTreeMap::from([("login".to_owned(), vec!["check:*".to_owned()])]);
+        assert_eq!(
+            judge(&held, &now, &wild, &required).0,
+            ["check:operator is failing"]
+        );
+        let fresh = lines("check:login fail\n");
+        let mut held = fresh.clone();
+        require(&mut held, &required);
+        assert_eq!(
+            judge(&held, &now, &explains, &required).0,
+            ["check:operator is failing"]
+        );
+        // Without the requirement the login excuses it.
+        assert_eq!(judge(&before, &now, &explains, &[]).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn explanations_in_a_ring_dont_excuse_what_the_change_broke() {
+        let now = lines("check:a fail\ncheck:b fail\ncheck:c fail\n");
+        let before = lines("check:a ok\ncheck:b ok\ncheck:c ok\n");
+        for explains in [
+            BTreeMap::from([
+                ("a".to_owned(), vec!["check:b".to_owned()]),
+                ("b".to_owned(), vec!["check:a".to_owned()]),
+            ]),
+            BTreeMap::from([
+                ("a".to_owned(), vec!["check:b".to_owned()]),
+                ("b".to_owned(), vec!["check:c".to_owned()]),
+                ("c".to_owned(), vec!["check:a".to_owned()]),
+            ]),
+            BTreeMap::from([
+                ("a".to_owned(), vec!["check:*".to_owned()]),
+                ("b".to_owned(), vec!["check:*".to_owned()]),
+                ("c".to_owned(), vec!["check:*".to_owned()]),
+            ]),
+        ] {
+            let (bad, excused) = judge(&before, &now, &explains, &[]);
+            assert_eq!(bad.len(), 3, "{explains:?} {bad:?}");
+            assert!(excused.is_empty(), "{explains:?}");
+        }
+        // The same ring with checks the snapshot doesn't know.
+        let (bad, _) = judge(
+            &[],
+            &now,
+            &BTreeMap::from([
+                ("a".to_owned(), vec!["check:b".to_owned()]),
+                ("b".to_owned(), vec!["check:a".to_owned()]),
+            ]),
+            &[],
+        );
+        assert_eq!(bad.len(), 3, "{bad:?}");
+        // A chain that ends at a failure from before still holds.
+        let before = lines("check:a fail\ncheck:b ok\ncheck:c ok\n");
+        let chain = BTreeMap::from([("a".to_owned(), vec!["check:b".to_owned()])]);
+        let (bad, excused) = judge(&before, &now, &chain, &[]);
+        assert_eq!(bad, ["check:c is failing"]);
+        assert_eq!(excused.len(), 1);
+    }
+
+    #[test]
+    fn a_login_the_snapshot_never_saw_explains_on_its_first_switch() {
+        // The switch that brings the check in: the snapshot is the old
+        // system's, with no claude-login in it.
+        let explains =
+            BTreeMap::from([("claude-login".to_owned(), vec!["check:operator".to_owned()])]);
+        let before = lines("check:dns ok\ncheck:operator ok\n");
+        let now = lines("check:claude-login fail\ncheck:dns ok\ncheck:operator fail\n");
+        let (bad, excused) = judge(&before, &now, &explains, &[]);
+        assert_eq!(bad, Vec::<String>::new());
+        assert_eq!(excused.len(), 2, "{excused:?}");
+        // Another new check failing, or an old one, still counts.
+        let now =
+            lines("check:claude-login fail\ncheck:dns fail\ncheck:extra fail\ncheck:operator ok\n");
+        assert_eq!(
+            judge(&before, &now, &explains, &[]).0,
+            ["check:dns is failing", "check:extra (new) is failing"]
+        );
+        // A login that passed before and fails now is still the switch's.
+        let before = lines("check:claude-login ok\ncheck:operator ok\n");
+        let now = lines("check:claude-login fail\ncheck:operator fail\n");
+        assert_eq!(judge(&before, &now, &explains, &[]).0.len(), 2);
     }
 
     #[test]

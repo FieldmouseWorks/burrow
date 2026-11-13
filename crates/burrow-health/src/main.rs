@@ -88,6 +88,7 @@ fn main() -> ExitCode {
             match compare(
                 &before,
                 &cfg.explains,
+                &cfg.required,
                 within,
                 Duration::from_secs(cfg.settle),
                 || {

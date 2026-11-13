@@ -33,7 +33,8 @@
         don't count against the switch: a cause already failing before it
         (Claude Code logged out, say) doesn't revert a good deploy because
         the switch restarted what needs it. The check itself counts as any
-        other.
+        other. Only a check already failing before the switch (or new with
+        it) explains; a required check is never excused.
       '';
     };
   };
