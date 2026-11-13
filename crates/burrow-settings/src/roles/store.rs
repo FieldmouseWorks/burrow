@@ -199,6 +199,10 @@ impl Config {
             |doc: &mut Document| {
                 self.ready(doc, true)?;
                 let answer = apply(&mut doc.routing, &mut doc.offers, &mut doc.setups, words)?;
+                // The result must stay readable with the flake's starting
+                // effort too, or no turn could resolve its role.
+                doc.routing
+                    .in_force(&doc.offers, self.claude_effort.as_deref())?;
                 // With no migration source configured this is a fresh store.
                 // Its first accepted mutation establishes the complete state;
                 // a later import must not resurrect values it deliberately lacks.

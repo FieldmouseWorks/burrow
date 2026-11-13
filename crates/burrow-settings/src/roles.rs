@@ -227,7 +227,8 @@ pub const CLAUDE_ONLY: &[(&str, &str)] = &[
 /// effort where the flake gives the machine one (`burrow.claude.effort`): a
 /// declared starting point, which a live `model` line replaces.
 pub fn default_models(start: Option<&str>) -> BTreeMap<String, Tuning> {
-    let mut models: BTreeMap<String, Tuning> = declared("proj.models");
+    let mut models: BTreeMap<String, Tuning> =
+        serde_json::from_str(crate::schema::MODELS_BASE).expect("the declared tunings");
     if let Some(start) = start {
         models
             .get_mut("* claude")

@@ -274,6 +274,17 @@ fn per_project(values: &Values) -> Option<Value> {
     Some(json!(left.max(1)))
 }
 
+/// The declared tunings before the flake's starting effort.
+pub const MODELS_BASE: &str =
+    r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#;
+
+/// modules/settings.nix: `claude.effort` starts `* claude`'s effort.
+fn models_default(values: &Values) -> Option<Value> {
+    let mut models: Value = serde_json::from_str(MODELS_BASE).expect("a declared default");
+    models["* claude"]["effort"] = values.get("claude.effort")?.clone();
+    Some(models)
+}
+
 /// Every option, in the order `settings show` lists them.
 pub static SETTINGS: &[Setting] = &[
     // proj: its slots and what it holds back.
@@ -498,6 +509,13 @@ pub static SETTINGS: &[Setting] = &[
         "autoland-review",
         "Path regexes left out of what the reviewers read.",
     ),
+    flake(
+        "claude.effort",
+        &Kind::Maybe(&EFFORT),
+        Is("null"),
+        "proj",
+        "Where every role's Claude effort starts: the declared default of `* claude` in proj.models, which a live model line replaces. Null leaves each model's own.",
+    ),
     // What changes live, in proj's files.
     live(
         "proj.roles",
@@ -506,13 +524,19 @@ pub static SETTINGS: &[Setting] = &[
         ROLES_OVERLAY,
         "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one. Declared defaults beyond *: the planner runs on Codex; update, backup and firmware run on Claude with no overflow, by policy (update: a failed machine update is repaired with the machine's own Claude instructions and login, and a meter must not hand a system change to another engine; backup: a backup repair touches the only copy off the box, so it stays on the engine that guards it and never spills to another; firmware: a firmware review precedes flashing, which stays the owner's call, so it stays on Claude and never spills to another engine). A live role line changes any of them.",
     ),
-    live(
-        "proj.models",
-        &MODELS,
-        r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#,
-        ROLES_OVERLAY,
-        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
-    ),
+    Setting {
+        name: "proj.models",
+        kind: &MODELS,
+        default: Fallback::Derived {
+            says: "null model and effort for every role on each engine, except `* claude`'s effort, which starts at claude.effort",
+            from: models_default,
+        },
+        help: "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
+        owner: "proj",
+        change: Change::Live {
+            file: ROLES_OVERLAY,
+        },
+    },
     live(
         "proj.engineOffers",
         &OFFERS,

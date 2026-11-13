@@ -20,6 +20,7 @@ let
     };
 in
 lib.genAttrs [
+  "claude.effort"
   "proj.maxJobs"
   "proj.pipelineSlots"
   "proj.maxJobsPerProject"

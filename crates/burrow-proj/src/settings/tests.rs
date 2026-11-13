@@ -214,3 +214,33 @@ fn admission_reads_the_one_overlay_and_writes_without_a_tracked_document() {
     fs::write(&policy.overlay, "broken").unwrap();
     assert!(command(&cfg, &["show".into()]).is_err());
 }
+
+#[test]
+fn the_flakes_starting_effort_is_a_named_default_in_both_forms_of_show() {
+    let (d, mut cfg) = crate::usage::tests::rig();
+    cfg.settings.as_mut().unwrap().overlay = d.path().join("settings/overlay.json");
+    cfg.settings.as_mut().unwrap().claude_effort = Some("high".into());
+    let mut flake = tracked();
+    flake.insert(
+        "claude.effort".into(),
+        json!({"value": "high", "set": true, "default": null}),
+    );
+    set(&mut cfg, flake);
+    let options = show(&cfg)["options"].clone();
+    assert_eq!(options["claude.effort"]["origin"], "flake");
+    assert_eq!(options["proj.models"]["origin"], "default");
+    assert_eq!(
+        options["proj.models"]["value"]["* claude"],
+        json!({"model": null, "effort": "high"})
+    );
+    assert!(
+        command(&cfg, &["show".into()])
+            .unwrap()
+            .contains("claude.effort")
+    );
+    // A live line replaces it, and the origin follows.
+    crate::config::tests::set(&mut cfg, d.path(), &["model * claude - low"]);
+    let options = show(&cfg)["options"].clone();
+    assert_eq!(options["proj.models"]["origin"], "live");
+    assert_eq!(options["proj.models"]["value"]["* claude"]["effort"], "low");
+}

@@ -600,3 +600,16 @@ fn the_flakes_effort_is_a_starting_default_a_live_model_line_replaces() {
     cfg.claude_effort = Some("enormous".into());
     assert!(cfg.roles().unwrap_err().contains("starting effort"));
 }
+
+#[test]
+fn no_change_may_leave_the_settings_unreadable_with_the_flakes_effort() {
+    let (_dir, mut cfg) = rig();
+    cfg.claude_effort = Some("high".into());
+    // Withdrawing the starting effort from the offer is refused, and
+    // nothing is published.
+    let err = set(&cfg, "offer claude efforts low").unwrap_err();
+    assert!(err.contains("starting effort"), "{err}");
+    cfg.roles().unwrap();
+    set(&cfg, "offer claude efforts low high").unwrap();
+    cfg.roles().unwrap();
+}
