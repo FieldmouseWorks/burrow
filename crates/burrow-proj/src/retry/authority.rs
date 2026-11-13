@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Identity {
     pub choice: engine::Choice,
+    /// Earlier proj captured the job's request files here; the protected
+    /// request ([`crate::job::Request`]) is their only home now.
+    #[serde(default, skip_serializing)]
     files: BTreeMap<String, Option<String>>,
 }
 impl Identity {
@@ -39,45 +42,37 @@ impl Identity {
         // Called only after kernel census-wait attestation. The old host
         // parent wrote N.engine before entering its initial wait or retry.
         let recorded = read(&job.turn(n, "engine"));
-        let role = read(&job.path("role")).unwrap_or_default();
-        let repo = crate::pick::github_repo(job.cfg, &crate::pick::project(&job.dir));
-        let choice = engine::resolve(
+        let choice = engine::requested(
             job.cfg,
-            &role,
-            (!repo.is_empty()).then_some(repo.as_str()),
+            job,
+            &crate::job::Request::load(job)?,
             recorded.as_deref(),
         )?;
         Self::save(job, n, choice)
     }
     fn save(job: &Job, n: &str, choice: engine::Choice) -> Result<(), String> {
         crate::ask::ensure(job)?;
-        let files = ["project", "engine", "role", "app", "agent", "owned"]
-            .into_iter()
-            .map(|key| (key.into(), read(&job.path(key))))
-            .collect();
         swap(
             &job.turn(n, "execution"),
-            &serde_json::to_string(&Self { choice, files }).map_err(|e| e.to_string())?,
+            &serde_json::to_string(&Self {
+                choice,
+                files: BTreeMap::new(),
+            })
+            .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
+    }
+    /// What an earlier proj captured of the job's request files, if anything.
+    pub fn legacy_files(&self) -> &BTreeMap<String, Option<String>> {
+        &self.files
     }
     pub fn restore(job: &Job, n: &str) -> Result<(), String> {
         let Some(identity) = Self::load(job, n)? else {
             return Err("retained retry has no host execution identity".into());
         };
-        for (key, value) in identity.files {
-            let path = job.path(&key);
-            match value {
-                Some(value) => {
-                    crate::state_reads::write(&path, &value).map_err(|e| e.to_string())?
-                }
-                None => match crate::state_reads::remove(path) {
-                    Ok(()) => (),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(e.to_string()),
-                },
-            }
-        }
+        crate::job::Request::load(job)?
+            .publish(job)
+            .map_err(|e| e.to_string())?;
         crate::state_reads::write(job.turn(n, "engine"), identity.choice.engine.name())
             .map_err(|e| e.to_string())
     }

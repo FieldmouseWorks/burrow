@@ -70,25 +70,34 @@ pub struct Choice {
 }
 
 /// Inbox jobs pin their label's engine; role jobs resolve the file each turn.
+/// Both read the job's protected request ([`crate::job::Request`]), never
+/// the files a job may write.
 pub fn choice(cfg: &Config, job: &Job) -> Result<Choice, String> {
-    let role = read(&job.path("role")).unwrap_or_default();
-    let repo = if role.is_empty() {
-        String::new()
-    } else {
-        crate::pick::github_repo(cfg, &crate::pick::project(&job.dir))
-    };
     if let Some(n) = job.turns()
         && let Some(identity) = crate::retry::Identity::load(job, &n)?
     {
         return Ok(identity.choice);
     }
-    let pinned = read(&job.path("engine"));
-    resolve(
-        cfg,
-        &role,
-        (!repo.is_empty()).then_some(repo.as_str()),
-        pinned.as_deref(),
-    )
+    let request = crate::job::Request::load(job)?;
+    requested(cfg, job, &request, request.engine.map(Engine::name))
+}
+
+/// The request's role, scoped to the repository its admission bound (not
+/// its project's origin, which the job's git metadata grant reaches), with
+/// `pinned` for the engine.
+pub(crate) fn requested(
+    cfg: &Config,
+    job: &Job,
+    request: &crate::job::Request,
+    pinned: Option<&str>,
+) -> Result<Choice, String> {
+    let role = request.role.as_deref().unwrap_or_default();
+    let repo = if role.is_empty() {
+        None
+    } else {
+        crate::policy::repository(job)
+    };
+    resolve(cfg, role, repo.as_deref(), pinned)
 }
 
 /// Turn startup and drain admission share role scopes, overflow and pins.
@@ -351,7 +360,10 @@ for session in ('writer-session', 'reviewer-session'):
         assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
         fs::write(&cfg.roles, "steward-judged claude\n").unwrap();
         assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Claude);
-        fs::write(job.path("engine"), "codex").unwrap();
+        // Pinned by its starter (an inbox label), not by a file it writes.
+        let mut request = crate::job::Request::load(&job).unwrap();
+        request.engine = Some(Engine::Codex);
+        request.save(&job).unwrap();
         // Model and effort follow the engine the judge runs on.
         fs::write(
             &cfg.models,
@@ -371,8 +383,30 @@ mod scoped_tests {
     use super::*;
     use std::process::Command;
 
+    /// A job its starter made: its request, and the repository its
+    /// admission binds from the project's origin as it is now.
+    fn started<'a>(
+        cfg: &'a Config,
+        id: &'a str,
+        project: &Path,
+        role: &str,
+        engine: Option<Engine>,
+    ) -> Job<'a> {
+        let job = Job::new(cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        crate::job::Request {
+            project: project.to_string_lossy().into_owned(),
+            engine,
+            role: Some(role.into()),
+            ..Default::default()
+        }
+        .save(&job)
+        .unwrap();
+        job
+    }
+
     #[test]
-    fn scoped_choices_follow_the_project_origin_for_judges_too() {
+    fn scoped_choices_follow_the_bound_origin_for_judges_too() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
@@ -395,10 +429,6 @@ mod scoped_tests {
         fs::create_dir(&project).unwrap();
         git(&["init", "-q"]);
         git(&["remote", "add", "origin", "https://github.com/Sam/Code.git"]);
-        let job = Job::new(&cfg, "job");
-        fs::create_dir_all(&job.dir).unwrap();
-        fs::write(job.path("role"), "steward-handed").unwrap();
-        fs::write(job.path("project"), project.to_str().unwrap()).unwrap();
         fs::write(
             &cfg.roles,
             "steward-handed claude\nsteward-handed@sam/code codex\nsteward-judged@sam/code codex\n",
@@ -409,32 +439,43 @@ mod scoped_tests {
             "steward-handed claude bare\nsteward-handed@sam/code claude scoped\n",
         )
         .unwrap();
-        for url in [
-            "https://github.com/Sam/Code.git",
-            "git@github.com:SAM/CODE.git",
-            "ssh://git@github.com/Sam/Code",
+        for (id, url) in [
+            ("https", "https://github.com/Sam/Code.git"),
+            ("scp", "git@github.com:SAM/CODE.git"),
+            ("ssh", "ssh://git@github.com/Sam/Code"),
         ] {
             git(&["remote", "set-url", "origin", url]);
+            let job = started(&cfg, id, &project, "steward-handed", None);
             assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
         }
-        fs::write(job.path("role"), "steward-judged").unwrap();
+        let job = started(&cfg, "judged", &project, "steward-judged", None);
         assert_eq!(choice(&cfg, &job).unwrap().engine, Engine::Codex);
         // A scoped role on Claude takes its repo's line.
-        fs::write(job.path("engine"), "claude").unwrap();
-        fs::write(job.path("role"), "steward-handed").unwrap();
+        let job = started(
+            &cfg,
+            "pinned",
+            &project,
+            "steward-handed",
+            Some(Engine::Claude),
+        );
         assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("scoped"));
-        fs::remove_file(job.path("engine")).unwrap();
-        for url in [
-            "https://github.com/other/code.git",
-            "https://gitlab.com/sam/code.git",
-            "/tmp/clone",
+        for (id, url) in [
+            ("other", "https://github.com/other/code.git"),
+            ("gitlab", "https://gitlab.com/sam/code.git"),
+            ("clone", "/tmp/clone"),
         ] {
             git(&["remote", "set-url", "origin", url]);
+            let job = started(&cfg, id, &project, "steward-handed", None);
             assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("bare"));
         }
         git(&["remote", "remove", "origin"]);
+        let job = started(&cfg, "none", &project, "steward-handed", None);
         assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("bare"));
-        fs::remove_file(job.path("project")).unwrap();
+        let job = started(&cfg, "nowhere", Path::new(""), "steward-handed", None);
         assert_eq!(choice(&cfg, &job).unwrap().model.as_deref(), Some("bare"));
     }
 }
+
+#[cfg(test)]
+#[path = "request_tests.rs"]
+mod request_tests;

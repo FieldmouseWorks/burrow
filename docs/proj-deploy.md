@@ -64,6 +64,15 @@ the fenced legacy census lock. Sleeping legacy retries remain fenced until
 that proof is available at reset. Recovery restores the saved execution
 identity; mutable job files cannot broaden its capabilities.
 
+What a job runs as on every turn and every engine run (its project, pinned
+engine, role, GitHub App, sandbox and `--owned`) is its request, which the
+starter saves in the same host control root (`crates/burrow-proj/src/job/request.rs`).
+Only the starter and the inbox's label-to-role enrollment change it. A role is
+scoped to the repository its admission bound, not to its project's current
+origin. The job directory's files of those names are a published copy, put
+back at each turn's start. A job from before the request adopts it once, from
+a retained retry's captured files if it has them, else from its published files.
+
 Each retained turn occupies one queue place, even after promotion or a
 configuration-driven class change. The census and replacement adoption remove
 obsolete names under the admission lock. Every replacement launch records its

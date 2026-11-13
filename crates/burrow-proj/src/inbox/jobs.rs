@@ -87,13 +87,7 @@ impl Pass<'_> {
                 .and_then(|i| self.machine_role(i))
             {
                 let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-                crate::swap(&job.path("role"), &format!("{role}\n"))
-                    .map_err(|e| io_fail(&job.path("role"), e))?;
-                match fs::remove_file(job.path("engine")) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(io_fail(&job.path("engine"), e)),
-                }
+                crate::job::Request::enroll(&job, role).map_err(|e| Fail::new(1, e))?;
             }
             // The state and the turn count, read together: a turn starts
             // (proj reply, proj _watch) holding the job's lock, and halfway

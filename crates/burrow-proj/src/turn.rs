@@ -201,6 +201,9 @@ fn start_with(
 }
 
 pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
+    let Ok(request) = crate::job::Request::load(job) else {
+        return false;
+    };
     let end = job.end_unit();
     let unit = job.unit();
     let id = job.id;
@@ -212,10 +215,7 @@ pub(crate) fn launch(cfg: &Config, job: &Job, first: bool) -> bool {
         .arg(format!("--property=MemoryMax={}", cfg.job_memory_max))
         .arg("--property=OOMPolicy=continue")
         .arg("--property=OOMScoreAdjust=500")
-        .arg(format!(
-            "--property=WorkingDirectory={}",
-            read(&job.path("project")).unwrap_or_default()
-        ))
+        .arg(format!("--property=WorkingDirectory={}", request.project))
         .arg(format!("--property=OnSuccess={hook}"))
         .arg(format!("--property=OnFailure={hook}"))
         .arg(&cfg.me)
@@ -287,10 +287,23 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     }
     let retry =
         crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;
+    // What it was started as, never what the job wrote of itself since: its
+    // published copy goes back to match before anything reads it.
+    let request = match crate::job::Request::load(&job) {
+        Ok(r) => r,
+        Err(e) => {
+            outcome(&format!("couldn't read the job's request: {e}"));
+            return Err(Fail::quiet(1));
+        }
+    };
+    request
+        .publish(&job)
+        .map_err(|e| Fail::new(1, format!("couldn't publish the job's request: {e}")))?;
+    let agent = request.agent.clone();
     // Its scratch, made before it takes a slot: one that can't be made fails
     // the turn rather than leave its work nowhere to go. A sandbox's job works
     // in the VM's own clone.
-    if !filled(&job.path("agent")) {
+    if agent.is_none() {
         let dir = scratch::dir(cfg, id);
         if fs::create_dir_all(&dir).is_err() {
             outcome(&format!("couldn't make its scratch dir {}", dir.display()));
@@ -304,7 +317,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             return Err(Fail::quiet(1));
         }
     };
-    if choice.engine == Engine::Codex && filled(&job.path("agent")) {
+    if choice.engine == Engine::Codex && agent.is_some() {
         outcome("codex cannot run a --vm job; agent sandboxes are Claude-only");
         return Err(Fail::quiet(1));
     }
@@ -318,7 +331,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // here (slot::take), to read it again: an App that switch took away
     // fails the turn.
     let mut app_env = String::new();
-    match github_app(cfg, read(&job.path("app")), choice.engine) {
+    match github_app(cfg, request.app.clone(), choice.engine) {
         Ok(None) => {}
         Ok(Some(app)) => match cfg.app_environment(&app).filter(|e| !e.is_empty()) {
             Some(e) => app_env = e,
@@ -372,8 +385,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         .map_err(|e| Fail::new(1, format!("proj: {}: {e}", waitdir.display())))?;
     // Whether its turns must say what comes next: an --owned job's starter
     // acts on each end itself.
-    let agent = read(&job.path("agent")).filter(|a| !a.is_empty());
-    let must = !job.path("owned").exists();
+    let must = !request.owned;
     let stream = job.turn(&n, "jsonl");
     if retry.is_none() {
         crate::state_reads::write(&stream, "").map_err(|e| Fail::new(1, e.to_string()))?;
