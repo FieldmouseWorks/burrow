@@ -314,6 +314,13 @@
         "id": {
           "type": "string"
         },
+        "parkedFor": {
+          "description": "What a parked job waits for, as its park says: its repository to be\nallowed, the inbox pass, a drain slot or a sorting slot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "state": {
           "description": "What `proj state` says.",
           "type": "string"

@@ -385,7 +385,7 @@ fn an_unpause_mid_scan_restarts_order_before_resuming_later_work() {
             crate::policy::Kind::Automated,
         )
         .unwrap();
-        crate::policy::mark(&job, "queued", first).unwrap();
+        crate::policy::mark(&job, "queued", first, None).unwrap();
         fs::write(crate::policy::path(&job, "order"), order).unwrap();
     }
     // The first job was observed paused. Release while checking its unit,

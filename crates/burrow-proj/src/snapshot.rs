@@ -296,6 +296,10 @@ pub struct JobRow {
     pub id: String,
     /// What `proj state` says.
     pub state: String,
+    /// What a parked job waits for, as its park says: its repository to be
+    /// allowed, the inbox pass, a drain slot or a sorting slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_for: Option<String>,
     /// Its sandbox, with --vm.
     pub vm: Vec<String>,
     /// The App it acts as.
@@ -430,6 +434,9 @@ impl JobRow {
             items.iter().map(|i| f(i)).collect::<Vec<_>>().join("\n")
         };
         let mut notes = String::new();
+        if let Some(wait) = &self.parked_for {
+            notes += &format!("[waiting for {wait}] ");
+        }
         notes += &tagged(&self.vm, &|l| format!("[vm {l}] "));
         notes += &tagged(&self.apps, &|l| format!("[as {l}] "));
         if let Some(why) = &self.demoted {
@@ -507,6 +514,11 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
     }
     JobRow {
         id: job.id.to_owned(),
+        parked_for: if state == "parked" {
+            crate::policy::waits_for(job)
+        } else {
+            None
+        },
         vm: lines(&job.path("agent")),
         apps: lines(&job.path("app")),
         demoted: demoted(job.cfg, &job.dir),

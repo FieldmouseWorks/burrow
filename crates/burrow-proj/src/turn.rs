@@ -173,11 +173,19 @@ fn start_with(
         job.turn(&n.to_string(), "priority"),
         if first { "first" } else { "normal" },
     );
-    let started = if crate::policy::denied(&job)
-        || crate::policy::parked(&job)
-        || matches!(capacity, crate::inbox::resumption::Resume::Waiting)
-    {
-        crate::policy::mark(&job, "queued", first)?;
+    // What it parks waiting for: None, not parked; Some(None), behind an
+    // earlier park of the job, whose wait it keeps.
+    let wait = if crate::policy::denied(&job) {
+        Some(Some(crate::policy::DENIED))
+    } else if let crate::inbox::resumption::Resume::Waiting(wait) = capacity {
+        Some(Some(wait.says()))
+    } else if crate::policy::parked(&job) {
+        Some(None)
+    } else {
+        None
+    };
+    let started = if let Some(wait) = wait {
+        crate::policy::mark(&job, "queued", first, wait)?;
         true
     } else {
         launch(cfg, &job, first)

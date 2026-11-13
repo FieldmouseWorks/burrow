@@ -88,11 +88,11 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
         }
-        let _permit = resumption::Permit::new(pass);
+        let _permit = resumption::Permit::pass(pass);
         return forget(cfg, &inbox.state, repo);
     }
     pass.lock().map_err(|e| io_fail(&lock, e))?;
-    let pass = resumption::Permit::new(pass);
+    let pass = resumption::Permit::pass(pass);
     let mut p = Pass {
         cfg,
         inbox,
@@ -104,9 +104,23 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         scope: if only.is_empty() { None } else { told() },
     };
     let result = p.run(only).and_then(|()| p.finish(only));
-    drop(pass);
-    crate::policy::wake(cfg);
+    release_parked(cfg, pass);
     result
+}
+
+/// What's parked waits for capacity this pass may have freed, and for the
+/// lock the pass holds; passes run back to back, so the policy unit's own
+/// try for that lock almost never finds it free (#1009). So the pass, still
+/// holding it, releases them itself, in the policy's own order and under the
+/// same capacity count (`resumption::admission` sees the permit), and only
+/// then lets go. Should that fail, the policy unit takes its turn after.
+fn release_parked(cfg: &Config, pass: resumption::Permit) {
+    let released = crate::policy::reconcile(cfg);
+    drop(pass);
+    if let Err(error) = released {
+        eprintln!("proj-inbox: releasing parked work: {error}");
+        crate::policy::wake(cfg);
+    }
 }
 
 /// Which issue is which job.
@@ -839,6 +853,8 @@ mod enrollment_review_tests;
 mod handed_tests;
 #[cfg(test)]
 mod parking_tests;
+#[cfg(test)]
+mod pass_release_tests;
 #[cfg(test)]
 mod question_tests;
 #[cfg(test)]
