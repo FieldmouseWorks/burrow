@@ -6,10 +6,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::Broke;
 use crate::dispatch::{open, settled};
 use crate::run::{Run, Step, name};
 use crate::status::Outcome;
-use crate::{Broke, train};
 
 /// How long the health check waits for the box to settle after a switch,
 /// in seconds.
@@ -20,11 +20,67 @@ const SETTLE: &str = "180";
 const DOWNGRADE: i32 = 3;
 
 impl Run<'_> {
+    /// Whether the system that runs is a bump the updater before this one
+    /// put live itself (its record in `deployed`) and left unmerged: the
+    /// commit it's stamped with is one the clone has and main doesn't. That
+    /// takes positive evidence: no stamp, a stamp the clone can't read, or
+    /// any failed query is not it. Going back to main from such a bump can
+    /// be a downgrade the switch would refuse for ever, so then, and only
+    /// then, it's allowed. Anything else (a rollback main itself carries, a
+    /// first install, a system someone else switched to) keeps the switch's
+    /// check.
+    fn leaves_old_bump(&self) -> bool {
+        let run = &self.running;
+        let Some(rev) = run.rev.as_deref() else {
+            return false;
+        };
+        self.cfg.train.is_some()
+            && run.current == self.cfg.recorded("deployed")
+            && run.rev.as_deref() != Some(self.cfg.recorded("deployed-main").as_str())
+            && self
+                .cfg
+                .git_hushed(&["cat-file", "-e", &format!("{rev}^{{commit}}")])
+                .is_ok()
+            && self.not_ancestor(rev)
+    }
+
+    /// That git positively says `rev` is no ancestor of main: exit status 1
+    /// of `merge-base --is-ancestor`. A failure to ask (a missing object, a
+    /// traversal or execution error) says nothing.
+    fn not_ancestor(&self, rev: &str) -> bool {
+        self.cfg
+            .run_as_user("git")
+            .arg("-C")
+            .arg(&self.cfg.work)
+            .args(["merge-base", "--is-ancestor", rev, &self.main])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.code() == Some(1))
+    }
+
     pub(crate) fn go_live(&mut self) -> Step {
-        if self.live {
+        // A bump in a train repo isn't switched to: it goes live after it
+        // lands, as main.
+        if self.live || (self.changed && self.cfg.train.is_some()) {
             return Ok(());
         }
         let cfg = self.cfg;
+        // The system that runs is a bump the updater before this one left
+        // live, and its healthy PR is open: switching back to main would let
+        // that updater ride it again, and this one return, for ever. It
+        // waits for the PR to land (once, for this hand-over). A stuck PR
+        // doesn't wait: the next run replaces it, but only once main runs.
+        if let (Some(n), true) = (self.behind, self.leaves_old_bump()) {
+            return Err(self.end(
+                Outcome::Held,
+                &format!(
+                    "{} runs a bump the updater before this one put live, and its PR #{n} is open; holding until it lands",
+                    cfg.host
+                ),
+            ));
+        }
         let tools = &cfg.tools;
         let log = cfg.state.join("logs/switch.log");
         let before = cfg.state.join("health-before");
@@ -38,9 +94,14 @@ impl Run<'_> {
         }
         let claude_before = self.claude_version();
         let (out, err) = to(&log, false)?;
-        let switched = Command::new(&tools.switch)
+        let mut switch_cmd = Command::new(&tools.switch);
+        switch_cmd
             .env("BURROW_CONFIRM_WITHIN", &cfg.within)
-            .args(["--toplevel", &self.new])
+            .args(["--toplevel", &self.new]);
+        if self.leaves_old_bump() {
+            switch_cmd.arg("--allow-downgrade");
+        }
+        let switched = switch_cmd
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
@@ -130,21 +191,6 @@ impl Run<'_> {
         // as ours.
         if self.claude_version() != claude_before && !self.claude_answers() {
             self.warn("warning: the new Claude Code didn't answer a one-line prompt");
-        }
-
-        // A fresh bump for its stuck PR goes up as that PR's head before
-        // it's confirmed: refused (a fix, a rerun or a resolve got there
-        // first), it goes straight back, so the box never stays on what
-        // nothing will land, and the next run rides or holds for that PR as
-        // usual.
-        if let (Some(t), Some((pr, _))) = (&cfg.train, &self.replacing) {
-            match train::replace(cfg, t, self.api, pr) {
-                Ok(url) => self.url = Some(url),
-                Err(why) => {
-                    self.back(&log);
-                    return Err(self.end(Outcome::Held, &format!("{why}; reverted")));
-                }
-            }
         }
 
         let (out, err) = to(&log, true)?;

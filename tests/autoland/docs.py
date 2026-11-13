@@ -14,6 +14,8 @@ its workflow has run through for the PR's base, CI is pending. Anything short
 of the docs lane runs the proofs as before."""
 
 import pathlib
+import itertools
+import re
 
 from harness import FORK, FORKS, JOBS, PR_DIFF, C, S, clean, fresh_pr_state, merged, run
 
@@ -22,9 +24,17 @@ PROVING = "a Claude job is running agents"
 F, G = FORK["v"], "e" * 40  # where the PR leaves main, and where it once did
 
 
+_check_ids = itertools.count(1)
+
+
 def check(name, conclusion="SUCCESS", status="COMPLETED", app="github-actions", suite="s1", workflow="flake",
           done="COMPLETED"):
-    return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
+    # Suites s1, s2, ... are successive runs, even when a scenario builds
+    # its rollup in reverse order. Within a suite check IDs grow too.
+    number = re.search(r"[0-9]+$", suite)
+    run_id = int(number[0]) if number else 100
+    return {"__typename": "CheckRun", "databaseId": run_id * 1000000 + next(_check_ids),
+            "name": name, "status": status, "conclusion": conclusion,
             "checkSuite": {"id": suite, "status": done, "app": {"slug": app},
                            "workflowRun": {"file": {"path": f".github/workflows/{workflow}.yml"},
                                            "workflow": {"id": workflow, "name": workflow}}}}

@@ -57,6 +57,12 @@ own, say), in seconds and without starting a Claude.
   `github.machinery` App. A job uses the in-job path below. Ask with a question a line:
   - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
   - `units`: failed units and jobs under way, the system's and the user's
+  - `crashes EXE [SINCE]`: the latest five core reports for an exact absolute
+    executable path (no globs), newest first, a day back by default. Reports
+    include the PID, signal, owning units/cgroup and logged backtrace. They
+    read the host's coredump journal without opening a core, and exclude the
+    captured environment, command line and process memory. The normal answer
+    scrubber and job response limit still apply.
   - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
     units on `probe.journal.units` (and `userUnits`) only. The system defaults
     include Renovate's full pass (`renovate.service`) and repository passes
@@ -94,7 +100,7 @@ own, say), in seconds and without starting a Claude.
   Reopen it to ask again. An issue whose body or title someone else changed
   (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
 - **What keeps it safe:** no shell, and nothing of the issue's text reaches a
-  command but a unit name or a time the grammar made; journals only of the
+  command but a unit name, exact executable path or time the grammar made; unit journals only of the
   units on the allowlist; no answer at all in a repo GitHub doesn't call
   private; and every answer through a secret scrubber first
   (`tests/probe.nix` plants a token to prove it). Anyone else's issue runs

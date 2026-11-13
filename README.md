@@ -508,7 +508,8 @@ Each has an entry below, and each can be imported on its own.
   requests section, [house/prs.md](house/prs.md), each between its markers in
   AGENTS.md) kept the same as burrow's, as one PR per repo when a block
   changes. Broken markers, and repos it couldn't get through, go to the owner
-  through `notify`. See [docs/house-style.md](docs/house-style.md).
+  through `notify`; a pass GitHub's rate limit holds off is booked again for
+  when it lifts, not a failure. See [docs/house-style.md](docs/house-style.md).
 - **`github`** (`burrow.github`): Tokens of GitHub Apps of yours, for what on
   the machine should act as an App rather than as your own gh login. Each
   App's socket (`/run/gh-token/NAME.sock`, its `users` only) is answered by

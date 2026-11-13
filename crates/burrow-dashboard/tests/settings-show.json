@@ -1,0 +1,1248 @@
+{
+  "document": {
+    "options": {
+      "autoland.baselinePerPass": {
+        "origin": "default",
+        "value": 2
+      },
+      "autoland.handoffAfterMinutes": {
+        "origin": "default",
+        "value": 10
+      },
+      "autoland.holdStallAfterMinutes": {
+        "origin": "default",
+        "value": 480
+      },
+      "autoland.jobIdleMinutes": {
+        "origin": "default",
+        "value": 20
+      },
+      "autoland.jobTimeoutMinutes": {
+        "origin": "default",
+        "value": 60
+      },
+      "autoland.proofTimeoutMinutes": {
+        "origin": "default",
+        "value": 180
+      },
+      "autoland.renovateMergeAfterMinutes": {
+        "origin": "default",
+        "value": 60
+      },
+      "autoland.repos": {
+        "origin": "flake",
+        "value": {
+          "Example/project": {
+            "rounds": 3
+          }
+        }
+      },
+      "autoland.reviewers.codex.effort": {
+        "origin": "default",
+        "value": "high"
+      },
+      "autoland.reviewers.codex.enable": {
+        "origin": "flake",
+        "value": true
+      },
+      "autoland.reviewers.codex.parallel": {
+        "origin": "default",
+        "value": 2
+      },
+      "autoland.reviewers.skipPaths": {
+        "origin": "default",
+        "value": [
+          "(^|/)secrets?/",
+          "(^|/)\\.env(\\..*)?$"
+        ]
+      },
+      "autoland.reviewers.timeoutMinutes": {
+        "origin": "default",
+        "value": 30
+      },
+      "autoland.rounds": {
+        "origin": "default",
+        "value": 5
+      },
+      "autoland.sessionHandoffAfterMinutes": {
+        "origin": "default",
+        "value": 30
+      },
+      "autoland.settleDelayMinutes": {
+        "origin": "default",
+        "value": 1
+      },
+      "autoland.stallAfterMinutes": {
+        "origin": "default",
+        "value": 120
+      },
+      "autoland.trainStallAfterMinutes": {
+        "origin": "default",
+        "value": 240
+      },
+      "proj.codex.slots": {
+        "origin": "default",
+        "value": 2
+      },
+      "proj.engineSetups": {
+        "origin": "default",
+        "value": {
+          "active": null,
+          "saved": {}
+        }
+      },
+      "proj.inbox.triage.atOnce": {
+        "origin": "default",
+        "value": 2
+      },
+      "proj.inbox.triage.drain": {
+        "origin": "default",
+        "value": null
+      },
+      "proj.inbox.triage.drainJobs": {
+        "origin": "default",
+        "value": 2
+      },
+      "proj.maxJobs": {
+        "origin": "flake",
+        "value": 6
+      },
+      "proj.maxJobsPerProject": {
+        "origin": "default",
+        "value": 4
+      },
+      "proj.models": {
+        "origin": "default",
+        "value": {}
+      },
+      "proj.pipelineSlots": {
+        "origin": "default",
+        "value": 1
+      },
+      "proj.roles": {
+        "file": "/config/proj/roles",
+        "origin": "live",
+        "value": {
+          "planner@Example/project": "codex",
+          "review": "codex"
+        }
+      },
+      "proj.usage.paid": {
+        "origin": "default",
+        "value": false
+      },
+      "proj.usageHold": {
+        "file": "/jobs/.usage.json",
+        "origin": "default",
+        "value": null
+      },
+      "proj.usageTrickle": {
+        "origin": "default",
+        "value": 2
+      },
+      "settings.allowed": {
+        "origin": "default",
+        "value": []
+      },
+      "settings.pipelineUntil": {
+        "origin": "default",
+        "value": null
+      },
+      "settings.repositoryOverrides": {
+        "origin": "default",
+        "value": {}
+      }
+    }
+  },
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Every pipeline option in effect on the machine, and where its value came from.",
+    "properties": {
+      "options": {
+        "additionalProperties": false,
+        "properties": {
+          "autoland.baselinePerPass": {
+            "additionalProperties": false,
+            "description": "The most baseline jobs one pass starts.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 2,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.handoffAfterMinutes": {
+            "additionalProperties": false,
+            "description": "How long findings or red CI sit untouched before a Claude job takes them.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 10,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.holdStallAfterMinutes": {
+            "additionalProperties": false,
+            "description": "The same for a PR on hold.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 480,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.jobIdleMinutes": {
+            "additionalProperties": false,
+            "description": "How long such a turn may say nothing before it's stuck and stopped.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 20,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.jobTimeoutMinutes": {
+            "additionalProperties": false,
+            "description": "How long each turn of a steward's Claude job may run.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 60,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.proofTimeoutMinutes": {
+            "additionalProperties": false,
+            "description": "How long a proof build or run the steward does itself may take.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 180,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.renovateMergeAfterMinutes": {
+            "additionalProperties": false,
+            "description": "How long a settled, green Renovate PR with automerge may sit before the watchdog takes it.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 60,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.repos": {
+            "additionalProperties": false,
+            "description": "Per-repo overrides (OWNER/NAME) of the steward's rounds, waits and checks.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "additionalProperties": {
+                  "type": "object"
+                },
+                "default": {},
+                "type": "object"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.reviewers.codex.effort": {
+            "additionalProperties": false,
+            "description": "How hard Codex thinks on a review.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": "high",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland-review"
+          },
+          "autoland.reviewers.codex.enable": {
+            "additionalProperties": false,
+            "description": "Whether Codex reviews every head.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland-review"
+          },
+          "autoland.reviewers.codex.parallel": {
+            "additionalProperties": false,
+            "description": "The most Codex reviews at once.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 2,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland-review"
+          },
+          "autoland.reviewers.skipPaths": {
+            "additionalProperties": false,
+            "description": "Path regexes left out of what the reviewers read.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": [
+                  "(^|/)secrets?/",
+                  "(^|/)\\.sops\\.yaml$",
+                  "\\.sops\\.(ya?ml|json|env)$",
+                  "(^|/)\\.env(\\..*)?$",
+                  "\\.(pem|key|p12|pfx)$"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland-review"
+          },
+          "autoland.reviewers.timeoutMinutes": {
+            "additionalProperties": false,
+            "description": "How long one review may run before it's a failed try.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 30,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland-review"
+          },
+          "autoland.rounds": {
+            "additionalProperties": false,
+            "description": "Review rounds with findings before the reviewers stop and a judge decides.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 5,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.sessionHandoffAfterMinutes": {
+            "additionalProperties": false,
+            "description": "The same wait for a PR whose own session is linked in its body.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 30,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.settleDelayMinutes": {
+            "additionalProperties": false,
+            "description": "How long a new head sits still before the reviewers are asked.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 1,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.stallAfterMinutes": {
+            "additionalProperties": false,
+            "description": "How long a PR may wait on one thing before the stall watchdog takes it.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 120,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "autoland.trainStallAfterMinutes": {
+            "additionalProperties": false,
+            "description": "The same for a PR in its repo's merge train.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 240,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "autoland"
+          },
+          "proj.codex.slots": {
+            "additionalProperties": false,
+            "description": "How many Codex turns run at once, in a pool of their own.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 2,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "proj.engineSetups": {
+            "additionalProperties": false,
+            "description": "Saved engine setups (proj engines save/use), each a whole roles file, and the one in force.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "live"
+                ]
+              },
+              "value": {
+                "additionalProperties": false,
+                "default": {
+                  "active": null,
+                  "saved": {}
+                },
+                "properties": {
+                  "active": {
+                    "anyOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "saved": {
+                    "additionalProperties": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "active",
+                  "saved"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "live",
+            "x-owner": "proj"
+          },
+          "proj.inbox.triage.atOnce": {
+            "additionalProperties": false,
+            "description": "Sorting jobs at once, across every repo.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 2,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj-inbox"
+          },
+          "proj.inbox.triage.drain": {
+            "additionalProperties": false,
+            "description": "The engine `ready` issues are handed to on its idle slots; null hands none on.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "claude",
+                      "codex"
+                    ]
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj-inbox"
+          },
+          "proj.inbox.triage.drainJobs": {
+            "additionalProperties": false,
+            "description": "Handed-on issues with a job at once, across every repo.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 2,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj-inbox"
+          },
+          "proj.maxJobs": {
+            "additionalProperties": false,
+            "description": "How many turns run Claude at once; the rest wait in line.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 4,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "proj.maxJobsPerProject": {
+            "additionalProperties": false,
+            "description": "The most slots one project's jobs hold at once. Default: max 1 (maxJobs - pipelineSlots - 1).",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "proj.models": {
+            "additionalProperties": false,
+            "description": "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE). A role with no line keeps the engine's own.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "live"
+                ]
+              },
+              "value": {
+                "additionalProperties": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "effort": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model",
+                    "effort"
+                  ],
+                  "type": "object"
+                },
+                "default": {},
+                "type": "object"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "live",
+            "x-owner": "proj"
+          },
+          "proj.pipelineSlots": {
+            "additionalProperties": false,
+            "description": "Of maxJobs, how many only the pipeline's own repos' jobs may take. Default: 1 when maxJobs is more than 1, else 0.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "proj.roles": {
+            "additionalProperties": false,
+            "description": "Which engine runs each role (ROLE or ROLE@OWNER/REPO): ENGINE [over PCT ENGINE]. A role with no line runs on Claude.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "live"
+                ]
+              },
+              "value": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {},
+                "type": "object"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "live",
+            "x-owner": "proj"
+          },
+          "proj.usage.paid": {
+            "additionalProperties": false,
+            "description": "Whether paid extra usage is on; otherwise a usage limit means waiting for its reset.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "proj.usageHold": {
+            "additionalProperties": false,
+            "description": "The usage hold in force: no Claude turn takes a slot until it ends. Null for none.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "live"
+                ]
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "owner": {
+                        "type": "boolean"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "since": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "until": {
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "until",
+                      "since",
+                      "owner",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "live",
+            "x-owner": "proj"
+          },
+          "proj.usageTrickle": {
+            "additionalProperties": false,
+            "description": "How many Claude turns run at once while the line from a usage hold drains after its reset.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": 2,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "settings.allowed": {
+            "additionalProperties": false,
+            "description": "Tracked repositories whose automated work may move; the live repository overlay overrides these defaults.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "flake"
+                ]
+              },
+              "value": {
+                "default": [],
+                "items": {
+                  "pattern": "^[^/\\s]+/[^/\\s]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "deploy",
+            "x-owner": "proj"
+          },
+          "settings.pipelineUntil": {
+            "additionalProperties": false,
+            "description": "Until this timestamp only pipeline repositories may move; null means no scoped hold.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "live"
+                ]
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "live",
+            "x-owner": "proj"
+          },
+          "settings.repositoryOverrides": {
+            "additionalProperties": false,
+            "description": "Runtime repository permissions overriding settings.allowed; false vacates every role immediately.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "default",
+                  "live"
+                ]
+              },
+              "value": {
+                "additionalProperties": {
+                  "type": "boolean"
+                },
+                "default": {},
+                "type": "object"
+              }
+            },
+            "required": [
+              "value",
+              "origin"
+            ],
+            "type": "object",
+            "x-change": "live",
+            "x-owner": "proj"
+          }
+        },
+        "required": [
+          "proj.maxJobs",
+          "proj.pipelineSlots",
+          "proj.maxJobsPerProject",
+          "proj.codex.slots",
+          "proj.usageTrickle",
+          "proj.usage.paid",
+          "settings.allowed",
+          "settings.repositoryOverrides",
+          "settings.pipelineUntil",
+          "proj.inbox.triage.drain",
+          "proj.inbox.triage.drainJobs",
+          "proj.inbox.triage.atOnce",
+          "autoland.rounds",
+          "autoland.handoffAfterMinutes",
+          "autoland.sessionHandoffAfterMinutes",
+          "autoland.settleDelayMinutes",
+          "autoland.stallAfterMinutes",
+          "autoland.trainStallAfterMinutes",
+          "autoland.holdStallAfterMinutes",
+          "autoland.renovateMergeAfterMinutes",
+          "autoland.jobTimeoutMinutes",
+          "autoland.jobIdleMinutes",
+          "autoland.proofTimeoutMinutes",
+          "autoland.baselinePerPass",
+          "autoland.repos",
+          "autoland.reviewers.codex.enable",
+          "autoland.reviewers.codex.effort",
+          "autoland.reviewers.codex.parallel",
+          "autoland.reviewers.timeoutMinutes",
+          "autoland.reviewers.skipPaths",
+          "proj.roles",
+          "proj.models",
+          "proj.engineSetups",
+          "proj.usageHold"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "options"
+    ],
+    "title": "burrow settings",
+    "type": "object"
+  }
+}

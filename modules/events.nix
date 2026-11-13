@@ -20,7 +20,7 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
   });
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-events;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
@@ -174,13 +174,26 @@ in
               still count.
             '';
           };
+          pullRequestActions = mkOption {
+            type = types.nullOr (types.listOf types.str);
+            default = null;
+            example = [ "closed" ];
+            description = ''
+              For `pull_request` events: only these actions count. A handler
+              that reads a PR only when it ends (a PR closing an issue)
+              takes `closed`; relabels and pushes then start nothing. null:
+              every action.
+            '';
+          };
           wake = mkOption {
             type = types.nullOr types.str;
             default = null;
             description = ''
               A JSON file, {"OWNER/REPO": epoch}, the handler's passes write:
-              when each repo next needs a pass. Read after each pass, and when
-              burrow-events starts.
+              when each repo next needs a pass. Every handler's file is read
+              after any handler's pass ends (including failures), and when
+              burrow-events starts. One handler can publish another's wakes
+              without an HTTP kick; their saved deadlines are preserved.
             '';
           };
           gap = mkOption {
@@ -222,7 +235,14 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [{
+  config = lib.mkMerge [
+  # A switch never restarts a handler's pass itself, whether or not the event
+  # daemon runs: the handlers' units are defined by their modules either way.
+  {
+    systemd.services = lib.listToAttrs (lib.concatMap (h: map (unit: lib.nameValuePair unit { restartIfChanged = false; })
+      ([ h.unit ] ++ lib.optional h.perRepo "${h.unit}@")) (lib.attrValues cfg.handlers));
+  }
+  (lib.mkIf cfg.enable (lib.mkMerge [{
     assertions = [{
       assertion = (cfg.host == null) == (cfg.secretFile == null);
       message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
@@ -273,6 +293,8 @@ in
     };
     systemd.services.burrow-events-secret = lib.mkIf hooked {
       description = "burrow-events: restart for a new webhook secret";
+      # It waits out the handlers' passes, so a switch leaves it be too.
+      restartIfChanged = false;
       after = map (u: "${u}.service") units;
       path = [ config.systemd.package ];
       script = "systemctl try-restart burrow-events.service";
@@ -328,7 +350,13 @@ in
     # active unit that changed, and each of these stays active, with a
     # handler's units in its triggers, so its start is the kick. Not at boot:
     # burrow-events' own start runs every full pass then.
-    systemd.services = lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
+    #
+    # So a switch never restarts a handler's pass itself: it leaves a running
+    # one be, and the kick runs the next, the new unit's. Restarting it would
+    # have the switch wait out a pass of minutes, or one ordered after another
+    # pass (renovate-sweep after renovate), past its deadline, and revert.
+    systemd.services = lib.mkMerge [
+      (lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
       description = "burrow-events: a full pass of ${name} when a switch changes it";
       wantedBy = [ "multi-user.target" ];
       after = [ "burrow-events.service" ];
@@ -343,6 +371,8 @@ in
         RemainAfterExit = true;
         User = "burrow-events";
       };
-    }) cfg.handlers;
-  }]);
+    }) cfg.handlers)
+    ];
+  }]))
+  ];
 }

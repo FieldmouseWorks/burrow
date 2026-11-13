@@ -16,7 +16,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -312,19 +312,59 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
     }
 }
 
-/// [`rewatch`] for every job it watches: the machine's usage changed
-/// ([`usage`]), which moves the deadline of every turn in line.
+/// [`rewatch`] for every job it watches, every one whose wait the policy
+/// keeps from it for now ([`HELD`]), and every one still live ([`live`]):
+/// the machine's usage changed ([`usage`]), which moves the deadline of every
+/// turn in line, or the policy did, which lets a held one back, or the
+/// watchdog was just enabled, and jobs already running never published to it.
+/// Never a settled job, whose wait ended weeks ago.
 pub fn rewatch_all(cfg: &Config) {
-    let mut ids: Vec<String> = fs::read_dir(cfg.jobs.join(".waits"))
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut ids: Vec<String> = [".waits", HELD]
+        .iter()
+        .flat_map(|d| fs::read_dir(cfg.jobs.join(d)).into_iter().flatten())
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
+        .collect();
+    // Every job there is, so each is told live from its own files and one
+    // look at the units that are up: a turn's facts ask systemd about it,
+    // which across thousands of settled jobs is minutes.
+    let up = crate::systemd::up(cfg, "proj-*.service");
+    ids.extend(
+        fs::read_dir(&cfg.jobs)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.') && live(cfg, n, up.as_ref())),
+    );
     ids.sort();
+    ids.dedup();
     rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A job with a turn queued or running, or outstanding awaits: work the
+/// watchdog must see whether or not it ever heard of the job. Only a job
+/// whose unit is up (`up`, the units that are; asked of systemd itself when
+/// that couldn't be told), whose turn waits on a retry or which awaits
+/// something, including a reset whose await publication was interrupted,
+/// has its facts looked at. The existing watchdog contract decides which
+/// of those facts describe watchable work, including owned active turns.
+fn live(cfg: &Config, id: &str, up: Option<&std::collections::HashSet<String>>) -> bool {
+    let job = Job::new(cfg, id);
+    let unit = job.unit();
+    let maybe = up.map_or_else(
+        || crate::systemd::active(cfg, &unit),
+        |up| up.contains(&unit),
+    ) || crate::filled(&job.path("await"))
+        || job.turns().is_some_and(|n| {
+            job.retry_pending(&n) || crate::github_quota::reset(&job, &n).is_some()
+        });
+    maybe
+        && job
+            .facts()
+            .is_some_and(|f| !f.stopped && job_wait(cfg, &f).is_some())
 }
 
 /// [`rewatch`] in the background, never waited for: the watchdog's lock, or
@@ -334,12 +374,21 @@ pub fn rewatch_later(cfg: &Config, id: &str) {
     std::thread::spawn(move || rewatch(&cfg, &[&id]));
 }
 
+/// The jobs (an empty file each) with a wait the policy keeps from the
+/// watchdog while it denies or parks them: a pause, a scope that leaves
+/// their repo out, an admission it can't read. They're watched again once
+/// it lets them be ([`rewatch_all`]), however their turn ended; a job that
+/// has no wait to keep (settled, stopped, done) has none here.
+const HELD: &str = ".waits-held";
+
 fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     let Some(file) = &cfg.waits else {
         return Ok(());
     };
     let dir = cfg.jobs.join(".waits");
     fs::create_dir_all(&dir)?;
+    let held = cfg.jobs.join(HELD);
+    fs::create_dir_all(&held)?;
     let lock = OpenOptions::new()
         .append(true)
         .create(true)
@@ -348,8 +397,8 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     for id in ids {
         let f = dir.join(id);
         let job = Job::new(cfg, id);
-        let wait = (!crate::policy::parked(&job) && !crate::policy::denied(&job))
-            .then_some(&job)
+        let kept = crate::policy::parked(&job) || crate::policy::denied(&job);
+        let wait = Some(&job)
             .filter(|job| job.dir.is_dir())
             .and_then(|job| job.facts())
             .and_then(|mut facts| {
@@ -364,16 +413,26 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
                 })
             });
 
-        match wait {
-            Some(item) => swap(&f, &format!("{}\n", json!(item)))?,
-            None => {
-                for gone in [f.clone(), f.with_file_name(format!("{id}.new"))] {
-                    match fs::remove_file(gone) {
-                        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                        _ => (),
-                    }
-                }
-            }
+        // Held while the policy keeps it, watched once it doesn't. A parked
+        // job's own facts say nothing ([`job_wait`]), so its park record
+        // keeps it held too. The replacement is committed before the hold
+        // is dropped, so a failed write leaves the job discoverable.
+        let mark = held.join(id);
+        let drop_file = |p: PathBuf| match fs::remove_file(p) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        if kept && (wait.is_some() || crate::policy::parked(&job)) {
+            fs::write(&mark, "")?;
+            drop_file(f.clone())?;
+            drop_file(f.with_file_name(format!("{id}.new")))?;
+        } else if let Some(item) = wait {
+            swap(&f, &format!("{}\n", json!(item)))?;
+            drop_file(mark)?;
+        } else {
+            drop_file(f.clone())?;
+            drop_file(f.with_file_name(format!("{id}.new")))?;
+            drop_file(mark)?;
         }
     }
     let mut names: Vec<String> = fs::read_dir(&dir)?

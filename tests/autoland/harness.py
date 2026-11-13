@@ -395,6 +395,7 @@ FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless set, or what GitHub raises
+ATTEMPTS = {}  # a run's run_attempt, by its id: 1 unless set
 
 
 def gh_stub(*a, **k):
@@ -421,6 +422,8 @@ def gh_stub(*a, **k):
             raise got
         msgs = [{"message": m} for m in got]
         return [msgs[i:i + 100] for i in range(0, len(msgs), 100)] or [[]]  # --slurp: the pages
+    if a[:1] == ("api",) and "/actions/runs/" in a[1] and "--jq" in a:
+        return ATTEMPTS.get(int(a[1].split("/")[-1]), 1)
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
@@ -476,6 +479,7 @@ def compare_calls():
     return open(COMPARE_CALLED).read().splitlines()
 
 
+SILENT = []  # writes GitHub doesn't answer, by a piece of their arguments
 FAIL = []  # writes that fail, by a piece of their arguments: gh's None, or with check what gh() raises
 # What GitHub says to each, as gh prints it: two lines, as it can be.
 REFUSAL = "Repository rule violations found\nMerge method squash is not allowed for this base branch (HTTP 405)"
@@ -484,6 +488,8 @@ REFUSAL = "Repository rule violations found\nMerge method squash is not allowed 
 def write(*a, **k):
     acting()
     WROTE.append(" ".join(a))
+    if any(f in " ".join(a) for f in SILENT):
+        raise C.Unavailable("gh api: HTTP 502")
     if not any(f in " ".join(a) for f in FAIL):
         return {}
     if k.get("check", True):

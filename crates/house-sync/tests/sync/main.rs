@@ -4,6 +4,7 @@
 //! own, house/.
 
 mod github;
+mod limited;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -115,6 +116,7 @@ struct Setup<'a> {
     owners: &'a [&'a str],
     dry_run: bool,
     lock: PathBuf,
+    wake: PathBuf,
     fails: bool,
 }
 
@@ -125,6 +127,8 @@ fn setup() -> Setup<'static> {
         owners: &["Sam"],
         dry_run: false,
         lock: std::env::temp_dir().join(format!("house-sync-test-{}.lock", std::process::id())),
+        wake: std::env::temp_dir()
+            .join(format!("house-sync-test-{}-wake.json", std::process::id())),
         fails: false,
     }
 }
@@ -141,6 +145,7 @@ fn config(s: &Setup) -> Config {
             .map(|e| Exclude::parse(e).unwrap())
             .collect(),
         notify: "/nonexistent/notify".into(),
+        wake: s.wake.clone(),
         dry_run: s.dry_run,
     }
 }
