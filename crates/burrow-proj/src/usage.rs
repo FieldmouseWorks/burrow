@@ -46,8 +46,9 @@ const OWNER: &str = ".usage-owner-";
 const ADMISSION_REF: &str = ".usage-release-";
 /// A login hold's record, apart from [`FILE`]: an earlier proj never reads
 /// it, so a rollback leaves the machine with no login hold, as before it
-/// existed, and none of its writes or releases reaches one. At most one of
-/// the two records is kept: each new refusal replaces the other's.
+/// existed, and none of its writes or releases reaches one. Each change
+/// keeps one of the two records and removes the other; both are read as
+/// one ([`records`]).
 const LOGIN_FILE: &str = ".usage-login.json";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
@@ -96,6 +97,11 @@ pub struct Spent {
     /// [`LOGIN_FILE`], so which record it is says it.
     #[serde(skip)]
     pub login: bool,
+    /// In a login record only: the usage record's text when it was
+    /// written, so a usage record written since is told apart from one a
+    /// crash left behind ([`records`]). None in every record read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<String>,
 }
 
 impl Spent {
@@ -262,67 +268,6 @@ pub fn kept(cfg: &Config) -> Option<Spent> {
     read(cfg).ok().flatten()
 }
 
-/// Its record, None when there's none, or why it couldn't be read: the
-/// usage record, or the login's ([`LOGIN_FILE`]), the later refusal's if a
-/// crash between replacing one and removing the other left both.
-fn read(cfg: &Config) -> Result<Option<Spent>, String> {
-    let usage = read_file(cfg, FILE)?;
-    let login = read_file(cfg, LOGIN_FILE)?;
-    Ok(match (usage, login) {
-        (Some(u), Some(l)) => Some(if l.at > u.at { l } else { u }),
-        (u, l) => u.or(l),
-    })
-}
-
-fn read_file(cfg: &Config, name: &str) -> Result<Option<Spent>, String> {
-    let path = cfg.jobs.join(name);
-    match fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str::<Spent>(&text)
-            .map(|mut s| {
-                if s.back.is_some()
-                    && let Some((cutoff, job)) = s
-                        .job
-                        .strip_prefix(ADMISSION_REF)
-                        .and_then(|reference| reference.split_once('-'))
-                    && let Ok(cutoff) = cutoff.parse::<i64>()
-                {
-                    s.admission = Some(cutoff);
-                    s.job = job.to_owned();
-                }
-                s.login = name == LOGIN_FILE;
-                if let Some(back) = s.back
-                    && s.admission.is_none()
-                {
-                    // An old writer supplies only a whole-second release.
-                    // Its filesystem timestamp may be coarser than new queue
-                    // timestamps. Include the whole release second so none of
-                    // its same-second waiters can bypass the cap.
-                    s.admission = Some(((back + 1) * 1_000_000_000).min(s.until * 1_000_000_000));
-                }
-                // Legacy writers preserve the metadata reference in job. Their
-                // last-refusal update distinguishes a real refusal at/after the
-                // deadline from the compatibility fence (deadline minus one).
-                if let Some(mut owner) = owner_metadata(cfg, &s.job)? {
-                    if s.refused() >= owner.until {
-                        s.said = EARLIER.into();
-                    } else {
-                        owner.owner = true;
-                        owner.told = s.told;
-                        owner.back = s.back;
-                        owner.admission = s.admission;
-                        return Ok(owner);
-                    }
-                }
-                s.said = crate::engine::claude::normalize_refusal(&s.said);
-                Ok(s)
-            })
-            .map_err(|e| format!("proj: {}: {e}", path.display()))?
-            .map(Some),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("proj: {}: {e}", path.display())),
-    }
-}
-
 /// When a hold last ended ([`RELEASED`]), 0 if none has; or why it
 /// couldn't be read, when it's there.
 fn released(cfg: &Config) -> Result<i64, String> {
@@ -471,41 +416,6 @@ fn owner_generation(cfg: &Config, s: &Spent) -> Result<Spent, String> {
     Ok(generation)
 }
 
-/// The record written whole (a temp file renamed over it), or why not.
-fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
-    let mut mirror = if s.owner && s.back.is_none() {
-        owner_generation(cfg, s)?
-    } else {
-        s.clone()
-    };
-    if s.owner {
-        mirror.last = Some(s.until - 1);
-    }
-    if let Some(cutoff) = s.admission {
-        mirror.job = format!("{ADMISSION_REF}{cutoff}-{}", mirror.job);
-    }
-    let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
-    let (name, other) = if s.login {
-        (LOGIN_FILE, FILE)
-    } else {
-        (FILE, LOGIN_FILE)
-    };
-    swap(&cfg.jobs.join(name), &format!("{text}\n")).map_err(|e| format!("proj: {name}: {e}"))?;
-    // The other cause's record is replaced: written first, so a crash
-    // between leaves both, and the later refusal wins ([`read`]).
-    match fs::remove_file(cfg.jobs.join(other)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("proj: {other}: {e}")),
-        _ => Ok(()),
-    }
-}
-
-/// The record gone, whichever kind it is.
-fn forget(cfg: &Config) {
-    for name in [FILE, LOGIN_FILE] {
-        let _ = fs::remove_file(cfg.jobs.join(name));
-    }
-}
-
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
 /// `until`, or UNSAID on when that's unsaid or past. The owner is told when
 /// it wasn't out already, or its reset had passed (a run refused again then
@@ -585,6 +495,7 @@ pub fn hold(cfg: &Config, until: i64, reason: &str) -> Result<(), String> {
         told: at,
         last: Some(at),
         login: false,
+        over: None,
     };
     keep(cfg, &spent)?;
     tell(cfg, &["open", NOTICE, &title(&spent), &body(cfg, &spent)]);
@@ -646,6 +557,7 @@ fn put(
             // as that: a delayed refusal never moves the watermark back.
             last: Some(prior.map_or(last, |p| p.max(last))),
             login,
+            over: None,
         },
     };
     let open = if spent.login {
@@ -959,8 +871,10 @@ pub fn adopt(cfg: &Config) -> Result<(), String> {
 
 mod login;
 mod notice;
+mod records;
 use notice::{CLOSED, body, closed, pending, tell, title};
 pub use notice::{hold_line, line, policy, when};
+use records::{forget, keep, read};
 
 #[cfg(test)]
 pub(crate) mod tests;

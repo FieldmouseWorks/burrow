@@ -160,6 +160,7 @@ fn a_login_hold_is_invisible_to_the_previous_binary() {
         told: t + 1,
         last: Some(t + 1),
         login: false,
+        over: None,
     };
     fs::write(cfg.jobs.join(FILE), serde_json::to_string(&old).unwrap()).unwrap();
     let s = kept(&cfg).unwrap();
