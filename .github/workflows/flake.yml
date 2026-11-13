@@ -63,10 +63,14 @@ jobs:
       # that's safe).
       keep-builds: true
       # The docs lane, for a PR that changes only these: nothing burrow
-      # builds or tests reads them. docs/, house/ and templates/ aren't on
-      # it: the steward's config carries them (modules/autoland.nix,
-      # baselineDocs), so every machine's build reads them.
+      # builds or tests reads them but the guidance check, which reads
+      # every Markdown file and holds AGENTS.md's house blocks to house/
+      # (crates/burrow-guidance), so the lane builds it. docs/, house/ and
+      # templates/ aren't on it: the steward's config carries them
+      # (modules/autoland.nix, baselineDocs), so every machine's build
+      # reads them.
       docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-checks: guidance
   # GitHub expression equality ignores case; git branch names do not.
   # Route using the event's exact refs, without checking out PR code.
   train-route:
@@ -108,4 +112,5 @@ jobs:
       legs: 4
       keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
+      docs-checks: guidance
       pr-gate: false

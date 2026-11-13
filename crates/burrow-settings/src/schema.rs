@@ -52,15 +52,17 @@ pub enum Change {
     /// It's set in the machine's flake: a change is a PR to it and a deploy.
     Deploy,
     /// It's kept in a file on the machine, and its readers read it again at
-    /// their next decision: a change takes effect then, no deploy.
-    Live,
+    /// their next decision: a change takes effect then, no deploy. `file`
+    /// says which, as the guidance would name it: the reference is the one
+    /// place that does (burrow-guidance holds the rest to that).
+    Live { file: &'static str },
 }
 
 impl Change {
     pub fn name(self) -> &'static str {
         match self {
             Change::Deploy => "deploy",
-            Change::Live => "live",
+            Change::Live { .. } => "live",
         }
     }
 }
@@ -115,7 +117,7 @@ impl Setting {
         use crate::show::Origin;
         match self.change {
             Change::Deploy => &[Origin::Default, Origin::Flake],
-            Change::Live => &[Origin::Default, Origin::Live],
+            Change::Live { .. } => &[Origin::Default, Origin::Live],
         }
     }
 }
@@ -125,6 +127,10 @@ pub fn find(name: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.name == name)
 }
 
+/// The one runtime settings overlay, under `burrow.stateDir`.
+const OVERLAY: &str = "settings/overlay.json";
+/// Role routing and tuning, beside it under the same lock (roles::store).
+const ROLES_OVERLAY: &str = "settings/overlay.roles.json";
 const REPOS: Kind = Kind::List(&Kind::Repo);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
@@ -238,6 +244,7 @@ const fn live(
     name: &'static str,
     kind: &'static Kind,
     default: &'static str,
+    file: &'static str,
     help: &'static str,
 ) -> Setting {
     Setting {
@@ -246,7 +253,7 @@ const fn live(
         default: Fallback::Value(default),
         help,
         owner: "proj",
-        change: Change::Live,
+        change: Change::Live { file },
     }
 }
 
@@ -329,12 +336,14 @@ pub static SETTINGS: &[Setting] = &[
         "settings.repositoryOverrides",
         &Kind::Map(&Kind::Bool),
         "{}",
+        OVERLAY,
         "Runtime repository permissions overriding settings.allowed; false vacates every role immediately.",
     ),
     live(
         "settings.pipelineUntil",
         &Kind::Maybe(&Kind::Count { min: 0 }),
         "null",
+        OVERLAY,
         "Until this timestamp only pipeline repositories may move; null means no scoped hold.",
     ),
     // proj-inbox: sorting issues and handing ready ones on.
@@ -494,30 +503,35 @@ pub static SETTINGS: &[Setting] = &[
         "proj.roles",
         &ROLES,
         r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}}"#,
+        ROLES_OVERLAY,
         "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one.",
     ),
     live(
         "proj.models",
         &MODELS,
         r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#,
+        ROLES_OVERLAY,
         "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
     ),
     live(
         "proj.engineOffers",
         &OFFERS,
         r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "codex": {"models": [], "efforts": ["minimal", "low", "medium", "high", "xhigh"]}}"#,
+        ROLES_OVERLAY,
         "The models and efforts each engine offers on the machine: the only ones proj.models may name. Model ids live here, never in a tracked file.",
     ),
     live(
         "proj.engineSetups",
         &SETUPS,
         r#"{"active": null, "saved": {}}"#,
+        ROLES_OVERLAY,
         "Saved engine setups (proj engines save/use), each a named set of proj.roles and proj.models values, and the one in force.",
     ),
     live(
         "proj.usageHold",
         &HOLD,
         "null",
+        ".usage.json",
         "The usage hold in force: no Claude turn takes a slot until it ends. Null for none.",
     ),
 ];

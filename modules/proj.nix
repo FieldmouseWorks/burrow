@@ -161,6 +161,8 @@ let
   policyService = {
     Type = "exec";
     ExecStart = "${proj}/bin/proj _policy";
+    Restart = "on-failure";
+    RestartSec = "2s";
   };
 
   # proj-inbox, with the same config, whose inbox part is its own. The turns
@@ -600,8 +602,6 @@ in
         restartIfChanged = false;
         serviceConfig = policyService // {
           User = user;
-          Restart = "on-failure";
-          RestartSec = "2s";
         };
       };
     } // lib.genAttrs [ "proj-watch" "proj-watch@" ] (name: {

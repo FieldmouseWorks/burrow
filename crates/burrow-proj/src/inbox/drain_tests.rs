@@ -215,6 +215,16 @@ fn the_drain_comes_back() {
 
     // Handed on, its job not started yet: at its limit (one here), the pass
     // books another for when the mark is let go.
+    on_github(
+        &b,
+        &found(
+            "sam/game",
+            4,
+            "sam",
+            &["ready", "codex"],
+            "2026-10-01T00:00:00Z",
+        ),
+    );
     let mut p = b.pass();
     p.drain().unwrap();
     assert!(!p.wake.is_empty());
@@ -338,14 +348,16 @@ fn a_stalled_hand_on_holds_its_place() {
     let log = b.log()[before..].to_owned();
     assert!(!log.contains("labels[]=codex"), "{log}");
     assert!(state.join("sam_game-4/drained").exists());
-    // The label's off: its old mark is let go, and the oldest ready one
-    // (itself again, as nothing else holds it) handed on afresh.
+    // Removing the last engine label parks #4 and releases its reservation.
+    // The next ready issue can start, while #4 stays excluded.
     on_github(&b, &four);
     let before = b.log().len();
     b.pass().drain().unwrap();
     let log = b.log()[before..].to_owned();
-    assert!(log.contains("issues/4/labels -f labels[]=codex"), "{log}");
-    let mark = state.join("sam_game-4/drained");
+    assert!(!log.contains("issues/4/labels -f labels[]=codex"), "{log}");
+    assert!(log.contains("issues/5/labels -f labels[]=codex"), "{log}");
+    assert!(!state.join("sam_game-4/drained").exists());
+    let mark = state.join("sam_game-5/drained");
     let made = crate::mtime(&mark).unwrap();
     assert!(crate::now() - made < 60, "a fresh mark: {log}");
 }
@@ -608,6 +620,10 @@ fn a_blocked_role_does_not_block_another_engine_or_bypass_the_drain_limit() {
         state.join(super::WAITING).exists(),
         "the blocked engine still needs a wake-up"
     );
+    // The successful enrollment is now visible on the live issue snapshot.
+    let mut enrolled = newer.clone();
+    enrolled["labels"] = json!([{"name":"ready"},{"name":"codex"}]);
+    on_github(&b, &enrolled);
     drop(held);
     b.pass().drain().unwrap();
     assert!(

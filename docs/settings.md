@@ -5,7 +5,9 @@ Every pipeline option is declared once, in burrow-settings' schema
 its name, type, allowed values, default, help, the part of the pipeline that
 reads it (`owner`), and how a change takes effect (`deploy`: it's set in the
 machine's flake; `live`: it's kept in a file its readers read again at their
-next decision). This is the first slice of
+next decision). The [settings reference](settings-reference.md) lists them
+all, generated from the schema: each option's type, allowed values, default,
+owner, and where its value is kept. This is the first slice of
 [#655](https://github.com/FieldmouseWorks/burrow/issues/655): the read side.
 Repository admission and each role's engine, model and effort have moved to the write door and runtime overlay described below. Other options remain in their existing homes.
 
@@ -19,18 +21,7 @@ proj settings schema         the schema as JSON Schema (draft 2020-12)
 
 Each value says where it came from: `default` (nothing sets it: the schema's
 default), `flake` (the machine's flake sets it) or `live` (a file on the
-machine, named beside it). What it covers today:
-
-| Options | Where they live now |
-|---|---|
-| `proj.maxJobs`, `pipelineSlots`, `maxJobsPerProject`, `codex.slots`, `usageTrickle`, `usage.paid` | `burrow.proj` in the flake |
-| `proj.inbox.triage.drain`, `drainJobs`, `atOnce` | `burrow.proj.inbox.triage` in the flake |
-| `autoland.rounds`, its waits and limits, `repos` (per-repo overrides) | `burrow.autoland` in the flake |
-| `autoland.reviewers.*` | `burrow.autoland.reviewers` in the flake |
-| `settings.allowed` | `burrow.settings` in the flake |
-| `settings.repositoryOverrides`, `settings.pipelineUntil` | the one runtime settings overlay |
-| `proj.roles`, `proj.models`, `proj.engineOffers`, `proj.engineSetups` | the one runtime settings overlay ([below](#engines-models-and-efforts-per-role)) |
-| `proj.usageHold` | proj's usage record, `.usage.json` in its jobs dir |
+machine, named beside it).
 
 The JSON Schema marks each option with `x-owner` and `x-change`, gives each
 value's type and default, and requires every option once and no other: a
@@ -49,9 +40,9 @@ dashboard can be built from it alone.
   declare, a declared option nothing read, a value of the wrong kind, a value
   from where its option can't come, or a module's default that isn't the
   schema's, each fails it, naming the option. That last holds whether or not
-  the flake overrides the option, and a derived default (`pipelineSlots`,
-  `maxJobsPerProject`) is worked out from the machine's own values by the
-  schema's formula.
+  the flake overrides the option, and a derived one (the reference says
+  which) is worked out from the machine's own values by the schema's
+  formula.
 - The live values are read as proj's turns read them, so an overlay a turn
   would refuse fails the show too.
 - `checks/settings.nix` runs it on a fixture machine with values from its
@@ -71,7 +62,7 @@ gated at the reader, so a stopped publisher cannot turn a pause into repair
 work or an owner escalation.
 
 The reusable `burrow-settings` crate reads that starting policy and one
-runtime overlay (`settings/overlay.json` under `burrow.stateDir`). Every
+runtime overlay under `burrow.stateDir` (the reference names its file). Every
 admission reloads it; malformed or unreadable settings stop admission.
 The host's `settings` command and `proj settings` share the write door:
 

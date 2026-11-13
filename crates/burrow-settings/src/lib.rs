@@ -334,6 +334,7 @@ mod tests {
     }
 }
 
+pub mod reference;
 pub mod schema;
 pub mod show;
 

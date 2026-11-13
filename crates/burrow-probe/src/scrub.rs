@@ -114,15 +114,32 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
         .collect()
 });
 
+/// How many of [`RULES`]' first entries are the private-key ones.
+const KEY_RULES: usize = 2;
+
 /// `text` with every secret it can tell for one replaced.
 pub fn scrub(text: &str) -> Scrubbed {
+    Scrubbed(apply(&RULES, text))
+}
+
+/// `text` with only its private keys taken out, each block whole: what a
+/// request goes through before its lines are read as questions. A key is
+/// the one secret only its block's other lines identify, so this has to
+/// see them all at once; the other rules would rewrite a valid question
+/// (a commit hash after `token`, a unit named `secret:x`), so they're left
+/// to what gets posted. Not a [`Scrubbed`]: nothing posts it as it is.
+pub fn redact_keys(text: &str) -> String {
+    apply(&RULES[..KEY_RULES], text)
+}
+
+fn apply(rules: &[(Regex, String)], text: &str) -> String {
     let mut out = text.to_string();
-    for (find, with) in RULES.iter() {
+    for (find, with) in rules {
         if find.is_match(&out) {
             out = find.replace_all(&out, with.as_str()).into_owned();
         }
     }
-    Scrubbed(out)
+    out
 }
 
 static KEY_BEGIN: LazyLock<Regex> = LazyLock::new(|| {
