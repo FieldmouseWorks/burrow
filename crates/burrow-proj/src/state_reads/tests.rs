@@ -364,7 +364,9 @@ fn host_writes_into_job_directories_go_through_the_confined_writer() {
             for (at, _) in flat.match_indices("let") {
                 let rest = &flat[at + 3..];
                 let rest = rest.strip_prefix("mut").unwrap_or(rest);
-                let Some((name, value)) = rest.split_once('=') else { continue };
+                let Some((name, value)) = rest.split_once('=') else {
+                    continue;
+                };
                 if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
                     continue;
                 }
@@ -388,9 +390,8 @@ fn host_writes_into_job_directories_go_through_the_confined_writer() {
                     let call = &args[..args.len().min(80)];
                     let host = is_host_record(call);
                     let aliased = aliases.iter().any(|a| {
-                        args.strip_prefix(a.as_str()).is_some_and(|r| {
-                            r.starts_with([',', ')', '.'])
-                        })
+                        args.strip_prefix(a.as_str())
+                            .is_some_and(|r| r.starts_with([',', ')', '.']))
                     });
                     let into_job = is_job_dir_path(args) || aliased;
                     if into_job && !host {
