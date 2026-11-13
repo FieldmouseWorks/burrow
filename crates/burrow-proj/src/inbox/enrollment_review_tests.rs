@@ -14,6 +14,234 @@ fn listed(n: u64, labels: &[&str]) -> Value {
 }
 
 #[test]
+fn stale_lists_cannot_restore_parking_recorded_by_resume_admission() {
+    for resume in ["wake", "deadline", "policy"] {
+        for labels in [vec!["claude", "later"], vec![]] {
+            let b = fixture();
+            let snapshot = listed(7, &["claude"]);
+            let old = Job::new(&b.cfg, "j1");
+            on_github(&b, &listed(7, &labels));
+            match resume {
+                "wake" => {
+                    on_github(&b, &listed(8, &["claude"]));
+                    crate::watch::look(&b.cfg, "sam/box").unwrap();
+                }
+                "deadline" => {
+                    let q = ask::Question {
+                        recommendation: ask::Recommendation {
+                            default: "continue".into(),
+                            one_way: false,
+                        },
+                        due: crate::now() - 1,
+                    };
+                    fs::write(ask::host_path(&old, "question"), json!(q).to_string()).unwrap();
+                    let _held = old.lock().unwrap();
+                    assert!(ask::expire(&b.cfg, &old).is_err());
+                }
+                _ => {
+                    crate::policy::mark(&old, "queued", false).unwrap();
+                    crate::policy::reconcile(&b.cfg).unwrap();
+                }
+            }
+            let inbox = b.cfg.inbox.as_ref().unwrap();
+            let exclusion = inbox.state.join(".parked/sam_box/7");
+            assert!(old.turn("1", "stopped").exists());
+            assert!(exclusion.exists());
+            let mut pass = b.pass();
+            pass.new_issues("sam/box", std::slice::from_ref(&snapshot))
+                .unwrap();
+            assert!(!b.path("launched").exists(), "{resume}: {labels:?}");
+            assert!(exclusion.exists());
+            // An unreadable restoration must also retain the exclusion and retry.
+            fs::write(b.path("repos_sam_box_issues_7"), "{}").unwrap();
+            pass.new_issues("sam/box", std::slice::from_ref(&snapshot))
+                .unwrap();
+            assert!(exclusion.exists());
+            assert!(!b.path("launched").exists());
+            assert!(pass.wake.contains_key("sam/box"));
+            on_github(&b, &listed(7, &["ready", "codex"]));
+            fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();
+            pass.new_issues("sam/box", std::slice::from_ref(&snapshot))
+                .unwrap();
+            assert!(exclusion.exists());
+            assert!(!b.path("launched").exists());
+            fs::remove_file(b.path("fail")).unwrap();
+            pass.new_issues("sam/box", std::slice::from_ref(&snapshot))
+                .unwrap();
+            let record = inbox.state.join("sam_box-7/job");
+            let fresh = read(&record).unwrap();
+            assert_ne!(fresh, "j1");
+            assert!(!exclusion.exists());
+            pass.new_issues("sam/box", &[snapshot]).unwrap();
+            assert_eq!(read(&record).as_deref(), Some(fresh.as_str()));
+            assert_eq!(old.turns().as_deref(), Some("1"));
+        }
+    }
+}
+
+#[test]
+fn initial_admission_checks_live_enrollment_before_starting_a_worker() {
+    for labels in [
+        json!([{"name":"claude"},{"name":"later"}]),
+        json!([]),
+        Value::Null,
+    ] {
+        let b = fixture();
+        let snapshot = listed(9, &["claude"]);
+        let mut current = snapshot.clone();
+        current["labels"] = labels;
+        on_github(&b, &current);
+        let mut pass = b.pass();
+        pass.new_issues("sam/box", &[snapshot]).unwrap();
+        assert!(!b.path("launched").exists());
+        assert!(
+            !b.cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join("sam_box-9/job")
+                .exists()
+        );
+        assert!(pass.wake.contains_key("sam/box"));
+    }
+}
+
+#[test]
+fn parking_cannot_be_overwritten_by_an_admission_label_read_already_in_flight() {
+    use std::{io::Read, sync::mpsc, thread, time::Duration};
+    for labels in [vec!["claude", "later"], vec![]] {
+        let b = fixture();
+        let snapshot = listed(7, &["claude"]);
+        on_github(&b, &snapshot);
+        fs::rename(&b.cfg.tools.gh, b.path("original-gh")).unwrap();
+        for name in ["captured", "release"] {
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                b.path(name),
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            )
+            .unwrap();
+        }
+        // Hold a successful enrollment response in flight while a wake tries
+        // to record a newer park. These barriers control the request ordering.
+        burrow_test::executable(
+            &b.cfg.tools.gh,
+            format!(
+                r#"#!/bin/sh
+if [ "$4 $5" = 'GET repos/sam/box/issues/7' ] && mkdir '{root}/first-read' 2>/dev/null; then
+  printf 'HTTP/2.0 200 OK\n\n'
+  cat '{root}/repos_sam_box_issues_7'
+  echo captured >'{root}/captured'
+  read -r release <'{root}/release'
+else
+  exec '{root}/original-gh' "$@"
+fi
+"#,
+                root = b.path("").display()
+            ),
+        );
+        thread::scope(|scope| {
+            let start = scope.spawn(|| b.pass().start("sam/box", &snapshot, &[]));
+            let mut captured = String::new();
+            fs::File::open(b.path("captured"))
+                .unwrap()
+                .read_to_string(&mut captured)
+                .unwrap();
+            on_github(&b, &listed(7, &labels));
+            let (sent, received) = mpsc::channel();
+            let (trying, attempted) = mpsc::channel();
+            let cfg = &b.cfg;
+            let park = scope.spawn(move || {
+                let job = Job::new(cfg, "j1");
+                let _held = job.lock().unwrap();
+                trying.send(()).unwrap();
+                let refused = crate::turn::start(cfg, "j1", "await changed", false).is_err();
+                sent.send(refused).unwrap();
+            });
+            attempted.recv().unwrap();
+            let premature = received.recv_timeout(Duration::from_millis(100));
+            // Always release the subprocess before asserting, even on failure.
+            fs::write(b.path("release"), "continue\n").unwrap();
+            start.join().unwrap().unwrap();
+            park.join().unwrap();
+            assert!(premature.is_err(), "parking raced the admission label read");
+            assert!(received.recv().unwrap());
+        });
+        assert!(
+            b.cfg
+                .inbox
+                .as_ref()
+                .unwrap()
+                .state
+                .join(".parked/sam_box/7")
+                .exists()
+        );
+        assert!(Job::new(&b.cfg, "j1").turn("1", "stopped").exists());
+    }
+}
+
+#[test]
+fn missing_session_replacement_rechecks_enrollment_after_retiring_the_old_worker() {
+    for labels in [
+        json!([{"name":"claude"},{"name":"later"}]),
+        json!([]),
+        Value::Null,
+    ] {
+        let b = fixture();
+        let old = Job::new(&b.cfg, "j1");
+        fs::remove_file(old.path("session")).unwrap();
+        fs::write(
+            b.path("comments"),
+            json!([[{
+                "id":42,"user":burrow_github::fake::actor("sam"),
+                "body":"continue","created_at":"2020-01-01T00:00:00Z"
+            }]])
+            .to_string(),
+        )
+        .unwrap();
+        let snapshot = listed(7, &["claude"]);
+        on_github(&b, &snapshot);
+        let mut current = snapshot.clone();
+        current["labels"] = labels.clone();
+        fs::write(b.path("parked-issue"), current.to_string()).unwrap();
+        // Parking arrives after the final REST snapshot, as the old worker
+        // is stopped for replacement. The cached task must not admit a turn.
+        burrow_test::executable(
+            &b.cfg.tools.systemctl,
+            format!(
+                r#"#!/bin/sh
+if [ -e '{stopped}' ]; then cp '{root}/parked-issue' '{root}/repos_sam_box_issues_7'; fi
+case "$*" in
+*is-active*) exit 3;;
+*LoadState*) echo not-found;;
+*ActiveState*) echo inactive;;
+esac
+"#,
+                root = b.path("").display(),
+                stopped = old.turn("1", "stopped").display()
+            ),
+        );
+        let mut pass = b.pass();
+        pass.jobs("sam/box", "box", &[snapshot]).unwrap();
+        assert!(!b.path("launched").exists(), "{labels}");
+        assert!(old.turn("1", "stopped").exists());
+        assert!(!old.path("await").exists());
+        assert!(pass.wake.contains_key("sam/box"));
+        let restored = listed(7, &["ready", "codex"]);
+        // Subsequent stops no longer change the restored live labels.
+        fs::write(b.path("parked-issue"), restored.to_string()).unwrap();
+        on_github(&b, &restored);
+        pass.jobs("sam/box", "box", std::slice::from_ref(&restored))
+            .unwrap();
+        pass.new_issues("sam/box", &[restored]).unwrap();
+        let record = b.cfg.inbox.as_ref().unwrap().state.join("sam_box-7/job");
+        assert_ne!(read(&record).as_deref(), Some("j1"));
+        assert!(b.path("launched").exists());
+    }
+}
+
+#[test]
 fn retiring_a_worker_preserves_parking_against_both_automatic_admissions() {
     for labels in [vec!["ready"], vec![]] {
         let b = fixture();

@@ -2,7 +2,10 @@
 use super::{Pass, dirs, key, raw, say, written};
 use crate::{Fail, config::Inbox, github::api, io_fail, job::Job, read};
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{
+    fs::{self, File, OpenOptions},
+    path::Path,
+};
 
 /// Missing labels are an unreadable response, never evidence of removal.
 pub(super) fn parked(inbox: &Inbox, issue: &Value) -> Result<Option<&'static str>, String> {
@@ -32,6 +35,30 @@ fn parking_path(inbox: &Inbox, repo: &str, n: &str) -> std::path::PathBuf {
         .join(n)
 }
 pub(super) fn mark_parked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> {
+    let _held = lock(inbox, repo, n)?;
+    mark_parked_locked(inbox, repo, n)
+}
+
+/// Job locks precede this lock. Admission of a fresh worker holds only this
+/// issue's lock until its first turn starts; it never locks an older worker.
+fn lock(inbox: &Inbox, repo: &str, n: &str) -> Result<File, String> {
+    let path = inbox
+        .state
+        .join(".enrollment-locks")
+        .join(key(repo).to_lowercase())
+        .join(n);
+    fs::create_dir_all(path.parent().expect("issue enrollment directory"))
+        .map_err(|e| e.to_string())?;
+    let held = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    held.lock().map_err(|e| e.to_string())?;
+    Ok(held)
+}
+
+fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> {
     let path = parking_path(inbox, repo, n);
     fs::create_dir_all(path.parent().expect("issue parking directory"))
         .map_err(|e| e.to_string())?;
@@ -120,8 +147,8 @@ pub(crate) fn admit(job: &Job) -> Result<(), String> {
 /// Under the turn-start lock, before writing a prompt or consuming a question.
 /// Stopping here closes the race with an inbox label event not yet processed.
 pub(crate) fn check(job: &Job) -> Result<Admission, String> {
-    // The inbox admits the initial verified snapshot. Only resumptions need
-    // another label read; never replace the worker's approved text with it.
+    // The inbox holds the issue enrollment lock and checks live labels while
+    // admitting a first turn. Resumes take the same lock before reading labels.
     if job.turns().is_none() {
         return Ok(Admission::Ready);
     }
@@ -142,6 +169,7 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
         .inbox
         .as_ref()
         .ok_or("proj: inbox configuration is unavailable")?;
+    let _held = lock(inbox, &repo, &n)?;
     let issue = api(job.cfg, &format!("repos/{repo}/issues/{n}"))
         .ok_or_else(|| format!("proj: cannot check {repo}#{n}'s labels; no turn started"))?;
     if let Some(why) = parked(inbox, &issue)? {
@@ -150,7 +178,7 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
             job.id
         );
         eprintln!("{message}");
-        mark_parked(inbox, &repo, &n)?;
+        mark_parked_locked(inbox, &repo, &n)?;
         crate::ask::ensure(job)?;
         crate::swap(&crate::ask::host_path(job, "inbox-parked"), why).map_err(|e| e.to_string())?;
         crate::cmd::halt(job.cfg, job, false).map_err(|e| {
@@ -164,6 +192,29 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
 }
 
 impl Pass<'_> {
+    /// A list or a previous REST read cannot restore enrollment. Serialize a
+    /// fresh label read and restoration with resume-side parking, retaining
+    /// the verified task text. The caller holds the guard through first launch.
+    pub(super) fn enroll(&self, repo: &str, issue: &Value) -> Result<(File, Value), Fail> {
+        let n = raw(&issue["number"]);
+        let held = lock(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
+        let current = api(self.cfg, &format!("repos/{repo}/issues/{n}"))
+            .ok_or_else(|| Fail::new(1, format!("proj-inbox: cannot check {repo}#{n}'s labels")))?;
+        if let Some(why) = parked(self.inbox, &current).map_err(|e| Fail::new(1, e))? {
+            mark_parked_locked(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
+            return Err(Fail::new(1, format!("proj-inbox: no worker: {why}")));
+        }
+        let mark = parking_path(self.inbox, repo, &n);
+        match fs::remove_file(&mark) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(io_fail(&mark, e)),
+        }
+        let mut enrolled = issue.clone();
+        enrolled["labels"] = current["labels"].clone();
+        Ok((held, enrolled))
+    }
+
     /// Reconcile parking before posting answers, recovering questions or
     /// skipping a running/repository-paused job. A missing list entry is
     /// checked directly: losing the last engine label removes it from the list.
@@ -221,14 +272,7 @@ impl Pass<'_> {
             let n = raw(&issue["number"]);
             let d = self.inbox.state.join(format!("{}-{n}", key(repo)));
             match parked(self.inbox, issue) {
-                Ok(None) => {
-                    let mark = parking_path(self.inbox, repo, &n);
-                    match fs::remove_file(&mark) {
-                        Ok(()) => (),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                        Err(e) => return Err(io_fail(&mark, e)),
-                    }
-                }
+                Ok(None) => (),
                 Ok(Some(_)) => {
                     if d.join("drained").exists() && !d.join("job").exists() {
                         mark_parked(self.inbox, repo, &n).map_err(|e| Fail::new(1, e))?;
@@ -261,7 +305,8 @@ impl Pass<'_> {
             }
             if let Some(id) = read(&d.join("job")) {
                 let job = Job::new(self.cfg, &id);
-                if !crate::ask::host_path(&job, "inbox-parked").exists()
+                if (!crate::ask::host_path(&job, "inbox-parked").exists()
+                    && !parking_path(self.inbox, repo, &n).exists())
                     || !job
                         .turns()
                         .is_some_and(|n| job.turn(&n, "stopped").exists())

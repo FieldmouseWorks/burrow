@@ -405,6 +405,8 @@ impl Pass<'_> {
         if let Some(why) = enrollment::parked(self.inbox, issue).map_err(|e| Fail::new(1, e))? {
             return Err(Fail::new(1, format!("proj-inbox: no worker: {why}")));
         }
+        let (_enrollment, enrolled) = self.enroll(repo, issue)?;
+        let issue = &enrolled;
         let pipeline = self
             .cfg
             .pipeline_repos
