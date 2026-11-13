@@ -223,8 +223,10 @@ Each has an entry below, and each can be imported on its own.
   proj jobs retain the roleless form for work an agent hands on.
   Both engines consume the
   [job capability contract](crates/burrow-proj/src/engine/capabilities.rs): writable
-  project and scratch, job state (`proj await`, `ask`, `done`), host facts (`proj probe`),
-  git metadata,
+  project and scratch, job state (`proj await`, `ask`, `done`), the host's
+  other jobs (`proj status`, `state`, `lifecycle`, `log`, `reply`, `stop`, run
+  by the host's proj through the turn's jobs socket; a job without one says it
+  can't reach them), host facts (`proj probe`), git metadata,
   toolchains, system paths and meters, GitHub as the assigned App, heavy slots,
   Nix builds through the daemon, `/dev/kvm`, the machine's MCP servers
   (`burrow.mcpServers`, including each server's socket and output paths), and

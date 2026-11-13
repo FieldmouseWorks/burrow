@@ -226,7 +226,9 @@ into project jobs.
   and see nothing else but the machine's system paths, with network access
   (the App's token socket included) but no server of the user's own (the
   runtime dir's D-Bus and systemd manager, tmux, any socket the user serves
-  outside those paths); sudo cannot elevate there.
+  outside those paths); sudo cannot elevate there. Either engine's
+  `proj status`, `log`, `reply` and `stop` go to the host's proj, so a Codex
+  job sees and continues other jobs as a Claude job does.
 - Jobs are headless (`claude -p` or `codex exec --json`).
   They can't stop to ask mid-turn: they end the turn with their question and
   pick up from your reply.

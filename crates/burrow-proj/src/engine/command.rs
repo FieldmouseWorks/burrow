@@ -175,6 +175,7 @@ pub fn spawn(
     }
     c.args(&args)
         .env("PROJ_PROBE_SOCKET", crate::probe::socket(cfg, job, n))
+        .env("PROJ_JOBS_SOCKET", crate::host_jobs::socket(cfg, job, n))
         .env("PROJ_JOB", id)
         .env("PROJ_GITHUB_DIR", job.path("github"))
         .env(

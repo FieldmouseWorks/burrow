@@ -19,6 +19,7 @@ use std::{
 pub enum Capability {
     Workspace,
     JobState,
+    Jobs,
     GitMetadata,
     Toolchains,
     System,
@@ -196,6 +197,7 @@ pub fn resolve(
             ],
         ),
         Grant::new(Capability::JobState, vec![(job.dir.clone(), true)]),
+        Grant::new(Capability::Jobs, vec![]),
         Grant::new(Capability::GitMetadata, vec![(metadata, true)]),
         Grant::new(Capability::Toolchains, vec![(cargo, true)]),
         Grant::new(
@@ -224,18 +226,20 @@ pub fn resolve(
         Grant::new(Capability::Network, vec![]),
         Grant::new(Capability::Environment, vec![]),
     ];
-    // The host transport lives in Workspace's scratch. Its address belongs
-    // to the contract even though it needs no additional filesystem grant.
-    if let Some(socket) = var(env, "PROJ_PROBE_SOCKET") {
-        items
-            .iter_mut()
-            .find(|g| g.capability == Capability::Probe)
-            .unwrap()
-            .env
-            .insert(
-                "PROJ_PROBE_SOCKET".into(),
-                socket.to_string_lossy().into_owned(),
-            );
+    // The host transports live in Workspace's scratch. Their addresses belong
+    // to the contract even though they need no additional filesystem grant.
+    for (capability, name) in [
+        (Capability::Probe, "PROJ_PROBE_SOCKET"),
+        (Capability::Jobs, "PROJ_JOBS_SOCKET"),
+    ] {
+        if let Some(socket) = var(env, name) {
+            items
+                .iter_mut()
+                .find(|g| g.capability == capability)
+                .unwrap()
+                .env
+                .insert(name.into(), socket.to_string_lossy().into_owned());
+        }
     }
     items
         .iter_mut()
@@ -308,6 +312,7 @@ mod tests {
             "HOME" => Some(home.clone().into_os_string()),
             "SETTING" | "EXTRA" => Some("inherited".into()),
             "PROJ_PROBE_SOCKET" => Some(dir.path().join("scratch/probe.sock").into_os_string()),
+            "PROJ_JOBS_SOCKET" => Some(dir.path().join("scratch/jobs.sock").into_os_string()),
             _ => None,
         };
         let machine = sandbox::tests::machine_in(dir.path());
@@ -358,6 +363,14 @@ mod tests {
                 .as_ref()
         );
         assert!(profile.contains("shell_environment_policy.set.PROJ_PROBE_SOCKET="));
+        assert!(profile.contains("shell_environment_policy.set.PROJ_JOBS_SOCKET="));
+        assert_eq!(
+            settings["env"]["PROJ_JOBS_SOCKET"],
+            dir.path()
+                .join("scratch/jobs.sock")
+                .to_string_lossy()
+                .as_ref()
+        );
         assert!(profile.contains("shell_environment_policy.set.PROJ_CAPABILITIES="));
     }
 }

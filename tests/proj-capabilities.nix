@@ -20,6 +20,9 @@ let
   drop = pkgs.writeShellScript "codex-without-heavy" ''
     exec ${fixture}/bin/capabilities drop-heavy ${agents}/bin/codex "$@"
   '';
+  dropJobs = pkgs.writeShellScript "codex-without-jobs" ''
+    exec ${fixture}/bin/capabilities drop-jobs ${agents}/bin/codex "$@"
+  '';
   calls = pkgs.writeText "capability-calls.json" (builtins.toJSON [
     [ "exec_command" { cmd = "${fixture}/bin/capabilities"; yield_time_ms = 300000; } ]
     [ "mcp__reach.ping" { } ]
@@ -110,9 +113,24 @@ in pkgs.testers.runNixOSTest {
     # This check is about reach, not GitHub's remote API: keep the real
     # App environment and token socket and stand in only for gh's endpoint.
     dev("echo 'export PATH=${fakeGh}/bin:$PATH ANTHROPIC_BASE_URL=http://127.0.0.1:18556 ANTHROPIC_API_KEY=sk-stand-in ANTHROPIC_MODEL=stand-in CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' >>~/.bash_profile")
-    def job(role):
-        j = dev(f'proj run --local-work --role {role} --app workers web go')
+    # The jobs probe replies to another job's timed-out turn: each job gets
+    # its own, in a project of its own, since a project's share runs one
+    # turn at a time.
+    machine.succeed("install -d -o dev -g dev /data/dev/src/held")
+    dev("git init -q -b trunk /data/dev/src/held && git -C /data/dev/src/held commit -q --allow-empty -m initial")
+    def hold():
+        t = dev('proj run --local-work --timeout 20s --role first --app workers held go')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {t}' | grep -x 'timed out after 20s'", timeout=300)
+        dev(f"echo {t} >/data/dev/src/web/reply-target")
+        return t
+    def resumed(t):
+        return machine.execute(f"test -s /data/dev/jobs/{t}/2.jsonl")[0] == 0
+    targets = {}
+    def job(role, proj="proj"):
+        t = hold()
+        j = dev(f'{proj} run --local-work --role {role} --app workers web go')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -Evx 'queued|running'", timeout=300)
+        targets[j] = t
         return j
     def results(j):
         return machine.execute(f"cat /data/dev/jobs/{j}/capabilities-passed")[1].splitlines()
@@ -125,6 +143,9 @@ in pkgs.testers.runNixOSTest {
     for j in [a, b]:
         assert machine.succeed("readlink /run/current-system").strip() in machine.succeed(f"cat /data/dev/jobs/{j}/host-probe")
         assert machine.execute(f"test -f /data/dev/jobs/{j}/mcp-called")[0] == 0, machine.execute(f"cat /data/dev/jobs/{j}/1.jsonl /data/dev/jobs/{j}/1.stderr /tmp/model.log /tmp/claude-provider.log")
+    # Each engine's reply resumed its target's timed-out turn, on the host.
+    for j in [a, b]:
+        assert resumed(targets[j]), machine.execute(f"cat /data/dev/jobs/{j}/1.jsonl")
     machine.fail("test -e /data/dev/src/web/unexpected-server")
     # The real client must supply the evidence: the direct probe still runs
     # when its engine registry is empty, but cannot satisfy mcp-called.
@@ -140,11 +161,20 @@ in pkgs.testers.runNixOSTest {
     dev("jq '.tools.codex = \"${drop}\" | .deployed = \"/home/dev/proj-negative\"' " + original + " >/home/dev/proj-negative.json")
     wrapper = "#!/bin/sh\nexport PROJ_CONFIG=/home/dev/proj-negative.json PROJ_SELF=/home/dev/proj-negative\nexec ${self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj \"$@\"\n"
     dev("printf %s " + shlex.quote(wrapper) + " >/home/dev/proj-negative && chmod +x /home/dev/proj-negative")
-    n = dev('/home/dev/proj-negative run --local-work --role second --app workers web go')
-    machine.wait_until_succeeds(f"su - dev -c 'proj state {n}' | grep -Evx 'queued|running'", timeout=300)
+    n = job("second", "/home/dev/proj-negative")
     assert results(n) != expected, "dropping heavy did not break parity"
     assert machine.succeed(f"cat /data/dev/jobs/{n}/capability-running").strip() == "heavy"
     assert results(n) == expected[:expected.index("heavy")]
     print("Negative control passed: dropping Codex's heavy grant failed the heavy probe and broke parity")
+    # Drop the jobs grant: Codex's commands no longer reach the host's jobs,
+    # and say so, rather than read the sandbox's own view of them.
+    dev("jq '.tools.codex = \"${dropJobs}\" | .deployed = \"/home/dev/proj-negative\"' " + original + " >/home/dev/proj-negative.json")
+    m = job("second", "/home/dev/proj-negative")
+    assert results(m) != expected, "dropping jobs did not break parity"
+    assert machine.succeed(f"cat /data/dev/jobs/{m}/capability-running").strip() == "jobs"
+    assert results(m) == expected[:expected.index("jobs")]
+    machine.succeed(f"grep -F \"this job can't reach the host's jobs\" /data/dev/jobs/{m}/1.jsonl")
+    assert not resumed(targets[m])
+    print("Negative control passed: dropping Codex's jobs grant failed the jobs probe loudly and resumed nothing")
   '';
 }

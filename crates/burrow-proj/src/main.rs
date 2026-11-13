@@ -22,6 +22,14 @@ fn main() -> ExitCode {
             }
         };
     }
+    // Inside a job, the host's jobs are the host's to say, whatever the
+    // job's own view of them (a sandbox's has none).
+    if burrow_proj::host_jobs::about_jobs(&args)
+        && std::env::var_os("PROJ_JOB").is_some_and(|j| !j.is_empty())
+    {
+        let socket = std::env::var_os("PROJ_JOBS_SOCKET").filter(|s| !s.is_empty());
+        return burrow_proj::host_jobs::client(socket.as_deref().map(std::path::Path::new), &args);
+    }
     let cfg = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {

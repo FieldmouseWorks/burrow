@@ -25,7 +25,7 @@ pub(crate) fn socket(cfg: &Config, job: &Job, n: &str) -> PathBuf {
 // Resolve through an open directory rather than putting the full scratch
 // path in sockaddr_un's small sun_path. The socket still lives only in this
 // job's scratch and remains subject to the same filesystem permissions.
-fn address(path: &Path) -> Result<(fs::File, PathBuf), String> {
+pub(crate) fn address(path: &Path) -> Result<(fs::File, PathBuf), String> {
     let directory = fs::File::open(path.parent().ok_or("probe socket has no parent")?)
         .map_err(|e| e.to_string())?;
     let name = path.file_name().ok_or("probe socket has no name")?;
@@ -184,6 +184,19 @@ impl Bridge {
         let listener = UnixListener::bind(address).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let vm = agent.map(|a| (a.to_owned(), PathBuf::from(guest::path(job, n))));
+        // The host's jobs, beside its answers: a VM's guest has no socket of
+        // the host's to reach them by, and its proj says so.
+        let jobs_path = crate::host_jobs::socket(&cfg, job, n);
+        let jobs = match vm {
+            Some(_) => None,
+            None => {
+                let _ = fs::remove_file(&jobs_path);
+                let (_held, at) = self::address(&jobs_path)?;
+                let jobs = UnixListener::bind(at).map_err(|e| e.to_string())?;
+                jobs.set_nonblocking(true).map_err(|e| e.to_string())?;
+                Some(jobs)
+            }
+        };
         let thread = thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 if let Some((agent, path)) = &vm {
@@ -238,9 +251,19 @@ impl Bridge {
                         let _ = stream.write_all(answer(&cfg, &request).as_bytes());
                     }
                 }
+                // Each on its own, so a slow `proj stop` holds up no probe.
+                if let Some(jobs) = &jobs
+                    && let Ok((stream, _)) = jobs.accept()
+                {
+                    let cfg = cfg.clone();
+                    thread::spawn(move || crate::host_jobs::serve(&cfg, stream));
+                }
                 thread::sleep(Duration::from_millis(if vm.is_some() { 1000 } else { 100 }));
             }
             let _ = fs::remove_file(path);
+            if jobs.is_some() {
+                let _ = fs::remove_file(jobs_path);
+            }
         });
         Ok(Self {
             stop,
