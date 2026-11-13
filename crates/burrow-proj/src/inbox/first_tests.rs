@@ -168,3 +168,64 @@ fn later_parks_a_first_no_author_put_on() {
         assert_eq!(!d.join("job").exists(), parks, "{by}: {}", b.log());
     }
 }
+
+// Among an author's first issues the oldest goes first, whatever their
+// priority or repo; the rest keep priority, pipeline and age.
+#[test]
+fn first_issues_go_oldest_first_among_themselves() {
+    let b = Box::new();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let mark = |mut i: Value| {
+        i[super::first::MARKED] = json!(true);
+        i
+    };
+    let items = [
+        mark(found_in(
+            "sam/box",
+            1,
+            &["ready", "first", "priority: high"],
+            "2026-05-01",
+        )),
+        mark(found_in(
+            "sam/game",
+            2,
+            &["later", "first", "priority: low"],
+            "2026-03-01",
+        )),
+        mark(found_in("sam/box", 3, &["ready", "first"], "2026-04-01")),
+        found_in("sam/box", 4, &["ready", "priority: high"], "2026-01-01"),
+        found_in("sam/game", 5, &["ready", "priority: high"], "2026-02-01"),
+    ];
+    let order: Vec<String> = b
+        .pass()
+        .ranked(&t, &items)
+        .into_iter()
+        .map(|c| format!("{}#{}", c.repo, c.n))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "sam/game#2",
+            "sam/box#3",
+            "sam/box#1",
+            "sam/box#4",
+            "sam/game#5"
+        ]
+    );
+}
+
+// With planning on, an author's first issue in `later` is planned as a
+// ready one is, so it can start; one the workers App marked stays sorted.
+#[test]
+fn a_later_first_issue_reaches_the_planner() {
+    for (by, planned) in [("sam", true), ("workers[bot]", false)] {
+        let mut b = Box::new();
+        b.cfg.inbox.as_mut().unwrap().planning = true;
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        let i = found(9, &["later", "first"], "2026-11-01T00:00:00Z");
+        on_github(&b, &i);
+        labelled_first(&b, 9, by);
+        let sorted = b.pass().sorted("sam/box", &t, &i, &Default::default());
+        assert_eq!(!sorted, planned, "{by}");
+    }
+}

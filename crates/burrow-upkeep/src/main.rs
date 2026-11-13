@@ -9,7 +9,8 @@
 //! repo; `carry`, which works out from it which of a PR's earlier heads'
 //! looks cover its head; `commits`, which reads a PR's commits whole for
 //! who made them; `ci`, which owns the CI verdict and cancelled workflow
-//! recovery; and `sweep`, which deletes what the reviewers leave of its closed
+//! recovery; `firsts`, which says which open PRs go first and puts the
+//! label on those that get it from an issue they close; and `sweep`, which deletes what the reviewers leave of its closed
 //! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
@@ -28,6 +29,7 @@ use burrow_upkeep::ci;
 use burrow_upkeep::claims;
 use burrow_upkeep::commits::{self, Read as Commits};
 use burrow_upkeep::config::Config;
+use burrow_upkeep::firsts;
 use burrow_upkeep::hook::{self, Hooks};
 use burrow_upkeep::mirror;
 use burrow_upkeep::pass::{Out, Pass, Proj};
@@ -236,7 +238,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
     }
     if ![
         "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "carry",
-        "sweep", "commits", "ci",
+        "sweep", "commits", "ci", "firsts",
     ]
     .contains(&word)
     {
@@ -324,6 +326,12 @@ fn run(args: &[String]) -> Result<(), Stop> {
         )?),
         _ => None,
     };
+    let firsting = match word {
+        "firsts" => Some(stdin::<firsts::Ask>(
+            "the open PRs, their labels and the issues they close, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
     let ci = if word == "ci" {
         Some(stdin::<ci::Ask>("the PR's CI, as a JSON object on stdin")?)
     } else {
@@ -357,6 +365,13 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 }
             })?;
             json!({"ci": verdict, "limited": p.out.limited})
+        }
+        ("firsts", _) => {
+            let Some(ask) = &firsting else {
+                return Err(Stop::Usage("no PRs to order".into()));
+            };
+            let found = firsts::firsts(&mut p, ask);
+            json!({"firsts": found.firsts, "labelled": found.labelled, "limited": p.out.limited})
         }
         ("settle", _) => {
             let repo = Repo {
@@ -457,7 +472,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose earlier looks may carry, the PR whose commits are read, the open PRs' snapshots, or the
+/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the PR whose earlier looks may carry, the PR whose commits are read, the open PRs to order (firsts), the open PRs' snapshots, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();

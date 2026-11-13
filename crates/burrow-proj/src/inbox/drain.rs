@@ -43,10 +43,11 @@ pub(crate) const WAITING: &str = ".drain-waiting";
 /// as its last pass saw them.
 pub(crate) const READY_LISTS: &str = ".ready";
 
-/// A ready issue in the drain's order: its fields sort it, an author's
-/// first ahead of the rest, then highest priority, then the pipeline's
-/// repos, then the oldest.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A ready issue in the drain's order ([`Candidate::key`]): an author's
+/// first ahead of the rest, the oldest first among them whatever their
+/// priority or repo; then highest priority, then the pipeline's repos, then
+/// the oldest.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Candidate {
     /// Not marked first by an author: it goes after those that are.
     pub(crate) behind: bool,
@@ -59,6 +60,49 @@ pub(crate) struct Candidate {
     pub(crate) n: String,
     /// A repair child: it takes no ordinary drain capacity.
     pub(crate) repair: bool,
+}
+
+impl Candidate {
+    /// What sorts it: priority and repo count only among those not marked
+    /// first, and break no tie among those that are before their age does.
+    #[allow(clippy::type_complexity)]
+    fn key(
+        &self,
+    ) -> (
+        bool,
+        Option<(Priority, bool)>,
+        &str,
+        &str,
+        &str,
+        Priority,
+        bool,
+        bool,
+    ) {
+        let ranked = self.behind.then_some((self.priority, self.outside));
+        let (opened, repo, n) = (self.opened.as_str(), self.repo.as_str(), self.n.as_str());
+        (
+            self.behind,
+            ranked,
+            opened,
+            repo,
+            n,
+            self.priority,
+            self.outside,
+            self.repair,
+        )
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Pass<'_> {
@@ -400,7 +444,7 @@ impl Pass<'_> {
     /// an author, nobody else's to work, and without a record here; an
     /// author's first ahead (`later` doesn't keep it back), then the
     /// priority, then pipeline repos, then oldest first.
-    fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<Candidate> {
+    pub(super) fn ranked(&mut self, t: &Triage, items: &[Value]) -> Vec<Candidate> {
         let claimed: std::collections::BTreeMap<_, _> = self
             .project
             .keys()

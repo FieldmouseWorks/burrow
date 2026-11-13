@@ -9,7 +9,7 @@ import itertools
 import json
 
 import proofs as P
-from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, WROTE, clean, fresh_pr_state, info, mkpr, pr_state, run, tmp
+from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, clean, firsts_wrote, fresh_pr_state, info, mkpr, pr_state, run, serve_firsts, tmp
 
 kept = C.job
 ids = itertools.count(1)
@@ -125,49 +125,43 @@ P.begin("sam/r", {1, 2, 4}, {4})
 assert RUNNING in line(4, 800, labels=(first,)) and len(JOBS) == 1, JOBS
 assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
 # The pass takes a repo's PRs in that order, so a free slot goes to the
-# first in line. `first` counts as GitHub's last LabeledEvent for it says
-# who put it on (firsts.py): an author, or the steward from an issue, by
+# first in line. `first` counts as GitHub's last labelled event for it says
+# who put it on (burrow-upkeep's firsts.rs): an author, or the steward, by
 # account id; the machinery's App, which Claude jobs act as, doesn't. A PR
 # closing an issue an author marked first gets the label, and goes first.
-AUTHOR = {"__typename": "User", "login": "sam", "databaseId": S.CFG["inbox"]["authors"][0]["id"]}
-STEWARD = {"__typename": "Bot", "login": S.CFG["app"]["slug"], "databaseId": S.CFG["inbox"]["postingAccountId"]}
-WORKERS = {"__typename": "Bot", "login": "workers", "databaseId": 99}
-SPOOF = {"__typename": "User", "login": "sam", "databaseId": 98}  # an author's login, another account
-BY = {}  # node id: who last put `first` on it
+AUTHOR, STEWARD = S.CFG["inbox"]["authors"][0]["id"], S.CFG["inbox"]["postingAccountId"]
+WORKERS, SPOOF = 99, 98  # the machinery's App; an author's login on another account
 
 
-def labelled(query, id, cursor=None):
-    """GitHub's LabeledEvents for a node, the steward's stage labels on top
-    and a page further back."""
-    if cursor is None:
-        nodes = [{"label": {"name": "waiting: review"}, "actor": STEWARD}]
-        return {"node": {"timelineItems": {"pageInfo": {"hasPreviousPage": True, "startCursor": "c"}, "nodes": nodes}}}
-    nodes = [{"label": {"name": first}, "actor": BY[id]}] if id in BY else []
-    return {"node": {"timelineItems": {"pageInfo": {"hasPreviousPage": False, "startCursor": None}, "nodes": nodes}}}
+def events(by):
+    """An issue's or PR's events: `first` put on by `by`, then the
+    steward's stage labels."""
+    return [{"event": "labeled", "label": {"name": first}, "actor": {"login": "sam", "id": by}},
+            {"event": "labeled", "label": {"name": "waiting: review"}, "actor": {"login": "steward[bot]", "id": STEWARD}}]
 
 
 def pr(k, labels=(), closes=()):
     p = mkpr(number=k, labels=labels)
-    p["id"] = f"pr{k}"
-    p["closingIssuesReferences"] = {"nodes": [{"id": i, "labels": {"nodes": [{"name": first}]}} for i in closes]}
+    p["closingIssuesReferences"] = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [
+        {"number": i, "repository": {"nameWithOwner": "sam/r"}, "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": first}]}}
+        for i in closes]}
     return p
 
 
-BY.update({"pr9": AUTHOR, "pr8": STEWARD, "pr7": WORKERS, "pr6": SPOOF, "issue1": AUTHOR, "issue3": WORKERS})
+serve_firsts({f"repos/sam/r/issues/{n}/events?per_page=100": events(by)
+              for n, by in ((9, AUTHOR), (8, STEWARD), (7, WORKERS), (6, SPOOF), (11, AUTHOR), (13, WORKERS))})
 order = []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, C.graphql)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = lambda *a: None
-S.open_prs = lambda owner, name: (info, [pr(2), pr(9, (first,)), pr(1, closes=("issue1",)), pr(7, (first,)),
-                                         pr(8, (first,)), pr(3, closes=("issue3",)), pr(6, (first,))])
+S.open_prs = lambda owner, name: (info, [pr(2), pr(9, (first,)), pr(1, closes=(11,)), pr(7, (first,)),
+                                         pr(8, (first,)), pr(3, closes=(13,)), pr(6, (first,))])
 S.step.handle = lambda repo, pr, *a: order.append(pr["number"])
-C.graphql = labelled
-WROTE.clear()
 S.main()
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, C.graphql = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle = kept_fns
 assert order == [1, 8, 9, 2, 3, 6, 7], order
-assert [w for w in WROTE if "--add-label" in w] == [f"pr edit 1 -R sam/r --add-label {first}"], WROTE
+assert firsts_wrote() == [["POST", "repos/sam/r/issues/1/labels", {"labels": [first]}]], firsts_wrote()
 
 # Unset, no limit.
 fresh_pr_state()

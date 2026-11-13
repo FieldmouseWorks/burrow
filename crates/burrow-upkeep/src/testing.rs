@@ -32,6 +32,7 @@ pub fn config(dir: &Path) -> Config {
             slug: "steward".into(),
             id: 7,
         },
+        first_by: vec![1, 2],
         api: "http://127.0.0.1:9".into(),
         webhook: Webhook {
             url: "https://example.org/burrow/hook".into(),

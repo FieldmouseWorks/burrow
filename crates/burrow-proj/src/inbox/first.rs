@@ -4,7 +4,7 @@
 //! hands it on ahead of every priority, its job takes the next free slot
 //! ahead of jobs without it, and `later` doesn't park it. The steward reads
 //! the same label off the issue a PR closes and puts it on the PR
-//! (modules/autoland/firsts.py).
+//! (crates/burrow-upkeep/src/firsts.rs).
 //!
 //! It counts only when the last time the label went on, one of the authors
 //! put it there, by account id, as GitHub's `labeled` event names its

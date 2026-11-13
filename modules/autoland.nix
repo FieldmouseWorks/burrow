@@ -203,6 +203,9 @@ let
   # parts, each null when it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
     inherit (settings) stateDir owner proj projectsDir authors bots app jobTimeout renovate;
+    # Whose `first` label on an issue or a PR counts, by account id
+    # (firsts.rs): proj's inbox authors, the steward's App among them.
+    firstBy = lib.unique (map (a: a.id) config.burrow.proj.inbox.authors ++ [ cfg.app.accountId ]);
     # GitHub's REST API, where the App's own calls go: its tokens
     # (token.rs) and its webhook (hook.rs).
     api = "https://api.github.com";

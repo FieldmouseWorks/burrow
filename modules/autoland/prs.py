@@ -38,7 +38,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
-        closingIssuesReferences(first: 5) { nodes { id labels(first: 30) { nodes { name } } } }
+        closingIssuesReferences(first: 10) { pageInfo { hasNextPage endCursor } nodes { number repository { nameWithOwner } labels(first: 20) { pageInfo { hasNextPage } nodes { name } } } }
         files(first: 100) { nodes { path changeType } }
         changedFiles
         reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
