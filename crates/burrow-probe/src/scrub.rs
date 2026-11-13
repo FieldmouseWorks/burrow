@@ -14,6 +14,9 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
+mod streams;
+pub use streams::Jsonl;
+
 const HEADER_NAME: &str =
     "(?:proxy-)?authorization|x-api-key|api-key|x-auth-token|private-token|cookie|set-cookie";
 const SECRET_NAME: &str = "[a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?)";
@@ -128,13 +131,13 @@ static KEY_BEGIN: LazyLock<Regex> = LazyLock::new(|| {
 static KEY_END: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----").expect("key end")
 });
-/// A quoted value of a credential-named field in a decoded string: the
-/// string's newlines are its own, so the value runs to its closing quote.
-static DECODED_QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+// An opening delimiter, not a replacement regex: closing delimiters and
+// private-key markers must be observed in the original, unmodified text.
+static CREDENTIAL_OPEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?is)\b({SECRET_NAME})(["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?)"#
+        r#"(?i)\b({SECRET_NAME}|{HEADER_NAME})(["']?\s*[:=]\s*)(["'])"#
     ))
-    .expect("decoded quoted credential")
+    .expect("credential opening quote")
 });
 
 /// How much raw text is kept to see a delimiter split across two pieces.
@@ -153,6 +156,12 @@ pub struct Redactor {
     quote: Option<(char, bool)>,
     /// The last raw characters seen, for a delimiter cut between pieces.
     tail: String,
+}
+
+enum Mask {
+    Key,
+    Quoted(String),
+    Continuation,
 }
 
 /// Where the quote `q` closes in `text`, past `after` (the byte it starts
@@ -188,62 +197,107 @@ impl Redactor {
     }
 
     fn run(&mut self, text: &str) -> String {
-        let mut out = String::new();
-        let mut rest = text;
         let seen = self.tail.len();
         let joined = format!("{}{text}", self.tail);
-        let cut = |re: &Regex| {
-            re.find_iter(&joined)
-                .find(|m| m.start() < seen && m.end() > seen)
-                .map(|m| m.end() - seen)
-        };
-        // A delimiter cut between this piece and the last one.
-        if self.in_key {
-            if let Some(n) = cut(&KEY_END) {
-                self.in_key = false;
-                out.push_str("[redacted private key]");
-                rest = &text[n..];
+        let mut spans = Vec::new();
+
+        // Key and quote automata inspect the same raw bytes independently.
+        // Their hidden spans are united only after both states are updated.
+        let mut markers = KEY_BEGIN
+            .find_iter(&joined)
+            .filter(|m| m.end() > seen)
+            .map(|m| (m.start().saturating_sub(seen), m.end() - seen, true))
+            .chain(
+                KEY_END
+                    .find_iter(&joined)
+                    .filter(|m| m.end() > seen)
+                    .map(|m| (m.start().saturating_sub(seen), m.end() - seen, false)),
+            )
+            .collect::<Vec<_>>();
+        markers.sort_unstable();
+        let mut start = self.in_key.then_some(0);
+        for (at, end, begin) in markers {
+            if begin {
+                start.get_or_insert(at);
+            } else {
+                spans.push((start.take().unwrap_or(0), end, Mask::Key));
             }
-        } else if let Some(n) = cut(&KEY_BEGIN) {
-            self.in_key = true;
-            out.push_str("[redacted private key]");
-            rest = &text[n..];
         }
-        self.remember(text);
-        // A credential quote the last piece left open.
-        if let Some((q, escaped)) = self.quote.take() {
-            match close_of(rest, 0, q, escaped) {
-                Ok(n) => rest = &rest[n..],
+        self.in_key = start.is_some();
+        if let Some(start) = start {
+            spans.push((start, text.len(), Mask::Key));
+        }
+
+        let mut cursor = 0;
+        if let Some((quote, escaped)) = self.quote.take() {
+            match close_of(text, 0, quote, escaped) {
+                Ok(end) => {
+                    spans.push((0, end, Mask::Continuation));
+                    cursor = end;
+                }
                 Err(escaped) => {
-                    self.quote = Some((q, escaped));
-                    return out;
+                    self.quote = Some((quote, escaped));
+                    spans.push((0, text.len(), Mask::Continuation));
+                    cursor = text.len();
                 }
             }
         }
-        if rest.is_empty() {
-            return out;
-        }
-        let ends = KEY_END.is_match(rest);
-        if self.in_key && !ends {
-            out.push_str("[redacted private key]");
-            return out;
-        }
-        let quoted = DECODED_QUOTED.replace_all(rest, format!("$1$2\"{REDACTED}\""));
-        out.push_str(&scrub(&quoted).0);
-        let last_end = KEY_END.find_iter(rest).last().map(|m| m.end());
-        let open = KEY_BEGIN
-            .find_iter(rest)
-            .last()
-            .is_some_and(|m| last_end.is_none_or(|e| m.start() >= e));
-        self.in_key = open || (self.in_key && !ends);
-        for caps in DECODED_QUOTED.captures_iter(rest) {
-            let after = caps.get(2).map_or(0, |m| m.end());
-            if let Some(q) = rest[after..].chars().next()
-                && let Err(escaped) = close_of(rest, after + q.len_utf8(), q, false)
-            {
-                self.quote = Some((q, escaped));
+        for caps in CREDENTIAL_OPEN.captures_iter(&joined) {
+            let whole = caps.get(0).unwrap();
+            if whole.end() <= seen {
+                continue;
+            }
+            let quote_at = caps.get(3).unwrap();
+            let at = quote_at.start().saturating_sub(seen);
+            if at < cursor {
+                continue;
+            }
+            let quote = quote_at.as_str().chars().next().unwrap();
+            let after = whole.end() - seen;
+            let (end, escaped) = match close_of(text, after, quote, false) {
+                Ok(end) => (end, None),
+                Err(escaped) => (text.len(), Some(escaped)),
+            };
+            // Keep the field label and spacing without running text rules
+            // over them again (a header rule would eat the public suffix).
+            let begin = whole.start().saturating_sub(seen);
+            let prefix = &joined[whole.start().max(seen)..quote_at.start()];
+            spans.push((
+                begin,
+                end,
+                Mask::Quoted(format!("{prefix}{quote}{REDACTED}{quote}")),
+            ));
+            cursor = end;
+            if let Some(escaped) = escaped {
+                self.quote = Some((quote, escaped));
+                break;
             }
         }
+        self.remember(text);
+        spans.sort_by_key(|(start, end, _)| (*start, *end));
+        let mut merged: Vec<(usize, usize, Mask)> = Vec::new();
+        for (start, end, mask) in spans {
+            if let Some(last) = merged.last_mut().filter(|last| start < last.1) {
+                last.1 = last.1.max(end);
+                if matches!(mask, Mask::Key) {
+                    last.2 = Mask::Key;
+                }
+            } else {
+                merged.push((start, end, mask));
+            }
+        }
+        let mut out = String::new();
+        let mut from = 0;
+        for (start, end, mask) in merged {
+            out.push_str(scrub(&text[from..start]).as_str());
+            match mask {
+                Mask::Key => out.push_str("[redacted private key]"),
+                Mask::Quoted(replacement) => out.push_str(&replacement),
+                Mask::Continuation => {}
+            }
+            from = end;
+        }
+        out.push_str(scrub(&text[from..]).as_str());
         out
     }
 
@@ -265,11 +319,11 @@ impl Redactor {
                     let value = if SECRET_FIELD.is_match(key) {
                         Value::String(REDACTED.into())
                     } else {
-                        self.json(value)?
+                        // Object fields describe independent values, not
+                        // consecutive pieces of their neighbours' text.
+                        Redactor::default().json(value)?
                     };
-                    if clean.insert(scrub(key).0, value).is_some() {
-                        return Err("JSON property names collide after redaction".into());
-                    }
+                    insert(&mut clean, key, value)?;
                 }
                 Value::Object(clean)
             }
@@ -278,9 +332,47 @@ impl Redactor {
     }
 }
 
+fn insert(
+    fields: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Value,
+) -> Result<(), String> {
+    if fields.insert(scrub(key).0, value).is_some() {
+        return Err("JSON property names collide after redaction".into());
+    }
+    Ok(())
+}
+
 /// One decoded value, redacted on its own.
 pub fn json(value: &Value) -> Result<Value, String> {
     Redactor::default().json(value)
+}
+
+/// A structured view (for example a snapshot) contains independent values,
+/// including entries in arrays of names. It has no continuation semantics.
+pub fn independent_json(value: &Value) -> Result<Value, String> {
+    Ok(match value {
+        Value::String(text) => Value::String(Redactor::default().plain(text)),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(independent_json)
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(fields) => {
+            let mut clean = serde_json::Map::new();
+            for (key, value) in fields {
+                let value = if SECRET_FIELD.is_match(key) {
+                    Value::String(REDACTED.into())
+                } else {
+                    independent_json(value)?
+                };
+                insert(&mut clean, key, value)?;
+            }
+            Value::Object(clean)
+        }
+        value => value.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -542,5 +634,76 @@ mod tests {
             assert!(!out.contains(leak), "{out}");
         }
         assert!(out.contains("after"), "{out}");
+    }
+
+    #[test]
+    fn independent_fields_do_not_inherit_another_values_open_secret() {
+        let source = serde_json::json!({"output":"password=\"first", "command":"cat \"$file\"", "state":"done", "id":"public-job"});
+        let value = super::json(&source).unwrap();
+        assert_eq!(value["command"], source["command"]);
+        assert_eq!(value["id"], "public-job");
+        assert_eq!(value["state"], "done");
+        assert!(!value["output"].as_str().unwrap().contains("first"));
+        let names = serde_json::json!(["password=\"first", "cat \"$file\"", "next public"]);
+        let clean = super::independent_json(&names).unwrap();
+        assert_eq!(clean[1], names[1]);
+        assert_eq!(clean[2], names[2]);
+    }
+
+    #[test]
+    fn overlapping_quoted_keys_close_both_states_and_preserve_public_suffixes() {
+        let begin = format!("-----BEGIN RSA {} ", "PRIVATE");
+        let end = format!("-----END RSA {} KEY-----", "PRIVATE");
+        for pieces in [
+            vec![
+                format!("password=\"{begin}"),
+                format!("KEY-----\nPAYLOAD\n{end}\" public suffix"),
+                "following public record".into(),
+            ],
+            vec![
+                format!("password=\"{begin}"),
+                "KEY-----\nPAY\\\"LOAD\n-----END RSA PRIVATE ".into(),
+                "KEY-----\" public suffix".into(),
+                "following public record".into(),
+            ],
+        ] {
+            let mut redactor = super::Redactor::default();
+            let output = pieces
+                .iter()
+                .map(|piece| redactor.plain(piece))
+                .collect::<String>();
+            assert!(
+                !output.contains("PAYLOAD") && !output.contains("LOAD"),
+                "{output}"
+            );
+            assert!(
+                output.contains("public suffix") && output.contains("following public record"),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quote_opened_inside_a_key_keeps_hiding_after_the_key_ends() {
+        let mut redactor = super::Redactor::default();
+        let pieces = [
+            format!("-----BEGIN RSA {} KEY-----", "PRIVATE"),
+            "password=\"FIRSTSECRET".into(),
+            format!("-----END RSA {} KEY----- SECONDSECRET", "PRIVATE"),
+            "\" public suffix".into(),
+            "following public record".into(),
+        ];
+        let out = pieces
+            .iter()
+            .map(|text| redactor.plain(text))
+            .collect::<String>();
+        assert!(
+            !out.contains("FIRSTSECRET") && !out.contains("SECONDSECRET"),
+            "{out}"
+        );
+        assert!(
+            out.contains("public suffix") && out.contains("following public record"),
+            "{out}"
+        );
     }
 }

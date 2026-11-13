@@ -382,3 +382,149 @@ fn every_launcher_name_is_usable_through_host_job_operations() {
         assert!(job.turn("2", "stopped").exists());
     }
 }
+
+#[test]
+fn summaries_redact_before_truncation_without_hiding_jobs_or_literal_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    for (id, result) in [
+        (
+            "z-secret",
+            format!(
+                "password=\"{}\" public suffix",
+                "PRIVATEFRAGMENT".repeat(20)
+            ),
+        ),
+        ("a-public", "public answer".into()),
+    ] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.turn("1", "outcome"), "done").unwrap();
+        fs::write(job.turn("1", "result"), result).unwrap();
+    }
+    let caller = Job::new(&cfg, "recovery");
+    let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+    let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+    let run = |args: &[&str]| success(cli(&cfg, Some(&socket), args));
+    let text = run(&["state", "--json", "100"]);
+    let snapshot: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for id in ["z-secret", "a-public"] {
+        let row = snapshot["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .expect("public job identity retained");
+        assert_eq!(row["state"], "done");
+    }
+    assert!(!text.contains("PRIVATEFRAGMENT"));
+    assert!(
+        text.contains("public suffix"),
+        "redact the full answer before shortening it"
+    );
+    let status = run(&["status", "100"]);
+    assert!(status.contains("z-secret") && status.contains("a-public"));
+    assert!(!status.contains("PRIVATEFRAGMENT"));
+    for name in ["password=\"first", "next public", "cat \"$file\""] {
+        fs::create_dir(cfg.projects.join(name)).unwrap();
+    }
+    let list = run(&["list"]);
+    assert!(
+        list.contains("next public") && list.contains("cat \"$file\""),
+        "{list}"
+    );
+    assert!(!list.contains("first"));
+}
+
+#[test]
+fn interleaved_payloads_and_quoted_keys_are_scoped_on_both_output_streams() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = config(tmp.path());
+    let client_cfg = cfg.clone();
+    let begin = format!("-----BEGIN RSA {} ", "PRIVATE");
+    let end = format!("-----END RSA {} KEY-----", "PRIVATE");
+    let records = [
+        json!({"call_id":"a", "output":"password=\"FIRSTSECRET"}),
+        json!({"call_id":"b", "output":"other public output \"quoted\""}),
+        json!({"call_id":"a", "command":"cat \"$file\""}),
+        json!({"call_id":"a", "output":"SECONDSECRET\" public suffix"}),
+        json!({"call_id":"key", "output":format!("password=\"{begin}")}),
+        json!({"call_id":"key", "command":"printf \"public metadata\""}),
+        json!({"call_id":"key", "output":format!("KEY-----\nKEYPAYLOAD\n{end}\" public key suffix")}),
+        json!({"call_id":"key", "output":"following public record"}),
+    ];
+    let stream = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+    cfg.me = tmp.path().join("emitter");
+    burrow_test::executable(
+        &cfg.me,
+        format!(
+            "#!/bin/sh\ncat <<'RECORDS'\n{stream}RECORDS\ncat >&2 <<'RECORDS'\n{stream}RECORDS\n"
+        ),
+    );
+    let caller = Job::new(&cfg, "recovery");
+    let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+    let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+    let output = cli(&client_cfg, Some(&socket), &["log", "target", "--raw"]);
+    assert!(output.status.success());
+    for bytes in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        for secret in ["FIRSTSECRET", "SECONDSECRET", "KEYPAYLOAD"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        let values: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(values.len(), records.len());
+        assert_eq!(values[1]["output"], records[1]["output"]);
+        assert_eq!(values[2]["command"], records[2]["command"]);
+        assert_eq!(values[5]["command"], records[5]["command"]);
+        assert!(
+            values[3]["output"]
+                .as_str()
+                .unwrap()
+                .contains("public suffix")
+        );
+        assert!(
+            values[6]["output"]
+                .as_str()
+                .unwrap()
+                .contains("public key suffix")
+        );
+        assert_eq!(values[7]["output"], records[7]["output"]);
+    }
+}
+
+#[test]
+fn default_log_tail_redacts_the_complete_payload_before_dropping_earlier_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let job = Job::new(&cfg, "tail");
+    fs::create_dir(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.turn("1", "outcome"), "timed out after 60m").unwrap();
+    let records = [
+        json!({"call_id":"a", "output":format!("-----BEGIN RSA {} KEY-----", "PRIVATE")}),
+        json!({"call_id":"a", "command":"cat \"public metadata\""}),
+        json!({"call_id":"a", "output":"SECRETTAILPAYLOAD"}),
+        json!({"call_id":"b", "output":"unrelated public record"}),
+        json!({"call_id":"a", "output":"SECRETTAILPAYLOAD continued"}),
+    ];
+    fs::write(
+        job.turn("1", "jsonl"),
+        records.iter().map(|v| format!("{v}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let caller = Job::new(&cfg, "recovery");
+    let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+    let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+    let output = cli(&cfg, Some(&socket), &["log", "tail"]);
+    assert!(
+        !output.status.success(),
+        "a timed-out turn still reports failure"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("SECRETTAILPAYLOAD"), "{text}");
+    assert!(text.contains("unrelated public record"), "{text}");
+}

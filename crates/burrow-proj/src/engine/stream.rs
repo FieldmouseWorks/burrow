@@ -82,7 +82,7 @@ pub fn answer(stream: &Path) -> String {
                 if !answer.is_empty() {
                     answer.push_str("\n\n");
                 }
-                answer.push_str(text);
+                answer.push_str(&burrow_probe::scrub::Redactor::default().plain(text));
             }
         }
     }
@@ -99,6 +99,7 @@ pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
 
 pub fn stream_tail(stream: &Path) -> String {
     let mut tail = VecDeque::new();
+    let mut redactor = burrow_probe::scrub::Jsonl::default();
     if let Ok(file) = crate::state_reads::open(stream) {
         let mut reader = BufReader::new(file);
         loop {
@@ -109,7 +110,13 @@ pub fn stream_tail(stream: &Path) -> String {
                     if tail.len() == 3 {
                         tail.pop_front();
                     }
-                    tail.push_back(line);
+                    // Read and redact earlier records too: the visible tail
+                    // may start in the middle of an earlier secret payload.
+                    tail.push_back(
+                        redactor
+                            .line(&line)
+                            .unwrap_or_else(|_| "[redacted]\n".into()),
+                    );
                 }
             }
         }

@@ -308,6 +308,12 @@ pub struct JobRow {
 }
 
 impl Snapshot {
+    /// Redact fields separately before rendering a structured view as text.
+    pub(crate) fn redacted(self) -> Result<Self, Fail> {
+        let value = serde_json::to_value(self).map_err(|e| Fail::new(1, e.to_string()))?;
+        let value = burrow_probe::scrub::independent_json(&value).map_err(|e| Fail::new(1, e))?;
+        serde_json::from_value(value).map_err(|e| Fail::new(1, e.to_string()))
+    }
     /// Now, with the `jobs` most recently changed.
     pub fn take(cfg: &Config, jobs: usize) -> Result<Snapshot, Fail> {
         let at = now();
@@ -471,6 +477,10 @@ pub(crate) fn row(job: &Job) -> JobRow {
         Vec::new()
     };
     let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    // A shortened credential may lose its closing delimiter. Redact the
+    // complete answer first, while it still has its logical boundaries.
+    let result = burrow_probe::scrub::Redactor::default().plain(&String::from_utf8_lossy(&result));
+    let result = result.as_bytes();
     let mut cut = result.len().min(100);
     while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
         cut -= 1;

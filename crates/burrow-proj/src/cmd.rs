@@ -78,7 +78,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
             put(&cfg.settings_line());
-            put(&Snapshot::take(cfg, 0)?.in_line());
+            put(&Snapshot::take(cfg, 0)?.redacted()?.in_line());
             Ok(())
         }
         None | Some("status") => status(cfg, args.get(1)),
@@ -111,7 +111,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             let (state, held) = job.lifecycle().map_err(|e| Fail::new(1, e))?;
             put(&std::iter::once(state)
                 .chain(held)
-                .map(|l| format!("{l}\n"))
+                .map(|l| format!("{}\n", burrow_probe::scrub::Redactor::default().plain(&l)))
                 .collect::<String>());
             Ok(())
         }
@@ -133,7 +133,10 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect();
             names.sort();
-            put(&names.iter().map(|n| format!("{n}\n")).collect::<String>());
+            put(&names
+                .iter()
+                .map(|n| format!("{}\n", burrow_probe::scrub::Redactor::default().plain(n)))
+                .collect::<String>());
             Ok(())
         }
         Some("usage") => match args.get(1).map(String::as_str) {
@@ -284,14 +287,14 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
             .map_err(|_| Fail::new(1, format!("proj status: {n} isn't a number")))?,
     };
     put(&cfg.settings_line());
-    put(&Snapshot::take(cfg, limit)?.status());
+    put(&Snapshot::take(cfg, limit)?.redacted()?.status());
     Ok(())
 }
 
 /// `proj state --json [N]`: the live snapshot, with the N jobs most recently
 /// changed.
 pub(crate) fn state_json(cfg: &Config, jobs: usize) -> Result<String, Fail> {
-    let snap = Snapshot::take(cfg, jobs)?;
+    let snap = Snapshot::take(cfg, jobs)?.redacted()?;
     Ok(format!("{}\n", serde_json::to_string(&snap).unwrap()))
 }
 
@@ -350,7 +353,7 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     if read(&job.turn(n, "end")).as_deref() == Some("ask")
         && let Some(q) = crate::ask::load(&job)
     {
-        said.push_str(&q.notice());
+        said.push_str(&burrow_probe::scrub::Redactor::default().plain(&q.notice()));
     }
     let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
@@ -362,9 +365,14 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
             out.push_str(&format!("\n(turn {n} ended in an error)\n"));
             match last.get("errors") {
                 None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => (),
-                Some(errors) => out.push_str(&format!("{errors}\n")),
+                Some(errors) => {
+                    let clean = burrow_probe::scrub::independent_json(errors)
+                        .unwrap_or_else(|_| serde_json::json!("[redacted]"));
+                    out.push_str(&format!("{clean}\n"));
+                }
             }
         } else if let Some(outcome) = outcome.filter(|o| !o.is_empty() && o != "done") {
+            let outcome = burrow_probe::scrub::Redactor::default().plain(&outcome);
             out.push_str(&format!("\n(turn {n} then ended: {outcome})\n"));
         } else if read(&job.turn(n, "end")).as_deref() == Some("undeclared") {
             out.push_str(&format!(
