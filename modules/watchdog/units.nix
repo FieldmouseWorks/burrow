@@ -27,6 +27,7 @@ let
 
   configFile = pkgs.writeText "${name}.json" (builtins.toJSON {
     inherit file;
+    inherit (cfg) clearSocket;
     inherit (cfg) ignore;
     grace = cfg.graceMinutes * 60;
     window = cfg.crashHours * 3600;
@@ -51,6 +52,13 @@ in
   ];
 
   options.burrow.watchdog.units = {
+    clearSocket = mkOption {
+      type = types.str;
+      internal = true;
+      readOnly = true;
+      default = "/run/burrow-units/clear.sock";
+      description = "The host acknowledgement socket, also granted to sandboxed jobs.";
+    };
     enable = mkOption {
       type = types.bool;
       default = config.burrow.watchdog.enable or false;
@@ -86,6 +94,39 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ units ];
+
+    systemd.sockets.burrow-units-clear = {
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ cfg.clearSocket ];
+      socketConfig = {
+        Accept = true;
+        SocketUser = user;
+        SocketMode = "0600";
+        DirectoryMode = "0755";
+        MaxConnections = 8;
+      };
+    };
+    systemd.services."burrow-units-clear@" = {
+      description = "Acknowledge resolved program crashes on the host";
+      serviceConfig = {
+        User = user;
+        Environment = "UNITS_CONFIG=${configFile}";
+        ExecStart = "${package}/bin/${name} serve-clear";
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        Type = "oneshot";
+        TimeoutStartSec = "30s";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        # Strict leaves everything read-only, /home included, but the units
+        # state, wherever stateDir puts it (under /home, or a symlink into
+        # it). ProtectHome would hide that state from the handler, and
+        # ReadWritePaths can't reopen it.
+        ProtectSystem = "strict";
+        ReadWritePaths = [ dir ];
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+      };
+    };
 
     burrow.events.handlers.units = {
       # Nothing on GitHub: its kicks, and the hourly catch-up.

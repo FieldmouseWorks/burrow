@@ -44,7 +44,9 @@ let
 in pkgs.testers.runNixOSTest {
   name = "proj-capabilities";
   nodes.machine = {
-    imports = [ self.nixosModules.proj self.nixosModules.cpu ];
+    imports = [ self.nixosModules.proj self.nixosModules.cpu self.nixosModules.watchdog ];
+    # Jobs reach its host clear handler, and nothing else of its state.
+    burrow.watchdog.units.enable = true;
     burrow = {
       claude.enable = true;
       cpu.enable = true;

@@ -66,6 +66,9 @@ pub struct Config {
     pub ask_timeout: u64,
     #[serde(default)]
     pub probe: Option<burrow_probe::Config>,
+    /// Only the crash acknowledgement socket, never host units state.
+    #[serde(default)]
+    pub units_clear_socket: Option<PathBuf>,
     #[serde(default = "waiting_owner_label")]
     pub waiting_owner_label: String,
     #[serde(default = "needs_owner_label")]
