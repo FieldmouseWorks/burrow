@@ -74,9 +74,10 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     assert!(uses(restore, "actions/cache/restore@"), "{restore:?}");
     assert_eq!(restore["with"]["path"], "${{ runner.temp }}/kept");
     let key = text(&restore["with"]["key"]);
+    let exact = "${{ steps.merge.outputs.tip || github.sha }}";
     assert!(
-        key.ends_with("-${{ github.sha }}")
-            && restore["with"]["restore-keys"] == key.trim_end_matches("${{ github.sha }}"),
+        key.ends_with(&format!("-{exact}"))
+            && restore["with"]["restore-keys"] == key.trim_end_matches(exact),
         "{restore:?}"
     );
     assert!(
@@ -153,7 +154,12 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     assert_eq!(version(save), version(restore));
     // The cache keeps an entry for a restore of the same paths only.
     assert_eq!(save["with"]["path"], restore["with"]["path"]);
-    assert_eq!(save["with"]["key"], key);
+    // Under its own commit, the tip a PR merged onto it restores by
+    // (a_prs_exact_key_is_its_bases_push_save).
+    assert_eq!(
+        text(&save["with"]["key"]),
+        key.replace(exact, "${{ github.sha }}")
+    );
     assert_eq!(save["with"].as_mapping().map(|m| m.len()), Some(2));
     // A red gate keeps its builds too (#812), and the steps after the tool
     // follow it there: each of them would otherwise run only while the job
@@ -249,6 +255,8 @@ fn a_negative_restores_every_legs_kept_builds() {
             ("runner.os", "Linux".into()),
             ("runner.temp", "/tmp/runner".into()),
             ("github.sha", "abc".into()),
+            // The negative job merges nothing, so it has no merge step's tip.
+            ("steps.merge.outputs.tip", "".into()),
         ])
     };
     for legs in 1..=8u64 {
@@ -348,6 +356,62 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("pull_request", "o/r", "true")));
     assert!(!on(&c("pull_request", "someone/r", "")));
     assert!(!on(&c("push", "", "")));
+}
+
+/// A PR's exact key is the one its base's push saved under: the merge
+/// step's tip, never GitHub's merge commit (github.sha), which no run saves
+/// under. Keyed on that, a PR never hit exactly, so the wait's guard on an
+/// exact hit never skipped it, and every PR leg planned and restored again
+/// what it had already restored (#929). The waiter polls for that same key,
+/// and the push's leg under this leg's own job name.
+#[test]
+fn a_prs_exact_key_is_its_bases_push_save() {
+    let job = job();
+    let common = [
+        ("github.workflow", V::from("flake")),
+        ("runner.os", "Linux".into()),
+        ("matrix.leg", 2u64.into()),
+        ("inputs.legs", 4u64.into()),
+    ];
+    let with = |more: &[(&str, V)]| {
+        let mut c = ctx(&common);
+        c.extend(more.iter().map(|(k, v)| ((*k).to_owned(), v.clone())));
+        c
+    };
+    let saved = value(
+        text(&step(&job, "keep-save")["with"]["key"]),
+        &with(&[("github.sha", "base".into())]),
+    )
+    .text();
+    let pr = with(&[
+        ("github.sha", "merge".into()),
+        ("steps.merge.outputs.tip", "base".into()),
+    ]);
+    for id in ["kept-lookup", "kept-restore"] {
+        assert_eq!(
+            value(text(&step(&job, id)["with"]["key"]), &pr).text(),
+            saved,
+            "{id}"
+        );
+        // A push has no merge step: its own commit, as it saves.
+        let push = with(&[
+            ("github.sha", "base".into()),
+            ("steps.merge.outputs.tip", "".into()),
+        ]);
+        assert_eq!(
+            value(text(&step(&job, id)["with"]["key"]), &push).text(),
+            saved,
+            "{id}"
+        );
+    }
+    let env = &step(&job, "kept-wait")["env"];
+    let waits_for = format!(
+        "{}{}",
+        value(text(&env["KEPT_KEY"]), &pr).text(),
+        value(text(&env["TIP"]), &pr).text()
+    );
+    assert_eq!(waits_for, saved);
+    assert_eq!(env["LEG_JOB"], job["name"]);
 }
 
 #[test]

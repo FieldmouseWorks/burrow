@@ -58,7 +58,9 @@ base failures, fetches, signals, VM slots, memory limits and test coverage.
 ## Waiting for kept builds
 
 On a same-repository PR that missed its exact base cache, `run.sh wait`
-first runs the planner (`cold`) with its own Nix cache. The planner writes
+first runs the planner (`cold`) with its own Nix cache. A PR's exact key is
+the merge step's base tip (`steps.merge.outputs.tip`), the commit whose push
+saved it, so an exact hit skips the wait. The planner writes
 `cold.txt` and returns before builds in either evaluation mode, including
 whole-flake fallback paths. A plan it cannot safely produce is left to the
 real gate; `COLD_ONLY` no longer controls the gate's build policy.
@@ -69,10 +71,17 @@ bootstrap builds it with the same pinned compiler and lock file, in a fresh
 private target directory; wait steps pay this dependency build cost and
 registry access. Gate and negative runs retain the direct compilation path.
 Only an unfinished push of the same workflow at the merged base's exact SHA
-on the default branch justifies waiting. Every poll reads status before the
-exact cache lookup, including after a failed producer run or completion
-during planning. No matching run and no saved cache ends the wait promptly;
-a running producer is bounded by `WAIT_MAX` (3600 seconds by default).
+on the default branch justifies waiting, and only while that push's own leg
+(the job named as this one, `LEG_JOB`) is running on a runner. One still
+queued, or not created yet, may want the very runner this leg holds, so the
+leg builds cold rather than wait (#929). A leg on a runner is waited for to
+its end, with no cap: it ends by itself, and a wait cut off part way buys
+nothing. The waiter lists the push's runs once, then polls only their jobs
+(`WAIT_POLL`, 60 seconds), and reads the exact cache once the leg isn't
+building, which keeps a long wait inside the token's hourly requests. A
+leg that ended without saving, or no such run, ends the wait. A request
+past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
+which reports `degraded/kept-wait`.
 
 The job inherits the caller's token permissions. Shipped callers grant
 `actions: read` for both runs and caches, including in private repositories;
