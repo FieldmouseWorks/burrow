@@ -176,6 +176,18 @@ fn mutation_helpers_reject_nested_names_and_leave_denied_host_state_untouched() 
     assert!(root.rename_into("link/victim", &other, "stolen").is_err());
     assert!(root.rename_into("mine", &other, "link/moved").is_err());
     assert!(root.rename_into("mine", &other, "a/b").is_err());
+    for bad in [
+        "link/.", "link//", "link/", "./link", "link/./x", "//x", ".", "..", "", "a\0b",
+    ] {
+        assert!(root.create(bad, b"x").is_err(), "{bad}");
+        assert!(root.create_new(bad).is_err(), "{bad}");
+        assert!(root.remove(bad).is_err(), "{bad}");
+        assert!(root.rename_into(bad, &other, "t").is_err(), "{bad}");
+        assert!(root.rename_into("mine", &other, bad).is_err(), "{bad}");
+    }
+    for bad in ["link/.", "link/", "link//", "a/b", "\0"] {
+        assert!(root.mkdir_unique(bad).is_err(), "{bad}");
+    }
 
     let names: Vec<_> = fs::read_dir(&denied)
         .unwrap()
