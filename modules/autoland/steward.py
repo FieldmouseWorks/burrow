@@ -80,7 +80,7 @@ import step
 import train as T
 import waits
 from common import CFG, DRY, MIN, STATE, load, log, save
-from prs import open_prs, retire_stages, stage_news
+from prs import open_prs, retire_stages, retire_untracked_stages, stage_news
 
 
 # ---------------------------------------------------------------- main
@@ -266,6 +266,7 @@ def run_pass(kick, continuing=False):
     if kick is None and batch.traversal_full and not DRY:
         C.follow_renames({r["repo"].lower() for r in all_repos})
         retire_deleted(known, failed, digest)
+        retire_untracked_stages({r["repo"] for r in all_repos})
     live = {}  # the repos whose PRs it read: their heads' snapshots
     covered = []
     seen = set()

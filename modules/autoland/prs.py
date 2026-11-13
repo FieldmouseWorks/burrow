@@ -131,10 +131,30 @@ def retire_stages(repo, numbers):
     for name in sorted(os.listdir(C.STATE)):
         m = re.fullmatch(rf"pr-{k}-(\d+)\.json", name)
         if m and int(m[1]) not in numbers:
-            st = C.load(name, {})
-            if st.pop("stage", None) is not None:
-                C.save(name, st)
-                C.STAGE_NEWS.append((repo, int(m[1])))
+            _retire(name)
+
+
+def retire_untracked_stages(inventory):
+    """Every repo the steward tracks is `inventory`, from a complete
+    discovery: a record for a repo that isn't in it under the very name the
+    record carries (one renamed, transferred, spelled in another case, or no
+    longer tracked) leaves the snapshot, so a PR is one item under its
+    current name. Call it only on a full inventory: a partial one would drop
+    what's still open."""
+    for name in sorted(os.listdir(C.STATE)):
+        if re.fullmatch(r"pr-.+-\d+\.json", name):
+            stage = C.load(name, {}).get("stage")
+            if isinstance(stage, dict) and stage.get("repo") not in inventory:
+                _retire(name)
+
+
+def _retire(name):
+    """The PR state file's stage record goes, and its subscribers are told."""
+    st = C.load(name, {})
+    stage = st.pop("stage", None)
+    if stage is not None:
+        C.save(name, st)
+        C.STAGE_NEWS.append((stage.get("repo"), stage.get("number")) if isinstance(stage, dict) else (None, name))
 
 
 def stage_news():

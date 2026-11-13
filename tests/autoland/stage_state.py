@@ -60,6 +60,25 @@ assert C.STAGE_NEWS == [("sam/r", 5)], C.STAGE_NEWS
 run(clean(), 2000)
 assert saved()["since"] == C.NOW, saved()
 
+# A repo renamed, transferred or respelled: its old name's records go, under
+# whatever file they sit in, while the inventory's own names' stay.
+C.save("pr-old_r-1.json", {"head": "x", "stage": {"repo": "old/r", "number": 1, "stage": "ci", "by": None, "on": "d", "since": 1}})
+C.save("pr-Sam_r-5.json", {"stage": {"repo": "Sam/r", "number": 5, "stage": "ci", "by": None, "on": "d", "since": 1}})
+C.STAGE_NEWS.clear()
+prs.retire_untracked_stages({"sam/r", "sam/q"})
+assert "stage" not in C.load("pr-old_r-1.json", {}) and C.load("pr-old_r-1.json", {}).get("head") == "x"
+assert "stage" not in C.load("pr-Sam_r-5.json", {})
+assert saved() and C.load("pr-sam_q-5.json", {}).get("stage") and len(C.STAGE_NEWS) == 2, C.STAGE_NEWS
+
+# A repo's reset deletes its PRs' files: the removal is news, though no PR is left.
+import repos as R
+C.save("repo-sam_q.json", {})
+R.retire_checkouts = lambda repo, k: None
+R.V.sweep = lambda k, keep: []
+C.STAGE_NEWS.clear()
+R.reset({"repo": "sam/q"}, "sam_q", set(), {})
+assert not os.path.exists(f"{C.STATE}/pr-sam_q-5.json") and C.STAGE_NEWS == [("sam/q", 5)], C.STAGE_NEWS
+
 # The subscribers are told once, after the pass, and only when something changed.
 told = f"{tmp}/told"
 fake = f"{tmp}/proj-fake"

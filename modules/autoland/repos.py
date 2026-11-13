@@ -133,6 +133,9 @@ def reset(r, k, known, failed):
     mine = re.compile(rf"(dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
     for name in sorted(os.listdir(C.STATE)):
         if mine.fullmatch(name):
+            # A PR's listed stage goes with its file: news for the snapshot.
+            if name.startswith("pr-") and C.load(name, {}).get("stage") is not None:
+                C.STAGE_NEWS.append((repo, int(name.rsplit("-", 1)[1].removesuffix(".json"))))
             os.remove(os.path.join(C.STATE, name))
     os.remove(os.path.join(C.STATE, f"repo-{k}.json"))
 
