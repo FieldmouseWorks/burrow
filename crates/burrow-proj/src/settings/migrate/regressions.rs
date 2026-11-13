@@ -293,7 +293,7 @@ impl Drop for Child {
 #[test]
 fn the_deployed_fence_notifies_and_retains_waiters_on_success_and_failure() {
     use std::os::unix::net::UnixDatagram;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     for failed in [false, true] {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path();
@@ -327,7 +327,7 @@ fn the_deployed_fence_notifies_and_retains_waiters_on_success_and_failure() {
             .set_read_timeout(Some(std::time::Duration::from_secs(15)))
             .unwrap();
         let mut child = Child(
-            Command::new(std::env::current_exe().unwrap())
+            burrow_test::command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "settings::migrate::regressions::deployed_fence_child",

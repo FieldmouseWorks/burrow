@@ -6,7 +6,7 @@ use burrow_proj::{
     policy::{self, Identity, Kind},
 };
 use serde_json::json;
-use std::{fs, process::Command};
+use std::fs;
 
 #[test]
 fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_member() {
@@ -54,7 +54,7 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         policy::mark(&job, "done", false).unwrap(); // accepted answers stay parked
     }
     let run = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_burrow-proj"))
+        let out = burrow_test::command(env!("CARGO_BIN_EXE_burrow-proj"))
             .env("PROJ_CONFIG", &config)
             .env("PROJ_SELF", env!("CARGO_BIN_EXE_burrow-proj"))
             .args(args)

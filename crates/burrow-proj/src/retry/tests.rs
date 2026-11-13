@@ -175,7 +175,7 @@ fn start(r: &mut Rig, id: &str, mode: &str, project: &str) {
     } else {
         std::env::current_exe().unwrap()
     };
-    let child = Command::new(exe)
+    let child = burrow_test::command(exe)
         .args([
             "--exact",
             "retry::tests::child",
@@ -640,7 +640,7 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
     until(|| r.cfg.jobs.join("running/running").exists());
     let barrier = File::create(r.cfg.jobs.join(".slots/.lock")).unwrap();
     barrier.lock().unwrap();
-    let consumer = Command::new(std::env::current_exe().unwrap())
+    let consumer = burrow_test::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "retry::tests::child",
