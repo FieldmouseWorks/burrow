@@ -115,7 +115,8 @@ Every repo with code gets a `flake.nix` from the template
   machine can read ([which, and how](../crates/burrow-house/src/lib.rs)): its
   title is `area: plain sentence`, and a PR that adds Python or grows Python
   and shell past a fix, adds a timer, grows a code file past 1,000 lines,
-  grows an AGENTS.md's own part past 100 lines or names a model has the line
+  grows an AGENTS.md's own part past 100 lines, turns an automated spender on by
+  default or names a model has the line
   in its body that says why, with a reason. Each
   rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
   by the next run's, so fixing the title or body clears it; a fork's PR,
@@ -185,3 +186,26 @@ test follows inline and external test modules and rejects direct permission
 setters, including aliases, macro calls and permission-changing commands.
 To run its negative control against another checkout's `crates/`, set
 `BURROW_TEST_SOURCE_ROOT` for that test.
+
+## Where the house lessons came from
+
+The 2026-11-11 pipeline audit (tracker remi#981) put these lines in
+[`house/rules.md`](../house/rules.md). The block keeps one line each; this is
+the why, and what enforces each. "Open" means the issue is not built yet; the
+PR that lands its check updates this table.
+
+| Rule | Incident | Enforced by |
+|---|---|---|
+| A model runs only where judgment is needed | Claude sessions watching wend's VM replays cost about $40 a day, and 14 of 20 died at the deadline | burrow#646 deletes `proofJobs` (open); burrow#651 flags model jobs that end with no output (open) |
+| Nothing degrades quietly | A cache restore failed as a warning for 3 days, making the negative run take 2 hours | burrow#648: a `continue-on-error` step must declare its degradation key (open) |
+| A limit that work keeps hitting is a design bug | Proofs were killed at the 60-minute deadline and restarted from zero; remi#975 raised every steward job to 240 | burrow#651 flags repeated deadline deaths (open) |
+| Anything that spends is off until turned on | The drain spent on issues nobody had asked to run; usage totals couldn't be read | burrow#647 drain opt-in (open), burrow#650 (open); the house check's `Why on by default:` (live) |
+| A switch isn't real until enforced and shown | Pipeline-only mode was declared for 11 hours while nothing paused wend and PSIV | burrow#647 and burrow#655 `settings show` (open); burrow#651 flags work on paused repos (open) |
+| Work goes in explicit priority order | The drain took the oldest `ready` issue whatever its rank | burrow#652 (open) |
+| A person is asked once per decision | 15 of the owner's 18 open notices were one question | burrow#649 (open) |
+| Same inputs, same verdict | 61% of burrow's main gates re-ran a proven tree, 13% of judgments repeated, 141 job-hours were cancelled in 8 days | Conary#291, #292, #293 (open) |
+| Settings have one home | Options were documented in seven places and the authors list declared three times | burrow#655's guidance check (open) |
+| Lessons about parts Conary replaces are kept | Fixes to `autoland`, triage and drain, proofs, settings, `undo` and the train were lost with the parts | A `Conary lesson:` house line for fix PRs in those areas, linking an entry in Conary#294's `docs/lessons.toml` (open, not built) |
+| Pipeline pieces are reusable | Machine details crept into generic modules | The eval-each-module-alone gate (live), and a check that fails on a module naming one machine's host, user, repo or owner as a value (open, not built) |
+| Leave Nix you touch modular, its glue in Rust | The owner's rule, 2026-11-12 | The review rule on one machine's details in a generic module (live) and the `Why not Rust:` line (live) |
+| Settings change through the settings door | Settings changes went out as inbox jobs and PRs, holding lanes, CI and wall-clock time for what a live change does (owner rule, 2026-11-12) | burrow#655's door, `settings show` and its write path (open). Until it covers role maps and saved setups: change it on the host with a backup, run `proj check-config`, and record an undo line |

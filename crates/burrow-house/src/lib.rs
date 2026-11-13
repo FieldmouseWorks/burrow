@@ -15,6 +15,9 @@
 //!   - file-size: a PR that grows a code file past its limit, or grows one
 //!     already past it, splits it or says why not on a `Why not split:`
 //!     line.
+//!   - on-by-default: anything that spends is off until someone turns it on,
+//!     so a PR that turns an automated spender on (a drain, runners, paid
+//!     usage) says why on a `Why on by default:` line.
 //!   - model-names: tracked files never name a model, so a PR that adds a
 //!     line naming one says why on a `Why a model name:` line. A repo whose
 //!     subject is models (wend records which one wrote each fix) turns it

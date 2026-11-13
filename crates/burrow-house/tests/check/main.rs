@@ -10,6 +10,7 @@
 mod file_size;
 mod guide_size;
 mod model_names;
+mod on_by_default;
 mod runs;
 mod rust_first;
 mod timers;
@@ -338,7 +339,7 @@ impl Case {
         if self.model_names {
             &RULES
         } else {
-            &RULES[..5]
+            &RULES[..6]
         }
     }
 }
@@ -359,12 +360,13 @@ impl Outcome {
     }
 }
 
-pub const RULES: [&str; 6] = [
+pub const RULES: [&str; 7] = [
     "title",
     "rust-first",
     "timers",
     "file-size",
     "guide-size",
+    "on-by-default",
     "model-names",
 ];
 
@@ -376,6 +378,7 @@ pub fn wants(rule: &str) -> (&'static str, &'static str) {
         "timers" => ("Why a timer?", "Why a timer:"),
         "file-size" => ("Why not split?", "Why not split:"),
         "guide-size" => ("Why a longer guide?", "Why a longer guide:"),
+        "on-by-default" => ("Why on by default?", "Why on by default:"),
         "model-names" => ("Why a model name?", "Why a model name:"),
         _ => unreachable!("{rule}"),
     }
