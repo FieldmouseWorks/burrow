@@ -490,3 +490,132 @@ fn a_description_whose_write_was_lost_stays_the_jobs_own() {
     assert_eq!(outcomes, ["moved"], "{:?}", s.answered);
     assert!(writes(&hub).is_empty());
 }
+
+/// GitHub not answering the read of PR 5: answers wait, nothing written.
+fn unanswering() -> Hub {
+    Hub {
+        graphql: vec![("reviewThreads(first: 100)".into(), reply(502, json!({})))],
+        ..Hub::default()
+    }
+}
+
+// A retirement look whose answers are to go again (GitHub didn't answer,
+// or a turn's holds can't be read) doesn't retire the job: they go up
+// first, and posting them is what resumes it.
+#[test]
+fn a_retirement_look_leaves_answers_to_go_again_before_it_retires() {
+    let comment = |c: &str| json!({"pushed": null, "comment": c});
+    type Setup = fn(&std::path::Path, &dyn Fn(&str) -> Value);
+    let cases: [(&str, Setup, &str); 2] = [
+        (
+            "unanswered",
+            |dir, comment| {
+                std::fs::write(dir.join("turns"), "1").unwrap();
+                std::fs::write(dir.join("answers.json"), comment("one").to_string()).unwrap();
+            },
+            "unanswered",
+        ),
+        (
+            "holds unread",
+            |dir, comment| {
+                std::fs::write(dir.join("turns"), "2").unwrap();
+                std::fs::write(dir.join("1.answers"), comment("one").to_string()).unwrap();
+                std::fs::write(dir.join("answers.json"), comment("two").to_string()).unwrap();
+            },
+            "pending",
+        ),
+    ];
+    for (how, setup, outcome) in cases {
+        let jobs = tempfile::tempdir().unwrap();
+        let dir = folder(jobs.path());
+        std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+        setup(&dir, &comment);
+        let mut l = at(HANDED, jobs.path(), true);
+        l.retire = true;
+        let mut hub = unanswering();
+        let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+        let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+        assert_eq!(outcomes, [outcome], "{how}: {:?}", s.answered);
+        assert!(writes(&hub).is_empty(), "{how}");
+        let kept = &s.answering["job-1"];
+        assert!(
+            s.stop.is_empty() && !kept.retiring && kept.taken.is_empty(),
+            "{how}"
+        );
+        // The next retirement look, GitHub answering and the holds read:
+        // they go up, which resumes the job, so it isn't retired and
+        // keeps the branch.
+        std::fs::write(dir.join("1.holds"), "await SAM/R#5").unwrap();
+        l.answering = s.answering;
+        let mut hub = github(HANDED, "Does it.", json!([]));
+        let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+        assert!(
+            s.answered.iter().all(|a| a.outcome == "posted"),
+            "{how}: {:?}",
+            s.answered
+        );
+        assert!(!writes(&hub).is_empty(), "{how}");
+        let kept = &s.answering["job-1"];
+        assert!(kept.resumes && kept.owns && !kept.retiring, "{how}");
+        assert!(s.stop.is_empty() && !s.clear, "{how}");
+    }
+}
+
+// A job named to stop that finished a turn meanwhile (resumed before the
+// stop took): once proj says it's over, that turn's answers are collected,
+// kept while GitHub won't take them, and go up once it does; the turns
+// already taken never again.
+#[test]
+fn a_retired_jobs_answers_left_behind_go_up_once_its_over() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = folder(jobs.path());
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    let one = json!({"pushed": null, "comment": "one"});
+    kept_turn(&dir, 1, "await SAM/R#5", one.clone());
+    kept_turn(&dir, 2, "", json!({"pushed": null, "comment": "two"}));
+    let mut l = at(HANDED, jobs.path(), true);
+    let mut rec = retiring(handing());
+    rec.taken.push(digest(&one.to_string()));
+    l.answering.insert("job-1".into(), rec);
+    // Still at work: named again, nothing collected.
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    let s = looked(&mut hub, &l, "running", &[]);
+    assert!(s.stop.len() == 1 && s.answered.is_empty() && writes(&hub).is_empty());
+    // Over, GitHub not answering: kept to go again, no longer retiring.
+    l.answering = s.answering;
+    let mut hub = unanswering();
+    let s = looked(&mut hub, &l, "stopped", &[]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["unanswered"], "{:?}", s.answered);
+    assert!(s.stop.is_empty() && !s.answering["job-1"].retiring);
+    // Then it goes up, turn 2's alone, and the job is done with.
+    l.answering = s.answering;
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    let s = looked(&mut hub, &l, "stopped", &[]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["posted"], "{:?}", s.answered);
+    assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
+    assert!(s.answering.is_empty() && s.clear);
+}
+
+// A job retired because someone else pushed: what it left once it's over is
+// for a head the PR has left, so the head guard turns it away, nothing
+// written.
+#[test]
+fn a_stale_retired_jobs_answers_are_turned_away_once_its_over() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = folder(jobs.path());
+    std::fs::write(dir.join("turns"), "1").unwrap();
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": PUSHED, "comment": "mine"}).to_string(),
+    )
+    .unwrap();
+    let mut l = at(THEIRS, jobs.path(), true);
+    l.answering.insert("job-1".into(), retiring(handing()));
+    let mut hub = github(THEIRS, "Does it.", json!([]));
+    let s = looked(&mut hub, &l, "stopped", &[]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["moved"], "{:?}", s.answered);
+    assert!(writes(&hub).is_empty() && s.answering.is_empty() && s.clear);
+}

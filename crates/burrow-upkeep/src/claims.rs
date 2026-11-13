@@ -15,7 +15,9 @@
 //! stopped, since whatever it does next is for a head the PR no longer has.
 //! A job named to stop (that, or retired for a new fix job: `Look::retire`)
 //! stays kept, retiring, and named again each pass until proj says it's
-//! over; `Seen::clear` says when no kept job may still push. One still waiting for its slot can't have pushed. One at
+//! over, then what it left that hasn't gone up is collected as any ended
+//! job's is; one waiting between turns isn't retired while answers of its
+//! are to go again; `Seen::clear` says when no kept job may still push. One still waiting for its slot can't have pushed. One at
 //! work is named once GitHub's record of the branch says the head is
 //! someone else's push, not the machinery App's its jobs push as
 //! (answer.rs's `pusher`). Without that App its jobs push as the user, as
@@ -186,8 +188,14 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             if life.at_work(None) {
                 rec.retire();
                 retire(&mut seen, jid, rec, "it is retiring from the branch");
+                continue;
             }
-            continue;
+            // Over, as proj says: retired. What it left that hasn't gone up
+            // (answers GitHub turned away, a turn whose holds couldn't be
+            // read, a turn it finished after it was named) is collected
+            // below as any ended job's is, and kept while it can go again:
+            // the head guard turns away whatever is for a head the PR left.
+            rec.retiring = false;
         }
         let resumed = dir
             .text("turns")
@@ -385,7 +393,11 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         } else if between {
             let resumes = woken(p, l, &rec, await_line(&dir, &own));
             let mut rec = rec.between(resumes);
-            if l.retire && !rec.resumes {
+            // Answers still to go again (turned away, or a turn's holds
+            // unread) go up before it's retired: posting them is what
+            // resumes it, and the look says so, so no new job is handed
+            // the branch meanwhile.
+            if l.retire && !rec.resumes && !retry {
                 rec.retire();
                 retire(&mut seen, jid, rec, "a new fix job is to be handed the PR");
             } else {
