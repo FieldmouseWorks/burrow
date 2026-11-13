@@ -88,7 +88,7 @@ target=$2
 shift 2
 [ "$*" = '-p burrow-flake-check --bin burrow-flake-wait' ] || exit 95
 mkdir -p "$target/debug"
-printf '#!/usr/bin/env bash\necho api-waiter-ran\n' > "$target/debug/burrow-flake-wait"
+printf '#!%s\necho api-waiter-ran\n' "$BASH" > "$target/debug/burrow-flake-wait"
 chmod +x "$target/debug/burrow-flake-wait"
 "#,
     );

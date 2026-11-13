@@ -28,7 +28,12 @@ fn poll(
 ) -> Result<Outcome> {
     let start = Instant::now();
     loop {
-        let (saved, running) = state()?;
+        // A request cut off by the deadline is the deadline, not a failure.
+        let (saved, running) = match state() {
+            Ok(s) => s,
+            Err(_) if start.elapsed() >= max => return Ok(Outcome::TimedOut),
+            Err(e) => return Err(e),
+        };
         if saved {
             return Ok(Outcome::Saved);
         }
@@ -126,8 +131,12 @@ fn wait() -> Result<()> {
         tip: &tip,
         key: &key,
     };
-    let mut api = Gh::default();
-    let max = var("WAIT_MAX").parse().unwrap_or(3600);
+    let max: u64 = var("WAIT_MAX").parse().unwrap_or(3600);
+    // One absolute deadline bounds every request, page and retry pause.
+    let mut api = Gh {
+        until: Some(Instant::now() + Duration::from_secs(max)),
+        ..Gh::default()
+    };
     println!(
         "checking {workflow}'s default-branch push at {tip} for the builds this leg would compile:\n{cold}"
     );
@@ -153,5 +162,5 @@ fn main() {
     }
 }
 #[cfg(test)]
-#[path = "wait/tests.rs"]
+#[path = "wait/cases.rs"]
 mod tests;

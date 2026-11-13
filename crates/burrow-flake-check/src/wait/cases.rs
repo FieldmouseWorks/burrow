@@ -169,3 +169,45 @@ fn unavailable_api_permission_is_an_error_for_the_soft_step() {
             .contains("403")
     );
 }
+#[test]
+fn a_request_cut_off_by_the_deadline_is_a_timeout_not_a_failure() {
+    assert_eq!(
+        poll(Duration::ZERO, Duration::ZERO, || Err("deadline".into())).unwrap(),
+        Outcome::TimedOut
+    );
+    assert!(
+        poll(Duration::from_secs(60), Duration::ZERO, || Err(
+            "denied".into()
+        ))
+        .is_err()
+    );
+}
+#[test]
+fn a_stalled_gh_request_ends_at_the_wait_deadline() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = env::temp_dir().join(format!("wait-stall-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let gh = dir.join("gh");
+    fs::write(&gh, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut api = Gh {
+        program: Some(gh.into_os_string()),
+        until: Some(Instant::now() + Duration::from_millis(300)),
+        ..Gh::default()
+    };
+    let p = Producer {
+        repo: "o/r",
+        workflow: "w",
+        branch: "main",
+        tip: "t",
+        key: "k",
+    };
+    let started = Instant::now();
+    let out = poll(Duration::from_millis(300), Duration::ZERO, || {
+        p.state(&mut api)
+    })
+    .unwrap();
+    assert_eq!(out, Outcome::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    fs::remove_dir_all(dir).ok();
+}
