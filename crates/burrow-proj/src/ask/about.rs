@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 mod state;
-use state::{Group, Member, State};
+use state::{Group, State};
+mod pauses;
+pub(crate) use pauses::{Pauses, restore};
 pub(crate) const FILE: &str = "question-about"; // legacy host metadata
 const MAX_KEY: usize = 120;
 
@@ -51,18 +53,32 @@ pub(crate) fn locked(cfg: &Config) -> Result<fs::File, String> {
 
 /// Legacy publications predate embedded identity. Bind them to the opened
 /// file itself, never to the separately allocated question-id marker.
-fn publication(job: &Job, name: &str) -> Option<Question> {
+fn publication(job: &Job, name: &str) -> Result<Option<Question>, String> {
     use std::{io::Read, os::unix::fs::MetadataExt};
-    let file = crate::state_reads::open(&host_path(job, name)).ok()?;
-    let meta = file.metadata().ok()?;
+    let path = host_path(job, name);
+    let file = match crate::state_reads::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let meta = file.metadata().map_err(|e| e.to_string())?;
     let mut text = String::new();
-    file.take(64_001).read_to_string(&mut text).ok()?;
+    file.take(64_001)
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
     if text.len() > 64_000 {
-        return None;
+        return Err(format!(
+            "{} exceeds the question size limit",
+            path.display()
+        ));
     }
-    let mut q: Question = serde_json::from_str(&text).ok()?;
+    let mut q: Question =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     q.id.get_or_insert_with(|| format!("legacy:{}:{}", meta.dev(), meta.ino()));
-    Some(q)
+    if q.id.as_deref() == Some("") {
+        return Err(format!("{} has an empty question identity", job.id));
+    }
+    Ok(Some(q))
 }
 
 fn legacy_due(job: &Job) -> i64 {
@@ -87,45 +103,53 @@ fn legacy_due(job: &Job) -> i64 {
 
 /// Both forms of an unanswered question, with identity read from the same
 /// publication as policy. Released legacy questions are always owner-required.
-fn open_raw(job: &Job) -> Option<Question> {
-    publication(job, "question").or_else(|| {
-        let default = read(&host_path(job, "question-needs-owner"))?;
-        if host_path(job, "question-released").exists() {
-            return publication(job, "question-released");
-        }
-        use std::os::unix::fs::MetadataExt;
-        let meta = fs::metadata(host_path(job, "question-needs-owner")).ok()?;
-        Some(Question {
-            id: Some(format!("legacy:{}:{}", meta.dev(), meta.ino())),
-            recommendation: super::Recommendation {
-                default,
-                one_way: true,
-                about: None,
-            },
-            due: legacy_due(job),
-        })
-    })
+fn open_raw(job: &Job) -> Result<Option<Question>, String> {
+    if let Some(q) = publication(job, "question")? {
+        return Ok(Some(q));
+    }
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let path = host_path(job, "question-needs-owner");
+    let file = match crate::state_reads::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    if let Some(q) = publication(job, "question-released")? {
+        return Ok(Some(q));
+    }
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let mut default = String::new();
+    file.take(64_001)
+        .read_to_string(&mut default)
+        .map_err(|e| e.to_string())?;
+    if default.len() > 64_000 {
+        return Err(format!(
+            "{} exceeds the recommendation size limit",
+            path.display()
+        ));
+    }
+    Ok(Some(Question {
+        id: Some(format!("legacy:{}:{}", meta.dev(), meta.ino())),
+        recommendation: super::Recommendation {
+            default: default.trim_end_matches('\n').to_owned(),
+            one_way: true,
+            about: None,
+        },
+        due: legacy_due(job),
+        pauses: Pauses::default(),
+    }))
 }
 
-/// The one liveness rule: a question waits until an accepted answer (a
-/// person's or the deadline's default) retires it, even while that answer's
-/// cleanup is still pending. Membership, leadership and policy all read it.
-pub(crate) fn identity(job: &Job) -> Option<String> {
-    open_raw(job)?
-        .id
-        .filter(|s| !s.is_empty() && !crate::question::retiring(job, s))
+/// Membership is absent only after a confirmed missing or retired publication.
+/// An unreadable member holds its place and policy until authority recovers.
+pub(crate) fn identity(job: &Job) -> Result<Option<String>, String> {
+    Ok(open_raw(job)?
+        .and_then(|q| q.id)
+        .filter(|s| !crate::question::retiring(job, s)))
 }
 
-/// The registry's view of a job's live question. A job with none needs no
-/// registry, so only questions are held by its errors.
 fn registry(job: &Job) -> Result<Option<State>, String> {
-    if identity(job).is_none() {
-        if open_raw(job).is_none()
-            && (host_path(job, "question").exists()
-                || host_path(job, "question-needs-owner").exists())
-        {
-            return Err(format!("{} has unreadable question authority", job.id));
-        }
+    if identity(job)?.is_none() {
         return Ok(None);
     }
     State::load(job.cfg).map(Some)
@@ -135,7 +159,7 @@ pub(crate) fn key_of(job: &Job) -> Result<Option<String>, String> {
     let Some(state) = registry(job)? else {
         return Ok(None);
     };
-    Ok(state.standing(job).map(|(key, _)| key.to_owned()))
+    Ok(state.standing(job)?.map(|(key, _)| key.to_owned()))
 }
 
 /// The leader whose notice carries this job's question. Err when the registry
@@ -144,11 +168,11 @@ pub(crate) fn follows(job: &Job) -> Result<Option<String>, String> {
     let Some(state) = registry(job)? else {
         return Ok(None);
     };
-    let Some((_, group)) = state.standing(job) else {
+    let Some((_, group)) = state.standing(job)? else {
         return Ok(None);
     };
     Ok(state
-        .live(job.cfg, group)
+        .live(job.cfg, group)?
         .first()
         .map(|m| m.id.clone())
         .filter(|id| id != job.id))
@@ -157,10 +181,7 @@ pub(crate) fn follows(job: &Job) -> Result<Option<String>, String> {
 /// Either form of the open question, a released one included, under its
 /// effective policy. Err when its authority is there but can't be read.
 pub(crate) fn open(job: &Job) -> Result<Option<Question>, String> {
-    let Some(mut q) = open_raw(job) else {
-        if host_path(job, "question").exists() || host_path(job, "question-needs-owner").exists() {
-            return Err(format!("{} has unreadable question authority", job.id));
-        }
+    let Some(mut q) = open_raw(job)? else {
         return Ok(None);
     };
     if q.id
@@ -176,10 +197,7 @@ pub(crate) fn open(job: &Job) -> Result<Option<Question>, String> {
 /// The unanswered, unreleased question under its effective policy. Err when
 /// its authority is there but can't be read: never "no question".
 pub(crate) fn load(job: &Job) -> Result<Option<Question>, String> {
-    let Some(mut q) = publication(job, "question") else {
-        if host_path(job, "question").exists() {
-            return Err(format!("{} has unreadable question authority", job.id));
-        }
+    let Some(mut q) = publication(job, "question")? else {
         return Ok(None);
     };
     if q.id
@@ -194,7 +212,7 @@ pub(crate) fn load(job: &Job) -> Result<Option<Question>, String> {
 
 pub(crate) fn apply(job: &Job, q: &mut Question) -> Result<(), String> {
     if q.id.is_none() {
-        q.id = identity(job);
+        q.id = identity(job)?;
     }
     State::load(job.cfg)?.apply(job, q)
 }
@@ -205,10 +223,10 @@ pub(crate) fn cohort(job: &Job) -> Result<Vec<(String, String)>, String> {
     let Some(state) = registry(job)? else {
         return Ok(vec![]);
     };
-    let Some((_, group)) = state.standing(job) else {
+    let Some((_, group)) = state.standing(job)? else {
         return Ok(vec![]);
     };
-    let live = state.live(job.cfg, group);
+    let live = state.live(job.cfg, group)?;
     if live.first().map(|m| m.id.as_str()) != Some(job.id) {
         return Ok(vec![]);
     }
@@ -221,11 +239,11 @@ pub(crate) fn cohort(job: &Job) -> Result<Vec<(String, String)>, String> {
 
 #[cfg(test)]
 pub(crate) fn question_id(job: &Job) -> String {
-    identity(job).unwrap_or_default()
+    identity(job).unwrap().unwrap_or_default()
 }
 
 pub(crate) fn still_waiting(job: &Job, key: &str, question: &str) -> Result<bool, String> {
-    Ok(identity(job).as_deref() == Some(question) && key_of(job)?.as_deref() == Some(key))
+    Ok(identity(job)?.as_deref() == Some(question) && key_of(job)?.as_deref() == Some(key))
 }
 
 pub(crate) fn publish(
@@ -239,15 +257,18 @@ pub(crate) fn publish(
     let mut state = State::load(job.cfg)?;
     // The caller read this job's policy before the lock. Whatever joined,
     // merged or shifted its group since binds the question it moves.
-    if let Some((_, group)) = state.standing(job)
+    if let Some((_, group)) = state.standing(job)?
         && q.id.is_some()
-        && q.id == identity(job)
+        && q.id == identity(job)?
     {
         q.due = group.due;
         q.recommendation.one_way |= group.one_way;
     }
     let before = state.0.get(key);
-    let live = before.map(|g| state.live(job.cfg, g)).unwrap_or_default();
+    let live = before
+        .map(|g| state.live(job.cfg, g))
+        .transpose()?
+        .unwrap_or_default();
     let existing = live
         .iter()
         .any(|m| m.id == job.id && Some(&m.question) == q.id.as_ref());
@@ -255,18 +276,17 @@ pub(crate) fn publish(
         due: q.due,
         one_way: q.recommendation.one_way,
         members: live,
+        pauses: state.clock(job, &q)?,
     };
     if !next.members.is_empty() {
         let before = before.unwrap();
         next.due = before.due;
         next.one_way |= before.one_way;
+        next.pauses = before.pauses.clone();
     }
     if !existing {
         next.members.retain(|m| m.id != job.id);
-        next.members.push(Member {
-            id: job.id.to_owned(),
-            question: q.id.clone().ok_or("question has no identity")?,
-        });
+        next.members.push(state.member(job, &q)?);
     }
     for group in state.0.values_mut() {
         group.members.retain(|m| m.id != job.id);
@@ -278,44 +298,6 @@ pub(crate) fn publish(
     // identity, so even a crash here keeps their constraints authoritative.
     state.save(job.cfg)?;
     write(&q)
-}
-
-/// Move the question's effective deadline out to `due`, never in: its
-/// group's when it has one (every member waits on it), else its own.
-pub(crate) fn extend(job: &Job, due: i64) -> Result<(), String> {
-    let _lock = locked(job.cfg)?;
-    if load(job)?.is_none() {
-        return Ok(());
-    }
-    let mut state = State::load(job.cfg)?;
-    if let Some(key) = state.standing(job).map(|(key, _)| key.to_owned()) {
-        let group = state.0.get_mut(&key).expect("standing names a group");
-        if due > group.due {
-            group.due = due;
-            state.save(job.cfg)?;
-        }
-        return Ok(());
-    }
-    let path = host_path(job, "question");
-    let Some(text) = read(&path) else {
-        if path.exists() {
-            return Err(format!("{} has unreadable question authority", job.id));
-        }
-        return Ok(());
-    };
-    let mut q: Question = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    if q.recommendation.about.is_some() || host_path(job, FILE).exists() {
-        return Err(format!("{} has an unbound shared question", job.id));
-    }
-    if due > q.due {
-        q.due = due;
-        swap(
-            &path,
-            &serde_json::to_string(&q).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 pub(crate) fn footer(job: &Job) -> Result<String, String> {
@@ -362,31 +344,32 @@ pub(crate) fn merge(cfg: &Config, key: &str, ids: &[String]) -> Result<String, S
     let mut named = Vec::new();
     for id in &ids {
         let job = Job::new(cfg, id);
-        let mut q = open_raw(&job).ok_or_else(|| format!("{id} has no open question to merge"))?;
+        let mut q = open_raw(&job)?.ok_or_else(|| format!("{id} has no open question to merge"))?;
         state.apply(&job, &mut q)?;
-        let question = identity(&job).ok_or_else(|| format!("{id} has no question identity"))?;
+        identity(&job)?.ok_or_else(|| format!("{id} has no question identity"))?;
         let since = read(&host_path(&job, "question-since"))
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
-        named.push((
-            since,
-            Member {
-                id: id.clone(),
-                question,
-            },
-            q,
-        ));
+        named.push((since, state.member(&job, &q)?, state.clock(&job, &q)?, q));
     }
     named.sort_by(|a, b| (b.0, &b.1.id).cmp(&(a.0, &a.1.id)));
     let before = state.0.get(&key);
-    let live = before.map(|g| state.live(cfg, g)).unwrap_or_default();
+    let live = before
+        .map(|g| state.live(cfg, g))
+        .transpose()?
+        .unwrap_or_default();
     let due = if live.is_empty() {
-        named[0].2.due
+        named[0].3.due
     } else {
         before.unwrap().due
     };
     let one_way = (!live.is_empty() && before.unwrap().one_way)
-        || named.iter().any(|n| n.2.recommendation.one_way);
+        || named.iter().any(|n| n.3.recommendation.one_way);
+    let pauses = if live.is_empty() {
+        named[0].2.clone()
+    } else {
+        before.unwrap().pauses.clone()
+    };
     let members = named
         .iter()
         .map(|n| n.1.clone())
@@ -402,6 +385,7 @@ pub(crate) fn merge(cfg: &Config, key: &str, ids: &[String]) -> Result<String, S
             due,
             one_way,
             members,
+            pauses,
         },
     );
     // All source removals, destination membership and effective policies are

@@ -1,0 +1,139 @@
+//! A damaged member remains a member; only confirmed retirement frees it.
+use super::*;
+
+fn damage(job: &Job, name: &str, kind: &str) -> Vec<u8> {
+    let path = host_path(job, name);
+    let before = fs::read(&path).unwrap();
+    match kind {
+        "parse" => fs::write(path, "{broken").unwrap(),
+        "read" => {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(path).unwrap();
+        }
+        "large" => fs::write(path, "x".repeat(65_000)).unwrap(),
+        _ => unreachable!(),
+    }
+    before
+}
+
+fn repair(job: &Job, name: &str, before: Vec<u8>) {
+    let path = host_path(job, name);
+    if path.is_dir() {
+        fs::remove_dir(&path).unwrap();
+    }
+    fs::write(path, before).unwrap();
+}
+
+#[test]
+fn unknown_member_liveness_blocks_changes_and_reply_cohorts_until_repaired() {
+    for released in [false, true] {
+        for kind in ["parse", "read", "large"] {
+            for damaged in ["leader", "follower"] {
+                let (_dir, cfg) = fixture();
+                asks(&cfg, "leader", Some("subject"), true);
+                asks(&cfg, "follower", Some("subject"), false);
+                let job = Job::new(&cfg, damaged);
+                if released {
+                    let mut state: serde_json::Value = serde_json::from_str(
+                        &fs::read_to_string(control_root(&cfg).join(".about/state.json")).unwrap(),
+                    )
+                    .unwrap();
+                    state["subject"]["due"] = (crate::now() - 1).into();
+                    fs::write(
+                        control_root(&cfg).join(".about/state.json"),
+                        state.to_string(),
+                    )
+                    .unwrap();
+                    expire(&cfg, &job).unwrap();
+                }
+                let name = if released {
+                    "question-released"
+                } else {
+                    "question"
+                };
+                let before = damage(&job, name, kind);
+                let registry = control_root(&cfg).join(".about/state.json");
+                let saved = fs::read(&registry).unwrap();
+                let leader = Job::new(&cfg, "leader");
+                let follower = Job::new(&cfg, "follower");
+                assert!(follows(&follower).is_err(), "{released} {kind} {damaged}");
+                assert!(cohort(&leader).is_err(), "{released} {kind} {damaged}");
+                assert!(crate::cmd::reply_answer(&cfg, "leader", "yes", false).is_err());
+                assert!(merge(&cfg, "elsewhere", &["follower".into()]).is_err());
+                asks(&cfg, "outside", None, false);
+                assert!(merge(&cfg, "subject", &["outside".into()]).is_err());
+                record(
+                    &Job::new(&cfg, "outside"),
+                    &Recommendation {
+                        default: "leave it".into(),
+                        one_way: false,
+                        about: Some("subject".into()),
+                    },
+                )
+                .unwrap();
+                assert!(finish(&cfg, &Job::new(&cfg, "outside"), "ask").is_err());
+                assert_eq!(fs::read(&registry).unwrap(), saved);
+                repair(&job, name, before);
+                assert_eq!(key_of(&job).unwrap().as_deref(), Some("subject"));
+                assert!(open(&job).unwrap().unwrap().recommendation.one_way);
+                assert_eq!(cohort(&leader).unwrap().len(), 1);
+                assert_eq!(
+                    leader.turns().as_deref(),
+                    Some(if released && damaged == "leader" {
+                        "2"
+                    } else {
+                        "1"
+                    })
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_import_does_not_drop_unreadable_live_or_released_members() {
+    for released in [false, true] {
+        for name in if released {
+            vec!["question-released", "question-needs-owner", ABOUT_FILE]
+        } else {
+            vec!["question", ABOUT_FILE]
+        } {
+            let (_dir, cfg) = fixture();
+            asks(&cfg, "old", None, true);
+            let old = Job::new(&cfg, "old");
+            if released {
+                let mut q = load_raw(&old).unwrap();
+                q.due = crate::now() - 1;
+                fs::write(
+                    host_path(&old, "question"),
+                    serde_json::to_string(&q).unwrap(),
+                )
+                .unwrap();
+                expire(&cfg, &old).unwrap();
+            }
+            fs::write(host_path(&old, ABOUT_FILE), "subject").unwrap();
+            let registry = control_root(&cfg).join(".about");
+            fs::create_dir_all(&registry).unwrap();
+            fs::write(
+                registry.join("7375626a656374"),
+                serde_json::json!({
+                    "due":crate::now()+1000, "one_way":true, "members":["old"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let before = damage(&old, name, "read");
+            asks(&cfg, "new", None, false);
+            assert!(
+                merge(&cfg, "subject", &["new".into()]).is_err(),
+                "{released} {name}"
+            );
+            assert!(!registry.join("state.json").exists());
+            repair(&old, name, before);
+            merge(&cfg, "subject", &["new".into()]).unwrap();
+            assert_eq!(key_of(&old).unwrap().as_deref(), Some("subject"));
+            assert!(open(&old).unwrap().unwrap().recommendation.one_way);
+            assert_eq!(cohort(&Job::new(&cfg, "new")).unwrap().len(), 1);
+        }
+    }
+}

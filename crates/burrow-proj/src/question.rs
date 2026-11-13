@@ -257,7 +257,11 @@ impl Resume {
                 deadline: answered && deadline,
                 accepted: false,
                 applied: false,
-                question: (!asking).then(|| crate::ask::identity(job)).flatten(),
+                question: if asking {
+                    None
+                } else {
+                    crate::ask::identity(job)?
+                },
             },
         )?;
         let state = Self {

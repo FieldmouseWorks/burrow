@@ -352,3 +352,9 @@ mod notices;
 
 #[path = "authority.rs"]
 mod authority;
+
+#[path = "reading.rs"]
+mod reading;
+
+#[path = "pauses.rs"]
+mod pauses;

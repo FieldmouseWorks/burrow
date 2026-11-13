@@ -5,8 +5,8 @@ use std::fs;
 
 mod about;
 pub(crate) use about::{
-    FILE as ABOUT_FILE, cohort, extend, follows, footer, identity, key_of, load, locked, merge,
-    open, still_waiting,
+    FILE as ABOUT_FILE, cohort, follows, footer, identity, key_of, load, locked, merge, open,
+    restore, still_waiting,
 };
 mod host;
 pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
@@ -59,6 +59,9 @@ pub(crate) struct Question {
     pub id: Option<String>,
     pub recommendation: Recommendation,
     pub due: i64,
+    /// Credits owned here while unkeyed; shared questions use the registry.
+    #[serde(default)]
+    pub pauses: about::Pauses,
 }
 const POLICY: &str = "\n\nWithout an answer by ";
 const ONE_WAY: &str =
@@ -169,6 +172,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         let q = Question {
+            pauses: prior.as_ref().map(|q| q.pauses.clone()).unwrap_or_default(),
             id: Some(
                 prior
                     .and_then(|q| q.id)
@@ -415,6 +419,7 @@ mod tests {
         fs::write(job.turn("1", "end"), "ask\n").unwrap();
         fs::write(job.turn("1", "outcome"), "done\n").unwrap();
         let q = Question {
+            pauses: Default::default(),
             id: None,
             recommendation: Recommendation {
                 default: "keep the change".into(),

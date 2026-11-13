@@ -8,14 +8,14 @@ fn registry(cfg: &Config) -> std::path::PathBuf {
     control_root(cfg).join(".about/state.json")
 }
 
-fn edit_group(cfg: &Config, key: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+pub(super) fn edit_group(cfg: &Config, key: &str, edit: impl FnOnce(&mut serde_json::Value)) {
     let mut state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(registry(cfg)).unwrap()).unwrap();
     edit(&mut state[key]);
     fs::write(registry(cfg), state.to_string()).unwrap();
 }
 
-fn group_due(cfg: &Config, key: &str) -> i64 {
+pub(super) fn group_due(cfg: &Config, key: &str) -> i64 {
     let state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(registry(cfg)).unwrap()).unwrap();
     state[key]["due"].as_i64().unwrap()
@@ -159,102 +159,104 @@ fn default_admission_releases_the_registry_for_concurrent_publication() {
     use std::fs::{OpenOptions, TryLockError};
     use std::time::{Duration, Instant};
 
-    for upgrade in [false, true] {
-        for slots in [1, 4] {
-            let (dir, mut cfg) = fixture();
-            let inbox = cfg.inbox.as_mut().unwrap();
-            inbox.state = dir.path().join("inbox");
-            inbox.wake = dir.path().join("inbox-wake");
-            inbox.triage = Some(crate::config::Triage {
-                sort_unlabelled: true,
-                owner_label: "owner".into(),
-                owner: None,
-                skip: vec![],
-                at_once: slots,
-                drain: None,
-                drain_jobs: 4,
-            });
-            for id in ["a", "z"] {
-                asks(&cfg, id, Some("subject"), false);
-                let record = cfg.inbox.as_ref().unwrap().state.join(".triage").join(id);
-                fs::create_dir_all(&record).unwrap();
-                fs::write(record.join("job"), id).unwrap();
-            }
-            edit_group(&cfg, "subject", |g| g["due"] = (crate::now() - 1).into());
-            let other = Job::new(&cfg, "z");
-            let held = other.lock().unwrap();
-            let open_lock = |path| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .unwrap()
-            };
-            let authority = open_lock(registry(&cfg).with_file_name("lock"));
-            let admission = open_lock(dir.path().join("inbox-wake.lock"));
-            let running = std::thread::spawn({
-                let cfg = cfg.clone();
-                move || {
-                    let job = Job::new(&cfg, "a");
-                    let _held = job.lock().unwrap();
-                    expire(&cfg, &job)
+    for (expiring, scanned) in [("a", "z"), ("z", "a")] {
+        for upgrade in [false, true] {
+            for slots in [1, 4] {
+                let (dir, mut cfg) = fixture();
+                let inbox = cfg.inbox.as_mut().unwrap();
+                inbox.state = dir.path().join("inbox");
+                inbox.wake = dir.path().join("inbox-wake");
+                inbox.triage = Some(crate::config::Triage {
+                    sort_unlabelled: true,
+                    owner_label: "owner".into(),
+                    owner: None,
+                    skip: vec![],
+                    at_once: slots,
+                    drain: None,
+                    drain_jobs: 4,
+                });
+                for id in [expiring, scanned] {
+                    asks(&cfg, id, Some("subject"), false);
+                    let record = cfg.inbox.as_ref().unwrap().state.join(".triage").join(id);
+                    fs::create_dir_all(&record).unwrap();
+                    fs::write(record.join("job"), id).unwrap();
                 }
-            });
-            // A blocked sorting scan must leave the registry available to
-            // the publisher holding the job it is inspecting. Observe the
-            // locks themselves, and release z even on the broken ordering.
-            let until = Instant::now() + Duration::from_secs(3);
-            let scans_first = loop {
-                match authority.try_lock() {
-                    Ok(()) => authority.unlock().unwrap(),
-                    Err(TryLockError::WouldBlock) => break false,
-                    Err(e) => panic!("{e}"),
-                }
-                match admission.try_lock() {
-                    Ok(()) => admission.unlock().unwrap(),
-                    Err(TryLockError::WouldBlock) => {
-                        // Both observations must describe the blocked scan:
-                        // it may have taken both locks between our probes.
-                        break match authority.try_lock() {
-                            Ok(()) => {
-                                authority.unlock().unwrap();
-                                true
-                            }
-                            Err(TryLockError::WouldBlock) => false,
-                            Err(e) => panic!("{e}"),
-                        };
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-                if Instant::now() >= until {
-                    break false;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            };
-            if scans_first && upgrade {
-                // This publication can finish while z is locked, and its
-                // upgrade must bind the default after admission completes.
-                asks(&cfg, "upgrade", Some("subject"), true);
-            }
-            drop(held);
-            running.join().unwrap().unwrap();
-            assert!(
-                scans_first,
-                "default held the registry while scanning job locks"
-            );
-            let a = Job::new(&cfg, "a");
-            assert_eq!(a.turns().as_deref(), Some("2"));
-            if upgrade {
-                assert!(host_path(&a, "question-needs-owner").exists());
-                assert!(!a.path("prompt.2").exists());
-            } else {
-                assert!(
-                    read(&a.path("prompt.2"))
+                edit_group(&cfg, "subject", |g| g["due"] = (crate::now() - 1).into());
+                let other = Job::new(&cfg, scanned);
+                let held = other.lock().unwrap();
+                let open_lock = |path| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
                         .unwrap()
-                        .contains("Take your reversible")
+                };
+                let authority = open_lock(registry(&cfg).with_file_name("lock"));
+                let admission = open_lock(dir.path().join("inbox-wake.lock"));
+                let running = std::thread::spawn({
+                    let cfg = cfg.clone();
+                    move || {
+                        let job = Job::new(&cfg, expiring);
+                        let _held = job.lock().unwrap();
+                        expire(&cfg, &job)
+                    }
+                });
+                // A blocked sorting scan must leave the registry available to
+                // the publisher holding the job it is inspecting. Observe the
+                // locks themselves, and release z even on the broken ordering.
+                let until = Instant::now() + Duration::from_secs(3);
+                let scans_first = loop {
+                    match authority.try_lock() {
+                        Ok(()) => authority.unlock().unwrap(),
+                        Err(TryLockError::WouldBlock) => break false,
+                        Err(e) => panic!("{e}"),
+                    }
+                    match admission.try_lock() {
+                        Ok(()) => admission.unlock().unwrap(),
+                        Err(TryLockError::WouldBlock) => {
+                            // Both observations must describe the blocked scan:
+                            // it may have taken both locks between our probes.
+                            break match authority.try_lock() {
+                                Ok(()) => {
+                                    authority.unlock().unwrap();
+                                    true
+                                }
+                                Err(TryLockError::WouldBlock) => false,
+                                Err(e) => panic!("{e}"),
+                            };
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                    if Instant::now() >= until {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                if scans_first && upgrade {
+                    // This publication can finish while z is locked, and its
+                    // upgrade must bind the default after admission completes.
+                    asks(&cfg, "upgrade", Some("subject"), true);
+                }
+                drop(held);
+                running.join().unwrap().unwrap();
+                assert!(
+                    scans_first,
+                    "default held the registry while scanning job locks"
                 );
-                assert!(load(&a).unwrap().is_none());
-                assert_eq!(crate::policy::parked(&a), slots == 1);
+                let a = Job::new(&cfg, expiring);
+                assert_eq!(a.turns().as_deref(), Some("2"));
+                if upgrade {
+                    assert!(host_path(&a, "question-needs-owner").exists());
+                    assert!(!a.path("prompt.2").exists());
+                } else {
+                    assert!(
+                        read(&a.path("prompt.2"))
+                            .unwrap()
+                            .contains("Take your reversible")
+                    );
+                    assert!(load(&a).unwrap().is_none());
+                    assert_eq!(crate::policy::parked(&a), slots == 1);
+                }
             }
         }
     }
@@ -341,22 +343,20 @@ fn independently_paused_members_keep_their_remaining_time_after_failed_restorati
     }
     // A later, separate pause extends from the deadline then in force.
     let effective = load(&a_job).unwrap().unwrap().due;
-    a = park(&cfg, "a", crate::now() - 300, Some(effective));
-    crate::policy::shift_waits(&a_job, &mut a).unwrap();
+    // Simulate a genuinely later pause: it must not overlap the pause that
+    // just ended. Moving the test clock forward keeps the exact 300s check.
+    restore(&a_job, now + 100, now + 400).unwrap();
     crate::cmd::stop(&cfg, "a", false).unwrap();
     merge(&cfg, "moved", &["b".into()]).unwrap();
     let moved = load(&b_job).unwrap().unwrap().due;
     assert!((effective + 300..=effective + 305).contains(&moved));
 }
 
-fn park(cfg: &Config, id: &str, at: i64, due: Option<i64>) -> crate::policy::Park {
-    let rec = crate::policy::Park {
-        state: "done".into(),
-        turn: "1".into(),
-        first: false,
-        at,
-        due,
-    };
+pub(super) fn park(cfg: &Config, id: &str, at: i64, due: Option<i64>) -> crate::policy::Park {
+    // Exercise migration of both historical park formats, with and without
+    // the old deadline snapshot. New park records need neither baseline.
+    let legacy = serde_json::json!({"state":"done", "turn":"1", "first":false, "at":at, "due":due});
+    let rec: crate::policy::Park = serde_json::from_value(legacy.clone()).unwrap();
     fs::create_dir_all(
         crate::policy::path(&Job::new(cfg, id), "park")
             .parent()
@@ -365,7 +365,7 @@ fn park(cfg: &Config, id: &str, at: i64, due: Option<i64>) -> crate::policy::Par
     .unwrap();
     fs::write(
         crate::policy::path(&Job::new(cfg, id), "park"),
-        serde_json::to_string(&rec).unwrap(),
+        legacy.to_string(),
     )
     .unwrap();
     rec
@@ -392,7 +392,10 @@ fn a_restored_job_gets_back_its_paused_time_once_through_the_shared_deadline() {
     for id in ["j1", "j2", "j1"] {
         let mut rec = park(&cfg, id, paused, Some(due));
         crate::policy::shift_waits(&Job::new(&cfg, id), &mut rec).unwrap();
-        assert!(near(rec.due.unwrap(), due + 600), "{id}");
+        assert!(
+            near(load(&Job::new(&cfg, id)).unwrap().unwrap().due, due + 600),
+            "{id}"
+        );
     }
     for id in ["j1", "j2"] {
         assert!(
@@ -408,8 +411,8 @@ fn a_restored_job_gets_back_its_paused_time_once_through_the_shared_deadline() {
         load(&Job::new(&cfg, "j2")).unwrap().unwrap().due,
         due + 600
     ));
-    // A park from before records its deadline the first time, so a retry
-    // extends that one rather than the one already extended.
+    // A legacy park has no deadline snapshot. Its authority records the
+    // interval once, even when the unchanged legacy record is retried.
     let plain = Job::new(&cfg, "plain");
     let plain_due = load(&plain).unwrap().unwrap().due;
     let legacy = park(&cfg, "plain", paused, None);
@@ -589,6 +592,7 @@ fn a_damaged_structured_notice_retries_without_sending_its_serialized_state() {
 #[test]
 fn only_a_policy_paragraph_as_notice_writes_it_is_stripped() {
     let q = Question {
+        pauses: Default::default(),
         id: None,
         recommendation: Recommendation {
             default: "leave it".into(),
