@@ -93,6 +93,7 @@ let
     name = health;
     dir = "/etc/${healthD}";
     required = cfg.requiredHealth;
+    explains = cfg.healthExplains;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
     checkTimeout = 30;
@@ -692,7 +693,27 @@ in
           if [ "$(id -un)" = ${user} ]; then claude --version
           else runuser -u ${user} -- env HOME=${account.home} claude --version; fi
         '';
+        # Logged in, and not past the login's own expiry. Its stdout (who's
+        # logged in) goes no further than jq.
+        claude-login = ''
+          status() {
+            if [ "$(id -un)" = ${user} ]; then claude auth status --json
+            else runuser -u ${user} -- env HOME=${account.home} claude auth status --json; fi
+          }
+          status 2>/dev/null | jq -e '.loggedIn == true and (.loginExpiresAt == null
+            or (.loginExpiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > now)' >/dev/null \
+            || { echo "Claude Code isn't logged in as ${user} (claude auth status)" >&2; exit 1; }
+        '';
       });
+
+      # No Remote Control server starts while Claude Code is logged out, so
+      # a login gone before a switch explains the operator's check and the
+      # servers failing after it: the switch restarted them, it didn't break
+      # them.
+      burrow.updates.healthExplains = lib.mkIf
+        ((config.burrow.claude.enable or false) && (config.burrow.remoteControl.enable or false)) {
+          claude-login = [ "check:operator" "user-unit:claude-rc@*.service" ];
+        };
 
       environment.systemPackages = [ updateTool healthTool ];
       burrow.tools.update = updateTool;

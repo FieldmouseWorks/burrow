@@ -1,9 +1,9 @@
 //! burrow-health CONFIG [snapshot FILE | compare FILE [SECONDS]]: HOST-health,
 //! with modules/updates.nix's config (lib.rs says what each does).
 //!
-//! A compare's stdout is its verdict, `healthy` or what regressed, which
-//! HOST-update puts in what it says; a snapshot it can't read is said there
-//! too, and fails it.
+//! A compare's stdout is its verdict, `healthy` (then what it didn't count,
+//! a line each) or what regressed, which HOST-update puts in what it says; a
+//! snapshot it can't read is said there too, and fails it.
 
 use std::ffi::OsString;
 use std::fs;
@@ -85,12 +85,21 @@ fn main() -> ExitCode {
             require(&mut before, &cfg.required);
             let within = Duration::from_secs(secs);
             let mut details = Vec::new();
-            match compare(&before, within, Duration::from_secs(cfg.settle), || {
-                let (report, diagnostics) = report_details(&cfg);
-                details = diagnostics;
-                report
-            }) {
-                Ok(()) => print(&cfg, "healthy\n", ExitCode::SUCCESS),
+            match compare(
+                &before,
+                &cfg.explains,
+                within,
+                Duration::from_secs(cfg.settle),
+                || {
+                    let (report, diagnostics) = report_details(&cfg);
+                    details = diagnostics;
+                    report
+                },
+            ) {
+                Ok(excused) => {
+                    let said: String = excused.iter().map(|l| format!("{l}\n")).collect();
+                    print(&cfg, &format!("healthy\n{said}"), ExitCode::SUCCESS)
+                }
                 Err(mut bad) => {
                     details.retain(|(key, _)| {
                         bad.iter().any(|b| {

@@ -18,7 +18,22 @@
         tells the owner about one that keeps failing. Checks in requiredHealth
         must always pass after a switch. Failure notices include bounded
         diagnostics from failed checks. burrow adds its own (sshd, the nix
-        daemon, the operator, burrow-events, ZFS, DNS, GitHub, Claude Code).
+        daemon, the operator, burrow-events, ZFS, DNS, GitHub, Claude Code
+        and its login).
+      '';
+    };
+    healthExplains = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.listOf lib.types.str);
+      default = { };
+      example = { claude-login = [ "check:operator" "user-unit:claude-rc@*.service" ]; };
+      description = ''
+        By health check: what can't pass while it fails, as the report says
+        it (`check:NAME`, `unit:NAME` or `user-unit:NAME`, `*` standing for
+        any run of characters). While that check fails after a switch, these
+        don't count against the switch: a cause already failing before it
+        (Claude Code logged out, say) doesn't revert a good deploy because
+        the switch restarted what needs it. The check itself counts as any
+        other.
       '';
     };
   };
