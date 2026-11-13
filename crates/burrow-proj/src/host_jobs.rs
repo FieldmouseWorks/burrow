@@ -144,27 +144,52 @@ pub(crate) fn answer(cfg: &Config, request: &str) -> String {
             Instant::now() + Duration::from_secs(90),
             MAX_OUTPUT,
         )?;
+        let code = output
+            .status
+            .code()
+            .and_then(|c| c.try_into().ok())
+            .unwrap_or(1);
         Ok(Response {
-            code: output
-                .status
-                .code()
-                .and_then(|c| c.try_into().ok())
-                .unwrap_or(1),
-            stdout: scrub_output(
+            code,
+            stdout: scrub_child_output(
                 &String::from_utf8_lossy(&output.stdout),
                 output_contract(&args),
+                output.status.success(),
             )?,
-            stderr: scrub_output(
+            stderr: scrub_child_output(
                 &String::from_utf8_lossy(&output.stderr),
                 if output_contract(&args) == Output::Records {
                     Output::Records
                 } else {
                     Output::Literal
                 },
+                output.status.success(),
             )?,
         })
     })();
     serde_json::to_string(&result).expect("host job response")
+}
+
+/// A failed child may stop before completing its document. Keep its native
+/// verdict and diagnostics; successful children must meet their contract.
+fn scrub_child_output(text: &str, mut output: Output, success: bool) -> Result<String, String> {
+    if !success
+        && output == Output::Json
+        && serde_json::from_str::<serde_json::Value>(text).is_err()
+    {
+        // Incomplete JSON can conceal field boundaries behind escapes or
+        // nested objects. Preserve the verdict and stderr, but fail closed
+        // for that document; plain failure diagnostics remain readable.
+        if text.trim_start().starts_with(['{', '[', '"']) {
+            return Ok("[redacted incomplete JSON]\n".into());
+        }
+        output = Output::Literal;
+    }
+    match scrub_output(text, output) {
+        Ok(clean) => Ok(clean),
+        Err(_) if !success => Ok("[redacted]\n".into()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Structured views, raw records, literal values and already rendered

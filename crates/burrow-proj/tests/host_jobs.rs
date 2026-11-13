@@ -528,3 +528,66 @@ fn default_log_tail_redacts_the_complete_payload_before_dropping_earlier_records
     assert!(!text.contains("SECRETTAILPAYLOAD"), "{text}");
     assert!(text.contains("unrelated public record"), "{text}");
 }
+
+#[test]
+fn failed_structured_commands_keep_native_status_and_sanitized_diagnostics() {
+    for stdout in [
+        "",
+        "{\"output\":\"password=\\\"OUTSECRET",
+        "broken password=\"OUTSECRET\" public output",
+        "{\"password\":{\"nested\":\"OUTSECRET\"},\"public\":42}",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = config(tmp.path());
+        let client_cfg = cfg.clone();
+        cfg.me = tmp.path().join("emitter");
+        burrow_test::executable(
+            &cfg.me,
+            format!(
+                "#!/bin/sh\n[ -z '{stdout}' ] || cat <<'OUTPUT'\n{stdout}\nOUTPUT\ncat >&2 <<'ERROR'\nnative failure password=\"ERRSECRET\" public diagnostic\nERROR\nexit 23\n"
+            ),
+        );
+        let caller = Job::new(&cfg, "recovery");
+        let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+        let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+        let output = cli(&client_cfg, Some(&socket), &["state", "--json"]);
+        assert_eq!(output.status.code(), Some(23), "{:?}", output);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(!out.contains("OUTSECRET"), "{out}");
+        assert!(!err.contains("ERRSECRET"), "{err}");
+        assert!(
+            err.contains("native failure") && err.contains("public diagnostic"),
+            "{err}"
+        );
+        if stdout.contains("public output") {
+            assert!(out.contains("public output"), "{out}");
+        }
+        if stdout.contains("nested") {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&out).unwrap()["public"],
+                42
+            );
+        }
+    }
+}
+
+#[test]
+fn successful_structured_commands_still_reject_invalid_documents() {
+    for stdout in ["", "{\"partial\":", "malformed"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = config(tmp.path());
+        let client_cfg = cfg.clone();
+        cfg.me = tmp.path().join("emitter");
+        burrow_test::executable(
+            &cfg.me,
+            format!("#!/bin/sh\n[ -z '{stdout}' ] || cat <<'OUTPUT'\n{stdout}\nOUTPUT\nexit 0\n"),
+        );
+        let caller = Job::new(&cfg, "recovery");
+        let _bridge = Bridge::start(&cfg, &caller, "1", None).unwrap();
+        let socket = burrow_proj::scratch::dir(&cfg, caller.id).join("host-jobs-1.sock");
+        let output = cli(&client_cfg, Some(&socket), &["state", "--json"]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("can't reach host jobs"));
+    }
+}
