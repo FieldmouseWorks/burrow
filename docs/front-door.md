@@ -452,6 +452,17 @@ or a correction turn. Other running jobs continue; queued turns on that
 installation wait for the reset before taking a slot. Permission denials
 remain errors.
 
+The host's own passes (the issue doors, house-sync, renovate-run, the
+steward's upkeep) wait on the same meter, through burrow-github's
+`quota::Meters`. A pass asks its installation's meter before it starts, and
+a hold there books it in its wake file with no GitHub call. Every answer
+feeds the meter (`quota::Metered`). A limit met partway comes back as one
+`quota::Hold` (App, owner, until), which the pass books. A host pass may not
+write the door's directory, so what it meets itself counts for that pass
+only. What GitHub's answers say about limits is
+read in burrow-github and nowhere else, gh-token's observer aside. Its
+`one_meter` test holds every other crate to that.
+
 `proj await` retains targets when quota prevents taking their baselines.
 Its intent atomically includes the producing turn, deadline and any captured
 prefix. Replay checkpoints every new baseline before requesting another;

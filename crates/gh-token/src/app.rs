@@ -219,14 +219,18 @@ impl App {
     }
 }
 
-/// A success's JSON, or why there's none. GitHub's limits (a 429, a 403 its
-/// headers or message say is one) and its own 5xx are unavailable, and so is
-/// the network; anything else GitHub said no to is refused.
+/// A success's JSON, or why there's none. GitHub's limits (as
+/// burrow_github::quota::limited reads them) and its own 5xx are
+/// unavailable, and so is the network; anything else GitHub said no to is
+/// refused.
 fn answer<T: DeserializeOwned>(url: &str, got: Result<Response, ureq::Error>) -> Result<T, Error> {
     let mut r = got.map_err(|e| unreachable(url, e))?;
     let status = r.status().as_u16();
-    let limited =
-        header(&r, "x-ratelimit-remaining") == Some("0") || header(&r, "retry-after").is_some();
+    let headers = r
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_owned())))
+        .collect();
     let body = r
         .body_mut()
         .with_config()
@@ -236,6 +240,12 @@ fn answer<T: DeserializeOwned>(url: &str, got: Result<Response, ureq::Error>) ->
     if (200..300).contains(&status) {
         return serde_json::from_slice(&body).map_err(|e| Error::refused(format!("{url}: {e}")));
     }
+    // Which answers are GitHub's limits is burrow-github's to say.
+    let limited = burrow_github::quota::limited(&burrow_github::Response {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    });
     #[derive(Deserialize)]
     struct Message {
         message: String,
@@ -244,10 +254,7 @@ fn answer<T: DeserializeOwned>(url: &str, got: Result<Response, ureq::Error>) ->
         .map(|m| m.message)
         .unwrap_or_default();
     let what = format!("{url}: http status {status}: {message}");
-    if status == 429
-        || status >= 500
-        || status == 403 && (limited || message.to_lowercase().contains("rate limit"))
-    {
+    if limited || status >= 500 {
         Err(Error::unavailable(what))
     } else {
         Err(Error::refused(what))
@@ -267,10 +274,6 @@ fn unreachable(url: &str, e: ureq::Error) -> Error {
         | ureq::Error::ConnectProxyFailed(_) => Error::unavailable(what),
         _ => Error::refused(what),
     }
-}
-
-fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
-    r.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
 #[cfg(test)]

@@ -294,6 +294,7 @@ let
       inherit (machineApp) env;
       inherit (cfg.renovate) owners;
       ghToken = "${tools.gh-token}/bin/gh-token";
+      meters = config.burrow.github.machineMeters;
     };
     tools = {
       gh = "${machineGh}/bin/gh";

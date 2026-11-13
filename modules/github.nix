@@ -268,6 +268,26 @@ in
     description = "`machinery`'s App, with its name, for the modules that run the jobs; null for none.";
   };
 
+  options.burrow.github.machineMeters = mkOption {
+    type = types.nullOr (types.attrsOf types.str);
+    readOnly = true;
+    internal = true;
+    default = if cfg.machineApp == null then null else { dir = cfg.quotaDir; app = cfg.machineApp.name; };
+    defaultText = lib.literalMD "`quotaDir` and `machinery`'s App's name; null for none";
+    description = "Where the meters of `machinery`'s installations are kept (burrow-github's quota::Kept), for the programs that act as it.";
+  };
+
+  options.burrow.github.doorMeter = mkOption {
+    type = types.functionTo types.str;
+    readOnly = true;
+    internal = true;
+    default = repo: if cfg.machineMeters == null then "" else builtins.toJSON (cfg.machineMeters // {
+      owner = lib.head (lib.splitString "/" repo);
+    });
+    defaultText = lib.literalMD "the installation meter of `machinery`'s App on REPO's owner, as JSON; empty for none";
+    description = "BURROW_DOOR_METER for a door acting as `machineGh` on REPO: the meter its pass is held by and feeds (burrow-github's deferred::configured).";
+  };
+
   options.burrow.github.machineGh = mkOption {
     type = types.package;
     readOnly = true;

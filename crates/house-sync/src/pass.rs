@@ -8,17 +8,18 @@
 //!
 //! GitHub's rate limit is a wait, not a failure: an owner's installation
 //! has one hourly allowance, shared with everything else acting as the App
-//! there. An owner it holds off is left for the rest of the pass, whose
-//! other owners (each with an allowance of its own) go on, and the pass is
-//! booked again in the house handler's wake file (burrow-events) for when
-//! the first limit lifts: the repo's pass for one repo's, the full pass for
-//! a full one. A held-off pass exits 0, and opens no notice nor closes one
-//! that's about repos it didn't get to.
+//! there, and one meter (burrow-github's quota.rs). An owner whose meter
+//! holds it off, before the pass asks or partway, is left for the rest of
+//! the pass, whose other owners (each with an allowance of its own) go on,
+//! and the pass is booked again in the house handler's wake file
+//! (burrow-events) for when the first hold lifts: the repo's pass for one
+//! repo's, the full pass for a full one. A held-off pass exits 0, and opens
+//! no notice nor closes one that's about repos it didn't get to.
 
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 
+use burrow_github::quota::{Kept, Metered};
 use burrow_github::{Api, Error, deferred};
 
 use crate::blocks::{House, Rewritten, rewrite, same_tree};
@@ -62,23 +63,31 @@ pub fn run(
         );
         return Ok(true);
     }
+    let started = now()?;
+    let mut meters = Kept::meters(cfg.meters.as_ref());
     let mut pass = Pass {
         house: House::read(&cfg.house).map_err(|e| format!("{}: {e}", cfg.house.display()))?,
         dry,
-        api,
+        now: started,
+        api: &mut Metered {
+            api,
+            meters: &mut meters,
+            owner: None,
+        },
         out,
         failed: Vec::new(),
         mangled: Vec::new(),
-        held: BTreeMap::new(),
     };
 
     // What this pass is booked as in the wake file.
     let key = ask.only.unwrap_or_default();
-    let started = now()?;
     let mut repos = Vec::new();
     if let Some(only) = ask.only {
         // One repo: only one of the owners', as a full pass would list it.
-        match github::repo(pass.api, only, &cfg.owners) {
+        match pass
+            .already(only)
+            .map_or_else(|| github::repo(pass.api, only, &cfg.owners), Err)
+        {
             Ok(Some(repo)) => repos.push(repo),
             Ok(None) => pass.say(&format!("{only}: not a repo it keeps")),
             Err(e) if pass.hold(only, &e) => {}
@@ -93,7 +102,10 @@ pub fn run(
         for owner in &cfg.owners {
             // An owner whose list can't be read is a failure too; the
             // others go on.
-            match github::repos(pass.api, owner) {
+            match pass
+                .already(owner)
+                .map_or_else(|| github::repos(pass.api, owner), Err)
+            {
                 Ok(found) => repos.extend(found),
                 Err(e) if pass.hold(owner, &e) => {}
                 Err(e) => {
@@ -108,7 +120,7 @@ pub fn run(
     for repo in repos {
         // An owner GitHub's rate limit holds off: the rest of its repos
         // would only be held off too.
-        if cfg.exclude.iter().any(|e| e.matches(&repo.name)) || pass.is_held(&repo.name) {
+        if cfg.exclude.iter().any(|e| e.matches(&repo.name)) || pass.already(&repo.name).is_some() {
             continue;
         }
         if let Err(e) = pass.repo(&repo) {
@@ -126,11 +138,13 @@ pub fn run(
     if dry {
         return Ok(true);
     }
-    match pass.held.values().min() {
+    pass.api.meters.record();
+    let holds = pass.api.meters.holds(started);
+    match holds.iter().map(|h| h.until).min() {
         // Again once the first limit lifts, in place of what an earlier
         // pass booked: this one knows when. An owner still held off then is
         // booked again.
-        Some(&at) => {
+        Some(at) => {
             deferred::rebook(&cfg.wake, key, at)?;
             let what = if key.is_empty() { "every repo" } else { key };
             pass.say(&format!(
@@ -141,7 +155,7 @@ pub fn run(
         None => deferred::ran(&cfg.wake, key, started)?,
     }
     // Only a pass that reached every repo can say they're all clear.
-    let whole = pass.held.is_empty();
+    let whole = holds.is_empty();
     // The owner's notices are about every repo, so only a full pass changes
     // them.
     if ask.only.is_some() {
@@ -211,19 +225,19 @@ fn lock(cfg: &Config) -> Result<File, String> {
     Ok(file)
 }
 
-struct Pass<'a> {
+struct Pass<'a, 'm> {
     house: House,
     dry: bool,
-    api: &'a mut dyn Api,
+    /// When the pass started: what holds are reckoned from.
+    now: u64,
+    /// GitHub, feeding each installation's meter every answer.
+    api: &'a mut Metered<'m>,
     out: &'a mut dyn Write,
     failed: Vec<String>,
     mangled: Vec<String>,
-    /// The owners GitHub's rate limit held off, in lower case, and when
-    /// each one's lifts.
-    held: BTreeMap<String, u64>,
 }
 
-impl Pass<'_> {
+impl Pass<'_, '_> {
     fn say(&mut self, what: &str) {
         // The journal; a pass goes on whether or not it takes the line.
         let _ = writeln!(self.out, "house-sync: {what}");
@@ -233,22 +247,32 @@ impl Pass<'_> {
     /// one of its repos): then that owner is left for the rest of the pass.
     /// Never in a dry pass, which books nothing: there it's a failure.
     fn hold(&mut self, what: &str, e: &Error) -> bool {
-        let Some(at) = e.retry_at.filter(|_| !self.dry) else {
+        if self.dry {
+            return false;
+        }
+        let owner = what.split('/').next().unwrap_or(what);
+        let Some(hold) = self.api.meters.met(owner, e, self.now) else {
             return false;
         };
-        let owner = what.split('/').next().unwrap_or(what).to_lowercase();
-        let lifts = self.held.entry(owner).or_insert(at);
-        *lifts = (*lifts).max(at);
         self.say(&format!(
-            "{what}: held off by GitHub's rate limit until {at}, booked again ({e})"
+            "{what}: held off by GitHub's rate limit until {}, booked again ({e})",
+            hold.until
         ));
         true
     }
 
-    /// Whether the rate limit held off REPO's owner earlier in this pass.
-    fn is_held(&self, repo: &str) -> bool {
-        let owner = repo.split('/').next().unwrap_or(repo);
-        self.held.contains_key(&owner.to_lowercase())
+    /// The hold WHAT's owner's installation is under before the pass asks
+    /// about it, whoever met it (this pass, or another program on the same
+    /// installation), as the error a call would have given: nothing is
+    /// asked of an installation that's held. A dry pass books nothing, so
+    /// asks anyway.
+    fn already(&mut self, what: &str) -> Option<Error> {
+        if self.dry {
+            return None;
+        }
+        let owner = what.split('/').next().unwrap_or(what);
+        let hold = self.api.meters.held(owner, self.now)?;
+        Some(deferred::held(&hold))
     }
 
     fn repo(&mut self, repo: &Repo) -> Result<(), Error> {

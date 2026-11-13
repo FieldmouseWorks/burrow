@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::config::Config;
 use crate::snapshot::Meta;
-use crate::testing::{Hub, States, T, answer, config, look, put, sh};
+use crate::testing::{Hub, States, T, answer, config, limit_headers, look, put, sh};
 
 const COMMENTS: &str = "repos/sam/r/pulls/5/comments?per_page=100";
 
@@ -163,7 +163,7 @@ fn a_reviewer_is_queued_on_the_heads_snapshot_with_its_brief() {
     let (out, got) = look(&r.cfg, &mut hub, &mut jobs, 7.0, |p| queue(p, &a));
     let name = format!("codex--{}", a.name);
     assert_eq!(got.as_deref(), Ok(name.as_str()));
-    assert_eq!(out.limited, None);
+    assert_eq!(out.until(), None);
     // As the pass's token, a page at a time: one GET of the threads.
     assert_eq!(hub.paths(), [COMMENTS]);
     // The entry is what the reviewers' service reads (burrow-review's
@@ -282,13 +282,14 @@ fn the_earlier_findings_are_read_whole_or_not_at_all() {
         let mut hub = Hub::default();
         let mut no = answer(status, json!({"message": why}));
         no.why = why.into();
+        if limited.is_some() {
+            no.headers = limit_headers(T + 60.0);
+        }
         hub.on("GET", COMMENTS, no);
-        let spent = json!({"resources": {"core": {"remaining": 0, "reset": T + 60.0}}});
-        hub.on("GET", "rate_limit$", answer(200, spent));
         let (out, got) = look(&r.cfg, &mut hub, &mut jobs, 0.0, |p| queue(p, &a));
         let why = got.unwrap_err();
         assert!(why.starts_with("its earlier findings: "), "{status}: {why}");
-        assert_eq!(out.limited, limited, "{status}");
+        assert_eq!(out.until(), limited, "{status}");
         assert_eq!(
             entry(&r.cfg, &format!("codex--{}", a.name)),
             None,

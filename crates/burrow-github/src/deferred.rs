@@ -1,11 +1,16 @@
 //! Durable rate-limit deferral: a pass GitHub held off, booked again in its
-//! burrow-events wake file for when the limit lifts.
+//! burrow-events wake file for when the limit lifts. A pass runs under its
+//! installation's meter (quota.rs): held already, it's booked without a
+//! GitHub call; held partway, the meter is recorded and the pass booked.
+use crate::quota::{Hold, Metered, Meters};
 use crate::{Api, Error};
 use serde_json::{Map, Value, json};
 use std::{fs, path::Path};
 
 /// The issue-door services configure their own wake file. Local commands do
 /// not, so a transient failure cannot silently become success without a retry.
+/// A door that acts as an App is given its installation's meter too
+/// (BURROW_DOOR_METER, [`DoorMeter`]), and runs under it.
 pub fn configured<T>(
     pass: impl FnOnce(&mut dyn Api) -> Result<T, Error>,
 ) -> Result<Option<T>, String> {
@@ -15,14 +20,41 @@ pub fn configured<T>(
         .map_err(|e| e.to_string())?
         .as_secs();
     let kick = std::env::var("BURROW_DOOR_WATCHDOG_KICK").ok();
+    let door = DoorMeter::parse(&std::env::var("BURROW_DOOR_METER").unwrap_or_default())?;
+    let mut meters = door
+        .as_ref()
+        .map(|d| (Meters::new(Some(d.dir.clone()), &d.app), d.owner.as_str()));
     run_kicking(
         wake.as_deref(),
         kick.as_deref(),
         &mut crate::Gh::default(),
         now,
+        meters.as_mut().map(|(m, owner)| (m, *owner)),
         pass,
     )
     .map_err(Into::into)
+}
+
+/// BURROW_DOOR_METER, as modules/github.nix's doorMeter writes it: the
+/// meters' dir, the App the door acts as and the owner of its repo, as
+/// JSON; empty for a door that acts as no App.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoorMeter {
+    pub dir: std::path::PathBuf,
+    pub app: String,
+    pub owner: String,
+}
+
+impl DoorMeter {
+    pub fn parse(text: &str) -> Result<Option<Self>, String> {
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(text)
+            .map(Some)
+            .map_err(|e| format!("BURROW_DOOR_METER: {e}"))
+    }
 }
 
 /// Run a pass, preserving a deferred full pass in burrow-events' wake file.
@@ -33,20 +65,72 @@ pub fn run<T>(
     now: u64,
     pass: impl FnOnce(&mut dyn Api) -> Result<T, Error>,
 ) -> Result<Option<T>, Error> {
-    run_kicking(wake, None, api, now, pass)
+    run_kicking(wake, None, api, now, None, pass)
+}
+
+/// The hold on an installation, as the error a pass held off by it gives:
+/// for a caller with no wake file to book it in.
+pub fn held(hold: &Hold) -> Error {
+    Error {
+        why: format!(
+            "GitHub holds {}'s installation on {} off until {}",
+            hold.app, hold.owner, hold.until
+        ),
+        unanswered: true,
+        retry_at: Some(hold.until),
+    }
+}
+
+/// PASS under METER, the meters of an App and the owner whose installation
+/// the pass is about: held already, its hold and no call; otherwise the pass
+/// on a client that feeds the meter every answer, and a limit it meets
+/// recorded there, for the next caller on the installation.
+pub fn metered<T>(
+    meter: Option<(&mut Meters, &str)>,
+    api: &mut dyn Api,
+    now: u64,
+    pass: impl FnOnce(&mut dyn Api) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let Some((meters, owner)) = meter else {
+        return pass(api);
+    };
+    if let Some(hold) = meters.held(owner, now) {
+        return Err(held(&hold));
+    }
+    let done = pass(&mut Metered {
+        api,
+        meters,
+        owner: Some(owner.into()),
+    });
+    match done {
+        Err(e) => Err(match meters.met(owner, &e, now) {
+            // The meter's hold, which can outlast what this answer said.
+            Some(hold) => Error {
+                retry_at: Some(hold.until),
+                ..e
+            },
+            None => e,
+        }),
+        Ok(done) => {
+            meters.record();
+            Ok(done)
+        }
+    }
 }
 
 /// [`run`], kicking the watchdog at KICK (a loopback http URL) when the
-/// door's deferral starts or ends.
+/// door's deferral starts or ends, under METER ([`metered`]) when it's
+/// given.
 pub fn run_kicking<T>(
     wake: Option<&Path>,
     kick: Option<&str>,
     api: &mut dyn Api,
     now: u64,
+    meter: Option<(&mut Meters, &str)>,
     pass: impl FnOnce(&mut dyn Api) -> Result<T, Error>,
 ) -> Result<Option<T>, Error> {
     let Some(wake) = wake else {
-        return pass(api).map(Some);
+        return metered(meter, api, now, pass).map(Some);
     };
     let booked = match fs::read(wake) {
         Ok(bytes) => {
@@ -69,7 +153,7 @@ pub fn run_kicking<T>(
     if booked.is_some_and(|at| at > now) {
         return Ok(None);
     }
-    match pass(api) {
+    match metered(meter, api, now, pass) {
         Ok(done) => {
             save(wake, None)?;
             watch(wake, kick, now, None)?;
@@ -422,16 +506,16 @@ mod tests {
             ],
         );
         assert_eq!(
-            run_kicking(Some(&wake), Some(&url), &mut api, 1000, ask),
+            run_kicking(Some(&wake), Some(&url), &mut api, 1000, None, ask),
             Ok(None)
         );
         assert_eq!(
-            run_kicking(Some(&wake), Some(&url), &mut api, 2000, ask),
+            run_kicking(Some(&wake), Some(&url), &mut api, 2000, None, ask),
             Ok(None)
         );
         api.status = 200;
         assert_eq!(
-            run_kicking(Some(&wake), Some(&url), &mut api, 3000, ask),
+            run_kicking(Some(&wake), Some(&url), &mut api, 3000, None, ask),
             Ok(Some(()))
         );
         assert_eq!(
