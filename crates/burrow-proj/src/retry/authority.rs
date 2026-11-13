@@ -5,6 +5,12 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Identity {
     pub choice: engine::Choice,
+    /// The job's request files as this record's turn began. The protected
+    /// request ([`crate::job::Request`]) is the authority; this copy is kept
+    /// in the earlier format so a rolled-back proj's transfer consumer can
+    /// still restore a retained retry, and so migration can read captures an
+    /// earlier proj wrote.
+    #[serde(default)]
     files: BTreeMap<String, Option<String>>,
 }
 impl Identity {
@@ -39,45 +45,78 @@ impl Identity {
         // Called only after kernel census-wait attestation. The old host
         // parent wrote N.engine before entering its initial wait or retry.
         let recorded = read(&job.turn(n, "engine"));
-        let role = read(&job.path("role")).unwrap_or_default();
-        let repo = crate::pick::github_repo(job.cfg, &crate::pick::project(&job.dir));
-        let choice = engine::resolve(
+        let choice = engine::requested(
             job.cfg,
-            &role,
-            (!repo.is_empty()).then_some(repo.as_str()),
+            job,
+            &crate::job::Request::load(job)?,
             recorded.as_deref(),
         )?;
         Self::save(job, n, choice)
     }
     fn save(job: &Job, n: &str, choice: engine::Choice) -> Result<(), String> {
         crate::ask::ensure(job)?;
-        let files = ["project", "engine", "role", "app", "agent", "owned"]
-            .into_iter()
-            .map(|key| (key.into(), read(&job.path(key))))
-            .collect();
         swap(
             &job.turn(n, "execution"),
-            &serde_json::to_string(&Self { choice, files }).map_err(|e| e.to_string())?,
+            &serde_json::to_string(&Self {
+                choice,
+                files: crate::job::Request::load(job)?.captured_files(),
+            })
+            .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
+    }
+    /// What an earlier proj captured of the job's request files, across every
+    /// execution record on the host, never just the one the (job-writable)
+    /// turn selector names, so advancing or rewriting `turns` cannot hide a
+    /// capture. Records are read under their actual filenames, padded turn
+    /// numbers included. What the starter fixed (project, app, agent, owned)
+    /// comes from the earliest capture; engine and role, which the host
+    /// changes when the inbox enrolls a job, from the latest, so migration
+    /// keeps a completed enrollment without waiting for an inbox pass.
+    pub fn legacy_files(job: &Job) -> Result<Option<BTreeMap<String, Option<String>>>, String> {
+        let dir = crate::ask::host_path(job, "request");
+        let entries = match fs::read_dir(dir.parent().unwrap_or(&dir)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut names: Vec<(u64, String)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let stem = name.strip_suffix(".execution")?;
+                let n: u64 = stem.parse().ok()?;
+                (n > 0 && crate::job::valid_turn(stem)).then(|| (n, stem.to_owned()))
+            })
+            .collect();
+        names.sort_unstable();
+        let mut captures = Vec::new();
+        for (_, stem) in names {
+            if let Some(identity) = Self::load(job, &stem)?
+                && !identity.files.is_empty()
+            {
+                captures.push(identity.files);
+            }
+        }
+        let Some(latest) = captures.last().cloned() else {
+            return Ok(None);
+        };
+        let mut files = captures.remove(0);
+        for key in ["engine", "role"] {
+            match latest.get(key) {
+                Some(value) => files.insert(key.into(), value.clone()),
+                None => files.remove(key),
+            };
+        }
+        Ok(Some(files))
     }
     pub fn restore(job: &Job, n: &str) -> Result<(), String> {
         let Some(identity) = Self::load(job, n)? else {
             return Err("retained retry has no host execution identity".into());
         };
-        for (key, value) in identity.files {
-            let path = job.path(&key);
-            match value {
-                Some(value) => {
-                    crate::state_reads::write(&path, &value).map_err(|e| e.to_string())?
-                }
-                None => match crate::state_reads::remove(path) {
-                    Ok(()) => (),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-                    Err(e) => return Err(e.to_string()),
-                },
-            }
-        }
+        crate::job::Request::load(job)?
+            .publish(job)
+            .map_err(|e| e.to_string())?;
         crate::state_reads::write(job.turn(n, "engine"), identity.choice.engine.name())
             .map_err(|e| e.to_string())
     }

@@ -62,7 +62,7 @@ fn kicked(d: &tempfile::TempDir) -> Vec<String> {
 /// finds the lock taken is tried again, never taken for an error, since a
 /// child another test's thread forks can hold this test's lock for a moment
 /// after it's let go ([`try_lock`]).
-pub(super) fn cutoff(cfg: &Config) -> Option<i64> {
+pub(crate) fn cutoff(cfg: &Config) -> Option<i64> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         match admission_cutoff(cfg) {

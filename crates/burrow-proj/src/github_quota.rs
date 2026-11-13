@@ -42,12 +42,13 @@ pub(crate) fn admission_reset(
     job: &Job,
     engine: crate::engine::Engine,
 ) -> Option<i64> {
-    let app = crate::turn::github_app(cfg, read(&job.path("app")), engine)
+    let request = crate::job::Request::load(job).ok()?;
+    let app = crate::turn::github_app(cfg, request.app, engine)
         .ok()
         .flatten()?;
     let repo = read(&job.path("link"))
         .and_then(|link| crate::github::target(&link).map(|(r, _)| r))
-        .unwrap_or_else(|| crate::pick::github_repo(cfg, &crate::pick::project(&job.dir)));
+        .unwrap_or_else(|| crate::pick::github_repo(cfg, &request.project));
     let owner = repo.split('/').next()?;
     meters(cfg)
         .into_iter()
@@ -598,15 +599,23 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         cfg.tools.git = git;
         let job = Job::new(&cfg, "job");
         fs::create_dir_all(&job.dir).unwrap();
+        let mut request = crate::job::Request {
+            project: d.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        request.save(&job).unwrap();
         crate::policy::bind(
             &job,
             crate::policy::Identity::Local,
             crate::policy::Kind::Automated,
         )
         .unwrap();
-        fs::write(job.path("project"), d.path().to_str().unwrap()).unwrap();
         assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_some());
+        // A file the job writes names no App; its request does.
         fs::write(job.path("app"), "other").unwrap();
+        assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_some());
+        request.app = Some("other".into());
+        request.save(&job).unwrap();
         assert!(held(&cfg, &job, crate::engine::Engine::Codex).is_none());
         assert_eq!(meters(&cfg).len(), 2);
     }
