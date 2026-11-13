@@ -39,6 +39,12 @@ pkgs.testers.runNixOSTest {
     };
     environment.etc."burrow-webhook".text = "hook-secret\n";
     burrow.watchdog.units.enable = true;
+    # The state lives under /home, through a symlink: the clear handler
+    # must still reach it.
+    systemd.tmpfiles.settings."00-burrow-home-state" = {
+      "/home/dev/burrow-state".d = { mode = "0755"; user = "dev"; group = "dev"; };
+      "/var/lib/burrow".L.argument = "/home/dev/burrow-state";
+    };
     systemd.services.watchdog-stand-in.serviceConfig = {
       Type = "oneshot";
       ExecStart = "${watchdog}";

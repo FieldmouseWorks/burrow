@@ -118,8 +118,11 @@ in
         TimeoutStartSec = "30s";
         NoNewPrivileges = true;
         PrivateTmp = true;
+        # Strict leaves everything read-only, /home included, but the units
+        # state, wherever stateDir puts it (under /home, or a symlink into
+        # it). ProtectHome would hide that state from the handler, and
+        # ReadWritePaths can't reopen it.
         ProtectSystem = "strict";
-        ProtectHome = true;
         ReadWritePaths = [ dir ];
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
       };

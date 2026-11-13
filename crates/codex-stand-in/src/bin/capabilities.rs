@@ -1,7 +1,7 @@
 //! The same executable runs as a tool inside each engine's job.
 use std::{
     env, fs,
-    io::{BufRead, Write},
+    io::{BufRead, Read, Write},
     net::TcpStream,
     os::unix::{net::UnixStream, process::CommandExt},
     path::PathBuf,
@@ -28,7 +28,6 @@ fn main() {
     }
     if args.first().is_some_and(|s| s == "github") {
         if args.iter().any(|s| s == "--input") {
-            use std::io::Read;
             let mut body = Vec::new();
             std::io::stdin().read_to_end(&mut body).unwrap();
         }
@@ -173,6 +172,16 @@ fn main() {
                 );
                 assert!(!answer.stdout.is_empty());
                 fs::write(job.join("host-probe"), answer.stdout).unwrap();
+            }
+            "units-clear" => {
+                // The host's handler answers, here with its refusal of an
+                // empty list, which changes nothing on the host.
+                let mut door = UnixStream::connect("/run/burrow-units/clear.sock").unwrap();
+                door.write_all(b"[]").unwrap();
+                door.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut answer = String::new();
+                door.read_to_string(&mut answer).unwrap();
+                assert!(answer.contains("clear takes"), "{answer}");
             }
             "github" => {
                 UnixStream::connect(env::var("GH_TOKEN_SOCKET").unwrap()).unwrap();
