@@ -533,13 +533,18 @@ pub(crate) mod tests {
             err.contains(&format!("agentTool {}", tool.display())),
             "{err}"
         );
-        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        // A plain file there isn't one either. It has a path of its own: the
+        // stand-in is installed fresh, never written over (#902).
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "not a program\n").unwrap();
+        cfg.agent_tool = Some(plain);
         assert!(
             cfg.check_config()
                 .unwrap_err()
                 .contains("not an executable file")
         );
         burrow_test::executable(&tool, "#!/bin/sh\n");
+        cfg.agent_tool = Some(tool.clone());
         cfg.check_config().unwrap();
         cfg.agent_tool = Some(dir.path().to_owned());
         assert!(

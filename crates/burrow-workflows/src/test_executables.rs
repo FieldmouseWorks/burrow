@@ -1,6 +1,6 @@
 //! The workspace has one way to install executable fixtures. Follow test
 //! modules from Cargo's entry points, including helpers with arbitrary names.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,9 +30,43 @@ struct Guard {
     modules: PathBuf,
     testing: bool,
     findings: BTreeSet<String>,
+    /// Each file's stand-ins: what its `executable` calls named.
+    installed: BTreeSet<(PathBuf, String)>,
+    /// Each file's plain writes, by the name of the path written.
+    written: BTreeSet<(PathBuf, String)>,
+    /// The current function's locals, by the name of the path each holds.
+    lets: BTreeMap<String, String>,
 }
 
 impl Guard {
+    fn new(file: PathBuf, testing: bool) -> Self {
+        Guard {
+            file,
+            modules: PathBuf::new(),
+            testing,
+            findings: BTreeSet::new(),
+            installed: BTreeSet::new(),
+            written: BTreeSet::new(),
+            lets: BTreeMap::new(),
+        }
+    }
+
+    /// Writing over a stand-in leaves its mode as it was, so a plain write
+    /// installs an executable as surely as a mode change does: a test that
+    /// writes a script, or writes where its file installed a stand-in, holds
+    /// a writer that a concurrent fork can keep open until the exec.
+    fn finish(mut self) -> BTreeSet<String> {
+        for (file, name) in &self.written {
+            if self.installed.contains(&(file.clone(), name.clone())) {
+                self.findings.insert(format!(
+                    "{}: writes over the stand-in `{name}`: use burrow_test",
+                    file.display()
+                ));
+            }
+        }
+        self.findings
+    }
+
     fn reject(&mut self, what: &str) {
         if self.testing {
             self.findings
@@ -97,10 +131,27 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        let old = self.testing;
+        let old = (self.testing, std::mem::take(&mut self.lets));
         self.testing |= test_attrs(&f.attrs);
         visit::visit_item_fn(self, f);
-        self.testing = old;
+        (self.testing, self.lets) = old;
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        let old = std::mem::take(&mut self.lets);
+        visit::visit_impl_item_fn(self, f);
+        self.lets = old;
+    }
+
+    fn visit_local(&mut self, l: &'ast syn::Local) {
+        visit::visit_local(self, l);
+        if let syn::Pat::Ident(p) = &l.pat {
+            let named = l.init.as_ref().and_then(|i| name(&i.expr, &self.lets));
+            match named {
+                Some(n) => self.lets.insert(p.ident.to_string(), n),
+                None => self.lets.remove(&p.ident.to_string()),
+            };
+        }
     }
 
     fn visit_path(&mut self, p: &'ast syn::Path) {
@@ -122,6 +173,9 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
+        if e.method == "write_all" && e.args.first().is_some_and(script) {
+            self.reject("writes a script in place");
+        }
         if e.method == "set_mode"
             || e.method == "set_permissions"
             || (e.method == "mode" && !e.args.is_empty())
@@ -148,6 +202,20 @@ impl<'ast> Visit<'ast> for Guard {
                 .iter()
                 .map(|s| s.ident.to_string())
                 .collect();
+            let writer = names.ends_with(&["fs".into(), "write".into()])
+                || names.ends_with(&["File".into(), "create".into()]);
+            if self.testing
+                && let Some(path) = e.args.first().and_then(|p| name(p, &self.lets))
+            {
+                if names.last().is_some_and(|n| n == "executable") {
+                    self.installed.insert((self.file.clone(), path));
+                } else if writer {
+                    self.written.insert((self.file.clone(), path));
+                }
+            }
+            if writer && e.args.iter().nth(1).is_some_and(script) {
+                self.reject("writes a script in place");
+            }
             if names.ends_with(&["Command".into(), "new".into()]) {
                 for arg in &e.args {
                     if let syn::Expr::Lit(syn::ExprLit {
@@ -218,6 +286,89 @@ impl Guard {
     }
 }
 
+/// The name an expression gives the path it builds: the last file name a
+/// `join` or literal spells, else the field that holds it, or what the local
+/// holding it was bound to, seen through borrows and conversions. `None` when
+/// it's computed some other way or comes from a parameter: a helper's `path`
+/// names nothing.
+fn name(e: &syn::Expr, lets: &BTreeMap<String, String>) -> Option<String> {
+    match e {
+        syn::Expr::Reference(r) => name(&r.expr, lets),
+        syn::Expr::Paren(p) => name(&p.expr, lets),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => s.value().rsplit('/').next().map(String::from),
+        syn::Expr::Field(f) => match &f.member {
+            syn::Member::Named(n) => Some(n.to_string()),
+            syn::Member::Unnamed(_) => None,
+        },
+        syn::Expr::Path(p) => p
+            .path
+            .get_ident()
+            .and_then(|i| lets.get(&i.to_string()).cloned()),
+        syn::Expr::MethodCall(m) if m.method == "join" => {
+            m.args.first().and_then(|a| name(a, lets))
+        }
+        syn::Expr::MethodCall(m)
+            if matches!(
+                m.method.to_string().as_str(),
+                "as_ref"
+                    | "as_path"
+                    | "as_deref"
+                    | "borrow"
+                    | "clone"
+                    | "expect"
+                    | "into"
+                    | "to_owned"
+                    | "to_path_buf"
+                    | "unwrap"
+            ) =>
+        {
+            name(&m.receiver, lets)
+        }
+        syn::Expr::Call(c) => {
+            match &*c.func {
+                syn::Expr::Path(p)
+                    if p.path.segments.last().is_some_and(|s| {
+                        matches!(s.ident.to_string().as_str(), "new" | "from")
+                    }) && c.args.len() == 1 =>
+                {
+                    c.args.first().and_then(|a| name(a, lets))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether an expression is a script's text: a literal, or a `format!` or
+/// `concat!`, starting with a shebang.
+fn script(e: &syn::Expr) -> bool {
+    match e {
+        syn::Expr::Reference(r) => script(&r.expr),
+        syn::Expr::Paren(p) => script(&p.expr),
+        syn::Expr::MethodCall(m)
+            if matches!(m.method.to_string().as_str(), "as_bytes" | "as_str") =>
+        {
+            script(&m.receiver)
+        }
+        syn::Expr::Lit(syn::ExprLit { lit, .. }) => match lit {
+            syn::Lit::Str(s) => s.value().starts_with("#!"),
+            syn::Lit::ByteStr(s) => s.value().starts_with(b"#!"),
+            _ => false,
+        },
+        syn::Expr::Macro(m) if m.mac.path.is_ident("format") || m.mac.path.is_ident("concat") => m
+            .mac
+            .parse_body_with(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+            )
+            .is_ok_and(|args| args.first().is_some_and(script)),
+        _ => false,
+    }
+}
+
 fn shell_setter(text: &str) -> bool {
     text.split(|c: char| c.is_whitespace() || ";|&".contains(c))
         .any(|word| word == "chmod" || word == "/bin/chmod")
@@ -231,12 +382,7 @@ impl<'ast> Visit<'ast> for Shell {
 }
 
 fn check(root: &Path) -> BTreeSet<String> {
-    let mut guard = Guard {
-        file: PathBuf::new(),
-        modules: PathBuf::new(),
-        testing: false,
-        findings: BTreeSet::new(),
-    };
+    let mut guard = Guard::new(PathBuf::new(), false);
     for entry in fs::read_dir(root).unwrap() {
         let dir = entry.unwrap().path();
         if !dir.join("Cargo.toml").is_file() {
@@ -269,7 +415,7 @@ fn check(root: &Path) -> BTreeSet<String> {
             }
         }
     }
-    guard.findings
+    guard.finish()
 }
 
 #[test]
@@ -297,17 +443,61 @@ fn setters_cannot_bypass_the_guard() {
         "Command::new(\"chmod\").args([\"+x\", \"stand-in\"]);",
         "Command::new(\"sh\").arg(\"chmod +x stand-in\");",
         "wrapper!(fs::set_permissions(p, mode));",
+        "fs::write(&p, \"#!/bin/sh\\nexit 0\\n\").unwrap();",
+        "File::create(&p).unwrap().write_all(b\"#!/bin/sh\\n\").unwrap();",
+        "let gh = bin.join(\"gh\"); burrow_test::executable(&gh, GH); fs::write(&gh, OTHER).unwrap();",
+        "executable(bin.join(\"gh\"), GH); File::create(dir.path().join(\"bin/gh\")).unwrap();",
     ] {
         let ast = syn::parse_file(&format!("fn fixture() {{ {code} }}")).unwrap();
-        let mut guard = Guard {
-            file: "fixture.rs".into(),
-            modules: PathBuf::new(),
-            testing: true,
-            findings: BTreeSet::new(),
-        };
+        let mut guard = Guard::new("fixture.rs".into(), true);
         guard.visit_file(&ast);
-        assert!(!guard.findings.is_empty(), "accepted: {code}");
+        assert!(!guard.finish().is_empty(), "accepted: {code}");
     }
+}
+
+/// The usage tests' notice capture (#902): the rig installs `notify`, and the
+/// test wrote its new body over it in place, keeping its mode.
+#[test]
+fn writing_over_a_stand_in_is_rejected() {
+    let rig = r##"
+        fn rig() {
+            let notify = d.path().join("notify");
+            burrow_test::executable(&notify, format!("#!/bin/sh\necho \"$1\" >>{dir}/told\n"));
+            cfg["notify"] = json!(notify);
+        }
+    "##;
+    let overwrite = r##"
+        #[test]
+        fn old_holds_are_normalized_for_status_reminders_and_extensions() {
+            fs::write(
+                cfg.notify.as_ref().unwrap(),
+                format!("#!/bin/sh\nprintf '%s' \"$4\" >'{}'\n", capture.display()),
+            )
+            .unwrap();
+        }
+    "##;
+    let found = |code: &str| {
+        let mut guard = Guard::new("usage/tests.rs".into(), true);
+        guard.visit_file(&syn::parse_file(code).unwrap());
+        guard.finish()
+    };
+    let old = found(&format!("{rig}{overwrite}"));
+    assert!(old.iter().any(|f| f.contains("script in place")), "{old:?}");
+    // Its path alone gives it away, whatever it writes.
+    let renamed = overwrite.replace("format!(\"#!", "format!(\"");
+    let renamed = found(&format!("{rig}{renamed}"));
+    assert!(
+        renamed
+            .iter()
+            .any(|f| f.contains("over the stand-in `notify`")),
+        "{renamed:?}"
+    );
+    let fixed = overwrite.replace("fs::write(", "burrow_test::executable(");
+    let fixed = fixed.replace(".unwrap();\n        }", ";\n        }");
+    assert_eq!(found(&format!("{rig}{fixed}")), BTreeSet::new());
+    // Data beside a stand-in is still written plainly.
+    let data = "#[test] fn data() { executable(bin.join(\"gh\"), GH); fs::write(bin.join(\"says\"), \"[]\").unwrap(); }";
+    assert_eq!(found(data), BTreeSet::new());
 }
 
 #[test]

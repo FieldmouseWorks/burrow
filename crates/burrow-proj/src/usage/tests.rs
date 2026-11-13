@@ -755,11 +755,10 @@ fn old_holds_are_normalized_for_status_reminders_and_extensions() {
     assert!(line(&expected).contains("weekly allowance"));
     assert!(!line(&expected).contains("monthly spend limit"));
     let capture = d.path().join("notice-body");
-    fs::write(
+    burrow_test::executable(
         cfg.notify.as_ref().unwrap(),
         format!("#!/bin/sh\nprintf '%s' \"$4\" >'{}'\n", capture.display()),
-    )
-    .unwrap();
+    );
     remind(&cfg);
     let notice = fs::read_to_string(&capture).unwrap();
     assert!(notice.contains("weekly allowance"));
