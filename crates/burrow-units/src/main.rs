@@ -10,7 +10,8 @@
 //!                          (burrow-units-watch.service)
 //! burrow-units             ask for a pass
 //! burrow-units clear EXE.. mark those programs' crashes so far dealt with
-//!                          (their cause fixed), then ask for a pass
+//!                          through the host socket, then ask for a pass
+//! burrow-units serve-clear handle one socket-activated host request
 //! ```
 //!
 //! Only the service passes, so every pass reads the whole journal, whoever
@@ -28,6 +29,8 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use serde::Deserialize;
+
+mod clear_door;
 
 use burrow_units::{Found, cores, failed_names, items, shown};
 use burrow_watchdog::now;
@@ -55,6 +58,8 @@ const SETTLE: Duration = Duration::from_secs(2);
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Config {
+    /// The host's acknowledgement socket. Callers never need its state directory.
+    clear_socket: PathBuf,
     /// The watch file the watchdog reads.
     file: PathBuf,
     /// Globs of units and programs never watched.
@@ -91,14 +96,12 @@ fn run() -> Result<(), String> {
     match args.next().as_deref() {
         Some("pass") => pass(&cfg),
         Some("watch") => watch(&cfg),
+        Some("serve-clear") => clear_door::serve(&cfg),
         None => ask(&cfg),
         Some("clear") => {
             let exes: Vec<String> = args.collect();
-            if exes.is_empty() {
-                return Err("clear takes the programs' paths, as the watch names them".into());
-            }
-            clear(&cfg, &exes)?;
-            ask(&cfg)
+            clear_door::validate(&exes)?;
+            clear_door::client(&cfg.clear_socket, &exes)
         }
         Some(other) => Err(format!(
             "unknown command {other}: it takes pass, watch, clear EXE..., or none"
@@ -149,9 +152,14 @@ fn clear(cfg: &Config, exes: &[String]) -> Result<(), String> {
 
 /// A pass asked of the service.
 fn ask(cfg: &Config) -> Result<(), String> {
+    request_pass(cfg)?;
+    println!("asked for a pass: the watch file has it in a moment");
+    Ok(())
+}
+
+fn request_pass(cfg: &Config) -> Result<(), String> {
     burrow_events::kick::kick(&cfg.own, Duration::from_secs(10))
         .map_err(|e| format!("couldn't ask for a pass: {e}"))?;
-    println!("asked for a pass: the watch file has it in a moment");
     Ok(())
 }
 
