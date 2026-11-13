@@ -23,7 +23,10 @@
 //! where it resolves inside the scratch or the job's own project, and what
 //! doesn't keeps the scratch rather than reading further. Nothing read from it
 //! is printed. A submodule whose commit the superproject's change moved is
-//! kept with its objects even when its own files are clean.
+//! kept with its objects even when its own files are clean, as is one a saved
+//! head already names. Index flags (assume-unchanged, skip-worktree) don't hide
+//! a present file's edits, and an unmerged index, which a patch can't hold, keeps
+//! the scratch.
 
 use std::collections::HashMap;
 use std::fs;
@@ -608,6 +611,37 @@ fn keep(
             .trim()
             .to_owned(),
     };
+    // The copied index may mark tracked files assume-unchanged or
+    // skip-worktree, which makes a diff take the index's word for them. A flagged
+    // file that is on disk is compared like any other; a skip-worktree file that
+    // isn't there is a sparse checkout's, not a deletion, and stays flagged.
+    let flagged = git.git(&["ls-files", "-v", "-z"])?;
+    let mut present: Vec<String> = Vec::new();
+    for entry in flagged.split(|b| *b == 0).filter(|e| e.len() > 2) {
+        if matches!(entry[0], b'h' | b'S' | b's') {
+            let path = std::str::from_utf8(&entry[2..]).map_err(|e| e.to_string())?;
+            if fs::symlink_metadata(tree.join(path)).is_ok() {
+                present.push(path.to_owned());
+            }
+        }
+    }
+    // One flag at a time: git applies only the last of several.
+    for flag in ["--no-assume-unchanged", "--no-skip-worktree"] {
+        for batch in present.chunks(256) {
+            let mut args = vec!["update-index", flag, "--"];
+            args.extend(batch.iter().map(String::as_str));
+            git.git(&args)?;
+        }
+    }
+    // A patch can't hold an index's conflict stages (a resolved working file
+    // may be all it shows of them), and the index goes with the scratch: it
+    // stays rather than lose the sides.
+    if !git.git(&["ls-files", "-u", "-z"])?.is_empty() {
+        return Err(format!(
+            "{} has unmerged index entries, which can't be kept",
+            tree.display()
+        ));
+    }
     // A submodule's own files are its own tree's to keep, and git is not to
     // look inside one: it would run what the job configured there.
     let diff = |extra: &[&str]| {
@@ -631,11 +665,20 @@ fn keep(
         "--no-renames",
         "--cached",
     ])?));
-    if force {
-        // A submodule kept for the commits its superproject names holds
-        // gitlinks of its own at each of them (and at its head): the commits
-        // those name in nested submodules are needed to restore it, clean
-        // nested modules and commits not checked out included.
+    let listed = git.git(&["ls-files", "-z", "--others", "--exclude-standard"])?;
+    if !force && tracked.is_empty() && staged.is_empty() && listed.is_empty() {
+        return Ok((false, links));
+    }
+    // Every revision the saved state is built on (the head, and the commits a
+    // superproject names here) holds gitlinks of its own, in a clone as in a
+    // submodule: their commits are needed to restore it, clean modules and
+    // commits not checked out included. Only a repository whose objects are in
+    // the scratch loses them with it.
+    let local = sha.is_some()
+        && g.object_dirs(&common)?
+            .iter()
+            .any(|d| d.starts_with(&g.roots[0]));
+    if force || local {
         let mut revs: Vec<&str> = named
             .unwrap_or_default()
             .iter()
@@ -648,10 +691,6 @@ fn keep(
             links.extend(tree_gitlinks(&listing));
         }
     }
-    let listed = git.git(&["ls-files", "-z", "--others", "--exclude-standard"])?;
-    if !force && tracked.is_empty() && staged.is_empty() && listed.is_empty() {
-        return Ok((false, links));
-    }
     let put = |name: &str, data: &[u8]| {
         fs::write(to.join(name), data).map_err(|e| format!("{}: {e}", to.join(name).display()))
     };
@@ -661,11 +700,7 @@ fn keep(
     put("tracked.patch", &tracked)?;
     put("staged.patch", &staged)?;
     if sha.is_some() {
-        let scratch = &g.roots[0];
-        if g.object_dirs(&common)?
-            .iter()
-            .any(|d| d.starts_with(scratch))
-        {
+        if local {
             // Each commit the superproject names is a ref of this process's own
             // git dir, so the bundle carries it though it isn't in HEAD's history.
             let mut revs = vec![String::from("HEAD")];

@@ -854,3 +854,116 @@ fn keeping_work_stays_when_a_nested_submodule_has_no_worktree() {
     assert!(e.contains("no working tree"), "{e}");
     assert!(at.exists());
 }
+
+// A tracked file marked assume-unchanged or skip-worktree and then edited is
+// still work: git's own diff trusts the flag, the kept patch must not.
+#[test]
+fn keeping_work_sees_edits_hidden_by_index_flags() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let b = Box::new();
+        let at = clone_in_scratch(&b);
+        fs::write(at.join("README"), "v1\n").unwrap();
+        git(&at, &["add", "README"]);
+        git(&at, &["commit", "-q", "-m", "r"]);
+        git(&at, &["update-index", flag, "README"]);
+        fs::write(at.join("README"), "hidden edit\n").unwrap();
+        clear(&b.cfg, "u");
+        let tracked = fs::read_to_string(kept(&b, "clone.1").join("tracked.patch")).unwrap();
+        assert!(tracked.contains("+hidden edit"), "{flag}: {tracked}");
+    }
+}
+
+// A sparse checkout's absent, skip-worktree file is not a deletion.
+#[test]
+fn keeping_work_does_not_call_a_sparse_absence_a_deletion() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join("README"), "v1\n").unwrap();
+    fs::write(at.join("other"), "o\n").unwrap();
+    git(&at, &["add", "README", "other"]);
+    git(&at, &["commit", "-q", "-m", "r"]);
+    git(&at, &["update-index", "--skip-worktree", "other"]);
+    fs::remove_file(at.join("other")).unwrap();
+    fs::write(at.join("README"), "edited\n").unwrap();
+    clear(&b.cfg, "u");
+    let tracked = fs::read_to_string(kept(&b, "clone.1").join("tracked.patch")).unwrap();
+    assert!(tracked.contains("+edited"), "{tracked}");
+    assert!(!tracked.contains("deleted file"), "{tracked}");
+}
+
+// Conflict stages can't be kept in a patch: the scratch stays.
+#[test]
+fn keeping_work_stays_when_the_index_is_unmerged() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join("README"), "base\n").unwrap();
+    git(&at, &["add", "README"]);
+    git(&at, &["commit", "-q", "-m", "base"]);
+    git(&at, &["checkout", "-q", "-b", "side"]);
+    fs::write(at.join("README"), "side\n").unwrap();
+    git(&at, &["commit", "-q", "-am", "side"]);
+    git(&at, &["checkout", "-q", "-"]);
+    fs::write(at.join("README"), "main\n").unwrap();
+    git(&at, &["commit", "-q", "-am", "main"]);
+    let merge = Command::new("git")
+        .arg("-C")
+        .arg(&at)
+        .args(["merge", "side"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success());
+    fs::write(at.join("README"), "resolved by hand\n").unwrap();
+    let e = keep_err(&b);
+    assert!(e.contains("unmerged"), "{e}");
+    assert!(at.exists());
+}
+
+// A submodule commit the saved top-level HEAD already names, with only an
+// ordinary parent file changed, is kept with the parent.
+#[test]
+fn keeping_work_keeps_submodule_commits_a_saved_head_names() {
+    let b = Box::new();
+    let leaf = b.repo("leaf");
+    let at = clone_in_scratch(&b);
+    git(
+        &at,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            leaf.to_str().unwrap(),
+            "mod",
+        ],
+    );
+    let m = at.join("mod");
+    fs::write(m.join("unpublished.txt"), "u\n").unwrap();
+    git(&m, &["add", "unpublished.txt"]);
+    git(&m, &["commit", "-q", "-m", "unpublished"]);
+    let sha = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&m)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    git(&at, &["add", "mod"]);
+    git(&at, &["commit", "-q", "-m", "record mod"]);
+    fs::write(at.join("README"), "ordinary edit\n").unwrap();
+    clear(&b.cfg, "u");
+    let bundle = kept(&b, "clone-mod.1").join("base.bundle");
+    assert!(bundle.exists(), "{:?}", left(&b.cfg));
+    let heads = Command::new("git")
+        .arg("-C")
+        .arg(bundle.parent().unwrap())
+        .args(["bundle", "list-heads", "base.bundle"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&heads.stdout).contains(&sha));
+}

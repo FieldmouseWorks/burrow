@@ -211,11 +211,19 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     if crate::question::acceptance_pending(job)? {
         return Ok(Some(crate::now() + 60));
     }
+    let busy = job.end_pending() || matches!(job.state().as_str(), "queued" | "running");
+    // A recommendation a handoff carried to a turn that never ran (or one left
+    // for a question already open) is the question's: committed now, with the
+    // question's identity, text and deadline kept, so neither its one-way flag
+    // nor its default is lost to the one on record.
+    if !busy && pending(job)?.is_some() {
+        finish(cfg, job, "ask")?;
+    }
     let Some(q) = load(job) else { return Ok(None) };
     if crate::planning::admit(job).is_err() {
         return Ok(Some(crate::now() + 60));
     }
-    if job.end_pending() || matches!(job.state().as_str(), "queued" | "running") {
+    if busy {
         return Ok(Some(q.due.max(crate::now() + 60)));
     }
     if crate::now() < q.due {
@@ -470,6 +478,41 @@ mod tests {
         assert!(!job.path("prompt.2").exists(), "no engine ran the default");
         assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
         assert!(host_path(&job, "question-needs-owner").exists());
+    }
+    // A carried one-way recommendation with no committed question yet (the
+    // successor failed before it could commit one) is published at expiry with
+    // its own default, and an upgrade over a reversible question brings its
+    // default along, not the old one.
+    #[test]
+    fn a_carried_recommendation_is_committed_whole_when_the_successor_never_runs() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        let _held = job.lock().unwrap();
+        expire(&cfg, &job).unwrap();
+        drop(_held);
+        assert_eq!(
+            read(&host_path(&job, "question-needs-owner")).as_deref(),
+            Some("delete it")
+        );
+        // No committed question at all.
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::remove_file(host_path(&job, "question")).unwrap();
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        let _held = job.lock().unwrap();
+        assert!(expire(&cfg, &job).unwrap().is_some());
+        let q = load(&job).unwrap();
+        assert!(q.recommendation.one_way);
+        assert_eq!(q.recommendation.default, "delete it");
     }
     // The launcher of a handoff can die after numbering the successor and
     // before retargeting the recommendation: it is still the question's, for
