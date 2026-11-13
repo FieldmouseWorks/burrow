@@ -94,12 +94,10 @@ fn restoration_receipts_survive_moves_after_an_interrupted_commit() {
         // The await rewrite fails once the question's credit is committed:
         // the job's directory refuses the confined writer's replacement file.
         let dir = a.path("await").parent().unwrap().to_path_buf();
-        let open = fs::metadata(&dir).unwrap().permissions();
-        let mut shut = open.clone();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut shut, 0o555);
-        fs::set_permissions(&dir, shut).unwrap();
+        let open = std::os::unix::fs::MetadataExt::mode(&fs::metadata(&dir).unwrap()) & 0o7777;
+        burrow_test::permissions(&dir, 0o555);
         let failed = crate::policy::shift_waits(&a, &mut rec).is_err();
-        fs::set_permissions(&dir, open).unwrap();
+        burrow_test::permissions(&dir, open);
         assert!(failed);
         near(due(&cfg, "a"), original + 600);
         // Membership changes before the old restoration can record success.
