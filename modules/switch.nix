@@ -62,12 +62,14 @@ let
     current = "/run/current-system";
     profile = "/nix/var/nix/profiles/system";
     activationLock = "/run/nixos/switch-to-configuration.lock";
+    activationLists = "/run/nixos";
     path = lib.makeBinPath [ pkgs.coreutils pkgs.util-linux config.systemd.package ];
     tools = {
       sudo = "${config.security.wrapperDir}/sudo";
       systemctl = "${config.systemd.package}/bin/systemctl";
       systemdRun = "${config.systemd.package}/bin/systemd-run";
       systemdAnalyze = "${config.systemd.package}/bin/systemd-analyze";
+      busctl = "${config.systemd.package}/bin/busctl";
       logger = "${config.systemd.package}/bin/systemd-cat";
       runuser = "${pkgs.util-linux}/bin/runuser";
       nix = "${config.nix.package}/bin/nix";

@@ -284,6 +284,74 @@ fn an_activation_with_errors_or_past_its_deadline_isnt_kept() {
     );
 }
 
+/// A sweep restarted behind a long run that was going before the
+/// activation, as burrow#811's: in systemd's queue, and in what
+/// switch-to-configuration lists.
+fn behind_a_long_run(m: &Machine) {
+    let job = |id: u32, unit: &str, kind: &str, state: &str| {
+        format!(r#"[{id},"{unit}","{kind}","{state}","/org/freedesktop/systemd1/job/{id}","/u"]"#)
+    };
+    m.set(
+        "jobs",
+        &format!(
+            "{},{}",
+            job(1, "renovate.service", "start", "running"),
+            job(9, "renovate-sweep.service", "restart", "waiting")
+        ),
+    );
+    m.set("before-9", &job(1, "renovate.service", "start", "running"));
+    m.set("lists", "renovate-sweep.service\n");
+}
+
+const LET_GO: &str = "renovate-sweep.service restart waited behind renovate.service (job 1, running since before the activation): queued again, not waited for\n";
+
+#[test]
+fn an_activation_doesnt_wait_behind_a_run_that_was_already_going() {
+    let m = Machine::new(false);
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    behind_a_long_run(&m);
+    let out = m.switch(&["--toplevel", &two]);
+    // Let go, and queued again, so it still restarts after the run.
+    assert_eq!(
+        said(&out),
+        (
+            Some(0),
+            format!(
+                "live: {two}\nrun box-confirm within 10min to keep it (and make it the boot default)\n"
+            ),
+            LET_GO.into()
+        )
+    );
+    assert_eq!(
+        m.fake("busctl"),
+        "cancel 9\nRestartUnit renovate-sweep.service replace\n"
+    );
+    assert_eq!(
+        m.fake("journal"),
+        format!("-t box-switch -p warning {LET_GO}")
+    );
+    // The revert's activation, too.
+    let out = m.switch(&["--revert-to", &one]);
+    assert_eq!(said(&out), (Some(0), String::new(), LET_GO.into()));
+    assert_eq!(
+        m.fake("busctl"),
+        "cancel 9\nRestartUnit renovate-sweep.service replace\n"
+    );
+    assert_eq!(m.running(), one);
+    // A job that ended before it was let go is left be.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("fail-cancel", "");
+    let out = m.switch(&["--toplevel", &two]);
+    assert_eq!(
+        said(&out),
+        ok(&format!(
+            "live: {two}\nrun box-confirm within 10min to keep it (and make it the boot default)\n"
+        ))
+    );
+    assert_eq!(m.fake("busctl"), "");
+}
+
 #[test]
 fn a_revert_that_wont_arm_puts_nothing_live() {
     let m = Machine::new(false);

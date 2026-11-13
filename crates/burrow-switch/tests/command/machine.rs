@@ -44,7 +44,7 @@ pub fn bin() -> &'static Path {
     .path()
 }
 
-const STAND_INS: [(&str, &str); 10] = [
+const STAND_INS: [(&str, &str); 11] = [
     (
         "sudo",
         // Never inside itself: a run it starts that starts it again would
@@ -57,7 +57,7 @@ given=$PATH PATH='@PATH@'
 echo "$*" >>"$FAKE/sudo"
 [ "$1" = -- ] || exit 9
 shift
-exec env -i FAKE="$FAKE" CURRENT="$CURRENT" PATH="$given" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
+exec env -i FAKE="$FAKE" CURRENT="$CURRENT" LISTS="$LISTS" PATH="$given" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
 "#,
     ),
     (
@@ -123,6 +123,30 @@ PATH=$path exec "$@"
 "#,
     ),
     (
+        // systemd's job queue: FAKE/jobs is what ListJobs says, FAKE/before-ID
+        // what job ID waits for (nothing, when they aren't there). A job's
+        // Cancel and a unit's job queued again are kept in FAKE/busctl;
+        // FAKE/fail-cancel fails a cancel, as for a job that just ended.
+        "busctl",
+        r#"#!/bin/sh
+PATH='@PATH@'
+[ "$1 $2 $3" = "--json=short call org.freedesktop.systemd1" ] || exit 1
+shift 3
+reply() { printf '{"type":"a(usssoo)","data":[[%s]]}\n' "$1"; }
+case "$2 $3" in
+  "org.freedesktop.systemd1.Manager ListJobs") reply "$(cat "$FAKE/jobs" 2>/dev/null)" ;;
+  "org.freedesktop.systemd1.Job GetBefore") reply "$(cat "$FAKE/before-${1##*/}" 2>/dev/null)" ;;
+  "org.freedesktop.systemd1.Job Cancel")
+    if [ -e "$FAKE/fail-cancel" ]; then echo "$1" >"$FAKE/cancel-failed"; exit 1; fi
+    echo "cancel ${1##*/}" >>"$FAKE/busctl" ;;
+  "org.freedesktop.systemd1.Manager "*Unit)
+    echo "$3 $5 $6" >>"$FAKE/busctl"
+    echo '{"type":"o","data":["/org/freedesktop/systemd1/job/900"]}' ;;
+  *) exit 1 ;;
+esac
+"#,
+    ),
+    (
         "systemd-analyze",
         r#"#!/bin/sh
 PATH='@PATH@'
@@ -185,13 +209,22 @@ echo "$*" >>"$FAKE/box-boot"
     (
         // Every system's: which one it is is the dir it's in. `test` makes
         // it the one that runs, unless it hangs (the revert fires) or stays.
-        // FAKE/locked-NAME is how many tries it refuses as locked.
+        // FAKE/locked-NAME is how many tries it refuses as locked. With
+        // FAKE/lists, it lists what it restarts as FAKE/lists says, and waits
+        // (up to 20s) for one of its jobs to be let go (or tried), as a real one waits
+        // for its jobs.
         "switch-to-configuration",
         r#"#!/bin/sh
 PATH='@PATH@'
 sys=${0%/bin/switch-to-configuration}
 name=${sys##*/}
 echo "$name $*" >>"$FAKE/switch-to-configuration"
+if [ -e "$FAKE/lists" ]; then
+  cp "$FAKE/lists" "$LISTS/restart-list"
+  n=0
+  until grep -q '^cancel ' "$FAKE/busctl" 2>/dev/null || [ -e "$FAKE/cancel-failed" ] || [ $n -ge 200 ]; do sleep 0.1; n=$((n + 1)); done
+  rm -f "$LISTS/restart-list"
+fi
 n=$(cat "$FAKE/locked-$name" 2>/dev/null || echo 0)
 if [ "$n" -gt 0 ]; then echo $((n - 1)) >"$FAKE/locked-$name"; exit 11; fi
 if [ -e "$FAKE/hang-$name" ]; then echo dead >"$FAKE/timer-state"; exit 1; fi
@@ -225,7 +258,7 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         let m = Machine { _dir: dir, root };
-        for d in ["fake", "systems", "run", "flake"] {
+        for d in ["fake", "systems", "run", "flake", "lists"] {
             fs::create_dir_all(m.path(d)).unwrap();
         }
         m.system("one", Some(100));
@@ -237,8 +270,9 @@ impl Machine {
             "switch": "box-switch", "confirm": "box-confirm", "revert": "box-revert",
             "state": m.path("state"), "flake": m.path("flake"), "configuration": "box",
             "within": "10min", "current": m.path("run/current-system"), "profile": m.path("profile"),
-            "activationLock": m.path("s2c.lock"), "path": unit_path(),
-            "tools": {"sudo": b.join("sudo"), "systemctl": b.join("systemctl"),
+            "activationLock": m.path("s2c.lock"), "activationLists": m.path("lists"),
+            "path": unit_path(),
+            "tools": {"sudo": b.join("sudo"), "systemctl": b.join("systemctl"), "busctl": b.join("busctl"),
                       "systemdRun": b.join("systemd-run"), "systemdAnalyze": b.join("systemd-analyze"),
                       "logger": b.join("systemd-cat"), "runuser": b.join("runuser"),
                       "nix": b.join("nix"), "nixEnv": b.join("nix-env"),
@@ -320,6 +354,7 @@ impl Machine {
             .args(words)
             .env("FAKE", self.path("fake"))
             .env("CURRENT", self.path("run/current-system"))
+            .env("LISTS", self.path("lists"))
             .env_remove("BURROW_CONFIRM_WITHIN")
             .env_remove("SERVICE_RESULT");
         if root() {
