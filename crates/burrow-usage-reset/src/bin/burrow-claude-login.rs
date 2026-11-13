@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::{env, fs, process};
+use std::env;
 
 use burrow_usage_reset::claude::check_login;
 
@@ -13,12 +13,14 @@ fn main() -> ExitCode {
         eprintln!("usage: burrow-claude-login CLAUDE");
         return ExitCode::from(2);
     };
-    // A folder of its own, so Claude Code's project state lands nowhere shared.
-    let dir = env::temp_dir().join(format!("burrow-claude-login-{}", process::id()));
-    let result = fs::create_dir_all(&dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))
-        .and_then(|()| check_login(&claude, &dir));
-    let _ = fs::remove_dir_all(&dir);
+    // A folder of its own, so Claude Code's project state lands nowhere shared:
+    // created exclusively and private (0700), so nobody else's directory is
+    // ever adopted, and removed on drop, only if this made it.
+    let result = tempfile::Builder::new()
+        .prefix("burrow-claude-login-")
+        .tempdir()
+        .map_err(|e| format!("a temporary folder: {e}"))
+        .and_then(|dir| check_login(&claude, dir.path()));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

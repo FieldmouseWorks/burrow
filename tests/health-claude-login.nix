@@ -37,5 +37,22 @@ pkgs.runCommand "health-claude-login-check" { } ''
   for login in null-limits cached no-plan expired silent broken; do
     ! LOGIN=$login ${probe} ${claude} 2>err || { echo "$login passed"; exit 1; }
   done
+
+  # Persisted copies of the meter (fetchedAtMs, ms): the check never waits for
+  # one to age, so each case is bounded by the health runner's 30s timeout.
+  copy() { echo '{"cachedUsageUtilization":{"fetchedAtMs":'$(( $(date +%s%3N) + $1 ))'}}' >$HOME/.claude.json; }
+  timed() { s=$SECONDS; "$@"; r=$?; [ $((SECONDS - s)) -lt 25 ] || { echo "took over the health timeout"; exit 1; }; return $r; }
+  copy -10000; rm -f asked
+  LOGIN=expired timed ${probe} ${claude} || { echo "a 10s-old copy failed"; exit 1; }
+  [ ! -e asked ] || { echo "a 10s-old copy was asked past"; exit 1; }
+  copy -3600000
+  LOGIN=ok timed ${probe} ${claude} || { echo "an old copy failed a working login"; exit 1; }
+  [ -s asked ] || { echo "an old copy wasn't asked past"; exit 1; }
+  ! LOGIN=expired timed ${probe} ${claude} 2>err || { echo "an old copy passed an expired login"; exit 1; }
+  copy 3600000
+  ! LOGIN=ok timed ${probe} ${claude} 2>err || { echo "a future-dated copy passed"; exit 1; }
+  copy -3600000
+  rm -f $HOME/.claude.json
+  ! LOGIN=silent timed ${probe} ${claude} 2>err || { echo "a stalled request passed"; exit 1; }
   touch $out
 ''

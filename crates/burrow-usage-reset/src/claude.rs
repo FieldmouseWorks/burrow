@@ -61,29 +61,40 @@ impl Account for ClaudeCode {
 /// shown to be fresh (read_fresh).
 pub fn read_usage(claude: &Path, dir: &Path) -> Result<Reading, String> {
     read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir)
+        ask_usage(claude, dir, TIMEOUT)
     })
 }
 
-/// Whether CLAUDE is logged in as the user it runs as, which only a fresh
-/// answer from its usage endpoint shows: `get_usage` answers `success` to
-/// the request alone, and from a cached copy or with null limits when the
-/// endpoint failed on an expired or revoked login. So it's a live reading
-/// of the meter (read_usage), asked once any copy that would answer in its
-/// place is old enough not to.
+/// How long check_login may take in all, inside HOST-health's check timeout
+/// (modules/updates.nix checkTimeout, 30s).
+const LOGIN_BUDGET: Duration = Duration::from_secs(20);
+
+/// Whether CLAUDE is logged in as the user it runs as, within LOGIN_BUDGET.
+/// `get_usage` answers `success` to the request alone, and from a cached copy
+/// or with null limits when the endpoint failed on an expired or revoked
+/// login, so only a fresh answer from its endpoint shows it. A copy under
+/// SNAPSHOT old is itself that: Claude Code persists one only from an answer
+/// of its endpoint, a minute ago at most, so it passes without asking (and
+/// without waiting for the copy to age, which would not fit the budget). With
+/// no copy or an older one, a live reading of the meter (read_usage) is asked.
+/// A copy dated ahead of this clock proves nothing and is not waited out: the
+/// reading refuses it.
 pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
     if let Some(at) = copied_at()? {
         let age = crate::now() - at;
-        if age < SNAPSHOT {
-            thread::sleep(Duration::from_secs_f64(SNAPSHOT - age + 1.0));
+        if (0.0..SNAPSHOT).contains(&age) {
+            return Ok(());
         }
     }
-    read_usage(claude, dir).map(|_| ())
+    read_fresh(&mut copied_at, &mut crate::now, &mut || {
+        ask_usage(claude, dir, LOGIN_BUDGET)
+    })
+    .map(|_| ())
 }
 
 /// Claude Code's answer to `get_usage`, without the scan of local
 /// transcripts the meter has no use for. It makes no model call.
-fn ask_usage(claude: &Path, dir: &Path) -> Result<Value, String> {
+fn ask_usage(claude: &Path, dir: &Path, timeout: Duration) -> Result<Value, String> {
     {
         let mut child = Command::new(claude)
             .args([
@@ -123,7 +134,7 @@ fn ask_usage(claude: &Path, dir: &Path) -> Result<Value, String> {
             });
         }
         let answer = sent.and_then(|_| {
-            rx.recv_timeout(TIMEOUT)
+            rx.recv_timeout(timeout)
                 .map_err(|_| "Claude Code didn't answer get_usage".to_owned())
         });
         let _ = child.kill();
