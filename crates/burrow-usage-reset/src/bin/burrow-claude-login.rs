@@ -2,9 +2,9 @@
 //! the user running it (a live reading of its usage meter, claude::check_login),
 //! and says why not on stderr otherwise. HOST-health's claude-login check.
 
+use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::env;
 
 use burrow_usage_reset::claude::check_login;
 
