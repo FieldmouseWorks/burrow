@@ -166,7 +166,13 @@ class Context:
         ok = post_status(self.repo, self.pr, state, desc)
         # A draft or a held PR is out of the pipeline, and GitHub's draft
         # mark or the hold label says so: no stage's label, whatever said it.
-        show_waiting(self.repo, self.pr, self.labels, S.NONE if self.pr["isDraft"] or CFG["labels"]["hold"] in self.labels else stage)
+        stage = S.NONE if self.pr["isDraft"] or CFG["labels"]["hold"] in self.labels else stage
+        show_waiting(self.repo, self.pr, self.labels, stage)
+        # Where it stands, for proj's snapshot (crates/burrow-proj/src/snapshot.rs):
+        # `since` is when it came to this stage, kept while it stays in it.
+        was = self.st.get("stage") or {}
+        self.st["stage"] = {"repo": self.repo, "number": self.n, "stage": stage, "by": wait, "on": desc,
+                            "since": was["since"] if was.get("stage") == stage else C.NOW}
         if why:
             self.digest.append((why, self.line, desc))
         self.refresh["usage_release"] = self.usage_grace()

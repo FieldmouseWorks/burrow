@@ -11,6 +11,12 @@
     "holds": {
       "$ref": "#/$defs/Holds"
     },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
     "jobs": {
       "type": "array",
       "items": {
@@ -57,7 +63,8 @@
     "slots",
     "meters",
     "holds",
-    "jobs"
+    "jobs",
+    "items"
   ],
   "$defs": {
     "Engine": {
@@ -274,6 +281,57 @@
       "required": [
         "app",
         "owner"
+      ]
+    },
+    "Item": {
+      "description": "An open PR the steward tracks, as its state file says it stands.",
+      "type": "object",
+      "properties": {
+        "age": {
+          "description": "Seconds since then.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "by": {
+          "description": "Who has it: the kind of wait the steward noted (steward, hold, sweep,\nrenovate or train); none when it noted none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "on": {
+          "description": "What it waits on: the status the steward last posted.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "OWNER/REPO.",
+          "type": "string"
+        },
+        "since": {
+          "description": "When it came to this stage, in seconds since the epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "stage": {
+          "description": "The steward's stage name (`stages.py`): review, reviewer, fix, ci,\nproofSlot, proof, releaseAge, train, merge, owner or base. None: out\nof the pipeline (a draft, or on hold).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "number",
+        "on",
+        "since",
+        "age"
       ]
     },
     "JobRow": {
