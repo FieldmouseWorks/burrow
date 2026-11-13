@@ -26,10 +26,9 @@ pub fn markdown() -> String {
          \n\
          An option that isn't live is set in the machine's flake, under `burrow.`\n\
          and its name: a change is a PR to the flake and a deploy. A live one is kept\n\
-         in a file on the machine (the settings overlay under `burrow.stateDir`;\n\
-         proj's in the job user's `~/.config/proj`, setups in `roles.d/` beside the\n\
-         roles file, and the usage hold in proj's jobs directory), and its readers\n\
-         read it again at their next decision.\n\
+         in a file on the machine (the settings overlays under `burrow.stateDir`,\n\
+         and the usage hold in proj's jobs directory), and its readers read it\n\
+         again at their next decision.\n\
          \n\
          | Option | Type | Allowed | Default | Live | Owner | Kept in | What it is |\n\
          |---|---|---|---|---|---|---|---|\n",
