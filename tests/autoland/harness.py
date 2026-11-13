@@ -677,7 +677,7 @@ def fresh_pr_state():
         os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
-REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
+REAL = {"write": C.write, "job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
         "onto": H.onto, "carry": V.carry}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.

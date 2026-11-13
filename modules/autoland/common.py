@@ -440,9 +440,11 @@ def poke(url):
         return False
 
 
-def load(name, default):
+def load(name, default, live=False):
+    """A state file, from this run's state; live: from the steward's own,
+    which a status run (DRY) reads and never writes."""
     try:
-        return json.load(open(os.path.join(STATE, name)))
+        return json.load(open(os.path.join(CFG["stateDir"] if live else STATE, name)))
     except (OSError, ValueError):
         return default
 

@@ -15,10 +15,13 @@ import itertools
 import json
 import os
 import re
+import shutil
 import sys
+from unittest.mock import patch
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+import waits
+from harness import C, CI_GREEN, FAIL, JOBS, REAL, STATES, STOPPED, S, UNSTOPPABLE, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
     upkeep_config
 from prs import ci_state
 
@@ -203,6 +206,65 @@ assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes"
                     f"git+file://{mirror}?ref=refs/pr/{n}&rev={heads[n]}#checks.x86_64-linux.proof.drvPath"]
                    for n in (1, 2)], evals()
 
+# A status run (dry, with state of its own) works no eval out: it has what
+# the live passes worked out on the head, and reads their state without
+# writing it. Outputs of theirs all in the store are taken from there; a
+# failure of theirs still standing is theirs, one more in their run of
+# strikes and no more however often status runs; and a head they haven't
+# worked out yet is no failure at all, and no strike.
+AUTOLAND = os.path.dirname(P.__file__)
+
+
+def dry(n, t, checks=None):
+    """A status run's pass on PR n, t seconds on; its status, its state."""
+    mods = [m for m in list(sys.modules.values()) if os.path.dirname(getattr(m, "__file__", None) or "") == AUTOLAND
+            and isinstance(vars(m).get("DRY"), bool)]
+    live = {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")}
+    state_mods = [m for m in list(sys.modules.values()) if os.path.dirname(getattr(m, "__file__", None) or "") == AUTOLAND
+                  and vars(m).get("STATE") == C.STATE]
+    kept_state, C.STATE = C.STATE, f"{tmp}/state/dry"
+    for m in state_mods:
+        m.STATE = C.STATE
+    os.makedirs(C.STATE, exist_ok=True)
+    waits.begin()
+    for m in mods:
+        m.DRY = True
+    try:
+        with patch.object(C, "write", wraps=REAL["write"]) as writes:
+            line(n, t, checks)
+        status = " ".join(" ".join(call.args) for call in writes.call_args_list)
+    finally:
+        for m in mods:
+            m.DRY = False
+        C.STATE = kept_state
+        for m in state_mods:
+            m.STATE = kept_state
+    assert {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")} == live
+    assert WROTE == [] and not waits.FAILING, (WROTE, waits.FAILING)
+    return status, json.load(open(f"{tmp}/state/dry/pr-sam_r-{n}.json"))
+
+
+UNTOLD = "Settled; what remi-proof builds is worked out on the steward's next pass"
+fresh_pr_state()
+VALID[:] = [X]
+nix_knows()
+P.begin("sam/r", {1, 5, 6})
+assert STORE in line(1) and line(5) and pr_state(5)["strikes"] == {"eval": 1}, pr_state(5)
+open(NIX_LOG, "w").close()
+for t in (800, 900):
+    status, st = dry(1, t)
+    assert STORE in status and CANT not in status and "eval" not in st["strikes"], (status, st)
+    status, st = dry(5, t)
+    assert CANT in status and st["strikes"] == {"eval": 2}, (status, st)
+    status, st = dry(6, t)
+    assert UNTOLD in status and CANT not in status and st["strikes"] == {} and "proofOutputs" not in st, (status, st)
+assert evals() == [] and JOBS == [], (evals(), JOBS)
+# Past EVAL_RETRY the live passes try the failure again: until they do,
+# a status run can't say how that goes.
+status, st = dry(5, 700 + P.EVAL_RETRY * 60)
+assert UNTOLD in status and st["strikes"] == {"eval": 1} and evals() == [], (status, st)
+VALID[:] = [Z]
+
 # A build whose eval fails has nothing to build: no build and no slot, a
 # strike, and the eval tried again EVAL_RETRY minutes on. A check with no
 # attribute is never worked out: a Claude job's, waiting its turn.
@@ -214,6 +276,7 @@ status = line(5)
 assert CANT in status and JOBS == [] and pr_state(5)["strikes"] == {"eval": 1}, (status, JOBS)
 assert CANT in line(5, 800) and len(evals()) == 2, evals()
 assert CANT in line(5, 700 + P.EVAL_RETRY * 60) and len(evals()) == 3, evals()
+
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
 VALID.append(W)  # PR 6's, had it been asked
 nix_knows()
@@ -340,6 +403,68 @@ def other_store():
             if "/statuses/" in w and "context=other-proof" in w and "state=success" in w]
 
 
+# Production dry writes return None, including when all or only some of
+# the cached verdicts still need posting. Two live refusals must not turn
+# into a third refusal and an overdue wait just by asking for status.
+for checks, github in ((pending_two, {}), (pending_two, {c: "pending" for c in TWO}),
+                       (pending_two, {"remi-proof": "success"}),
+                       (pending_other, {"remi-proof": "success"})):
+    fresh_pr_state()
+    VALID[:] = [Z, W]
+    nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
+    S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"] = "Run the other proof."
+    S.CFG["repos"]["sam/r"]["proofBuilds"] = TWO
+    GITHUB[heads[3]] = github.copy()
+    FAIL.append("context=other-proof")
+    line(3, 700, checks)
+    line(3, 800, checks)
+    FAIL.remove("context=other-proof")
+    assert pr_state(3)["strikes"] == {"status": 2}, pr_state(3)
+    GITHUB[heads[3]] = github.copy()
+    before = GITHUB[heads[3]].copy()
+    open(NIX_LOG, "w").close()
+    for t in (900, 1000):
+        status, st = dry(3, t, checks)
+        assert "taken from the store" in status and st["strikes"] == {}, (status, st)
+        assert status.count("context=other-proof") == 1, status
+        assert status.count("context=remi-proof") == ("remi-proof" not in github or github["remi-proof"] == "pending"), status
+        assert GITHUB[heads[3]] == before and evals() == [] and JOBS == [], (status, GITHUB, JOBS)
+
+# Completed builds and runs also post verdicts, with a failed build's log
+# or a run's summary first. Retry any previously unposted verdicts too.
+for kind, verdict, unposted in itertools.product(("build", "run"), ("success", "failure"), (False, True)):
+    fresh_pr_state()
+    S.CFG["repos"]["sam/r"]["proofBuilds"] = TWO if kind == "build" else {}
+    S.CFG["repos"]["sam/r"]["proofRuns"] = {c: "true" for c in TWO} if kind == "run" else {}
+    GITHUB[heads[3]] = {"remi-proof": "success"} if unposted else {}
+    before = GITHUB[heads[3]].copy()
+    jid = f"{C.BUILD}dry-{kind}"
+    os.makedirs(f"{tmp}/state/builds/{jid}")
+    C.save(f"builds/{jid}/build.json", {"head": heads[3], "drvs": {"remi-proof": Z + ".drv", "other-proof": W + ".drv"},
+                                       **({"runs": {c: "true" for c in TWO}} if kind == "run" else {})})
+    C.save(f"builds/{jid}/end.json", {"state": "done", "at": C.NOW,
+                                     "verdicts": {c: [verdict, "Finished here"] for c in TWO}})
+    with open(f"{tmp}/state/builds/{jid}/comment.md", "w") as f:
+        f.write("Proof summary\n")
+    STATES[jid] = "done"
+    # Seed the status run's existing job knowledge; this PR only mirrors
+    # live strikes and eval records, not live running-job state.
+    state = {"head": heads[3], "seen": C.NOW, "strikes": {"status": 2},
+             "proved": heads[3], "provedJob": jid, "provedAt": C.NOW,
+             "provedFor": [kind, sorted(TWO), TWO if kind == "build" else {c: "true" for c in TWO}]}
+    if unposted:
+        state["provedUnposted"] = jid
+    C.save("pr-sam_r-3.json", state)
+    os.makedirs(f"{tmp}/state/dry")
+    C.save("dry/pr-sam_r-3.json", state)
+    shutil.copytree(f"{tmp}/state/builds/{jid}", f"{tmp}/state/dry/builds/{jid}")
+    for t in (900, 1000):
+        status, st = dry(3, t, pending_two)
+        assert "its verdict posted" in status and st["strikes"] == {} and "provedUnposted" not in st, (status, st)
+        assert GITHUB[heads[3]] == before and JOBS == [], (GITHUB, JOBS)
+S.CFG["repos"]["sam/r"]["proofRuns"] = {}
+S.CFG["repos"]["sam/r"]["proofBuilds"] = TWO
+fresh_pr_state()
 VALID[:] = [Z, W]
 nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
 S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"] = "Run the other proof."
