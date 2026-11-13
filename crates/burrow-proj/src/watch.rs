@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::github::{changes, fingerprint, target};
+use crate::github::{changes, fingerprint, over, target};
 use crate::job::{Job, USAGE_LIMIT, awaits};
-use crate::turn::start;
+use crate::turn::{start, start_closed};
 use crate::{Fail, filled, io_fail, now, read, swap, usage};
 
 // Usage awaits from old Claude turns become its global hold. Codex turns
@@ -126,6 +126,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         // started its next turn.
         let Some(waits) = read(&f) else { continue };
         let (mut news, mut lines) = (String::new(), String::new());
+        // The first awaited PR or issue this look sees close: it settles a
+        // reversible open question (question::Answer::Closed).
+        let mut closed = None;
         for a in awaits(&waits) {
             if a.target.is_empty() {
                 continue;
@@ -235,8 +238,13 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             let expired = now() - since >= hours * 3600;
             let t = &a.target;
             match (&fp, &was) {
-                (Some(Value::Object(now)), Some(Some(Value::Object(was)))) if now != was => {
+                (Some(fp @ Value::Object(now)), Some(Some(old @ Value::Object(was))))
+                    if now != was =>
+                {
                     news.push_str(&format!("- {t}: {}\n", changes(was, now)));
+                    if let (Some(how), None, None) = (over(fp), over(old), &closed) {
+                        closed = Some(format!("{t} was {how}"));
+                    }
                 }
                 (Some(_), _) if expired => {
                     news.push_str(&format!("- {t}: nothing changed in {hours}h; no longer watched\n"));
@@ -271,7 +279,11 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             let prompt = format!(
                 "News on what you were waiting on:\n\n{news}\nCarry on from there. Anything you left in the background last turn was stopped when it ended."
             );
-            if let Err(e) = start(cfg, &id, &prompt, false) {
+            let started = match closed {
+                Some(what) => start_closed(cfg, &id, &prompt, what),
+                None => start(cfg, &id, &prompt, false),
+            };
+            if let Err(e) = started {
                 eprintln!("{e}");
                 // By repo; "" (every repo's look) for one that's no repo's.
                 for a in awaits(&waits) {
