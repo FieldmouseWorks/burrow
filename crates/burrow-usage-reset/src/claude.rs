@@ -65,29 +65,30 @@ pub fn read_usage(claude: &Path, dir: &Path) -> Result<Reading, String> {
     })
 }
 
-/// How long check_login may take in all, inside HOST-health's check timeout
-/// (modules/updates.nix checkTimeout, 30s).
-const LOGIN_BUDGET: Duration = Duration::from_secs(20);
+/// How long check_login may take in all: a copy of the meter is waited out
+/// (SNAPSHOT at most) and then one live reading asked, inside HOST-health's
+/// check timeout (modules/updates.nix checkTimeout, 90s).
+const LOGIN_BUDGET: Duration = Duration::from_secs(80);
 
 /// Whether CLAUDE is logged in as the user it runs as, within LOGIN_BUDGET.
 /// `get_usage` answers `success` to the request alone, and from a cached copy
 /// or with null limits when the endpoint failed on an expired or revoked
-/// login, so only a fresh answer from its endpoint shows it. A copy under
-/// SNAPSHOT old is itself that: Claude Code persists one only from an answer
-/// of its endpoint, a minute ago at most, so it passes without asking (and
-/// without waiting for the copy to age, which would not fit the budget). With
-/// no copy or an older one, a live reading of the meter (read_usage) is asked.
-/// A copy dated ahead of this clock proves nothing and is not waited out: the
-/// reading refuses it.
+/// login, so only a fresh answer from its endpoint shows it, and a copy's
+/// recency shows nothing about the login now. A copy under SNAPSHOT old would
+/// be what answers, so it is waited out first; then a live reading of the
+/// meter (read_usage's) is asked, whatever the copy's age. A copy dated ahead
+/// of this clock proves nothing and is not waited out: the reading refuses it.
 pub fn check_login(claude: &Path, dir: &Path) -> Result<(), String> {
+    let start = Instant::now();
     if let Some(at) = copied_at()? {
         let age = crate::now() - at;
         if (0.0..SNAPSHOT).contains(&age) {
-            return Ok(());
+            thread::sleep(Duration::from_secs_f64(SNAPSHOT - age + 1.0));
         }
     }
+    let left = LOGIN_BUDGET.saturating_sub(start.elapsed());
     read_fresh(&mut copied_at, &mut crate::now, &mut || {
-        ask_usage(claude, dir, LOGIN_BUDGET)
+        ask_usage(claude, dir, left)
     })
     .map(|_| ())
 }

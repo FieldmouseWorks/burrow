@@ -95,7 +95,7 @@ let
     required = cfg.requiredHealth;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
-    checkTimeout = 30;
+    checkTimeout = 90;
     settle = 20;
   });
   healthTool = pkgs.runCommand health {
