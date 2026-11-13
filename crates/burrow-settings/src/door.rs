@@ -20,6 +20,34 @@ pub struct DoorConfig {
     pub settings: Config,
 }
 
+/// Split an issue line into arguments: on whitespace, except inside single
+/// quotes, which group a JSON value or a reason and are dropped.
+fn words(line: &str) -> Vec<String> {
+    let (mut out, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+    for c in line.chars() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any {
+                    out.push(std::mem::take(&mut word));
+                }
+                any = false;
+            }
+            c => {
+                word.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        out.push(word);
+    }
+    out
+}
+
 pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
     let door = Door {
         repo: &cfg.repo,
@@ -49,14 +77,11 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
         let receipt = cfg.state.join(digest);
         let lines = asked(&text);
         let args = match lines.as_slice() {
-            [line] => line
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
+            [line] => words(line),
             _ => Vec::new(),
         };
-        let body = if !crate::valid_command(&args) {
-            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, pipeline TIMESTAMP or back.".into()
+        let body = if let Err(why) = crate::parse(&args) {
+            format!("Nothing changed. {why}")
         } else {
             cfg.settings.request(
                 &receipt,
@@ -143,5 +168,39 @@ mod tests {
         );
         pass(&mut github("sam", None, "bad request"), &cfg).unwrap();
         assert!(cfg.settings.allows("sam/code").unwrap());
+    }
+
+    #[test]
+    fn issue_words_keep_quoted_json_whole() {
+        assert_eq!(
+            words(r#"set a.b '{"x": 1}' because  'two words'"#),
+            ["set", "a.b", r#"{"x": 1}"#, "because", "two words"]
+        );
+        assert_eq!(words("set  a "), ["set", "a"]);
+    }
+
+    #[test]
+    fn an_issue_can_set_json_with_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = DoorConfig {
+            repo: "sam/box".into(),
+            label: "settings".into(),
+            authors: vec![burrow_github::fake::author("sam")],
+            state: dir.path().join("door"),
+            settings: Config {
+                overlay: dir.path().join("overlay.json"),
+                allowed: vec!["sam/code".into()],
+                pipeline_repos: vec![],
+            },
+        };
+        for body in [
+            r#"set settings.repositoryOverrides {"sam/code": false} because maintenance window"#,
+            r#"set settings.repositoryOverrides '{"sam/code": false}' because 'maintenance window'"#,
+        ] {
+            let _ = fs::remove_dir_all(&cfg.state);
+            let _ = fs::remove_file(&cfg.settings.overlay);
+            pass(&mut github("sam", None, body), &cfg).unwrap();
+            assert!(!cfg.settings.allows("sam/code").unwrap(), "{body}");
+        }
     }
 }

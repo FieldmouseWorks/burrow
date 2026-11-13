@@ -81,6 +81,8 @@ The host's `settings` command and `proj settings` share the write door:
 settings show
 settings pause OWNER/REPO
 settings allow OWNER/REPO
+settings set NAME JSON because REASON
+settings unset NAME because REASON
 proj usage hold UNIX_TIMESTAMP --only pipeline
 proj usage back
 ```
@@ -103,6 +105,19 @@ dispatcher. It authenticates the opener and every editor through the shared
 issue door. Repeated deliveries cannot replay an old allow over a newer
 host pause. It polls independently so it remains reachable during a
 pipeline outage; no paid agent handles these requests.
+
+`set` and `unset` are the one write door for every option the schema's
+`write` marks `Door` (today `settings.repositoryOverrides` and
+`settings.pipelineUntil`, kept in the overlay). The value is JSON, checked
+against the option's kind before anything is written, and a reason of two
+words or more is required. The answer says what the change lasts (until it
+is changed back; a deploy leaves the overlay alone). Any other option is
+refused with the reason the schema declares: a flake option needs Nix and a
+deploy; the other live options are proj's own files, written by proj's
+commands. `settings show` lists each overlay option with its value, its
+layer (default, flake or overlay) and the last log entry that changed it.
+`allow`, `pause`, `pipeline` and `back` are the same writes for one
+repository or the scope.
 
 Writes are serialized, logged with actor and timestamp, synced and
 published atomically. Readers never write their own overlay. This is the
