@@ -224,11 +224,19 @@ fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
 #[test]
 fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
     let mut b = Box::new();
-    b.cfg.tools.systemd_run = "true".into();
+    // The reply launches a live turn; the finished verdict below ends it.
+    b.cfg.tools.systemd_run = b.path("systemd-run");
+    burrow_test::executable(
+        &b.cfg.tools.systemd_run,
+        format!("#!/bin/sh\ntouch '{}'\n", b.path("active").display()),
+    );
     b.cfg.needs_owner_label = "needs-owner".into();
     burrow_test::executable(
         &b.cfg.tools.systemctl,
-        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *is-active*) test -e '{active}' ;; *LoadState*) echo not-found ;; *ActiveState*) if test -e '{active}'; then echo active; else echo inactive; fi ;; esac\n",
+            active = b.path("active").display(),
+        ),
     );
     let d = super::sorting_tests::sorting(&b, "Which release?");
     let job = crate::job::Job::new(&b.cfg, "s1");
@@ -271,6 +279,7 @@ fn sorting_one_way_timeout_keeps_a_human_reply_route_without_holding_a_slot() {
     }
     assert_eq!(job.turns().as_deref(), Some("3"));
     assert!(b.pass().sorting_slot(&d));
+    fs::remove_file(b.path("active")).unwrap();
     fs::write(job.turn("3", "end"), "done\n").unwrap();
     fs::write(job.turn("3", "outcome"), "done\n").unwrap();
     fs::write(
