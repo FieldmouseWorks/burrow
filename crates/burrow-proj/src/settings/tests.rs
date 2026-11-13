@@ -68,6 +68,14 @@ fn every_option_shown_comes_from_the_schema() {
     let unset = json!({"engine": "claude", "over": null});
     assert_eq!(options["proj.roles"]["value"]["*"], unset);
     assert_eq!(options["proj.roles"]["origin"], "default");
+    // The deliberate Claude roles and the planner are named defaults too.
+    for role in ["update", "backup", "firmware"] {
+        assert_eq!(options["proj.roles"]["value"][role], unset, "{role}");
+    }
+    assert_eq!(
+        options["proj.roles"]["value"]["planner"],
+        json!({"engine": "codex", "over": null})
+    );
     assert_eq!(options["proj.roles"]["file"], json!(roles_file));
     assert_eq!(
         options["proj.models"]["value"]["* claude"],
@@ -100,6 +108,9 @@ fn every_option_shown_comes_from_the_schema() {
     let usual_roles = json!({
         "*": {"engine": "claude", "over": null},
         "planner": {"engine": "codex", "over": null},
+        "update": {"engine": "claude", "over": null},
+        "backup": {"engine": "claude", "over": null},
+        "firmware": {"engine": "claude", "over": null},
         "triage": {"engine": "claude", "over": null},
         "fix@sam/box": {"engine": "codex", "over": {"pct": 80.0, "engine": "claude"}},
     });

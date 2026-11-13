@@ -53,7 +53,7 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         ("proj.models", models, json!(force.models)),
         ("proj.engineOffers", offers, json!(force.offers)),
     ] {
-        readings.push(Reading::live(name, view.file.clone(), set.then_some(value)));
+        readings.push(Reading::declared(name, view.file.clone(), set, value));
     }
     readings.push(Reading::live(
         "proj.engineSetups",

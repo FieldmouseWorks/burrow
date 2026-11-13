@@ -129,10 +129,11 @@ inputs:
             default = null;
             example = "high";
             description = ''
-              How hard every Claude session and job thinks, here and in the
-              agent sandboxes (Claude Code's `effortLevel`): where each one
-              starts, which `/effort` can still move. null leaves each model's
-              own default.
+              Where every role's Claude effort starts: the declared default of
+              `proj.models` (`* claude`), which `proj settings show` names and
+              a live `model` line replaces at the next decision. Not written
+              into Claude Code's managed settings, so nothing here defeats a
+              live change. null leaves each model's own default.
             '';
           };
 

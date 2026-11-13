@@ -12,6 +12,10 @@ let
     legacyRoles = if config.burrow.proj.enable or false then "${config.users.users.${user}.home}/.config/proj" else null;
     legacyEnginesLock = if (config.burrow.proj.enable or false) && (config.burrow.proj.engines.door.enable or false)
       then "${stateDir}/proj-engines/${lib.toLower (builtins.replaceStrings [ "/" ] [ "--" ] config.burrow.proj.engines.door.repo)}/lock" else null;
+    # Where every role's Claude effort starts: a declared default of the live
+    # role settings, never written into Claude Code's managed settings, which
+    # would outrank a live change.
+    claudeEffort = config.burrow.claude.effort;
     pipelineRepos = lib.unique (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config);
   };
   tracked = pkgs.writeText "burrow-settings.json" (builtins.toJSON settings);

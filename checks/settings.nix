@@ -63,7 +63,7 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   want '.options["proj.maxJobs"]' '{"value":6,"origin":"flake"}'
   want '.options["autoland.jobIdleMinutes"]' '{"value":20,"origin":"default"}'
   want '.options["settings.allowed"].value' '["sam/kept"]'
-  want '.options["proj.roles"].value' '{"*":{"engine":"claude","over":null},"planner":{"engine":"codex","over":null},"triage":{"engine":"codex","over":null},"fix@sam/homelab":{"engine":"codex","over":{"pct":80.0,"engine":"claude"}}}'
+  want '.options["proj.roles"].value' '{"*":{"engine":"claude","over":null},"planner":{"engine":"codex","over":null},"update":{"engine":"claude","over":null},"backup":{"engine":"claude","over":null},"firmware":{"engine":"claude","over":null},"triage":{"engine":"codex","over":null},"fix@sam/homelab":{"engine":"codex","over":{"pct":80.0,"engine":"claude"}}}'
   want '.options["proj.models"].value' '{"* claude":{"model":null,"effort":null},"* codex":{"model":null,"effort":null},"triage codex":{"model":null,"effort":"low"}}'
   want '.options["proj.roles"].file' "\"$live/settings/overlay.roles.json\""
   want '.options["proj.engineSetups"].value.active' '"usual"'

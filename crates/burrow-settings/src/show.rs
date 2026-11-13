@@ -56,6 +56,18 @@ impl Reading {
         }
     }
 
+    /// One from a live file whose declared default can be a starting value
+    /// the flake gives (`proj.models`): VALUE is what's in force, and SET
+    /// whether the file sets any of it, else it is the default.
+    pub fn declared(name: &str, file: PathBuf, set: bool, value: Value) -> Self {
+        Self {
+            name: name.into(),
+            value,
+            origin: if set { Origin::Live } else { Origin::Default },
+            file: Some(file),
+        }
+    }
+
     /// One from a live file: the file's when it's there, the default when
     /// it isn't.
     pub fn live(name: &str, file: PathBuf, value: Option<Value>) -> Self {

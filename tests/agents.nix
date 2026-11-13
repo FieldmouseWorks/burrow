@@ -146,8 +146,9 @@ pkgs.testers.runNixOSTest {
         settings = json.loads(vm(a, "cat /etc/claude-code/managed-settings.json"))
         assert settings["permissions"]["defaultMode"] == "bypassPermissions"
         assert settings["skipDangerousModePermissionPrompt"] is True
-        # The host's effort, which sessions and `proj run --vm` jobs start at.
-        assert settings["effortLevel"] == "high", settings
+        # The host's effort is a declared default of the live role settings,
+        # never a managed pin that would outrank a live change.
+        assert "effortLevel" not in settings and "model" not in settings, settings
         assert json.loads(vm(a, "cat ~/.claude.json"))["projects"]["/data/dev/src/demo"]["hasTrustDialogAccepted"]
 
     with subtest("it has KVM of its own, for projects with VMs"):

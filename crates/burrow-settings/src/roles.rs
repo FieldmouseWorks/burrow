@@ -178,6 +178,7 @@ impl InForce {
 
     /// ROLE's model and effort on ENGINE in REPO.
     pub fn tuning(&self, role: &str, repo: Option<&str>, engine: &str) -> Tuning {
+        // The declared `* ENGINE` tuning matches every role, so one is found.
         best(
             self.models.iter().filter_map(|(k, v)| {
                 k.split_once(' ')
@@ -188,7 +189,7 @@ impl InForce {
             repo,
         )
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_else(|| panic!("the schema's default tunes every role on {engine}"))
     }
 }
 
@@ -204,9 +205,36 @@ pub fn default_routes() -> BTreeMap<String, Route> {
     declared("proj.roles")
 }
 
-/// The schema's default tunings (`proj.models`).
-pub fn default_models() -> BTreeMap<String, Tuning> {
-    declared("proj.models")
+/// The roles whose engine is Claude by deliberate policy, and why: each is a
+/// declared default route of `proj.roles` with no overflow, so no meter moves
+/// it to Codex. `settings show` names them; a live `role` line changes one.
+pub const CLAUDE_ONLY: &[(&str, &str)] = &[
+    (
+        "update",
+        "a failed machine update is repaired with the machine's own Claude instructions and login, and a meter must not hand a system change to another engine",
+    ),
+    (
+        "backup",
+        "a backup repair touches the only copy off the box, so it stays on the engine that guards it and never spills to another",
+    ),
+    (
+        "firmware",
+        "a firmware review precedes flashing, which stays the owner's call, so it stays on Claude and never spills to another engine",
+    ),
+];
+
+/// The schema's default tunings (`proj.models`), with START as `* claude`'s
+/// effort where the flake gives the machine one (`burrow.claude.effort`): a
+/// declared starting point, which a live `model` line replaces.
+pub fn default_models(start: Option<&str>) -> BTreeMap<String, Tuning> {
+    let mut models: BTreeMap<String, Tuning> = declared("proj.models");
+    if let Some(start) = start {
+        models
+            .get_mut("* claude")
+            .expect("the schema tunes every role on claude")
+            .effort = Some(start.to_owned());
+    }
+    models
 }
 
 /// The schema's default offers (`proj.engineOffers`).
@@ -217,7 +245,11 @@ pub fn default_offers() -> BTreeMap<String, Offer> {
 impl Roles {
     /// These values over the schema's defaults, each checked against the
     /// offers.
-    pub fn in_force(&self, offers: &BTreeMap<String, Offer>) -> Result<InForce, String> {
+    pub fn in_force(
+        &self,
+        offers: &BTreeMap<String, Offer>,
+        start: Option<&str>,
+    ) -> Result<InForce, String> {
         let mut offered = default_offers();
         offered.extend(offers.clone());
         for (name, offer) in &offered {
@@ -231,7 +263,12 @@ impl Roles {
         self.check(&offered)?;
         let mut roles = default_routes();
         roles.extend(self.roles.clone());
-        let mut models = default_models();
+        let mut models = default_models(start);
+        if let Some(start) = start
+            && !offered["claude"].efforts.iter().any(|e| e == start)
+        {
+            return Err(format!("claude: its starting effort {start} isn't offered"));
+        }
         models.extend(self.models.clone());
         Ok(InForce {
             roles,

@@ -502,9 +502,9 @@ pub static SETTINGS: &[Setting] = &[
     live(
         "proj.roles",
         &ROLES,
-        r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}}"#,
+        r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}, "update": {"engine": "claude", "over": null}, "backup": {"engine": "claude", "over": null}, "firmware": {"engine": "claude", "over": null}}"#,
         ROLES_OVERLAY,
-        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one.",
+        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one. Declared defaults beyond *: the planner runs on Codex; update, backup and firmware run on Claude with no overflow, by policy (update: a failed machine update is repaired with the machine's own Claude instructions and login, and a meter must not hand a system change to another engine; backup: a backup repair touches the only copy off the box, so it stays on the engine that guards it and never spills to another; firmware: a firmware review precedes flashing, which stays the owner's call, so it stays on Claude and never spills to another engine). A live role line changes any of them.",
     ),
     live(
         "proj.models",

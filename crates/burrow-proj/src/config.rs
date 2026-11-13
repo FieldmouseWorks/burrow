@@ -329,15 +329,10 @@ impl Config {
     /// fails the turn; so does reading them while proj's old files are
     /// still to be moved in, rather than running the defaults.
     pub fn role_view(&self) -> Result<burrow_settings::roles::View, String> {
-        let Some(settings) = &self.settings else {
-            return Ok(burrow_settings::roles::View {
-                in_force: burrow_settings::roles::Roles::default().in_force(&BTreeMap::new())?,
-                set: (false, false, false),
-                setups: None,
-                migrated: false,
-                file: self.jobs.join(".settings-unconfigured"),
-            });
-        };
+        let settings = self
+            .settings
+            .as_ref()
+            .ok_or("settings are not configured: no role can be routed")?;
         let view = settings.role_view()?;
         if !view.migrated
             && let Some(dir) = &self.old_config
