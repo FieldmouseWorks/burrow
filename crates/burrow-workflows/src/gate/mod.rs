@@ -495,7 +495,11 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
              path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates\\n\"}"
         )
     );
-    assert!(tools.get("if").is_none(), "{tools:?}");
+    // Every run but gate-reuse's hit, which builds nothing (reuse.rs).
+    assert_eq!(
+        tools["if"], "needs.reuse.outputs.hit != 'true'",
+        "{tools:?}"
+    );
     // The plan it splices in is beside it.
     assert!(
         read(&repo_file("crates/burrow-flake-check/src/gate.rs"))

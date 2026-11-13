@@ -60,6 +60,9 @@ fn the_gate_runs_where_it_should() {
             ("github.event_name", event.into()),
             ("needs.lane.result", lane_result.into()),
             ("needs.lane.outputs.gate", lane_gate.clone()),
+            // gate-reuse off, or no hit: reuse.rs has the rest.
+            ("needs.reuse.outputs.hit", V::Null),
+            ("inputs.legs", V::from(1)),
         ]);
         let case = format!("{event} {lane_result} {lane_gate:?} cancelled {cancelled}");
         assert_eq!(
@@ -88,6 +91,7 @@ fn the_gate_runs_where_it_should() {
             ("cancelled()", cancelled.into()),
             ("inputs.legs", V::from(legs)),
             ("needs.check.result", check.into()),
+            ("needs.reuse.outputs.hit", V::Null),
         ]);
         assert_eq!(
             value(text(&jobs["gate"]["if"]), &c).truthy(),
@@ -136,6 +140,8 @@ fn inputs() -> Vec<(&'static str, V)> {
         ("inputs.docs-checks", "".into()),
         ("inputs.legs", 1.into()),
         ("inputs.keep-builds", false.into()),
+        ("inputs.gate-reuse", false.into()),
+        ("inputs.gate-reuse-lookup", "".into()),
         ("inputs.negative-runner", "".into()),
     ]
 }
@@ -282,6 +288,20 @@ fn only_a_prs_newer_run_cancels() {
                 name,
                 Run {
                     inputs: &[("keep-builds", "true")],
+                    ..PUSHED
+                },
+            ),
+            g(
+                name,
+                Run {
+                    inputs: &[("gate-reuse", "true")],
+                    ..PUSHED
+                },
+            ),
+            g(
+                name,
+                Run {
+                    inputs: &[("gate-reuse-lookup", "https://lookup.example/")],
                     ..PUSHED
                 },
             ),

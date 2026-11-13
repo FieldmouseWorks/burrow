@@ -38,6 +38,8 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
             ("inputs.keep-builds", keep.into()),
             ("inputs.install-nix", nix.into()),
             ("github.event_name", "push".into()),
+            // No gate-reuse hit: on one, nothing is restored (reuse.rs).
+            ("needs.reuse.outputs.hit", V::Null),
         ]);
         assert_eq!(condition(text(&made["if"]), &c), keep && nix, "{made:?}");
         assert_eq!(value(text(&restore["if"]), &c).truthy(), keep && nix);
@@ -57,6 +59,7 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
             ("inputs.install-nix", true.into()),
             ("github.event_name", event.into()),
             ("github.repository", "FieldmouseWorks/burrow".into()),
+            ("needs.reuse.outputs.hit", V::Null),
         ]);
         if event == "pull_request" {
             c.insert(
@@ -84,7 +87,10 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         "{key}"
     );
     assert!(uses(install, "cachix/install-nix-action@"), "{install:?}");
-    assert_eq!(install["if"], "inputs.install-nix");
+    assert_eq!(
+        install["if"],
+        "inputs.install-nix && needs.reuse.outputs.hit != 'true'"
+    );
     for (keep, said) in [
         (
             true,

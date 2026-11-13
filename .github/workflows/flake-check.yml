@@ -149,6 +149,30 @@ on:
           so a PR that changes it changes only where its negative runs.
         type: string
         default: ''
+      gate-reuse:
+        description: >-
+          On a push to the default branch, before anything is built, ask
+          gate-reuse-lookup whether CI already attested a pass of this same
+          gate on this exact tree: the push's tree, this workflow's
+          repository, file and commit (by the commit's tree), and its inputs
+          that can change a result (runner, install-nix, eval-apart, legs,
+          build-skip and keep-builds). Only a hit, the lookup answering this
+          request and naming a run of this repository, skips the gate: the
+          job named check reports the pass, linking the run it reused, and
+          builds, attests and keeps nothing. A miss, an error, an answer it
+          can't read or one that can't tell runs the whole gate, as it runs
+          without this. It also names that same gate in every result it
+          attests (the predicate's `gate`), so a later push can be matched
+          to it. crates/burrow-flake-check/README.md, "Reusing an attested
+          pass", is the contract. Needs id-token write, as attesting does.
+        type: boolean
+        default: false
+      gate-reuse-lookup:
+        description: >-
+          The URL gate-reuse asks: https, or http on the runner's own
+          machine.
+        type: string
+        default: ''
 jobs:
   # Which gate a PR gets: none here when the train lands it (pr-gate off,
   # and its base is the default branch, compared as git compares refs: an
@@ -167,7 +191,7 @@ jobs:
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -259,14 +283,95 @@ jobs:
             grep -vxF -f <(echo "$docs") <<<"$changed" || true
             echo "docs=false" >>"$GITHUB_OUTPUT"
           fi
+  # gate-reuse, on a push to the default branch: whether CI already attested
+  # a pass of this gate on this tree (crates/burrow-flake-check/README.md,
+  # "Reusing an attested pass"), asked before any job builds. Only its
+  # `hit` skips the gate, and only a hit the runner read whole, for this
+  # request, naming a run of this repository, sets it; this job failing,
+  # cancelled or never run leaves it unset, so the gate runs. A push of
+  # another branch (a train's candidate, which the train counts the
+  # attestation of) and a PR never ask.
+  reuse:
+    if: ${{ inputs.gate-reuse && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} reuse {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] run-{12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, github.run_id) }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      hit: ${{ steps.lookup.outputs.hit }}
+      run: ${{ steps.lookup.outputs.run }}
+    steps:
+      # The runner is compiled with Nix's compiler, as the gate's is.
+      - if: inputs.install-nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - id: tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .flake-check
+          persist-credentials: false
+          # Cone mode: crates/'s own files (its rust-toolchain.toml) and the
+          # root's (flake.lock, for compiler.nix) come too.
+          sparse-checkout: |
+            .github/flake-check
+            crates/burrow-flake-check
+      # The gate this run is: this workflow, by its repository, file, commit
+      # and the commit's tree, and its inputs that can change a result. Every
+      # job that attests names it in its predicate as `gate`, and the lookup
+      # is asked for it: one home, so the two can't drift.
+      - &identity
+        id: identity
+        if: ${{ inputs.gate-reuse && steps.tools.outcome == 'success' }}
+        shell: bash
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_FILE: ${{ job.workflow_file_path }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          RUNNER_LABEL: ${{ inputs.runner }}
+          INSTALL_NIX: ${{ inputs.install-nix }}
+          APART: ${{ inputs.eval-apart }}
+          LEGS: ${{ inputs.legs }}
+          SKIP: ${{ inputs.build-skip }}
+          KEEP: ${{ inputs.keep-builds }}
+        run: |
+          commit=$(git -C .flake-check rev-parse 'HEAD^{commit}')
+          [ "$commit" = "$WORKFLOW_SHA" ] || { echo "the workflow's checkout is $commit, not $WORKFLOW_SHA"; exit 1; }
+          jq -cnS --arg repository "$WORKFLOW_REPOSITORY" --arg file "$WORKFLOW_FILE" --arg commit "$commit" \
+            --arg tree "$(git -C .flake-check rev-parse 'HEAD^{tree}')" --arg runner "$RUNNER_LABEL" \
+            --argjson nix "$INSTALL_NIX" --argjson apart "$APART" --argjson legs "$LEGS" --arg skip "$SKIP" --argjson keep "$KEEP" \
+            '{workflow: {$repository, $file, $commit, $tree},
+              inputs: {$runner, "install-nix": $nix, "eval-apart": $apart, $legs,
+                       "build-skip": ($skip | split(" ") | map(select(. != "")) | unique), "keep-builds": $keep}}' \
+            > "$RUNNER_TEMP/gate.json"
+          echo "this gate: $(cat "$RUNNER_TEMP/gate.json")"
+      - id: lookup
+        name: soft/gate-reuse
+        if: steps.identity.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        env:
+          LOOKUP: ${{ inputs.gate-reuse-lookup }}
+          COMMIT: ${{ github.sha }}
+          HEAD_ID: ${{ github.event.head_commit.id }}
+          TREE: ${{ github.event.head_commit.tree_id }}
+          TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
+        run: bash "$TOOLS/run.sh" reuse
+      - name: degraded/gate-reuse
+        if: ${{ always() && steps.lookup.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/gate-reuse' >> "$GITHUB_STEP_SUMMARY"
   # The whole gate, unless the train lands the PR or it takes the docs lane:
   # anything else the lane job says, its failure included, is the whole gate.
   # A cancelled lane job means the PR has a newer run (concurrency), which
   # checks the head and base it has now: this one checks nothing. With legs,
   # one job each, and then the gate job below says what they found.
   check:
-    needs: lane
-    if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' }}
+    needs: [lane, reuse]
+    if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' && (needs.reuse.outputs.hit != 'true' || inputs.legs <= 1) }}
     name: ${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}
     strategy:
       # Every leg runs to its end, as the gate builds every check it can
@@ -277,7 +382,7 @@ jobs:
         leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.legs] }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} leg {10} {11}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] leg {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     # Each leg's log, its digest, the commit it checked and its plan, for the
     # gate job: a matrix's legs combine their outputs, one name each.
@@ -296,7 +401,9 @@ jobs:
     # Callers grant contents: read, id-token: write and attestations: write;
     # actions: read enables the waiter's runs and caches reads in private repos.
     steps:
+      # A hit (gate-reuse) builds nothing, so it checks nothing out.
       - &checkout
+        if: needs.reuse.outputs.hit != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The check only reads the tree, and on a self-hosted runner a token
@@ -351,11 +458,11 @@ jobs:
       # repo, restores nothing. The directory is there before nix, whose
       # config names it, whether or not there's anything kept to restore
       # into it.
-      - if: inputs.keep-builds && inputs.install-nix
+      - if: inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true'
         shell: bash
         run: mkdir -p "$RUNNER_TEMP/kept"
       - id: kept-lookup
-        if: ${{ inputs.keep-builds && inputs.install-nix && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: true
@@ -363,20 +470,22 @@ jobs:
           key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
       - id: kept-restore
-        if: ${{ inputs.keep-builds && inputs.install-nix && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kept
           key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
-      - if: inputs.install-nix
+      - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
           extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
       # The gate's own files, at this workflow's commit: its script and the
       # plan it evaluates (crates/burrow-flake-check), beside the checkout, which
       # they're no part of (nix reads only what git tracks).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: tools
+        if: needs.reuse.outputs.hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -385,6 +494,8 @@ jobs:
           sparse-checkout: |
             .github/flake-check
             crates
+      # gate-reuse: the gate this is, for the attestation to name.
+      - *identity
       # keep-builds, on a PR: a leg that would compile something cold while
       # the push to the default branch it is merged onto is still building
       # (and will keep) it waits for that push's kept builds and restores them,
@@ -421,6 +532,7 @@ jobs:
           fail-on-cache-miss: true
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       - id: gate
+        if: needs.reuse.outputs.hit != 'true'
         shell: bash
         env:
           SKIP: ${{ inputs.build-skip }}
@@ -497,10 +609,14 @@ jobs:
             printf 'conary commit v1\n%s\n' "$GITHUB_SHA" > "$subject"
             revision=null
           fi
+          # gate-reuse: the gate this was (the identity step's), last.
+          gate=null
+          if [ -s "$RUNNER_TEMP/gate.json" ]; then gate=$(cat "$RUNNER_TEMP/gate.json"); fi
           jq -n --arg result "$result" --argjson revision "$revision" \
             --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg skip "$SKIP" \
-            --arg sha256 "$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)" --arg artifact "$log" \
-            '{$result, $revision, $tree, skipped: ($skip | split(" ") | map(select(. != ""))), log: {$sha256, $artifact}}' \
+            --arg sha256 "$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)" --arg artifact "$log" --argjson gate "$gate" \
+            '{$result, $revision, $tree, skipped: ($skip | split(" ") | map(select(. != ""))), log: {$sha256, $artifact}}
+             + if $gate == null then {} else {$gate} end' \
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
@@ -614,6 +730,17 @@ jobs:
         if: ${{ always() && steps.saved-lookup.outcome == 'success' && steps.saved-lookup.outputs.cache-hit != 'true' }}
         shell: bash
         run: echo 'degraded/keep-save-missing' >> "$GITHUB_STEP_SUMMARY"
+      # gate-reuse's hit: every step above skipped, so nothing was built,
+      # attested or kept, and the gate passed as it did in the run named.
+      - &reused
+        id: reused
+        if: needs.reuse.outputs.hit == 'true'
+        shell: bash
+        env:
+          RUN: ${{ needs.reuse.outputs.run }}
+        run: |
+          echo "this gate already passed on this tree, attested, in $RUN: reused, so nothing was built"
+          echo "The gate already passed on this tree in $RUN: reused, nothing built." >> "$GITHUB_STEP_SUMMARY"
   # With legs, the gate's own verdict: whether every leg passed, on the commit
   # each was to check and with one plan to share out, attested as the gate's
   # result with this tree's subject, and the legs' logs, each the one its leg
@@ -622,12 +749,12 @@ jobs:
   # check, as the gate's job is with one leg: by an expression, so the job
   # skipped (with one leg) shows that, not a second check of that name.
   gate:
-    needs: [lane, check]
-    if: ${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure') }}
+    needs: [lane, reuse, check]
+    if: ${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure' || needs.reuse.outputs.hit == 'true') }}
     name: ${{ inputs.legs > 1 && 'check' || 'gate' }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -636,11 +763,24 @@ jobs:
     steps:
       - *checkout
       - *merge
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: needs.reuse.outputs.hit != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: flake-log-leg-*
           path: ${{ runner.temp }}/legs
+      # gate-reuse: the gate the legs ran, for the attestation to name.
+      - id: tools
+        if: inputs.gate-reuse && needs.reuse.outputs.hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .flake-check
+          persist-credentials: false
+          sparse-checkout: .github/flake-check
+      - *identity
       - id: gate
+        if: needs.reuse.outputs.hit != 'true'
         shell: bash
         env:
           LEGS: ${{ inputs.legs }}
@@ -693,6 +833,7 @@ jobs:
       - *log
       - *token
       - *bundle
+      - *reused
   # The docs lane: nothing the PR changes is anything the flake builds or
   # tests reads, so only the checks that read the documentation are built,
   # by name, on the head merged with its base as the whole gate checks it,
@@ -700,12 +841,12 @@ jobs:
   # tree. Its check run's name is how autoland knows the head took it, for
   # which base, and from which commit on it: the changes the lane judged.
   docs:
-    needs: lane
+    needs: [lane, reuse]
     if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -739,7 +880,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.negative-runner || inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} {11}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} negative {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12} {13}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, inputs.negative-runner, (github.event.action != 'edited' || github.event.changes.base) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -984,7 +1125,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10} [{11}] {12}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, inputs.gate-reuse, inputs.gate-reuse-lookup, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read

@@ -1,11 +1,13 @@
-//! The shared gate and negative runner. No Rust dependencies: callers compile
-//! these pinned sources directly with rustc, without a registry or cargo build.
+//! The shared gate and negative runner, and gate-reuse's lookup. No Rust
+//! dependencies: callers compile these pinned sources directly with rustc,
+//! without a registry or cargo build.
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
 mod gate;
 mod memory;
 mod negative;
 mod plan;
+mod reuse;
 mod snapshot;
 
 use std::{
@@ -177,6 +179,18 @@ fn main() {
             Ok(false) => std::process::exit(1),
             Err(e) => {
                 eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    // gate-reuse's lookup, before anything is built; its answer goes to
+    // the step's outputs.
+    if mode == "reuse" {
+        match reuse::reuse() {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("gate-reuse: can't tell ({e}), so the gate runs");
                 std::process::exit(1);
             }
         }
