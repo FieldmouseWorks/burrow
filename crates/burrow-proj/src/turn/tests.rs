@@ -1,6 +1,7 @@
 use std::fs;
 
-use super::{github_app, gone_quiet, stopped};
+use super::clock::gone_quiet;
+use super::{github_app, stopped};
 use crate::config::Config;
 use crate::engine::Engine;
 

@@ -8,6 +8,8 @@
 //! - boot-trying: the system a trial reboot went into, until the boot after
 //!   settles it (`check`) and every grubenv has let go of it; a trial of
 //!   another system waits until they have
+//! - boot-lock: held while a word changes any of these, so the trial an
+//!   event starts and the one the daily timer starts take turns
 //!
 //! What it says goes to stdout, and to stderr when it refused something;
 //! what the owner should hear about also goes to the journal and HOST-notify.
@@ -29,9 +31,10 @@ const FAILED: &str = "boot-failed";
 const DEFAULT: &str = "boot-default";
 pub(crate) const TRIAL: &str = "boot-trial";
 const TRYING: &str = "boot-trying";
+const LOCK: &str = "boot-lock";
 
-/// How long jobs and sandboxes running can put a queued trial off, in
-/// seconds: two days.
+/// How long work running can put a queued trial off, in seconds: two
+/// days. Only the daily timer's start (`trial --deadline`) goes past it.
 const POSTPONE: u64 = 2 * 24 * 60 * 60;
 
 /// The notice a trial that failed opens, and one that worked closes.
@@ -45,22 +48,37 @@ pub enum Word {
     /// otherwise keep the default and queue SYSTEM for a trial
     /// (HOST-confirm says this).
     Default(PathBuf),
-    /// Reboot into the queued trial once, if the box is idle (`force`:
-    /// whatever jobs and sandboxes are running).
-    Trial {
-        force: bool,
-    },
+    /// Reboot into the queued trial once, if the box is idle, or if
+    /// `Busy` says what's running doesn't hold it off.
+    Trial(Busy),
     /// After a boot: settle a trial, and remember what came up.
     Check,
     Status,
 }
 
+/// What work running does to a trial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Busy {
+    /// Puts it off, however long it's been queued: a trial an event started
+    /// (a unit ending, the queue or a switch changing).
+    Waits,
+    /// Puts it off until it's been queued for `POSTPONE`
+    /// (`trial --deadline`: the daily timer's start, at `trialBoot.at`).
+    Deadline,
+    /// Doesn't (`trial --force`).
+    Ignored,
+}
+
 /// Runs `word`: what it exits with, or why it broke.
 pub fn run(cfg: &Config, word: &Word) -> Result<u8, Broke> {
     let boot = Boot::open(cfg)?;
+    let _held = match word {
+        Word::Default(_) | Word::Trial(_) | Word::Check => Some(boot.lock()?),
+        Word::Watch | Word::Status => None,
+    };
     match word {
         Word::Default(system) => boot.default(system),
-        Word::Trial { force } => boot.trial(*force),
+        Word::Trial(busy) => boot.trial(*busy),
         Word::Watch => crate::watch::run(cfg),
         Word::Check => boot.check(),
         Word::Status => boot.status(),
@@ -85,6 +103,19 @@ impl<'a> Boot<'a> {
                 .map_err(|e| at(&path, e))?;
         }
         Ok(boot)
+    }
+
+    /// boot-lock, once no other word holds it: held until it's dropped.
+    fn lock(&self) -> Result<fs::File, Broke> {
+        let path = self.file(LOCK);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| at(&path, e))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|e| at(&path, e.into()))?;
+        Ok(file)
     }
 
     fn file(&self, name: &str) -> PathBuf {
@@ -123,12 +154,13 @@ impl<'a> Boot<'a> {
         Ok(0)
     }
 
-    fn trial(&self, force: bool) -> Result<u8, Broke> {
+    fn trial(&self, busy: Busy) -> Result<u8, Broke> {
         let Some(new) = self.read(TRIAL)? else {
             say("no trial queued");
             return Ok(0);
         };
-        if self.proven(&bits(&new)?)? {
+        let new_bits = bits(&new)?;
+        if self.proven(&new_bits)? {
             self.make_default(&new)?;
             self.unqueue()?;
             say(&format!(
@@ -137,7 +169,22 @@ impl<'a> Boot<'a> {
             ));
             return Ok(0);
         }
-        if !force && self.queued_for()? < POSTPONE && self.busy() {
+        if self.listed(FAILED, &new_bits)? {
+            // Its kernel failed to boot here once (a check that couldn't
+            // unqueue it left it queued): never tried again, forced or not.
+            self.unqueue()?;
+            complain(&format!(
+                "{}'s kernel failed to boot before; its trial is unqueued",
+                new.display()
+            ));
+            return Ok(0);
+        }
+        let waits = match busy {
+            Busy::Waits => true,
+            Busy::Deadline => self.queued_for()? < POSTPONE,
+            Busy::Ignored => false,
+        };
+        if waits && self.busy() {
             say("work running; trial postponed");
             return Ok(0);
         }

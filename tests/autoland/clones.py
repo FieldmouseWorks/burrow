@@ -87,11 +87,14 @@ assert open(f"{tmp}/clones-proj").read().split()[-2:] == ["app", "t"]
 assert C.taken("sam/app") is None
 
 # Renamed outright, in a folder of the old name, and over ssh: it keeps its
-# folder and its kind of URL, and no second clone is made in `now`.
+# folder and its effective URL kind, and no second clone is made in `now`.
+# Git may map SSH URLs to HTTPS through insteadOf (as App job shells do);
+# require the exact URL Git reported, with only the repository renamed.
 clone("was", "git@github.com:sam/was.git")
+was_url = url("was")
 with C.acting_for("sam/now"):
     assert C.job("sam/now", "t", clone=True, role="baseline") == "job-1"
-assert url("was") == "git@github.com:sam/now.git", url("was")
+assert url("was") == was_url.replace("sam/was.git", "sam/now.git"), "the rename changed more than the repo in Git's effective URL"
 assert tried() == [] and not os.path.exists(f"{src}/now")
 
 # A full pass does it before anything needs the checkout, whichever job it is

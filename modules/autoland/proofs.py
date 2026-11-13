@@ -152,22 +152,53 @@ def derivations(repo, mirror, ref, rev, checks):
     return drvs, sorted(set(nix("nix-store", "--query", "--outputs", *drvs.values()).split()))
 
 
+def evaluable(repo, checks):
+    """Whether each of checks has a flake attribute (the repo's proofBuilds)
+    to work its derivation out from."""
+    return bool(checks) and all(c in C.repo_cfg(repo)["proofBuilds"] for c in checks)
+
+
+def output_key(repo, pr, checks):
+    """What outputs' record is for: the PR's head and checks' attributes."""
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    return [pr["headRefOid"], {c: attrs[c] for c in sorted(checks)}]
+
+
+def kept(repo, pr, checks, st):
+    """outputs' record for PR's head and checks while it still holds: one
+    with paths whose derivations are still in the store (those collected
+    since are worked out again, which puts them back), or one that couldn't
+    be worked out, until it's tried again EVAL_RETRY minutes on. Else None."""
+    if not evaluable(repo, checks):
+        return None
+    got = st.get("proofOutputs")
+    if got and got["for"] == output_key(repo, pr, checks) and (got["paths"] or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
+        if not got["paths"] or not gone(sorted(set((got.get("drvs") or {}).values()))):
+            return got
+    return None
+
+
+def untold(repo, pr, checks, st):
+    """Whether outputs' None says nothing about the eval: a status run's, on
+    a head and checks the live passes haven't worked out yet (or whose
+    derivations were collected since, or whose failure is due to be tried
+    again). A failure the live passes recorded, still standing, is told."""
+    return C.DRY and evaluable(repo, checks) and kept(repo, pr, checks, st) is None
+
+
 def outputs(repo, pr, checks, st):
     """The store paths PR's proof of checks builds on its head (derivations).
     Worked out once a head, and None when it can't be: a check with no
     attribute, an eval that fails or takes too long (tried again EVAL_RETRY
-    minutes on)."""
-    attrs = C.repo_cfg(repo)["proofBuilds"]
-    if C.DRY or not checks or not all(c in attrs for c in checks):
+    minutes on). A status run works nothing out: it has what the live passes
+    worked out (step_context.LIVE_FACTS), else None, and untold says which."""
+    got = kept(repo, pr, checks, st)
+    if got is not None:
+        return got["paths"]
+    if C.DRY or not evaluable(repo, checks):
         return None
     n, head = pr["number"], pr["headRefOid"]
-    key = [head, {c: attrs[c] for c in sorted(checks)}]
-    got = st.get("proofOutputs")
-    if got and got["for"] == key and (got["paths"] or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
-        # Derivations collected since are worked out again, which puts them
-        # back in the store.
-        if not got["paths"] or not gone(sorted(set((got.get("drvs") or {}).values()))):
-            return got["paths"]
+    key = output_key(repo, pr, checks)
     drvs = paths = None
     try:
         mirror = V.fetch(repo, pr=pr)
@@ -185,15 +216,18 @@ def merged(repo, pr, checks, st, tip):
     into tip, as GitHub's update-branch merges it (a clean merge only).
     Worked out once a head on a tip, and None when it's up to date already,
     the merge conflicts, or what it builds can't be worked out (tried again
-    EVAL_RETRY minutes on)."""
+    EVAL_RETRY minutes on). A status run works nothing out: it has what the
+    live passes worked out (step_context.LIVE_FACTS), else None."""
     attrs = C.repo_cfg(repo)["proofBuilds"]
-    if C.DRY or not tip or not checks or not all(c in attrs for c in checks):
+    if not tip or not evaluable(repo, checks):
         return None
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     key = [head, tip, {c: attrs[c] for c in sorted(checks)}]
     got = st.get("mergedOutputs")
     if got and got["for"] == key and (not got.get("failed") or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
         return got["paths"]
+    if C.DRY:
+        return None
     paths, failed = None, True
     try:
         mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
@@ -246,7 +280,8 @@ def record(repo, pr, verdicts):
     one's status posts nothing again, and one added, remapped or set back
     to pending since is posted, and a red one is left red. A context is the
     same one however it's spelled: GitHub ignores its case. False if GitHub
-    didn't answer or take one: what's left is posted next time."""
+    didn't answer or take one: what's left is posted next time. A status
+    run logs each write but skips it; that is no posting failure."""
     head = pr["headRefOid"]
     now = C.gh("api", f"repos/{repo}/commits/{head}/status?per_page=100", check=False)
     if not isinstance(now, dict):
@@ -258,7 +293,7 @@ def record(repo, pr, verdicts):
         if c.lower() in settled:
             continue
         if C.write("api", f"repos/{repo}/statuses/{head}", "-f", f"state={state}", "-f", f"context={c}",
-                   "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None:
+                   "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None and not C.DRY:
             return False
     return True
 

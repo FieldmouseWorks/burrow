@@ -699,22 +699,20 @@ fn keep(
     put("head", sha.as_deref().unwrap_or_default().as_bytes())?;
     put("tracked.patch", &tracked)?;
     put("staged.patch", &staged)?;
-    if sha.is_some() {
-        if local {
-            // Each commit the superproject names is a ref of this process's own
-            // git dir, so the bundle carries it though it isn't in HEAD's history.
-            let mut revs = vec![String::from("HEAD")];
-            for (i, sha) in named.unwrap_or_default().iter().enumerate() {
-                git.git(&["cat-file", "-e", &format!("{sha}^{{commit}}")])?;
-                let name = format!("refs/preserved/{i}");
-                git.git(&["update-ref", &name, sha])?;
-                revs.push(name);
-            }
-            let out = to.join("base.bundle").to_string_lossy().into_owned();
-            let mut args = vec!["bundle", "create", out.as_str()];
-            args.extend(revs.iter().map(String::as_str));
-            git.git(&args)?;
+    if sha.is_some() && local {
+        // Each commit the superproject names is a ref of this process's own
+        // git dir, so the bundle carries it though it isn't in HEAD's history.
+        let mut revs = vec![String::from("HEAD")];
+        for (i, sha) in named.unwrap_or_default().iter().enumerate() {
+            git.git(&["cat-file", "-e", &format!("{sha}^{{commit}}")])?;
+            let name = format!("refs/preserved/{i}");
+            git.git(&["update-ref", &name, sha])?;
+            revs.push(name);
         }
+        let out = to.join("base.bundle").to_string_lossy().into_owned();
+        let mut args = vec!["bundle", "create", out.as_str()];
+        args.extend(revs.iter().map(String::as_str));
+        git.git(&args)?;
     }
     let untracked = to.join("untracked");
     fs::create_dir_all(&untracked).map_err(|e| format!("{}: {e}", untracked.display()))?;
