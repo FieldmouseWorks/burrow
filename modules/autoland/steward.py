@@ -329,8 +329,9 @@ def run_pass(kick, continuing=False):
                 pending = [pr for pr in prs if pr in pending or pr["number"] in held]
                 # Every open PR's branches, head and base, drafts and forks' PRs
                 # included: the branch watch leaves them all (deleting a base
-                # closes the PRs on it).
-                in_use = set()
+                # closes the PRs on it). From the whole listing, so the watch
+                # needn't wait for every PR to be stepped.
+                in_use = {b for pr in prs for b in (pr.get("headRefName"), pr.get("baseRefName")) if b}
                 snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
@@ -351,7 +352,6 @@ def run_pass(kick, continuing=False):
                         partial = True
                         batch.left = True
                         break
-                    in_use.update((pr["headRefName"], pr["baseRefName"]))
                     snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     T.STOPPED.pop(repo, None)
                     seen_to = True
@@ -365,18 +365,24 @@ def run_pass(kick, continuing=False):
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
                     batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
-                # Swept only once it has every open PR's head: one whose look
-                # failed before then would have the sweep take what's theirs.
                 if partial or batch.expired():
                     complete = False
                     batch.left = True
+                    # The train waits for every PR to be stepped; the branch
+                    # watch and upkeep need only the listing, so they run on
+                    # every batch. Otherwise a repo busy enough that no batch
+                    # steps all its PRs keeps every dead branch for good.
+                    try:
+                        branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
+                    except Exception as e:
+                        failing(repo, f"its branches: {e}")
+                    upkeep(repo, mine)
                     continue
                 # A partial traversal leaves all reviewer files alone. Once
                 # complete, include the snapshots carried from earlier batches
                 # before sweeping, just as a single complete pass does.
                 for pr in prs:
                     if pr not in pending:
-                        in_use.update((pr["headRefName"], pr["baseRefName"]))
                         snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 live[repo] = snaps
                 if why := batch.stopped(repo):

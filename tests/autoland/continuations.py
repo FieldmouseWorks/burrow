@@ -238,6 +238,32 @@ with tempfile.TemporaryDirectory() as tmp:
             S.run_pass(['sam/r'], continuing=True)
         assert operations == ['sam/r'] and len(handled) == 1, (operations, handled)
 
+    # A repo busy enough that every pass is new work never finishes its
+    # traversal in one slice. Its branch watch and upkeep still run each
+    # batch, leaving every open PR's branches, the unstepped ones' too; only
+    # the train waits for the whole traversal.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        prs[:] = [pr(n) for n in range(1, 6)]
+        watched, kept, trained = [], [], []
+        original = S.step.handle
+
+        def long(*args):
+            original(*args)
+            clock[0] += 9 * 60
+
+        def watch(repo, default, in_use, mine, full):
+            watched.append((repo, default, set(in_use)))
+
+        with patch.object(S, 'branches', watch), patch.object(S, 'upkeep', lambda repo, mine: kept.append(repo)), \
+                patch.object(S.T, 'step', trained.append), patch.object(S.step, 'handle', long):
+            for _ in range(3):
+                S.run_pass(['sam/r'])
+        assert len(handled) == 3 and trained == [], (handled, trained)
+        everyone = {f'branch-{n}' for n in range(1, 6)} | {'main'}
+        assert watched == [('sam/r', 'main', everyone)] * 3, watched
+        assert kept == ['sam/r'] * 3, kept
+    print('a busy repo still watches its branches every batch: passed')
+
     # A bounded multi-repo kick owes the repo it never entered, and an
     # unavailable train is retried at its own deadline, not at once.
     with fixture() as (clock, handled, facts, repos, prs, info):
