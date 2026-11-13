@@ -66,7 +66,7 @@ fn refuses_the_original_keep_builds_steps() {
                 .remove(Value::String("name".into()));
         }
     }
-    assert_eq!(unreported(&old).len(), 3);
+    assert_eq!(unreported(&old).len(), 4);
 }
 
 #[test]
