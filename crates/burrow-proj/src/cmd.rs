@@ -492,12 +492,6 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
                         == crate::turn::handoff::Fate::Unaccepted
                 })
         });
-    if unwinding
-        && let Some(from) = read(&job.path(scratch::HANDOFF))
-        && job.turns().as_deref() != Some(from.trim())
-    {
-        mark_handed_off(job, from.trim())?;
-    }
     if withdraw
         && how != Handoff::Resume
         && !unwinding
@@ -515,6 +509,20 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
         }
         put(&format!("{said}\n"));
         return Ok(());
+    }
+    // A stop ends whatever handoff was under way, whether its successor was
+    // accepted or not: the source turn stays marked as handed off (not as
+    // stopped for good), and the marker goes once the stop has succeeded.
+    let stranded = if how == Handoff::No {
+        read(&job.path(scratch::HANDOFF)).map(|from| from.trim().to_owned())
+    } else {
+        None
+    };
+    if let Some(from) = stranded
+        .as_ref()
+        .filter(|f| job.turns().as_deref() != Some(f.as_str()))
+    {
+        mark_handed_off(job, from)?;
     }
     if handoff && let Some(n) = &n {
         crate::state_reads::write(job.path(scratch::HANDOFF), format!("{n}\n"))
@@ -569,9 +577,10 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
     if !handoff {
         crate::ask::clear(job);
     }
-    if unwinding {
-        // Everything of a stranded handoff is cancelled; the scratch is no
-        // longer a new turn's.
+    if stranded.is_some() {
+        // Everything of a handoff under way is cancelled, whichever step it
+        // was at and whether or not its successor was accepted: the scratch is
+        // no longer a new turn's.
         retire_handoff(job)?;
     }
     if crate::ask::host_path(job, "label").exists() {

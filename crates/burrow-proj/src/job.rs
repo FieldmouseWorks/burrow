@@ -386,7 +386,11 @@ impl<'a> Job<'a> {
                 .map_err(|e| format!("{}: {e}", path.display()))
         };
         let mut held = Vec::new();
-        if self.turns().is_some_and(|n| self.handing_off(&n)) {
+        // A handoff holds the job from its first step to its settlement,
+        // whichever turn is the latest: its successor may be numbered, yet
+        // unaccepted, and the job is no ended one. Unreadable is held too.
+        let handoff = there(&self.path(crate::scratch::HANDOFF))?;
+        if handoff {
             held.push("handoff".into());
         }
         if self.turns().is_some_and(|n| self.retry_pending(&n)) {
@@ -394,7 +398,7 @@ impl<'a> Job<'a> {
         }
         let asked = match text(&self.path("turns"))?.filter(|n| valid_turn(n)) {
             Some(n) => {
-                (!there(&self.turn(&n, "stopped"))? || self.handing_off(&n))
+                (!there(&self.turn(&n, "stopped"))? || handoff)
                     && text(&self.turn(&n, "end"))?.as_deref() == Some("ask")
             }
             None => false,

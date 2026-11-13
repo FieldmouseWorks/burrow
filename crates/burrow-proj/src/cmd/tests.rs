@@ -226,6 +226,12 @@ fn a_handoff_in_progress_is_not_a_stop() {
     assert!(job.holds().unwrap().contains(&"handoff".to_owned()));
     assert!(!crate::scratch::over(&job));
 
+    // Its successor numbered but not yet accepted: the handoff still holds
+    // the job, so the job is no ended one.
+    fs::write(job.path("turns"), "2\n").unwrap();
+    assert!(job.holds().unwrap().contains(&"handoff".to_owned()));
+    fs::write(job.path("turns"), "1\n").unwrap();
+
     // Interrupted before its successor: nothing to settle yet.
     super::handoff::settle_handoff(&job).unwrap();
     assert!(job.turn("1", "stopped").exists());
@@ -324,4 +330,36 @@ fn withdrawing_leaves_an_accepted_or_unknown_handoff_successor_be() {
         );
         assert!(!job.turn("2", "stopped").exists());
     }
+}
+
+// A stop is the job's end in every phase of a handoff: one whose successor was
+// accepted but never settled is stopped like any turn, and its marker and
+// protection go with it, so the scratch is cleared (a second stop too).
+#[test]
+fn stopping_an_accepted_handoff_successor_retires_the_handoff() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().join("jobs").to_str().unwrap().into();
+    v["scratch"] = tmp.path().join("scratch").to_str().unwrap().into();
+    let mut cfg: Config = serde_json::from_value(v).unwrap();
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *LoadState*) echo not-found ;; *ActiveState*) echo inactive ;; esac\n",
+    );
+    fs::create_dir_all(tmp.path().join("jobs/j")).unwrap();
+    fs::create_dir_all(tmp.path().join("scratch/jobs/j")).unwrap();
+    fs::write(tmp.path().join("scratch/jobs/j/f"), "x").unwrap();
+    let job = Job::new(&cfg, "j");
+    fs::write(job.path("turns"), "2\n").unwrap();
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    fs::write(job.turn("2", "slot"), "").unwrap();
+    fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+    super::halt(&cfg, &job, false).unwrap();
+    assert!(!job.path(crate::scratch::HANDOFF).exists());
+    assert!(job.turn("1", "handed-off").exists());
+    assert!(job.turn("2", "stopped").exists());
+    assert!(!tmp.path().join("scratch/jobs/j").exists());
+    // Again: nothing left to hold it.
+    super::halt(&cfg, &job, false).unwrap();
 }

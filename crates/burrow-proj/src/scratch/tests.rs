@@ -725,3 +725,132 @@ fn a_project_the_job_names_itself_grants_nothing() {
     unfinished(&elsewhere);
     assert!(keep_err(&elsewhere).contains("outside the job's granted paths"));
 }
+
+fn fifo(path: &Path) {
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+}
+
+// Git opens object files by path, so one that is a link (a fan-out directory,
+// a loose object or a pack) would send it into another repository: refused
+// before git runs, and the scratch stays.
+#[test]
+fn keeping_work_refuses_links_inside_an_object_store() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join("a.txt"), "edited\n").unwrap();
+    let other = b.repo("other");
+    let objects = at.join(".git/objects");
+    let fan = objects.join("ab");
+    std::os::unix::fs::symlink(other.join(".git/objects"), &fan).unwrap();
+    assert!(keep_err(&b).contains("neither a plain file nor a directory"));
+    fs::remove_file(&fan).unwrap();
+    fs::create_dir_all(objects.join("pack")).unwrap();
+    let pack = objects.join("pack/x.pack");
+    let _ = fs::remove_file(&pack);
+    std::os::unix::fs::symlink(other.join(".git/HEAD"), &pack).unwrap();
+    assert!(keep_err(&b).contains("neither a plain file nor a directory"));
+    assert!(!Job::new(&b.cfg, "u").path("preserved/clone.1").exists());
+    assert!(at.exists(), "the scratch stays");
+}
+
+// A metadata file that is a FIFO, or too big, is an error at once, not a wait
+// or a partial read; the scratch stays.
+#[test]
+fn keeping_work_refuses_special_and_oversized_metadata() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join("a.txt"), "edited\n").unwrap();
+    let head = at.join(".git/HEAD");
+    let original = fs::read(&head).unwrap();
+    fs::remove_file(&head).unwrap();
+    fifo(&head);
+    let e = keep_err(&b);
+    assert!(e.contains("not a regular file"), "{e}");
+    fs::remove_file(&head).unwrap();
+    fs::write(
+        &head,
+        vec![b'x'; (super::preserve::META_LIMIT + 1) as usize],
+    )
+    .unwrap();
+    assert!(keep_err(&b).contains("larger than"));
+    fs::write(&head, &original).unwrap();
+    let index = at.join(".git/index");
+    fs::remove_file(&index).unwrap();
+    fifo(&index);
+    assert!(keep_err(&b).contains("not a regular file"));
+    assert!(at.exists());
+}
+
+/// Two submodule levels: the outer clone's `mod`, whose own `nest` is a
+/// submodule of it. A commit in `nest` that `mod`'s commit names exists only
+/// there.
+fn nested(b: &Box) -> (PathBuf, PathBuf, String) {
+    let leaf = b.repo("leaf");
+    let mid = b.repo("midsrc");
+    let allow = ["-c", "protocol.file.allow=always"];
+    let add = |dir: &Path, src: &Path, name: &str| {
+        let mut args = allow.to_vec();
+        args.extend(["submodule", "add", "-q", src.to_str().unwrap(), name]);
+        git(dir, &args);
+    };
+    add(&mid, &leaf, "nest");
+    git(&mid, &["commit", "-q", "-m", "add nest"]);
+    let at = clone_in_scratch(b);
+    add(&at, &mid, "mod");
+    git(&at, &["commit", "-q", "-m", "add mod"]);
+    let outer_mod = at.join("mod");
+    let mut args = allow.to_vec();
+    args.extend(["submodule", "update", "--init", "-q"]);
+    git(&outer_mod, &args);
+    let nest = outer_mod.join("nest");
+    fs::write(nest.join("deep.txt"), "deep\n").unwrap();
+    git(&nest, &["add", "deep.txt"]);
+    git(&nest, &["commit", "-q", "-m", "unpublished deep"]);
+    let sha = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&nest)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    git(&outer_mod, &["add", "nest"]);
+    git(&outer_mod, &["commit", "-q", "-m", "records deep"]);
+    git(&at, &["add", "mod"]);
+    // The nested commit is no longer checked out anywhere.
+    git(&nest, &["checkout", "-q", "--detach", "HEAD~1"]);
+    (at, nest, sha)
+}
+
+// A nested submodule's commit that only a clean, forced submodule's own
+// commit names is kept too, though nothing in the outer diffs shows it.
+#[test]
+fn keeping_work_keeps_a_nested_submodule_commit_recursively() {
+    let b = Box::new();
+    let (_at, _nest, sha) = nested(&b);
+    clear(&b.cfg, "u");
+    let bundle = kept(&b, "clone-mod-nest.1").join("base.bundle");
+    assert!(bundle.exists(), "{:?}", left(&b.cfg));
+    let heads = Command::new("git")
+        .arg("-C")
+        .arg(bundle.parent().unwrap())
+        .args(["bundle", "list-heads", "base.bundle"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&heads.stdout).contains(&sha));
+}
+
+// A submodule the saved states name with no working tree keeps the scratch.
+#[test]
+fn keeping_work_stays_when_a_nested_submodule_has_no_worktree() {
+    let b = Box::new();
+    let (at, nest, _sha) = nested(&b);
+    fs::remove_dir_all(&nest).unwrap();
+    let e = keep_err(&b);
+    assert!(e.contains("no working tree"), "{e}");
+    assert!(at.exists());
+}

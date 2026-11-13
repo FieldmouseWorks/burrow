@@ -144,7 +144,10 @@ impl Grants {
         }
     }
 
-    /// A granted file's text; none if it isn't there.
+    /// A granted file's text; none if it isn't there. The file is opened with
+    /// no link followed anywhere on its path and checked to be a regular file
+    /// before it is read (a FIFO or a device is refused, never opened for
+    /// reading), and no more than [`META_LIMIT`] bytes of it are read.
     fn read(&self, p: &Path) -> Result<Option<String>, String> {
         match p.canonicalize() {
             Ok(_) => {}
@@ -152,8 +155,10 @@ impl Grants {
             Err(e) => return Err(format!("{}: {e}", p.display())),
         }
         let c = self.confine(p)?;
-        match fs::read_to_string(&c) {
-            Ok(t) => Ok(Some(t)),
+        match bounded(&c, META_LIMIT) {
+            Ok(b) => String::from_utf8(b)
+                .map(Some)
+                .map_err(|_| format!("{} isn't text", p.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", p.display())),
         }
@@ -168,8 +173,11 @@ impl Grants {
         let gitdir = if meta.is_dir() {
             dotgit
         } else if meta.is_file() {
-            let text =
-                fs::read_to_string(&dotgit).map_err(|e| format!("{}: {e}", dotgit.display()))?;
+            let text = bounded(&dotgit, META_LIMIT)
+                .map_err(|e| format!("{}: {e}", dotgit.display()))
+                .and_then(|b| {
+                    String::from_utf8(b).map_err(|_| format!("{} isn't text", dotgit.display()))
+                })?;
             let at = text
                 .trim_end()
                 .strip_prefix("gitdir: ")
@@ -248,8 +256,62 @@ impl Grants {
             }
             seen.push(o);
         }
+        for o in &seen {
+            plain_objects(o)?;
+        }
         Ok(seen)
     }
+}
+
+/// The most a repository metadata file (a HEAD, a ref, an alternates list, a
+/// config) may hold; real ones are a few lines.
+pub(super) const META_LIMIT: u64 = 1 << 20;
+/// The most an index may hold.
+const INDEX_LIMIT: u64 = 1 << 30;
+/// The most entries one object directory may have, so a job can't make the
+/// walk endless.
+const OBJECT_ENTRIES: usize = 4_000_000;
+
+/// A regular file's content, up to `limit` bytes, opened with no link followed
+/// anywhere on its path: a link, a FIFO or a device is an error, and so is a
+/// file past the limit, never a truncated read.
+fn bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    let bytes = burrow_process::state_reads::prefix(path, limit + 1)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::other(format!("larger than {limit} bytes")));
+    }
+    Ok(bytes)
+}
+
+/// An object directory holds only directories and regular files, none of them
+/// links: git opens its loose objects and packs by path, and a link in there
+/// would send the unconfined git into another repository. Each entry is
+/// reached from a pinned directory, so a name swapped for a link later is
+/// refused rather than followed.
+fn plain_objects(dir: &Path) -> Result<(), String> {
+    use burrow_process::state_reads::Dir;
+    fn walk(d: &Dir, at: &Path, left: &mut usize, depth: usize) -> Result<(), String> {
+        let names = d.names().map_err(|e| format!("{}: {e}", at.display()))?;
+        for name in names {
+            *left = left
+                .checked_sub(1)
+                .ok_or_else(|| format!("{} has too many entries", at.display()))?;
+            let here = at.join(&name);
+            if let Ok(sub) = d.dir(Path::new(&name)) {
+                if depth == 0 {
+                    return Err(format!("{} is nested too deep", here.display()));
+                }
+                walk(&sub, &here, left, depth - 1)?;
+            } else {
+                d.file(Path::new(&name)).map_err(|_| {
+                    format!("{} is neither a plain file nor a directory", here.display())
+                })?;
+            }
+        }
+        Ok(())
+    }
+    let d = Dir::open(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    walk(&d, dir, &mut OBJECT_ENTRIES.clone(), 4)
 }
 
 /// A commit id as a git dir holds it; nothing else is repeated.
@@ -390,11 +452,12 @@ fn sanitized(
     for e in entries {
         let e = e.map_err(|e| format!("{}: {e}", gitdir.display()))?;
         let name = e.file_name().to_string_lossy().into_owned();
-        if (name == "index" || name.starts_with("sharedindex."))
-            && e.file_type().is_ok_and(|t| t.is_file())
-        {
-            fs::copy(e.path(), at.join(&name))
+        if name == "index" || name.starts_with("sharedindex.") {
+            // A link or a special file there is no index: refused, not read.
+            let bytes = bounded(&e.path(), INDEX_LIMIT)
                 .map_err(|err| format!("{}: {err}", e.path().display()))?;
+            fs::write(at.join(&name), bytes)
+                .map_err(|err| format!("{}/{name}: {err}", at.display()))?;
         }
     }
     Ok(())
@@ -423,6 +486,24 @@ fn gitlinks(raw: &[u8]) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// The submodules a `ls-tree -r -z` listing names: each path with its commit.
+fn tree_gitlinks(listing: &[u8]) -> Links {
+    listing
+        .split(|b| *b == 0)
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_at(entry.iter().position(|b| *b == b'\t')?);
+            let meta = String::from_utf8_lossy(meta);
+            let mut f = meta.split(' ');
+            (f.next() == Some("160000") && f.next() == Some("commit")).then(|| {
+                (
+                    String::from_utf8_lossy(&path[1..]).into_owned(),
+                    f.next().map(str::to_owned).into_iter().collect(),
+                )
+            })
+        })
+        .collect()
+}
+
 /// Keep what every working tree in job `id`'s scratch has not published. The
 /// caller holds the job's clear lock: nobody else keeps or removes this
 /// scratch meanwhile.
@@ -443,6 +524,7 @@ pub(super) fn unfinished(cfg: &Config, id: &str) -> Result<(), String> {
     // A superproject before the submodules inside it, whatever order the
     // directories were read in.
     found.sort();
+    let trees: Vec<PathBuf> = found.clone();
     for tree in found {
         let rel = tree.strip_prefix(&root).unwrap_or(&tree);
         let name = rel.to_string_lossy().replace('/', "-");
@@ -478,6 +560,15 @@ pub(super) fn unfinished(cfg: &Config, id: &str) -> Result<(), String> {
             dest.display()
         );
     }
+    // A submodule the saved states name, with no working tree to keep it from
+    // (not checked out, or gone): its commits may be nowhere else, so the
+    // scratch stays.
+    if let Some(missing) = linked.keys().find(|p| !trees.contains(p)) {
+        return Err(format!(
+            "{} is a submodule of saved work with no working tree to keep it from",
+            missing.display()
+        ));
+    }
     Ok(())
 }
 
@@ -496,6 +587,10 @@ fn keep(
     named: Option<&[String]>,
 ) -> Result<(bool, Links), String> {
     let force = named.is_some();
+    // Every path below is under the tree as it really is, so nothing of it is
+    // reached through a link.
+    let canonical = g.confine(tree)?;
+    let tree = canonical.as_path();
     let (gitdir, common) = g.locate(tree)?;
     let (branch, sha) = g.head(&gitdir, &common)?;
     let own = to.join(".gitdir");
@@ -536,6 +631,23 @@ fn keep(
         "--no-renames",
         "--cached",
     ])?));
+    if force {
+        // A submodule kept for the commits its superproject names holds
+        // gitlinks of its own at each of them (and at its head): the commits
+        // those name in nested submodules are needed to restore it, clean
+        // nested modules and commits not checked out included.
+        let mut revs: Vec<&str> = named
+            .unwrap_or_default()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        revs.extend(sha.as_deref());
+        for rev in revs {
+            let tree_rev = format!("{rev}^{{tree}}");
+            let listing = git.git(&["ls-tree", "-r", "-z", "--full-tree", &tree_rev])?;
+            links.extend(tree_gitlinks(&listing));
+        }
+    }
     let listed = git.git(&["ls-files", "-z", "--others", "--exclude-standard"])?;
     if !force && tracked.is_empty() && staged.is_empty() && listed.is_empty() {
         return Ok((false, links));
@@ -583,7 +695,20 @@ fn keep(
             let target = fs::read_link(&from).map_err(|e| format!("{}: {e}", from.display()))?;
             symlink(target, &into).map_err(|e| format!("{}: {e}", into.display()))?;
         } else if meta.is_file() {
-            fs::copy(&from, &into).map_err(|e| format!("{}: {e}", from.display()))?;
+            // Opened with no link followed on its path, and checked to be a
+            // regular file once open: a name swapped for a link or a FIFO
+            // after the look above is refused, never read or waited on.
+            let mut source = burrow_process::state_reads::open(&from)
+                .map_err(|e| format!("{}: {e}", from.display()))?;
+            let mut copy = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&into)
+                .map_err(|e| format!("{}: {e}", into.display()))?;
+            std::io::copy(&mut source, &mut copy)
+                .map_err(|e| format!("{}: {e}", from.display()))?;
+        } else {
+            return Err(format!("{} is a special file", from.display()));
         }
     }
     fs::remove_dir_all(&own).map_err(|e| format!("{}: {e}", own.display()))?;

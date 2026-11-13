@@ -84,7 +84,14 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
     };
     let pending: PendingRecommendation = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     if !pending.turn.is_empty() && job.turns().as_deref() != Some(pending.turn.as_str()) {
-        return Ok(None);
+        // A recommendation left by the turn a handoff is ending is still the
+        // question's until the handoff has moved it to its successor or given
+        // it back: the launcher can stop between numbering the successor and
+        // retargeting the record.
+        let source = state(&job.path(crate::scratch::HANDOFF))?;
+        if source.as_deref().map(str::trim) != Some(pending.turn.as_str()) {
+            return Ok(None);
+        }
     }
     Ok(Some(pending.recommendation))
 }
@@ -463,6 +470,33 @@ mod tests {
         assert!(!job.path("prompt.2").exists(), "no engine ran the default");
         assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
         assert!(host_path(&job, "question-needs-owner").exists());
+    }
+    // The launcher of a handoff can die after numbering the successor and
+    // before retargeting the recommendation: it is still the question's, for
+    // the handoff's source turn only, until the handoff is over.
+    #[test]
+    fn a_handoff_in_progress_keeps_its_source_turns_recommendation() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        job.set_turns(2).unwrap();
+        // No handoff: the turn count moved on, so it is another turn's.
+        assert!(!one_way_pending(&job).unwrap());
+        fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+        assert!(one_way_pending(&job).unwrap());
+        let kept = pending(&job).unwrap().unwrap();
+        assert_eq!(kept.default, "delete it");
+        // Another turn's still isn't.
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"x","one_way":true,"turn":"7"}"#,
+        )
+        .unwrap();
+        assert!(!one_way_pending(&job).unwrap());
     }
     // A one-way recommendation that was superseded (a later marker committed
     // before its removal failed) or belongs to another turn doesn't make the
