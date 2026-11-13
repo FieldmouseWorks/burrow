@@ -59,6 +59,9 @@ pub struct Config {
     pub stall_after_minutes: u64,
     /// How long an await waits on a PR or issue that doesn't change.
     pub await_hours: u64,
+    /// The directory of the snapshot change stream's subscriber sockets.
+    #[serde(default)]
+    pub stream: Option<PathBuf>,
     #[serde(default = "ask_timeout")]
     pub ask_timeout: u64,
     #[serde(default)]
@@ -98,6 +101,10 @@ pub struct Config {
     /// The steward App's account, distinct from the App running jobs.
     #[serde(default)]
     pub steward_account: Option<burrow_github::Author>,
+    /// The machinery App's account: its issues are sorted and run like an
+    /// author's, admitted by this id alone. Its comments stay unheard.
+    #[serde(default)]
+    pub machinery_account: Option<burrow_github::Author>,
     /// The owner's notifier (burrow.tools.notify), when there is one.
     pub notify: Option<PathBuf>,
     /// Where the old roles, models and roles.d files were (~/.config/proj):

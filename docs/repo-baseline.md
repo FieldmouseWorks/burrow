@@ -113,11 +113,12 @@ event: that's how a repo is heard the moment it's made, before it has a
 hook of its own. The steward sets the webhook's URL and secret itself, to
 burrow-events' (leave them to it). Give it these
 repository permissions: read and write on administration (the settings and
-ruleset above), contents (merges and deleting branches), issues (the labels
+ruleset above), actions (running a stranded or cancelled workflow run
+again), contents (merges and deleting branches), issues (the labels
 and the digest's issues), pull requests (reviews, comments and merges),
 commit statuses, webhooks, workflows (a merge that changes
 `.github/workflows`), and merge queues (taking a PR out of one someone else
-put it in); read on checks and actions. Install it on each of
+put it in); read on checks. Install it on each of
 `owners`, for all repositories, so new ones are covered too: the repos the
 steward keeps are the ones its installations reach (GitHub never reports an
 App as a repo's admin). Its private key goes in `app.keyFile`, readable by
@@ -226,9 +227,9 @@ root only.
    after, told which. An undo's or a red fix's own landing goes to the job.
 9. A PR whose merge would change nothing on its base (its head merged into
    the base's tip has the tip's own tree: another PR made the same change)
-   is closed, saying so, instead of landing as an empty commit. A dependency
-   bot's is left for the bot to close, and never cleared for the bot to
-   merge.
+   is closed, saying so, instead of landing as an empty commit. Dependency
+   updates close the same way: their bot need not run again to retire work
+   already present on the base, and they are never cleared to merge.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside

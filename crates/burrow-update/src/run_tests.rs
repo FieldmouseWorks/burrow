@@ -93,7 +93,7 @@ fn a_bump_goes_live_healthy_and_onto_main() {
     assert_eq!(
         m.origin(&["log", "-1", "--format=%B", "main"]),
         format!(
-            "deps: update {moved}\n\nPushed by box-update after the build, the VM tests and the health check passed."
+            "deps: update {moved}\n\nPushed by box-update after the build and the VM tests passed."
         )
     );
     assert_eq!(m.git(&m.path("operator"), &["rev-parse", "HEAD"]), m.main());
@@ -122,7 +122,7 @@ fn a_bump_goes_live_healthy_and_onto_main() {
     assert_eq!(
         m.did("notices"),
         "close not-on-main: box is back on main.
-close build-riding: main with its PR on top builds.
+close build-riding: box-update no longer rides its PR.
 close build-inputs: Cleared by a later run.
 close build-main: main builds again.
 close check-vm: The VM test vm passes again.
@@ -783,3 +783,43 @@ fn a_machine_without_its_clone_makes_one() {
 
 #[path = "run_train_tests.rs"]
 mod train;
+
+#[test]
+fn a_bump_that_cant_be_committed_is_never_deployed() {
+    // The pins stay in the clone, uncommitted. The system they'd build is
+    // not main, and not what the VM tests ran on: nothing goes live.
+    let m = machine();
+    let was = m.running();
+    m.upstream("nixpkgs", &sha('c'));
+    let hook = m.cfg.work.join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    burrow_test::executable(&hook, "#!/bin/sh\nexit 1\n");
+    assert_eq!(once(&m.cfg, &mut Fake::default(), true), 1);
+    assert_eq!(m.running(), was);
+    assert!(!switched(&m));
+}
+
+#[test]
+fn a_fallback_input_that_cant_be_committed_is_never_deployed() {
+    // The bump as a whole commits but doesn't build; the fallback's own
+    // commit then fails. The first commit's success says nothing of the
+    // second: the pins stay uncommitted and nothing goes live.
+    let m = machine();
+    let was = m.running();
+    m.upstream("nixpkgs", &sha('c'));
+    fs::write(m.home("build-breaks"), sha('c')).unwrap();
+    let hook = m.cfg.work.join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let count = m.dir.path().join("commits");
+    burrow_test::executable(
+        &hook,
+        format!(
+            "#!/bin/sh\necho x >>{c}\n[ \"$(wc -l <{c})\" -le 1 ]\n",
+            c = count.display()
+        ),
+    );
+    assert_eq!(once(&m.cfg, &mut Fake::default(), true), 1);
+    assert_eq!(m.running(), was);
+    assert!(!switched(&m));
+    assert_eq!(m.recorded("deployed-main"), None);
+}

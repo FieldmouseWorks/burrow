@@ -29,6 +29,11 @@ use serde::Deserialize;
 pub struct Config {
     /// OWNER/NAME: the private repo whose issues it answers.
     pub repo: String,
+    /// OWNER/NAME of the machine's own flake, when it is on GitHub: the repo
+    /// whose commits `contains` checks against the configuration revision.
+    /// Independent of `repo`, which is only where the issues live.
+    #[serde(default)]
+    pub system_repo: Option<String>,
     /// The label that makes an issue a probe.
     pub label: String,
     /// Who may ask (GitHub logins, any case).

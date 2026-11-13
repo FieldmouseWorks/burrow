@@ -621,6 +621,7 @@ dependencies = [
  "burrow-events",
  "burrow-github",
  "burrow-process",
+ "burrow-test",
  "jiff",
  "regex",
  "serde",

@@ -10,7 +10,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use super::{Info, Kept, Nix, Store, keep};
+use super::{Gate, Info, Kept, Nix, Store, keep};
 
 /// A path in the stand-in's store: signed or not, what it refers to, and
 /// its contents, which name its NAR.
@@ -231,7 +231,7 @@ fn a_push_keeps_what_no_one_signed_but_derivations() {
     nix.path("hhh-hello", true, &["ggg-glibc"], "hello");
     nix.drv("fff-git.drv", &["aaa-git-2.54"]);
     nix.drv("ddd-gate.drv", &["bbb-vm-test-run-proj"]);
-    let k = keep(&nix, d).unwrap();
+    let k = keep(&nix, d, Gate::Passed).unwrap();
     assert_eq!((k.gate, k.carried), (2, 0), "{k:?}");
     assert_eq!(
         cache(&d.join("kept")),
@@ -278,7 +278,7 @@ fn what_a_derivation_here_still_makes_is_carried_and_the_rest_dropped() {
     nix.drv("fff-git.drv", &["aaa-git-2.54"]);
     let inode = |p: &Path| fs::metadata(p).unwrap().ino();
     let before = inode(&d.join("kept/nar/git.nar"));
-    let k = keep(&nix, d).unwrap();
+    let k = keep(&nix, d, Gate::Passed).unwrap();
     assert_eq!((k.gate, k.carried), (1, 1), "{k:?}");
     assert_eq!(
         cache(&d.join("kept")),
@@ -315,7 +315,7 @@ fn a_download_is_kept_only_when_a_kept_path_refers_to_it() {
     nix.drv("ggg-rustc.drv", &["bbb-rustc"]);
     nix.drv("hhh-wrapper.drv", &["ccc-wrapper"]);
     nix.drv("iii-script.sh.drv", &["ddd-script.sh"]);
-    let k = keep(&nix, d).unwrap();
+    let k = keep(&nix, d, Gate::Passed).unwrap();
     assert_eq!(
         (k.gate, k.carried, k.downloads, k.download_bytes),
         (4, 0, 1, "tarball".len() as u64),
@@ -358,7 +358,7 @@ fn a_download_the_kept_builds_hold_is_carried_only_when_a_kept_path_refers_to_it
             "eee-script.sh",
         ],
     );
-    let k = keep(&nix, d).unwrap();
+    let k = keep(&nix, d, Gate::Passed).unwrap();
     assert_eq!(
         (k.gate, k.carried, k.downloads, k.download_bytes),
         (1, 4, 1, "tarball".len() as u64),
@@ -374,6 +374,54 @@ fn a_download_the_kept_builds_hold_is_carried_only_when_a_kept_path_refers_to_it
             "zzz-check"
         ])
     );
+}
+
+/// A push whose gate failed keeps what it built all the same: a check
+/// that failed left no path, so the next run builds it (and fails) again,
+/// but the patched package another check needed is a build of its
+/// derivation whatever failed beside it (#812). What the kept builds hold
+/// is carried whole, as the evaluation may have stopped short of what
+/// would still make it: the store has derivations for none of it here.
+#[test]
+fn a_failed_gate_keeps_what_it_built_and_carries_all_the_kept_builds() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    kept(d, &[("aaa-git-2.54", "git"), ("zzz-old-check", "old")]);
+    let mut nix = Fake::default();
+    nix.path("ccc-codex-patched", false, &["ggg-glibc"], "codex");
+    nix.path("ggg-glibc", true, &[], "glibc");
+    nix.drv("kkk-codex.drv", &["ccc-codex-patched"]);
+    // The check that failed: its derivation, but no output.
+    nix.drv("lll-failed-check.drv", &["mmm-failed-check"]);
+    let k = keep(&nix, d, Gate::Failed).unwrap();
+    assert_eq!((k.gate, k.carried), (1, 2), "{k:?}");
+    assert_eq!(
+        cache(&d.join("kept")),
+        (
+            names(&["aaa-git-2.54", "ccc-codex-patched", "zzz-old-check"]),
+            nars(&["codex", "git", "old"])
+        )
+    );
+    assert_eq!(*nix.wrote.borrow(), names(&["ccc-codex-patched"]));
+
+    // The same store, had its gate passed, drops what no derivation makes.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    kept(d, &[("aaa-git-2.54", "git"), ("zzz-old-check", "old")]);
+    let k = keep(&nix, d, Gate::Passed).unwrap();
+    assert_eq!((k.gate, k.carried), (1, 0), "{k:?}");
+    assert_eq!(cache(&d.join("kept")).0, names(&["ccc-codex-patched"]));
+}
+
+/// The gate's outcome as the workflow passes it: one that didn't run, or
+/// was cancelled, says nothing of what to keep.
+#[test]
+fn the_gate_is_its_steps_outcome() {
+    assert_eq!(Gate::from_outcome("success"), Some(Gate::Passed));
+    assert_eq!(Gate::from_outcome("failure"), Some(Gate::Failed));
+    for other in ["skipped", "cancelled", ""] {
+        assert_eq!(Gate::from_outcome(other), None, "{other}");
+    }
 }
 
 /// A narinfo keep can't read, or whose NAR isn't a file of its own under
@@ -414,7 +462,7 @@ fn what_the_kept_builds_hold_is_only_what_they_name_as_nix_does() {
         "ggg-text",
     ];
     nix.drv("kkk-all.drv", &all);
-    let kept = keep(&nix, d).unwrap();
+    let kept = keep(&nix, d, Gate::Passed).unwrap();
     assert_eq!(kept.carried, 1);
     assert_eq!(
         cache(&d.join("kept")),
@@ -434,7 +482,7 @@ fn a_failure_leaves_the_kept_builds_as_they_were() {
     };
     nix.path("bbb-vm", false, &[], "vm");
     nix.drv("fff-git.drv", &["aaa-git-2.54"]);
-    let err = keep(&nix, d).unwrap_err();
+    let err = keep(&nix, d, Gate::Passed).unwrap_err();
     assert!(err.contains("nix copy"), "{err}");
     assert_eq!(
         cache(&d.join("kept")),
@@ -451,7 +499,7 @@ fn nothing_to_keep_is_an_empty_cache() {
     fs::create_dir(d.join("kept")).unwrap();
     let mut nix = Fake::default();
     nix.path("ggg-glibc", true, &[], "glibc");
-    let k = keep(&nix, d).unwrap();
+    let k = keep(&nix, d, Gate::Passed).unwrap();
     assert_eq!(
         k,
         Kept {

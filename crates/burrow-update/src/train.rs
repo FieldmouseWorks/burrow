@@ -5,19 +5,17 @@
 //!
 //! While that PR is open, HOST-update brings in nothing fresh. A new head
 //! would take it out of the train, and stop the candidate it's in and every
-//! PR in that with it; a newer bump put live beside it would leave the box on
-//! something main never gets. So it rides the PR instead (`ride`): main with
-//! the PR's head on top, which is what the train lands next.
+//! PR in that with it. Main still deploys: only main is ever live, so a
+//! bump goes live after it lands, and one held for a finding never strands
+//! the box. The train's candidate is where it is proven before that.
 //!
 //! Unless the steward won't land a head it pushed itself as it is (`stuck`):
 //! a check failed on it, or a reviewer's finding on it is open. The steward
 //! settles only a green PR with every thread resolved, and takes one that
 //! goes red out of the train, so that head is in no candidate for a new one
-//! to stop, and riding it would hold the box, security fixes and all, until
-//! a Claude job got to it: forever, when the finding is about an input's own
-//! code, which only a newer pin fixes. So it brings in a fresh bump as if
-//! none were open, which goes up as the same PR's new head (`replace`): only
-//! a whole one, though, that isn't the stuck head's very tree (`replaces`).
+//! to stop. So it brings in a fresh bump as if none were open, which goes up
+//! as the same PR's new head (`replace`): only a whole one, though, that
+//! isn't the stuck head's very tree (`replaces`).
 //!
 //! The head it pushed last is `proposed`, in its state dir: a head on its PR
 //! that isn't that one is someone else's, a fix, and what it holds hasn't
@@ -95,7 +93,7 @@ impl std::fmt::Display for Stuck {
 
 /// Whether its open PR `pr` is stuck on a head HOST-update pushed, and why,
 /// with that head fetched when it is (`replaces` reads it): None when it
-/// isn't, or when the head is anyone else's (`ride` holds for that). Red is
+/// isn't, or when the head is anyone else's. Red is
 /// CI as the steward reads it (ci_state in modules/autoland/prs.py, whose
 /// rules these are), in `failing`; a finding is a review thread on that
 /// head, in `found`. Fails, saying why, when GitHub doesn't say, or the head
@@ -203,34 +201,6 @@ fn failing(t: &Train, commit: &Value) -> bool {
     !nodes(suites).iter().all(started) || nodes(contexts).iter().any(red)
 }
 
-/// Main with its open PR `pr` on top, in the clone, which a run has at
-/// main. Fails, saying why, when that head isn't the one HOST-update pushed
-/// (someone's fixing it: what it holds hasn't been through HOST-update's
-/// gate) or doesn't merge onto main, with the clone as it was.
-pub fn ride(cfg: &Config, t: &Train, pr: &Pr) -> Result<(), String> {
-    if proposed(cfg).as_deref() != Some(pr.head.as_str()) {
-        return Err(format!(
-            "its PR #{} has a head it didn't push ({}); holding until that lands",
-            pr.number, pr.head
-        ));
-    }
-    fetch(cfg, t, pr)?;
-    let msg = format!("Ride #{} on main", pr.number);
-    if cfg
-        .git_hushed(&["merge", "-q", "--no-edit", "-m", &msg, "FETCH_HEAD"])
-        .is_err()
-    {
-        if cfg.git_hushed(&["merge", "--abort"]).is_err() {
-            let _ = cfg.git(&["reset", "-q", "--hard"]);
-        }
-        return Err(format!(
-            "its PR #{} doesn't merge onto main; holding until it's fixed",
-            pr.number
-        ));
-    }
-    Ok(())
-}
-
 /// Whether HEAD, a fresh bump on `main` for its stuck PR `pr`, replaces
 /// that head: Ok, or why it doesn't. `short` are the inputs that didn't make it
 /// in (they didn't build, or what's new in them couldn't be fetched). One
@@ -260,10 +230,8 @@ pub fn replaces(cfg: &Config, pr: &Pr, main: &str, short: &[String]) -> Result<(
 /// same PR, never a new one. Only while that head is still on it and still
 /// stuck: a head pushed since is someone's fix, and one the steward can land
 /// now (a rerun gone green, a finding resolved) is its to settle and put in
-/// the train, so it's ridden instead. Gives the PR's URL; fails, saying
-/// why, with the PR left as it was. A run calls it once HEAD is live and
-/// healthy but before it's confirmed (live.rs), so a refusal reverts it:
-/// the box never stays on a bump nothing will land.
+/// the train. Gives the PR's URL; fails, saying why, with the PR left as it
+/// was.
 pub fn replace(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<String, String> {
     let (title, body) = said(cfg)?;
     let n = pr.number;
@@ -338,8 +306,8 @@ pub fn said(cfg: &Config) -> Result<(String, String), String> {
     let title = cfg.git(&["log", "-1", "--format=%s"])?;
     let did = cfg.git(&["log", "-1", "--format=%b"])?;
     let body = format!(
-        "{did}\n\nIt is live on {}. The steward settles this PR and the merge train lands it; until then {} brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it.",
-        cfg.host, cfg.update
+        "{did}\n\nIt is not live: {} runs main. The steward settles this PR and the merge train lands it; until then {} brings in nothing newer, unless a check fails on it or a finding on it is left open: then a fresh bump replaces it. Only main goes live: {} deploys this after it lands.",
+        cfg.host, cfg.update, cfg.update
     );
     Ok((title, body))
 }

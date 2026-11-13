@@ -1,27 +1,51 @@
-//! An ancestry verdict uses the running input revision, never a checkout's HEAD.
+//! An ancestry verdict uses the running input (or, for the machine's own
+//! repo, configuration) revision, never a checkout's HEAD.
 use super::Machine;
 use serde_json::Value;
 use std::fs;
 
 pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, String> {
-    let inputs: Value = serde_json::from_str(
-        &fs::read_to_string(m.path("/etc/burrow/inputs.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let revisions: Vec<&str> = inputs
-        .as_object()
-        .ok_or("invalid running inputs")?
-        .values()
-        .filter(|i| {
-            i["repo"]
-                .as_str()
-                .is_some_and(|r| r.eq_ignore_ascii_case(repo))
-        })
-        .filter_map(|i| i["rev"].as_str())
-        .collect();
+    let is_system = m
+        .cfg
+        .system_repo
+        .as_deref()
+        .is_some_and(|r| r.eq_ignore_ascii_case(repo));
+    // The inputs manifest is optional; a missing one only matters to a repo
+    // that has no other source of a running revision.
+    let inputs: Result<Value, String> = fs::read_to_string(m.path("/etc/burrow/inputs.json"))
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .and_then(|v: Value| {
+            if v.is_object() {
+                Ok(v)
+            } else {
+                Err("invalid running inputs".to_owned())
+            }
+        });
+    let mut revisions: Vec<String> = Vec::new();
+    match &inputs {
+        Ok(inputs) => revisions.extend(
+            inputs
+                .as_object()
+                .into_iter()
+                .flat_map(|o| o.values())
+                .filter(|i| {
+                    i["repo"]
+                        .as_str()
+                        .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+                })
+                .filter_map(|i| i["rev"].as_str().map(str::to_owned)),
+        ),
+        Err(e) if !is_system => return Err(e.clone()),
+        Err(_) => {}
+    }
+    // The machine's own repo is the configuration, not an input.
+    if is_system {
+        revisions.push(super::system::configuration_revision(m)?);
+    }
     if revisions.is_empty() {
         return Err(format!(
-            "{repo} is not identified in the running system's inputs"
+            "{repo} is neither the machine's repo nor one of the running system's inputs"
         ));
     }
     let projects = m
@@ -59,6 +83,7 @@ pub(super) fn answer(m: &Machine, repo: &str, commit: &str) -> Result<String, St
         }
         let mut out = String::new();
         for rev in &revisions {
+            let rev = rev.as_str();
             if rev.len() != 40 || !rev.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("invalid running revision".into());
             }
@@ -291,6 +316,62 @@ mod tests {
         git(&["branch", &second[..10], &first]);
         assert!(
             answer(&machine, "sam/tool", &second[..10])
+                .unwrap()
+                .ends_with(": no\n")
+        );
+    }
+    #[test]
+    fn host_repo_is_answered_from_the_configuration_revision() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repo = root.join("projects/host");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {:?}", out.stderr);
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["remote", "add", "origin", "https://github.com/sam/host.git"]);
+        git(&["commit", "--allow-empty", "-qm", "first"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "--allow-empty", "-qm", "second"]);
+        let second = git(&["rev-parse", "HEAD"]);
+        fs::create_dir_all(root.join("etc/burrow")).unwrap();
+        let bin = root.join("run/current-system/sw/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("nixos-version");
+        burrow_test::executable(
+            &script,
+            format!(
+                "#!/bin/sh\necho '{{\"nixosVersion\":\"1\",\"configurationRevision\":\"{first}\"}}'\n"
+            ),
+        );
+        let cfg: Config = serde_json::from_value(serde_json::json!({"repo":"sam/issues","systemRepo":"sam/host","label":"probe","authors":[],"host":"host","user":"dev","stateDir":root,"projects":root.join("projects"),"proj":null,"journal":{"units":[],"userUnits":[]},"tools":{"journalctl":"false","systemctl":"false"}})).unwrap();
+        let commands = crate::answer::Commands;
+        let machine = Machine {
+            cfg: &cfg,
+            root: root.to_owned(),
+            now: 0,
+            uid: 1001,
+            run: &commands,
+        };
+        // Running at `first`: first is an ancestor, second is not.
+        assert!(
+            answer(&machine, "sam/host", &first)
+                .unwrap()
+                .ends_with(": yes\n")
+        );
+        assert!(
+            answer(&machine, "sam/host", &second)
                 .unwrap()
                 .ends_with(": no\n")
         );
