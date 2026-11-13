@@ -13,11 +13,31 @@ pub(crate) trait Document: Default + Serialize + DeserializeOwned {
     fn receipts(&mut self) -> &mut BTreeMap<String, String>;
 }
 
+/// True only for an accessible, existing path; false only for genuine
+/// absence. Inspect ancestors too: ENOENT behind a dangling link isn't absence.
+pub fn path_exists(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                path_exists(parent)?;
+            }
+            Ok(false)
+        }
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 /// The document at PATH; its default when there's none yet.
 pub(crate) fn read<D: DeserializeOwned + Default>(path: &Path) -> Result<D, String> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(D::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !path_exists(path)? => {
+            Ok(D::default())
+        }
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
@@ -62,6 +82,9 @@ pub(crate) fn write<D: Document>(
         return Ok(Some(body));
     }
     let Some(answer) = change(&mut state)? else {
+        if path_exists(path)? {
+            sync(path)?;
+        }
         return Ok(None);
     };
     if let Some(receipt) = receipt {

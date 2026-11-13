@@ -191,12 +191,30 @@ overlay after a rollback. A turn reads them once: its engine, overflow,
 model and effort come from one version of them, and so does `settings show`.
 
 `proj check-config` reads the role settings as each turn does; the update's
-health check runs it as the job user after every switch. proj's old files
-(`~/.config/proj/roles`, `models`, `roles.d/`) are moved in once by `proj
-settings migrate` (the `proj-settings-migrate` unit, ordered before the
-units that start or switch turns), which also makes and answers a switch the
-old store had journalled; values set through the door before it ran win
-over the old files'. The files stay, for a generation from before the
-settings, and nothing reads them since. While they're there unmoved, proj
-refuses role settings, and every turn and check-config with them, rather
-than run the defaults.
+health checks require a durable migration after every switch. proj's old files
+(`~/.config/proj/roles`, `models`, `roles.d/`) are imported once by `proj
+settings migrate`. The deployed `proj-settings-migrate` service holds the old
+CLI lock and the old engines door's whole-pass lock for the generation's
+lifetime, including after a migration error. Its readiness means the retired
+writers are fenced; the separate migration health check requires the cutover
+to be durable before confirmation. New engines-door passes use a separate lock.
+Rollback stops the fence and makes the legacy inputs writable again.
+
+Every role, tuning, offer and setup mutation waits for configured legacy
+inputs to migrate, so unsets and complete replacements cannot be undone by
+import. Admission's off switch remains available. With no legacy source
+configured, the first role mutation establishes a fresh settings store.
+
+Recovery finishes a journalled switch in the legacy inputs, retaining named,
+plain unsaved and absent predecessors. Its completed journal and synced receipt
+remain readable by the previous generation. The live routing and the request's
+receipt are then published together; the new door waits for cutover and syncs
+stored answers before acknowledging them. Retrying a cycle after a CLI change
+or loss of its filesystem receipt returns the original answer without switching
+again. Migration retries after publication sync the live document and never
+reread the retired inputs.
+
+Legacy files stay for rollback. Before migration, turns and check-config
+refuse existing legacy inputs. Read errors, invalid path components and dangling
+links in either source paths or the live role document fail closed; only genuine
+absence permits defaults.

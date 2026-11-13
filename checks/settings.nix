@@ -19,6 +19,11 @@ let
   proj = fixture.config.burrow.tools.proj;
   tracked = fixture.config.environment.etc."burrow/settings.json".source;
 in
+assert fixture.config.systemd.services.proj-settings-migrate.serviceConfig.Type == "notify";
+assert !fixture.config.systemd.services.proj-settings-migrate.restartIfChanged;
+assert builtins.elem "proj-role-migration" fixture.config.burrow.updates.requiredHealth;
+assert fixture.config.systemd.services.proj-settings-migrate.serviceConfig.ExecStart == "${proj}/bin/proj settings migrate --fence";
+assert fixture.config.burrow.settings.effective.legacyRoles == "${fixture.config.users.users.${fixture.config.burrow.user}.home}/.config/proj";
 pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-jsonschema ]; } ''
   # The fixture's own config, its live files moved where the build can write.
   config=$(grep -o '/nix/store/[^ ]*-proj\.json' ${proj}/bin/proj | head -n1)

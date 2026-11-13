@@ -6,18 +6,24 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use burrow_settings::roles::{self, Key, Migration, Offer, Roles, Setups, Tuning};
-use serde::{Deserialize, Serialize};
 
-/// The old files that hold role settings.
-const FILES: &[&str] = &["roles", "models", "roles.d"];
+mod fence;
+mod recovery;
+
+#[cfg(test)]
+mod regressions;
 
 fn text(path: &Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(t) => Ok(Some(t)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => Ok(None),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound && !burrow_settings::path_exists(path)? =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
@@ -96,19 +102,9 @@ fn models(path: &Path, text: &str) -> Result<BTreeMap<String, Tuning>, String> {
     Ok(out)
 }
 
-/// A switch the old engines door or CLI had journalled (`roles.operation`):
-/// its receipt, the setup it switched to and from, and its answer once done.
-#[derive(Serialize, Deserialize)]
-struct Operation {
-    receipt: PathBuf,
-    destination: String,
-    before: Option<String>,
-    result: Option<String>,
-}
-
 /// What the old files in DIR hold, as the settings will, and the switch
 /// they had in flight.
-fn read(dir: &Path) -> Result<(Migration, Option<Operation>), String> {
+fn read(dir: &Path) -> Result<Migration, String> {
     let roles_path = dir.join("roles");
     let models_path = dir.join("models");
     let tuned = match text(&models_path)? {
@@ -123,7 +119,7 @@ fn read(dir: &Path) -> Result<(Migration, Option<Operation>), String> {
         offer.models.extend(tuning.model.clone());
         offer.efforts.extend(tuning.effort.clone());
     }
-    let mut routing = Roles {
+    let routing = Roles {
         roles: match text(&roles_path)? {
             Some(t) => routes(&roles_path, &t)?,
             None => BTreeMap::new(),
@@ -138,7 +134,12 @@ fn read(dir: &Path) -> Result<(Migration, Option<Operation>), String> {
             for entry in entries {
                 let entry = entry.map_err(|e| format!("{}: {e}", saved.display()))?;
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if !roles::valid_setup(&name) || !entry.path().is_file() {
+                if !roles::valid_setup(&name)
+                    || !burrow_settings::path_exists(&entry.path())?
+                    || !fs::metadata(entry.path())
+                        .map_err(|e| e.to_string())?
+                        .is_file()
+                {
                     continue;
                 }
                 let path = entry.path();
@@ -152,7 +153,9 @@ fn read(dir: &Path) -> Result<(Migration, Option<Operation>), String> {
                 );
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !burrow_settings::path_exists(&saved)? => {}
         Err(e) => return Err(format!("{}: {e}", saved.display())),
     }
     // The setup the roles file linked to, as `engines use` left it.
@@ -161,101 +164,80 @@ fn read(dir: &Path) -> Result<(Migration, Option<Operation>), String> {
         .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()))
         .filter(|n| setups.saved.get(n) == Some(&routing));
     let previous = text(&dir.join("roles.previous"))?.map(|n| n.trim().to_owned());
-    // A switch journalled but maybe not made: make it, as the old store
-    // would have before its next command.
-    let journal = dir.join("roles.operation");
-    let op = match text(&journal)? {
-        Some(t) => Some(
-            serde_json::from_str::<Operation>(&t)
-                .map_err(|e| format!("{}: {e}", journal.display()))?,
-        ),
-        None => None,
-    };
-    let previous = match &op {
-        Some(op) if op.result.is_none() => {
-            routing = setups
-                .saved
-                .get(&op.destination)
-                .cloned()
-                .ok_or_else(|| format!("{}: no setup {}", journal.display(), op.destination))?;
-            setups.active = Some(op.destination.clone());
-            op.before.clone()
-        }
-        _ => previous,
-    };
     setups.previous = previous.and_then(|name| setups.saved.get(&name).cloned());
-    Ok((
-        Migration {
-            routing,
-            offers,
-            setups,
-        },
-        op,
-    ))
+    Ok(Migration {
+        routing,
+        offers,
+        setups,
+        receipts: BTreeMap::new(),
+    })
 }
 
-/// The first of the old files still in DIR.
-pub(crate) fn left(dir: &Path) -> Option<PathBuf> {
-    FILES
-        .iter()
-        .map(|f| dir.join(f))
-        .find(|p| p.symlink_metadata().is_ok())
+fn lock(path: &Path) -> Result<File, String> {
+    fs::create_dir_all(path.parent().ok_or("lock has no parent")?).map_err(|e| e.to_string())?;
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.lock()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(file)
 }
 
-/// Moves the old files in DIR into SETTINGS, once, holding the lock their
-/// old writers took so none changes them meanwhile.
+/// Both locks remain held for the deployed generation with --fence. A retained
+/// door cannot finish a fetched request, nor can a CLI waiting on roles.lock
+/// mutate retired inputs. Stopping this generation releases them for rollback.
 pub(crate) fn run(settings: &burrow_settings::Config, dir: &Path) -> Result<String, String> {
-    let _lock = match dir.is_dir() {
-        true => {
-            let path = dir.join("roles.lock");
-            let lock = File::options()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            lock.lock()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            Some(lock)
-        }
-        false => None,
-    };
-    if settings.role_view()?.migrated {
+    if settings.roles_migrated()? {
+        settings.migrate(Migration::default(), "proj settings migrate")?;
         return Ok("The settings took the old files already.\n".into());
     }
-    let (from, op) = read(dir)?;
-    // The answer to a switch the old door had journalled, where that door
-    // looks for it, before the switch is made: a retried request finds it
-    // and answers again, never switches again.
-    if let Some(op) = op
-        && !op.receipt.exists()
-    {
-        let result = op.result.clone().unwrap_or_else(|| {
-            format!(
-                "Was active: {}\nActive: {}\n",
-                op.before.as_deref().unwrap_or("unsaved"),
-                op.destination
-            )
-        });
-        let done = Operation {
-            result: Some(result),
-            ..op
-        };
-        let body = serde_json::to_vec(&done).map_err(|e| e.to_string())?;
-        let tmp = done.receipt.with_extension("migrating");
-        fs::write(&tmp, body)
-            .and_then(|()| File::open(&tmp)?.sync_all())
-            .and_then(|()| fs::rename(&tmp, &done.receipt))
-            .map_err(|e| format!("{}: {e}", done.receipt.display()))?;
-    }
-    let moved = settings.migrate(from, "proj settings migrate")?;
-    Ok(if moved {
-        format!(
+    run_with(settings, dir, |_| Ok(()))
+}
+
+fn run_with(
+    settings: &burrow_settings::Config,
+    dir: &Path,
+    after: impl FnOnce(&Result<String, String>) -> Result<(), String>,
+) -> Result<String, String> {
+    let _door = settings
+        .legacy_engines_lock
+        .as_deref()
+        .map(lock)
+        .transpose()?;
+    let _roles = lock(&dir.join("roles.lock"))?;
+    let answer = migrate_locked(settings, dir);
+    // A failed migration must not release the retired writers. The deployed
+    // fence stays up through refusal as well as success; health separately
+    // checks the durable cutover before a deployment can be confirmed.
+    after(&answer)?;
+    answer
+}
+
+fn migrate_locked(settings: &burrow_settings::Config, dir: &Path) -> Result<String, String> {
+    if settings.roles_migrated()? {
+        settings.migrate(Migration::default(), "proj settings migrate")?;
+        Ok("The settings took the old files already.\n".into())
+    } else {
+        let receipts = recovery::run(dir)?;
+        let mut from = read(dir)?;
+        from.receipts = receipts;
+        settings.migrate(from, "proj settings migrate")?;
+        Ok(format!(
             "Moved what {} held into the settings; proj settings show has them. Nothing reads the old files now.\n",
             dir.display()
-        )
-    } else {
-        "The settings took the old files already.\n".into()
+        ))
+    }
+}
+
+pub(crate) fn fenced(settings: &burrow_settings::Config, dir: &Path) -> Result<String, String> {
+    run_with(settings, dir, |answer| {
+        if let Err(error) = answer {
+            eprintln!("proj: migration failed; retained writers stay fenced: {error}");
+        }
+        fence::hold()
     })
 }
 

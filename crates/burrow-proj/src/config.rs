@@ -331,7 +331,7 @@ impl Config {
         let view = settings.role_view()?;
         if !view.migrated
             && let Some(dir) = &self.old_config
-            && let Some(old) = crate::settings::old_files(dir)
+            && let Some(old) = crate::settings::old_files(dir)?
         {
             return Err(format!(
                 "{}: proj's old role settings aren't moved into the settings yet (proj settings migrate)",

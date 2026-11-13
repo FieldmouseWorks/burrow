@@ -59,7 +59,7 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
         .state
         .join(cfg.repo.to_ascii_lowercase().replace('/', "--"));
     stored(&state, fs::create_dir_all(&state))?;
-    let lock_path = state.join("lock");
+    let lock_path = state.join("settings.lock");
     let lock = stored(
         &lock_path,
         File::options()
@@ -69,6 +69,9 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
             .open(&lock_path),
     )?;
     stored(&lock_path, lock.lock())?;
+    // Migration also fences the legacy pass lock. Never answer a legacy
+    // receipt while its recovered switch is still waiting for publication.
+    cfg.settings.roles()?;
     for issue in door.issues(api)? {
         // A non-author's text is ignored, including edits by outsiders.
         let (text, cycle) = match door.written_cycle(api, &issue)? {
@@ -95,14 +98,18 @@ pub fn pass(api: &mut dyn Api, cfg: &Config) -> Result<(), Error> {
         }
         // A request the door before the settings completed, its answer
         // still to post: answered again, never made again.
-        let legacy = match fs::read(&operation) {
-            Ok(bytes) => {
-                serde_json::from_slice::<Legacy>(&bytes)
+        let legacy = match cfg.settings.legacy_answer(&operation, None)? {
+            Some(said) => Some(said),
+            None => match fs::read(&operation) {
+                Ok(bytes) => serde_json::from_slice::<Legacy>(&bytes)
                     .map_err(|e| format!("{}: {e}", operation.display()))?
                     .result
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", operation.display()).into()),
+                    .map(|said| cfg.settings.legacy_answer(&operation, Some(&said)))
+                    .transpose()?
+                    .flatten(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("{}: {e}", operation.display()).into()),
+            },
         };
         let lines = asked(&text);
         let args = match lines.as_slice() {

@@ -542,7 +542,14 @@ in
         exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg user} -- ${proj}/bin/proj check-config
       fi
     '';
-    burrow.updates.requiredHealth = [ "proj-config" "proj-retry-transfer" ];
+    burrow.updates.health.proj-role-migration = let check = "${proj}/bin/proj settings _migration-ready"; in ''
+      if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
+        exec ${check}
+      else
+        exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg user} -- ${check}
+      fi
+    '';
+    burrow.updates.requiredHealth = [ "proj-config" "proj-retry-transfer" "proj-role-migration" ];
     burrow.updates.health.proj-retry-transfer = ''
       ${pkgs.systemd}/bin/systemctl is-active --quiet proj-retry-barrier.service &&
       ${pkgs.systemd}/bin/systemctl is-active --quiet proj-retry-transfer.service
@@ -563,16 +570,18 @@ in
       # on it; admission's own overlay stays readable throughout.
       proj-settings-migrate = {
         description = "Move proj's old roles and models files into the settings";
+        restartIfChanged = false;
         wantedBy = [ "multi-user.target" ];
         before = [
           "burrow-engines-door.service" "proj-inbox.service" "proj-watch.service"
           "proj-retry-transfer.service"
         ];
         serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
+          Type = "notify";
+          Restart = "on-failure";
           User = user;
-          ExecStart = "${proj}/bin/proj settings migrate";
+          ExecStart = "${proj}/bin/proj settings migrate --fence";
+          TimeoutStartSec = "infinity";
         };
       };
       burrow-settings-reconcile = {
@@ -731,8 +740,8 @@ in
     ];
     systemd.services.burrow-engines-door = {
       description = "Switch saved engine setups from issues in ${cfg.engines.door.repo}";
-      restartIfChanged = false;
-      after = [ "network-online.target" ];
+      requires = [ "proj-settings-migrate.service" ];
+      after = [ "network-online.target" "proj-settings-migrate.service" ];
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";

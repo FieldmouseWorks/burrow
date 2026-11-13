@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod store;
-pub use store::{Migration, View};
+pub use store::{Migration, View, legacy_file};
 
 /// The engines a role can run on.
 pub const ENGINES: &[&str] = &["claude", "codex"];

@@ -474,6 +474,7 @@ dependencies = [
  "burrow-door",
  "burrow-github",
  "burrow-settings",
+ "burrow-test",
  "serde",
  "serde_json",
  "sha2",

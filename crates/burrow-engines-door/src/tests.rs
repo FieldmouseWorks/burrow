@@ -360,3 +360,43 @@ fn a_switch_the_door_before_the_settings_made_is_answered_not_made_again() {
         .to_string();
     assert!(comment.contains("Active: one"), "{comment}");
 }
+
+#[test]
+fn a_legacy_request_waits_for_cutover_and_unsynced_receipts_stay_open() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = door(d.path(), &[]);
+    let old = d.path().join("old");
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("roles"), "work codex\n").unwrap();
+    cfg.settings.legacy_roles = Some(old);
+    let mut gh = github("sam", "use back", None);
+    assert!(pass(&mut gh, &cfg).is_err());
+    assert!(gh.asked("PATCH").is_empty());
+    cfg.settings
+        .migrate(burrow_settings::roles::Migration::default(), "test")
+        .unwrap();
+    let state = cfg.state.join("sam--box");
+    fs::create_dir_all(&state).unwrap();
+    let hash: String = Sha256::digest(b"issue-one:initial")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let operation = state.join(format!("1-{hash}.operation"));
+    cfg.settings
+        .legacy_answer(&operation, Some("Was active: two\nActive: one\n"))
+        .unwrap();
+    // Simulate a readable publication whose parent cannot yet be synced.
+    burrow_test::permissions(d.path(), 0o300);
+    let mut gh = github("sam", "use back", None);
+    assert!(pass(&mut gh, &cfg).is_err());
+    assert!(gh.asked("PATCH").is_empty());
+    burrow_test::permissions(d.path(), 0o700);
+    let mut gh = github("sam", "use back", None);
+    pass(&mut gh, &cfg).unwrap();
+    assert!(!gh.asked("PATCH").is_empty());
+    assert_eq!(
+        work(&cfg),
+        "claude",
+        "retry only answered the recovered receipt"
+    );
+}

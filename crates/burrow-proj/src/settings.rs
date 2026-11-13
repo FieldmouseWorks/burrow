@@ -26,7 +26,7 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut readings = show::flake(&tracked)?;
     let (file, overrides, until) = match &cfg.settings {
-        Some(policy) if there(&policy.overlay) => {
+        Some(policy) if burrow_settings::path_exists(&policy.overlay)? => {
             let (overrides, until) = policy.readings()?;
             (
                 policy.overlay.clone(),
@@ -71,14 +71,8 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
 
 /// The first of proj's old role files in DIR, which only `proj settings
 /// migrate` reads.
-pub(crate) fn old_files(dir: &Path) -> Option<std::path::PathBuf> {
-    migrate::left(dir)
-}
-
-/// Whether a live file is there to say anything: one that isn't leaves the
-/// default.
-fn there(path: &Path) -> bool {
-    path.symlink_metadata().is_ok()
+pub(crate) fn old_files(dir: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    burrow_settings::roles::legacy_file(dir)
 }
 
 /// `proj settings show [--json]` and `proj settings schema`.
@@ -92,6 +86,23 @@ pub fn command(cfg: &Config, args: &[String]) -> Result<String, String> {
         [] | ["show"] => Ok(document(cfg)?.text()),
         ["show", "--json"] => Ok(document(cfg)?.json()),
         ["migrate"] => migrate::run(
+            cfg.settings.as_ref().ok_or("settings are not configured")?,
+            cfg.old_config
+                .as_deref()
+                .ok_or("proj's config names no old config folder")?,
+        ),
+        ["_migration-ready"] => {
+            let settings = cfg.settings.as_ref().ok_or("settings are not configured")?;
+            if !settings.roles_migrated()? {
+                return Err("role settings migration has not completed".into());
+            }
+            settings.migrate(
+                burrow_settings::roles::Migration::default(),
+                "migration health",
+            )?;
+            Ok("Role settings migration is durable.\n".into())
+        }
+        ["migrate", "--fence"] => migrate::fenced(
             cfg.settings.as_ref().ok_or("settings are not configured")?,
             cfg.old_config
                 .as_deref()

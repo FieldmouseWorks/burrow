@@ -42,6 +42,8 @@ pub struct Migration {
     /// Models and efforts the old files set, which the engines offered.
     pub offers: BTreeMap<String, Offer>,
     pub setups: Setups,
+    /// Replay protection for a recovered legacy request, published with routing.
+    pub receipts: BTreeMap<String, String>,
 }
 
 /// The role settings, all from one version of their document.
@@ -59,6 +61,24 @@ pub struct View {
     pub file: PathBuf,
 }
 
+/// The first retained legacy input, with lookup failures propagated. Both
+/// the settings door and proj use this gate; admission never calls it.
+pub fn legacy_file(dir: &Path) -> Result<Option<PathBuf>, String> {
+    for name in [
+        "roles",
+        "models",
+        "roles.d",
+        "roles.previous",
+        "roles.operation",
+    ] {
+        let path = dir.join(name);
+        if live::path_exists(&path)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 impl Config {
     /// The file the role settings are kept in.
     pub fn roles_file(&self) -> PathBuf {
@@ -69,10 +89,30 @@ impl Config {
         live::read(&self.roles_file())
     }
 
+    /// Whether migration was published, without attempting to consume roles.
+    pub fn roles_migrated(&self) -> Result<bool, String> {
+        Ok(self.roles_doc()?.migrated.is_some())
+    }
+
+    fn ready(&self, doc: &Document, mutation: bool) -> Result<(), String> {
+        if doc.migrated.is_none()
+            && let Some(dir) = &self.legacy_roles
+        {
+            if mutation {
+                return Err("role settings await proj settings migrate".into());
+            }
+            if legacy_file(dir)?.is_some() {
+                return Err("proj's old role settings aren't moved into the settings yet (proj settings migrate)".into());
+            }
+        }
+        Ok(())
+    }
+
     /// The role settings, read once and checked again: a document a hand
     /// edit broke fails the turn rather than running a default.
     pub fn role_view(&self) -> Result<View, String> {
         let doc = self.roles_doc()?;
+        self.ready(&doc, false)?;
         let in_force = doc.routing.in_force(&doc.offers)?;
         Ok(View {
             in_force,
@@ -100,6 +140,7 @@ impl Config {
     /// `engines`: the setups and the routes in force, changing nothing.
     pub fn engines(&self) -> Result<String, String> {
         let doc = self.roles_doc()?;
+        self.ready(&doc, false)?;
         doc.routing.in_force(&doc.offers)?;
         let active = active(&doc.routing, &doc.setups);
         Ok(status(active.as_deref(), &doc.routing, &doc.setups))
@@ -113,6 +154,28 @@ impl Config {
             .receipts
             .get(receipt.to_string_lossy().as_ref())
             .cloned())
+    }
+
+    /// A legacy completed answer, imported once after cutover. The receipt
+    /// then survives loss of the legacy file, and retries sync the publication
+    /// before returning it, just like a new request.
+    pub fn legacy_answer(
+        &self,
+        receipt: &Path,
+        answer: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        live::write(
+            &self.roles_file(),
+            &self.overlay.with_extension("lock"),
+            &self.overlay.with_extension("log"),
+            "legacy engines door",
+            Some(receipt.to_string_lossy().as_ref()),
+            &["legacy receipt".into()],
+            |doc: &mut Document| {
+                self.ready(doc, true)?;
+                Ok(answer.map(str::to_owned))
+            },
+        )
     }
 
     pub(crate) fn change_roles(
@@ -130,15 +193,21 @@ impl Config {
             receipt,
             args,
             |doc: &mut Document| {
-                apply(&mut doc.routing, &mut doc.offers, &mut doc.setups, words).map(Some)
+                self.ready(doc, true)?;
+                let answer = apply(&mut doc.routing, &mut doc.offers, &mut doc.setups, words)?;
+                // With no migration source configured this is a fresh store.
+                // Its first accepted mutation establishes the complete state;
+                // a later import must not resurrect values it deliberately lacks.
+                doc.migrated.get_or_insert_with(now);
+                Ok(Some(answer))
             },
         )
         .map(Option::unwrap_or_default)
     }
 
     /// Moves proj's old files in, once: false, changing nothing, when they
-    /// were moved already. Checked as the door checks a change. What was set
-    /// through the door before it ran is newer, and wins over them.
+    /// were moved already. Configured legacy inputs gate every mutation until
+    /// this publication; a store with no legacy source starts from defaults.
     pub fn migrate(&self, from: Migration, actor: &str) -> Result<bool, String> {
         let mut moved = false;
         live::write(
@@ -153,7 +222,6 @@ impl Config {
                     return Ok(None);
                 }
                 let mut offers = default_offers();
-                offers.extend(doc.offers.clone());
                 for (engine, offer) in from.offers {
                     let have = offers.entry(engine).or_default();
                     for m in offer.models {
@@ -167,18 +235,9 @@ impl Config {
                         }
                     }
                 }
-                let mut routing = from.routing;
-                routing.roles.extend(doc.routing.roles.clone());
-                routing.models.extend(doc.routing.models.clone());
+                let routing = from.routing;
                 routing.in_force(&offers)?;
-                let mut setups = from.setups;
-                setups.saved.extend(doc.setups.saved.clone());
-                if doc.setups.previous.is_some() {
-                    setups.previous = doc.setups.previous.clone();
-                }
-                if doc.setups.active.is_some() {
-                    setups.active = doc.setups.active.clone();
-                }
+                let setups = from.setups;
                 for (name, setup) in &setups.saved {
                     if !valid_setup(name) {
                         return Err(format!("setup {name}: not a setup name"));
@@ -190,6 +249,7 @@ impl Config {
                 // Only what differs from the declared default is set.
                 let declared = default_offers();
                 offers.retain(|engine, offer| declared.get(engine) != Some(offer));
+                doc.receipts.extend(from.receipts);
                 doc.offers = offers;
                 doc.routing = routing;
                 doc.setups = setups;

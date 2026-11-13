@@ -280,6 +280,7 @@ fn the_old_files_migrate_once() {
             },
         )]
         .into(),
+        receipts: BTreeMap::new(),
         setups: Setups {
             saved: [("usual".to_owned(), routing(engine))].into(),
             active: Some("usual".into()),
@@ -305,7 +306,7 @@ fn the_old_files_migrate_once() {
 }
 
 #[test]
-fn what_the_door_set_before_the_migration_wins_over_the_old_files() {
+fn a_store_with_no_legacy_source_keeps_its_complete_accepted_state() {
     let (_d, cfg) = rig();
     set(&cfg, "role triage claude").unwrap();
     set(&cfg, "engines save mine").unwrap();
@@ -319,22 +320,27 @@ fn what_the_door_set_before_the_migration_wins_over_the_old_files() {
             models: BTreeMap::new(),
         },
         offers: BTreeMap::new(),
+        receipts: BTreeMap::new(),
         setups: Setups {
             saved: [("old".to_owned(), Roles::default())].into(),
             active: None,
             previous: None,
         },
     };
-    assert!(cfg.migrate(old, "test").unwrap());
+    assert!(!cfg.migrate(old, "test").unwrap());
     let force = cfg.roles().unwrap();
     assert_eq!(force.route("triage", None).engine, "claude", "newer wins");
-    assert_eq!(force.route("fix", None).engine, "codex");
+    assert_eq!(
+        force.route("fix", None).engine,
+        "claude",
+        "absent keys stay absent"
+    );
     let engines = cfg.engines().unwrap();
     assert!(
         engines.contains("  mine\n") || engines.contains("* mine\n"),
         "{engines}"
     );
-    assert!(engines.contains("  old\n"), "{engines}");
+    assert!(!engines.contains("  old\n"), "{engines}");
 }
 
 #[test]
@@ -348,4 +354,126 @@ fn the_admission_overlay_keeps_its_own_format() {
         serde_json::from_slice(&fs::read(&cfg.overlay).unwrap()).unwrap();
     let keys: Vec<_> = admission.as_object().unwrap().keys().cloned().collect();
     assert_eq!(keys, ["pipelineUntil", "receipts", "repos"]);
+}
+
+#[test]
+fn every_role_mutation_waits_for_migration_but_admission_stays_available() {
+    for command in [
+        "role fix codex",
+        "role fix unset",
+        "role fix@Sam/Box unset",
+        "role *@Sam/Box claude",
+        "model fix codex - low",
+        "model fix codex unset",
+        "model fix@Sam/Box codex unset",
+        "offer codex models",
+        "offer claude efforts low",
+        "engines save mine",
+        "engines use mine",
+        "engines use back",
+    ] {
+        let (d, mut cfg) = rig();
+        let old = d.path().join("old");
+        fs::create_dir(&old).unwrap();
+        fs::write(old.join("roles"), "fix codex\nfix@Sam/Box codex\n").unwrap();
+        cfg.legacy_roles = Some(old);
+        assert!(
+            set(&cfg, command).unwrap_err().contains("await"),
+            "{command}"
+        );
+        assert!(!cfg.roles_file().exists(), "{command}");
+        set(&cfg, "pause sam/box").unwrap();
+        assert!(!cfg.allows("sam/box").unwrap());
+        cfg.migrate(Migration::default(), "test").unwrap();
+        // The same unset/replacement is accepted after cutover, and a
+        // migration retry cannot reinstate the removed value.
+        if !command.contains("use") {
+            set(&cfg, command).unwrap();
+        }
+        let before = fs::read(cfg.roles_file()).unwrap();
+        cfg.migrate(Migration::default(), "test").unwrap();
+        assert_eq!(fs::read(cfg.roles_file()).unwrap(), before);
+    }
+    let (d, mut cfg) = rig();
+    cfg.legacy_roles = Some(d.path().join("not-created-yet"));
+    assert!(
+        set(&cfg, "role fix unset").is_err(),
+        "even before old files appear"
+    );
+}
+
+#[test]
+fn broken_role_paths_never_supply_defaults() {
+    use std::os::unix::fs::symlink;
+    for kind in [
+        "dangling",
+        "dangling-parent",
+        "file-parent",
+        "denied",
+        "loop",
+    ] {
+        let (d, mut cfg) = rig();
+        let broken = d.path().join("broken");
+        match kind {
+            "dangling" => symlink(d.path().join("absent"), cfg.roles_file()).unwrap(),
+            "dangling-parent" => {
+                symlink(d.path().join("absent"), &broken).unwrap();
+                cfg.overlay = broken.join("overlay.json");
+            }
+            "file-parent" => {
+                fs::write(&broken, "file").unwrap();
+                cfg.overlay = broken.join("overlay.json");
+            }
+            "denied" => {
+                fs::create_dir(&broken).unwrap();
+                burrow_test::permissions(&broken, 0o000);
+                cfg.overlay = broken.join("overlay.json");
+            }
+            _ => {
+                symlink(&broken, &broken).unwrap();
+                cfg.overlay = broken.join("overlay.json");
+            }
+        }
+        assert!(cfg.roles().is_err(), "{kind}");
+        assert!(cfg.engines().is_err(), "{kind}");
+        if kind == "denied" {
+            burrow_test::permissions(&broken, 0o700);
+        }
+    }
+    let (d, mut cfg) = rig();
+    cfg.overlay = d.path().join("absent/also-absent/overlay.json");
+    cfg.roles().unwrap();
+}
+
+#[test]
+fn a_recovered_receipt_and_its_routing_are_one_durable_document() {
+    let (d, cfg) = rig();
+    let receipt = d.path().join("legacy.operation");
+    let said = "Was active: two\nActive: one\n";
+    cfg.migrate(
+        Migration {
+            routing: Roles {
+                roles: [("work".into(), route(&["codex"]).unwrap())].into(),
+                ..Default::default()
+            },
+            receipts: [(receipt.to_string_lossy().into_owned(), said.into())].into(),
+            ..Default::default()
+        },
+        "test",
+    )
+    .unwrap();
+    set(&cfg, "role work claude").unwrap();
+    let args = ["engines".into(), "use".into(), "back".into()];
+    assert_eq!(cfg.request(&receipt, &args, "retry").unwrap(), said);
+    assert_eq!(cfg.roles().unwrap().route("work", None).engine, "claude");
+    // A visible post-rename receipt may not be acknowledged until the
+    // publication's directory can be synced (including duplicate retries).
+    burrow_test::permissions(d.path(), 0o300);
+    assert!(cfg.request(&receipt, &args, "retry").is_err());
+    assert!(cfg.legacy_answer(&receipt, None).is_err());
+    burrow_test::permissions(d.path(), 0o700);
+    assert_eq!(
+        cfg.legacy_answer(&receipt, None).unwrap().as_deref(),
+        Some(said)
+    );
 }

@@ -3,6 +3,7 @@
 //! to change it. Other settings can join this document without another store.
 pub mod door;
 mod live;
+pub use live::path_exists;
 pub mod roles;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -11,6 +12,13 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub overlay: PathBuf,
+    /// Legacy role inputs. Role mutations wait for their migration; admission
+    /// remains independent and available throughout the cutover.
+    #[serde(default)]
+    pub legacy_roles: Option<PathBuf>,
+    /// The retained engines door's whole-pass lock, fenced at deployment.
+    #[serde(default)]
+    pub legacy_engines_lock: Option<PathBuf>,
     #[serde(default)]
     pub allowed: Vec<String>,
     #[serde(default)]
@@ -238,6 +246,7 @@ mod tests {
             overlay: dir.path().join("overlay.json"),
             allowed: vec!["sam/box".into(), "sam/game".into()],
             pipeline_repos: vec!["sam/box".into()],
+            ..Default::default()
         };
         assert!(!cfg.allows("sam/new").unwrap());
         assert!(cfg.allows("SAM/GAME").unwrap());
