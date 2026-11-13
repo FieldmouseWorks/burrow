@@ -421,12 +421,14 @@ jobs:
           path: ${{ runner.temp }}/flake.log
       # The gate's result, signed with this job's own GitHub identity, in the
       # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
-      # a public repo's as a Sigstore bundle, and a private repo's, which
-      # GitHub attests only on Enterprise Cloud, with the job's own token,
-      # whose audience names the digest of what it attests. A run with no OIDC
-      # token (a fork's PR, Dependabot's) can't sign, so it gets none and its
-      # result doesn't count as evidence. With legs, the gate job attests
-      # them, with this same script.
+      # every repo's with the job's own token, whose audience names the digest
+      # of what it attests, which is what Conary's train reads, and a public
+      # repo's as a Sigstore bundle too (GitHub attests a private repo's only
+      # on Enterprise Cloud). The token can say nothing else: its audience is
+      # this statement's, and it expires minutes after the job asks for it. A
+      # run with no OIDC token (a fork's PR, Dependabot's) can't sign, so it
+      # gets none and its result doesn't count as evidence. With legs, the
+      # gate job attests them, with this same script.
       - id: subject
         if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1 && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
@@ -435,7 +437,6 @@ jobs:
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PRIVATE: ${{ github.event.repository.private }}
         run: &subject |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -470,20 +471,18 @@ jobs:
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
-          if [ "$PRIVATE" = true ]; then
-            # The statement is the subject, then the predicate on one line.
-            # The file keeps the token after it, as its last line.
-            attestation="$dir/conary-attestation"
-            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
-            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
-            echo "signing with this job's token, audience $audience"
-            # Nothing in the audience needs escaping in a URL. GitHub's token
-            # service answers a 503 now and then; --retry asks again after any
-            # answer that says try later, rather than fail a gate that passed.
-            curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
-            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
-          fi
+          # The statement is the subject, then the predicate on one line.
+          # The file keeps the token after it, as its last line.
+          attestation="$dir/conary-attestation"
+          { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+          audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+          echo "signing with this job's token, audience $audience"
+          # Nothing in the audience needs escaping in a URL. GitHub's token
+          # service answers a 503 now and then; --retry asks again after any
+          # answer that says try later, rather than fail a gate that passed.
+          curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+          { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
       - &log
         if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -900,7 +899,6 @@ jobs:
         env:
           FORK: ${{ steps.paths.outputs.fork }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -922,15 +920,13 @@ jobs:
             "$RUNNER_TEMP/negative.json" > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
-          if [ "$PRIVATE" = true ]; then
-            attestation="$dir/conary-attestation"
-            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
-            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
-            echo "signing with this job's token, audience $audience"
-            curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
-            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
-          fi
+          attestation="$dir/conary-attestation"
+          { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+          audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+          echo "signing with this job's token, audience $audience"
+          curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+          { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -5,6 +5,13 @@
       "description": "The project template's workflow follows burrow's main on purpose; a project made from it gets its own pin. Pinned here, every merge to main would make the next pin PR.",
       "matchFileNames": ["templates/**"],
       "enabled": false
+    },
+    {
+      "description": "burrow's own train call follows its shared workflow's main on purpose: Conary counts only a result signed at a commit on main, and a pin would make the next pin PR after every merge to main.",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [".github/workflows/flake.yml", ".github/workflows/flake-retarget.yml"],
+      "matchDepNames": ["/^fieldmouseworks/burrow$/i"],
+      "enabled": false
     }
   ]
 }

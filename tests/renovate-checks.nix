@@ -15,6 +15,13 @@
     done
     touch $out
   '';
+  # The wrapper's contract with real Renovate's error log: a rate limit
+  # met in discovery leaves only typed rate-limit-exceeded errors there.
+  renovate-errors = pkgs.runCommand "renovate-errors-check" { } ''
+    export HOME=$TMPDIR
+    ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-errors.mjs} ${pkgs.renovate}
+    touch $out
+  '';
   # What renovate-sweep leaves to Python: major-seal's seals on a job's
   # verdicts, and when lock-wait says a refresh can go again (the sweep
   # itself is crates/burrow-renovate's, tested there).
