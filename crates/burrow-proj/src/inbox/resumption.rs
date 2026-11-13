@@ -208,6 +208,10 @@ mod tests {
             // An outstanding question still consumes the other worker's lane.
             let other = Job::new(&fixture.cfg, "other");
             policy::mark(&other, "done", false).unwrap();
+            if !sorting {
+                // Both workers are now policy-parked with their units gone.
+                fs::remove_file(fixture.path("active")).unwrap();
+            }
             let Resume::Ready(_guard) = admission(&fixture.cfg, &job).unwrap() else {
                 panic!("freed lane was not available")
             };
