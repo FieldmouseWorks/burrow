@@ -652,7 +652,7 @@ pub fn take(
                 fs::write(slots.join(".next"), "")?;
                 let _ = fs::remove_file(queue.join(&me));
                 drop(lk);
-                fs::write(job.turn(n, "queue-order"), &me)?;
+                crate::state_reads::write(job.turn(n, "queue-order"), &me)?;
                 took_slot(&job, n, &n_slot.to_string(), class.name())?;
                 return Ok(slot);
             }

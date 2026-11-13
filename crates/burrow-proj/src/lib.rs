@@ -242,7 +242,8 @@ pub fn filled(path: &Path) -> bool {
 }
 
 /// Swap host-owned state through PATH.new. Guest-writable job state uses
-/// `state_reads::write`, whose directory and replacement are confined.
+/// `state_reads::write`, whose directory and replacement are confined; a
+/// test holds every write into a job's directory to that.
 pub fn swap(path: &Path, text: &str) -> io::Result<()> {
     let new = path.with_file_name(format!(
         "{}.new",

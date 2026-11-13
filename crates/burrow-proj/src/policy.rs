@@ -484,7 +484,7 @@ fn shift_waits(job: &Job, elapsed: i64) -> Result<(), String> {
                 a.line()
             })
             .collect();
-        swap(&job.path("await"), &shifted).map_err(|e| e.to_string())?;
+        crate::state_reads::write(job.path("await"), &shifted).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

@@ -87,7 +87,7 @@ impl Pass<'_> {
                 .and_then(|i| self.machine_role(i))
             {
                 let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-                crate::swap(&job.path("role"), &format!("{role}\n"))
+                crate::state_reads::write(job.path("role"), format!("{role}\n"))
                     .map_err(|e| io_fail(&job.path("role"), e))?;
                 match fs::remove_file(job.path("engine")) {
                     Ok(()) => {}
@@ -198,8 +198,11 @@ impl Pass<'_> {
                         self.retry(repo);
                         continue;
                     }
-                    fs::write(job.path("planning-hold"), "finishing the task split\n")
-                        .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
+                    crate::state_reads::write(
+                        job.path("planning-hold"),
+                        "finishing the task split\n",
+                    )
+                    .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
                 }
                 let Some(written) = self.written(repo, parent) else {
                     self.miss(repo);
