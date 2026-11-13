@@ -21,6 +21,10 @@ const TIME: Duration = Duration::from_secs(300);
 const MAX_REQUEST: u64 = 1 << 20;
 const MAX_OUTPUT: usize = 16 << 20;
 
+/// Set by the host on each command a job sends: which job asked. Only the
+/// host's side of the socket sets it, so a reply carrying it is a job's.
+pub const FROM_JOB: &str = "PROJ_FROM_JOB";
+
 pub(crate) fn socket(cfg: &Config, job: &Job, n: &str) -> PathBuf {
     scratch::dir(cfg, job.id).join(format!("jobs-{n}.sock"))
 }
@@ -99,7 +103,7 @@ fn exchange(path: &Path, args: &[String]) -> Result<Answer, String> {
 
 /// One request on the host: run as the proj the turn runs, outside the
 /// job's environment, so it is the host's own answer.
-pub(crate) fn serve(cfg: &Config, mut stream: UnixStream) {
+pub(crate) fn serve(cfg: &Config, job: &str, mut stream: UnixStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let mut request = Vec::new();
@@ -110,7 +114,7 @@ pub(crate) fn serve(cfg: &Config, mut stream: UnixStream) {
     {
         return;
     }
-    let answer = answer(cfg, &request).unwrap_or_else(|err| Answer {
+    let answer = answer(cfg, job, &request).unwrap_or_else(|err| Answer {
         code: 1,
         out: String::new(),
         err: format!("{err}\n"),
@@ -118,7 +122,7 @@ pub(crate) fn serve(cfg: &Config, mut stream: UnixStream) {
     let _ = stream.write_all(&serde_json::to_vec(&answer).expect("jobs answer"));
 }
 
-fn answer(cfg: &Config, request: &[u8]) -> Result<Answer, String> {
+fn answer(cfg: &Config, job: &str, request: &[u8]) -> Result<Answer, String> {
     let args: Vec<String> = serde_json::from_slice(request).map_err(|e| e.to_string())?;
     if !about_jobs(&args) {
         return Err(format!(
@@ -132,7 +136,8 @@ fn answer(cfg: &Config, request: &[u8]) -> Result<Answer, String> {
         .args(&args)
         .env_remove("PROJ_JOB")
         .env_remove("PROJ_JOBS_SOCKET")
-        .env_remove("PROJ_PROBE_SOCKET");
+        .env_remove("PROJ_PROBE_SOCKET")
+        .env(FROM_JOB, job);
     let out = burrow_process::output(&mut command, None, Instant::now() + TIME, MAX_OUTPUT)
         .map_err(|e| format!("proj {}: {e}", name(&args)))?;
     Ok(Answer {
@@ -175,7 +180,7 @@ mod tests {
         cfg.me = dir.path().join("proj");
         burrow_test::executable(
             &cfg.me,
-            "#!/bin/sh\necho \"host: $*\" \"job=${PROJ_JOB-unset}\" \"socket=${PROJ_JOBS_SOCKET-unset}\"\necho said >&2\nexit 3\n",
+            "#!/bin/sh\necho \"host: $*\" \"job=${PROJ_JOB-unset}\" \"socket=${PROJ_JOBS_SOCKET-unset}\" \"from=${PROJ_FROM_JOB-unset}\"\necho said >&2\nexit 3\n",
         );
         let job = Job::new(&cfg, "asking");
         let _bridge = crate::probe::Bridge::start(&cfg, &job, "1", None).unwrap();
@@ -183,7 +188,7 @@ mod tests {
         let got = exchange(&path, &words(&["reply", "other", "carry on"])).unwrap();
         assert_eq!(
             got.out,
-            "host: reply other carry on job=unset socket=unset\n"
+            "host: reply other carry on job=unset socket=unset from=asking\n"
         );
         assert_eq!(got.err, "said\n");
         assert_eq!(got.code, 3);

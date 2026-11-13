@@ -536,6 +536,25 @@ pub fn escape(s: &str) -> String {
     out
 }
 
+/// Whether `id` names a job beneath the jobs root and nothing else: one plain
+/// name, neither a dot one (the root's own state) nor option-like, and, when
+/// it's there, the job's own folder rather than a link to somewhere else.
+/// Every command that takes a job's id asks this first, since a job's id
+/// becomes a path under the jobs root and the host's control root.
+pub fn confined(cfg: &Config, id: &str) -> Result<(), String> {
+    let plain = !id.is_empty()
+        && !id.starts_with(['.', '-'])
+        && !id.contains(['/', '\0'])
+        && Path::new(id).components().count() == 1;
+    if !plain {
+        return Err(format!("proj: {id:?} isn't a job's id"));
+    }
+    match fs::symlink_metadata(cfg.jobs.join(id)) {
+        Ok(m) if !m.is_dir() => Err(format!("proj: {id} isn't a job")),
+        _ => Ok(()),
+    }
+}
+
 fn valid_turn(n: &str) -> bool {
     !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok_and(|v| v > 0)
 }
@@ -866,5 +885,57 @@ mod usage_start_tests {
         );
         let lines = fs::read_to_string(job.turn("1", "jsonl")).unwrap();
         assert_eq!(lines.lines().count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod confined_tests {
+    use crate::config::{Config, tests::example};
+    use std::fs;
+
+    #[test]
+    fn every_command_resolves_only_jobs_beneath_the_jobs_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = example();
+        v["jobs"] = tmp.path().join("jobs").to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        fs::create_dir_all(cfg.jobs.join("real")).unwrap();
+        // A job's own scratch, with forged job state in it.
+        let forged = tmp.path().join("scratch/fake");
+        fs::create_dir_all(&forged).unwrap();
+        fs::write(forged.join("session"), "s").unwrap();
+        std::os::unix::fs::symlink(&forged, cfg.jobs.join("alias")).unwrap();
+        assert!(super::confined(&cfg, "real").is_ok());
+        assert!(super::confined(&cfg, "not-yet").is_ok());
+        let forged = forged.to_str().unwrap().to_owned();
+        for id in [
+            forged.as_str(),
+            "..",
+            ".",
+            "../jobs/real",
+            "real/..",
+            "real/sub",
+            ".slots",
+            "-x",
+            "",
+            "alias",
+        ] {
+            assert!(super::confined(&cfg, id).is_err(), "{id:?}");
+            for args in [
+                vec!["state", id],
+                vec!["lifecycle", id],
+                vec!["log", id],
+                vec!["stop", id],
+                vec!["withdraw", id],
+                vec!["unstick", id],
+                vec!["reply", id, "m"],
+                vec!["reply", "--first", id, "m"],
+                vec!["reply", "--cut-off", "1", id, "m"],
+            ] {
+                let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+                let fail = crate::cmd::dispatch(&cfg, &args).unwrap_err();
+                assert_eq!(fail.code, if id.is_empty() { 1 } else { 2 }, "{args:?}");
+            }
+        }
     }
 }

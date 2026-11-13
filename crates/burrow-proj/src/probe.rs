@@ -187,6 +187,7 @@ impl Bridge {
         // The host's jobs, beside its answers: a VM's guest has no socket of
         // the host's to reach them by, and its proj says so.
         let jobs_path = crate::host_jobs::socket(&cfg, job, n);
+        let asking = job.id.to_owned();
         let jobs = match vm {
             Some(_) => None,
             None => {
@@ -255,8 +256,8 @@ impl Bridge {
                 if let Some(jobs) = &jobs
                     && let Ok((stream, _)) = jobs.accept()
                 {
-                    let cfg = cfg.clone();
-                    thread::spawn(move || crate::host_jobs::serve(&cfg, stream));
+                    let (cfg, asking) = (cfg.clone(), asking.clone());
+                    thread::spawn(move || crate::host_jobs::serve(&cfg, &asking, stream));
                 }
                 thread::sleep(Duration::from_millis(if vm.is_some() { 1000 } else { 100 }));
             }

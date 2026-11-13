@@ -18,6 +18,8 @@ mod run;
 mod starter;
 
 pub(crate) use run::reply_answer;
+#[cfg(test)]
+pub(crate) use run::reply_command;
 pub use run::{New, reply, start_job};
 
 /// What a command prints: a reader that's gone (`proj status | head`) is no
@@ -32,6 +34,13 @@ fn arg<'a>(args: &'a [String], i: usize, usage: &str) -> Result<&'a str, Fail> {
         .map(String::as_str)
         .filter(|a| !a.is_empty())
         .ok_or_else(|| Fail::new(1, usage))
+}
+
+/// The word at `i`, a job's id: one under the jobs root ([`crate::job::confined`]).
+fn job_arg<'a>(cfg: &Config, args: &'a [String], i: usize, usage: &str) -> Result<&'a str, Fail> {
+    let id = arg(args, i, usage)?;
+    crate::job::confined(cfg, id).map_err(|e| Fail::new(2, e))?;
+    Ok(id)
 }
 
 /// The job a command run from inside one is about.
@@ -93,12 +102,12 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         Some("state") => {
-            let id = arg(args, 1, "usage: proj state ID")?;
+            let id = job_arg(cfg, args, 1, "usage: proj state ID")?;
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
         Some("lifecycle") => {
-            let id = arg(args, 1, "usage: proj lifecycle ID")?;
+            let id = job_arg(cfg, args, 1, "usage: proj lifecycle ID")?;
             let job = Job::new(cfg, id);
             if !job.dir.is_dir() {
                 return Err(Fail::new(1, format!("no job {id}")));
@@ -117,9 +126,9 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             }
             Ok(())
         }
-        Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),
-        Some("withdraw") => stop(cfg, arg(args, 1, "usage: proj withdraw ID")?, true),
-        Some("unstick") => unstick(cfg, arg(args, 1, "usage: proj unstick ID")?),
+        Some("stop") => stop(cfg, job_arg(cfg, args, 1, "usage: proj stop ID")?, false),
+        Some("withdraw") => stop(cfg, job_arg(cfg, args, 1, "usage: proj withdraw ID")?, true),
+        Some("unstick") => unstick(cfg, job_arg(cfg, args, 1, "usage: proj unstick ID")?),
         Some("list") => {
             let mut names: Vec<String> = fs::read_dir(&cfg.projects)
                 .map_err(|e| io_fail(&cfg.projects, e))?
@@ -293,7 +302,7 @@ pub(crate) fn state_json(cfg: &Config, jobs: usize) -> Result<String, Fail> {
 /// `proj log ID [--turn N] [--raw]`: a turn's answer, and how it ended.
 fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     let usage = "usage: proj log ID [--turn N] [--raw]";
-    let id = arg(args, 1, usage)?;
+    let id = job_arg(cfg, args, 1, usage)?;
     let (mut n, mut raw) = (None, false);
     let mut i = 2;
     while let Some(a) = args.get(i) {

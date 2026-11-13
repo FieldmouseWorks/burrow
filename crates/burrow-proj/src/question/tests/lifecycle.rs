@@ -438,6 +438,22 @@ fn one_way_notices_survive_timeout_and_pause_until_answered_or_stopped() {
             crate::watch::look(&f.cfg, "").unwrap();
             assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
             assert!(!f.job().turn("1", "question-close").exists());
+            // A job's reply, either engine's, is no person's answer.
+            fs::write(f.job().path("session"), "s1").unwrap();
+            for first in [false, true] {
+                let refused =
+                    crate::cmd::reply_command(&f.cfg, "j1", "job news", first, None, true)
+                        .unwrap_err()
+                        .say
+                        .unwrap_or_default();
+                assert!(
+                    refused.contains("waiting for a person's answer"),
+                    "{refused}"
+                );
+                assert!(crate::ask::host_path(&f.job(), "question-needs-owner").exists());
+                assert_eq!(f.job().turns().as_deref(), Some("3"));
+            }
+            fs::remove_file(f.job().path("session")).unwrap();
             f.flag("fail-close");
             if end == "answer" {
                 crate::turn::start_answer(&f.cfg, "j1", "owner decision", false).unwrap();
