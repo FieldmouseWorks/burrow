@@ -1,0 +1,103 @@
+# Code scanning, shared: every project calls it from a code-scanning.yml of
+# its own, with the CodeQL languages it has. It replaces GitHub's default
+# setup, which ran every language on every PR push and held a hosted runner
+# for each, whatever the PR changed.
+#
+# A PR scans only the languages its changed files are in (`pick` below); a
+# language with no pattern there is always scanned, so none goes unscanned by
+# omission. A push to the default branch scans every language, so each merged
+# tree is scanned whole and the code-scanning alerts stay current.
+name: codeql
+on:
+  workflow_call:
+    inputs:
+      languages:
+        description: The project's CodeQL languages, as a JSON array.
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      languages: ${{ steps.pick.outputs.languages }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          LANGUAGES: ${{ inputs.languages }}
+        run: |
+          set -euo pipefail
+          all=$(jq -c . <<<"$LANGUAGES")
+          if [ "$EVENT" != pull_request ]; then
+            echo "Not a PR: every language, $all."
+            echo "languages=$all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Every path the PR touches, a rename's old one included. GitHub
+          # lists at most 3000; a PR that big scans everything.
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          if [ "$(grep -c . <<<"$files" || true)" -ge 3000 ]; then
+            echo "3000 or more changed files: every language, $all."
+            echo "languages=$all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          declare -A match=(
+            [actions]='^\.github/(workflows|actions)/|(^|/)action\.ya?ml$'
+            [c-cpp]='\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
+            [csharp]='\.(cs|csproj|sln)$'
+            [go]='\.go$|(^|/)go\.(mod|sum)$'
+            [java-kotlin]='\.(java|kt|kts)$|(^|/)(pom\.xml|build\.gradle(\.kts)?)$'
+            [javascript-typescript]='\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|svelte|html?)$|(^|/)package(-lock)?\.json$'
+            [python]='\.pyi?$|(^|/)(pyproject\.toml|setup\.(py|cfg)|requirements[^/]*\.txt)$'
+            [ruby]='\.(rb|erb|rake)$|(^|/)Gemfile(\.lock)?$'
+            [rust]='\.rs$|(^|/)Cargo\.(toml|lock)$'
+          )
+          picked=()
+          while read -r lang; do
+            re=${match[$lang]:-}
+            if [ -z "$re" ]; then
+              echo "$lang: no pattern for its files, so scanned on every PR."
+              picked+=("$lang")
+            elif grep -Eq "$re" <<<"$files"; then
+              echo "$lang: the PR changes its files."
+              picked+=("$lang")
+            else
+              echo "$lang: the PR changes none of its files, so not scanned here (the merge's push scans it)."
+            fi
+          done < <(jq -r '.[]' <<<"$all")
+          out=$(printf '%s\n' "${picked[@]}" | jq -Rnc '[inputs | select(. != "")]')
+          echo "languages=$out" >> "$GITHUB_OUTPUT"
+  analyze:
+    needs: pick
+    if: needs.pick.outputs.languages != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.pick.outputs.languages) }}
+    name: analyze (${{ matrix.language }})
+    concurrency:
+      group: ${{ format('codeql {0} {1}', matrix.language, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}

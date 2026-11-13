@@ -1,0 +1,19 @@
+# burrow's own code scanning, through the shared workflow every project calls
+# (codeql.yml), taken from this checkout so a PR runs its own version.
+name: code-scanning
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  codeql:
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      security-events: write
+    with:
+      languages: '["actions", "c-cpp", "javascript-typescript", "python", "rust"]'
