@@ -1,6 +1,7 @@
 # Usage records and turns across a deploy
 
-The shared `.usage.json` and immutable `.usage-owner-*` metadata retain the
+The shared usage record (`proj.usageHold`'s file, named in the
+[settings reference](settings-reference.md)) and immutable `.usage-owner-*` metadata retain the
 strict pre-trickle `Spent` schema. Readers accept the short-lived generation
 that added `admission`, but writers never serialize that field.
 
