@@ -232,6 +232,12 @@ into project jobs.
   and restore the job label to pick them up. Notice delivery retries separately
   from stopping the old job, so a reopened issue starts afresh even while a
   notice is pending. Long lists of unread replies are delivered in batches.
+- **Park:** adding `later` or removing the last engine label stops the issue's
+  job immediately and cancels its waits and question deadlines. Its branch
+  and PR remain. The inbox remembers parking even if `ready` remains, so
+  automatic triage and draining cannot undo it. Await wakes and deadline
+  resumes check the issue's live labels too, so parking wins even before the inbox processes the label event.
+  Remove `later` and restore an engine label to start a fresh job.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
   Author lists use `{ login = "NAME"; id = ACCOUNT_ID; }`, shared by the inbox,
   engines door, probe and undo door. The positive numeric account ID grants

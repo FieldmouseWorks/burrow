@@ -165,6 +165,7 @@ impl Pass<'_> {
     ) -> bool {
         if issue.get("pull_request").is_some()
             || !self.eligible(repo, issue)
+            || super::enrollment::automatic_parked(self.inbox, repo, issue)
             || claimed.contains(&raw(&issue["number"]))
         {
             return true;

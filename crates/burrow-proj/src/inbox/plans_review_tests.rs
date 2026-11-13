@@ -161,6 +161,7 @@ fn stale_split_proposals_resume_the_updated_verified_task_and_keep_receipts() {
 fn worker_admission_uses_the_verified_payload_it_launches_without_a_second_read() {
     for child in [false, true] {
         let (mut b, mut task, _) = parent_fixture();
+        task["labels"] = json!([{"name":"claude"}]);
         b.cfg.projects = b.path("projects");
         fs::create_dir_all(b.cfg.projects.join("box")).unwrap();
         b.cfg.tools.systemd_run = "true".into();
@@ -216,6 +217,7 @@ fn launched_workers_share_approved_prompt_handed_text_and_comment_cursor() {
         b.cfg.tools.systemd_run = "true".into();
         b.cfg.tools.systemctl = "false".into();
         if kind == "ordinary" {
+            task["labels"] = json!([{"name":"claude"}]);
             fs::remove_file(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap();
         } else {
             for (i, planned) in list.tasks.iter_mut().enumerate() {
@@ -870,7 +872,11 @@ fn unplanned_trackers_remain_eligible_without_ready_enrollment() {
             );
             fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
             let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
-            assert!(!b.pass().sorted("sam/box", t, &parent, &Default::default()));
+            let parked = labels.contains(&"later");
+            assert_eq!(
+                b.pass().sorted("sam/box", t, &parent, &Default::default()),
+                parked
+            );
             b.job("planner", "done", "ready");
             let record = b
                 .cfg
@@ -884,7 +890,7 @@ fn unplanned_trackers_remain_eligible_without_ready_enrollment() {
             Pass::hand(&record, &b.pass().issue_text("sam/box", &parent, &[])).unwrap();
             b.pass().verdicts("sam/box", t, &[parent]).unwrap();
             assert!(!record.exists());
-            assert!(b.log().contains("labels[]=ready"), "{}", b.log());
+            assert_eq!(b.log().contains("labels[]=ready"), !parked, "{}", b.log());
         }
     }
 }
