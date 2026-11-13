@@ -632,8 +632,7 @@ pub(crate) fn record_wait(
                 )
                 .map_err(|e| io_fail(&pending, e))?;
                 crate::github_quota::remember(job, &text)?;
-                crate::state_reads::write(job.path("end.next"), "await\n")
-                    .map_err(|e| io_fail(&job.path("end.next"), e))?;
+                crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
                 if let Err(e) = crate::github_quota::note(cfg, job, &limited_owner, due) {
                     eprintln!("proj: quota meter unavailable: {e}");
                 }
@@ -659,8 +658,7 @@ pub(crate) fn record_wait(
     let next = job.path("await.next");
     crate::state_reads::write(&next, crate::github_quota::captured(job)?)
         .map_err(|e| io_fail(&next, e))?;
-    crate::state_reads::write(job.path("end.next"), "await\n")
-        .map_err(|e| io_fail(&job.path("end.next"), e))?;
+    crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
     let _ = fs::remove_file(job.path(crate::github_quota::PENDING));
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
@@ -731,8 +729,7 @@ fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
 /// Record the declaration and return the instruction the engine receives.
 fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
     let _ = fs::remove_file(job.path("await.next"));
-    crate::state_reads::write(job.path("end.next"), format!("{how}\n"))
-        .map_err(|e| io_fail(&job.path("end.next"), e))?;
+    crate::ask::declare(job, how).map_err(|e| Fail::new(1, e))?;
     if how == "done" {
         let _ = fs::remove_file(job.path("open-question"));
     }
