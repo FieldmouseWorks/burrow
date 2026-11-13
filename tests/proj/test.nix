@@ -173,7 +173,7 @@ pkgs.testers.runNixOSTest {
             assert re.fullmatch(r"Without an answer by [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z: continue[.] The job will take this reversible default and report the outcome[.]", lines[2]), out
   ''
   + pkgs.lib.optionalString planning ''
-    machine.succeed("su - dev -c 'mkdir -p ~/.config/proj && printf \"planner claude\\n\" >~/.config/proj/roles && printf \"planner claude selected low\\n\" >~/.config/proj/models'")
+    machine.succeed("su - dev -c 'proj settings role planner claude && proj settings offer claude models selected && proj settings model planner claude selected low'")
   ''
   + script;
 }

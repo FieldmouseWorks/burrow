@@ -33,7 +33,7 @@
 //!                             empty for nothing
 //! proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 //!                             one of burrow.github.apps, never as the user
-//! proj run --role NAME PROJECT "task"  the engine ~/.config/proj/roles gives it
+//! proj run --role NAME PROJECT "task"  the engine the settings give the role
 //! proj run --key KEY PROJECT "task"  what its starter knows it by before
 //!                             it has its id: one job a key, taken at once
 //!                             (a key a started job has is refused)
@@ -66,7 +66,7 @@
 //! proj engines                list saved engine setups, active and previous
 //! proj engines save NAME [--replace]  check and save the current roles
 //! proj engines use NAME       check and atomically switch roles (back returns)
-//! proj check-config           validate machine config and every roles line
+//! proj check-config           validate machine config and the role settings
 //! proj settings show [--json] every pipeline option in effect, its value and
 //!                             where it came from (default, flake, live file)
 //! proj settings schema        the options' JSON Schema (burrow-settings)
@@ -172,16 +172,14 @@ pub mod guest;
 pub mod host_jobs;
 pub mod inbox;
 pub mod job;
-mod models;
 pub mod pick;
 pub mod planning;
 pub mod probe;
 mod question;
 pub mod retry;
-mod roles;
 pub mod scratch;
+pub mod select;
 pub mod settings;
-pub mod setups;
 pub mod slot;
 pub mod snapshot;
 mod subprocess;

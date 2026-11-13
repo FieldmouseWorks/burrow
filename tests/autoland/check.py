@@ -8,14 +8,16 @@ keeps up in each repo, what a PR touches, what starts its passes, the
 digest's issues, clones under a repo's old name, burrow-upkeep's looks at a repo's settings, its branches, Renovate's dashboards and
 flaky tests, the merge train, that
 no failing step loops quietly, and the label that says what a PR waits on.
-Each module is one part, run in this order.
+Each module is one part, run in this order. Needs git, bash, jq and openssl
+on PATH, as checks/autoland.nix supplies them.
 
-  nix eval --json .#nixosConfigurations.example.config.burrow.ledger.policy >/tmp/policy.json
-  (cd crates && cargo build -p burrow-review -p burrow-upkeep -p burrow-proof)
-  python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/policy.json \
+  policy=$(nix eval --raw .#nixosConfigurations.example.config.burrow.ledger.env.CONARY_POLICY)
+  (cd crates && cargo build -p burrow-review -p burrow-upkeep -p burrow-proof -p burrow-settings)
+  python3 -I tests/autoland/check.py modules/autoland/steward.py "$policy" \
     crates/target/debug/burrow-review crates/burrow-review/tests/fakes \
     crates/target/debug/burrow-upkeep crates/burrow-upkeep/src \
-    crates/target/debug/burrow-proof crates/burrow-proj/src/ask.rs
+    crates/target/debug/burrow-proof crates/burrow-proj/src/ask.rs \
+    crates/target/debug/burrow-settings
   nix build .#checks.x86_64-linux.autoland
 """
 

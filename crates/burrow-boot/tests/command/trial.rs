@@ -68,19 +68,22 @@ fn nothing_queued_or_proven_since_is_no_reboot() {
 }
 
 #[test]
-fn jobs_or_sandboxes_put_a_trial_off_for_two_days_unless_forced() {
+fn jobs_or_sandboxes_put_a_trial_off_until_the_deadline_or_forced() {
     let postponed = ok("work running; trial postponed\n");
     for busy in ["jobs", "sandboxes"] {
         let m = queued();
         m.set(busy, "proj-1.service loaded active running x\n");
-        assert_eq!(said(&m.run(&["trial"])), postponed, "{busy}");
+        for words in [&["trial"][..], &["trial", "--deadline"]] {
+            assert_eq!(said(&m.run(words)), postponed, "{busy} {words:?}");
+        }
         assert!(!m.fake("systemctl").contains("reboot"));
         assert_eq!(m.state("boot-trying"), None);
         // Forced, it goes.
         assert_eq!(said(&m.run(&["trial", "--force"])), ok(""), "{busy}");
         assert!(m.fake("systemctl").ends_with("reboot\n"));
     }
-    // Queued two days ago, it goes whatever's running.
+    // Queued two days ago, the daily timer's start goes whatever's running;
+    // one an event started still waits, at any hour.
     let m = queued();
     m.set("jobs", "proj-1.service loaded active running x\n");
     let trial = File::options()
@@ -89,10 +92,46 @@ fn jobs_or_sandboxes_put_a_trial_off_for_two_days_unless_forced() {
         .unwrap();
     let ago = |secs| SystemTime::now() - Duration::from_secs(secs);
     trial.set_modified(ago(2 * 24 * 3600 - 60)).unwrap();
-    assert_eq!(said(&m.run(&["trial"])), postponed);
+    assert_eq!(said(&m.run(&["trial", "--deadline"])), postponed);
     trial.set_modified(ago(2 * 24 * 3600 + 1)).unwrap();
-    assert_eq!(said(&m.run(&["trial"])), ok(""));
+    assert_eq!(said(&m.run(&["trial"])), postponed);
+    assert!(!m.fake("systemctl").contains("reboot"));
+    assert_eq!(m.state("boot-trying"), None);
+    assert_eq!(said(&m.run(&["trial", "--deadline"])), ok(""));
     assert!(m.fake("systemctl").ends_with("reboot\n"));
+}
+
+#[test]
+fn a_kernel_that_failed_is_unqueued_never_trialled() {
+    // A trial that failed, whose check couldn't unqueue it.
+    for words in [
+        &["trial"][..],
+        &["trial", "--deadline"],
+        &["trial", "--force"],
+    ] {
+        let m = queued();
+        m.set("jobs", "");
+        fs::write(m.path("state/boot-failed"), format!("{}\n", m.bits("two"))).unwrap();
+        let out = m.run(words);
+        assert_eq!(
+            said(&out),
+            (
+                Some(0),
+                String::new(),
+                format!(
+                    "{}'s kernel failed to boot before; its trial is unqueued\n",
+                    m.sys("two")
+                )
+            ),
+            "{words:?}"
+        );
+        assert_eq!(m.state("boot-trial"), None, "{words:?}");
+        assert_eq!(m.state("boot-trying"), None, "{words:?}");
+        assert_eq!(m.fake("grub-editenv"), "", "{words:?}");
+        assert!(!m.fake("systemctl").contains("reboot"), "{words:?}");
+        // Nothing left to try.
+        assert_eq!(said(&m.run(words)), ok("no trial queued\n"), "{words:?}");
+    }
 }
 
 #[test]

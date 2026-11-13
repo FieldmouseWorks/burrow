@@ -31,8 +31,11 @@ fn stale_lists_cannot_restore_parking_recorded_by_resume_admission() {
                         recommendation: ask::Recommendation {
                             default: "continue".into(),
                             one_way: false,
+                            about: None,
                         },
                         due: crate::now() - 1,
+                        id: None,
+                        pauses: Default::default(),
                     };
                     fs::write(ask::host_path(&old, "question"), json!(q).to_string()).unwrap();
                     let _held = old.lock().unwrap();

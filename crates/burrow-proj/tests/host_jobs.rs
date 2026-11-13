@@ -20,7 +20,7 @@ fn config(root: &Path) -> Config {
         "kick":"", "wake":p("wake.json"), "waits":null, "inboxMark":"test",
         "pipelineRepos":[], "leadRepos":[], "flake":p("projects/machine"),
         "deployed":env!("CARGO_BIN_EXE_burrow-proj"), "apps":{}, "notify":null,
-        "roles":p("roles"), "models":p("models"), "meters":null,
+        "meters":null,
         "codexSlots":2, "codexHooks":p("hooks"), "inbox":null,
         "tools":{"codex":"false", "bwrap":"false", "bash":"sh", "flock":"flock",
                  "gh":"false", "git":"git", "systemctl":p("systemctl"),

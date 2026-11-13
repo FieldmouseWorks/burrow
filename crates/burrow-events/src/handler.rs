@@ -47,6 +47,11 @@ pub struct Handler {
     pub branches: Option<Vec<String>>,
     #[serde(default)]
     pub issue_titles: Option<Vec<String>>,
+    /// Where its passes over a repo are told which issues their events were
+    /// about, while one runs: DIR/INSTANCE (the unit's %i), a number a line.
+    /// None: every pass looks at everything.
+    #[serde(default)]
+    pub issue_dir: Option<PathBuf>,
     /// Seconds one of its passes starts after the last, at least.
     #[serde(default = "gap")]
     pub gap: f64,
@@ -149,6 +154,34 @@ impl Handler {
             Pass::repo(repo)
         } else {
             Pass::Full
+        }
+    }
+
+    /// The issue an `issues` or `issue_comment` delivery is about, for a
+    /// handler told them (`issue_dir`) that has a pass over one repo. None:
+    /// its pass looks at everything. An issue deleted, or moved to another
+    /// repo, is no longer there under its number to look at.
+    pub fn issue(&self, event: &str, payload: &Value) -> Option<u64> {
+        if self.issue_dir.is_none()
+            || !self.per_repo
+            || !matches!(event, "issues" | "issue_comment")
+            || (event == "issues"
+                && matches!(
+                    payload.get("action").and_then(Value::as_str),
+                    Some("deleted" | "transferred")
+                ))
+        {
+            return None;
+        }
+        at(payload, &["issue", "number"]).and_then(Value::as_u64)
+    }
+
+    /// The file a pass over a repo is told its issues in, if the handler is
+    /// told them.
+    pub fn issue_file(&self, pass: &Pass) -> Option<PathBuf> {
+        match pass {
+            Pass::Repo(repo) => self.issue_dir.as_ref().map(|d| d.join(escape(repo))),
+            Pass::Full => None,
         }
     }
 
@@ -522,6 +555,36 @@ mod tests {
         assert!(h.takes("pull_request", &act("labeled")));
     }
 
+    // A handler told issues gets the number of an issue's or a comment's
+    // event, for its pass over a repo; not for one deleted or moved away,
+    // another event, or a handler not told them or with no pass over a repo.
+    #[test]
+    fn issue_numbers() {
+        let mut h = handler(&["issues", "issue_comment", "pull_request"], "proj-inbox");
+        let p = |action: &str| payload("sam/r", json!({"action": action, "issue": {"number": 7}}));
+        assert_eq!(h.issue("issues", &p("opened")), None);
+        h.issue_dir = Some("/run/burrow-events/inbox".into());
+        assert_eq!(h.issue("issues", &p("labeled")), Some(7));
+        assert_eq!(h.issue("issue_comment", &p("created")), Some(7));
+        assert_eq!(h.issue("issue_comment", &p("deleted")), Some(7));
+        assert_eq!(h.issue("issues", &p("deleted")), None);
+        assert_eq!(h.issue("issues", &p("transferred")), None);
+        let pr = payload(
+            "sam/r",
+            json!({"action": "closed", "pull_request": {"number": 7}}),
+        );
+        assert_eq!(h.issue("pull_request", &pr), None);
+        let odd = payload("sam/r", json!({"issue": {"number": "7"}}));
+        assert_eq!(h.issue("issues", &odd), None);
+        assert_eq!(
+            h.issue_file(&Pass::repo("Sam/my-r")),
+            Some("/run/burrow-events/inbox/sam-my\\x2dr".into())
+        );
+        assert_eq!(h.issue_file(&Pass::Full), None);
+        h.per_repo = false;
+        assert_eq!(h.issue("issues", &p("opened")), None);
+    }
+
     // One with no pass over one repo gets its full pass for a repo's event.
     #[test]
     fn place() {
@@ -538,7 +601,7 @@ mod tests {
             "kickPort": 8788, "port": null,
             "handlers": {"update": {"events": ["push"], "unit": "remi-update", "wake": null, "ownStatuses": [], "ownLabels": [],
                                     "perRepo": false, "repos": ["sam/r"], "pushes": "default", "branches": null,
-                                    "issueTitles": null}}
+                                    "issueTitles": null, "issueDir": null}}
         }))
         .unwrap();
         let h = &cfg.handlers["update"];

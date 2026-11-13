@@ -1,8 +1,9 @@
 //! `proj settings`: the read door of burrow-settings' schema. Each option
 //! is read from where it lives today: the flake's, from the values
-//! modules/settings/tracked.nix renders into the file proj's config names; the live ones,
-//! from proj's own files, through the parsers its turns use. The schema
-//! decides what may be shown ([`burrow_settings::show::Document`]).
+//! modules/settings/tracked.nix renders into the file proj's config names;
+//! the live ones, from the settings overlay (and proj's usage record), as
+//! its turns read them. The schema decides what may be shown
+//! ([`burrow_settings::show::Document`]).
 
 use std::path::Path;
 
@@ -10,8 +11,9 @@ use burrow_settings::show::{self, Document, Reading};
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::setups::Store;
 use crate::usage;
+
+mod migrate;
 
 /// Every option in effect, and where each came from.
 pub fn document(cfg: &Config) -> Result<Document, String> {
@@ -23,15 +25,17 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     let tracked: serde_json::Map<String, Value> =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut readings = show::flake(&tracked)?;
-    let (file, overrides, until) = if let Some(policy) = &cfg.settings {
-        let (overrides, until) = policy.readings()?;
-        (
-            policy.overlay.clone(),
-            there(&policy.overlay).then(|| json!(overrides)),
-            there(&policy.overlay).then(|| json!(until)),
-        )
-    } else {
-        (cfg.jobs.join(".settings-unconfigured"), None, None)
+    let (file, overrides, until) = match &cfg.settings {
+        Some(policy) if burrow_settings::path_exists(&policy.overlay)? => {
+            let (overrides, until) = policy.readings()?;
+            (
+                policy.overlay.clone(),
+                Some(json!(overrides)),
+                Some(json!(until)),
+            )
+        }
+        Some(policy) => (policy.overlay.clone(), None, None),
+        None => (cfg.jobs.join(".settings-unconfigured"), None, None),
     };
     readings.push(Reading::live(
         "settings.repositoryOverrides",
@@ -39,29 +43,22 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
         overrides,
     ));
     readings.push(Reading::live("settings.pipelineUntil", file, until));
-    let roles = crate::roles::read(&cfg.roles)?;
-    readings.push(Reading::live(
-        "proj.roles",
-        cfg.roles.clone(),
-        there(&cfg.roles)
-            .then(|| crate::roles::shown(&cfg.roles, &roles))
-            .transpose()?
-            .map(Value::Object),
-    ));
-    let models = crate::roles::read(&cfg.models)?;
-    readings.push(Reading::live(
-        "proj.models",
-        cfg.models.clone(),
-        there(&cfg.models)
-            .then(|| crate::models::shown(&cfg.models, &models))
-            .transpose()?
-            .map(Value::Object),
-    ));
-    let setups = Store::new(&cfg.roles);
+    // Each role setting, from one version of them: the declared defaults
+    // with what's set over them, or the default where nothing is.
+    let view = cfg.role_view()?;
+    let (roles, models, offers) = view.set;
+    let force = &view.in_force;
+    for (name, set, value) in [
+        ("proj.roles", roles, json!(force.roles)),
+        ("proj.models", models, json!(force.models)),
+        ("proj.engineOffers", offers, json!(force.offers)),
+    ] {
+        readings.push(Reading::live(name, view.file.clone(), set.then_some(value)));
+    }
     readings.push(Reading::live(
         "proj.engineSetups",
-        setups.dir().to_owned(),
-        setups.shown()?,
+        view.file.clone(),
+        view.setups,
     ));
     readings.push(Reading::live(
         "proj.usageHold",
@@ -72,10 +69,10 @@ pub fn document(cfg: &Config) -> Result<Document, String> {
     Document::build(readings)
 }
 
-/// Whether a live file is there to say anything: one that isn't leaves the
-/// default.
-fn there(path: &Path) -> bool {
-    path.symlink_metadata().is_ok()
+/// The first of proj's old role files in DIR, which only `proj settings
+/// migrate` reads.
+pub(crate) fn old_files(dir: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    burrow_settings::roles::legacy_file(dir)
 }
 
 /// `proj settings show [--json]` and `proj settings schema`.
@@ -88,6 +85,29 @@ pub fn command(cfg: &Config, args: &[String]) -> Result<String, String> {
     {
         [] | ["show"] => Ok(document(cfg)?.text()),
         ["show", "--json"] => Ok(document(cfg)?.json()),
+        ["migrate"] => migrate::run(
+            cfg.settings.as_ref().ok_or("settings are not configured")?,
+            cfg.old_config
+                .as_deref()
+                .ok_or("proj's config names no old config folder")?,
+        ),
+        ["_migration-ready"] => {
+            let settings = cfg.settings.as_ref().ok_or("settings are not configured")?;
+            if !settings.roles_migrated()? {
+                return Err("role settings migration has not completed".into());
+            }
+            settings.migrate(
+                burrow_settings::roles::Migration::default(),
+                "migration health",
+            )?;
+            Ok("Role settings migration is durable.\n".into())
+        }
+        ["migrate", "--fence"] => migrate::fenced(
+            cfg.settings.as_ref().ok_or("settings are not configured")?,
+            cfg.old_config
+                .as_deref()
+                .ok_or("proj's config names no old config folder")?,
+        ),
         ["schema"] => Ok(
             serde_json::to_string_pretty(&burrow_settings::schema::json_schema())
                 .expect("a schema is JSON")

@@ -68,7 +68,12 @@ Every repo with code gets a `flake.nix` from the template
   It attests the gate's result for Conary's ledger with the job's own OIDC
   token, the only evidence Conary's train reads, and on a public repo with
   a Sigstore bundle too, so the caller's job grants it `id-token: write`
-  and `attestations: write`. On
+  and `attestations: write`. Callers also grant `actions: read` so the
+  kept-build waiter can read push runs and caches in private repositories.
+  The gate job inherits the caller's permissions; callers withholding
+  actions access can still run the gate, with the wait failing softly on an
+  API permission error. Other runtime API errors also leave the gate to
+  build normally. On
   a PR, its `commits` job fails any commit GitHub can't verify: a signed one
   under a name and email its key isn't for (the house rules' Commits). Its
   `negative` job holds a PR to the house rule that a new check fails on the

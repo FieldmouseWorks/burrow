@@ -203,13 +203,14 @@ mod tests {
                     &crate::ask::Recommendation {
                         default: "keep it".into(),
                         one_way: false,
+                        about: None,
                     },
                 )
                 .unwrap();
                 crate::ask::finish(&cfg, &job, "ask").unwrap();
             }
             let identity = crate::read(&crate::ask::host_path(&job, "question-id"));
-            let deadline = crate::ask::load(&job).map(|q| q.due);
+            let deadline = crate::ask::load(&job).unwrap().map(|q| q.due);
             fs::write(
                 job.path(crate::github_quota::PENDING),
                 serde_json::to_vec(&crate::github_quota::Pending {
@@ -229,13 +230,19 @@ mod tests {
         )
         .unwrap();
             assert!(crate::github_quota::finish(&job, "1").unwrap());
-            assert!(crate::ask::load(&job).unwrap().recommendation.one_way);
+            assert!(
+                crate::ask::load(&job)
+                    .unwrap()
+                    .unwrap()
+                    .recommendation
+                    .one_way
+            );
             if committed {
                 assert_eq!(
                     crate::read(&crate::ask::host_path(&job, "question-id")),
                     identity
                 );
-                assert_eq!(crate::ask::load(&job).map(|q| q.due), deadline);
+                assert_eq!(crate::ask::load(&job).unwrap().map(|q| q.due), deadline);
             }
             assert_eq!(
                 crate::read(&crate::ask::host_path(&job, "question-text")).as_deref(),
@@ -279,7 +286,7 @@ mod tests {
             for _ in 0..2 {
                 crate::github_quota::finish(&job, "1").unwrap();
             }
-            assert!(crate::ask::load(&job).is_none());
+            assert!(crate::ask::load(&job).unwrap().is_none());
         }
     }
 
