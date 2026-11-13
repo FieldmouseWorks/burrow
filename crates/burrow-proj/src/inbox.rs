@@ -591,6 +591,9 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     }
 
     fn run(&mut self, only: &str) -> Result<(), Fail> {
+        // The machine's own bookkeeping first, before GitHub is asked
+        // anything: a dry quota can't keep a finished sorting job's slot.
+        self.settle();
         self.prune_planner_waits()?;
         let repos: Vec<(String, String)> = self
             .project
@@ -823,6 +826,7 @@ mod jobs;
 mod plans;
 pub(crate) mod resumption;
 mod retirement;
+pub(crate) mod settle;
 mod written;
 
 pub(crate) use drain::WAITING;
@@ -843,6 +847,8 @@ mod parking_tests;
 mod question_tests;
 #[cfg(test)]
 mod scope_tests;
+#[cfg(test)]
+mod settle_tests;
 #[cfg(test)]
 mod sorting_tests;
 #[cfg(test)]
