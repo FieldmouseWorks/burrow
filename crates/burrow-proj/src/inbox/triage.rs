@@ -395,9 +395,12 @@ impl Pass<'_> {
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // One outside the pass's issues isn't in `all` because the pass
+            // didn't ask for it, not because it closed.
             let Some(n) = name
                 .strip_prefix(&prefix)
                 .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                .filter(|n| self.in_scope(n))
             else {
                 continue;
             };

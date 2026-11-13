@@ -1,6 +1,7 @@
 use super::*;
 use crate::{config::tests::example, pick::Class, slot, usage};
 use std::fs::File;
+use std::os::fd::AsFd;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Instant;
@@ -672,8 +673,8 @@ fn filesystem_events_transfer_a_refusal_after_the_initial_deploy_scan() {
 #[test]
 fn transferred_turn_pins_its_conversation_engine_and_rejects_queue_path_escape() {
     let mut r = rig();
-    r.cfg.roles = r.tmp.path().join("roles");
-    fs::write(&r.cfg.roles, "work codex\n").unwrap();
+    let dir = r.tmp.path().join("settings");
+    crate::config::tests::routes(&mut r.cfg, &dir, "work codex");
     let job = Job::new(&r.cfg, "queued");
     fs::create_dir(&job.dir).unwrap();
     fs::write(job.path("role"), "work\n").unwrap();
@@ -959,10 +960,9 @@ fn busy_job_lock_is_reported_for_retry_and_a_stopped_checkpoint_is_not_launched(
     let job = Job::new(&r.cfg, "p");
     pending(&r, "p", true);
     let held = job.lock().unwrap();
-    let _inherited_copy = held.try_clone().unwrap();
+    let _inherited_copy = held.as_fd().try_clone_to_owned().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     // A concurrent fork may still hold its copy when recovery runs again.
-    held.unlock().unwrap();
     drop(held);
     fs::write(job.turn("1", "stopped"), "").unwrap();
     assert!(pass(&r.cfg).is_ok());

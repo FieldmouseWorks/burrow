@@ -5,9 +5,11 @@
 //!                              came up here before; otherwise keep the
 //!                              default and queue a trial (HOST-confirm says
 //!                              this)
-//!   HOST-boot trial [--force]  reboot into the queued trial once, if the box
-//!                              is idle (--force: whatever jobs and sandboxes
-//!                              are running)
+//!   HOST-boot trial [--deadline | --force]
+//!                              reboot into the queued trial once, if the box
+//!                              is idle (--deadline: or it's been queued two
+//!                              days, as the daily timer starts it; --force:
+//!                              whatever work is running)
 //!   HOST-boot check            after a boot: settle the trial, remember what
 //!                              came up
 //!   HOST-boot [status]
@@ -22,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use burrow_boot::Config;
-use burrow_boot::boot::{self, Word};
+use burrow_boot::boot::{self, Busy, Word};
 
 /// The word a HOST-boot that isn't root starts again with, through sudo.
 /// sudo makes it root. Where it doesn't (a runas default, or the tests'
@@ -42,8 +44,9 @@ fn parse(words: &[String]) -> Option<(bool, Word)> {
         [w] if w == "status" => Word::Status,
         [w] if w == "watch" => Word::Watch,
         [w] if w == "check" => Word::Check,
-        [w] if w == "trial" => Word::Trial { force: false },
-        [w, f] if w == "trial" && f == "--force" => Word::Trial { force: true },
+        [w] if w == "trial" => Word::Trial(Busy::Waits),
+        [w, f] if w == "trial" && f == "--deadline" => Word::Trial(Busy::Deadline),
+        [w, f] if w == "trial" && f == "--force" => Word::Trial(Busy::Ignored),
         [w, system] if w == "default" && !system.is_empty() => Word::Default(PathBuf::from(system)),
         _ => return None,
     };
@@ -65,7 +68,7 @@ fn main() -> ExitCode {
     };
     let Some((through_sudo, word)) = parse(words) else {
         eprintln!(
-            "usage: {} default SYSTEM | trial [--force] | check | status",
+            "usage: {} default SYSTEM | trial [--deadline | --force] | check | status",
             cfg.boot
         );
         return ExitCode::from(2);
@@ -110,13 +113,14 @@ mod tests {
         assert_eq!(parsed(&[]), Some((false, Word::Status)));
         assert_eq!(parsed(&["status"]), Some((false, Word::Status)));
         assert_eq!(parsed(&["check"]), Some((false, Word::Check)));
+        assert_eq!(parsed(&["trial"]), Some((false, Word::Trial(Busy::Waits))));
         assert_eq!(
-            parsed(&["trial"]),
-            Some((false, Word::Trial { force: false }))
+            parsed(&["trial", "--deadline"]),
+            Some((false, Word::Trial(Busy::Deadline)))
         );
         assert_eq!(
             parsed(&["trial", "--force"]),
-            Some((false, Word::Trial { force: true }))
+            Some((false, Word::Trial(Busy::Ignored)))
         );
         assert_eq!(
             parsed(&["default", "/nix/store/x"]),
@@ -125,7 +129,7 @@ mod tests {
         // Through sudo, the same words after its own.
         assert_eq!(
             parsed(&[THROUGH_SUDO, "trial", "--force"]),
-            Some((true, Word::Trial { force: true }))
+            Some((true, Word::Trial(Busy::Ignored)))
         );
         assert_eq!(parsed(&[THROUGH_SUDO]), Some((true, Word::Status)));
         for words in [
@@ -135,6 +139,8 @@ mod tests {
             &["default", "/a", "/b"],
             &["trial", "-f"],
             &["trial", "--force", "--force"],
+            &["trial", "--deadline", "--force"],
+            &["trial", "--force", "--deadline"],
             &["status", "now"],
             &["check", "--force"],
             &["--force", "trial"],

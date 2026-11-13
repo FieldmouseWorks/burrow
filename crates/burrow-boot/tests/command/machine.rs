@@ -230,7 +230,8 @@ pub fn ok(out: &str) -> (Option<i32>, String, String) {
     (Some(0), out.into(), String::new())
 }
 
-pub const USAGE: &str = "usage: box-boot default SYSTEM | trial [--force] | check | status\n";
+pub const USAGE: &str =
+    "usage: box-boot default SYSTEM | trial [--deadline | --force] | check | status\n";
 
 /// A machine with `two`, a new kernel, queued for a trial a moment ago, and
 /// in GRUB's menu.

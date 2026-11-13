@@ -44,6 +44,18 @@ pub(super) fn parent_fixture() -> (Box, Value, List) {
 }
 
 #[test]
+fn scoped_fetches_check_added_parents() {
+    // The event is for child 8, so the saved plan also adds parent 7.
+    let (b, mut parent, _) = parent_fixture();
+    parent["repository_url"] = json!("https://api.github.com/repos/else/box");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    let mut p = b.pass();
+    assert!(p.asked("sam/box", BTreeSet::from([8])).is_none());
+    assert!(b.log().contains("api repos/sam/box/issues/7"));
+    assert!(b.posted().is_empty());
+}
+
+#[test]
 fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
     let (b, parent, _) = parent_fixture();
     let mut child = issue(8, "sam", &["later"]);
@@ -596,10 +608,16 @@ fn unavailable_planning_reads_retry_without_false_stale_notices() {
 fn unstick_preflight_bypasses_ordinary_triage_admission() {
     for engine in ["claude", "codex"] {
         let mut b = Box::new();
-        b.cfg.roles = b.path("roles");
-        b.cfg.models = b.path("models");
-        fs::write(&b.cfg.roles, format!("planner {engine}\n")).unwrap();
-        fs::write(&b.cfg.models, format!("planner {engine} selected\n")).unwrap();
+        let dir = b.path("settings");
+        crate::config::tests::set(
+            &mut b.cfg,
+            &dir,
+            &[
+                &format!("role planner {engine}"),
+                &format!("offer {engine} models selected"),
+                &format!("model planner {engine} selected"),
+            ],
+        );
         b.cfg.inbox.as_mut().unwrap().planning = true;
         for n in [8, 9] {
             let id = format!("busy{n}");

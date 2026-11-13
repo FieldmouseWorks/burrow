@@ -116,7 +116,7 @@ fn finish_at(job: &Job, n: &str, due: i64) -> Result<(), String> {
             .map_err(|e| format!("{:?}", e.say))?
             .is_some();
         if !expired && crate::ask::pending(job)?.is_some() {
-            if crate::ask::load(job).is_none() {
+            if crate::ask::load(job)?.is_none() {
                 let text = crate::engine::answer(&job.turn(n, "jsonl"));
                 if !text.is_empty() {
                     swap(job.turn(n, "result"), format!("{text}\n")).map_err(|e| e.to_string())?;
@@ -524,12 +524,13 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
             &crate::ask::Recommendation {
                 default: "Retry after quota reset?".into(),
                 one_way: false,
+                about: None,
             },
         )
         .unwrap();
         fs::write(job.path("end.next"), "ask\n").unwrap();
         assert!(finish(&job, "1").unwrap());
-        assert!(crate::ask::load(&job).is_none());
+        assert!(crate::ask::load(&job).unwrap().is_none());
         assert!(!job.path("ask.next").exists());
         assert!(!job.turn("1", "cut").exists());
         let parked = read(&job.path("await")).unwrap();
@@ -549,7 +550,7 @@ case "$*" in */comments*) if [ -f "$(dirname "$0")/changed" ]; then echo '[{{"bo
         assert!(read(&job.path("await")).unwrap().starts_with("sam/r#7\t"));
         assert_eq!(read(&job.turn("1", "end")).as_deref(), Some("await"));
         assert_eq!(job.turns().as_deref(), Some("1"));
-        assert!(crate::ask::load(&job).is_none());
+        assert!(crate::ask::load(&job).unwrap().is_none());
         fs::write(d.path().join("changed"), "").unwrap();
         crate::watch::look(&cfg, "").unwrap();
         assert_eq!(job.turns().as_deref(), Some("2"));

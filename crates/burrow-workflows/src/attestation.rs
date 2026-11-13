@@ -34,7 +34,9 @@ fn subject(job: &yaml_serde::Value) -> (usize, &yaml_serde::Value) {
 #[test]
 fn every_push_and_pr_attests_and_uploads() {
     let job = job();
-    assert_eq!(job["permissions"]["id-token"], "write");
+    // The leg inherits the caller's OIDC and attestations grants, checked
+    // for every shipped caller by keep_builds' permission-chain test.
+    assert!(job.get("permissions").is_none());
     let (at, step) = subject(&job);
     assert_eq!(step["shell"], "bash");
     // Every repo's push and PR, a private one's included; with legs, the
@@ -464,7 +466,10 @@ fn with_legs_the_gate_job_attests_for_them() {
         gate["if"],
         "${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure') }}"
     );
-    assert_eq!(gate["permissions"], job["permissions"]);
+    assert_eq!(
+        gate["permissions"],
+        yaml("contents: read\nid-token: write\nattestations: write")
+    );
     let g = steps(gate);
     assert_eq!(g[..2], all[..2]);
     assert!(
