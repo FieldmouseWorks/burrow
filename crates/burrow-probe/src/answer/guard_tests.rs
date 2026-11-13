@@ -475,3 +475,85 @@ fn the_probe_hides_whatever_the_snapshot_hides() {
     // As a directory, a trailing-slash pattern takes the directory itself.
     assert!(g.hidden("/home/ci/private", true) && !g.hidden("/home/ci/private", false));
 }
+
+#[test]
+fn entries_are_held_to_the_directory_name_they_were_asked_under() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    exe(&root.join("srv/rustup/rustc"));
+    exe(&root.join("srv/rustup/cargo"));
+    fs::create_dir_all(root.join("home/ci")).unwrap();
+    symlink("/srv/rustup", root.join("home/ci/private")).unwrap();
+    symlink("../../srv/rustup", root.join("home/ci/rel")).unwrap();
+    symlink("private", root.join("home/ci/again")).unwrap();
+    let mut cfg = config(root);
+    cfg.hidden = vec!["^(private|rel|again)/rustc$".into()];
+    let fake = Fake::default();
+    let m = machine(&cfg, root, &fake);
+    for dir in ["/home/ci/private", "/home/ci/rel", "/home/ci/again"] {
+        assert_eq!(m.entry(dir, "rustc").unwrap_err(), Unread::Hidden, "{dir}");
+        assert!(m.entry(dir, "cargo").unwrap().is_some(), "{dir}");
+        let listing = m.list(dir).unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!((names, listing.hidden), (vec!["cargo"], 1), "{dir}");
+    }
+    // Under its real name it is not hidden.
+    assert!(m.entry("/srv/rustup", "rustc").unwrap().is_some());
+}
+
+#[test]
+fn a_configured_home_is_not_restored_to_a_unit_loaded_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    toolchain_world(root);
+    let new = root.join("opt/new-home/.rustup");
+    fs::create_dir_all(&new).unwrap();
+    fs::write(
+        new.join("settings.toml"),
+        "default_toolchain = \"from-new-home\"\n",
+    )
+    .unwrap();
+    let mut cfg = config(root);
+    cfg.runners[0]
+        .environment
+        .insert("HOME".into(), "/opt/new-home".into());
+    // Loaded without HOME, the user's own home stands: not the new one.
+    let got = runner(&cfg, root, &loaded("ci", ""));
+    assert!(!got.contains("from-new-home"), "{got}");
+    assert!(got.contains("/var/lib/ci/.rustup/settings.toml"), "{got}");
+    // Nothing loaded: the configuration's.
+    let got = runner(&cfg, root, &Fake::default());
+    assert!(
+        got.contains("default toolchain: from-new-home (/opt/new-home/.rustup/settings.toml)"),
+        "{got}"
+    );
+}
+
+#[test]
+fn a_visible_rustup_does_not_make_an_unsearched_compiler_known() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    toolchain_world(root);
+    command(root, "/run/secrets/bin", "rustc-0", "rustc");
+    let mut cfg = config(root);
+    for path in [
+        "/etc/actions-runner/ci-runner/bin:/run/secrets/bin",
+        "/etc/actions-runner/ci-runner/bin:",
+        "/etc/actions-runner/ci-runner/bin:bin",
+    ] {
+        cfg.runners[0]
+            .environment
+            .insert("PATH".into(), path.into());
+        let got = runner(&cfg, root, &Fake::default());
+        assert!(
+            got.contains("default toolchain: unknown: a toolchain command on PATH isn't read; rustup's own answer: stable-x86_64-unknown-linux-gnu"),
+            "{path}: {got}"
+        );
+    }
+    // The same with the toolchain chosen by the environment.
+    cfg.runners[0]
+        .environment
+        .insert("RUSTUP_TOOLCHAIN".into(), "1.91.0".into());
+    let got = runner(&cfg, root, &Fake::default());
+    assert!(got.contains("default toolchain: unknown: a toolchain command on PATH isn't read; rustup's own answer: 1.91.0"), "{got}");
+}

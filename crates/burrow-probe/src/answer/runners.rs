@@ -546,9 +546,28 @@ fn find(m: &Machine, dirs: &[&str], name: &str) -> Option<Result<Found, String>>
     })
 }
 
+fn default_toolchain(
+    m: &Machine,
+    home: Option<&String>,
+    env: &BTreeMap<String, String>,
+    found: &BTreeMap<&str, Option<Result<Found, String>>>,
+) -> String {
+    let said = rustup_default(m, home, env, found);
+    // A compiler the probe couldn't find stays unknown, whatever rustup's
+    // settings or the environment say: they decide for rustup's commands.
+    if RUST.iter().any(|t| matches!(found[t], Some(Err(_))))
+        && !said.starts_with("unknown: a toolchain")
+    {
+        return format!(
+            "unknown: a toolchain command on PATH isn't read; rustup's own answer: {said}"
+        );
+    }
+    said
+}
+
 /// What decides the default toolchain `rustc` and `cargo` get, as far as
 /// the runner's environment and HOME say.
-fn default_toolchain(
+fn rustup_default(
     m: &Machine,
     home: Option<&String>,
     env: &BTreeMap<String, String>,

@@ -614,6 +614,11 @@ mod tests {
                 "hunter2hunter2".to_string(),
                 format!("{}https://ci:hunter2hunter2@example.com/x", "y".repeat(480)),
             ),
+            // Past what is kept whole at all.
+            (
+                "a1B2c3D4e5a1".to_string(),
+                format!("{}{token}", "k".repeat(70_000)),
+            ),
             (
                 "MIIEvQIBADANBgkqhkiG".to_string(),
                 format!(

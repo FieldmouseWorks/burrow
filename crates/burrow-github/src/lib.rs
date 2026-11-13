@@ -78,7 +78,7 @@ fn by_name(asked: &str, next: &str) -> String {
 pub struct Error {
     pub why: String,
     /// `why` before GitHub's own words were cut to a few hundred
-    /// characters (at most WHOLE_MAX), for a caller that must scrub a
+    /// characters: all of them, or, past WHOLE_MAX, one fixed line. For a caller that must scrub a
     /// diagnostic before it shortens it: a cut can take the part of a
     /// credential that makes it one.
     pub whole: String,
@@ -361,9 +361,9 @@ fn graphql(
             .iter()
             .map(|e| e["message"].as_str().unwrap_or("an error"))
             .collect();
-        let whole: String = said.join("; ").chars().take(WHOLE_MAX).collect();
-        let why = format!("{what}: {}", cut(&whole));
-        let whole = format!("{what}: {whole}");
+        let said = said.join("; ");
+        let why = format!("{what}: {}", cut(&said));
+        let whole = format!("{what}: {}", kept_whole(said));
         return Err(
             if !errors.is_empty() && errors.iter().all(graphql_rate_error) {
                 limited(why, &r, at, limited_until)
@@ -461,9 +461,9 @@ fn kept(what: &str, received: Received, allowed: &[u16]) -> Result<Response, Err
     if (200..300).contains(&r.status) || r.status == 304 || allowed.contains(&r.status) {
         return Ok(r);
     }
-    let whole = message(&r.body);
-    let why = format!("{what}: HTTP {}: {}", r.status, cut(&whole));
-    let whole = format!("{what}: HTTP {}: {whole}", r.status);
+    let said = message(&r.body);
+    let why = format!("{what}: HTTP {}: {}", r.status, cut(&said));
+    let whole = format!("{what}: HTTP {}: {}", r.status, kept_whole(said));
     Err(if rate_limited(&r) {
         limited(why, &r, at, limited_until)
     } else if r.status >= 500 {
@@ -525,12 +525,22 @@ fn message(body: &str) -> String {
     let m = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| v["message"].as_str().map(String::from));
-    let m = m.unwrap_or_else(|| body.trim().to_string());
-    m.chars().take(WHOLE_MAX).collect()
+    m.unwrap_or_else(|| body.trim().to_string())
 }
 
 /// The most of GitHub's words kept whole in an Error.
 const WHOLE_MAX: usize = 64 * 1024;
+
+/// GitHub's words for an Error's `whole`: all of them, or, past WHOLE_MAX,
+/// a fixed line instead. A cut would leave a credential's fragment that a
+/// scrub, which can only take what it recognizes, would let through.
+fn kept_whole(said: String) -> String {
+    if said.chars().count() > WHOLE_MAX {
+        format!("GitHub's message is over {WHOLE_MAX} characters, so none of it is kept")
+    } else {
+        said
+    }
+}
 
 /// GitHub's words as an Error's `why` says them.
 fn cut(whole: &str) -> String {

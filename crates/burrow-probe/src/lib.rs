@@ -92,7 +92,8 @@ pub struct Runner {
     pub user: Option<String>,
     #[serde(default)]
     pub dynamic_user: bool,
-    /// HOME as configured: the unit's own, else its user's home.
+    /// The home of the unit's user, which it gets when its environment sets
+    /// no HOME (a configured HOME is in `environment`).
     #[serde(default)]
     pub home: Option<String>,
     /// The packages the unit's `path` puts on PATH.

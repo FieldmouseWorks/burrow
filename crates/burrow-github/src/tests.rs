@@ -666,3 +666,42 @@ fn an_error_keeps_the_whole_of_what_github_said_beside_the_cut_one() {
         ("ctx: short", "ctx: short")
     );
 }
+
+#[test]
+fn an_oversized_diagnostic_is_not_kept_cut() {
+    // A cut anywhere leaves a credential's fragment a scrub can't know.
+    let huge = format!(
+        "{}ghp_{}",
+        "x".repeat(WHOLE_MAX - 6),
+        "a1B2c3D4e5".repeat(4)
+    );
+    let mut gh = Fake::default();
+    gh.on(
+        "POST",
+        "graphql",
+        vec![ok(422, json!({ "message": huge }), &[])],
+    );
+    let e = query(&mut gh, "sam", "q", json!({})).unwrap_err();
+    assert_eq!(
+        e.whole,
+        format!(
+            "POST graphql: HTTP 422: GitHub's message is over {WHOLE_MAX} characters, so none of it is kept"
+        )
+    );
+    let mut gh = Fake::default();
+    gh.on(
+        "POST",
+        "graphql",
+        vec![ok(
+            200,
+            json!({"data": null, "errors": [{"message": huge}]}),
+            &[],
+        )],
+    );
+    let e = query(&mut gh, "sam", "q", json!({})).unwrap_err();
+    assert!(
+        e.whole.ends_with("so none of it is kept") && !e.whole.contains("ghp_"),
+        "{}",
+        e.whole
+    );
+}

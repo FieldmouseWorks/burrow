@@ -519,7 +519,7 @@ fn hidden_paths_are_never_listed_resolved_or_read() {
     assert!(got.contains("1 left out as hidden"), "{got}");
     assert!(got.contains("rustc unknown: not found in the directories searched; the probe could not search /etc/actions-runner/ci-runner/bin (not read: it is, or leads to, a path the reviewers never read)"), "{got}");
     assert!(
-        got.contains("default toolchain: /var/lib/ci/.rustup/settings.toml: not read: it is, or leads to, a path the reviewers never read"),
+        got.contains("rustup's own answer: /var/lib/ci/.rustup/settings.toml: not read: it is, or leads to, a path the reviewers never read"),
         "{got}"
     );
 

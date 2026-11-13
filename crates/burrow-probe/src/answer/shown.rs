@@ -309,6 +309,9 @@ impl Machine<'_> {
             real: r.real.clone(),
             ..Listing::default()
         };
+        // Each entry is held to the directory's name as it was asked for
+        // (a link's name, however it leads on) as well as its real one.
+        let logical = normal(&[], dir.split('/'));
         let read = rustix::fs::Dir::read_from(&r.dir).map_err(Unread::errno)?;
         for entry in read {
             let entry = entry.map_err(Unread::errno)?;
@@ -317,17 +320,18 @@ impl Machine<'_> {
                 continue;
             }
             let full = format!("{}/{name}", r.real.trim_end_matches('/'));
+            let asked = format!("{}/{name}", logical.trim_end_matches('/'));
             let kind = entry.file_type();
-            let hidden = match kind {
-                FileType::Directory => g.hidden(&full, true),
-                FileType::RegularFile => g.hidden(&full, false),
-                _ => g.hidden_any(&full),
-            };
+            let hidden = [&full, &asked].into_iter().any(|p| match kind {
+                FileType::Directory => g.hidden(p, true),
+                FileType::RegularFile => g.hidden(p, false),
+                _ => g.hidden_any(p),
+            });
             if hidden {
                 listing.hidden += 1;
                 continue;
             }
-            match self.command(&g, &full) {
+            match self.command(&g, &asked) {
                 Ok(Some(real)) => listing.entries.push(Entry {
                     name,
                     link: (kind == FileType::Symlink).then_some(real),
@@ -348,10 +352,14 @@ impl Machine<'_> {
         let g = self.guard()?;
         let real = self.resolve_with(&g, dir)?.real;
         let full = format!("{}/{name}", real.trim_end_matches('/'));
-        if g.hidden_any(&full) {
+        // Held to the directory's name as asked for too, and walked by it,
+        // so every link on the way is checked as a link.
+        let logical = normal(&[], dir.split('/'));
+        let asked = format!("{}/{name}", logical.trim_end_matches('/'));
+        if g.hidden_any(&full) || g.hidden_any(&asked) {
             return Err(Unread::Hidden);
         }
-        let Some(file) = self.command(&g, &full)? else {
+        let Some(file) = self.command(&g, &asked)? else {
             return Ok(None);
         };
         Ok(Some(Entry {

@@ -65,8 +65,10 @@ let
     defined = unit != null;
     user = if user == null then null else toString user;
     dynamicUser = service.DynamicUser or false;
-    home = environment.HOME or (if user != null && config.users.users ? ${toString user}
-      then config.users.users.${toString user}.home else null);
+    # The user's own home, which a unit without HOME gets: a configured
+    # HOME is in `environment`, kept apart from it.
+    home = if user != null && config.users.users ? ${toString user}
+      then config.users.users.${toString user}.home else null;
     packages = if unit == null then [ ] else map (p: if lib.isDerivation p then p.name else toString p) unit.path;
   };
   runners = lib.optionals dispatching (

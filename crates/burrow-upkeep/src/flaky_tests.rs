@@ -575,9 +575,8 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
     assert!(was.failing.is_none());
     let fail = |cfg: &Config, hub: &mut Hub, jobs: &mut States, t: f64, why: &str, unanswered| {
         let listed = Err(Error {
-            why: why.into(),
             unanswered,
-            retry_at: None,
+            ..Error::said(why)
         });
         let (out, r) = at(cfg, hub, jobs, t, |p| {
             look(p, p.cfg.flaky.as_ref().unwrap(), listed)

@@ -208,8 +208,11 @@ pkgs.testers.runNixOSTest {
         assert "configured: user ci, HOME /var/lib/ci, PATH /opt/runner/bin:/opt/sneaky:" in out, out
         assert "loaded: ci-runner.service active/running" in out, out
         assert "/opt/sneaky (not read: it is, or leads to, a path the reviewers never read)" in out, out
-        assert "rustc in /opt/runner/bin, not read" in out, out
-        assert "cargo not on PATH" in out and "rustup not on PATH" in out, out
+        hide = "(not read: it is, or leads to, a path the reviewers never read)"
+        assert f"rustc unknown: not found in the directories searched; the probe could not search /opt/runner/bin {hide}, /opt/sneaky {hide}" in out, out
+        assert f"cargo unknown: not found in the directories searched; the probe could not search /opt/sneaky {hide}" in out, out
+        assert "rustup unknown: not found in the directories searched" in out, out
+        assert "cargo not on PATH" not in out and "rustup not on PATH" not in out, out
         assert "default toolchain: unknown: a toolchain command on PATH isn't read" in out, out
         assert "burrow-fresh-runner@INSTANCE: runners started fresh for one job each, for sam/homelab" in out, out
         assert "configured: user a dynamic user of its own, HOME /var/lib/private/burrow-fresh-runner/%i" in out, out
