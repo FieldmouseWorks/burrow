@@ -560,7 +560,9 @@ fn finalization_runs_every_obligation_despite_notification_errors() {
         fs::create_dir_all(&inbox.state).unwrap();
         fs::write(inbox.state.join(crate::inbox::WAITING), "sam/repo").unwrap();
         f.ending(1, "ask");
-        fs::write(f.job().path("owned"), "").unwrap();
+        let mut request = crate::job::Request::load(&f.job()).unwrap();
+        request.owned = true;
+        request.save(&f.job()).unwrap();
         fs::write(f.job().path("kick"), "completion").unwrap();
         let scratch = crate::scratch::dir(&f.cfg, "j1");
         fs::create_dir_all(&scratch).unwrap();

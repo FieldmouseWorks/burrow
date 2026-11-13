@@ -32,7 +32,7 @@ pub fn bind(job: &Job, identity: Identity, kind: Kind) -> Result<(), String> {
     let record = Admission {
         identity,
         kind,
-        agent: read(&job.path("agent")).filter(|s| !s.is_empty()),
+        agent: crate::job::Request::load(job)?.agent,
     };
     swap(
         &path(job, "admission"),
@@ -81,7 +81,12 @@ fn admission(job: &Job) -> Result<Admission, String> {
                 .and_then(|s| s.split_once('#').map(|(repo, _)| repo.to_owned()));
             let identity = match source {
                 Some(repo) => Identity::Repository(repo),
-                None => identify(job.cfg, &crate::pick::project(&job.dir), true, false)?,
+                None => identify(
+                    job.cfg,
+                    &crate::job::Request::load(job)?.project,
+                    true,
+                    false,
+                )?,
             };
             // Legacy automation is never inferred to be local from a failed
             // lookup. Modern launchers bind identity before exposing job state.

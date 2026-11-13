@@ -4,6 +4,8 @@ use std::os::unix::fs::symlink;
 fn retained(r: &Rig, id: &str) {
     let job = Job::new(&r.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("project"), "/original").unwrap();
+    fs::write(job.path("engine"), "codex").unwrap();
     crate::policy::bind(
         &job,
         crate::policy::Identity::Local,
@@ -11,8 +13,6 @@ fn retained(r: &Rig, id: &str) {
     )
     .unwrap();
     job.set_turns(1).unwrap();
-    fs::write(job.path("project"), "/original").unwrap();
-    fs::write(job.path("engine"), "codex").unwrap();
     fs::write(job.path("prompt.1"), "original prompt").unwrap();
     fs::write(job.turn("1", "jsonl"), "original transcript").unwrap();
     fs::write(

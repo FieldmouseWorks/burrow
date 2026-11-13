@@ -46,7 +46,8 @@ pub fn over(job: &Job) -> bool {
     if filled(&job.path("await")) {
         return false;
     }
-    read(&job.turn(&n, "end")).as_deref() == Some("done") || job.path("owned").exists()
+    read(&job.turn(&n, "end")).as_deref() == Some("done")
+        || crate::job::Request::load(job).is_ok_and(|r| r.owned)
 }
 
 /// Job ID's scratch gone, and each worktree in it taken off the repo it's a
