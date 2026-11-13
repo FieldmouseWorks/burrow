@@ -884,7 +884,6 @@ fn a_denied_failure_in_a_stretch_without_the_watchdog_is_found_when_it_returns()
 #[cfg(unix)]
 #[test]
 fn adoption_waits_for_an_unreadable_job_to_be_readable() {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = TempDir::new().unwrap();
     let (cfg, jobs) = adoption_cfg(&tmp);
     say(&cfg, &["allow", "sam/web"]);
@@ -893,7 +892,7 @@ fn adoption_waits_for_an_unreadable_job_to_be_readable() {
     let job = Job::new(&cfg, "legacy");
     let outcome = job.turn("1", "outcome");
     fs::write(&outcome, "failed").unwrap();
-    fs::set_permissions(&outcome, fs::Permissions::from_mode(0)).unwrap();
+    burrow_test::permissions(&outcome, 0o0);
     if fs::read(&outcome).is_ok() {
         return; // running as root: nothing is unreadable
     }
@@ -902,7 +901,7 @@ fn adoption_waits_for_an_unreadable_job_to_be_readable() {
         !jobs.join(".waits-held/.adopted").exists(),
         "adoption completed past a file it couldn't read"
     );
-    fs::set_permissions(&outcome, fs::Permissions::from_mode(0o644)).unwrap();
+    burrow_test::permissions(&outcome, 0o644);
     crate::policy::reconcile(&cfg).unwrap();
     assert!(jobs.join(".waits-held/legacy").exists());
     assert!(jobs.join(".waits-held/.adopted").exists());
@@ -943,7 +942,15 @@ fn jobs_an_adoption_found_stay_its_when_the_policy_moves_before_it_ends() {
     denied_failure(&cfg, "legacy");
     // Found while denied, recorded, and the repo allowed before it ended.
     fs::create_dir_all(jobs.join(".waits-held")).unwrap();
-    fs::write(jobs.join(".waits-held/.adopting"), "legacy\n").unwrap();
+    say(&cfg, &["pause", "sam/web"]);
+    let snapshot = cfg.settings.as_ref().unwrap().snapshot().unwrap();
+    fs::write(
+        jobs.join(".waits-held/.adopting"),
+        serde_json::to_vec(&serde_json::json!({"policies": [snapshot], "found": ["legacy"]}))
+            .unwrap(),
+    )
+    .unwrap();
+    say(&cfg, &["allow", "sam/web"]);
     crate::policy::reconcile(&cfg).unwrap();
     assert!(jobs.join(".waits/legacy").exists());
     assert!(jobs.join(".waits-held/.adopted").exists());
@@ -958,7 +965,7 @@ fn a_proj_with_a_successor_leaves_adoption_to_it_without_waiting_on_its_lock() {
     let deployed = tmp.path().join("deployed");
     burrow_test::executable(
         &deployed,
-        "#!/bin/sh\ncase $1 in\n_handover_format) echo 1 ;;\n_rewatch) exit 0 ;;\n*) exit 2 ;;\nesac\n",
+        "#!/bin/sh\ncase $1 in\n_handover_format) echo 1 ;;\n_rewatch_all) exit 0 ;;\n*) exit 2 ;;\nesac\n",
     );
     cfg.deployed = deployed;
     // Another pass holds the adoption lock; this one must not wait for it.

@@ -249,6 +249,13 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", slot::HANDOVER_FORMAT));
             Ok(())
         }
+        Some("_rewatch_all") => {
+            if crate::waits::rewatch_all(cfg) {
+                Ok(())
+            } else {
+                Err(Fail::new(1, "couldn't refresh the stall watchdog's waits"))
+            }
+        }
         Some("_rewatch") => {
             let ids: Vec<&str> = args[1..].iter().map(String::as_str).collect();
             if rewatch(cfg, &ids) {

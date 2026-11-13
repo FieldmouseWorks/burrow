@@ -296,14 +296,22 @@ pub fn waiting(dir: &Path) -> Option<(i64, String)> {
 /// proj's waits, when a turn outlives a switch ([`crate::slot`]). Whether
 /// they got there.
 pub fn rewatch(cfg: &Config, ids: &[&str]) -> bool {
-    if let Some(d) = successor(cfg)
-        && Command::new(d)
-            .arg("_rewatch")
-            .args(ids)
-            .status()
-            .is_ok_and(|s| s.success())
-    {
-        return true;
+    if let Some(result) = forward(cfg, "_rewatch", ids) {
+        return result;
+    }
+    // Resetting migration belongs to the deployed configuration too. Never
+    // hold this lock across a handoff, including after waiting for the lock.
+    let guard = if cfg.waits.is_none() {
+        match adoption::lock(cfg) {
+            Ok(guard) => Some(guard),
+            Err(_) => return false,
+        }
+    } else {
+        None
+    };
+    if successor(cfg).is_some() {
+        drop(guard);
+        return rewatch(cfg, ids);
     }
     if publish(cfg, ids).is_err() {
         eprintln!(
@@ -312,202 +320,28 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) -> bool {
         );
         return false;
     }
-    true
-}
-
-/// [`rewatch`] for every job it watches, every one whose wait the policy
-/// keeps from it for now ([`HELD`]), and every one still live ([`live`]):
-/// the machine's usage changed ([`usage`]), which moves the deadline of every
-/// turn in line, or the policy did, which lets a held one back, or the
-/// watchdog was just enabled, and jobs already running never published to it.
-/// Never a settled job, whose wait ended weeks ago, unless the policy denies
-/// it and nothing has held it yet ([`ADOPTED`]).
-///
-/// Adoption is one transaction, owned by the deployed proj: a proj that has
-/// a successor leaves it to that one, so no lock is held across a handover.
-/// Every pass takes the adoption lock before it looks at the marker, so a
-/// pass that began before another finished sees the marker and adopts
-/// nothing. The jobs it finds are written to [`PENDING`] before any is
-/// published, and stay in it until the marker is written, so a policy that
-/// moves between retries takes none of them away; the marker is written only
-/// after a scan that read everything it needed.
-pub fn rewatch_all(cfg: &Config) {
-    let adopted = cfg.jobs.join(HELD).join(ADOPTED);
-    let guard = (cfg.waits.is_some() && !adopted.exists() && successor(cfg).is_none())
-        .then(|| adoption_lock(cfg))
-        .and_then(|l| l.ok())
-        .filter(|_| !adopted.exists());
-    let adopting = guard.is_some();
-    let pending = cfg.jobs.join(HELD).join(PENDING);
-    let scan = adopting.then(|| adoptable(cfg));
-    let mut ids: Vec<String> = [".waits", HELD]
-        .iter()
-        .flat_map(|d| fs::read_dir(cfg.jobs.join(d)).into_iter().flatten())
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
-        .collect();
-    if let Some((found, _)) = &scan {
-        let mut all: std::collections::BTreeSet<String> = fs::read_to_string(&pending)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        all.extend(found.iter().cloned());
-        let text: String = all.iter().map(|n| format!("{n}\n")).collect();
-        let _ = fs::create_dir_all(cfg.jobs.join(HELD));
-        if swap(&pending, &text).is_err() {
-            eprintln!("proj: couldn't record the denied jobs found so far");
-        }
-        ids.extend(all);
-    }
-    // Every job there is, so each is told live from its own files and one
-    // look at the units that are up: a turn's facts ask systemd about it,
-    // which across thousands of settled jobs is minutes.
-    let up = crate::systemd::up(cfg, "proj-*.service");
-    ids.extend(
-        fs::read_dir(&cfg.jobs)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.') && live(cfg, n, up.as_ref())),
-    );
-    ids.sort();
-    ids.dedup();
-    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let published = if adopting {
-        // Under this proj's own configuration, which holds the lock: a
-        // handover would wait on it.
-        publish(cfg, &ids).is_ok()
-    } else {
-        rewatch(cfg, &ids)
-    };
-    if let Some((_, complete)) = scan {
-        if !published {
-            eprintln!("proj: couldn't update the stall watchdog's waits");
-        } else if !complete {
-            eprintln!("proj: the denied jobs' waits aren't all found yet; trying again next pass");
-        } else if fs::write(&adopted, "").is_err() {
-            eprintln!("proj: couldn't record that the denied jobs' waits are held");
-        } else {
-            let _ = fs::remove_file(&pending);
-        }
-    }
     drop(guard);
+    forward(cfg, "_rewatch", ids).unwrap_or(true)
 }
 
-/// Held for a whole adoption, and by whatever clears its marker.
-fn adoption_lock(cfg: &Config) -> io::Result<File> {
-    let lock = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(cfg.jobs.join(".adopt.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+// A failed deployed owner is retryable; a retained caller must never fall
+// back to changing the current deployment's state with its old config.
+fn forward(cfg: &Config, command: &str, ids: &[&str]) -> Option<bool> {
+    successor(cfg).map(|d| {
+        Command::new(d)
+            .arg(command)
+            .args(ids)
+            .status()
+            .is_ok_and(|s| s.success())
+    })
 }
 
-/// Written in [`HELD`] once every job the policy denies with a wait has been
-/// through [`publish`], which holds it. A job denied before there was a
-/// [`HELD`], or while there was no watchdog to publish to, lost its watch
-/// with nothing to keep it, and one whose turn just failed isn't [`live`]:
-/// its repo allowed again, nothing would watch it. Done once per stretch with
-/// a watchdog, as each look at a job asks systemd; after that, [`publish`]
-/// holds every job the policy keeps as it goes, and a stretch without one
-/// ([`publish`]) takes the marker away, so the next has its jobs found again.
-const ADOPTED: &str = ".adopted";
+mod adoption;
 
-/// The jobs an adoption found, a name a line, kept in [`HELD`] until it is
-/// done: a retry goes on with them whatever the policy has become.
-const PENDING: &str = ".adopting";
-
-/// Every job [`unheld`] finds, and whether every read it needed answered: a
-/// directory, an entry or a file that couldn't be read is not a job that
-/// isn't there. The policy is asked once per repository, so one scan judges
-/// all of a repository's jobs by the same answer.
-fn adoptable(cfg: &Config) -> (std::collections::BTreeSet<String>, bool) {
-    let mut found = std::collections::BTreeSet::new();
-    let mut complete = true;
-    let Ok(entries) = fs::read_dir(&cfg.jobs) else {
-        return (found, false);
-    };
-    let mut decisions = std::collections::HashMap::new();
-    for e in entries {
-        let Ok(e) = e else {
-            complete = false;
-            continue;
-        };
-        let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        match e.path().metadata() {
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => continue,
-            Err(_) => {
-                complete = false;
-                continue;
-            }
-        }
-        match unheld(cfg, &name, &mut decisions) {
-            Ok(true) => {
-                found.insert(name);
-            }
-            Ok(false) => {}
-            Err(_) => complete = false,
-        }
-    }
-    (found, complete)
-}
-
-/// A file's text through the confined reader, None when it isn't there; an
-/// error for any other failure, a link or special file included.
-fn present(path: &Path) -> io::Result<Option<String>> {
-    match crate::state_reads::bytes(path) {
-        Ok(b) => Ok(Some(
-            String::from_utf8_lossy(&b)
-                .trim_end_matches('\n')
-                .to_owned(),
-        )),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-/// A job the policy denies, not parked (a park holds itself), with a wait
-/// it keeps from the watchdog that [`live`] doesn't see: a turn that ended
-/// other than done, or done without saying what comes next. Its own files
-/// tell that, so a settled job costs no look at systemd ([`job_wait`] has
-/// the last word on the rest). An error when a file it needs can't be read.
-fn unheld(
-    cfg: &Config,
-    id: &str,
-    decisions: &mut std::collections::HashMap<String, Result<burrow_settings::Decision, String>>,
-) -> io::Result<bool> {
-    let job = Job::new(cfg, id);
-    let Some(n) = present(&job.path("turns"))?.filter(|n| crate::job::valid_turn(n)) else {
-        return Ok(false);
-    };
-    let open = present(&job.turn(&n, "outcome"))?.as_deref() != Some("done")
-        || present(&job.turn(&n, "end"))?.as_deref() == Some("undeclared");
-    Ok(open
-        && !job.turn(&n, "stopped").try_exists()?
-        && !job.path("owned").try_exists()?
-        && !crate::policy::path(&job, "park").try_exists()?
-        && crate::policy::denied_by(&job, |repo| {
-            decisions
-                .entry(repo.to_owned())
-                .or_insert_with(|| {
-                    cfg.settings
-                        .as_ref()
-                        .map_or(Err(String::new()), |s| s.decision(repo))
-                })
-                .clone()
-        })
-        && job
-            .facts()
-            .is_some_and(|f| !f.stopped && job_wait(cfg, &f).is_some()))
+/// Refresh every watched, held or live job, including the one-time recovery
+/// of legacy denied waits. The deployed proj owns the entire transaction.
+pub fn rewatch_all(cfg: &Config) -> bool {
+    adoption::rewatch_all(cfg)
 }
 
 /// A job with a turn queued or running, or outstanding awaits: work the
@@ -551,11 +385,7 @@ fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     let Some(file) = &cfg.waits else {
         // Nothing is held for a watchdog that isn't there, so the stretch
         // that follows has its jobs found again.
-        let _guard = adoption_lock(cfg)?;
-        return match fs::remove_file(cfg.jobs.join(HELD).join(ADOPTED)) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        };
+        return adoption::reset(cfg);
     };
     let dir = cfg.jobs.join(".waits");
     fs::create_dir_all(&dir)?;
