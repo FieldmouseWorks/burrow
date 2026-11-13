@@ -75,7 +75,11 @@ fn status_snapshots_and_notices_do_not_read_outside_job_state() {
     for name in ["agent", "1.result"] {
         symlink(p.join("denied"), job.path(name)).unwrap();
     }
-    assert!(!crate::snapshot::row(&job).line().contains(secret));
+    assert!(
+        !crate::snapshot::row(&job, crate::host_jobs::View::Owner)
+            .line()
+            .contains(secret)
+    );
     crate::ask::record(
         &job,
         &crate::ask::Recommendation {

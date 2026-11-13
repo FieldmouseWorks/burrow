@@ -380,8 +380,13 @@ impl Config {
     /// Validate the turn-start configuration without starting a job: the
     /// module's JSON (Config::load) and the role settings every turn reads.
     /// Runtime state (meters, usage holds and individual jobs) is not
-    /// machine configuration.
+    /// machine configuration. The sandbox controller, when agents are on,
+    /// must be a program proj can run: pause and release call it.
     pub fn check_config(&self) -> Result<(), String> {
+        if let Some(tool) = &self.agent_tool {
+            burrow_process::executable(tool)
+                .map_err(|e| format!("agentTool {}: {e}", tool.display()))?;
+        }
         self.role_view().map(|_| ())
     }
 
@@ -513,6 +518,35 @@ pub(crate) mod tests {
         std::fs::remove_file(overlay).unwrap();
         std::fs::create_dir(overlay).unwrap();
         assert!(cfg.check_config().is_err());
+    }
+
+    #[test]
+    fn check_config_requires_a_runnable_agent_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.check_config().unwrap(); // No agents, no controller to check.
+        // The package's bin/agent that was never built (#711).
+        let tool = dir.path().join("agent");
+        cfg.agent_tool = Some(tool.clone());
+        let err = cfg.check_config().unwrap_err();
+        assert!(
+            err.contains(&format!("agentTool {}", tool.display())),
+            "{err}"
+        );
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        assert!(
+            cfg.check_config()
+                .unwrap_err()
+                .contains("not an executable file")
+        );
+        burrow_test::executable(&tool, "#!/bin/sh\n");
+        cfg.check_config().unwrap();
+        cfg.agent_tool = Some(dir.path().to_owned());
+        assert!(
+            cfg.check_config()
+                .unwrap_err()
+                .contains("not an executable file")
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ burrow-usage-reset = { path = "../burrow-usage-reset" }
 burrow-events = { path = "../burrow-events" }
 burrow-watchdog = { path = "../burrow-watchdog" }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
-rustix = { version = "1.1.6", features = ["process", "fs"] }
+rustix = { version = "1.1.6", features = ["process", "fs", "net"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

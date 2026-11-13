@@ -20,7 +20,9 @@ mod stream;
 pub use command::{LONG, NEXT, exec_claude, exec_codex, spawn};
 pub use handoff::first_prompt;
 pub(crate) use role::route;
-pub use stream::{Said, answer, last_result, names_session, stream_names_session, stream_tail};
+pub use stream::{
+    Said, answer, last_result, names_session, results, stream_names_session, stream_tail,
+};
 
 #[derive(
     Clone,

@@ -169,6 +169,7 @@ pub mod engine;
 pub mod github;
 pub mod github_quota;
 pub mod guest;
+pub mod host_jobs;
 pub mod inbox;
 pub mod job;
 pub mod pick;
