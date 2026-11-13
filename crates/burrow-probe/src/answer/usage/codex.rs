@@ -41,9 +41,10 @@ pub fn decode(
     let mut report = Report::new(identity);
     report.unpriced = true;
     let mut thread = identity.to_owned();
-    // A turn under way, not yet completed.
-    let mut open = false;
-    let mut any = false;
+    // `live`: an invocation (from its host boundary or its turn.started)
+    // that has neither completed nor failed; `started`: its turn.started
+    // was seen; `seen`: any invocation at all.
+    let (mut live, mut started, mut seen) = (false, false, false);
     for v in records {
         match v["type"].as_str().unwrap_or_default() {
             "thread.started" => {
@@ -51,25 +52,39 @@ pub fn decode(
                     thread = id.into();
                 }
             }
-            // A new run, or a new turn, while one is still open: that one
-            // ended without its total.
-            kind @ ("burrow.run" | "turn.started") => {
-                if open {
+            // A new invocation while one is still live: that one ended
+            // without its total.
+            "burrow.run" => {
+                if live {
                     gap(&thread, threads, &mut report);
                 }
-                open = kind == "turn.started";
+                (live, started, seen) = (true, false, true);
+            }
+            // The live invocation's own turn, unless it has one already.
+            "turn.started" => {
+                if live && started {
+                    gap(&thread, threads, &mut report);
+                }
+                (live, started, seen) = (true, true, true);
             }
             "turn.failed" => {
                 gap(&thread, threads, &mut report);
-                open = false;
+                (live, started, seen) = (false, false, true);
             }
             "turn.completed" => {
-                any = true;
-                open = false;
+                (live, started, seen) = (false, false, true);
                 let usage = &v["usage"];
                 let total = FIELDS.map(|k| usage[k].as_u64().unwrap_or(0));
+                // Cache writes are optional; the other counters are not.
+                let complete = usage.is_object()
+                    && FIELDS
+                        .iter()
+                        .filter(|k| **k != "cache_write_input_tokens")
+                        .all(|k| usage[*k].is_u64())
+                    && (usage["cache_write_input_tokens"].is_null()
+                        || usage["cache_write_input_tokens"].is_u64());
                 let previous = threads.entry(thread.clone()).or_default();
-                if usage.is_object() && total.iter().zip(previous.total).all(|(t, p)| *t >= p) {
+                if complete && total.iter().zip(previous.total).all(|(t, p)| *t >= p) {
                     let d: [u64; 4] = std::array::from_fn(|i| total[i] - previous.total[i]);
                     let [input, cached, written, output] = d;
                     report.tokens[0] += input.saturating_sub(cached + written);
@@ -80,15 +95,15 @@ pub fn decode(
                     report.recovered.append(&mut previous.gaps);
                     previous.total = total;
                 } else {
-                    // A missing or regressed total never erases the last
-                    // trustworthy one.
+                    // A missing, partial or regressed total never erases the
+                    // last trustworthy one.
                     gap(&thread, threads, &mut report);
                 }
             }
             _ => {}
         }
     }
-    if open || !any {
+    if live || !seen {
         gap(&thread, threads, &mut report);
     }
     report

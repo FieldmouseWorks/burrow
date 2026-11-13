@@ -160,3 +160,78 @@ fn a_stream_with_no_total_is_partial() {
     );
     assert!(failed.tokens_partial);
 }
+#[test]
+fn each_unreported_invocation_is_counted_once() {
+    let started = || json!({"type":"turn.started"});
+    let host = || json!({"type":"burrow.run","at":1});
+    let failed = || json!({"type":"turn.failed","error":{"message":"x"}});
+    let count = |records: Vec<Value>| {
+        let mut threads = BTreeMap::new();
+        decode(records.into_iter(), &mut threads, "t").missing.len()
+    };
+    // A failure is one gap, not another at EOF.
+    assert_eq!(count(vec![host(), started(), failed()]), 1);
+    // A retry dying before turn.started, after a completed run.
+    let mut v = run("t", completed(1, 0, 1));
+    v.push(host());
+    assert_eq!(count(v), 1);
+    // Failed, then a retry killed mid-turn: two runs, two gaps.
+    assert_eq!(
+        count(vec![host(), started(), failed(), host(), started()]),
+        2
+    );
+    // The host marker and its turn.started are one invocation.
+    assert_eq!(count(vec![host(), started()]), 1);
+    // A run killed before its turn, then a retry that completes.
+    let mut v = vec![host()];
+    v.extend(run("t", completed(1, 0, 1)));
+    assert_eq!(count(v), 1);
+}
+#[test]
+fn an_incomplete_usage_object_is_no_total() {
+    let mut threads = BTreeMap::new();
+    decode(
+        run("t", completed(100, 0, 10)).into_iter(),
+        &mut threads,
+        "turn-1",
+    );
+    // A killed run leaves a gap that an incomplete total must not recover.
+    let killed = decode(
+        vec![
+            json!({"type":"burrow.run"}),
+            json!({"type":"thread.started","thread_id":"t"}),
+            json!({"type":"turn.started"}),
+        ]
+        .into_iter(),
+        &mut threads,
+        "turn-2",
+    );
+    for (i, usage) in [
+        json!({}),
+        json!({"input_tokens":500,"output_tokens":50}),
+        json!({"input_tokens":"500","cached_input_tokens":0,"output_tokens":50}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = decode(
+            run("t", json!({"type":"turn.completed","usage":usage})).into_iter(),
+            &mut threads,
+            &format!("bad-{i}"),
+        );
+        assert_eq!(r.tokens, [0; 4]);
+        assert!(r.tokens_partial && r.recovered.is_empty());
+    }
+    // Zero cache writes may be omitted; the baseline survived.
+    let ok = decode(
+        run(
+            "t",
+            json!({"type":"turn.completed","usage":{"input_tokens":130,"cached_input_tokens":0,"output_tokens":13}}),
+        )
+        .into_iter(),
+        &mut threads,
+        "turn-3",
+    );
+    assert_eq!(ok.tokens, [30, 3, 0, 0]);
+    assert!(ok.recovered.is_superset(&killed.missing));
+}
