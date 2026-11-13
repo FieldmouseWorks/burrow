@@ -87,6 +87,8 @@ let
     waitingOwnerLabel = "waiting: ${config.burrow.owner}";
     needsOwnerLabel = config.burrow.autoland.labels.owner or cfg.inbox.triage.ownerLabel;
     probe = config.burrow.probe.settings;
+    unitsClearSocket = if config.burrow.watchdog.units.enable or false
+      then config.burrow.watchdog.units.clearSocket else null;
     wake = watchWake;
     waits = if watchdog then waits else null;
     inherit inboxMark pipelineRepos leadRepos;

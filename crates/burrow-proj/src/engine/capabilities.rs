@@ -23,6 +23,7 @@ pub enum Capability {
     Toolchains,
     System,
     Probe,
+    UnitsClear,
     Github,
     Heavy,
     Nix,
@@ -204,6 +205,13 @@ pub fn resolve(
         ),
         Grant::new(Capability::Probe, vec![]),
         Grant::new(
+            Capability::UnitsClear,
+            cfg.units_clear_socket
+                .iter()
+                .map(|p| (p.clone(), false))
+                .collect(),
+        ),
+        Grant::new(
             Capability::Github,
             github.into_iter().map(|p| (p, false)).collect(),
         ),
@@ -284,6 +292,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         cfg.jobs = dir.path().join("jobs");
+        cfg.units_clear_socket = Some(dir.path().join("units/clear.sock"));
         cfg.tools.git = "git".into();
         let project = dir.path().join("project");
         let socket = dir.path().join("server-socket");
@@ -346,6 +355,14 @@ mod tests {
         assert!(profile.contains(&format!("\"{}\"=\"read\"", socket.display())));
         assert!(profile.contains(&format!("\"{}\"=\"write\"", output.display())));
         assert!(profile.contains(r#""/dev/kvm"="write""#));
+        let clear_socket = cfg.units_clear_socket.as_ref().unwrap();
+        assert!(profile.contains(&format!("\"{}\"=\"read\"", clear_socket.display())));
+        let clear = grants
+            .items
+            .iter()
+            .find(|g| g.capability == Capability::UnitsClear)
+            .unwrap();
+        assert_eq!(clear.paths, vec![(clear_socket.clone(), false)]);
         assert_eq!(grants.environment()["NIX_REMOTE"], "daemon");
         // Both adapters take their environment from the same resolved contract.
         let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
