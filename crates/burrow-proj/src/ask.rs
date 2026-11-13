@@ -228,6 +228,14 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     if crate::now() < q.due {
         return Ok(Some(q.due));
     }
+    // Admission may inspect another job under its lock. Do that before
+    // taking the registry, which that job may need to publish its question.
+    // Keep the admission result through acceptance instead of scanning again.
+    let capacity = if q.recommendation.one_way {
+        None
+    } else {
+        Some(crate::inbox::resumption::admission(cfg, job)?)
+    };
     // Decide and act under the registry: a join or merge that makes the group
     // one-way, or a restoration that moves its deadline, either lands first
     // and is read here, or finds this default accepted and its question retired.
@@ -292,7 +300,14 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             "No answer by {time}. Take your reversible recommended answer now: {}\n\nCarry out that default and say on the issue that you took it because the question timed out. Do not ask the same question again.",
             q.recommendation.default
         );
-        crate::turn::start_default(cfg, job.id, &prompt)?;
+        crate::turn::start_default(
+            cfg,
+            job.id,
+            &prompt,
+            capacity
+                .as_ref()
+                .ok_or("one-way question lost its policy")?,
+        )?;
         drop(registry);
     }
     Ok(None)

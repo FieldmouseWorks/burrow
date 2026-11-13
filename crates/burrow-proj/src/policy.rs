@@ -355,11 +355,10 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
-        let crate::inbox::resumption::Resume::Ready(_capacity) =
-            crate::inbox::resumption::admission(cfg, &job)?
-        else {
+        let capacity = crate::inbox::resumption::admission(cfg, &job)?;
+        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
             return Ok(());
-        };
+        }
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
@@ -400,7 +399,7 @@ fn reconcile_job(cfg: &Config, id: &str, release_generation: &Generation) -> Res
                     read(&job.path(&format!("prompt.{}", rec.turn))).unwrap_or_default()
                 )
             };
-            crate::turn::start_admitted(cfg, id, &prompt, rec.first, &_capacity)
+            crate::turn::start_admitted(cfg, id, &prompt, rec.first, &capacity)
         } else {
             Ok(())
         };

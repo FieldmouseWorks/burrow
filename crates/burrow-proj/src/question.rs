@@ -448,6 +448,42 @@ fn close_reason(job: &Job, turn: &str, latest: u64) -> String {
     }
 }
 
+/// New outbox records keep text structurally separate from rendered policy.
+/// A question can itself quote a policy paragraph without losing its words.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NoticeBody {
+    text: String,
+}
+
+impl NoticeBody {
+    fn original(job: &Job, turn: &str) -> Self {
+        let mut body = crate::engine::answer(&job.turn(turn, "jsonl"));
+        // Keep argv below Linux's per-argument limit, on a UTF-8 boundary.
+        if body.len() > 32_000 {
+            let mut at = 32_000;
+            while !body.is_char_boundary(at) {
+                at -= 1;
+            }
+            body.truncate(at);
+            body.push_str("\n[Full answer: proj log]");
+        }
+        Self {
+            text: format!(
+                "Job {} needs your answer. Reply with proj reply {}.\n\n{}",
+                job.id, job.id, body
+            ),
+        }
+    }
+
+    fn write(&self, path: &Path) -> Result<(), String> {
+        crate::state_reads::write(
+            path,
+            serde_json::to_string(self).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// Durable per-question outbox. An open is replayed idempotently because the
 /// notifier's zero exit is not delivery acknowledgement. A close is forgotten
 /// only when `pending` explicitly returns 1. Keys belong to turns, never reused
@@ -566,26 +602,9 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         // pass reconstructs the same operation, with the same idempotency key.
         let path = job.turn(&source, "question");
         if !path.exists() {
-            let mut body = crate::engine::answer(&job.turn(&source, "jsonl"));
-            // Keep argv below Linux's per-argument limit, on a UTF-8 boundary.
-            if body.len() > 32_000 {
-                let mut at = 32_000;
-                while !body.is_char_boundary(at) {
-                    at -= 1;
-                }
-                body.truncate(at);
-                body.push_str("\n[Full answer: proj log]");
-            }
             // The policy paragraph is not kept: each send renders the
             // effective one (below), which joins, merges and shifts change.
-            crate::state_reads::write(
-                &path,
-                format!(
-                    "Job {} needs your answer. Reply with proj reply {}.\n\n{}",
-                    job.id, job.id, body
-                ),
-            )
-            .map_err(|e| e.to_string())?;
+            NoticeBody::original(job, &source).write(&path)?;
         }
         crate::state_reads::write(job.path("open-question"), format!("{source}\n"))
             .map_err(|e| e.to_string())?;
@@ -677,10 +696,38 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
                     continue;
                 }
             };
+            let body = match serde_json::from_str::<NoticeBody>(&body) {
+                Ok(body) => body,
+                Err(e) if body.starts_with('{') => {
+                    errors.push(format!("unreadable question notice: {e}"));
+                    continue;
+                }
+                Err(_) => {
+                    // Upgrade a plain legacy entry once. The immediately
+                    // preceding writer also cached policy-free text: when
+                    // it matches the original, none of it is generated policy.
+                    let original = NoticeBody::original(job, turn);
+                    let known_original = body.strip_prefix(&original.text).is_some_and(|tail| {
+                        tail.is_empty() || crate::ask::without_policy(tail) != tail
+                    });
+                    let body = NoticeBody {
+                        text: if known_original {
+                            original.text
+                        } else {
+                            crate::ask::without_policy(&body).to_owned()
+                        },
+                    };
+                    if let Err(e) = body.write(&entry.path()) {
+                        errors.push(e);
+                        continue;
+                    }
+                    body
+                }
+            };
             let body = if active.as_deref() == Some(turn) {
-                format!("{}{policy}{footer}", crate::ask::without_policy(&body))
+                format!("{}{policy}{footer}", body.text)
             } else {
-                body
+                body.text
             };
             Command::new(notifier)
                 .args(["ensure", &key, "A project job needs an answer", &body])

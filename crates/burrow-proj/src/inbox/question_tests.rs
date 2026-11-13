@@ -143,6 +143,43 @@ fn writable_job_metadata_cannot_redirect_host_label_authority() {
 }
 
 #[test]
+fn damaged_registry_keeps_sorting_questions_from_becoming_verdicts() {
+    for keyed in [false, true] {
+        let b = Box::new();
+        let d = super::sorting_tests::sorting(&b, "ready\nUse this verdict only after an answer.");
+        let job = crate::job::Job::new(&b.cfg, "s1");
+        fs::write(job.turn("1", "end"), "ask\n").unwrap();
+        fs::write(job.path("owned"), "").unwrap();
+        crate::ask::record(
+            &job,
+            &crate::ask::Recommendation {
+                default: "ready".into(),
+                one_way: false,
+                about: keyed.then(|| "subject".into()),
+            },
+        )
+        .unwrap();
+        crate::ask::finish(&b.cfg, &job, "ask").unwrap();
+        let authority = crate::ask::control_root(&b.cfg).join(".about");
+        fs::create_dir_all(&authority).unwrap();
+        fs::write(authority.join("state.json"), "{broken").unwrap();
+        let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+        let mut pass = b.pass();
+        pass.verdicts("sam/box", &t, &[issue(7, "sam", &[])])
+            .unwrap();
+        assert!(
+            d.join("job").exists(),
+            "question was retired: keyed {keyed}"
+        );
+        assert!(!crate::scratch::over(&job));
+        assert!(!pass.wake.is_empty(), "retry was lost: keyed {keyed}");
+        assert!(!b.log().contains("labels[]=ready"), "{}", b.log());
+        assert!(!b.log().contains("state=closed"), "{}", b.log());
+        assert!(!b.posted().contains("Sorted:"), "{}", b.posted());
+    }
+}
+
+#[test]
 fn sorting_question_retains_deadline_scratch_and_uses_the_resumed_verdict() {
     let b = Box::new();
     let d = super::sorting_tests::sorting(&b, "Which release?");

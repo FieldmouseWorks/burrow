@@ -22,13 +22,13 @@ fn group_due(cfg: &Config, key: &str) -> i64 {
 }
 
 /// An accepted answer to `id`'s question whose cleanup never ran.
-fn accepted_unapplied(cfg: &Config, id: &str, named: bool) {
+fn accepted_unapplied(cfg: &Config, id: &str, named: bool, deadline: bool) {
     let job = Job::new(cfg, id);
     let question = named.then(|| about::question_id(&job));
     fs::write(
         host_path(&job, "resume-2"),
         serde_json::json!({
-            "through": 1, "answered": true, "clear": true, "deadline": false,
+            "through": 1, "answered": true, "clear": true, "deadline": deadline,
             "accepted": true, "applied": false, "question": question,
         })
         .to_string(),
@@ -155,21 +155,134 @@ fn a_default_waits_on_the_registry_and_takes_the_policy_it_has_then() {
 }
 
 #[test]
+fn default_admission_releases_the_registry_for_concurrent_publication() {
+    use std::fs::{OpenOptions, TryLockError};
+    use std::time::{Duration, Instant};
+
+    for upgrade in [false, true] {
+        for slots in [1, 4] {
+            let (dir, mut cfg) = fixture();
+            let inbox = cfg.inbox.as_mut().unwrap();
+            inbox.state = dir.path().join("inbox");
+            inbox.wake = dir.path().join("inbox-wake");
+            inbox.triage = Some(crate::config::Triage {
+                sort_unlabelled: true,
+                owner_label: "owner".into(),
+                owner: None,
+                skip: vec![],
+                at_once: slots,
+                drain: None,
+                drain_jobs: 4,
+            });
+            for id in ["a", "z"] {
+                asks(&cfg, id, Some("subject"), false);
+                let record = cfg.inbox.as_ref().unwrap().state.join(".triage").join(id);
+                fs::create_dir_all(&record).unwrap();
+                fs::write(record.join("job"), id).unwrap();
+            }
+            edit_group(&cfg, "subject", |g| g["due"] = (crate::now() - 1).into());
+            let other = Job::new(&cfg, "z");
+            let held = other.lock().unwrap();
+            let open_lock = |path| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .unwrap()
+            };
+            let authority = open_lock(registry(&cfg).with_file_name("lock"));
+            let admission = open_lock(dir.path().join("inbox-wake.lock"));
+            let running = std::thread::spawn({
+                let cfg = cfg.clone();
+                move || {
+                    let job = Job::new(&cfg, "a");
+                    let _held = job.lock().unwrap();
+                    expire(&cfg, &job)
+                }
+            });
+            // A blocked sorting scan must leave the registry available to
+            // the publisher holding the job it is inspecting. Observe the
+            // locks themselves, and release z even on the broken ordering.
+            let until = Instant::now() + Duration::from_secs(3);
+            let scans_first = loop {
+                match authority.try_lock() {
+                    Ok(()) => authority.unlock().unwrap(),
+                    Err(TryLockError::WouldBlock) => break false,
+                    Err(e) => panic!("{e}"),
+                }
+                match admission.try_lock() {
+                    Ok(()) => admission.unlock().unwrap(),
+                    Err(TryLockError::WouldBlock) => {
+                        // Both observations must describe the blocked scan:
+                        // it may have taken both locks between our probes.
+                        break match authority.try_lock() {
+                            Ok(()) => {
+                                authority.unlock().unwrap();
+                                true
+                            }
+                            Err(TryLockError::WouldBlock) => false,
+                            Err(e) => panic!("{e}"),
+                        };
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+                if Instant::now() >= until {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            if scans_first && upgrade {
+                // This publication can finish while z is locked, and its
+                // upgrade must bind the default after admission completes.
+                asks(&cfg, "upgrade", Some("subject"), true);
+            }
+            drop(held);
+            running.join().unwrap().unwrap();
+            assert!(
+                scans_first,
+                "default held the registry while scanning job locks"
+            );
+            let a = Job::new(&cfg, "a");
+            assert_eq!(a.turns().as_deref(), Some("2"));
+            if upgrade {
+                assert!(host_path(&a, "question-needs-owner").exists());
+                assert!(!a.path("prompt.2").exists());
+            } else {
+                assert!(
+                    read(&a.path("prompt.2"))
+                        .unwrap()
+                        .contains("Take your reversible")
+                );
+                assert!(load(&a).unwrap().is_none());
+                assert_eq!(crate::policy::parked(&a), slots == 1);
+            }
+        }
+    }
+}
+
+#[test]
 fn an_accepted_answer_retires_its_member_before_its_cleanup_runs() {
-    for named in [true, false] {
+    for (named, deadline, merging) in [true, false].into_iter().flat_map(|named| {
+        [true, false]
+            .into_iter()
+            .flat_map(move |deadline| [true, false].map(move |merging| (named, deadline, merging)))
+    }) {
         let (_dir, cfg) = fixture();
-        asks(&cfg, "old", Some("profile"), true);
+        asks(&cfg, "old", Some("profile"), !deadline);
         let past = crate::now() - 1;
         edit_group(&cfg, "profile", |g| g["due"] = past.into());
         let old = Job::new(&cfg, "old");
         // Answered and accepted; the process died before its cleanup.
-        accepted_unapplied(&cfg, "old", named);
+        accepted_unapplied(&cfg, "old", named, deadline);
         assert!(host_path(&old, "question").exists());
         assert!(load(&old).unwrap().is_none(), "named {named}");
         assert!(open(&old).unwrap().is_none(), "named {named}");
         // A new question on the subject starts a fresh group: its own
         // deadline and requirement, not the retired one's, and it leads.
-        asks(&cfg, "new", Some("profile"), false);
+        asks(&cfg, "new", (!merging).then_some("profile"), false);
+        if merging {
+            merge(&cfg, "profile", &["new".into()]).unwrap();
+        }
         let new = Job::new(&cfg, "new");
         let q = load(&new).unwrap().unwrap();
         assert!(!q.recommendation.one_way, "named {named}");
@@ -200,6 +313,40 @@ fn an_accepted_answer_retires_its_member_before_its_cleanup_runs() {
         follows(&Job::new(&cfg, "new")).unwrap().as_deref(),
         Some("old")
     );
+}
+
+#[test]
+fn independently_paused_members_keep_their_remaining_time_after_failed_restoration() {
+    let (_dir, cfg) = fixture();
+    for id in ["a", "b"] {
+        asks(&cfg, id, Some("subject"), false);
+    }
+    let due = group_due(&cfg, "subject");
+    let now = crate::now();
+    let mut a = park(&cfg, "a", now - 600, Some(due));
+    let mut b = park(&cfg, "b", now - 900, Some(due));
+    let a_job = Job::new(&cfg, "a");
+    let b_job = Job::new(&cfg, "b");
+    crate::policy::shift_waits(&a_job, &mut a).unwrap();
+    let blocked = registry(&cfg).with_file_name("state.json.new");
+    fs::create_dir(&blocked).unwrap();
+    let before = serde_json::to_string(&b).unwrap();
+    assert!(crate::policy::shift_waits(&b_job, &mut b).is_err());
+    assert_eq!(serde_json::to_string(&b).unwrap(), before);
+    fs::remove_dir(blocked).unwrap();
+    for _ in 0..2 {
+        crate::policy::shift_waits(&b_job, &mut b).unwrap();
+        let effective = load(&b_job).unwrap().unwrap().due;
+        assert!((due + 900..=due + 905).contains(&effective));
+    }
+    // A later, separate pause extends from the deadline then in force.
+    let effective = load(&a_job).unwrap().unwrap().due;
+    a = park(&cfg, "a", crate::now() - 300, Some(effective));
+    crate::policy::shift_waits(&a_job, &mut a).unwrap();
+    crate::cmd::stop(&cfg, "a", false).unwrap();
+    merge(&cfg, "moved", &["b".into()]).unwrap();
+    let moved = load(&b_job).unwrap().unwrap().due;
+    assert!((effective + 300..=effective + 305).contains(&moved));
 }
 
 fn park(cfg: &Config, id: &str, at: i64, due: Option<i64>) -> crate::policy::Park {
@@ -310,7 +457,10 @@ fn every_send_of_a_notice_says_the_policy_it_has_now_once() {
     // A notice cached with its policy (as before) keeps its text and says
     // only the current policy.
     let cached = Job::new(&cfg, "j1").turn("1", "question");
-    let legacy = format!("{}{}", fs::read_to_string(&cached).unwrap(), first.notice());
+    let legacy = format!(
+        "Job j1 needs your answer. Reply with proj reply j1.\n\nMay j1 edit the profile?{}",
+        first.notice()
+    );
     fs::write(&cached, legacy).unwrap();
     notified(&cfg, &["j1"]);
     let body = last_ensure(&dir, "proj-question-j1-1");
@@ -336,6 +486,104 @@ fn every_send_of_a_notice_says_the_policy_it_has_now_once() {
     let body = last_ensure(&dir, "proj-question-r-1");
     assert_eq!(body.matches("This is one-way").count(), 1, "{body}");
     assert!(body.contains(&burrow_probe::answer::utc(q.due)), "{body}");
+}
+
+#[test]
+fn notices_refresh_after_joins_pause_restoration_handover_and_moves() {
+    let (dir, cfg) = fixture();
+    asks(&cfg, "a", Some("subject"), false);
+    notified(&cfg, &["a"]);
+    asks(&cfg, "b", Some("subject"), true);
+    let a = Job::new(&cfg, "a");
+    let before = load(&a).unwrap().unwrap().due;
+    let mut rec = park(&cfg, "a", crate::now() - 600, Some(before));
+    crate::policy::shift_waits(&a, &mut rec).unwrap();
+    let shifted = load(&a).unwrap().unwrap().due;
+    let check = |id: &str, due: i64| {
+        notified(&cfg, &[id]);
+        let body = last_ensure(&dir, &format!("proj-question-{id}-1"));
+        assert!(
+            body.contains(&format!("May {id} edit the profile?")),
+            "{body}"
+        );
+        assert!(body.contains(&burrow_probe::answer::utc(due)), "{body}");
+        assert_eq!(body.matches("Without an answer by").count(), 1, "{body}");
+        assert_eq!(body.matches("This is one-way").count(), 1, "{body}");
+    };
+    check("a", shifted);
+    crate::cmd::stop(&cfg, "a", false).unwrap();
+    check("b", shifted);
+    merge(&cfg, "fresh", &["b".into()]).unwrap();
+    check("b", shifted);
+    // A legacy released publication has no saved question-released record.
+    let b = Job::new(&cfg, "b");
+    edit_group(&cfg, "fresh", |g| g["due"] = (crate::now() - 1).into());
+    let due = load(&b).unwrap().unwrap().due;
+    {
+        let _held = b.lock().unwrap();
+        expire(&cfg, &b).unwrap();
+    }
+    fs::remove_file(host_path(&b, "question-released")).unwrap();
+    // Legacy identity was allocated from the retained owner marker. Move
+    // that publication into a group before rendering the released notice.
+    merge(&cfg, "legacy release", &["b".into()]).unwrap();
+    check("b", due);
+}
+
+#[test]
+fn refreshing_notice_policy_keeps_policy_shaped_original_question_text() {
+    let (dir, cfg) = fixture();
+    asks(&cfg, "a", Some("subject"), false);
+    let a = Job::new(&cfg, "a");
+    let mut quoted = load(&a).unwrap().unwrap();
+    quoted.due -= 3600;
+    let original = format!("Is this wording accurate?{}", quoted.notice());
+    fs::write(
+        a.turn("1", "jsonl"),
+        serde_json::json!({"type":"result", "result":original, "is_error":false}).to_string(),
+    )
+    .unwrap();
+    fs::write(host_path(&a, "question-text"), &original).unwrap();
+    // New, retained, and both earlier plain formats preserve all the text.
+    for mode in ["fresh", "resend", "legacy", "legacy-policy"] {
+        if mode.starts_with("legacy") {
+            let path = a.turn("1", "question");
+            let cached: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let mut text = cached["text"].as_str().unwrap().to_owned();
+            if mode == "legacy-policy" {
+                // The old generated paragraph's default can itself quote
+                // policy; all of it belongs after the complete original.
+                quoted.recommendation.default.push_str(&quoted.notice());
+                text.push_str(&quoted.notice());
+            }
+            fs::write(path, text).unwrap();
+        }
+        notified(&cfg, &["a"]);
+        let body = last_ensure(&dir, "proj-question-a-1");
+        assert!(
+            body.contains(&original),
+            "original text was removed: {body}"
+        );
+        assert_eq!(body.matches("Without an answer by").count(), 2, "{body}");
+    }
+}
+
+#[test]
+fn a_damaged_structured_notice_retries_without_sending_its_serialized_state() {
+    let (dir, cfg) = fixture();
+    asks(&cfg, "a", None, false);
+    notified(&cfg, &["a"]);
+    let a = Job::new(&cfg, "a");
+    let path = a.turn("1", "question");
+    let cached = fs::read(&path).unwrap();
+    let before = calls(&dir);
+    fs::write(&path, "{damaged").unwrap();
+    assert!(crate::question::notify(&cfg, &a).is_err());
+    assert_eq!(calls(&dir), before);
+    fs::write(&path, cached).unwrap();
+    notified(&cfg, &["a"]);
+    assert!(last_ensure(&dir, "proj-question-a-1").contains("May a edit the profile?"));
 }
 
 #[test]
