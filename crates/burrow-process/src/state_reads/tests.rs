@@ -131,7 +131,9 @@ fn quarantine_primitives_refuse_planted_links_and_stay_beneath_their_pins() {
     let moved = job.join(".unstarted").join(&name);
     fs::rename(&moved, job.join(".unstarted").join("gone")).unwrap();
     symlink(&host, &moved).unwrap();
-    pinned.rename_into("2.result", &attempt, "2.result").unwrap();
+    pinned
+        .rename_into("2.result", &attempt, "2.result")
+        .unwrap();
     assert_eq!(fs::read_dir(&host).unwrap().count(), 0);
     assert!(job.join(".unstarted/gone/2.result").exists());
     assert!(pinned.rename_into("../x", &attempt, "y").is_err());
@@ -175,7 +177,10 @@ fn mutation_helpers_reject_nested_names_and_leave_denied_host_state_untouched() 
     assert!(root.rename_into("mine", &other, "link/moved").is_err());
     assert!(root.rename_into("mine", &other, "a/b").is_err());
 
-    let names: Vec<_> = fs::read_dir(&denied).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let names: Vec<_> = fs::read_dir(&denied)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
     assert_eq!(names, ["victim"]);
     assert_eq!(fs::read(denied.join("victim")).unwrap(), b"keep");
     assert!(job.join("mine").exists());
