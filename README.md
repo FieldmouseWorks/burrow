@@ -236,6 +236,16 @@ Each has an entry below, and each can be imported on its own.
   the preceding turns' questions and answers.
   The deliberate authorship exception: a Codex-written head is judged by
   Claude, so its author never grades its own head.
+  Local jobs inspect and recover other host jobs with the ordinary
+  `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop` and `withdraw`
+  commands through a per-turn host socket. The broker keeps host paths,
+  configuration and credentials outside the command sandbox, validates the
+  recovery arguments and scrubs both output streams of what it sends back;
+  the host's own commands, and the answers it stores, posts and hands on,
+  are never redacted. A recovery reply retains
+  open owner questions. Missing host access is an explicit error, rather than
+  a claim that another job has no history. VM jobs have only the read-only
+  probe mailbox and local lifecycle declarations.
   The [front door](docs/front-door.md#jobs-the-inbox-nothing-to-approve)
   says which label fits which work.
   Retained retries follow the deployed scheduler too;
