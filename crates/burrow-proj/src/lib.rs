@@ -180,6 +180,7 @@ mod question;
 pub mod retry;
 mod roles;
 pub mod scratch;
+pub mod select;
 pub mod settings;
 pub mod setups;
 pub mod slot;
