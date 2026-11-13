@@ -7,7 +7,6 @@ mod memory;
 mod negative;
 mod plan;
 mod snapshot;
-mod wait;
 
 use std::{
     env, fs,
@@ -172,9 +171,10 @@ fn main() {
         }
     }
     // The wait step runs its own plan and prints to the step's log.
-    if mode == "wait" {
-        match wait::wait() {
-            Ok(_) => return,
+    if mode == "cold" {
+        match gate::plan() {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(1);

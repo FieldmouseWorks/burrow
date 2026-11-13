@@ -120,16 +120,20 @@ fn announce_cold(targets: &[String]) -> Vec<String> {
     }
     names
 }
+pub fn plan(targets: &[String]) -> Result<()> {
+    let cold = if targets.is_empty() {
+        Vec::new()
+    } else {
+        announce_cold(targets)
+    };
+    fs::write(temp().join("cold.txt"), cold.join("\n"))?;
+    Ok(())
+}
 pub fn checks(link: Option<&Path>, targets: &[String], roots: &Path) -> Result<bool> {
     if targets.is_empty() {
         return Ok(true);
     }
-    let cold = announce_cold(targets);
-    // The wait step (wait.rs) only plans: it says what is cold and stops.
-    if env::var_os("COLD_ONLY").is_some() {
-        fs::write(temp().join("cold.txt"), cold.join("\n"))?;
-        return Ok(true);
-    }
+    announce_cold(targets);
     let args = |ts: &[String], vm: bool| {
         let mut a = vec!["build".to_owned(), "-L".into()];
         if let Some(p) = link {

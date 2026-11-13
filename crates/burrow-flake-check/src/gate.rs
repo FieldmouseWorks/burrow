@@ -1,6 +1,26 @@
 //! Gate planning, per-output evaluation and whole-flake verification.
 use super::plan::PLAN;
 use super::*;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Plan,
+    Build,
+}
+impl Mode {
+    fn evaluation(self, mut command: Command) -> Command {
+        if self == Self::Plan {
+            // Even evaluation can build through import-from-derivation.
+            command.env(
+                "NIX_CONFIG",
+                format!(
+                    "{}\nallow-import-from-derivation = false",
+                    var("NIX_CONFIG")
+                ),
+            );
+        }
+        command
+    }
+}
 fn plan_args(url: &str, system: &str, skip: &str) -> Vec<String> {
     vec![
         "--option".into(),
@@ -24,8 +44,8 @@ fn plan_args(url: &str, system: &str, skip: &str) -> Vec<String> {
         ),
     ]
 }
-fn evaluate(flake: &Path, system: &str, entry: &str) -> Command {
-    cmd(
+fn evaluate(flake: &Path, system: &str, entry: &str, mode: Mode) -> Command {
+    mode.evaluation(cmd(
         "nix",
         &[
             "eval",
@@ -38,9 +58,9 @@ fn evaluate(flake: &Path, system: &str, entry: &str) -> Command {
             "--json",
             &format!("{}#.", s(flake)),
         ],
-    )
+    ))
 }
-fn apart(skip: &str, legs: usize, leg: usize) -> Result<bool> {
+fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
     let system = system()?;
     let work = Work::new("eval-apart")?;
     let work = &work.0;
@@ -55,7 +75,7 @@ fn apart(skip: &str, legs: usize, leg: usize) -> Result<bool> {
         checked(cmd("cp", &["-a", ".", s(&source)]))?;
         source
     };
-    if string(cmd(
+    if string(mode.evaluation(cmd(
         "nix-instantiate",
         &[
             "--eval",
@@ -65,13 +85,13 @@ fn apart(skip: &str, legs: usize, leg: usize) -> Result<bool> {
             "--expr",
             "{ f }: (import f) ? nixConfig",
         ],
-    ))? == "true"
+    )))? == "true"
     {
         return Err(err(
             "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole `nix flake check`, without eval-apart.",
         ));
     }
-    let plan = checked(evaluate(&flake, &system, ""))?;
+    let plan = checked(evaluate(&flake, &system, "", mode))?;
     fs::write(temp().join("plan.json"), &plan)?;
     if jq(&plan, ".other | length")? != "0" {
         return Err(err(format!(
@@ -115,7 +135,7 @@ fn apart(skip: &str, legs: usize, leg: usize) -> Result<bool> {
         let what = jq(entry.as_bytes(), ".what")?;
         let mut log = format!("evaluating {what}\n");
         let result = (|| -> Result<Option<String>> {
-            let o = output(evaluate(&flake, &system, &format!("entry = {i};")))?;
+            let o = output(evaluate(&flake, &system, &format!("entry = {i};"), mode))?;
             log.push_str(&String::from_utf8_lossy(&o.stderr));
             if !o.status.success() {
                 return Err(err("evaluation failed"));
@@ -151,9 +171,15 @@ fn apart(skip: &str, legs: usize, leg: usize) -> Result<bool> {
             Err(_) => ok = false,
         }
     }
-    Ok(build::checks(None, &targets, &roots)? && ok)
+    Ok(match mode {
+        Mode::Plan => {
+            build::plan(&targets)?;
+            true
+        }
+        Mode::Build => build::checks(None, &targets, &roots)?,
+    } && ok)
 }
-fn whole(skip: &str) -> Result<bool> {
+fn whole(skip: &str, mode: Mode) -> Result<bool> {
     let work = Work::new("roots")?;
     let roots = &work.0;
     let mut failed = false;
@@ -164,13 +190,18 @@ fn whole(skip: &str) -> Result<bool> {
         let args = plan_args(&url, &system()?, skip);
         let mut c = cmd("nix-instantiate", &["--eval", "--strict", "--json"]);
         c.args(&args);
-        let plan = checked(c)?;
+        let plan = checked(mode.evaluation(c))?;
         fs::write(temp().join("plan.json"), &plan)?;
         if jq(&plan, ".nixConfig")? == "true" {
             return Err(err("flake has nixConfig"));
         }
         Ok(args)
     })();
+    // A planner cannot use the gate's build-capable fallbacks. Leave a
+    // failed plan (including nixConfig) to the actual gate.
+    if mode == Mode::Plan && plan.is_err() {
+        return Err(plan.unwrap_err());
+    }
     if let Ok(args) = plan {
         let mut c = cmd(
             "nix-instantiate",
@@ -183,12 +214,16 @@ fn whole(skip: &str) -> Result<bool> {
             ],
         );
         c.args(args);
-        let o = output(c)?;
+        let o = output(mode.evaluation(c))?;
         if o.status.success() {
             let mut targets = Vec::new();
             for r in String::from_utf8(o.stdout)?.lines() {
                 let r = r.split('!').next().unwrap();
                 targets.push(format!("{}^*", s(&fs::read_link(r)?)));
+            }
+            if mode == Mode::Plan {
+                build::plan(&targets)?;
+                return Ok(true);
             }
             if build::checks(Some(&roots.join("out")), &targets, roots)? {
                 built = true;
@@ -203,6 +238,9 @@ fn whole(skip: &str) -> Result<bool> {
             show(&o)?;
             failed = true;
         }
+    }
+    if mode == Mode::Plan {
+        return Ok(false);
     }
     if skip.is_empty() {
         let ok = if built {
@@ -258,6 +296,13 @@ fn whole(skip: &str) -> Result<bool> {
     Ok(build::slot(&refs)? && !failed)
 }
 pub fn gate() -> Result<bool> {
+    check(Mode::Build)
+}
+pub fn plan() -> Result<bool> {
+    fs::write(temp().join("cold.txt"), "")?;
+    check(Mode::Plan)
+}
+fn check(mode: Mode) -> Result<bool> {
     let legs = var("LEGS");
     let leg = var("LEG");
     let parse = |v: &str| {
@@ -281,8 +326,8 @@ pub fn gate() -> Result<bool> {
         ));
     }
     if var("APART") == "true" {
-        apart(&var("SKIP"), legs, leg)
+        apart(&var("SKIP"), legs, leg, mode)
     } else {
-        whole(&var("SKIP"))
+        whole(&var("SKIP"), mode)
     }
 }

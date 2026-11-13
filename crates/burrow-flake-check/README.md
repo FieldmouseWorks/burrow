@@ -5,7 +5,7 @@ workflow's evaluation, build scheduling, checkout snapshots and negative
 classification. The workflow's `.github/flake-check/*.sh` files only bootstrap
 it. `plan.rs` owns the Nix expression used to plan and evaluate outputs.
 
-The runner has no Rust dependencies. It uses the workflow's existing `jq`
+The gate and negative runner have no Rust dependencies. It uses the workflow's existing `jq`
 for JSON, and invokes git, Nix and, where installed, heavy. Each evaluation
 has its own Nix process; evaluations finish and derivations are rooted before
 builds start. A negative evaluation failure must repeat in a private local
@@ -29,7 +29,7 @@ and paths-only runs require Nix: the negative job now installs it before its
 path filter. Kept-build restores remain conditional on needing a negative;
 compiler provisioning does not query that cache before it has been restored.
 
-The earlier 16–20 second hosted Cargo build remains avoided. The bootstrap
+The earlier 16–20 second hosted Cargo build remains avoided for gate and negative runs. The bootstrap
 reports toolchain provisioning and direct compilation separately. A real run
 with broken ambient `rustc` and `cc` commands took 1 second for provisioning
 and 2 seconds for compilation with the compiler already in the local store.
@@ -54,3 +54,28 @@ No runner executable is reused between invocations.
 The behavioral tests live in `burrow-workflows/src/gate`: they run the workflow's
 own steps with real git and Nix evaluation, including the private-store retry,
 base failures, fetches, signals, VM slots, memory limits and test coverage.
+
+## Waiting for kept builds
+
+On a same-repository PR that missed its exact base cache, `run.sh wait`
+first runs the planner (`cold`) with its own Nix cache. The planner writes
+`cold.txt` and returns before builds in either evaluation mode, including
+whole-flake fallback paths. A plan it cannot safely produce is left to the
+real gate; `COLD_ONLY` no longer controls the gate's build policy.
+
+The API waiter is a separate Cargo binary, `burrow-flake-wait`, using
+`burrow-github` for requests, retries, pagination and URL encoding. The wait
+bootstrap builds it with the same pinned compiler and lock file, in a fresh
+private target directory; wait steps pay this dependency build cost and
+registry access. Gate and negative runs retain the direct compilation path.
+Only an unfinished push of the same workflow at the merged base's exact SHA
+on the default branch justifies waiting. Every poll reads status before the
+exact cache lookup, including after a failed producer run or completion
+during planning. No matching run and no saved cache ends the wait promptly;
+a running producer is bounded by `WAIT_MAX` (3600 seconds by default).
+
+The job inherits the caller's token permissions. Shipped callers grant
+`actions: read` for both runs and caches, including in private repositories;
+existing callers without it still run the gate and report a soft wait
+failure when GitHub denies an API read. A saved cache is restored with its
+exact key before the gate runs.

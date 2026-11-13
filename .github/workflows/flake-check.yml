@@ -8,7 +8,7 @@
 # be split across legs, each on a runner of its own, and then attested
 # together by one more job. Called from a repo's own
 # workflow with `uses:`, whose job grants `id-token: write` and
-# `attestations: write` (a called job gets no more than its caller gives). Its
+# `attestations: write`; `actions: read` also enables kept-build waiting. Its
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
 #
@@ -290,12 +290,11 @@ jobs:
       leg-6: ${{ steps.leg.outputs.leg-6 }}
       leg-7: ${{ steps.leg.outputs.leg-7 }}
       leg-8: ${{ steps.leg.outputs.leg-8 }}
-    permissions:
-      contents: read
-      # The attestation: a GitHub OIDC token to sign it with, and the API
-      # that keeps it.
-      id-token: write
-      attestations: write
+    # Inherit the caller's permissions here: a job map would set an omitted
+    # actions permission to none. Explicitly requesting actions: read would
+    # instead reject existing callers that do not grant that optional scope.
+    # Callers grant contents: read, id-token: write and attestations: write;
+    # actions: read enables the waiter's runs and caches reads in private repos.
     steps:
       - &checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -385,18 +384,18 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/flake-check
-            crates/burrow-flake-check
+            crates
       # keep-builds, on a PR: a leg that would compile something cold while
       # the push to the default branch it is merged onto is still building
       # (and will keep) it waits for that push's kept builds and restores them,
       # rather than build the same thing in parallel (#863). Only a push to
       # the default branch saves where a PR can read, so this is the one
-      # place a derivation is built once per change of its inputs. It plans
+      # source this wait can share. It plans
       # as the gate does, stopped before building, with a nix cache of its
       # own so the substituter's misses it saw aren't remembered by the gate.
-      # It reads the runs and caches APIs, so a caller that grants `actions:
-      # read` gets the wait; without it the step fails softly and the leg
-      # builds cold, as before.
+      # The token inherits actions: read when the caller grants it. Missing
+      # permission or other runtime API errors fail this step softly and
+      # leave the gate to build cold.
       - id: kept-wait
         name: soft/kept-wait
         if: ${{ inputs.keep-builds && inputs.install-nix && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.kept-restore.outputs.cache-hit != 'true' }}
@@ -409,7 +408,6 @@ jobs:
           LEGS: ${{ inputs.legs }}
           LEG: ${{ matrix.leg }}
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
-          COLD_ONLY: '1'
           XDG_CACHE_HOME: ${{ runner.temp }}/kept-wait-cache
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
@@ -550,8 +548,8 @@ jobs:
       # failed, and a red default branch that kept nothing left every later
       # leg to build cold (#812). A failed check leaves no output, so the
       # gate stays red. A leg that starts while a push is still building
-      # takes what the push before it kept rather than wait for it: waiting
-      # would hold a runner doing nothing, when runners are what ran out.
+      # first restores what the push before it kept, then waits for the
+      # exact base push's save if it would otherwise compile cold.
       # What crates/burrow-keep says, told how the gate went, in place of
       # the kept builds it restored and under the path it restored them to
       # (the cache keeps what it saves for a restore of the same path only).

@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "burrow-flake-check"
+
+[[bin]]
+name = "burrow-flake-wait"
+path = "src/wait.rs"
+
+[dependencies]
+burrow-github = { path = "../burrow-github" }
+serde_json.workspace = true
 
 [lints]
 workspace = true

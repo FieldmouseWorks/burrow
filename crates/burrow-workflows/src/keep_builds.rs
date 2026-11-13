@@ -13,7 +13,7 @@
 use yaml_serde::Value;
 
 use crate::expr::{Ctx, V, condition, value};
-use crate::harness::{repo_file, script, steps, text, workflow, yaml};
+use crate::harness::{repo_file, script, step, steps, text, workflow, yaml};
 
 fn job() -> Value {
     workflow(".github/workflows/flake-check.yml")["jobs"]["check"].clone()
@@ -348,4 +348,40 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("pull_request", "o/r", "true")));
     assert!(!on(&c("pull_request", "someone/r", "")));
     assert!(!on(&c("push", "", "")));
+}
+
+#[test]
+fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
+    let check = job();
+    assert!(
+        check.get("permissions").is_none(),
+        "inherit the caller token, including optional actions access"
+    );
+    assert_eq!(
+        step(&check, "kept-wait")["env"]["GH_TOKEN"],
+        "${{ github.token }}"
+    );
+    for path in [
+        ".github/workflows/flake.yml",
+        ".github/workflows/flake-retarget.yml",
+        "templates/project/.github/workflows/flake.yml",
+        "templates/project/.github/workflows/flake-retarget.yml",
+    ] {
+        let wf = workflow(path);
+        for (name, job) in wf["jobs"].as_mapping().unwrap() {
+            if job["uses"]
+                .as_str()
+                .is_some_and(|u| u.contains("/flake-check.yml"))
+            {
+                for (scope, level) in [
+                    ("actions", "read"),
+                    ("contents", "read"),
+                    ("id-token", "write"),
+                    ("attestations", "write"),
+                ] {
+                    assert_eq!(job["permissions"][scope], level, "{path} {name:?}: {scope}");
+                }
+            }
+        }
+    }
 }

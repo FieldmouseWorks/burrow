@@ -34,6 +34,7 @@ mod legs;
 mod negative;
 mod outputs;
 mod slots;
+mod waiting;
 mod whole;
 
 /// What the stand-ins keep beside their log, `nix.log`, cleared before
@@ -491,7 +492,7 @@ fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
         tools["with"],
         crate::harness::yaml(
             "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
-             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates/burrow-flake-check\\n\"}"
+             path: .flake-check, persist-credentials: false, sparse-checkout: \".github/flake-check\\ncrates\\n\"}"
         )
     );
     assert!(tools.get("if").is_none(), "{tools:?}");
