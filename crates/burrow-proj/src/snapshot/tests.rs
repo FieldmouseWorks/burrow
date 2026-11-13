@@ -585,6 +585,9 @@ fn items_report_the_stage_the_steward_saved() {
 
     let mut cfg: Config = serde_json::from_value(example()).unwrap();
     cfg.steward_state = Some(dir.path().to_owned());
+    // The example's jobs dir is this machine's: the snapshot makes it, so a
+    // sandboxed test can't have it.
+    cfg.jobs = dir.path().join("jobs");
     let found = items(&cfg, 2000);
     assert_eq!(found.len(), stages.len() + 1);
     assert_eq!(found[0].stage, None);
