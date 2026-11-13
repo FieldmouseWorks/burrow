@@ -49,6 +49,23 @@ impl live::Document for Overlay {
     fn receipts(&mut self) -> &mut BTreeMap<String, String> {
         &mut self.receipts
     }
+
+    fn answer(&mut self, receipt: &str) -> Result<Option<String>, String> {
+        let path = std::path::Path::new(receipt);
+        let mut answer = None;
+        for (key, body) in &self.receipts {
+            let old = std::path::Path::new(key);
+            // Other cycles need no filesystem lookup; retired directories must
+            // not prevent unrelated admission requests.
+            if old.file_name() == path.file_name() && receipt_key(old)? == receipt_key(path)? {
+                if answer.as_ref().is_some_and(|previous| previous != body) {
+                    return Err("conflicting answers for the same admission receipt".into());
+                }
+                answer = Some(body.clone());
+            }
+        }
+        Ok(answer)
+    }
 }
 
 pub fn now() -> i64 {
@@ -173,7 +190,8 @@ impl Config {
         args: &[String],
         actor: &str,
     ) -> Result<String, String> {
-        self.change(args, actor, Some(&receipt_key(receipt)?))
+        // Admission keys retain the supplied spelling for older generations.
+        self.change(args, actor, Some(&receipt.to_string_lossy()))
     }
 
     fn change(
@@ -189,7 +207,10 @@ impl Config {
             _ => {}
         }
         if let ["role" | "model" | "offer" | "engines", ..] = words.as_slice() {
-            return self.change_roles(&words, args, actor, receipt);
+            let key = receipt
+                .map(|r| receipt_key(std::path::Path::new(r)))
+                .transpose()?;
+            return self.change_roles(&words, args, actor, key.as_deref());
         }
         let answer = live::write(
             &self.overlay,
@@ -315,3 +336,6 @@ mod tests {
 
 pub mod schema;
 pub mod show;
+
+#[cfg(test)]
+mod admission_receipts;

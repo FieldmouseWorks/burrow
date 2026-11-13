@@ -195,7 +195,8 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       machine.succeed(f"su - dev -c 'echo s >/data/dev/jobs/{k}/session'")
       proj(f'reply {k} "sleep 600"')
       machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
-      machine.succeed(f"test -e /data/dev/jobs/{k}/2.handoff")
+      # Taking the slot reports running before startup writes the handoff.
+      machine.wait_until_succeeds(f"test -e /data/dev/jobs/{k}/2.handoff", timeout=120)
       time.sleep(3)
       assert state(k) == "running", state(k)
       machine.fail(f"test -e /data/dev/jobs/{k}/2.ended")

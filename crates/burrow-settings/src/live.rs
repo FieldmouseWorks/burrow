@@ -11,6 +11,10 @@ use std::path::Path;
 /// A document a request's receipt can live in, with the change it made.
 pub(crate) trait Document: Default + Serialize + DeserializeOwned {
     fn receipts(&mut self) -> &mut BTreeMap<String, String>;
+
+    fn answer(&mut self, receipt: &str) -> Result<Option<String>, String> {
+        Ok(self.receipts().get(receipt).cloned())
+    }
 }
 
 /// True only for an accessible, existing path; false only for genuine
@@ -32,7 +36,7 @@ pub fn path_exists(path: &Path) -> Result<bool, String> {
 }
 
 /// Identity of one receipt, independent of path spelling or receipt-file
-/// existence. Legacy requests canonicalized the parent, never the file itself;
+/// existence. Legacy engine requests canonicalized the parent, never the file itself;
 /// import and every subsequent lookup must use that same rule.
 pub fn receipt_key(path: &Path) -> Result<String, String> {
     let parent = path
@@ -95,7 +99,13 @@ pub(crate) fn write<D: Document>(
         sync(path)?;
         return Ok(Some(body));
     }
-    let Some(answer) = change(&mut state)? else {
+    // A document can recognize a historical spelling too. Publish the supplied
+    // key alongside that answer so retained consumers and rollback still find it.
+    let answer = match receipt.map(|r| state.answer(r)).transpose()?.flatten() {
+        Some(answer) => Some(answer),
+        None => change(&mut state)?,
+    };
+    let Some(answer) = answer else {
         if path_exists(path)? {
             sync(path)?;
         }
