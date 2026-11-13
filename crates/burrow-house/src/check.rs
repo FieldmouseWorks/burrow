@@ -53,8 +53,21 @@ fn pass(rule: Rule, why: &str) -> Verdict {
     }
 }
 
-/// A rule's verdict on the PR's title and body, and its diff.
-fn judge(rule: Rule, title: &str, body: &str, diff: &Diff, event: &Event) -> Verdict {
+/// What a run judges of the PR itself, read again after each post.
+#[derive(Clone, PartialEq, Eq)]
+struct Seen {
+    base: String,
+    title: String,
+    body: String,
+    /// The head's branch, and whether it's in the PR's own repo rather
+    /// than a fork's.
+    head: String,
+    own: bool,
+}
+
+/// A rule's verdict on the PR, and its diff.
+fn judge(rule: Rule, pr: &Seen, diff: &Diff, event: &Event) -> Verdict {
+    let Seen { title, body, .. } = pr;
     let (broke, mut what, hint) = match rule {
         Rule::Title => {
             return match rules::title_style(title) {
@@ -67,6 +80,26 @@ fn judge(rule: Rule, title: &str, body: &str, diff: &Diff, event: &Event) -> Ver
                         "::error title=PR title::This PR's title isn't in the house style: {what}. The steward squash-merges, so the title is the subject main gets, and the house rules want it as 'area: plain sentence', the area being the module, directory or tool the change is about (autoland: merge only the head that was checked). Lowercase after the colon, no trailing period, no feat:/fix: types. Editing the title runs this again."
                     )),
                 },
+            };
+        }
+        Rule::Branch => {
+            // A fork's branch isn't one Renovate looks at. The branch's name
+            // is the author's text, so it isn't printed either.
+            return if !(pr.own && rules::renovate_claims(&pr.head, body)) {
+                pass(rule, "the head isn't on a branch Renovate takes as its own")
+            } else {
+                Verdict {
+                    rule,
+                    passed: false,
+                    why: format!(
+                        "the head is under '{}' but Renovate didn't open this PR",
+                        rules::RENOVATE_PREFIX
+                    ),
+                    error: Some(format!(
+                        "::error title=Renovate's branch::This PR's head branch is under '{prefix}', Renovate's branch prefix, but Renovate didn't open it. Renovate takes every branch under '{prefix}' as its own: it renames the PR's title '... - abandoned', which the steward would squash onto main, and may rebase over the branch or close the PR. Push the work to a branch outside '{prefix}' (git push origin HEAD:refs/heads/AREA/TOPIC), open the PR from there and close this one.",
+                        prefix = rules::RENOVATE_PREFIX
+                    )),
+                }
             };
         }
         Rule::RustFirst => (
@@ -208,7 +241,7 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
         description,
         target_url: event.run_url.clone(),
     };
-    let mut judged: Option<(String, String, String)> = None;
+    let mut judged: Option<Seen> = None;
     let mut diff: Option<(String, Diff)> = None;
     let mut looks = 0;
     loop {
@@ -223,11 +256,13 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
             )?;
             return Ok(true);
         }
-        let seen = (
-            text(&pr["base"], "ref").to_owned(),
-            text(&pr, "title").to_owned(),
-            text(&pr, "body").replace('\r', ""),
-        );
+        let seen = Seen {
+            base: text(&pr["base"], "ref").to_owned(),
+            title: text(&pr, "title").to_owned(),
+            body: text(&pr, "body").replace('\r', ""),
+            head: text(&pr["head"], "ref").to_owned(),
+            own: text(&pr["head"]["repo"], "full_name") == event.repo,
+        };
         if judged.as_ref() == Some(&seen) {
             return Ok(true);
         }
@@ -253,10 +288,9 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
             diff = Some((base.to_owned(), read));
         }
         let (_, read) = diff.as_ref().expect("read above");
-        let (_, title, body) = &seen;
         let verdicts: Vec<Verdict> = rules
             .iter()
-            .map(|rule| judge(*rule, title, body, read, event))
+            .map(|rule| judge(*rule, &seen, read, event))
             .collect();
         for v in &verdicts {
             if let Some(error) = &v.error {
@@ -264,7 +298,7 @@ pub fn run(event: &Event, gh: &dyn GitHub, out: &mut dyn Write) -> Result<bool, 
             }
             say(out, &format!("{}: {}", v.rule.name(), v.why))?;
         }
-        if text(&pr["head"]["repo"], "full_name") != event.repo {
+        if !seen.own {
             return Ok(verdicts.iter().all(|v| v.passed));
         }
         for v in verdicts {
