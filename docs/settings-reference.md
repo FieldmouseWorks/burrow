@@ -25,6 +25,7 @@ read it again at their next decision.
 | `proj.codex.slots` | integer | 1 or more | `2` | no | proj | `burrow.proj.codex.slots` in the flake | How many Codex turns run at once, in a pool of their own. |
 | `proj.usageTrickle` | integer | 1 or more | `2` | no | proj | `burrow.proj.usageTrickle` in the flake | How many Claude turns run at once while the line from a usage hold drains after its reset. |
 | `proj.usage.paid` | boolean | `true`, `false` | `false` | no | proj | `burrow.proj.usage.paid` in the flake | Whether paid extra usage is on; otherwise a usage limit means waiting for its reset. |
+| `authors` | list of {login: text, id: integer} | each login: any; id: 1 or more | `[]` | no | proj | `burrow.authors` in the flake | The GitHub accounts, by login and immutable numeric ID, whose issues and replies the inbox, engines door, probe, undo door and settings door act on. |
 | `settings.allowed` | list of repository | each `OWNER/NAME` | `[]` | no | proj | `burrow.settings.allowed` in the flake | Tracked repositories whose automated work may move; the live repository overlay overrides these defaults. |
 | `settings.repositoryOverrides` | map of boolean | each `true`, `false` | `{}` | yes | proj | `settings/overlay.json` | Runtime repository permissions overriding settings.allowed; false vacates every role immediately. |
 | `settings.pipelineUntil` | integer or null | 0 or more, or `null` | `null` | yes | proj | `settings/overlay.json` | Until this timestamp only pipeline repositories may move; null means no scoped hold. |
