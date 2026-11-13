@@ -318,6 +318,7 @@ import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
 REAL_TOKEN = C.token
 REAL_UPKEEP = C.upkeep
+from selection import shape  # noqa: E402 (needs prs, set up above)
 # The App's installation tokens, one an owner (passes.py checks the real one).
 C.token = lambda owner: f"ghs_app_{owner}"
 # A second reviewer beside Codex, standing in for any a machine adds: the
@@ -430,6 +431,9 @@ def ci_upkeep(*args, **kw):
             "app": C.token(args[1].split("/")[0].lower()) if kw.get("as_app", True) and not C.DRY else None}
     with open(CI_FIXTURE, "w") as f:
         json.dump(data, f)
+    # The PR as the steward's query fetches it: no field it doesn't ask for.
+    asked = json.loads(kw["input"])
+    kw["input"] = json.dumps({**asked, "pr": shape(asked["pr"])})
     old = C.CFG["upkeep"]
     C.CFG["upkeep"] = upkeep_config(f"{tmp}/ci-config.json")
     try:
