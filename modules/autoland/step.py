@@ -27,11 +27,11 @@ import stages as S
 import stopping
 import train as T
 from aside import aside
-from common import CFG, MIN, log, save, ts
+from common import CFG, MIN, save, ts
 from touches import bot_edited, codex_written, dep_kind, gate_edit, moved_from
 from tasks import FAILURES, PAST_LIMIT, REVIEWED, judgment, owed
 from tasks import fix_task as fix_task, judge_task as judge_task, proof_task as proof_task, negative as negative
-from prs import ci_state, dead_runs, has_ci, our_status
+from prs import ci_state, has_ci, our_status
 from prs import onto, land, MERGE_STEPS as MERGE_STEPS
 from step_context import Context, CHECKS_START, SESSION, clock, STRIKES as STRIKES
 from step_jobs import Jobs
@@ -82,6 +82,10 @@ class Pass(Context, Jobs, Actions):
             stage=S.OWNER,
         )
 
+    def ci_checks(self):
+        """The Rust CI owner classifies and recovers cancelled workflows."""
+        return ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo, recover=True)
+
     def run(self):
 
         # The jobs a new head left answering for nothing, stopped: one proj
@@ -106,48 +110,7 @@ class Pass(Context, Jobs, Actions):
             return
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
-        self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
-        # A head with no live run (one GitHub never started, or one cancelled
-        # that nothing ran through since) is asked to run it again, through
-        # GitHub's own re-run, once per run: never an empty commit or a
-        # reopen. Said in the log; a re-run that changes nothing stays pending
-        # and goes on as a stall. In status mode nothing is asked or kept. A
-        # request GitHub couldn't take just now (Unavailable) isn't counted:
-        # the next pass asks again; one it refused is, since asking again
-        # would get the same answer.
-        if self.ci != "green" and (dead := dead_runs(self.pr, self.repo)):
-            asked = self.st.get("rerun") if (self.st.get("rerun") or {}).get("head") == self.head else {"head": self.head, "runs": []}
-            asked.setdefault("pending", {})  # run -> its attempt number when we last meant to ask
-            for run in [r for r in dead if r not in asked["runs"]]:
-                try:
-                    # An earlier ask may have been taken without our hearing
-                    # (or finished cancelled before this pass): a run whose
-                    # attempt moved on was asked already, not asked again.
-                    attempt = C.gh("api", f"repos/{self.repo}/actions/runs/{run}", "--jq", ".run_attempt")
-                    if str(run) in asked["pending"] and attempt != asked["pending"][str(run)]:
-                        if not C.DRY:
-                            asked["runs"].append(run)
-                            asked["pending"].pop(str(run))
-                        log(f"  {self.key}: run {run} on {self.head[:7]} was asked to run again already (attempt {attempt})")
-                        continue
-                    if not C.DRY:
-                        # Kept before the ask, so a pass that dies in it knows.
-                        asked["pending"][str(run)] = attempt
-                        self.st["rerun"] = asked
-                        save(self.key, self.st)
-                    C.write("api", "-X", "POST", f"repos/{self.repo}/actions/runs/{run}/rerun")
-                    said = "asked GitHub to run it again"
-                except C.Unavailable as e:
-                    log(f"  {self.key}: run {run} on {self.head[:7]}: GitHub didn't answer ({C.said(e)}); will ask again")
-                    continue
-                except RuntimeError as e:
-                    said = f"GitHub refused to run it again ({C.said(e)})"
-                if not C.DRY:
-                    asked["runs"].append(run)
-                    asked["pending"].pop(str(run), None)
-                    log(f"  {self.key}: run {run} has no live job on {self.head[:7]}; {said}")
-            if not C.DRY:
-                self.st["rerun"] = asked
+        self.ci, self.ci_names, docs = self.ci_checks()
         # A build's or run's verdicts GitHub took only some of: the rest go up
         # whatever CI says now, so a failure it took doesn't leave the others
         # unposted behind a red PR. Their statuses kick the pass that sees them.

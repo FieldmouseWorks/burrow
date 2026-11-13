@@ -12,6 +12,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Whether path names a program a child can be started from: a file,
+/// links followed, with an execute bit.
+pub fn executable(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+        Ok(())
+    } else {
+        Err("not an executable file".into())
+    }
+}
+
 fn nonblocking(fd: &impl std::os::fd::AsFd) -> Result<(), String> {
     let flags = fcntl_getfl(fd).map_err(|e| e.to_string())?;
     fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(|e| e.to_string())

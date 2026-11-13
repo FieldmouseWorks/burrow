@@ -57,6 +57,12 @@ own, say), in seconds and without starting a Claude.
   `github.machinery` App. A job uses the in-job path below. Ask with a question a line:
   - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
   - `units`: failed units and jobs under way, the system's and the user's
+  - `crashes EXE [SINCE]`: the latest five core reports for an exact absolute
+    executable path (no globs), newest first, a day back by default. Reports
+    include the PID, signal, owning units/cgroup and logged backtrace. They
+    read the host's coredump journal without opening a core, and exclude the
+    captured environment, command line and process memory. The normal answer
+    scrubber and job response limit still apply.
   - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
     units on `probe.journal.units` (and `userUnits`) only. The system defaults
     include Renovate's full pass (`renovate.service`) and repository passes
@@ -68,10 +74,21 @@ own, say), in seconds and without starting a Claude.
   - `contains REPO COMMIT`: whether a commit is an ancestor of the running
     input revision, using its repository identity and local history; unavailable
     or ambiguous history is reported as unknown
-  - `usage [SINCE]`: engine turns by role, inbox label and opener category,
-    or starter; defaults to `-5h`. Claude turns include stream token counts
-    and cost. Result tokens are per invocation; only session cost totals are
-    subtracted across resumes. Every appended invocation is accounted for,
+  - `usage [SINCE] [--totals]`: engine turns, tokens and cost; defaults to
+    `-5h`. It leads with a table of totals by engine, by engine and role, by
+    engine and project (the job's checkout) and by all three. The leading
+    summary and every aggregate distinguish cost still missing, cost recovered
+    from selected turns, recovered cost potentially belonging outside the span,
+    unread engine streams and partial token counts. Recovery is matched by run
+    identity, so including both a crash and its recovery does not claim the
+    recovered cost is still missing. `--totals` gives only this required section.
+    Project basenames, including leading dots and underscores, remain distinct;
+    names are escaped for display. Meter readings follow, then each turn by
+    role, inbox label and opener category, or starter. Optional detail is cut
+    to its question's budget with a count of omitted lines; required sections
+    span multiple comments when necessary, including multi-question issues.
+    Claude turns include stream token counts and cost. Result tokens are per
+    invocation; only session cost totals are subtracted across resumes. Every appended invocation is accounted for,
     including unfinished runs and zeroed crash results. Partial input/cache
     tokens exclude duplicate message IDs; output counts completed runs only.
     Incomplete cost is labelled `known-cost`, with unavailable coverage and
@@ -90,14 +107,19 @@ own, say), in seconds and without starting a Claude.
 
   A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
   or `@EPOCH`, in UTC. An empty body asks its title.
-- **Answer:** one comment with every answer, then the issue is closed.
+- **Answer:** comments with every answer, split when required totals exceed
+  one comment. The issue closes only after every comment succeeds.
   Reopen it to ask again. An issue whose body or title someone else changed
   (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
 - **What keeps it safe:** no shell, and nothing of the issue's text reaches a
-  command but a unit name or a time the grammar made; journals only of the
+  command but a unit name, exact executable path or time the grammar made; unit journals only of the
   units on the allowlist; no answer at all in a repo GitHub doesn't call
   private; and every answer through a secret scrubber first
-  (`tests/probe.nix` plants a token to prove it). Anyone else's issue runs
+  (`tests/probe.nix` plants a token to prove it). Private keys come out of
+  request titles and bodies, each block whole, before questions are read,
+  limited or replies split, so an echoed refusal can't separate a key's
+  markers from its payload. Every other question runs as asked, and its echo
+  is scrubbed after the line before it. Anyone else's issue runs
   nothing.
 - On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
   the machine says it.
@@ -106,7 +128,18 @@ own, say), in seconds and without starting a Claude.
   it to the job, including jobs inside sandboxes. Jobs never open probe issues.
 
 A job's question uses `proj ask --default "TEXT" [--one-way]`; a bare ask is
-refused. `burrow.proj.askTimeout` is its deadline in seconds (6h by default),
+refused. `--about KEY` names the subject: a job asking about a key that
+already has an open question joins it, waits on the same answer and the same
+deadline, and posts no notice of its own. The leader's notice lists every job
+waiting, and one `proj reply` to it resumes all of them. If the leader is
+stopped or answered, the next waiting job's notice takes over.
+`proj merge-questions KEY JOB...` is the one-time pass for duplicates asked
+before keys: the newest keeps its notice and the others close, pointing to it.
+It accepts live questions and timed-out one-way questions together. Moves
+commit membership and inherited policy atomically; an occupied subject keeps
+its deadline. A busy job makes the merge return a retryable error without
+retaining any locks or changing membership.
+`burrow.proj.askTimeout` is its deadline in seconds (6h by default),
 kept across unrelated updates. A reply resumes it normally. Without one, a
 reversible default resumes the job with “no answer by TIME” and instructions
 to take that recommendation and report it on the issue. A one-way default
@@ -129,30 +162,20 @@ The machine flake enables `burrow.proj.engines.door` and sets its `repo`;
 `label` defaults to `engines`, and `authors` to the inbox's authors.
 
 Open an issue there with that label, as an author, whose body is one line:
-`list`, `use NAME` or `use back`. The door uses proj's checked switch as the
-job user, comments with the old and new active setup and each role/scope's
-engine, then closes the issue. It never posts model choices. An unknown
-setup, bad file or different request changes nothing; text anyone outside
-the authors wrote or edited is ignored. Each open cycle is one request:
-reopening asks again even with unchanged text. Before a switch, proj records
-its resolved destination in a durable journal. The door and CLI recover it
-under the same lock before another change; completed results stay attached
-to that cycle, so interruption or a failed GitHub reply cannot repeat `back`.
+`list`, `use NAME` or `use back`. The door is a caller of the settings
+door: it runs `engines use NAME` there as the job user, comments with the
+old and new active setup and each role/scope's engine, then closes the
+issue. It never posts model choices. An unknown setup, one naming a model
+its engine no longer offers, or a different request changes nothing; text
+anyone outside the authors wrote or edited is ignored. Each open cycle is
+one request: reopening asks again even with unchanged text. The settings
+keep each cycle's receipt with the switch it made, published in one atomic
+write and answered only once it's on disk, so interruption or a failed
+GitHub reply cannot repeat `back`; nor can a switch the door made before
+the settings, whose receipt it still answers from.
 
-On the machine, `proj engines` lists saved setups, marks the active one and
-names the previous one. `proj engines save NAME` checks the current roles
-file and saves it under `roles.d/NAME`, beside that file in the user's
-untracked config. Names use lowercase letters, digits and hyphens; `back`
-is reserved. Replacing a saved setup needs `--replace`.
-`proj engines use NAME` checks it with the turn's parser, then atomically
-replaces the roles path with a link to it. An unmatched plain roles file is
-kept as `roles.d/unsaved-<UTC time>` first. `proj engines use back` returns
-to the setup replaced by the last switch. Existing plain roles files keep
-working without creating setups.
-
-`proj check-config` checks the module's config and the current roles file.
-The update's health check runs it as the job user after every switch; it
-must pass before confirmation, and a failure notice names the bad line.
+What a setup holds and how `proj engines` switches them on the machine is
+in [settings](settings.md#engines-models-and-efforts-per-role).
 Malformed roles still fail every turn: the checked switch and deploy check
 stop those mistakes before new turns have to discover them.
 
@@ -210,6 +233,12 @@ into project jobs.
   and restore the job label to pick them up. Notice delivery retries separately
   from stopping the old job, so a reopened issue starts afresh even while a
   notice is pending. Long lists of unread replies are delivered in batches.
+- **Park:** adding `later` or removing the last engine label stops the issue's
+  job immediately and cancels its waits and question deadlines. Its branch
+  and PR remain. The inbox remembers parking even if `ready` remains, so
+  automatic triage and draining cannot undo it. Await wakes and deadline
+  resumes check the issue's live labels too, so parking wins even before the inbox processes the label event.
+  Remove `later` and restore an engine label to start a fresh job.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
   Author lists use `{ login = "NAME"; id = ACCOUNT_ID; }`, shared by the inbox,
   engines door, probe and undo door. The positive numeric account ID grants
@@ -292,64 +321,15 @@ for it. A job whose issue gets the label later, or whose opener
 leaves `inbox.authors`, is stopped at once, even while it waits for a slot or
 as its issue closes, and the issue hears why.
 
-Roles on the box live in `~/.config/proj/roles`: `ROLE ENGINE`, with
-`ENGINE` either `claude` or `codex`. Scope a key to one repo with
-`ROLE@OWNER/REPO`:
-
-```
-steward-handed@octocat/project  codex
-steward-handed                  claude
-```
-
-The scoped line wins for that repo, regardless of line order; repo names
-match case-insensitively. Other repos, and jobs with no repo, use the bare
-role. With neither, the role uses Claude. Duplicate keys fail the turn and
-name both lines, including scopes spelled in different cases. Other invalid
-lines fail the turn and name the line. `proj check-config` validates the
-deployed configuration, all roles and all models lines without starting a
-job; updates run it as the job user in their health check before confirming
-([updates](../README.md)). Add
-`over PCT ENGINE` to move a turn to that engine when its own engine
-is short: any window on its meter (the five-hour session or the week) at
-PCT with no credits to carry on, or, for Claude, the machine already out of
-Claude's usage. It moves only when the other engine's meter has room:
-credits, or no window used up, so Codex's credits count once its plan's
-windows are spent. Missing readings, or readings an hour old, move nothing.
-`burrow.usageReset` supplies both meters and keeps their history in
-`meters/log`.
-Each engine keeps its own conversation when a role moves between them.
-
-The roles file picks only the engine, so a saved engine setup swaps it
-whole. What each role runs at on each engine lives beside it, in
-`~/.config/proj/models`, and stays put when setups switch:
-`ROLE[@OWNER/REPO] ENGINE MODEL|- [EFFORT]`.
-
-```
-steward-conflictFixed  claude  SMALLER-MODEL-ID  medium
-steward-judged         claude  -                  high
-```
-
-`-` keeps the engine's own model, and a line of just `ROLE ENGINE -` keeps
-all of its own settings, so a repo's line can undo a bare one. Effort is
-Claude Code's `--effort` (`low`, `medium`, `high`, `xhigh`, `max`) or
-Codex's `model_reasoning_effort`, passed as written: any lowercase word,
-since Codex's models define their own levels. The line for the engine the
-turn ends on applies, overflow and the judge's Claude included; scopes,
-duplicates and bad lines work as in the roles file. A role with no line
-keeps the engine's own settings: for Claude, the job user's
-`~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`.
-New sandbox guests (`agent new`, `proj run --vm`) copy the user's `model`
-and its `env.CLAUDE_CODE_SUBAGENT_MODEL` (the model Claude Code's subagents
-run on) with `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` (which moves Explore,
-whose own definition inherits the session's model) at creation; without them they use Claude Code's defaults. This is
-runtime data, not part of the guest image. Model ids live only in these
-untracked files: which model does what is the machine's business.
+Which engine, model and effort runs each role (`ROLE` or
+`ROLE@OWNER/REPO`), and when a turn overflows to the other engine, are
+live settings: see [settings](settings.md#engines-models-and-efforts-per-role).
 
 Codex jobs share the owner's ChatGPT plan with the PR reviewer, but have
 an independent login: `autoland-codex-login job` logs the job user in,
 `autoland-codex-login review` logs the reviewer in. Each is a device-code
 login; don't copy tokens between them. Codex jobs have their own small
-pool (`burrow.proj.codex.slots`, two by default), leaving the reviewer first
+pool (`burrow.proj.codex.slots`), leaving the reviewer first
 claim on the plan. Usage refusals wait for the reset and resume themselves.
 The job user's `.codex/config.toml` picks the default model. Machine
 instructions and one-way command rules are generated alongside Claude's.

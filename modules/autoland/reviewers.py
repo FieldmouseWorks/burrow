@@ -98,7 +98,8 @@ def fetch(repo, *refs, pr=None):
     snapshots are taken from, and what a proof's builds are worked out from
     (proofs.py). With pr, its head too, as refs/pr/N: from refs/pull/N/head,
     or by the head's id when GitHub has lost that ref (mirror.rs
-    `fetch_pr`). As long as git takes, as it always has."""
+    `fetch_pr`). As long as git takes while GitHub keeps answering; one
+    that goes quiet for mirror.rs's STALL fails, as any fetch that fails."""
     ask = {"refs": list(refs), "pr": pr and {"number": pr["number"], "head": pr["headRefOid"]}}
     out = C.upkeep("fetch", repo, input=json.dumps(ask), bounded=False)
     if out["mirror"] is None:

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::engine::Engine;
+use crate::host_jobs::View;
 use crate::job::{Job, awaits};
 use crate::pick::demoted;
 use crate::turn::lines;
@@ -283,6 +284,9 @@ pub struct Triage {
     pub drain: Option<Engine>,
     pub drain_jobs: usize,
     pub sorting_at_once: usize,
+    /// Issues waiting for sorting admission or verdict application, each with why.
+    #[serde(default)]
+    pub waiting: Vec<String>,
 }
 
 /// A job, as `proj status` lists it.
@@ -308,8 +312,22 @@ pub struct JobRow {
 }
 
 impl Snapshot {
+    /// Now, as `view` shows it. The bridge's redacts each field on its own
+    /// before it's rendered as text.
+    pub(crate) fn take_as(cfg: &Config, jobs: usize, view: View) -> Result<Snapshot, Fail> {
+        let snap = Snapshot::take_rows(cfg, jobs, view)?;
+        if view == View::Owner {
+            return Ok(snap);
+        }
+        let value = serde_json::to_value(snap).map_err(|e| Fail::new(1, e.to_string()))?;
+        let value = burrow_probe::scrub::independent_json(&value).map_err(|e| Fail::new(1, e))?;
+        serde_json::from_value(value).map_err(|e| Fail::new(1, e.to_string()))
+    }
     /// Now, with the `jobs` most recently changed.
     pub fn take(cfg: &Config, jobs: usize) -> Result<Snapshot, Fail> {
+        Snapshot::take_rows(cfg, jobs, View::Owner)
+    }
+    fn take_rows(cfg: &Config, jobs: usize, view: View) -> Result<Snapshot, Fail> {
         let at = now();
         let inbox = crate::inbox::view(cfg, at);
         let mut slots = crate::slot::view(cfg, at);
@@ -322,7 +340,7 @@ impl Snapshot {
             slots,
             meters: meters(cfg, at),
             holds: holds(cfg),
-            jobs: recent(cfg, jobs)?,
+            jobs: recent(cfg, jobs, view)?,
         })
     }
 
@@ -368,6 +386,11 @@ impl Snapshot {
                         out += &format!("  {issue} (enrolling)\n");
                     }
                 }
+            }
+        }
+        if let Some(t) = self.holds.triage.as_ref() {
+            for w in &t.waiting {
+                out += &format!("sorting: {w}\n");
             }
         }
         for (i, r) in self.queue.iter().take(5).enumerate() {
@@ -434,7 +457,7 @@ impl JobRow {
 }
 
 /// The `limit` jobs most recently changed, latest first.
-fn recent(cfg: &Config, limit: usize) -> Result<Vec<JobRow>, Fail> {
+fn recent(cfg: &Config, limit: usize, view: View) -> Result<Vec<JobRow>, Fail> {
     fs::create_dir_all(&cfg.jobs).map_err(|e| io_fail(&cfg.jobs, e))?;
     let mut jobs: Vec<(std::time::SystemTime, String)> = fs::read_dir(&cfg.jobs)
         .map_err(|e| io_fail(&cfg.jobs, e))?
@@ -453,12 +476,12 @@ fn recent(cfg: &Config, limit: usize) -> Result<Vec<JobRow>, Fail> {
     Ok(jobs
         .into_iter()
         .take(limit)
-        .map(|(_, id)| row(&Job::new(cfg, &id)))
+        .map(|(_, id)| row(&Job::new(cfg, &id), view))
         .collect())
 }
 
 /// A job's row, from its own records alone.
-pub(crate) fn row(job: &Job) -> JobRow {
+pub(crate) fn row(job: &Job, view: View) -> JobRow {
     let state = job.state();
     let n = job.turns().unwrap_or_default();
     let waiting_in_line = if state == "running" {
@@ -471,6 +494,13 @@ pub(crate) fn row(job: &Job) -> JobRow {
         Vec::new()
     };
     let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    // A shortened credential may lose its closing delimiter. The bridge's
+    // view redacts the complete answer first, while it still has its
+    // logical boundaries.
+    let result = match view {
+        View::Owner => result,
+        View::Bridge => view.plain(&String::from_utf8_lossy(&result)).into_bytes(),
+    };
     let mut cut = result.len().min(100);
     while cut > 0 && std::str::from_utf8(&result[..cut]).is_err() {
         cut -= 1;
@@ -628,6 +658,20 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
         .collect()
 }
 
+/// The issues the inbox says wait for sorting, each with why.
+fn waiting(cfg: &Config) -> Vec<String> {
+    let Some(i) = cfg.inbox.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = std::fs::read_dir(i.state.join(".triage-waiting"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| crate::read(&e.ok()?.path()))
+        .collect();
+    lines.sort();
+    lines
+}
+
 fn holds(cfg: &Config) -> Holds {
     Holds {
         paused: cfg.paused_repos(),
@@ -644,6 +688,7 @@ fn holds(cfg: &Config) -> Holds {
                 drain: t.drain,
                 drain_jobs: t.drain_jobs,
                 sorting_at_once: t.at_once,
+                waiting: waiting(cfg),
             }),
     }
 }

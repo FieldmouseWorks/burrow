@@ -97,8 +97,10 @@
       # tests in a slot of the real heavy (burrow-heavy); proj's clone repos
       # to read their origins, gh-token's make keys with openssl, lock-age's
       # check its wait against what the steward reads (lock_wait.py), and
-      # house-sync's read burrow's own house blocks, and attestation's ask a
-      # token server of their own with curl.
+      # house-sync's read burrow's own house blocks, burrow-settings' the
+      # settings reference it writes and its house guidance, and attestation's ask a
+      # token server of their own with curl. No test reads README.md,
+      # AGENTS.md or CLAUDE.md: they're the docs lane's (.github/workflows/flake.yml).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -109,11 +111,12 @@
             ".github/flake-check"
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
-            "modules/autoland/prs.py"
             "modules/autoland/lock_wait.py"
+            "modules/autoland/step_jobs.py"
             "house"
+            "docs/settings-reference.md"
           ];
-          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl ];
+          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl pkgs.python3 ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

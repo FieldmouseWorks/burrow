@@ -1,0 +1,19 @@
+[package]
+name = "burrow-guidance"
+description = "Holds the guidance to its owners: a fact named outside the file that owns it fails"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-settings = { path = "../burrow-settings" }
+house-sync = { path = "../house-sync" }
+serde_json.workspace = true
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

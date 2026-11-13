@@ -129,7 +129,7 @@ fn register(cfg: &Config, job: &Job, bytes: &[u8], until: Instant) -> Result<(),
                 )?;
             }
             let _ = fs::remove_file(job.path("await.next"));
-            fs::write(job.path("end.next"), declaration.end).map_err(|e| e.to_string())
+            crate::ask::declare(job, &declaration.end)
         }
         "await" if !declaration.targets.is_empty() => {
             let found = declaration
@@ -177,6 +177,117 @@ mod tests {
         value["jobs"] = serde_json::json!(d.path().join("jobs"));
         value["tools"]["gh"] = serde_json::json!(gh);
         (d, serde_json::from_value(value).unwrap())
+    }
+
+    #[test]
+    fn vm_quota_finalization_preserves_one_way_ask() {
+        for committed in [false, true] {
+            let (_dir, cfg) = registration_fixture("exit 1");
+            let job = Job::new(&cfg, "vm");
+            fs::create_dir_all(&job.dir).unwrap();
+            job.set_turns(1).unwrap();
+            fs::write(
+                job.turn("1", "jsonl"),
+                serde_json::json!({
+                    "type": "result", "subtype": "success", "is_error": false,
+                    "result": "May I remove the archive?"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            if committed {
+                // A previously completed ask already saved its engine answer.
+                fs::write(job.turn("1", "result"), "May I remove the archive?").unwrap();
+                crate::ask::record(
+                    &job,
+                    &crate::ask::Recommendation {
+                        default: "keep it".into(),
+                        one_way: false,
+                        about: None,
+                    },
+                )
+                .unwrap();
+                crate::ask::finish(&cfg, &job, "ask").unwrap();
+            }
+            let identity = crate::read(&crate::ask::host_path(&job, "question-id"));
+            let deadline = crate::ask::load(&job).unwrap().map(|q| q.due);
+            fs::write(
+                job.path(crate::github_quota::PENDING),
+                serde_json::to_vec(&crate::github_quota::Pending {
+                    targets: vec!["o/r#1".into()],
+                    retry_at: 1,
+                    turn: "1".into(),
+                    baselines: String::new(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            register(
+            &cfg,
+            &job,
+            br#"{"end":"ask","targets":[],"recommendation":{"default":"keep it","one_way":true}}"#,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+            assert!(crate::github_quota::finish(&job, "1").unwrap());
+            assert!(
+                crate::ask::load(&job)
+                    .unwrap()
+                    .unwrap()
+                    .recommendation
+                    .one_way
+            );
+            if committed {
+                assert_eq!(
+                    crate::read(&crate::ask::host_path(&job, "question-id")),
+                    identity
+                );
+                assert_eq!(crate::ask::load(&job).unwrap().map(|q| q.due), deadline);
+            }
+            assert_eq!(
+                crate::read(&crate::ask::host_path(&job, "question-text")).as_deref(),
+                Some("May I remove the archive?")
+            );
+        }
+    }
+
+    #[test]
+    fn vm_superseding_declarations_retire_pending_one_way_asks() {
+        for end in ["done", "await"] {
+            let (dir, cfg) = registration_fixture(&format!(
+                "printf 'HTTP/2.0 403 Forbidden\\nx-ratelimit-remaining: 0\\nx-ratelimit-reset: {}\\n\\n{{}}'\nexit 1",
+                crate::now() + 3600,
+            ));
+            let job = Job::new(&cfg, "vm");
+            fs::create_dir_all(&job.dir).unwrap();
+            job.set_turns(1).unwrap();
+            let outside = dir.path().join("untouched");
+            fs::write(&outside, "untouched").unwrap();
+            for name in ["ask.next.new", "end.next.new"] {
+                std::os::unix::fs::symlink(&outside, job.path(name)).unwrap();
+            }
+            register(&cfg, &job,
+                br#"{"end":"ask","targets":[],"recommendation":{"default":"keep it","one_way":true}}"#,
+                Instant::now() + Duration::from_secs(2)).unwrap();
+            let targets = if end == "await" {
+                vec!["o/r#1"]
+            } else {
+                vec![]
+            };
+            register(
+                &cfg,
+                &job,
+                &serde_json::to_vec(&serde_json::json!({"end":end,"targets":targets})).unwrap(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            assert!(!job.path("ask.next").exists());
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
+            for _ in 0..2 {
+                crate::github_quota::finish(&job, "1").unwrap();
+            }
+            assert!(crate::ask::load(&job).unwrap().is_none());
+        }
     }
 
     #[test]

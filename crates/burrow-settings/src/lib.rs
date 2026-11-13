@@ -2,17 +2,23 @@
 //! the overlay; an unreadable policy fails closed. No pipeline daemon is needed
 //! to change it. Other settings can join this document without another store.
 pub mod door;
+mod live;
+pub use live::{path_exists, receipt_key};
+pub mod roles;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs::{self, File},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub overlay: PathBuf,
+    /// Legacy role inputs. Role mutations wait for their migration; admission
+    /// remains independent and available throughout the cutover.
+    #[serde(default)]
+    pub legacy_roles: Option<PathBuf>,
+    /// The retained engines door's whole-pass lock, fenced at deployment.
+    #[serde(default)]
+    pub legacy_engines_lock: Option<PathBuf>,
     #[serde(default)]
     pub allowed: Vec<String>,
     #[serde(default)]
@@ -67,6 +73,29 @@ impl Snapshot {
     }
 }
 
+impl live::Document for Overlay {
+    fn receipts(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.receipts
+    }
+
+    fn answer(&mut self, receipt: &str) -> Result<Option<String>, String> {
+        let path = std::path::Path::new(receipt);
+        let mut answer = None;
+        for (key, body) in &self.receipts {
+            let old = std::path::Path::new(key);
+            // Other cycles need no filesystem lookup; retired directories must
+            // not prevent unrelated admission requests.
+            if old.file_name() == path.file_name() && receipt_key(old)? == receipt_key(path)? {
+                if answer.as_ref().is_some_and(|previous| previous != body) {
+                    return Err("conflicting answers for the same admission receipt".into());
+                }
+                answer = Some(body.clone());
+            }
+        }
+        Ok(answer)
+    }
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -101,11 +130,7 @@ impl Config {
     }
 
     fn read(&self) -> Result<Overlay, String> {
-        match fs::read(&self.overlay) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Overlay::default()),
-            Err(e) => Err(e.to_string()),
-        }
+        live::read(&self.overlay)
     }
 
     /// Read again on every admission, including a long-lived reader's next job.
@@ -196,7 +221,8 @@ impl Config {
         args: &[String],
         actor: &str,
     ) -> Result<String, String> {
-        self.change(args, actor, Some(receipt.to_string_lossy().as_ref()))
+        // Admission keys retain the supplied spelling for older generations.
+        self.change(args, actor, Some(&receipt.to_string_lossy()))
     }
 
     fn change(
@@ -205,75 +231,58 @@ impl Config {
         actor: &str,
         receipt: Option<&str>,
     ) -> Result<String, String> {
-        if args == ["show"] {
-            return self.show();
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+        match words.as_slice() {
+            ["show"] => return self.show(),
+            ["engines"] | ["engines", "list"] => return self.engines(),
+            _ => {}
         }
-        let parent = self
-            .overlay
-            .parent()
-            .ok_or("overlay needs a parent directory")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.overlay.with_extension("lock"))
-            .map_err(|e| e.to_string())?;
-        lock.lock().map_err(|e| e.to_string())?;
-        let mut state = self.read()?;
-        if let Some(body) = receipt.and_then(|r| state.receipts.get(r)) {
-            return Ok(body.clone());
+        if let ["role" | "model" | "offer" | "engines", ..] = words.as_slice() {
+            let key = receipt
+                .map(|r| receipt_key(std::path::Path::new(r)))
+                .transpose()?;
+            return self.change_roles(&words, args, actor, key.as_deref());
         }
-        match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-            [verb @ ("allow" | "pause"), repo] if burrow_github::repo_name(repo) => {
-                state.repos.insert(repo.to_ascii_lowercase(), *verb == "allow");
+        let answer = live::write(
+            &self.overlay,
+            &self.overlay.with_extension("lock"),
+            &self.overlay.with_extension("log"),
+            actor,
+            receipt,
+            args,
+            |state: &mut Overlay| {
+                match words.as_slice() {
+                    [verb @ ("allow" | "pause"), repo] if burrow_github::repo_name(repo) => {
+                        state
+                            .repos
+                            .insert(repo.to_ascii_lowercase(), *verb == "allow");
+                    }
+                    ["pipeline", until] => {
+                        let t: i64 = until
+                            .parse()
+                            .map_err(|_| "pipeline needs a Unix timestamp")?;
+                        if t <= now() {
+                            return Err("pipeline deadline must be in the future".into());
+                        }
+                        state.pipeline_until = Some(t);
+                    }
+                    ["back"] => state.pipeline_until = None,
+                    _ => {
+                        return Err(format!(
+                            "usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back\n{}",
+                            roles::USAGE
+                        ));
+                    }
+                }
+                Ok(Some(String::new()))
+            },
+        )?;
+        match answer {
+            Some(said) if !said.is_empty() => Ok(said),
+            _ if receipt.is_some() => {
+                Ok("Settings changed; use settings show for the current policy.".into())
             }
-            ["pipeline", until] => {
-                let t: i64 = until.parse().map_err(|_| "pipeline needs a Unix timestamp")?;
-                if t <= now() { return Err("pipeline deadline must be in the future".into()); }
-                state.pipeline_until = Some(t);
-            }
-            ["back"] => state.pipeline_until = None,
-            _ => return Err("usage: settings show | allow OWNER/REPO | pause OWNER/REPO | pipeline UNTIL | back".into()),
-        }
-        let answer = "Settings changed; use settings show for the current policy.".to_owned();
-        if let Some(receipt) = receipt {
-            state.receipts.insert(receipt.into(), answer.clone());
-        }
-        use std::io::Write;
-        let mut log = File::options()
-            .append(true)
-            .create(true)
-            .open(self.overlay.with_extension("log"))
-            .map_err(|e| e.to_string())?;
-        writeln!(
-            log,
-            "{}",
-            serde_json::json!({"at": now(), "actor": actor, "change": args})
-        )
-        .map_err(|e| e.to_string())?;
-        log.sync_all().map_err(|e| e.to_string())?;
-        let pending = self.overlay.with_extension("pending");
-        let mut file = File::create(&pending).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        // Readers include the isolated reviewer account. This overlay holds
-        // public operational policy, regardless of the writer's umask.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o644))
-                .map_err(|e| e.to_string())?;
-        }
-        file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(pending, &self.overlay).map_err(|e| e.to_string())?;
-        File::open(parent)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())?;
-        if receipt.is_some() {
-            Ok(answer)
-        } else {
-            self.show()
+            _ => self.show(),
         }
     }
 }
@@ -281,6 +290,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[test]
     fn one_policy_is_opt_in_live_and_scoped() {
         let dir = tempfile::tempdir().unwrap();
@@ -288,6 +298,7 @@ mod tests {
             overlay: dir.path().join("overlay.json"),
             allowed: vec!["sam/box".into(), "sam/game".into()],
             pipeline_repos: vec!["sam/box".into()],
+            ..Default::default()
         };
         assert!(!cfg.allows("sam/new").unwrap());
         assert!(cfg.allows("SAM/GAME").unwrap());
@@ -354,5 +365,9 @@ mod tests {
     }
 }
 
+pub mod reference;
 pub mod schema;
 pub mod show;
+
+#[cfg(test)]
+mod admission_receipts;

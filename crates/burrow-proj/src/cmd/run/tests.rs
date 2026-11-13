@@ -404,3 +404,6 @@ fn question_state_follows_resume_source_and_only_successful_starts() {
         }
     }
 }
+
+#[path = "tests/shared.rs"]
+mod shared;

@@ -6,8 +6,9 @@ use std::io::{self, Read, Write};
 use std::time::Instant;
 
 use crate::config::Config;
-use crate::engine::{answer, is_error, last_result};
+use crate::engine::{is_error, last_result};
 use crate::github::{fingerprint_until, over, target};
+use crate::host_jobs::View;
 use crate::job::{Job, awaits, kick};
 use crate::snapshot::{self, Snapshot};
 use crate::turn::{exec, lines};
@@ -17,12 +18,13 @@ use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 mod run;
 mod starter;
 
+pub(crate) use run::key_name;
 pub(crate) use run::reply_answer;
 pub use run::{New, reply, start_job};
 
 /// What a command prints: a reader that's gone (`proj status | head`) is no
 /// failure of the command's.
-fn put(text: &str) {
+pub(crate) fn put(text: &str) {
     let _ = io::stdout().lock().write_all(text.as_bytes());
 }
 
@@ -43,6 +45,13 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 }
 
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
+    dispatch_as(cfg, args, View::Owner)
+}
+
+/// A command, its output rendered for `view`. Only
+/// [`crate::host_jobs::view`] asks for [`View::Bridge`], after validating
+/// the bridge's grammar.
+pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
         Some("_retry_format") => {
             put(crate::slot::RETRY_HANDOVER_FORMAT);
@@ -58,8 +67,11 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             cfg.check_config().map_err(|e| Fail::new(1, e))
         }
         Some("engines") => {
-            let said = crate::setups::Store::new(&cfg.roles)
-                .command(&args[1..])
+            let said = cfg
+                .settings
+                .as_ref()
+                .ok_or_else(|| Fail::new(1, "settings are not configured"))?
+                .command(args, "proj engines")
                 .map_err(|e| Fail::new(1, e))?;
             put(&said);
             Ok(())
@@ -71,13 +83,14 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         Some("_claude") => crate::engine::exec_claude(cfg, &args[1..]),
         Some("_codex") => crate::engine::exec_codex(cfg, &args[1..]),
         Some(cmd @ ("run" | "reply")) => run::run(cfg, cmd == "reply", &args[1..]),
+        Some("_host-view") if view == View::Owner => crate::host_jobs::view(cfg, &args[1..]),
         None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
             put(&cfg.settings_line());
-            put(&Snapshot::take(cfg, 0)?.in_line());
+            put(&Snapshot::take_as(cfg, 0, view)?.in_line());
             Ok(())
         }
-        None | Some("status") => status(cfg, args.get(1)),
-        Some("log") => log(cfg, args),
+        None | Some("status") => status(cfg, args.get(1), view),
+        Some("log") => log(cfg, args, view),
         Some("state") if args.get(1).is_some_and(|a| a == "--json") => {
             let jobs = match args.get(2) {
                 None => snapshot::JOBS,
@@ -85,7 +98,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                     .parse()
                     .map_err(|_| Fail::new(2, "usage: proj state --json [N]"))?,
             };
-            put(&state_json(cfg, jobs)?);
+            put(&state_json(cfg, jobs, view)?);
             Ok(())
         }
         Some("state") if args.get(1).is_some_and(|a| a == "--schema") => {
@@ -106,7 +119,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             let (state, held) = job.lifecycle().map_err(|e| Fail::new(1, e))?;
             put(&std::iter::once(state)
                 .chain(held)
-                .map(|l| format!("{l}\n"))
+                .map(|l| format!("{}\n", view.plain(&l)))
                 .collect::<String>());
             Ok(())
         }
@@ -128,7 +141,10 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect();
             names.sort();
-            put(&names.iter().map(|n| format!("{n}\n")).collect::<String>());
+            put(&names
+                .iter()
+                .map(|n| format!("{}\n", view.plain(n)))
+                .collect::<String>());
             Ok(())
         }
         Some("usage") => match args.get(1).map(String::as_str) {
@@ -238,6 +254,15 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("merge-questions") => {
+            let key = arg(args, 1, MERGE_USAGE)?;
+            if args.len() < 3 {
+                return Err(Fail::new(2, MERGE_USAGE));
+            }
+            let leader = crate::ask::merge(cfg, key, &args[2..]).map_err(|e| Fail::new(1, e))?;
+            put(&format!("merged under {leader}'s notice\n"));
+            Ok(())
+        }
         Some("_policy") => crate::policy::reconcile(cfg).map_err(|e| Fail::new(1, e)),
         Some("_questions") => {
             put(&serde_json::to_string(&crate::ask::owner_lines(cfg)).unwrap());
@@ -274,14 +299,14 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|merge-questions",
         )),
     }
 }
 
 /// `proj status [N]`: the N jobs most recently changed, and how each is,
 /// as the live snapshot has them.
-fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
+fn status(cfg: &Config, limit: Option<&String>, view: View) -> Result<(), Fail> {
     let limit: usize = match limit {
         None => snapshot::JOBS,
         Some(n) => n
@@ -289,19 +314,19 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
             .map_err(|_| Fail::new(1, format!("proj status: {n} isn't a number")))?,
     };
     put(&cfg.settings_line());
-    put(&Snapshot::take(cfg, limit)?.status());
+    put(&Snapshot::take_as(cfg, limit, view)?.status());
     Ok(())
 }
 
 /// `proj state --json [N]`: the live snapshot, with the N jobs most recently
 /// changed.
-pub(crate) fn state_json(cfg: &Config, jobs: usize) -> Result<String, Fail> {
-    let snap = Snapshot::take(cfg, jobs)?;
+pub(crate) fn state_json(cfg: &Config, jobs: usize, view: View) -> Result<String, Fail> {
+    let snap = Snapshot::take_as(cfg, jobs, view)?;
     Ok(format!("{}\n", serde_json::to_string(&snap).unwrap()))
 }
 
 /// `proj log ID [--turn N] [--raw]`: a turn's answer, and how it ended.
-fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
+fn log(cfg: &Config, args: &[String], view: View) -> Result<(), Fail> {
     let usage = "usage: proj log ID [--turn N] [--raw]";
     let id = arg(args, 1, usage)?;
     let (mut n, mut raw) = (None, false);
@@ -331,7 +356,7 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             .map_err(|e| io_fail(&stream, e))?;
         return Ok(());
     }
-    match told(cfg, id, &n) {
+    match told_as(cfg, id, &n, view) {
         Ok(text) => {
             put(&text);
             Ok(())
@@ -346,16 +371,29 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
 /// Turn N's answer, and how the turn ended, as `proj log` says them; Err
 /// when it has no answer, with what's said instead.
 pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
+    told_as(cfg, id, n, View::Owner)
+}
+/// [`told`], as `view` shows it: the bridge's redacts each result, notice and
+/// outcome on its own, so one's unclosed quote can't swallow the next.
+fn told_as(cfg: &Config, id: &str, n: &str, view: View) -> Result<String, String> {
     let job = Job::new(cfg, id);
     // A turn's answer is read from its own stream, so an earlier turn's is
     // still there once later ones have started.
     let stream = job.turn(n, "jsonl");
     let last = last_result(&stream, 0);
-    let mut said = answer(&stream);
-    if read(&job.turn(n, "end")).as_deref() == Some("ask")
-        && let Some(q) = crate::ask::load(&job)
-    {
-        said.push_str(&q.notice());
+    let mut said = crate::engine::results(&stream)
+        .iter()
+        .map(|r| view.plain(r))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if read(&job.turn(n, "end")).as_deref() == Some("ask") {
+        match crate::ask::load(&job) {
+            Ok(Some(q)) => said.push_str(&view.plain(&q.notice())),
+            Ok(None) => (),
+            Err(e) => said.push_str(&format!(
+                "\n\nThis question's deadline and default can't be read now: {e}"
+            )),
+        }
     }
     let said = Some(said).filter(|a| !a.is_empty());
     if let (Some(last), Some(said)) = (&last, said) {
@@ -367,9 +405,15 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
             out.push_str(&format!("\n(turn {n} ended in an error)\n"));
             match last.get("errors") {
                 None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => (),
-                Some(errors) => out.push_str(&format!("{errors}\n")),
+                Some(errors) if view == View::Owner => out.push_str(&format!("{errors}\n")),
+                Some(errors) => {
+                    let clean = burrow_probe::scrub::independent_json(errors)
+                        .unwrap_or_else(|_| serde_json::json!("[redacted]"));
+                    out.push_str(&format!("{clean}\n"));
+                }
             }
         } else if let Some(outcome) = outcome.filter(|o| !o.is_empty() && o != "done") {
+            let outcome = view.plain(&outcome);
             out.push_str(&format!("\n(turn {n} then ended: {outcome})\n"));
         } else if read(&job.turn(n, "end")).as_deref() == Some("undeclared") {
             out.push_str(&format!(
@@ -385,7 +429,7 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
     } else {
         format!("(turn {n} ended without an answer)\n")
     };
-    out.push_str(&crate::engine::stream_tail(&stream));
+    out.push_str(&crate::engine::stream_tail(&stream, view));
     Err(out)
 }
 
@@ -629,8 +673,7 @@ pub(crate) fn record_wait(
                 )
                 .map_err(|e| io_fail(&pending, e))?;
                 crate::github_quota::remember(job, &text)?;
-                crate::state_reads::write(job.path("end.next"), "await\n")
-                    .map_err(|e| io_fail(&job.path("end.next"), e))?;
+                crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
                 if let Err(e) = crate::github_quota::note(cfg, job, &limited_owner, due) {
                     eprintln!("proj: quota meter unavailable: {e}");
                 }
@@ -656,8 +699,7 @@ pub(crate) fn record_wait(
     let next = job.path("await.next");
     crate::state_reads::write(&next, crate::github_quota::captured(job)?)
         .map_err(|e| io_fail(&next, e))?;
-    crate::state_reads::write(job.path("end.next"), "await\n")
-        .map_err(|e| io_fail(&job.path("end.next"), e))?;
+    crate::ask::declare(job, "await").map_err(|e| Fail::new(1, e))?;
     let _ = fs::remove_file(job.path(crate::github_quota::PENDING));
     put(&format!(
         "Noted. End your turn now: this job is resumed once {} changes.\n",
@@ -695,6 +737,8 @@ pub(crate) fn baselines(
     Ok(text)
 }
 
+const MERGE_USAGE: &str = "usage: proj merge-questions KEY JOB... (open questions about one subject: the newest keeps its notice)";
+
 /// `proj ask` and `proj done`, from inside a job: how its turn ends, said
 /// before it does. The last of proj await, ask and done stands; neither of
 /// these waits on GitHub any longer.
@@ -726,8 +770,7 @@ fn ends(cfg: &Config, how: &str, args: &[String]) -> Result<(), Fail> {
 /// Record the declaration and return the instruction the engine receives.
 fn declare_end(job: &Job, how: &str) -> Result<&'static str, Fail> {
     let _ = fs::remove_file(job.path("await.next"));
-    crate::state_reads::write(job.path("end.next"), format!("{how}\n"))
-        .map_err(|e| io_fail(&job.path("end.next"), e))?;
+    crate::ask::declare(job, how).map_err(|e| Fail::new(1, e))?;
     if how == "done" {
         let _ = fs::remove_file(job.path("open-question"));
     }
@@ -796,7 +839,8 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
-    if crate::ask::load(&job).is_some() || crate::ask::host_path(&job, "label").exists() {
+    if !matches!(crate::ask::load(&job), Ok(None)) || crate::ask::host_path(&job, "label").exists()
+    {
         names.extend(["proj-watch".into(), "autoland".into()]);
     }
     if crate::question::needs_watch(&job) {

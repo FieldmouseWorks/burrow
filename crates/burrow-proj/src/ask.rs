@@ -1,23 +1,33 @@
 //! Defaults and deadlines belong to the question, not to any one resume.
-use crate::{config::Config, job::Job, read, swap};
+use crate::state_reads::write as swap;
+use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+mod about;
+pub(crate) use about::{
+    FILE as ABOUT_FILE, cohort, follows, footer, identity, key_of, load, locked, merge, open,
+    restore, still_waiting,
+};
 mod host;
-pub(crate) use host::{control_root, ensure, host_path, initialize};
+pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
 mod visibility;
 pub(crate) use visibility::tend as visibility;
 
-pub const USAGE: &str = "usage: proj ask --default TEXT [--one-way]";
+pub const USAGE: &str = "usage: proj ask --default TEXT [--one-way] [--about KEY]";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Recommendation {
     pub default: String,
     pub one_way: bool,
+    /// The subject: jobs asking about the same key share one notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
 }
 impl Recommendation {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let mut default = None;
         let mut one_way = false;
+        let mut about = None;
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
@@ -31,70 +41,165 @@ impl Recommendation {
                     }
                 }
                 "--one-way" if !one_way => one_way = true,
+                "--about" if about.is_none() => {
+                    about = Some(about::normalize(words.next().ok_or(USAGE)?)?);
+                }
                 _ => return Err(USAGE.into()),
             }
         }
         Ok(Self {
             default: default.ok_or(USAGE)?,
             one_way,
+            about,
         })
     }
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Question {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub recommendation: Recommendation,
     pub due: i64,
+    /// Credits owned here while unkeyed; shared questions use the registry.
+    #[serde(default)]
+    pub pauses: about::Pauses,
 }
+const POLICY: &str = "\n\nWithout an answer by ";
+const ONE_WAY: &str =
+    "This is one-way: the job will finish and leave this question open for the owner.";
+const REVERSIBLE: &str = "The job will take this reversible default and report the outcome.";
 impl Question {
+    /// The policy paragraph: rendered from the effective policy each time a
+    /// notice goes out, never kept in its body.
     pub(crate) fn notice(&self) -> String {
         format!(
-            "\n\nWithout an answer by {}: {}. {}",
+            "{POLICY}{}: {}. {}",
             burrow_probe::answer::utc(self.due),
             self.recommendation.default,
             if self.recommendation.one_way {
-                "This is one-way: the job will finish and leave this question open for the owner."
+                ONE_WAY
             } else {
-                "The job will take this reversible default and report the outcome."
+                REVERSIBLE
             }
         )
     }
 }
-pub(crate) fn load(job: &Job) -> Option<Question> {
+/// A time as [`Question::notice`] writes it.
+pub(crate) fn parse_utc(time: &str) -> Option<i64> {
+    if let Some(epoch) = time.strip_prefix('@') {
+        return epoch.parse().ok();
+    }
+    time.replacen(' ', "T", 1)
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .map(|at| at.as_second())
+}
+/// A notice body cached before policy was rendered at send time ends in the
+/// paragraph it had then: strip that one, so the current one replaces it.
+pub(crate) fn without_policy(body: &str) -> &str {
+    let mut end = body.len();
+    while let Some(at) = body[..end].rfind(POLICY) {
+        let rest = &body[at + POLICY.len()..];
+        if (rest.ends_with(ONE_WAY) || rest.ends_with(REVERSIBLE))
+            && rest
+                .split_once(": ")
+                .is_some_and(|(time, _)| parse_utc(time).is_some())
+        {
+            return &body[..at];
+        }
+        end = at;
+    }
+    body
+}
+/// The question as the job wrote it. Use [`load`] for what it is bound by.
+#[cfg(test)]
+pub(crate) fn load_raw(job: &Job) -> Option<Question> {
     serde_json::from_str(&read(&host_path(job, "question"))?).ok()
+}
+#[derive(Serialize, Deserialize)]
+struct PendingRecommendation {
+    #[serde(flatten)]
+    recommendation: Recommendation,
+    // Older declarations were bare recommendations; turn startup already
+    // clears those. New declarations can reject residue from another turn.
+    #[serde(default)]
+    turn: String,
+}
+pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
+    let state = |path: &std::path::Path| {
+        crate::github_quota::state(path).map_err(|e| format!("{:?}", e.say))
+    };
+    if state(&job.path("end.next"))?.is_some_and(|end| end != "ask") {
+        return Ok(None);
+    }
+    let Some(text) = state(&job.path("ask.next"))? else {
+        return Ok(None);
+    };
+    let pending: PendingRecommendation = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if !pending.turn.is_empty() && job.turns().as_deref() != Some(pending.turn.as_str()) {
+        return Ok(None);
+    }
+    Ok(Some(pending.recommendation))
+}
+
+/// The end marker commits the active declaration; only asks keep a pending
+/// recommendation. Recovery also checks the marker if cleanup was interrupted.
+pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
+    swap(job.path("end.next"), format!("{end}\n")).map_err(|e| e.to_string())?;
+    if end != "ask" {
+        retire_pending(job)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn retire_pending(job: &Job) -> Result<(), String> {
+    crate::state_reads::remove_durable(job.path("ask.next")).map_err(|e| e.to_string())
+}
+
+/// Keep a superseding marker until the recommendation's absence is durable.
+/// If unlink or sync fails, recovery still sees the declaration that retired it.
+pub(crate) fn clear_declaration(job: &Job) -> Result<(), String> {
+    retire_pending(job)?;
+    crate::state_reads::remove_durable(job.path("end.next")).map_err(|e| e.to_string())
 }
 pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), String> {
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
         return Err(USAGE.into());
     }
     swap(
-        &job.path("ask.next"),
-        &serde_json::to_string(recommendation).map_err(|e| e.to_string())?,
+        job.path("ask.next"),
+        &serde_json::to_string(&PendingRecommendation {
+            recommendation: recommendation.clone(),
+            turn: job.turns().unwrap_or_default(),
+        })
+        .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())
 }
 pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
     if end == "ask" {
         ensure(job)?;
-        let mut recommendation: Recommendation =
-            serde_json::from_str(&read(&job.path("ask.next")).ok_or(USAGE)?)
-                .map_err(|e| e.to_string())?;
-        if load(job).is_some_and(|q| q.recommendation.one_way) {
+        let mut recommendation = pending(job)?.ok_or(USAGE)?;
+        let prior = about::open(job)?;
+        if prior.as_ref().is_some_and(|q| q.recommendation.one_way) {
             recommendation.one_way = true;
         }
-        let due = load(job)
+        // Asking again without the key stays under the one it has.
+        if recommendation.about.is_none() {
+            recommendation.about = about::key_of(job)?;
+        }
+        let due = prior
+            .as_ref()
             .map(|q| q.due)
             .unwrap_or_else(|| crate::now().saturating_add(cfg.ask_timeout as i64));
-        let q = Question {
-            recommendation,
-            due,
-        };
+
         if !host_path(job, "question-text").exists() {
             swap(
-                &host_path(job, "question-id"),
-                &crate::now_nanos().to_string(),
+                host_path(job, "question-id"),
+                crate::now_nanos().to_string(),
             )
             .map_err(|e| e.to_string())?;
-            swap(&host_path(job, "question-since"), &crate::now().to_string())
+            swap(host_path(job, "question-since"), crate::now().to_string())
                 .map_err(|e| e.to_string())?;
             let text = job
                 .turns()
@@ -106,8 +211,8 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
                 })
                 .unwrap_or_default();
             swap(
-                &host_path(job, "question-text"),
-                &burrow_probe::scrub::scrub(&text)
+                host_path(job, "question-text"),
+                burrow_probe::scrub::scrub(&text)
                     .as_str()
                     .chars()
                     .take(16000)
@@ -115,24 +220,45 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
         }
-        swap(
-            &host_path(job, "question"),
-            &serde_json::to_string(&q).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let q = Question {
+            pauses: prior.as_ref().map(|q| q.pauses.clone()).unwrap_or_default(),
+            id: Some(
+                prior
+                    .and_then(|q| q.id)
+                    .or_else(|| read(&host_path(job, "question-id")))
+                    .ok_or("question has no identity")?,
+            ),
+            recommendation,
+            due,
+        };
+        let write = |q: &Question| {
+            swap(
+                host_path(job, "question"),
+                &serde_json::to_string(q).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        };
+        // A question joined to a subject takes its group's deadline and
+        // requirement, and posts no notice of its own (see `about`).
+        match q.recommendation.about.clone() {
+            Some(key) => about::publish(job, &key, q, write)?,
+            None => write(&q)?,
+        }
     } else if end == "done" {
         clear(job);
     }
-    let _ = fs::remove_file(job.path("ask.next"));
+    retire_pending(job)?;
     Ok(())
 }
 pub(crate) fn clear(job: &Job) {
     for name in [
         "question",
         "question-needs-owner",
+        "question-released",
         "question-text",
         "question-since",
         "question-id",
+        ABOUT_FILE,
     ] {
         let _ = fs::remove_file(host_path(job, name));
     }
@@ -145,7 +271,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     if crate::question::acceptance_pending(job)? {
         return Ok(Some(crate::now() + 60));
     }
-    let Some(q) = load(job) else { return Ok(None) };
+    let Some(q) = load(job)? else { return Ok(None) };
     if crate::planning::admit(job).is_err() {
         return Ok(Some(crate::now() + 60));
     }
@@ -155,13 +281,35 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
     if crate::now() < q.due {
         return Ok(Some(q.due));
     }
+    // Admission may inspect another job under its lock. Do that before
+    // taking the registry, which that job may need to publish its question.
+    // Keep the admission result through acceptance instead of scanning again.
+    let capacity = if q.recommendation.one_way {
+        None
+    } else {
+        Some(crate::inbox::resumption::admission(cfg, job)?)
+    };
+    // Decide and act under the registry: a join or merge that makes the group
+    // one-way, or a restoration that moves its deadline, either lands first
+    // and is read here, or finds this default accepted and its question retired.
+    let registry = locked(cfg)?;
+    let Some(q) = load(job)? else { return Ok(None) };
+    if crate::now() < q.due {
+        return Ok(Some(q.due));
+    }
     let time = burrow_probe::answer::utc(q.due);
     if q.recommendation.one_way {
+        crate::inbox::enrollment::admit(job)?;
         // A one-way decision gets no engine and cannot accidentally execute
         // its default. Record a completed host turn for the normal issue writer.
         let n = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
         let ntext = n.to_string();
-        fs::write(
+        swap(
+            host_path(job, "question-released"),
+            serde_json::to_string(&q).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        swap(
             host_path(job, "question-needs-owner"),
             &q.recommendation.default,
         )
@@ -177,9 +325,9 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             ("end", "done\n"),
             ("outcome", "done\n"),
         ] {
-            fs::write(job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
+            swap(job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
         }
-        fs::write(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
+        swap(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
         job.set_turns(n).map_err(|e| e.to_string())?;
         for path in [
             host_path(job, "question"),
@@ -188,6 +336,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         ] {
             let _ = fs::remove_file(path);
         }
+        drop(registry);
         if let Some(inbox) = &cfg.inbox {
             for entry in fs::read_dir(&inbox.state).into_iter().flatten().flatten() {
                 let dir = entry.path();
@@ -205,7 +354,15 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             "No answer by {time}. Take your reversible recommended answer now: {}\n\nCarry out that default and say on the issue that you took it because the question timed out. Do not ask the same question again.",
             q.recommendation.default
         );
-        crate::turn::start_default(cfg, job.id, &prompt)?;
+        crate::turn::start_default(
+            cfg,
+            job.id,
+            &prompt,
+            capacity
+                .as_ref()
+                .ok_or("one-way question lost its policy")?,
+        )?;
+        drop(registry);
     }
     Ok(None)
 }
@@ -220,28 +377,45 @@ pub(crate) fn owner_lines(cfg: &Config) -> Vec<(String, String, String)> {
         }
         let job = Job::new(cfg, &id);
         let pending = host_path(&job, "question-needs-owner").exists();
-        if !pending && (host_path(&job, "question-reader").exists() || load(&job).is_none()) {
+        // An unreadable registry or question lists the job: the owner hears
+        // of it rather than miss a question nobody can place.
+        if matches!(about::follows(&job), Ok(Some(_))) {
+            continue;
+        }
+        let question = load(&job);
+        if !pending && (host_path(&job, "question-reader").exists() || matches!(question, Ok(None)))
+        {
             continue;
         }
         let link = visibility::issue(cfg, &job)
             .map(|(repo, n)| format!("https://github.com/{repo}/issues/{n}"));
-        let question = read(&host_path(&job, "question-text"))
+        let text = read(&host_path(&job, "question-text"))
             .map(|text| summary(&text))
             .unwrap_or_default();
-        let description = load(&job)
-            .map(|q| {
-                format!(
-                    "job {id} asks: {question}; default: {}; deadline {}",
-                    summary(&q.recommendation.default),
-                    burrow_probe::answer::utc(q.due)
-                )
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "job {id}: one-way question remains open: {question}; recommended {}",
-                    summary(&read(&host_path(&job, "question-needs-owner")).unwrap_or_default())
-                )
-            });
+        let description = match question {
+            Ok(Some(q)) => format!(
+                "job {id} asks: {text}; default: {}; deadline {}",
+                summary(&q.recommendation.default),
+                burrow_probe::answer::utc(q.due)
+            ),
+            Err(e) if !pending => {
+                format!("job {id} asks: {text}; its deadline and default can't be read: {e}")
+            }
+            _ => format!(
+                "job {id}: one-way question remains open: {text}; recommended {}",
+                summary(&read(&host_path(&job, "question-needs-owner")).unwrap_or_default())
+            ),
+        };
+        let others: Vec<String> = cohort(&job)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let description = if others.is_empty() {
+            description
+        } else {
+            format!("{description}; also waiting on it: {}", others.join(", "))
+        };
         let line = link.map(|url| format!("[{id}]({url})")).unwrap_or(id);
         lines.push(("Jobs waiting for the owner".into(), line, description));
     }
@@ -260,6 +434,9 @@ fn summary(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
+#[path = "ask/tests/about.rs"]
+pub(crate) mod about_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,9 +469,12 @@ mod tests {
         fs::write(job.turn("1", "end"), "ask\n").unwrap();
         fs::write(job.turn("1", "outcome"), "done\n").unwrap();
         let q = Question {
+            pauses: Default::default(),
+            id: None,
             recommendation: Recommendation {
                 default: "keep the change".into(),
                 one_way,
+                about: None,
             },
             due: crate::now() - 1,
         };
@@ -329,7 +509,7 @@ mod tests {
         assert!(prompt.contains("No answer by"));
         assert!(prompt.contains("Take your reversible recommended answer now: keep the change"));
         assert!(!prompt.contains("question is still posted"));
-        assert!(load(&job).is_none());
+        assert!(load(&job).unwrap().is_none());
     }
     #[test]
     fn split_intent_defers_both_question_expiry_transitions_without_losing_state() {
@@ -383,7 +563,7 @@ mod tests {
                 .contains("one-way")
         );
         assert!(host_path(&job, "question-needs-owner").exists());
-        assert!(load(&job).is_none());
+        assert!(load(&job).unwrap().is_none());
         assert_eq!(owner_lines(&cfg).len(), 1);
     }
     // What a job still holds open (Job::holds), through each end its
@@ -478,17 +658,18 @@ mod tests {
     fn repeating_a_question_cannot_drop_its_one_way_requirement() {
         let (_dir, cfg) = fixture();
         let job = asking(&cfg, true);
-        let due = load(&job).unwrap().due;
+        let due = load(&job).unwrap().unwrap().due;
         record(
             &job,
             &Recommendation {
                 default: "keep it".into(),
                 one_way: false,
+                about: None,
             },
         )
         .unwrap();
         finish(&cfg, &job, "ask").unwrap();
-        let question = load(&job).unwrap();
+        let question = load(&job).unwrap().unwrap();
         assert!(question.recommendation.one_way);
         assert_eq!(question.due, due);
     }
@@ -497,7 +678,7 @@ mod tests {
         for n in ["1", "9"] {
             let (_dir, cfg) = fixture();
             let job = asking(&cfg, true);
-            let mut q = load(&job).unwrap();
+            let mut q = load(&job).unwrap().unwrap();
             q.due = crate::now() + 3600;
             fs::write(
                 host_path(&job, "question"),
@@ -517,15 +698,16 @@ mod tests {
                 &Recommendation {
                     default: "keep it".into(),
                     one_way: false,
+                    about: None,
                 },
             )
             .unwrap();
             finish(&cfg, &job, "ask").unwrap();
-            assert!(load(&job).unwrap().recommendation.one_way);
-            assert_eq!(load(&job).unwrap().due, q.due);
+            assert!(load(&job).unwrap().unwrap().recommendation.one_way);
+            assert_eq!(load(&job).unwrap().unwrap().due, q.due);
             crate::cmd::stop(&cfg, "j1", false).unwrap();
             assert!(
-                load(&job).is_none(),
+                load(&job).unwrap().is_none(),
                 "authenticated operator stop clears the question"
             );
         }
@@ -539,6 +721,7 @@ mod tests {
         let recommendation = Recommendation {
             default: "keep it".into(),
             one_way: true,
+            about: None,
         };
         record(&job, &recommendation).unwrap();
         finish(&cfg, &job, "ask").unwrap();
@@ -554,7 +737,7 @@ mod tests {
             finish(&cfg, &job, "ask").unwrap();
             assert!(owner_lines(&cfg)[0].2.contains("Which release should run?"));
         }
-        let mut q = load(&job).unwrap();
+        let mut q = load(&job).unwrap().unwrap();
         q.due = crate::now() - 1;
         fs::write(
             host_path(&job, "question"),
@@ -597,6 +780,6 @@ mod tests {
             .unwrap()
             .commit()
             .unwrap();
-        assert!(load(&job).is_none());
+        assert!(load(&job).unwrap().is_none());
     }
 }

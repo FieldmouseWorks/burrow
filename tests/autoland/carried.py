@@ -4,20 +4,24 @@ only by a merge of its base lands on the looks at the head before it, with
 none asked for again; one whose merge edited its own lines is looked at
 again, and so is one whose newest look there had findings; and a judge still
 looks at what a carried head hides from the reviewers. GitHub's git remote
-is the bare repo review.py made, and the steward's mirror and
+is a private clone of the bare repo review.py made, and the steward's mirror and
 burrow-upkeep's `carry` and `verdict` are the real ones."""
 
 import subprocess
 
-from harness import POSTED, REAL, V, fresh_pr_state, merged, mkpr, queued, run, rv_review, sh, stand_in, tmp, worker
+from harness import POSTED, REAL, V, fresh_pr_state, merged, mkpr, queued, run, rv_review, sh, stand_in, tmp, upkeep_config, C, worker
 
 stand_in()
 V.carry = REAL["carry"]
-origin, work = f"{tmp}/origin/sam/r.git", f"{tmp}/carry"
+# Each scenario advances main, so keep this part's remote private instead
+# of rewinding the shared fixture's default branch afterward.
+origin_root, work = f"{tmp}/carry-origin", f"{tmp}/carry"
+origin = f"{origin_root}/sam/r.git"
+sh("git", "clone", "-q", "--bare", f"{tmp}/origin/sam/r.git", origin)
+kept_upkeep, C.CFG["upkeep"] = C.CFG["upkeep"], upkeep_config(f"{tmp}/upkeep-carry.json", git=origin_root)
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 sh("git", "clone", "-q", origin, work)
 sh("git", "checkout", "-qB", "main", "origin/main", cwd=work)
-was = sh("git", "rev-parse", "HEAD", cwd=work).strip()  # main as the parts before left it, put back after
 
 
 def lines(at=0, said=""):
@@ -112,7 +116,7 @@ keyed_looks = [rv_review("codex", 0, keyed), rv_review("rival", 0, keyed)]
 status, _ = run(mkpr(number=9, sha=merged_keyed, reviews=keyed_looks), 0)
 assert queued() == [] and not merged() and "key.pem" in status and "aren't shown" in status, status
 
-push(f"{was}:refs/heads/main", ":refs/pull/9/head")
+C.CFG["upkeep"] = kept_upkeep
 stand_in()
 fresh_pr_state()
 print("carried: ok")

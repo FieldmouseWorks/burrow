@@ -1,6 +1,6 @@
 //! A pass over the repo's probe issues, at its door (burrow-door): each
 //! open one an author opened, and only authors wrote, gets its answers in
-//! one comment and is closed; one anyone else wrote gets a line saying no
+//! comments and is closed; one anyone else wrote gets a line saying no
 //! probe ran, and is closed too. A repo GitHub doesn't say is private gets
 //! nothing: the answers are the machine's own business.
 
@@ -9,7 +9,7 @@ use burrow_github::{Api, Error, call};
 use serde_json::Value;
 
 use crate::query::Query;
-use crate::scrub::scrub;
+use crate::scrub::{REDACTED, redact_keys, scrub};
 use crate::{Config, MARK};
 
 /// The most questions one issue gets answered.
@@ -63,10 +63,30 @@ pub fn pass(
         };
         let author = vetted.is_ok();
         let (body, reason) = match vetted {
-            Ok(text) => (scrub(&answers(cfg, &text, answer, now)), "completed"),
-            Err(why) => (scrub(&format!("{MARK}\n{why}")), "not_planned"),
+            Ok(text) => (
+                answers(cfg, &text, answer, now)
+                    .iter()
+                    .map(|p| scrub(p))
+                    .collect::<Vec<_>>(),
+                "completed",
+            ),
+            Err(why) => (vec![scrub(&format!("{MARK}\n{why}"))], "not_planned"),
         };
-        match door.reply(api, n, body.as_str(), reason) {
+        // Post every page before closing. A failed continuation leaves the
+        // issue open, just as a failed single-comment answer does.
+        let reply = (|| {
+            for page in &body[..body.len() - 1] {
+                call(
+                    api,
+                    "POST",
+                    &format!("repos/{repo}/issues/{n}/comments"),
+                    Some(&serde_json::json!({"body": page.as_str()})),
+                    None,
+                )?;
+            }
+            door.reply(api, n, body.last().unwrap().as_str(), reason)
+        })();
+        match reply {
             Ok(()) if author => done.answered.push(n),
             Ok(()) => done.refused.push(n),
             Err(e) => failed.push(e.context(format!("#{n}"))),
@@ -79,29 +99,59 @@ pub fn pass(
     }
 }
 
-/// The answers to an issue's questions, as one comment.
+/// Answers packed into comments; required usage sections are never clipped.
 fn answers(
     cfg: &Config,
     issue: &Value,
     answer: &mut dyn FnMut(&Query) -> Result<String, String>,
     now: &str,
-) -> String {
-    let asked = asked(issue);
-    let mut out = format!("{MARK}\nThe probe on {}, at {now}:\n", cfg.host);
+) -> Vec<String> {
+    // Take each complete request field's private keys out before
+    // normalization, question limits, clipping or pagination can separate a
+    // key's markers from its payload. Only keys: the questions run as asked,
+    // and what's echoed of them is scrubbed in context below.
+    let request = serde_json::json!({
+        "title": redact_keys(issue["title"].as_str().unwrap_or("")),
+        "body": redact_keys(issue["body"].as_str().unwrap_or("")),
+    });
+    let asked = asked(&request);
+    let header = scrub(&format!(
+        "{MARK}\nThe probe on {}, at {now}:\n",
+        clip(&cfg.host, MAX_ECHO)
+    ))
+    .as_str()
+    .to_string();
+    let mut pages = vec![header.clone()];
     if asked.is_empty() {
-        out += &format!("\nNothing was asked: {}\n", crate::query::VOCABULARY);
-        return out;
+        *pages.last_mut().unwrap() +=
+            &format!("\nNothing was asked: {}\n", crate::query::VOCABULARY);
+        return pages;
     }
-    // Each answer's share of the comment, less what goes around it: the
-    // heading above, its question (clipped, up to four bytes a character),
-    // its fence and a note of a cut. The comment as a whole is cut too, for
-    // what this doesn't foresee (a fence a run of backticks made long).
+    // Optional answers keep their per-question budget. Usage's required
+    // prefix gets all the space it needs, across comments when necessary.
     let share = (MAX_COMMENT - 1_000) / asked.len().min(MAX_QUESTIONS);
     let each = share.saturating_sub(4 * MAX_ECHO + 100);
-    for line in asked.iter().take(MAX_QUESTIONS) {
-        let shown = clip(line, MAX_ECHO).replace('`', "'");
+    for (i, line) in asked.iter().enumerate().take(MAX_QUESTIONS) {
+        let before = i.checked_sub(1).map(|b| asked[b].as_str());
+        let echoed = echo(before, line);
+        let shown = clip(&echoed, MAX_ECHO).replace('`', "'");
         match Query::parse(line) {
-            Err(why) => out += &format!("\n**`{shown}`**: {}\n", clip(&why, MAX_ECHO)),
+            // A refusal's reason quotes the line, so one that looks like a
+            // secret, alone or after the line before it, gets no reason.
+            Err(_) if echoed != *line => append(
+                &mut pages,
+                &header,
+                scrub(&format!(
+                    "\n**`{shown}`**: not a question, and it looks like it holds a secret ({})\n",
+                    crate::query::VOCABULARY
+                ))
+                .as_str(),
+            ),
+            Err(why) => append(
+                &mut pages,
+                &header,
+                scrub(&format!("\n**`{shown}`**: {}\n", clip(&why, MAX_ECHO))).as_str(),
+            ),
             Ok(q) => {
                 let (text, end) = match answer(&q) {
                     Ok(t) => (t, matches!(q, Query::Journal { .. } | Query::Oom { .. })),
@@ -109,23 +159,89 @@ fn answers(
                 };
                 // Scrubbed whole before it's cut, so a cut can't leave part
                 // of a secret its rule needed all of to know (a key's END
-                // without its BEGIN, say). The comment is scrubbed again.
-                let text = scrub(&text);
-                let heading = clip(&q.to_string(), MAX_ECHO).replace('`', "'");
-                out += &format!(
-                    "\n**`{heading}`**\n\n{}\n",
-                    fenced(&fit(text.as_str(), each, end))
-                );
+                // without its BEGIN, say). Headings and refusals are scrubbed too.
+                let text = scrub(&text).as_str().to_string();
+                let heading = clip(&echo(before, &q.to_string()), MAX_ECHO).replace('`', "'");
+                let text = if matches!(q, Query::Usage { .. }) {
+                    // --totals has no optional suffix. Otherwise only the
+                    // meter readings and per-turn details share the budget.
+                    match text.split_once("Meter readings:\n") {
+                        Some((required, rest)) => format!(
+                            "{required}{}",
+                            fit(
+                                &format!("Meter readings:\n{rest}"),
+                                each.saturating_sub(required.len()),
+                                false
+                            )
+                        ),
+                        None => text,
+                    }
+                } else {
+                    fit(&text, each, end)
+                };
+                append_answer(&mut pages, &header, &heading, &text);
             }
         }
     }
     if asked.len() > MAX_QUESTIONS {
-        out += &format!(
-            "\nOnly the first {MAX_QUESTIONS} questions are answered; ask the other {} in another issue.\n",
-            asked.len() - MAX_QUESTIONS
+        append(
+            &mut pages,
+            &header,
+            &format!(
+                "\nOnly the first {MAX_QUESTIONS} questions are answered; ask the other {} in another issue.\n",
+                asked.len() - MAX_QUESTIONS
+            ),
         );
     }
-    out
+    pages
+}
+
+/// `line` as it may be echoed: scrubbed after the question `before` it,
+/// since a secret's shape can start on one line and end on the next
+/// (`password:`, then its value). If a rule took the line break with it,
+/// the whole line is hidden.
+fn echo(before: Option<&str>, line: &str) -> String {
+    let Some(before) = before else {
+        return scrub(line).as_str().to_string();
+    };
+    let both = scrub(&format!("{before}\n{line}"));
+    match both.as_str().split_once('\n') {
+        Some((_, after)) if !after.contains('\n') => after.to_string(),
+        _ => REDACTED.to_string(),
+    }
+}
+
+fn append(pages: &mut Vec<String>, header: &str, fragment: &str) {
+    if pages.last().unwrap().len() + fragment.len() > MAX_COMMENT {
+        pages.push(format!("{header}(continued)\n"));
+    }
+    *pages.last_mut().unwrap() += fragment;
+}
+
+/// Fence each chunk independently, reserving up to twice its text size for
+/// fences (the worst case is a chunk consisting entirely of backticks).
+/// Split at lines where possible; a single oversized line splits at UTF-8
+/// boundaries. Never pass an oversized required answer to Door's clipping.
+fn append_answer(pages: &mut Vec<String>, header: &str, heading: &str, mut text: &str) {
+    let prefix = format!("\n**`{heading}`**\n\n");
+    let budget = MAX_COMMENT.saturating_sub(header.len() + prefix.len() + 100);
+    loop {
+        let mut end = text.len().min(budget / 3);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < text.len()
+            && let Some(line) = text[..end].rfind('\n')
+        {
+            end = line + 1;
+        }
+        let fragment = format!("{prefix}{}\n", fenced(&text[..end]));
+        append(pages, header, &fragment);
+        text = &text[end..];
+        if text.is_empty() {
+            break;
+        }
+    }
 }
 
 /// `text` cut to `max` bytes, at a line's end: its last lines when `end`

@@ -46,8 +46,13 @@ pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Re
 
 /// The deadline's reversible default answers the question: the launch's
 /// receipt carries that as the question's cause.
-pub(crate) fn start_default(cfg: &Config, id: &str, msg: &str) -> Result<(), String> {
-    start_with(cfg, id, msg, false, Answer::Deadline, None)
+pub(crate) fn start_default(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    capacity: &crate::inbox::resumption::Resume,
+) -> Result<(), String> {
+    start_with(cfg, id, msg, false, Answer::Deadline, Some(capacity))
 }
 
 /// Restoration already owns the serialized inbox admission permit.
@@ -56,7 +61,7 @@ pub(crate) fn start_admitted(
     id: &str,
     msg: &str,
     first: bool,
-    permit: &crate::inbox::resumption::Permit,
+    permit: &crate::inbox::resumption::Resume,
 ) -> Result<(), String> {
     start_with(cfg, id, msg, first, Answer::Update, Some(permit))
 }
@@ -77,9 +82,10 @@ fn start_with(
     msg: &str,
     first: bool,
     answer: Answer,
-    permit: Option<&crate::inbox::resumption::Permit>,
+    permit: Option<&crate::inbox::resumption::Resume>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
+    crate::inbox::enrollment::admit(&job)?;
     crate::planning::admit(&job)?;
     let unit = job.unit();
     if job
@@ -136,11 +142,15 @@ fn start_with(
         undo();
         return Err(format!("proj: {}: {e}", prompt.display()));
     }
-    let capacity = if permit.is_some() {
-        None
+    let acquired;
+    let capacity = if let Some(permit) = permit {
+        permit
     } else {
         match crate::inbox::resumption::admission(cfg, &job) {
-            Ok(gate) => Some(gate),
+            Ok(gate) => {
+                acquired = gate;
+                &acquired
+            }
             Err(error) => {
                 undo();
                 return Err(error);
@@ -165,10 +175,8 @@ fn start_with(
     );
     let started = if crate::policy::denied(&job)
         || crate::policy::parked(&job)
-        || matches!(
-            capacity.as_ref(),
-            Some(crate::inbox::resumption::Resume::Waiting)
-        ) {
+        || matches!(capacity, crate::inbox::resumption::Resume::Waiting)
+    {
         crate::policy::mark(&job, "queued", first)?;
         true
     } else {
@@ -273,8 +281,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    for f in ["await", "await.next", "end.next", "ask.next"] {
-        if !job.turn(&n, "retry-migration").exists() {
+    if !job.turn(&n, "retry-migration").exists() {
+        crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
+        for f in ["await", "await.next"] {
             let _ = crate::state_reads::remove(job.path(f));
         }
     }
@@ -597,7 +606,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // if the turn has time left). A sandbox is stopped before retrying.
         let mut told = String::new();
         if let Some(error) = declaration_error {
-            let _ = crate::state_reads::remove(job.path("end.next"));
+            crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
             let _ = crate::state_reads::remove(job.path("await.next"));
             told.push_str(&format!("The host couldn't register your sandbox next step: {error}. Check what you await and declare the next step again. "));
         }

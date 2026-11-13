@@ -53,6 +53,119 @@ fn job(cfg: &Config) -> Job<'_> {
 }
 
 #[test]
+fn quota_preserves_owner_questions_through_finalization_and_restart() {
+    for committed in [false, true] {
+        let (_d, cfg) = fixture();
+        let job = job(&cfg);
+        fs::write(job.turn("1", "result"), "May I erase the remote archive?").unwrap();
+        crate::ask::record(
+            &job,
+            &crate::ask::Recommendation {
+                default: "Keep the archive until the owner answers".into(),
+                one_way: true,
+                about: None,
+            },
+        )
+        .unwrap();
+        fs::write(job.path("end.next"), "ask").unwrap();
+        if committed {
+            crate::ask::finish(&cfg, &job, "ask").unwrap();
+        }
+        let before: Vec<_> = ["question", "question-id", "question-since", "question-text"]
+            .map(|name| (name, read(&crate::ask::host_path(&job, name))))
+            .into_iter()
+            .collect();
+        pending(&job, 1, vec!["sam/r#7".into()]);
+        if committed {
+            fs::write(job.path("await"), format!("sam/r#7\t{}\t{{}}\n", now())).unwrap();
+        }
+        assert!(finish(&job, "1").unwrap());
+        assert!(!job.path("await").exists());
+        let q = crate::ask::load(&job)
+            .unwrap()
+            .expect("quota finalization lost the owner question");
+        assert!(q.recommendation.one_way);
+        assert_eq!(
+            q.recommendation.default,
+            "Keep the archive until the owner answers"
+        );
+        assert_eq!(
+            read(&crate::ask::host_path(&job, "question-text")).as_deref(),
+            Some("May I erase the remote archive?")
+        );
+        if committed {
+            for (name, value) in before {
+                assert_eq!(read(&crate::ask::host_path(&job, name)), value);
+            }
+        }
+        // Repeat host finalization, then reconstruct the watcher after reset.
+        assert!(finish(&job, "1").unwrap());
+        let id = read(&crate::ask::host_path(&job, "question-id"));
+        crate::watch::look(&cfg, "").unwrap();
+        assert_eq!(job.turns().as_deref(), Some("1"));
+        assert_eq!(read(&crate::ask::host_path(&job, "question-id")), id);
+        assert_eq!(crate::ask::load(&job).unwrap().unwrap().due, q.due);
+        assert_eq!(read(&job.turn("1", "end")).as_deref(), Some("ask"));
+        // Direct recovery entry points cannot publish the old await over it.
+        replay(&cfg, &job).unwrap();
+        restore(&job).unwrap();
+        assert_eq!(read(&crate::ask::host_path(&job, "question-id")), id);
+        assert_eq!(crate::ask::load(&job).unwrap().unwrap().due, q.due);
+        // Expiry retains the owner hold; another quota park cannot release it.
+        let mut expired = crate::ask::load(&job).unwrap().unwrap();
+        expired.due = now() - 1;
+        fs::write(
+            crate::ask::host_path(&job, "question"),
+            serde_json::to_vec(&expired).unwrap(),
+        )
+        .unwrap();
+        crate::ask::expire(&cfg, &job).unwrap();
+        let owner = crate::ask::host_path(&job, "question-needs-owner");
+        assert!(owner.exists());
+        park(&job, 1).unwrap();
+        crate::watch::look(&cfg, "").unwrap();
+        assert!(owner.exists());
+        assert!(crate::turn::start(&cfg, job.id, "quota reset", false).is_err());
+    }
+}
+
+#[test]
+fn quota_restart_commits_a_pending_one_way_ask_before_replaying() {
+    let (_d, cfg) = fixture();
+    let job = job(&cfg);
+    pending(&job, 1, vec!["sam/r#7".into()]);
+    crate::ask::record(
+        &job,
+        &crate::ask::Recommendation {
+            default: "Wait for the owner".into(),
+            one_way: true,
+            about: None,
+        },
+    )
+    .unwrap();
+    fs::write(job.turn("1", "result"), "Which archive can be erased?").unwrap();
+    fs::write(job.path("end.next"), "ask").unwrap();
+    crate::watch::look(&cfg, "").unwrap();
+    assert_eq!(job.turns().as_deref(), Some("1"));
+    assert!(
+        crate::ask::load(&job)
+            .unwrap()
+            .unwrap()
+            .recommendation
+            .one_way
+    );
+    let wake: serde_json::Value = serde_json::from_str(&read(&cfg.wake).unwrap()).unwrap();
+    assert_eq!(
+        wake[""].as_i64(),
+        Some(crate::ask::load(&job).unwrap().unwrap().due)
+    );
+    assert_eq!(
+        read(&crate::ask::host_path(&job, "question-text")).as_deref(),
+        Some("Which archive can be erased?")
+    );
+}
+
+#[test]
 fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
     for problem in ["denied", "invalid", "closed", "malformed"] {
         let (d, mut cfg) = fixture();
@@ -97,10 +210,11 @@ fn ordinary_replay_errors_retire_only_after_an_accepted_resume() {
         let recommendation = crate::ask::Recommendation {
             default: "A real owner decision".into(),
             one_way: false,
+            about: None,
         };
         crate::ask::record(&job, &recommendation).unwrap();
         crate::ask::finish(&cfg, &job, "ask").unwrap();
-        assert!(crate::ask::load(&job).is_some());
+        assert!(crate::ask::load(&job).unwrap().is_some());
     }
 }
 
