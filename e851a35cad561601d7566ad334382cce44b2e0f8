@@ -1,0 +1,132 @@
+{
+  "conary": "note v1",
+  "change": "56qeazcrm1t7ykc8xhpeh48v90",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 856,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/856",
+  "summary": "proj: close a question notice when what its job awaits closes",
+  "task": "fieldmouseworks/burrow#850",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "class": "R0",
+  "landing": {
+    "revision": "d1ec47eafb56cead70331bb8a26f09cc72f0834115a0b6fe0bd3da08fb1b1b47",
+    "before": "9dc8fd6c6794791728e23a615c9ef212ecabc96a",
+    "after": "e851a35cad561601d7566ad334382cce44b2e0f8",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1794536014955
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521514626"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521514282"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094/job/131521512924"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#856)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#856)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#856)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#856)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094"
+    },
+    {
+      "kind": "ci",
+      "check": "house/guide-size (#856)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#856)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268094"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 4 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521595122"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 2 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521594772"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 3 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521594615"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131531258801"
+    },
+    {
+      "kind": "ci",
+      "check": "check / leg 1 of 4",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521594798"
+    },
+    {
+      "kind": "ci",
+      "check": "check / negative",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/43315268202/job/131521514596"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/856#pullrequestreview-5883115091"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/856"
+    }
+  ]
+}
