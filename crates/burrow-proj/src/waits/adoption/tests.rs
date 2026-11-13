@@ -528,3 +528,50 @@ fn completed_pending_cleanup_is_not_reused_for_a_later_disabled_interval() {
     assert!(rewatch_all(&cfg));
     assert!(cfg.jobs.join(HELD).join("new-interval").exists());
 }
+
+#[test]
+fn pending_work_survives_unreadable_journals_and_odd_ids() {
+    for broken in ["garbage", "directory"] {
+        let tmp = TempDir::new().unwrap();
+        let cfg = fixture(&tmp);
+        policy(&cfg, r#"{"repos":{"sam/web":false}}"#);
+        let held = cfg.jobs.join(HELD);
+        fs::create_dir_all(&held).unwrap();
+        let pending = held.join(PENDING);
+        // Selected under the denying policy; every ID the launcher can make,
+        // line breaks included, and a repository alias in another case.
+        job(&cfg, "a\nb\r", "Sam/Web", None);
+        job(&cfg, "a", "sam/web", None);
+        // An unreadable record keeps the first pass from completing.
+        job(&cfg, "unreadable", "sam/web", Some("undeclared"));
+        fs::remove_file(cfg.jobs.join("unreadable/1.end")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", cfg.jobs.join("unreadable/1.end")).unwrap();
+        assert!(!rewatch_all(&cfg));
+        let saved = fs::read(&pending);
+        assert!(saved.is_ok());
+        // Now the repo is allowed and the journal can't be read.
+        policy(&cfg, "{}");
+        if broken == "garbage" {
+            fs::write(&pending, "{ not json").unwrap();
+        } else {
+            fs::remove_file(&pending).unwrap();
+            fs::create_dir(&pending).unwrap();
+        }
+        let before = fs::read(&pending).ok();
+        assert!(!rewatch_all(&cfg), "{broken}");
+        assert!(!held.join(ADOPTED).exists(), "{broken}");
+        assert_eq!(fs::read(&pending).ok(), before, "{broken}");
+        // Restoring the journal lets the original wait publish exactly.
+        if broken == "directory" {
+            fs::remove_dir(&pending).unwrap();
+        }
+        fs::write(&pending, saved.unwrap()).unwrap();
+        fs::remove_file(cfg.jobs.join("unreadable/1.end")).unwrap();
+        fs::write(cfg.jobs.join("unreadable/1.end"), "undeclared").unwrap();
+        assert!(rewatch_all(&cfg), "{broken}");
+        let waits = cfg.jobs.join(".waits");
+        assert!(waits.join("a\nb\r").exists(), "{broken}");
+        assert!(waits.join("a").exists(), "{broken}");
+        assert!(held.join(ADOPTED).exists(), "{broken}");
+    }
+}
