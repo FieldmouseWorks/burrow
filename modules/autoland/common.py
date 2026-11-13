@@ -172,7 +172,8 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
     owner it's about, and `sweep` asks GitHub nothing. What it says of
     itself goes to the journal; one that fails, or runs past UPKEEP_TIMEOUT
     while it's `bounded`, raises. A fetch into the steward's mirror isn't:
-    it takes as long as git does, as it always has."""
+    it takes as long as git does while GitHub keeps answering, and fails
+    once GitHub goes quiet (mirror.rs's STALL)."""
     p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
                        stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
                        timeout=UPKEEP_TIMEOUT if bounded else None)
