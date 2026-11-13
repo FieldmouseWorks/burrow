@@ -13,10 +13,10 @@
 //! while it fails, what can't pass without it (the operator's check and the
 //! Remote Control units while Claude Code isn't logged in) isn't counted as
 //! the change's doing. Only a cause already failing before the change
-//! explains (or one the snapshot never saw, on the switch that brings the
-//! check in, that no other cause explains), so a change that breaks the login
-//! is still a regression, explanations can't excuse each other in a ring, and
-//! a required check is never excused. A compare that passes says what it
+//! explains: a cause the snapshot has no line for is unobserved, so it
+//! counts like any new failure. A change that breaks the login is still a
+//! regression, explanations can't excuse each other in a ring, and a
+//! required check is never excused. A compare that passes says what it
 //! didn't count, after `healthy`.
 //!
 //! The checks are the executables in the config's `dir` (/etc/burrow/health.d,
@@ -178,11 +178,10 @@ fn regressed(before: &[Line], now: &[Line]) -> Vec<(String, String)> {
 /// What regressed, split in two: what counts against the change, and what
 /// a check failing in `now` explains (`explains`), said with its cause.
 ///
-/// Only a cause the change didn't break explains: one that was already
-/// failing in `before`, or one `before` knows nothing of (the switch that
-/// brings the check in has no earlier state to hold it to) that no other
-/// failing cause explains. So explanations can't excuse each other in a
-/// ring, and a check that passed before and fails now is the change's. A
+/// Only a cause the snapshot shows already failing explains. One that
+/// passed before, or that `before` has no line for (so nothing says it
+/// wasn't broken by the change), is the change's, and so is what it would
+/// explain. So explanations can't excuse each other in a ring. A
 /// `required` check is never excused: it must pass whatever else fails.
 pub fn judge(
     before: &[Line],
@@ -206,19 +205,11 @@ pub fn judge(
         .map(String::as_str)
         .filter(|c| failing(c))
         .collect();
-    // Causes that were failing before the change, or that it introduced and
-    // nothing else explains.
-    let causes: Vec<(&str, bool)> = failing_now
+    // Causes the snapshot shows failing before the change.
+    let causes: Vec<&str> = failing_now
         .iter()
-        .filter_map(|&c| match was(c) {
-            Some(l) if l.state == State::Fail => Some((c, false)),
-            Some(_) => None,
-            None => {
-                let key = format!("{CHECK}{c}");
-                let chained = failing_now.iter().any(|&o| explained_by(&key, o));
-                (!chained).then_some((c, true))
-            }
-        })
+        .copied()
+        .filter(|&c| was(c).is_some_and(|l| l.state == State::Fail))
         .collect();
     let mut bad = Vec::new();
     let mut excused = Vec::new();
@@ -230,15 +221,9 @@ pub fn judge(
             bad.push(said);
             continue;
         }
-        if let Some((cause, _)) = causes.iter().find(|(c, _)| explained_by(&key, c)) {
+        if let Some(cause) = causes.iter().find(|c| explained_by(&key, c)) {
             excused.push(format!(
                 "{said}, but not counted: check:{cause} is failing, and it can't pass without that"
-            ));
-        } else if let Some(name) = key.strip_prefix(CHECK)
-            && causes.iter().any(|&(c, new)| new && c == name)
-        {
-            excused.push(format!(
-                "{said}, but not counted: it's new, so nothing before the change says it passed"
             ));
         } else {
             bad.push(said);
@@ -841,26 +826,23 @@ mod tests {
     }
 
     #[test]
-    fn a_login_the_snapshot_never_saw_explains_on_its_first_switch() {
-        // The switch that brings the check in: the snapshot is the old
-        // system's, with no claude-login in it.
+    fn a_login_the_snapshot_never_saw_explains_nothing() {
+        // The snapshot is the old system's, with no claude-login in it:
+        // nothing says the login wasn't working before the switch.
         let explains =
             BTreeMap::from([("claude-login".to_owned(), vec!["check:operator".to_owned()])]);
         let before = lines("check:dns ok\ncheck:operator ok\n");
         let now = lines("check:claude-login fail\ncheck:dns ok\ncheck:operator fail\n");
         let (bad, excused) = judge(&before, &now, &explains, &[]);
+        assert_eq!(bad.len(), 2, "{bad:?}");
+        assert!(excused.is_empty(), "{excused:?}");
+        // The same once the snapshot has the login failing: excused.
+        let before = lines("check:claude-login fail\ncheck:operator ok\n");
+        let (bad, excused) = judge(&before, &now, &explains, &[]);
         assert_eq!(bad, Vec::<String>::new());
-        assert_eq!(excused.len(), 2, "{excused:?}");
-        // Another new check failing, or an old one, still counts.
-        let now =
-            lines("check:claude-login fail\ncheck:dns fail\ncheck:extra fail\ncheck:operator ok\n");
-        assert_eq!(
-            judge(&before, &now, &explains, &[]).0,
-            ["check:dns is failing", "check:extra (new) is failing"]
-        );
+        assert_eq!(excused.len(), 1, "{excused:?}");
         // A login that passed before and fails now is still the switch's.
         let before = lines("check:claude-login ok\ncheck:operator ok\n");
-        let now = lines("check:claude-login fail\ncheck:operator fail\n");
         assert_eq!(judge(&before, &now, &explains, &[]).0.len(), 2);
     }
 
