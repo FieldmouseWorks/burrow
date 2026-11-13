@@ -19,6 +19,8 @@ use crate::waits::{rewatch, rewatch_later, waiting};
 use crate::{
     Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, systemd, usage,
 };
+use handoff::failed;
+pub(crate) use handoff::{CARRY, start_handoff};
 
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
@@ -31,41 +33,6 @@ pub(crate) const SPENT: &str = "Your last run was refused before it finished: Cl
 /// Fails, saying why, when it can't: the job is then as it was.
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
     start_with(cfg, id, msg, first, Answer::Update, None)
-}
-
-/// The job's next turn takes a waiting one's place (`proj handoff`): what the
-/// old turn registered carries over, its published and pending waits, their
-/// baselines and quota registration, and a recommendation it left for its
-/// question, none of it cleared as a fresh turn's start does. The old turn
-/// keeps its own record.
-pub(crate) fn start_handoff(cfg: &Config, id: &str, msg: &str) -> Result<(), String> {
-    start_with(cfg, id, msg, false, Answer::Handoff, None)
-}
-
-/// A turn that took over a handed-off one's waits: whose turn it took over.
-pub(crate) const CARRY: &str = "carry";
-
-/// The turn-scoped records that name turn `from`, named `to` instead: the
-/// waits' quota registration and the question recommendation.
-fn retarget(job: &Job, from: &str, to: &str) {
-    if let Some(mut pending) = read(&job.path(crate::github_quota::PENDING))
-        .and_then(|t| serde_json::from_str::<crate::github_quota::Pending>(&t).ok())
-        .filter(|p| p.turn == from)
-    {
-        pending.turn = to.to_owned();
-        if let Ok(text) = serde_json::to_string(&pending) {
-            let _ = crate::swap(&job.path(crate::github_quota::PENDING), &text);
-        }
-    }
-    if let Some(mut ask) = read(&job.path("ask.next"))
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .filter(|v| v["turn"] == from)
-    {
-        ask["turn"] = to.into();
-        if let Ok(text) = serde_json::to_string(&ask) {
-            let _ = crate::swap(&job.path("ask.next"), &text);
-        }
-    }
 }
 
 /// News that what the job awaited closed: that settles a reversible open
@@ -160,7 +127,7 @@ fn start_with(
     // that can't start, or a start killed partway, leaves the job as it was.
     let prompt = job.path(&format!("prompt.{n}"));
     let couldnt = || format!("proj: turn {n} of {id} couldn't start");
-    let undo = || {
+    let undo = || -> Option<String> {
         if n == 1 {
             let _ = crate::state_reads::remove(job.path("turns"));
         } else {
@@ -168,13 +135,13 @@ fn start_with(
         }
         let _ = crate::state_reads::remove(&prompt);
         if carry {
-            let _ = crate::state_reads::remove(job.turn(&n.to_string(), CARRY));
-            retarget(&job, &n.to_string(), &last.to_string());
+            return handoff::give_back(&job, &last.to_string(), &n.to_string()).err();
         }
+        None
     };
     if let Err(e) = write_prompt(&prompt, &msg) {
         // write can leave a truncated or partial prompt even on failure.
-        undo();
+        let _ = undo();
         return Err(format!("proj: {}: {e}", prompt.display()));
     }
     let capacity = if permit.is_some() {
@@ -183,26 +150,20 @@ fn start_with(
         match crate::inbox::resumption::admission(cfg, &job) {
             Ok(gate) => Some(gate),
             Err(error) => {
-                undo();
+                let _ = undo();
                 return Err(error);
             }
         }
     };
     if job.set_turns(n).is_err() {
-        undo();
+        let _ = undo();
         return Err(couldnt());
     }
-    if carry {
-        if let Err(e) =
-            crate::state_reads::write(job.turn(&n.to_string(), CARRY), format!("{last}\n"))
-        {
-            undo();
-            return Err(format!(
-                "proj: {}: {e}",
-                job.turn(&n.to_string(), CARRY).display()
-            ));
-        }
-        retarget(&job, &last.to_string(), &n.to_string());
+    if carry && let Err(e) = handoff::take_over(&job, &last.to_string(), &n.to_string()) {
+        return Err(failed(
+            undo(),
+            format!("proj: turn {n} of {id} took no records: {e}"),
+        ));
     }
     // Claude is what goes first when memory runs out, not whatever it's
     // next to. Past its own cap the kernel kills the job's biggest process
@@ -228,8 +189,7 @@ fn start_with(
         launch(cfg, &job, first)
     };
     if !started {
-        undo();
-        return Err(couldnt());
+        return Err(failed(undo(), couldnt()));
     }
     // Accepted resumption owns the previous intent, including an error
     // recovery. A failed launch above leaves it durable for another attempt.
@@ -328,8 +288,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // The last turn's waits, now that this one has started: this turn
     // writes its own to await.next, and await only once it ends; how it says
     // it ends goes to end.next.
-    // A handed-off turn's successor keeps them: they are the old turn's, still
-    // waiting for one that carries on.
+    // A handoff's successor keeps them (the old turn's, still waiting).
     if !job.turn(&n, "retry-migration").exists() && !job.turn(&n, CARRY).exists() {
         crate::ask::clear_declaration(&job).map_err(|e| Fail::new(1, e))?;
         for f in ["await", "await.next"] {
@@ -1033,6 +992,7 @@ fn oom_kills() -> u64 {
         .unwrap_or(0)
 }
 
+pub(crate) mod handoff;
 #[cfg(test)]
 mod tests;
 

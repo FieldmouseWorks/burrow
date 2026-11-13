@@ -92,7 +92,7 @@ fn a_handoff_retargets_the_waiting_turns_records() {
         r#"{"default":"go","one_way":true,"turn":"1"}"#,
     )
     .unwrap();
-    super::retarget(&job, "1", "2");
+    super::handoff::retarget(&job, "1", "2").unwrap();
     let p: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(job.path(crate::github_quota::PENDING)).unwrap())
             .unwrap();
@@ -111,10 +111,98 @@ fn a_handoff_retargets_the_waiting_turns_records() {
         (Some("2"), Some(true))
     );
     // Another turn's records are left be.
-    super::retarget(&job, "9", "3");
+    super::handoff::retarget(&job, "9", "3").unwrap();
     assert!(
         fs::read_to_string(job.path("ask.next"))
             .unwrap()
             .contains(r#""turn":"2""#)
     );
+}
+
+fn handoff_job(tmp: &tempfile::TempDir) -> (Config, String) {
+    let mut v = crate::config::tests::example();
+    v["jobs"] = tmp.path().to_str().unwrap().into();
+    fs::create_dir(tmp.path().join("j")).unwrap();
+    (serde_json::from_value(v).unwrap(), "j".into())
+}
+
+// A record that can't be moved to the successor is an error, not skipped, and
+// the ones already moved are put back, so no turn is accepted that would lose
+// its inherited state.
+#[test]
+fn a_handoff_that_cant_move_every_record_moves_none() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, id) = handoff_job(&tmp);
+    let job = crate::job::Job::new(&cfg, &id);
+    let pending = job.path(crate::github_quota::PENDING);
+    let first = r#"{"targets":[],"retry_at":1,"turn":"1","baselines":""}"#;
+    fs::write(&pending, first).unwrap();
+    let second = r#"{"default":"go","one_way":false,"turn":"1"}"#;
+    fs::write(job.path("ask.next"), second).unwrap();
+    // The second record can't be replaced.
+    fs::create_dir(job.path("ask.next.new")).unwrap();
+    assert!(super::handoff::retarget(&job, "1", "2").is_err());
+    assert_eq!(fs::read_to_string(&pending).unwrap(), first);
+    assert_eq!(fs::read_to_string(job.path("ask.next")).unwrap(), second);
+    // One that can't be read is the same.
+    fs::remove_dir(job.path("ask.next.new")).unwrap();
+    fs::write(job.path("ask.next"), "not json").unwrap();
+    assert!(super::handoff::retarget(&job, "1", "2").is_err());
+    assert_eq!(fs::read_to_string(&pending).unwrap(), first);
+}
+
+// The old turn's captured awaits go with the records, so the successor's own
+// awaits join them and a repeated one keeps its first baseline; giving the
+// handoff back removes the copy and leaves the old turn's alone.
+#[test]
+fn a_handoff_carries_the_captured_awaits() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, id) = handoff_job(&tmp);
+    let job = crate::job::Job::new(&cfg, &id);
+    job.set_turns(2).unwrap();
+    fs::write(job.turn("1", "github-awaits"), "o/r#1\tbase-a\n").unwrap();
+    super::handoff::take_over(&job, "1", "2").unwrap();
+    assert_eq!(
+        fs::read_to_string(job.turn("2", "github-awaits")).unwrap(),
+        "o/r#1\tbase-a\n"
+    );
+    assert!(job.turn("2", super::CARRY).exists());
+    // A successor's await of its own joins; the same target keeps its baseline.
+    let joined = crate::github_quota::join_records(
+        &crate::github_quota::captured(&job).unwrap(),
+        "o/r#1\tother\no/r#2\tbase-b\n",
+    );
+    assert_eq!(joined, "o/r#1\tbase-a\no/r#2\tbase-b\n");
+    super::handoff::give_back(&job, "1", "2").unwrap();
+    assert!(!job.turn("2", "github-awaits").exists());
+    assert!(!job.turn("2", super::CARRY).exists());
+    assert!(job.turn("1", "github-awaits").exists());
+}
+
+// A successor that was numbered but never launched or queued is not accepted:
+// it's told apart from one that was, by what launching leaves.
+#[test]
+fn a_numbered_successor_is_accepted_only_once_launched_or_queued() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (mut cfg, id) = handoff_job(&tmp);
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(&cfg.tools.systemctl, "#!/bin/sh\necho not-found\n");
+    let job = crate::job::Job::new(&cfg, &id);
+    job.set_turns(2).unwrap();
+    assert!(!super::handoff::accepted(&cfg, &job, "2"));
+    fs::write(job.turn("2", "slot"), "").unwrap();
+    assert!(super::handoff::accepted(&cfg, &job, "2"));
+    fs::remove_file(job.turn("2", "slot")).unwrap();
+    fs::write(
+        crate::policy::path(&job, "park"),
+        r#"{"state":"queued","turn":"2","first":false,"at":0}"#,
+    )
+    .unwrap();
+    assert!(super::handoff::accepted(&cfg, &job, "2"));
+    // Giving the unaccepted one up puts the job back at the old turn.
+    fs::remove_file(crate::policy::path(&job, "park")).unwrap();
+    fs::write(job.path("prompt.2"), "p").unwrap();
+    super::handoff::abandon(&job, "1", "2").unwrap();
+    assert_eq!(job.turns().as_deref(), Some("1"));
+    assert!(!job.path("prompt.2").exists());
 }

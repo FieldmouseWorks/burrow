@@ -152,6 +152,8 @@ fn clearing_takes_its_worktrees_off_their_repos() {
     // And, deep in a's scratch, the only worktree of a second repo.
     let api = b.repo("api");
     b.worktree(&api, "fix-deep", &a.join("x/y/z/w/api"));
+    // Both repos are the job's project's, as far as the test is concerned.
+    grant(&b, "a");
     // What a build leaves, some of it read-only.
     let ro = a.join("web/target/debug/ro");
     fs::create_dir_all(&ro).unwrap();
@@ -184,6 +186,17 @@ fn clearing_takes_its_worktrees_off_their_repos() {
     clear(cfg, "never");
 }
 
+/// The job's project is the folder the test's repos are in.
+fn grant(b: &Box, id: &str) {
+    let job = Job::new(&b.cfg, id);
+    fs::create_dir_all(&job.dir).unwrap();
+    fs::write(
+        job.path("project"),
+        format!("{}\n", b.root.path().display()),
+    )
+    .unwrap();
+}
+
 // A name that isn't one job's can't reach past the scratch's jobs dir.
 #[test]
 fn clearing_only_ever_takes_one_jobs() {
@@ -209,6 +222,7 @@ fn two_clears_at_once() {
     let c = dir(cfg, "c");
     for i in 0..5 {
         b.worktree(&web, &format!("race-{i}"), &c.join("web"));
+        grant(&b, "c");
         fs::create_dir_all(c.join("web/target")).unwrap();
         for f in 0..500 {
             fs::write(c.join(format!("web/target/f{f}")), "").unwrap();
@@ -248,6 +262,7 @@ fn unfinished(b: &Box) -> PathBuf {
     fs::create_dir_all(&job.dir).unwrap();
     fs::write(job.path("turns"), "1\n").unwrap();
     fs::write(job.turn("1", "stopped"), "").unwrap();
+    fs::write(job.path("project"), format!("{}\n", repo.display())).unwrap();
     wt
 }
 
@@ -453,4 +468,171 @@ fn clears_at_once_keep_one_whole_copy() {
         4 << 20
     );
     assert!(base.join("wt.1/tracked.patch").exists());
+}
+
+fn keep_err(b: &Box) -> String {
+    super::preserve::unfinished(&b.cfg, "u").unwrap_err()
+}
+
+// What a job links its repository to is read only inside what it was given:
+// its scratch and its project. A gitfile, a commondir, a HEAD or a ref that
+// points elsewhere keeps the scratch, reads nothing there, and prints none of
+// it.
+#[test]
+fn keeping_work_reads_only_what_the_job_was_given() {
+    let b = Box::new();
+    let wt = unfinished(&b);
+    let other = b.repo("other");
+    fs::write(other.join("secret.txt"), "TOPSECRET\n").unwrap();
+    git(&other, &["add", "secret.txt"]);
+    git(&other, &["commit", "-q", "-m", "s"]);
+    let dotgit = wt.join(".git");
+    let original = fs::read_to_string(&dotgit).unwrap();
+    // A gitfile at another repository.
+    fs::write(
+        &dotgit,
+        format!("gitdir: {}\n", other.join(".git").display()),
+    )
+    .unwrap();
+    let e = keep_err(&b);
+    assert!(e.contains("outside the job's granted paths"), "{e}");
+    assert!(!job_kept(&b));
+    fs::write(&dotgit, &original).unwrap();
+    let gitdir = PathBuf::from(original.trim().strip_prefix("gitdir: ").unwrap());
+    // A commondir at another repository.
+    fs::write(
+        gitdir.join("commondir"),
+        other.join(".git").to_str().unwrap(),
+    )
+    .unwrap();
+    assert!(keep_err(&b).contains("outside"));
+    fs::write(gitdir.join("commondir"), "../..").unwrap();
+    // A HEAD that is a link to a secret: its content is not repeated.
+    fs::remove_file(gitdir.join("HEAD")).unwrap();
+    std::os::unix::fs::symlink(other.join("secret.txt"), gitdir.join("HEAD")).unwrap();
+    let e = keep_err(&b);
+    assert!(!e.contains("TOPSECRET"), "{e}");
+    assert!(!job_kept(&b));
+    fs::remove_file(gitdir.join("HEAD")).unwrap();
+    // A HEAD naming a ref outside refs/, and a ref that is a link to a secret.
+    fs::write(gitdir.join("HEAD"), "ref: ../../../other/secret.txt\n").unwrap();
+    assert!(keep_err(&b).contains("names no ref"));
+    fs::write(gitdir.join("HEAD"), "ref: refs/heads/work\n").unwrap();
+    let r = b.path("repo/.git/refs/heads/work");
+    let _ = fs::remove_file(&r);
+    std::os::unix::fs::symlink(other.join("secret.txt"), &r).unwrap();
+    let e = keep_err(&b);
+    assert!(!e.contains("TOPSECRET"), "{e}");
+    assert!(!job_kept(&b));
+}
+
+fn job_kept(b: &Box) -> bool {
+    Job::new(&b.cfg, "u").path("preserved/wt.1").exists()
+}
+
+// Object stores count as links too: an alternate of an alternate that leaves
+// the grants is refused, and one that leads back into the scratch gets the
+// base bundled.
+#[test]
+fn keeping_work_follows_alternates_all_the_way() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join("a.txt"), "committed\n").unwrap();
+    git(&at, &["add", "a.txt"]);
+    git(&at, &["commit", "-q", "-m", "local"]);
+    fs::write(at.join("a.txt"), "edited\n").unwrap();
+    // The clone's objects are an outside store's alternate, which is
+    // another store's, which is the clone's own again.
+    let mid = b.path("mid/objects");
+    fs::create_dir_all(mid.join("info")).unwrap();
+    let own = at.join(".git/objects");
+    fs::write(mid.join("info/alternates"), format!("{}\n", own.display())).unwrap();
+    fs::write(own.join("info/alternates"), format!("{}\n", mid.display())).unwrap();
+    assert!(keep_err(&b).contains("outside the job's granted paths"));
+    // Granted, through the project: the chain ends in the scratch, so the
+    // base is bundled.
+    fs::write(
+        Job::new(&b.cfg, "u").path("project"),
+        format!("{}\n", b.path("mid").display()),
+    )
+    .unwrap();
+    super::preserve::unfinished(&b.cfg, "u").unwrap();
+    assert!(kept(&b, "clone.1").join("base.bundle").exists());
+}
+
+// A commit made in a submodule that the superproject now points at exists
+// nowhere else: its tree is kept though its files are clean.
+#[test]
+fn keeping_work_keeps_a_clean_submodule_whose_commit_moved() {
+    let b = Box::new();
+    let sub = b.repo("subsrc");
+    let at = clone_in_scratch(&b);
+    git(
+        &at,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "mod",
+        ],
+    );
+    git(&at, &["commit", "-q", "-m", "add sub"]);
+    let inner = at.join("mod");
+    fs::write(inner.join("x.txt"), "inside\n").unwrap();
+    git(&inner, &["add", "x.txt"]);
+    git(&inner, &["commit", "-q", "-m", "unpublished"]);
+    git(&at, &["add", "mod"]);
+    clear(&b.cfg, "u");
+    let k = kept(&b, "clone-mod.1");
+    assert!(k.join("base.bundle").exists(), "{:?}", left(&b.cfg));
+    let outer = fs::read_to_string(kept(&b, "clone.1").join("staged.patch")).unwrap();
+    assert!(outer.contains("Subproject commit"), "{outer}");
+}
+
+// Ignore rules kept in the repository's own info/exclude still apply, so a
+// build's output they name isn't archived.
+#[test]
+fn keeping_work_honors_the_repositorys_exclude_file() {
+    let b = Box::new();
+    let at = clone_in_scratch(&b);
+    fs::write(at.join(".git/info/exclude"), "out/\n").unwrap();
+    fs::create_dir_all(at.join("out")).unwrap();
+    fs::write(at.join("out/big"), "build\n").unwrap();
+    fs::write(at.join("real.txt"), "work\n").unwrap();
+    clear(&b.cfg, "u");
+    let k = kept(&b, "clone.1");
+    assert!(k.join("untracked/real.txt").exists());
+    assert!(!k.join("untracked/out").exists());
+}
+
+// Where a user's global ignore file is when nothing configures it.
+#[test]
+fn the_global_ignore_file_is_where_git_looks() {
+    use std::ffi::OsString;
+    let os = |s: &str| Some(OsString::from(s));
+    assert_eq!(
+        super::preserve::default_global_ignore(os("/x"), os("/h")),
+        Some(PathBuf::from("/x/git/ignore"))
+    );
+    assert_eq!(
+        super::preserve::default_global_ignore(os(""), os("/h")),
+        Some(PathBuf::from("/h/.config/git/ignore"))
+    );
+    assert_eq!(super::preserve::default_global_ignore(None, None), None);
+}
+
+// A preserved directory that is a link to elsewhere isn't written through.
+#[test]
+fn keeping_work_never_writes_through_a_link() {
+    let b = Box::new();
+    let wt = unfinished(&b);
+    let elsewhere = b.path("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, Job::new(&b.cfg, "u").path("preserved")).unwrap();
+    clear(&b.cfg, "u");
+    assert!(wt.join("tracked.txt").exists(), "the scratch stays");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
 }

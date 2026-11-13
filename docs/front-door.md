@@ -155,17 +155,16 @@ file names the turn being ended from its first step to its last: that turn's
 stop is no end of the job meanwhile (its question stays open and notified, the
 job is held, inbox admission still takes it, the scratch is not cleared), and
 asking again after any interruption finishes the stop and starts the new turn,
-or, if the new turn was already accepted, adopts it without starting another.
+or, if the new turn was already accepted (launched or queued: a turn number alone is not evidence), adopts it without starting another; a numbered one that never was is given up and started again. A `proj stop` or `withdraw` on a stranded handoff cancels everything, question and awaits included.
 The new turn takes over the old one's published and pending awaits, quota
-registration and a pending question recommendation, instead of starting clean.
+registration (a copy of its captured-awaits archive included, so its own awaits join those and keep their baselines) and a pending question recommendation, instead of starting clean. The records move together or not at all, and a one-way recommendation left for a question keeps its default from running on its own.
 A `proj stop` in the middle ends the job as usual. Independently, clearing any
 scratch (one clear at a time) first copies work not yet published to the job's
 `preserved/` directory, and leaves the scratch in place if that fails or the
 scratch can't be read in full: the working files against head (`tracked.patch`),
 the index against head (`staged.patch`), new files (`untracked/`), and, when
 the scratch holds the repository's objects, `base.bundle` to apply them to. Git
-runs on a git dir of its own, never the job's config or hooks. Ignored build
-output is not kept.
+runs on a git dir of its own, never the job's config or hooks, and reads the job's repository links (gitfile, commondir, HEAD, refs, object stores and their alternates) only inside its scratch and project. A submodule whose commit the change moved is kept even when clean. Ignored build output (by .gitignore, info/exclude or the user's global ignore file) is not kept.
 
 ## Engines with no agent
 

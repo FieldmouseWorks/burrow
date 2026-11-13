@@ -89,6 +89,21 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
     Ok(Some(pending.recommendation))
 }
 
+/// Whether a one-way recommendation is recorded for the open question and not
+/// yet committed to it, whichever turn left it (a handoff's successor may never
+/// run to commit it). Such a question is one-way already: its default never
+/// runs on its own.
+fn one_way_pending(job: &Job) -> Result<bool, String> {
+    let Some(text) =
+        crate::github_quota::state(&job.path("ask.next")).map_err(|e| format!("{:?}", e.say))?
+    else {
+        return Ok(false);
+    };
+    serde_json::from_str::<PendingRecommendation>(&text)
+        .map(|p| p.recommendation.one_way)
+        .map_err(|e| e.to_string())
+}
+
 /// The end marker commits the active declaration; only asks keep a pending
 /// recommendation. Recovery also checks the marker if cleanup was interrupted.
 pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
@@ -205,7 +220,7 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         return Ok(Some(q.due));
     }
     let time = burrow_probe::answer::utc(q.due);
-    if q.recommendation.one_way {
+    if q.recommendation.one_way || one_way_pending(job)? {
         crate::inbox::enrollment::admit(job)?;
         // A one-way decision gets no engine and cannot accidentally execute
         // its default. Record a completed host turn for the normal issue writer.
@@ -435,6 +450,24 @@ mod tests {
         assert!(host_path(&job, "question-needs-owner").exists());
         assert!(load(&job).is_none());
         assert_eq!(owner_lines(&cfg).len(), 1);
+    }
+    // A one-way upgrade left for a reversible question (a handoff carries it
+    // to a turn that may never run) is no reversible default's to override.
+    #[test]
+    fn a_pending_one_way_upgrade_stops_a_reversible_default_from_running() {
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        let _held = job.lock().unwrap();
+        expire(&cfg, &job).unwrap();
+        drop(_held);
+        assert!(!job.path("prompt.2").exists(), "no engine ran the default");
+        assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
+        assert!(host_path(&job, "question-needs-owner").exists());
     }
     // What a job still holds open (Job::holds), through each end its
     // question can come to: the steward and claims take one that holds

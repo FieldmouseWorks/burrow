@@ -14,7 +14,10 @@ use crate::snapshot::{self, Snapshot};
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
 use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
+pub use handoff::handoff;
+use handoff::{Handoff, mark_handed_off, retire_handoff};
 
+mod handoff;
 mod run;
 mod starter;
 
@@ -468,72 +471,6 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     end(cfg, job, withdraw, Handoff::No)
 }
 
-/// `proj handoff ID`: the job's waiting turn is given up for a new one, which
-/// resolves its engine afresh (the old turn's identity is left as it was), in
-/// the same scratch, so the branch and the files the turn left unfinished are
-/// where they were. Unlike `proj stop` it keeps the job's scratch, its question
-/// and its awaits (the new turn takes the waits and the pending question
-/// recommendation over), and answers nothing. Only a turn that still waits for
-/// a slot can be handed off (a running one owns its files).
-///
-/// The job's HANDOFF file names the turn being ended, from the first step to
-/// the last, and the rest is read from the job: that turn's stop is no end of
-/// the job meanwhile ([`Job::stopped_for_good`]), and asking again after any
-/// interruption does what is left. While the job's turn count is still the
-/// named turn's, the stop is finished and the new turn started; once it is past
-/// it, the new turn was accepted and is adopted, never started a second time.
-pub fn handoff(cfg: &Config, id: &str) -> Result<(), Fail> {
-    let job = Job::new(cfg, id);
-    if !job.dir.is_dir() {
-        return Err(Fail::new(1, format!("no job {id}")));
-    }
-    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-    let Some(n) = job.turns() else {
-        return Err(Fail::new(1, format!("proj: {id} has no turn to hand off")));
-    };
-    match read(&job.path(scratch::HANDOFF)).map(|t| t.trim().to_owned()) {
-        Some(from) if from != n => {
-            settle_handoff(&job);
-            put("handed off\n");
-            return Ok(());
-        }
-        Some(_) => end(cfg, &job, true, Handoff::Resume)?,
-        None => end(cfg, &job, true, Handoff::Begin)?,
-    }
-    let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
-    let msg = format!(
-        "Your last run waited for capacity and was handed to a new run before it finished. Its work (the branch, changed and new files) is in the worktree just as it left it: see what had already finished before you run anything again, and carry on. What you were asked:\n\n{asked}"
-    );
-    crate::turn::start_handoff(cfg, id, &msg).map_err(|e| Fail::new(1, e))?;
-    settle_handoff(&job);
-    put("handed off\n");
-    Ok(())
-}
-
-/// A handoff whose new turn is accepted is over: the turn it ended keeps a
-/// marker nothing reads as a stop, and the job's own scratch rules apply again.
-fn settle_handoff(job: &Job) {
-    let Some(from) = read(&job.path(scratch::HANDOFF)).map(|t| t.trim().to_owned()) else {
-        return;
-    };
-    if job.turns().as_deref() != Some(from.as_str()) {
-        let _ = fs::rename(job.turn(&from, "stopped"), job.turn(&from, "handed-off"));
-        let _ = fs::remove_file(job.path(scratch::HANDOFF));
-    }
-}
-
-/// What an ending of a turn is for.
-#[derive(Clone, Copy, PartialEq)]
-enum Handoff {
-    /// `proj stop` or `withdraw`: the job's end.
-    No,
-    /// A new turn follows: the scratch, the question and the awaits stay.
-    Begin,
-    /// The same, after one that was interrupted: the turn is no longer looked
-    /// at for whether it waits, it is finished stopping.
-    Resume,
-}
-
 /// [`halt`], or the end of a waiting turn that a new one follows
 /// ([`handoff`]).
 fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail> {
@@ -541,13 +478,19 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
     let id = job.id;
     let unit = job.unit();
     let n = job.turns();
-    if how == Handoff::No {
-        // A stop is the job's end, a handoff it was in the middle of included.
-        settle_handoff(job);
-        let _ = fs::remove_file(job.path(scratch::HANDOFF));
+    // A stop is the job's end, a handoff it was in the middle of included: that
+    // one is finished stopping, whatever its turn is doing, and its marker
+    // stays until everything below has been done.
+    let unwinding = how == Handoff::No && job.path(scratch::HANDOFF).exists();
+    if unwinding
+        && let Some(from) = read(&job.path(scratch::HANDOFF))
+        && job.turns().as_deref() != Some(from.trim())
+    {
+        mark_handed_off(job, from.trim())?;
     }
     if withdraw
         && how != Handoff::Resume
+        && !unwinding
         && let Some(said) = left_be(
             job,
             n.as_deref().unwrap_or_default(),
@@ -588,7 +531,9 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
         if let Some(n) = &n {
             let _ = fs::remove_file(job.turn(n, "stopped"));
         }
-        let _ = fs::remove_file(job.path(scratch::HANDOFF));
+        if how == Handoff::Begin {
+            retire_handoff(job)?;
+        }
         rewatch(cfg, &[id]);
         return Err(Fail::new(
             u8::try_from(rc).unwrap_or(1),
@@ -613,6 +558,11 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
     }
     if !handoff {
         crate::ask::clear(job);
+    }
+    if unwinding {
+        // Everything of a stranded handoff is cancelled; the scratch is no
+        // longer a new turn's.
+        retire_handoff(job)?;
     }
     if crate::ask::host_path(job, "label").exists() {
         kick(cfg, ["proj-watch".into()]);
