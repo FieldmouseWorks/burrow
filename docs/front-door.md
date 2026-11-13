@@ -143,6 +143,21 @@ read together under its turn-start lock, and the steward never takes one that
 holds anything for ended, however its turn ended, or starts a second job on
 its work.
 
+**Handing a waiting turn to another engine.** A turn refused for usage waits
+for capacity, and may already have changed files. `proj handoff ID` (also
+through the host socket, as `stop` is) gives up that waiting turn and starts a
+new one in the same job: the engine is resolved afresh by the usual rules, the
+old turn's identity is left as it was, and the scratch, branch and unfinished
+files stay as they are. Unlike `proj stop` and `proj withdraw`, which end the
+job, it keeps the job's question and awaits and answers nothing. It refuses a
+turn that has a slot (a running engine owns its files). A `handoff` file in the
+job marks it in progress and keeps the scratch from being cleared; if the new
+turn couldn't start, asking again finishes it. Independently, clearing any
+scratch first copies work not yet published (changed tracked files, as
+`tracked.patch`, and new ones, under `untracked/`) to the job's `preserved/`
+directory, and leaves the scratch in place if that fails; ignored build output
+is not kept.
+
 ## Engines with no agent
 
 Use the engines door when the chat asks to move the machine between saved

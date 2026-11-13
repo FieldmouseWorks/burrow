@@ -129,6 +129,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),
         Some("withdraw") => stop(cfg, arg(args, 1, "usage: proj withdraw ID")?, true),
+        Some("handoff") => handoff(cfg, arg(args, 1, "usage: proj handoff ID")?),
         Some("unstick") => unstick(cfg, arg(args, 1, "usage: proj unstick ID")?),
         Some("list") => {
             let mut names: Vec<String> = fs::read_dir(&cfg.projects)
@@ -464,6 +465,43 @@ pub fn stop(cfg: &Config, id: &str, withdraw: bool) -> Result<(), Fail> {
 /// [`stop`]'s work, with the job's lock (the one turns start under) held by
 /// the caller, who may have looked at the job under it first.
 pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
+    end(cfg, job, withdraw, false)
+}
+
+/// `proj handoff ID`: the job's waiting turn is given up for a new one, which
+/// resolves its engine afresh (the old turn's identity is left as it was), in
+/// the same scratch, so the branch and the files the turn left unfinished are
+/// where they were. Unlike `proj stop` it keeps the job's scratch, its question
+/// and its awaits, and answers nothing. Only a turn that still waits for a slot
+/// can be handed off (a running one owns its files). One that failed partway
+/// (the HANDOFF file stays, the scratch is never cleared meanwhile) is
+/// finished by asking again.
+pub fn handoff(cfg: &Config, id: &str) -> Result<(), Fail> {
+    let job = Job::new(cfg, id);
+    if !job.dir.is_dir() {
+        return Err(Fail::new(1, format!("no job {id}")));
+    }
+    let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
+    let Some(n) = job.turns() else {
+        return Err(Fail::new(1, format!("proj: {id} has no turn to hand off")));
+    };
+    let again = job.path(scratch::HANDOFF).exists() && job.turn(&n, "stopped").exists();
+    if !again {
+        end(cfg, &job, true, true)?;
+    }
+    let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
+    let msg = format!(
+        "Your last run waited for capacity and was handed to a new run before it finished. Its work (the branch, changed and new files) is in the worktree just as it left it: see what had already finished before you run anything again, and carry on. What you were asked:\n\n{asked}"
+    );
+    crate::turn::start(cfg, id, &msg, false).map_err(|e| Fail::new(1, e))?;
+    let _ = fs::remove_file(job.path(scratch::HANDOFF));
+    put("handed off\n");
+    Ok(())
+}
+
+/// [`halt`], or, with `handoff`, the end of a waiting turn that a new one
+/// follows: the scratch, the question and the awaits stay.
+fn end(cfg: &Config, job: &Job, withdraw: bool, handoff: bool) -> Result<(), Fail> {
     let id = job.id;
     let unit = job.unit();
     let n = job.turns();
@@ -474,8 +512,18 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             &systemd::show(cfg, &unit, "ActiveState"),
         )?
     {
+        if handoff {
+            return Err(Fail::new(
+                1,
+                format!("proj: {id} is {said}, not waiting for a slot"),
+            ));
+        }
         put(&format!("{said}\n"));
         return Ok(());
+    }
+    if handoff {
+        crate::state_reads::write(job.path(scratch::HANDOFF), "")
+            .map_err(|e| io_fail(&job.path(scratch::HANDOFF), e))?;
     }
     // Marked first, so the turn's end already finds it stopped rather than
     // failed: nobody waits on it.
@@ -489,13 +537,16 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
     // the turn is known to be over: one that ended on its own between the
     // look and the stop is stopped all the same, and one systemd can't be
     // asked about may still be running.
-    for f in ["await", "await.next", "github-await"] {
-        let _ = fs::remove_file(job.path(f));
+    if !handoff {
+        for f in ["await", "await.next", "github-await"] {
+            let _ = fs::remove_file(job.path(f));
+        }
     }
     if rc != 0 && !systemd::gone(cfg, &unit) {
         if let Some(n) = &n {
             let _ = fs::remove_file(job.turn(n, "stopped"));
         }
+        let _ = fs::remove_file(job.path(scratch::HANDOFF));
         rewatch(cfg, &[id]);
         return Err(Fail::new(
             u8::try_from(rc).unwrap_or(1),
@@ -518,7 +569,9 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
             })
             .map_err(|e| Fail::new(1, e.to_string()))?;
     }
-    crate::ask::clear(job);
+    if !handoff {
+        crate::ask::clear(job);
+    }
     if crate::ask::host_path(job, "label").exists() {
         kick(cfg, ["proj-watch".into()]);
     }
@@ -535,10 +588,10 @@ pub fn halt(cfg: &Config, job: &Job, withdraw: bool) -> Result<(), Fail> {
         .is_some_and(|n| job.turn(n, "retry-cancelled").exists())
     {
         finish(cfg, id)?;
-    } else if idle {
+    } else if idle && !handoff {
         scratch::clear(cfg, id);
     }
-    if withdraw {
+    if withdraw && !handoff {
         put("withdrawn\n");
     }
     Ok(())

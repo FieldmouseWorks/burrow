@@ -17,10 +17,16 @@ use crate::config::Config;
 use crate::job::Job;
 use crate::{filled, read};
 
+mod preserve;
+
 /// Where job ID's scratch is.
 pub fn dir(cfg: &Config, id: &str) -> PathBuf {
     cfg.scratch.join("jobs").join(id)
 }
+
+/// The job's file while `proj handoff` moves its waiting turn to a new one: the
+/// scratch is the new turn's, so nothing clears it in between.
+pub const HANDOFF: &str = "handoff";
 
 /// Whether the job is over as its latest turn left it, so nothing gives it
 /// another turn of its own accord: `proj stop` ended it, or it awaits nothing
@@ -30,7 +36,10 @@ pub fn dir(cfg: &Config, id: &str) -> PathBuf {
 /// comes next) keeps its scratch: what it awaits, or a reply, resumes it there.
 /// A reply to a job that was over finds its scratch made afresh, empty.
 pub fn over(job: &Job) -> bool {
-    if crate::policy::parked(job) || crate::policy::path(job, "restoring").exists() {
+    if crate::policy::parked(job)
+        || crate::policy::path(job, "restoring").exists()
+        || job.path(HANDOFF).exists()
+    {
         return false;
     }
     if crate::ask::load(job).is_some() {
@@ -55,8 +64,19 @@ pub fn over(job: &Job) -> bool {
 /// end and `proj stop`, both) finds nothing to do. Only once no turn of the job
 /// runs: whatever still worked in it would lose its files. An id that isn't
 /// one name, which no job has, is left alone: it would name someone else's.
+/// Work not yet published (changed or new files git doesn't ignore) is copied
+/// to the job's `preserved/` first ([`preserve`]); a build's output isn't.
 pub fn clear(cfg: &Config, id: &str) {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') {
+        return;
+    }
+    if Job::new(cfg, id).path(HANDOFF).exists() {
+        return;
+    }
+    // What the job didn't publish is kept first; one that can't be kept
+    // leaves the scratch where it is, for a reply or another try.
+    if let Err(e) = preserve::unfinished(cfg, id) {
+        eprintln!("proj: job {id}'s scratch is kept, its unfinished work couldn't be saved: {e}");
         return;
     }
     let gone = cfg

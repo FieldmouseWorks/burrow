@@ -226,3 +226,82 @@ fn two_clears_at_once() {
     }
     assert_eq!(left(cfg), Vec::<PathBuf>::new());
 }
+
+/// A job's worktree with a tracked file edited and an untracked one made, as a
+/// turn refused for usage leaves it, and the job stopped (the old, destructive
+/// way to give up a waiting turn).
+fn unfinished(b: &Box) -> PathBuf {
+    let repo = b.repo("repo");
+    fs::write(repo.join("tracked.txt"), "one\n").unwrap();
+    git(&repo, &["add", "tracked.txt"]);
+    git(&repo, &["commit", "-q", "-m", "two"]);
+    let wt = dir(&b.cfg, "u").join("wt");
+    fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    b.worktree(&repo, "work", &wt);
+    fs::write(wt.join("tracked.txt"), "edited\n").unwrap();
+    fs::create_dir_all(wt.join("sub")).unwrap();
+    fs::write(wt.join("sub/new.txt"), "fresh\n").unwrap();
+    fs::write(wt.join(".gitignore"), "target/\n").unwrap();
+    fs::create_dir_all(wt.join("target")).unwrap();
+    fs::write(wt.join("target/out"), "build\n").unwrap();
+    let job = Job::new(&b.cfg, "u");
+    fs::create_dir_all(&job.dir).unwrap();
+    fs::write(job.path("turns"), "1\n").unwrap();
+    fs::write(job.turn("1", "stopped"), "").unwrap();
+    wt
+}
+
+// Clearing a stopped job (what withdrawing a waiting turn does) once removed
+// its unfinished files with the rest. They are kept, outside the scratch, as a
+// patch and a copy; a build's output is not.
+#[test]
+fn clearing_keeps_unfinished_work() {
+    let b = Box::new();
+    unfinished(&b);
+    clear(&b.cfg, "u");
+    assert!(!dir(&b.cfg, "u").exists(), "the scratch still goes");
+    let kept = Job::new(&b.cfg, "u").path("preserved/wt.1");
+    let patch = fs::read_to_string(kept.join("tracked.patch")).unwrap();
+    assert!(patch.contains("+edited"), "{patch}");
+    assert_eq!(
+        fs::read_to_string(kept.join("untracked/sub/new.txt")).unwrap(),
+        "fresh\n"
+    );
+    assert_eq!(
+        fs::read_to_string(kept.join("branch")).unwrap().trim(),
+        "work"
+    );
+    assert!(
+        !kept.join("untracked/target").exists(),
+        "build output stays disposable"
+    );
+}
+
+// Work that can't be kept keeps the scratch where it is.
+#[test]
+fn clearing_keeps_the_scratch_when_work_cant_be_saved() {
+    let b = Box::new();
+    let wt = unfinished(&b);
+    fs::write(Job::new(&b.cfg, "u").path("preserved"), "in the way").unwrap();
+    clear(&b.cfg, "u");
+    assert_eq!(
+        fs::read_to_string(wt.join("sub/new.txt")).unwrap(),
+        "fresh\n"
+    );
+}
+
+// A handoff in progress is the new turn's scratch: nothing clears it.
+#[test]
+fn clearing_waits_for_a_handoff() {
+    let b = Box::new();
+    let wt = unfinished(&b);
+    let job = Job::new(&b.cfg, "u");
+    fs::write(job.path(super::HANDOFF), "").unwrap();
+    assert!(!over(&job));
+    clear(&b.cfg, "u");
+    assert_eq!(
+        fs::read_to_string(wt.join("tracked.txt")).unwrap(),
+        "edited\n"
+    );
+    assert!(!job.path("preserved").exists());
+}

@@ -238,7 +238,7 @@ Each has an entry below, and each can be imported on its own.
   The deliberate authorship exception: a Codex-written head is judged by
   Claude, so its author never grades its own head.
   Local jobs inspect and recover other host jobs with the ordinary
-  `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop` and `withdraw`
+  `proj status`, `state`, `lifecycle`, `log`, `find`, `list`, `reply`, `stop`, `withdraw` and `handoff`
   commands through a per-turn host socket. The broker keeps host paths,
   configuration and credentials outside the command sandbox, validates the
   recovery arguments and scrubs both output streams of what it sends back;
