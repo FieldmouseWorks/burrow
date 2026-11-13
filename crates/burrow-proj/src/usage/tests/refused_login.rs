@@ -134,3 +134,83 @@ fn a_usage_limit_and_a_refused_login_each_keep_their_own_hold() {
     let s = record(&cfg, "web-2", None, "Claude AI usage limit reached", t).unwrap();
     assert_eq!(s.until, t + UNSAID);
 }
+
+#[test]
+fn a_login_hold_stays_readable_by_the_previous_record_schema() {
+    // The previous binary's record refuses unknown fields: the cause lives
+    // in `job`, so it reads a login hold as a usage hold and writes it back.
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Previous {
+        until: i64,
+        said: String,
+        job: String,
+        at: i64,
+        #[serde(default)]
+        back: Option<i64>,
+        #[serde(default)]
+        told: i64,
+        #[serde(default)]
+        last: Option<i64>,
+    }
+    let (_d, cfg) = rig();
+    let t = now();
+    login(&cfg, "web-1", SAID, t).unwrap();
+    let text = fs::read_to_string(cfg.jobs.join(FILE)).unwrap();
+    assert!(!text.contains("\"login\""), "{text}");
+    let old: Previous = serde_json::from_str(&text).unwrap();
+    // It writes it back as it knows it, and the cause survives that.
+    fs::write(cfg.jobs.join(FILE), serde_json::to_string(&old).unwrap()).unwrap();
+    assert!(kept(&cfg).unwrap().login);
+    // Released and settled, too.
+    back(&cfg, Some(now() + 1));
+    let text = fs::read_to_string(cfg.jobs.join(FILE)).unwrap();
+    serde_json::from_str::<Previous>(&text).unwrap();
+    let s = kept(&cfg).unwrap();
+    assert!(s.login && s.back.is_some() && s.job == "web-1", "{s:?}");
+    // An ordinary usage refusal is still held, and read as one.
+    let (_d, cfg) = rig();
+    record(&cfg, "web-2", Some(t + 7200), "weekly limit", t).unwrap();
+    let text = fs::read_to_string(cfg.jobs.join(FILE)).unwrap();
+    serde_json::from_str::<Previous>(&text).unwrap();
+    assert!(!kept(&cfg).unwrap().login);
+}
+
+#[test]
+fn a_meter_releases_only_a_usage_hold_judged_under_the_lock() {
+    // A login refusal that replaced the usage hold meanwhile is not
+    // released by a meter evaluated against the usage hold before it.
+    let (_d, cfg) = rig();
+    let t = now();
+    record(&cfg, "web-1", Some(t + 7200), "weekly limit", t).unwrap();
+    assert!(!kept(&cfg).unwrap().login);
+    let mut s = kept(&cfg).unwrap();
+    s.login = true;
+    keep(&cfg, &s).unwrap();
+    release(&cfg, Some(t + 100), true);
+    assert!(out(&cfg).is_some_and(|s| s.login));
+    // The same read releases an ordinary usage hold.
+    s.login = false;
+    keep(&cfg, &s).unwrap();
+    release(&cfg, Some(t + 100), true);
+    assert_eq!(out(&cfg), None);
+}
+
+#[test]
+fn a_changed_cause_keeps_the_latest_refusal() {
+    // A usage refusal at T arriving after a login refusal at T+1 doesn't
+    // move the watermark back, so a run started at T+1 can't release it.
+    let (_d, cfg) = rig();
+    let t = now();
+    login(&cfg, "web-1", SAID, t + 1).unwrap();
+    let s = record(&cfg, "web-2", Some(t + 7200), "weekly limit", t).unwrap();
+    assert!(!s.login);
+    assert_eq!(s.refused(), t + 1);
+    back(&cfg, Some(t + 1));
+    assert!(out(&cfg).is_some());
+    // And the other way round.
+    let (_d, cfg) = rig();
+    record(&cfg, "web-2", Some(t + 7200), "weekly limit", t + 1).unwrap();
+    let s = login(&cfg, "web-1", SAID, t).unwrap();
+    assert_eq!(s.refused(), t + 1);
+}

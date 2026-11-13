@@ -44,6 +44,8 @@ pub(crate) const FILE: &str = ".usage.json";
 const RELEASED: &str = ".usage.released";
 const OWNER: &str = ".usage-owner-";
 const ADMISSION_REF: &str = ".usage-release-";
+/// Marks a login hold in the record's `job`, an opaque string to earlier proj.
+const LOGIN_REF: &str = ".usage-login-";
 /// The owner's notice's key.
 const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
@@ -87,8 +89,10 @@ pub struct Spent {
     /// from before it was kept, which `at` stands for.
     #[serde(default)]
     pub last: Option<i64>,
-    /// Refused for Claude Code's login, not its usage ([`login`]).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Refused for Claude Code's login, not its usage ([`login`]). Kept on
+    /// disk in `job`'s prefix ([`LOGIN_REF`]), so a binary from before it
+    /// still reads, and writes back, the record as a usage hold.
+    #[serde(skip)]
     pub login: bool,
 }
 
@@ -147,7 +151,7 @@ pub fn held(cfg: &Config) -> Result<Option<Spent>, String> {
 /// arriving meanwhile keeps its hold. All release effects still live there.
 pub fn metered(cfg: &Config) {
     if let Some(started) = meter_start(cfg) {
-        back(cfg, Some(started));
+        release(cfg, Some(started), true);
     }
 }
 
@@ -269,6 +273,10 @@ fn read(cfg: &Config) -> Result<Option<Spent>, String> {
                     && let Ok(cutoff) = cutoff.parse::<i64>()
                 {
                     s.admission = Some(cutoff);
+                    s.job = job.to_owned();
+                }
+                if let Some(job) = s.job.strip_prefix(LOGIN_REF) {
+                    s.login = true;
                     s.job = job.to_owned();
                 }
                 if let Some(back) = s.back
@@ -462,8 +470,11 @@ fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
     if s.owner {
         mirror.last = Some(s.until - 1);
     }
+    if s.login {
+        mirror.job = format!("{LOGIN_REF}{}", s.job);
+    }
     if let Some(cutoff) = s.admission {
-        mirror.job = format!("{ADMISSION_REF}{cutoff}-{}", s.job);
+        mirror.job = format!("{ADMISSION_REF}{cutoff}-{}", mirror.job);
     }
     let text = serde_json::to_string(&mirror).map_err(|e| format!("proj: {FILE}: {e}"))?;
     swap(&cfg.jobs.join(FILE), &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
@@ -581,6 +592,7 @@ fn put(
         .as_ref()
         .filter(|w| w.holds(at))
         .map_or(until, |w| w.until.max(until));
+    let prior = unended.as_ref().map(Spent::refused);
     let was = unended.filter(|w| w.login == login || (login && w.holds(at)));
     let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
     let mut spent = match &was {
@@ -604,7 +616,9 @@ fn put(
             admission: None,
             // Not told yet, for a login: 0 is before any refusal.
             told: if login { 0 } else { now() },
-            last: Some(last),
+            // The hold of the other cause this replaces was refused as late
+            // as that: a delayed refusal never moves the watermark back.
+            last: Some(prior.map_or(last, |p| p.max(last))),
             login,
         },
     };
@@ -681,6 +695,13 @@ pub fn remind(cfg: &Config) {
 /// one settled or none recorded yet: an earlier proj's or watchdog's limit
 /// taken in after it, but written before, never holds again ([`earlier`]).
 pub fn back(cfg: &Config, started: Option<i64>) {
+    release(cfg, started, false);
+}
+
+/// [`back`]; `metered` when a meter read, not a run, is the proof: that
+/// releases only an ordinary usage hold, judged under the lock against the
+/// hold as it stands then (a login refusal may have replaced it meanwhile).
+fn release(cfg: &Config, started: Option<i64>, metered: bool) {
     let owner = started.is_none();
     if !owner && kept(cfg).is_none() {
         return;
@@ -697,6 +718,9 @@ pub fn back(cfg: &Config, started: Option<i64>) {
         return;
     }
     if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {
+        return;
+    }
+    if ends && metered && s.as_ref().is_some_and(|s| s.login) {
         return;
     }
     // What it ended is kept first, past the record: without it, an earlier
