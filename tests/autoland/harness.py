@@ -39,7 +39,7 @@ DEFAULT_ADMISSION = admission([
     "sam/old", "sam/was", "sam/took", "sam/config", "sam/.cfg", "sam/.github",
     "sam/empty", "sam/alias", "sam/plain", "sam/notes", "sam/now", "sam/latest",
     "sam/mirrored", "sam/lo-k", "sam/flaky", "sam/homelab", "sam/absent", "sam/bad",
-    "sam/gone", "sam/nobody", "sam/none", "sam/skip", "sam/pipe", "sam/lead",
+    "sam/gone", "sam/slow", "sam/nobody", "sam/none", "sam/skip", "sam/pipe", "sam/lead",
     "eve/app", "eve/later", "eve/p", "eve/tool", "eve/permission", "eve/.cfg",
     "kim/busy", "kim/r", "kim/x", "kim/z", "old-org/app", "old-org/later", "old-org/swept",
 ])
