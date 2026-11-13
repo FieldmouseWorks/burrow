@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::glob;
-use crate::line::Pass;
+use crate::line::{Line, Pass};
 
 /// The service's config, the JSON file EVENTS_CONFIG names.
 #[derive(Debug, Deserialize)]
@@ -52,6 +52,12 @@ pub struct Handler {
     /// None: every pass looks at everything.
     #[serde(default)]
     pub issue_dir: Option<PathBuf>,
+    /// Where its full pass is told the repos whose passes it took in, while
+    /// it runs, a repo a line: it books each one it doesn't get to (its
+    /// wake file), and the line runs those on their own before the next.
+    /// None: its full pass sees to every repo.
+    #[serde(default)]
+    pub lent_file: Option<PathBuf>,
     /// Seconds one of its passes starts after the last, at least.
     #[serde(default = "gap")]
     pub gap: f64,
@@ -176,12 +182,20 @@ impl Handler {
         at(payload, &["issue", "number"]).and_then(Value::as_u64)
     }
 
-    /// The file a pass over a repo is told its issues in, if the handler is
-    /// told them.
-    pub fn issue_file(&self, pass: &Pass) -> Option<PathBuf> {
+    /// The file a pass is told what it's for in, if the handler tells it:
+    /// a pass over a repo its issues, the full pass the repos it took in.
+    pub fn told_file(&self, pass: &Pass) -> Option<PathBuf> {
         match pass {
             Pass::Repo(repo) => self.issue_dir.as_ref().map(|d| d.join(escape(repo))),
-            Pass::Full => None,
+            Pass::Full => self.lent_file.clone(),
+        }
+    }
+
+    /// Its line: a lending one when its full pass is told what it took in.
+    pub fn line(&self) -> Line {
+        match self.lent_file {
+            Some(_) => Line::lending(self.gap),
+            None => Line::new(self.gap),
         }
     }
 
@@ -577,10 +591,15 @@ mod tests {
         let odd = payload("sam/r", json!({"issue": {"number": "7"}}));
         assert_eq!(h.issue("issues", &odd), None);
         assert_eq!(
-            h.issue_file(&Pass::repo("Sam/my-r")),
+            h.told_file(&Pass::repo("Sam/my-r")),
             Some("/run/burrow-events/inbox/sam-my\\x2dr".into())
         );
-        assert_eq!(h.issue_file(&Pass::Full), None);
+        assert_eq!(h.told_file(&Pass::Full), None);
+        h.lent_file = Some("/run/burrow-events/inbox.lent".into());
+        assert_eq!(
+            h.told_file(&Pass::Full),
+            Some("/run/burrow-events/inbox.lent".into())
+        );
         h.per_repo = false;
         assert_eq!(h.issue("issues", &p("opened")), None);
     }

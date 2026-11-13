@@ -51,11 +51,14 @@ impl std::fmt::Display for Pass {
 
 /// What a pass looks at: everything it covers, or only the issues its events
 /// were about (a handler told them, `issueDir`, whose pass had nothing but
-/// issue events booked).
+/// issue events booked). The full pass looks at everything, and takes over
+/// the repo passes due when it starts: these repos (a handler told them,
+/// `lentFile`, books again each one it doesn't get to).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     All,
     Issues(BTreeSet<u64>),
+    Full(BTreeSet<String>),
 }
 
 #[derive(Default)]
@@ -70,6 +73,14 @@ struct State {
     last: HashMap<Pass, f64>,
     /// Passes in a row that failed, by pass.
     fails: HashMap<Pass, u32>,
+    /// The repo passes a full pass took in, until each has had a pass of
+    /// its own (a lending line's). A full pass may be one slice of a long traversal that never
+    /// reaches a repo it took in: one booked again (the full pass asking
+    /// for it through its wake file, or an event since) runs on its own,
+    /// before the next full pass, instead of being taken in again.
+    lent: BTreeSet<Pass>,
+    /// The ones the last full pass took in: booked again if it fails.
+    handed: BTreeSet<Pass>,
     /// Something came in since the last take: the wait after it returns at
     /// once instead of sleeping through what it missed.
     news: bool,
@@ -78,6 +89,9 @@ struct State {
 pub struct Line {
     /// How far apart one pass's starts are, at least.
     gap: f64,
+    /// Its full pass may stop short of a repo it took in (the handler's
+    /// `slicedFullPass`): the repos it took in are lent, not seen to.
+    lends: bool,
     state: Mutex<State>,
     cond: Condvar,
 }
@@ -92,8 +106,17 @@ impl Line {
     pub fn new(gap: f64) -> Line {
         Line {
             gap,
+            lends: false,
             state: Mutex::default(),
             cond: Condvar::new(),
+        }
+    }
+
+    /// The line of a handler whose full pass may stop short of a repo.
+    pub fn lending(gap: f64) -> Line {
+        Line {
+            lends: true,
+            ..Line::new(gap)
         }
     }
 
@@ -147,9 +170,11 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// The passes that start now, the full pass first, each with what it
-    /// looks at, and how long until the next one is due (None: nothing is).
-    /// A pass due to look at everything sees to its issues' events as well.
+    /// The passes that start now, in order, each with what it looks at,
+    /// and how long until the next one is due (None: nothing is). A pass
+    /// due to look at everything sees to its issues' events as well. When
+    /// the full pass is due, the repo passes a full pass took in before and
+    /// that are due again go first, and the full pass takes in the rest.
     pub fn take(&self, now: f64) -> (Vec<(Pass, Scope)>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;
@@ -170,25 +195,41 @@ impl Line {
             })
             .collect();
         if ready.first().is_some_and(|(p, _)| *p == Pass::Full) {
-            // It sees to every repo whose event has come in as well, GAP or
-            // not.
-            let seen: Vec<Pass> = s
+            // It takes in every repo whose event has come in as well, GAP or
+            // not, and is lent them: a repo a full pass already had and
+            // that's due again (it wasn't seen, or more came) runs on its
+            // own first, once its GAP is up, never taken in twice.
+            let taken: Vec<Pass> = s
                 .due
                 .iter()
                 .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
-                .filter(|&(p, &at)| *p != Pass::Full && at <= now)
+                .filter(|&(p, &at)| *p != Pass::Full && at <= now && !s.lent.contains(p))
                 .map(|(p, _)| p.clone())
                 .collect();
-            for pass in seen {
-                s.due.remove(&pass);
-                s.issues.remove(&pass);
-                s.last.insert(pass, now);
+            ready.remove(0);
+            ready.retain(|(p, _)| s.lent.contains(p));
+            let names = taken
+                .iter()
+                .filter_map(|p| match p {
+                    Pass::Repo(name) => Some(name.clone()),
+                    Pass::Full => None,
+                })
+                .collect();
+            ready.push((Pass::Full, Scope::Full(names)));
+            for pass in &taken {
+                s.due.remove(pass);
+                s.issues.remove(pass);
+                s.last.insert(pass.clone(), now);
             }
-            ready = vec![(Pass::Full, Scope::All)];
+            if self.lends {
+                s.lent.extend(taken.iter().cloned());
+                s.handed = taken.into_iter().collect();
+            }
         }
         for (pass, scope) in &ready {
-            if *scope == Scope::All {
+            if !matches!(scope, Scope::Issues(_)) {
                 s.due.remove(pass);
+                s.lent.remove(pass);
             }
             s.issues.remove(pass);
             s.last.insert(pass.clone(), now);
@@ -205,9 +246,17 @@ impl Line {
     /// A pass ended. One that failed (or never started) runs again a minute
     /// later, then two, up to an hour, looking at everything: no other event
     /// may come for it, and once one goes through its unit isn't failed any
-    /// more. Returns when it runs again.
+    /// more. The repo passes a full pass that failed took in run on their
+    /// own now: it can't have said which it didn't get to. Returns when it
+    /// runs again.
     pub fn done(&self, pass: &Pass, ok: bool, now: f64) -> Option<f64> {
         let mut s = self.lock();
+        if *pass == Pass::Full {
+            let handed = std::mem::take(&mut s.handed);
+            if !ok {
+                Self::book_all(&mut s, handed, now);
+            }
+        }
         if ok {
             s.fails.remove(pass);
             return None;
@@ -218,6 +267,20 @@ impl Line {
         let at = now + after;
         Self::book(&mut s, pass.clone(), at);
         Some(at)
+    }
+
+    /// The full pass that's running couldn't be told the repo passes it
+    /// took in: they run on their own once it's done.
+    pub fn hand_back(&self, now: f64) {
+        let mut s = self.lock();
+        let handed = std::mem::take(&mut s.handed);
+        Self::book_all(&mut s, handed, now);
+    }
+
+    fn book_all(s: &mut State, passes: BTreeSet<Pass>, at: f64) {
+        for pass in passes {
+            Self::book(s, pass, at);
+        }
     }
 
     /// Wait for news, or this long (None: until news comes).
@@ -265,7 +328,7 @@ mod tests {
 
     use serde_json::{Map, Value, json};
 
-    use super::{DEBOUNCE, Line, Pass, Scope};
+    use super::{DEBOUNCE, GAP, Line, Pass, Scope};
 
     /// The passes that start now, every one looking at everything.
     fn took(line: &Line, now: f64) -> (Vec<Pass>, Option<f64>) {
@@ -273,11 +336,18 @@ mod tests {
         let passes = ready
             .into_iter()
             .map(|(p, scope)| {
-                assert_eq!(scope, Scope::All, "{p}");
+                match (&p, scope) {
+                    (Pass::Full, Scope::Full(_)) | (Pass::Repo(_), Scope::All) => (),
+                    (p, scope) => panic!("{p}: {scope:?}"),
+                }
                 p
             })
             .collect();
         (passes, next)
+    }
+
+    fn told(names: &[&str]) -> Scope {
+        Scope::Full(names.iter().map(|n| n.to_string()).collect())
     }
 
     fn booked(v: Value) -> Map<String, Value> {
@@ -327,7 +397,7 @@ mod tests {
         assert_eq!(took(&line, 1125.0).0, vec![Pass::Full]);
     }
 
-    // A full pass sees to every repo whose event has come in, GAP or not.
+    // A full pass takes in every repo whose event has come in, GAP or not.
     #[test]
     fn full_pass_first() {
         let line = Line::default();
@@ -340,6 +410,116 @@ mod tests {
         assert_eq!(took(&line, 111.0), (vec![Pass::Full], Some(389.0)));
         assert_eq!(line.due(), due(&[(r("sam/s"), 500.0)]));
         assert_eq!(took(&line, 120.0), (vec![], Some(380.0)));
+    }
+
+    // A full pass may be one slice of a long traversal (the steward's,
+    // since it resumes long passes). It's told the repos it took in; one it
+    // didn't get to and asks for again, or that had an event since, runs on
+    // its own before the next full pass, however often full passes are
+    // kicked, never taken in again in the meantime. One it saw to, nothing
+    // new since, doesn't run again.
+    #[test]
+    fn full_pass_lends_repos() {
+        let line = Line::lending(GAP);
+        line.event(r("sam/r"), 100.0);
+        line.event(r("sam/seen"), 100.0);
+        line.event(Pass::Full, 100.0 - DEBOUNCE);
+        assert_eq!(
+            line.take(105.0).0,
+            vec![(Pass::Full, told(&["sam/r", "sam/seen"]))]
+        );
+        // Kicked again during the slice, which ends 8 minutes on asking for
+        // the repo it didn't reach.
+        line.event(Pass::Full, 200.0);
+        line.wakes(&booked(json!({"sam/r": 586})));
+        assert_eq!(
+            line.take(586.0).0,
+            vec![(r("sam/r"), Scope::All), (Pass::Full, told(&[]))]
+        );
+        // Kicked through every slice, no repo is due again.
+        let mut now = 586.0;
+        for _ in 0..3 {
+            line.event(Pass::Full, now + 60.0);
+            now += 480.0;
+            assert_eq!(took(&line, now).0, vec![Pass::Full]);
+        }
+        assert_eq!(line.due(), due(&[]));
+        // An event during a slice, for a repo the slice had taken in, gets
+        // its own pass before the next one; once it had one, a full pass
+        // takes it in again.
+        line.event(r("sam/q"), now + 10.0);
+        line.event(Pass::Full, now + 10.0);
+        assert_eq!(took(&line, now + 20.0).0, vec![Pass::Full]);
+        line.event(r("sam/q"), now + 30.0);
+        line.event(Pass::Full, now + 100.0);
+        now += 480.0;
+        assert_eq!(took(&line, now).0, vec![r("sam/q"), Pass::Full]);
+        line.event(r("sam/q"), now + 30.0);
+        line.event(Pass::Full, now + 30.0);
+        assert_eq!(
+            line.take(now + 40.0).0,
+            vec![(Pass::Full, told(&["sam/q"]))]
+        );
+        // An issue's event for one, too.
+        line.issue(r("sam/q"), 7, now + 50.0);
+        line.event(Pass::Full, now + 50.0);
+        assert_eq!(
+            line.take(now + 480.0).0,
+            vec![
+                (r("sam/q"), Scope::Issues([7].into())),
+                (Pass::Full, told(&[]))
+            ]
+        );
+    }
+
+    // remi, 2026-11-13: the steward's full pass yielded every 8 minutes,
+    // booking the repos it hadn't reached, and a full pass was kicked during
+    // each slice. Every take handed those repos to the next slice again, for
+    // 96 minutes. A repo a slice handed back gets its own pass first.
+    #[test]
+    fn kicked_slices_dont_starve_repos() {
+        let line = Line::lending(GAP);
+        line.event(r("sam/remi"), 100.0);
+        line.event(Pass::Full, 100.0 - DEBOUNCE);
+        assert_eq!(took(&line, 105.0).0, vec![Pass::Full]);
+        line.event(Pass::Full, 300.0);
+        line.wakes(&booked(json!({"sam/remi": 586})));
+        assert_eq!(took(&line, 586.0).0, vec![r("sam/remi"), Pass::Full]);
+    }
+
+    // A full pass that failed can't have said which repos it didn't get to:
+    // every one it took in runs on its own, before the full pass again.
+    #[test]
+    fn failed_full_pass_hands_back() {
+        let line = Line::lending(GAP);
+        line.event(r("sam/r"), 100.0);
+        line.event(Pass::Full, 100.0);
+        assert_eq!(line.take(105.0).0, vec![(Pass::Full, told(&["sam/r"]))]);
+        assert_eq!(line.done(&Pass::Full, false, 500.0), Some(560.0));
+        line.event(Pass::Full, 500.0);
+        assert_eq!(took(&line, 505.0).0, vec![r("sam/r"), Pass::Full]);
+        // One that went through hands back only what it asks for.
+        line.event(r("sam/r"), 600.0);
+        line.event(Pass::Full, 600.0);
+        took(&line, 605.0);
+        line.done(&Pass::Full, true, 900.0);
+        assert_eq!(line.due(), due(&[]));
+    }
+
+    // A line whose full pass sees to every repo lends nothing: a repo's
+    // event after one is taken in by the next, and a failed one hands
+    // nothing back (its retry sees to it).
+    #[test]
+    fn full_pass_sees_to_all() {
+        let line = Line::default();
+        line.event(r("sam/r"), 100.0);
+        line.event(Pass::Full, 100.0);
+        assert_eq!(line.take(105.0).0, vec![(Pass::Full, told(&["sam/r"]))]);
+        line.event(r("sam/r"), 200.0);
+        line.event(Pass::Full, 200.0);
+        assert_eq!(line.take(205.0).0, vec![(Pass::Full, told(&["sam/r"]))]);
+        line.done(&Pass::Full, false, 300.0);
+        assert_eq!(line.due(), due(&[(Pass::Full, 360.0)]));
     }
 
     // GitHub's names are case-blind: two spellings are one repo's pass.
@@ -442,7 +622,13 @@ mod tests {
         assert!(line.issues().is_empty());
         line.issue(r("sam/r"), 4, 300.0);
         line.event(Pass::Full, 300.0);
-        assert_eq!(line.take(305.0), (vec![(Pass::Full, Scope::All)], None));
+        assert_eq!(
+            line.take(305.0),
+            (
+                vec![(Pass::Full, Scope::Full(["sam/r".into()].into()))],
+                None
+            )
+        );
         assert!(line.issues().is_empty());
         line.issue(r("sam/r"), 5, 400.0);
         assert_eq!(

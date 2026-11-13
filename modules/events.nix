@@ -23,12 +23,18 @@ let
     handlers = lib.mapAttrs (name: h: {
       inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap;
       issueDir = if h.issueNumbers then "${issueDir}/${name}" else null;
+      lentFile = if sliced h then lentFile name else null;
     }) cfg.handlers;
   });
-  # Where a pass is told its issues (`issueNumbers`): burrow-events' own
-  # runtime directory, gone with it, so nothing it told outlives it.
+  # Where a pass is told its issues (`issueNumbers`), or a full pass the repo
+  # passes it took in (`slicedFullPass`): burrow-events' own runtime
+  # directory, gone with it, so nothing it told outlives it. No escaped
+  # repo is `full`: each has the `-` of its slash.
   issueDir = "/run/burrow-events";
+  lentFile = name: "${issueDir}/${name}/full";
+  sliced = h: h.slicedFullPass && h.perRepo;  # perRepo: asserted below
   told = lib.filterAttrs (_: h: h.issueNumbers) cfg.handlers;
+  lends = lib.filterAttrs (_: sliced) cfg.handlers;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-events;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
   # Each one best-effort: burrow-events down (restarting, say) runs every
@@ -174,6 +180,23 @@ in
               `perRepo`.
             '';
           };
+          slicedFullPass = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Whether its full pass may stop short of a repo (one slice of a
+              long traversal it resumes later). A full pass takes over the
+              repo passes due when it starts; such a handler's is told
+              which, one repo a line, in the file its unit's
+              BURROW_EVENTS_LENT names (not there when there are none), and
+              books each one it didn't get to in its wake file. That one
+              then runs on its own before the next full pass, never taken
+              over twice, so kicking the full pass again and again can't
+              hold a repo's pass back. A full pass that fails can't have
+              said: every one it took over runs on its own. Off, the full
+              pass is taken to see to every repo. Needs `perRepo`.
+            '';
+          };
           ownStatuses = mkOption {
             type = types.listOf types.str;
             default = [ ];
@@ -270,7 +293,10 @@ in
     }] ++ lib.mapAttrsToList (name: h: {
       assertion = h.perRepo;
       message = "burrow.events.handlers.${name}: issueNumbers tells a pass over one repo its issues, so it needs perRepo.";
-    }) told;
+    }) told ++ lib.mapAttrsToList (name: h: {
+      assertion = h.perRepo;
+      message = "burrow.events.handlers.${name}: slicedFullPass hands repo passes back to run on their own, so it needs perRepo.";
+    }) (lib.filterAttrs (_: h: h.slicedFullPass) cfg.handlers);
 
     # The repos' hooks are the steward's to keep (burrow-upkeep's hook.rs).
     warnings = lib.optional (!(lib.attrByPath [ "burrow" "autoland" "enable" ] false config)) ''
@@ -298,8 +324,8 @@ in
         RestartSec = 5;
         # Each told handler's DIR/INSTANCE, which its pass (another user)
         # reads.
-        RuntimeDirectory = lib.mkIf (told != { }) "burrow-events";
-        RuntimeDirectoryMode = lib.mkIf (told != { }) "0755";
+        RuntimeDirectory = lib.mkIf (told != { } || lends != { }) "burrow-events";
+        RuntimeDirectoryMode = lib.mkIf (told != { } || lends != { }) "0755";
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
@@ -389,6 +415,10 @@ in
       (lib.mapAttrs' (name: h: lib.nameValuePair "${h.unit}@" {
         environment.BURROW_EVENTS_ISSUES = "${issueDir}/${name}/%i";
       }) told)
+      # A sliced handler's full pass finds the repos it took over in its file.
+      (lib.mapAttrs' (name: h: lib.nameValuePair h.unit {
+        environment.BURROW_EVENTS_LENT = lentFile name;
+      }) lends)
       (lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
       description = "burrow-events: a full pass of ${name} when a switch changes it";
       wantedBy = [ "multi-user.target" ];

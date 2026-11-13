@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::{env, fs};
 
 use burrow_events::handler::Config;
-use burrow_events::line::{DEBOUNCE, Line, Pass};
+use burrow_events::line::{DEBOUNCE, Pass};
 use burrow_events::passes::{Systemctl, refresh, serve};
 use burrow_events::routes::{Handlers, Lines, delivery, kick};
 use burrow_events::{http, now, supervise};
@@ -41,7 +41,7 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
     let lines: Lines = Arc::new(
         handlers
             .iter()
-            .map(|(name, h)| (name.clone(), Line::new(h.gap)))
+            .map(|(name, h)| (name.clone(), h.line()))
             .collect::<BTreeMap<_, _>>(),
     );
     for line in lines.values() {

@@ -53,35 +53,53 @@ pub fn booked(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Tell a pass about to start which issues to look at, if its handler is
-/// told them: its file has their numbers, one a line, or isn't there for a
-/// look at everything (whatever a pass before it left). The file to remove
-/// once it's done; a pass that can't be told looks at everything.
-fn tell(name: &str, h: &Handler, pass: &Pass, scope: &Scope) -> Option<PathBuf> {
-    let f = h.issue_file(pass)?;
-    let told = match scope {
-        Scope::All => match fs::remove_file(&f) {
+/// Tell a pass about to start what it's for, if its handler tells it: a
+/// pass over a repo's file has the numbers of the issues to look at, a full
+/// pass's the repos whose passes it took in, one a line, or it isn't there
+/// for a look at everything with nothing taken in (whatever a pass before
+/// it left). A pass over a repo that can't be told looks at everything; the
+/// repo passes a full pass that can't be told took in run on their own.
+fn tell(name: &str, h: &Handler, pass: &Pass, scope: &Scope) -> Told {
+    let Some(f) = h.told_file(pass) else {
+        return Told::Nothing;
+    };
+    let lines: Vec<String> = match scope {
+        Scope::All => vec![],
+        Scope::Issues(ns) => ns.iter().map(u64::to_string).collect(),
+        Scope::Full(repos) => repos.iter().cloned().collect(),
+    };
+    let told = if lines.is_empty() {
+        match fs::remove_file(&f) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => return None,
-        },
-        Scope::Issues(ns) => {
-            // Whole or not at all: a pass reading half the list would leave
-            // the rest of its issues unlooked at.
-            let text: String = ns.iter().map(|n| format!("{n}\n")).collect();
-            let new = f.with_extension("new");
-            f.parent()
-                .map_or(Ok(()), fs::create_dir_all)
-                .and_then(|()| fs::write(&new, text))
-                .and_then(|()| fs::rename(&new, &f))
+            _ => return Told::Nothing,
         }
+    } else {
+        // Whole or not at all: a pass reading half the list would leave the
+        // rest unlooked at.
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let new = f.with_extension("new");
+        f.parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&new, text))
+            .and_then(|()| fs::rename(&new, &f))
     };
     match told {
-        Ok(()) => Some(f),
+        Ok(()) => Told::In(f),
         Err(e) => {
             eprintln!("{name}: {}: {e}", f.display());
-            None
+            Told::Failed
         }
     }
+}
+
+/// What telling a pass came to.
+enum Told {
+    /// Nothing to tell, or its handler isn't told.
+    Nothing,
+    /// In this file, to remove once it's done.
+    In(PathBuf),
+    /// It couldn't be told.
+    Failed,
 }
 
 /// A completed unit may publish another handler's wakes. Notify every
@@ -115,6 +133,11 @@ pub fn serve(
             let unit = h.unit(pass);
             match scope {
                 Scope::All => eprintln!("{name}: {pass}"),
+                Scope::Full(repos) if repos.is_empty() => eprintln!("{name}: {pass}"),
+                Scope::Full(repos) => {
+                    let repos: Vec<&str> = repos.iter().map(String::as_str).collect();
+                    eprintln!("{name}: {pass}, taking in {}", repos.join(" "));
+                }
                 Scope::Issues(ns) => {
                     let ns: Vec<String> = ns.iter().map(|n| format!("#{n}")).collect();
                     eprintln!("{name}: {pass} {}", ns.join(" "));
@@ -128,8 +151,10 @@ pub fn serve(
             }
             let told = tell(name, h, pass, scope);
             let ok = units.start(&unit);
-            if let Some(f) = told {
-                let _ = fs::remove_file(f);
+            match told {
+                Told::In(f) => drop(fs::remove_file(f)),
+                Told::Failed if *pass == Pass::Full => line.hand_back(now()),
+                _ => (),
             }
             if let Some(again) = line.done(pass, ok, now()) {
                 eprintln!(
@@ -373,6 +398,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The steward, stood in for: its full pass is one slice of a long
+    /// traversal that never reaches a repo. It books each repo whose pass it
+    /// was told it took in through its wake file.
+    struct Slicing {
+        wake: PathBuf,
+        lent: PathBuf,
+        started: RefCell<Vec<String>>,
+    }
+
+    impl Units for Slicing {
+        fn state(&self, _: &str) -> String {
+            "inactive".into()
+        }
+
+        fn start(&self, unit: &str) -> bool {
+            self.started.borrow_mut().push(unit.into());
+            if unit == "autoland.service" {
+                let told = fs::read_to_string(&self.lent).unwrap_or_default();
+                let at = crate::now();
+                let wakes: serde_json::Map<_, _> =
+                    told.lines().map(|r| (r.to_owned(), at.into())).collect();
+                fs::write(&self.wake, serde_json::to_string(&wakes).unwrap()).unwrap();
+            }
+            true
+        }
+    }
+
+    // A repo's event gets its own pass within a full pass's slice, however
+    // long the traversal runs and however often its full pass is kicked
+    // (the watchdog's kick, each time the stuck issue changed): on remi,
+    // FieldmouseWorks/remi's events waited 96 minutes behind ten slices
+    // that never reached it.
+    #[test]
+    fn slices_dont_starve_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake.json");
+        let lent = dir.path().join("told/autoland/full");
+        fs::write(&wake, "{}").unwrap();
+        let h: Handler = serde_json::from_value(serde_json::json!({
+            "events": [], "unit": "autoland", "wake": wake, "lentFile": lent, "gap": 0,
+        }))
+        .unwrap();
+        let fake = Slicing {
+            wake: wake.clone(),
+            lent: lent.clone(),
+            started: RefCell::default(),
+        };
+        let line = h.line();
+        line.event(Pass::repo("sam/remi"), crate::now() - 100.0);
+        line.event(Pass::Full, crate::now() - 100.0);
+        line.wakes(
+            &serde_json::json!({"sam/later": crate::now() + 3600.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        for _ in 0..4 {
+            serve("autoland", &h, &line, &fake, true, || {
+                line.wakes(&super::booked(&wake));
+                line.event(Pass::Full, crate::now() - 100.0);
+            });
+        }
+        assert_eq!(
+            fake.started.borrow()[..3],
+            [
+                "autoland.service",
+                "autoland@sam-remi.service",
+                "autoland.service"
+            ],
+            "{:?}",
+            fake.started.borrow()
+        );
+        assert_eq!(
+            fake.started.borrow().len(),
+            5,
+            "a repo pass ran twice, or one nothing came for ran: {:?}",
+            fake.started.borrow()
+        );
+        assert!(!lent.exists());
     }
 
     // A wake file that's missing or isn't an object books nothing.

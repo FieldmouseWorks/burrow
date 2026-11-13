@@ -1,5 +1,6 @@
 # Continuation receipts and new-work events must reach different commands
-# and wake files, with the same authentication and hard timeout.
+# and wake files, with the same authentication and hard timeout. The full
+# pass is a slice of a traversal: it's told the repo passes it took over.
 { self, pkgs, ... }:
 let
   machine = self.nixosConfigurations.example.config;
@@ -16,7 +17,10 @@ let
       && pkgs.lib.hasSuffix " continue %I" services."autoland-continue@".serviceConfig.ExecStart
       && services.autoland-continue.serviceConfig.LoadCredential == services.autoland.serviceConfig.LoadCredential
       && services.autoland-continue.serviceConfig.TimeoutStartSec == services.autoland.serviceConfig.TimeoutStartSec
-      && services."autoland-continue@".unitConfig.OnSuccess == services."autoland@".unitConfig.OnSuccess;
+      && services."autoland-continue@".unitConfig.OnSuccess == services."autoland@".unitConfig.OnSuccess
+      && handlers.autoland.slicedFullPass
+      && services.autoland.environment ? BURROW_EVENTS_LENT
+      && !(services.autoland-continue.environment or { } ? BURROW_EVENTS_LENT);
   withoutHandler = machine // {
     burrow = machine.burrow // {
       events = machine.burrow.events // {
@@ -35,8 +39,18 @@ let
       };
     };
   };
+  unsliced = machine // {
+    burrow = machine.burrow // {
+      events = machine.burrow.events // {
+        handlers = machine.burrow.events.handlers // {
+          autoland = machine.burrow.events.handlers.autoland // { slicedFullPass = false; };
+        };
+      };
+    };
+  };
 in
 assert valid machine;
+assert !(valid unsliced);
 assert !(valid withoutHandler);
 assert !(valid sharedWake);
 pkgs.runCommand "autoland-continuations-check" { } "touch $out"

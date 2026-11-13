@@ -90,26 +90,66 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert (state / 'watch.json').exists(), (kick, name)
     print('slow preparation makes durable progress: passed')
 
-    # A normal full pass consumes repository events in Line.take. Finished
-    # and unvisited repos, including expired retries, must get ordinary work
-    # requests back, separate from the internal continuation line.
+    # A normal full pass is handed the repo passes due when it started
+    # (burrow-events' BURROW_EVENTS_LENT). Each one it skipped, and finished
+    # or unvisited repos with an outstanding wake-up, get ordinary work
+    # requests back, separate from the internal continuation line. A repo
+    # it skipped that nothing asked for gets none: its traversal reaches it.
     with fixture() as (clock, handled, facts, repos, prs, info):
-        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arb']
+        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arbcd']
         C.save('pass-progress.json', {'full': True, 'finished': ['sam/a'], 'repos': {}})
         C.save('wake.json', {'sam/a': C.NOW - 50, 'sam/b': C.NOW - 40, '': C.NOW - 30})
+        lent = Path(tmp) / 'lent'
+        lent.write_text('sam/c\nsam/r\nsam/gone\n')
         original = S.step.handle
 
         def long(*args):
             original(*args)
             clock[0] += 9 * 60
 
-        with patch.object(S.step, 'handle', long):
+        with patch.object(S.step, 'handle', long), patch.dict(os.environ, BURROW_EVENTS_LENT=str(lent)):
             S.run_pass(None)
         wakes = C.load('wake.json', {})
         assert wakes['sam/a'] > C.NOW and wakes['sam/b'] > C.NOW, wakes
+        assert wakes['sam/c'] > C.NOW and wakes['sam/r'] > C.NOW, wakes
+        assert 'sam/d' not in wakes and 'sam/gone' not in wakes, wakes
         assert '' not in wakes, wakes
         assert '' in C.load('continue.json', {}), C.load('continue.json', {})
+        # Told none, it hands none back.
+        C.save('wake.json', {})
+        C.WAKE.clear()
+        C.save('pass-progress.json', {'full': True, 'finished': ['sam/a'], 'repos': {}})
+        with patch.object(S.step, 'handle', long), patch.dict(os.environ, BURROW_EVENTS_LENT=str(Path(tmp) / 'none')):
+            S.run_pass(None)
+        assert C.load('wake.json', {}) == {}, C.load('wake.json', {})
     print('full passes preserve skipped event and deadline obligations: passed')
+
+    # The watchdog kicks the continuation line when the stuck issue changed.
+    # With no traversal to carry on it publishes the last pass's digest and
+    # the escalated stalls, and passes over no repo; with one under way the
+    # slice runs, and publishes as it yields.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        published = []
+        C.save('digest-repos.json', {'sam/r': [['Waiting for Sam', 'sam/r#1', 'a']]})
+        Path(tmp, 'escalated.json').write_text(json.dumps([['Stalled', 'proj job j', 'b']]))
+        with patch.object(S.R, 'publish', published.append), \
+                patch.object(S.R, 'discover', side_effect=AssertionError('a pass over the repos')):
+            S.run_pass(None, continuing=True)
+        assert published == [[('Waiting for Sam', 'sam/r#1', 'a'), ('Stalled', 'proj job j', 'b')]], published
+        assert handled == [], handled
+        C.save('pass-progress.json', {'full': True, 'finished': [], 'repos': {}})
+        published.clear()
+        with patch.object(S.R, 'publish', published.append):
+            S.run_pass(None, continuing=True)
+        assert [n for n, _, _ in handled] == [1, 2], handled
+        assert published and ('Stalled', 'proj job j', 'b') in published[0], published
+        # Nor before a rate limit's reset.
+        C.save(C.RETRY_AFTER, C.NOW + 600)
+        C.save('pass-progress.json', {})
+        published.clear()
+        S.run_pass(None, continuing=True)
+        assert published == [], published
+    print('a continuation with nothing to carry on publishes the stuck issue alone: passed')
 
     # Local completions/availability, lifecycle/held answers and sibling PR
     # changes all arrive on the ordinary line. Invalidate decisions on that

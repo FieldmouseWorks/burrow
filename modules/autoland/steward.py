@@ -237,11 +237,26 @@ def retire_deleted(known, failed, digest):
             digest[x["name"]] = [(C.RETIRING, x["name"], f"{x['for']} took on its name, and gets no job until this is done (journalctl -u autoland)")]
 
 
+def took_over():
+    """The repos whose passes burrow-events handed this full pass, lower
+    case: its BURROW_EVENTS_LENT file, not there when there are none."""
+    try:
+        with open(os.environ["BURROW_EVENTS_LENT"]) as f:
+            return {line.strip().lower() for line in f if line.strip()}
+    except (KeyError, FileNotFoundError):
+        return set()
+
+
 def run_pass(kick, continuing=False):
     waits.begin()
     batch = Batch(kick, continuing)
     if not batch.active(kick):
         batch.end(True, kick)
+        if kick is None and load(C.RETRY_AFTER, 0) <= C.NOW:
+            # No traversal to carry on: the watchdog kicked this line for the
+            # stuck issue, which needs no pass over every repo (one under way
+            # publishes it as it yields), only the last one's digest.
+            publish(load("digest-repos.json", {}))
         return
     if (at := load(C.RETRY_AFTER, 0)) > C.NOW:
         # Even discovery is remote work. A startup or local event must not
@@ -417,12 +432,14 @@ def run_pass(kick, continuing=False):
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     if kick is None and not continuing:
-        # Line.take consumed the full pass's repository requests. Any repo
-        # this batch skipped still owes a fresh look, for events, local
-        # completions and retries alike. Do not let the continuation line
-        # acknowledge those obligations.
+        # burrow-events handed this full pass the repo passes due when it
+        # started (`slicedFullPass`). Each one this batch skipped still owes
+        # a fresh look, for events, local completions and retries alike: it
+        # runs on its own before the next full pass. Do not let the
+        # continuation line acknowledge those obligations.
+        lent = took_over()
         for r in all_repos:
-            if r["repo"] not in seen or r["repo"] in deferred:
+            if r["repo"].lower() in lent and (r["repo"] not in seen or r["repo"] in deferred):
                 retry = batch.state["retry"].get(r["repo"].lower(), 0)
                 C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
     inventory = {r["repo"] for r in all_repos}
@@ -462,9 +479,15 @@ def run_pass(kick, continuing=False):
     batch.end(complete, kick)
     if kick is None and batch.traversal_full and complete:
         R.hooks(all_repos)
-    # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once. The stalls the
-    # watchdog took past a Claude job go on the stuck issue with the rest.
+    # Last: GitHub failing it leaves the pass's state saved.
+    publish(digest)
+
+
+def publish(digest):
+    """The owner's issue and the stuck issue, from what waits by repo. A
+    line more than one repo has (a reviewer out of service) is listed once.
+    The stalls the watchdog took past a Claude job go on the stuck issue
+    with the rest."""
     R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + waits.escalated())
 
 

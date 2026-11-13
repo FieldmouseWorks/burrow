@@ -48,9 +48,15 @@ line instead of spending that deadline waiting for the other pass's lock.
 have been saved. Internal `autoland-continue` passes use `continue.json` and
 retain those receipts. Ordinary `autoland` events, completion kicks and
 expired decision waits invalidate decisions, including their local inputs,
-while retaining visited ordering. A bounded full pass requeues ordinary
-requests for every repo it did not handle, so it cannot consume their events
-or deadlines. Train steps, branch cleanup and upkeep wait for the repo's
+while retaining visited ordering. A full pass takes over the repo passes
+due when it starts, and burrow-events tells it which (`slicedFullPass`,
+`BURROW_EVENTS_LENT`). A bounded one requeues an ordinary request for each
+of those it did not handle, and burrow-events runs that repo's own pass
+before the next full pass rather than handing it over again, so kicking
+full passes can't hold a repo's events or deadlines back. The watchdog
+kicks `autoland-continue` when the stuck issue changes, not the full pass:
+a continuation with no traversal to carry on publishes the owner's issues
+from the last digest and passes over no repo. Train steps, branch cleanup and upkeep wait for the repo's
 traversal to complete, retaining previous failure-watch clocks until those
 operations are retried. Later repos retain their notices and watches.
 

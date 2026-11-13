@@ -885,6 +885,9 @@ in
         ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
+      # Its full pass is one slice of a traversal it resumes: it books the
+      # repos whose passes it took over and didn't get to.
+      slicedFullPass = true;
       # Its own status tells it nothing (a job awaiting the PR does want it),
       # nor do its own stage labels, which it puts on with that status.
       ownStatuses = [ cfg.context ];
