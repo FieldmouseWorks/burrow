@@ -64,6 +64,22 @@ fn mark_parked_locked(inbox: &Inbox, repo: &str, n: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
     fs::write(path, "").map_err(|e| e.to_string())
 }
+/// Whether the job's latest turn was stopped for good (not mid-handoff):
+/// no turn of it starts again.
+pub(super) fn stopped(job: &Job) -> bool {
+    job.turns().is_some_and(|n| job.stopped_for_good(&n))
+}
+
+/// A stopped worker its issue's labels parked, which the issue's next
+/// enrollment replaces with a fresh one. One stopped by hand (`proj stop`)
+/// on an issue still enrolled isn't: its issue is told so once instead
+/// (jobs.rs).
+pub(super) fn replaceable(inbox: &Inbox, job: &Job, repo: &str, n: &str) -> bool {
+    stopped(job)
+        && (crate::ask::host_path(job, "inbox-parked").exists()
+            || parking_path(inbox, repo, n).exists())
+}
+
 pub(super) fn automatic_parked(inbox: &Inbox, repo: &str, issue: &Value) -> bool {
     parking_path(inbox, repo, &raw(&issue["number"])).exists()
         || issue["labels"].as_array().is_none_or(|labels| {
@@ -155,7 +171,7 @@ pub(crate) fn check(job: &Job) -> Result<Admission, String> {
     let Some((repo, n)) = source(job)? else {
         return Ok(Admission::Ready);
     };
-    if job.turns().is_some_and(|n| job.stopped_for_good(&n)) {
+    if stopped(job) {
         return Ok(Admission::Stopped(format!(
             "proj: {} is stopped; relabelling starts a fresh job",
             job.id
@@ -291,18 +307,14 @@ impl Pass<'_> {
             if dirs(&retiring, "").iter().any(|d| {
                 read(&d.join("job")).is_some_and(|id| {
                     let job = Job::new(self.cfg, &id);
-                    job.dir.is_dir() && !job.turns().is_some_and(|n| job.stopped_for_good(&n))
+                    job.dir.is_dir() && !stopped(&job)
                 })
             }) {
                 self.retry(repo);
                 continue;
             }
             if let Some(id) = read(&d.join("job")) {
-                let job = Job::new(self.cfg, &id);
-                if (!crate::ask::host_path(&job, "inbox-parked").exists()
-                    && !parking_path(self.inbox, repo, &n).exists())
-                    || !job.turns().is_some_and(|n| job.stopped_for_good(&n))
-                {
+                if !replaceable(self.inbox, &Job::new(self.cfg, &id), repo, &n) {
                     continue;
                 }
                 self.retire_record(repo, &n, &id, &d)?;
