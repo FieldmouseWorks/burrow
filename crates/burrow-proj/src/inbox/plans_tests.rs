@@ -44,6 +44,18 @@ pub(super) fn parent_fixture() -> (Box, Value, List) {
 }
 
 #[test]
+fn scoped_fetches_check_added_parents() {
+    // The event is for child 8, so the saved plan also adds parent 7.
+    let (b, mut parent, _) = parent_fixture();
+    parent["repository_url"] = json!("https://api.github.com/repos/else/box");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    let mut p = b.pass();
+    assert!(p.asked("sam/box", BTreeSet::from([8])).is_none());
+    assert!(b.log().contains("api repos/sam/box/issues/7"));
+    assert!(b.posted().is_empty());
+}
+
+#[test]
 fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
     let (b, parent, _) = parent_fixture();
     let mut child = issue(8, "sam", &["later"]);
