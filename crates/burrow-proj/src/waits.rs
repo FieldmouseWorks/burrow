@@ -293,8 +293,9 @@ pub fn waiting(dir: &Path) -> Option<(i64, String)> {
 /// whose deadline then catches it; one whose dir is gone has none. Without
 /// the watchdog there's no watch file: nothing to do. Never the caller's
 /// failure: a turn goes on whether or not the watchdog hears. By the deployed
-/// proj's waits, when a turn outlives a switch ([`crate::slot`]).
-pub fn rewatch(cfg: &Config, ids: &[&str]) {
+/// proj's waits, when a turn outlives a switch ([`crate::slot`]). Whether
+/// they got there.
+pub fn rewatch(cfg: &Config, ids: &[&str]) -> bool {
     if let Some(d) = successor(cfg)
         && Command::new(d)
             .arg("_rewatch")
@@ -302,14 +303,16 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
             .status()
             .is_ok_and(|s| s.success())
     {
-        return;
+        return true;
     }
     if publish(cfg, ids).is_err() {
         eprintln!(
             "proj: couldn't update the stall watchdog's waits for {}",
             ids.join(" ")
         );
+        return false;
     }
+    true
 }
 
 /// [`rewatch`] for every job it watches, every one whose wait the policy
@@ -317,8 +320,11 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
 /// the machine's usage changed ([`usage`]), which moves the deadline of every
 /// turn in line, or the policy did, which lets a held one back, or the
 /// watchdog was just enabled, and jobs already running never published to it.
-/// Never a settled job, whose wait ended weeks ago.
+/// Never a settled job, whose wait ended weeks ago, unless the policy denies
+/// it and nothing has held it yet ([`ADOPTED`]).
 pub fn rewatch_all(cfg: &Config) {
+    let adopted = cfg.jobs.join(HELD).join(ADOPTED);
+    let adopt = cfg.waits.is_some() && !adopted.exists();
     let mut ids: Vec<String> = [".waits", HELD]
         .iter()
         .flat_map(|d| fs::read_dir(cfg.jobs.join(d)).into_iter().flatten())
@@ -337,11 +343,48 @@ pub fn rewatch_all(cfg: &Config) {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.') && live(cfg, n, up.as_ref())),
+            .filter(|n| {
+                !n.starts_with('.') && (live(cfg, n, up.as_ref()) || adopt && unheld(cfg, n))
+            }),
     );
     ids.sort();
     ids.dedup();
-    rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+    if rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>())
+        && adopt
+        && fs::write(&adopted, "").is_err()
+    {
+        eprintln!("proj: couldn't record that the denied jobs' waits are held");
+    }
+}
+
+/// Written in [`HELD`] once every job the policy denies with a wait has been
+/// through [`publish`], which holds it. A job denied before there was a
+/// [`HELD`], or while there was no watchdog to publish to, lost its watch
+/// with nothing to keep it, and one whose turn just failed isn't [`live`]:
+/// its repo allowed again, nothing would watch it. Done once, as each look
+/// at a job asks systemd about it; after that, [`publish`] holds every job
+/// the policy keeps as it goes.
+const ADOPTED: &str = ".adopted";
+
+/// A job the policy denies, not parked (a park holds itself), with a wait
+/// it keeps from the watchdog that [`live`] doesn't see: a turn that ended
+/// other than done, or done without saying what comes next. Its own files
+/// tell that, so a settled job costs no look at systemd ([`job_wait`] has
+/// the last word on the rest).
+fn unheld(cfg: &Config, id: &str) -> bool {
+    let job = Job::new(cfg, id);
+    let Some(n) = job.turns() else {
+        return false;
+    };
+    let open = read(&job.turn(&n, "outcome")).as_deref() != Some("done")
+        || read(&job.turn(&n, "end")).as_deref() == Some("undeclared");
+    open && !job.turn(&n, "stopped").exists()
+        && !job.path("owned").exists()
+        && !crate::policy::parked(&job)
+        && crate::policy::denied(&job)
+        && job
+            .facts()
+            .is_some_and(|f| !f.stopped && job_wait(cfg, &f).is_some())
 }
 
 /// A job with a turn queued or running, or outstanding awaits: work the

@@ -494,6 +494,11 @@ fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
     crate::waits::rewatch(&cfg, &["failed"]);
     let watched = |id: &str| jobs.join(".waits").join(id).exists();
     assert!(watched("failed"));
+    // A pass while nothing is denied: the jobs denied before there were
+    // holds are adopted once, and there are none, so a later pause doesn't
+    // take the settled job for one of them.
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/.adopted").exists());
     // Paused: the watchdog doesn't hear of it, but it isn't forgotten.
     say(&["pause", "sam/web"]);
     crate::policy::reconcile(&cfg).unwrap();
@@ -512,6 +517,49 @@ fn a_watch_a_pause_keeps_from_the_watchdog_comes_back_when_its_repo_does() {
     say(&["allow", "sam/web"]);
     crate::policy::reconcile(&cfg).unwrap();
     assert!(!watched("failed") && !jobs.join(".waits-held/failed").exists());
+}
+
+#[test]
+fn a_job_denied_before_there_were_holds_is_watched_when_its_repo_is_allowed() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = watch_config(&tmp, &jobs);
+    let settings = cfg.settings.clone().unwrap();
+    let say = |w: &[&str]| {
+        settings
+            .command(&w.iter().map(|w| w.to_string()).collect::<Vec<_>>(), "test")
+            .unwrap()
+    };
+    say(&["allow", "sam/web"]);
+    say(&["pause", "sam/web"]);
+    // Failed turns: one in a paused repo, whose watch a proj before
+    // `.waits-held` dropped with nothing to keep it, and one settled in a
+    // repo that's allowed.
+    for (id, repo) in [("denied", "sam/web"), ("settled", "sam/api")] {
+        let job = Job::new(&cfg, id);
+        fs::create_dir_all(&job.dir).unwrap();
+        job.set_turns(1).unwrap();
+        fs::write(job.path("prompt.1"), "work").unwrap();
+        crate::policy::bind(
+            &job,
+            crate::policy::Identity::Repository(repo.into()),
+            crate::policy::Kind::Automated,
+        )
+        .unwrap();
+    }
+    say(&["allow", "sam/api"]);
+    let watched = |id: &str| jobs.join(".waits").join(id).exists();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!watched("denied"));
+    assert!(
+        jobs.join(".waits-held/denied").exists(),
+        "a job denied before holds existed wasn't held"
+    );
+    assert!(!watched("settled") && !jobs.join(".waits-held/settled").exists());
+    say(&["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(watched("denied"), "allowed again, it wasn't watched");
+    assert!(!watched("settled"));
 }
 
 fn watch_config(tmp: &TempDir, jobs: &std::path::Path) -> Config {
@@ -619,6 +667,14 @@ fn enabling_the_watchdog_registers_live_work_not_settled_jobs() {
     fs::create_dir_all(&settled.dir).unwrap();
     settled.set_turns(1).unwrap();
     fs::write(settled.path("prompt.1"), "work").unwrap();
+    // Allowed: one the policy denies is held once the watchdog is there
+    // (a_job_denied_before_there_were_holds_is_watched_when_its_repo_is_allowed).
+    crate::policy::bind(
+        &settled,
+        crate::policy::Identity::Local,
+        crate::policy::Kind::Manual,
+    )
+    .unwrap();
     // Nothing was ever published for any (no watchdog then).
     assert!(!jobs.join(".waits").exists());
     crate::waits::rewatch_all(&cfg);

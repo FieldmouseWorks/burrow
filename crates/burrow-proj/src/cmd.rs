@@ -251,8 +251,11 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some("_rewatch") => {
             let ids: Vec<&str> = args[1..].iter().map(String::as_str).collect();
-            rewatch(cfg, &ids);
-            Ok(())
+            if rewatch(cfg, &ids) {
+                Ok(())
+            } else {
+                Err(Fail::new(1, "couldn't update the stall watchdog's waits"))
+            }
         }
         Some("_exec") => {
             slot::handed_over(cfg);
