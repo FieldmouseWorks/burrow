@@ -469,13 +469,21 @@ fn transfer_checkpoint_survives_failed_launch_and_preserves_paused_deadline() {
     let launcher = fs::read(&r.cfg.tools.systemd_run).unwrap();
     burrow_test::executable(&r.cfg.tools.systemd_run, "#!/bin/sh\nexit 1\n");
     native_waits(&r);
+    let before = now_nanos();
     assert!(pass(&r.cfg).is_err());
     let job = Job::new(&r.cfg, "retry");
+    // The failed launch published its attempt before starting the unit.
+    let attempt = job.turn("1", "retry-attempt");
+    let at: i64 = read(&attempt).unwrap().parse().unwrap();
+    assert!((before..=now_nanos()).contains(&at));
     let state = Checkpoint::load(&job, "1").unwrap().unwrap();
     let original_deadline = state.deadline.unwrap();
     // Restarting the consumer resumes the committed transfer; it never
     // creates another turn or replaces the conversation or original stream.
     burrow_test::executable(&r.cfg.tools.systemd_run, launcher);
+    // A fresh attempt defers the relaunch. Stamp it now: on a loaded machine
+    // the failed pass's own stamp can already be 2s old by this point.
+    swap(&attempt, &now_nanos().to_string()).unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     sleep(Duration::from_secs(2));
     native_waits(&r);
