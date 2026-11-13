@@ -907,3 +907,67 @@ fn adoption_waits_for_an_unreadable_job_to_be_readable() {
     assert!(jobs.join(".waits-held/legacy").exists());
     assert!(jobs.join(".waits-held/.adopted").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn adoption_refuses_a_link_where_a_job_state_file_should_be() {
+    let tmp = TempDir::new().unwrap();
+    let (cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    denied_failure(&cfg, "legacy");
+    say(&cfg, &["pause", "sam/web"]);
+    let job = Job::new(&cfg, "legacy");
+    // /dev/zero would never end; the confined reader refuses the link.
+    std::os::unix::fs::symlink("/dev/zero", job.turn("1", "outcome")).unwrap();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!jobs.join(".waits-held/.adopted").exists());
+    // A named pipe in place of turns is refused without blocking.
+    fs::remove_file(job.turn("1", "outcome")).unwrap();
+    fs::remove_file(job.path("turns")).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(job.path("turns"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(!jobs.join(".waits-held/.adopted").exists());
+}
+
+#[test]
+fn jobs_an_adoption_found_stay_its_when_the_policy_moves_before_it_ends() {
+    let tmp = TempDir::new().unwrap();
+    let (cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    denied_failure(&cfg, "legacy");
+    // Found while denied, recorded, and the repo allowed before it ended.
+    fs::create_dir_all(jobs.join(".waits-held")).unwrap();
+    fs::write(jobs.join(".waits-held/.adopting"), "legacy\n").unwrap();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/legacy").exists());
+    assert!(jobs.join(".waits-held/.adopted").exists());
+    assert!(!jobs.join(".waits-held/.adopting").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_proj_with_a_successor_leaves_adoption_to_it_without_waiting_on_its_lock() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, jobs) = adoption_cfg(&tmp);
+    let deployed = tmp.path().join("deployed");
+    burrow_test::executable(
+        &deployed,
+        "#!/bin/sh\ncase $1 in\n_handover_format) echo 1 ;;\n_rewatch) exit 0 ;;\n*) exit 2 ;;\nesac\n",
+    );
+    cfg.deployed = deployed;
+    // Another pass holds the adoption lock; this one must not wait for it.
+    let lock = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(jobs.join(".adopt.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    crate::waits::rewatch_all(&cfg);
+    assert!(!jobs.join(".waits-held/.adopted").exists());
+}

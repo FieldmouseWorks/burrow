@@ -92,16 +92,27 @@ fn admission(job: &Job) -> Result<Admission, String> {
     }
 }
 pub fn denied(job: &Job) -> bool {
+    denied_by(job, |repo| {
+        job.cfg
+            .settings
+            .as_ref()
+            .map_or(Err(String::new()), |s| s.decision(repo))
+    })
+}
+
+/// [`denied`] by the decision `decide` gives for a repository, so a scan can
+/// ask the settings once per repository and judge every job by the same one.
+pub fn denied_by(
+    job: &Job,
+    mut decide: impl FnMut(&str) -> Result<burrow_settings::Decision, String>,
+) -> bool {
     let Ok(a) = admission(job) else {
         return true;
     };
     let Identity::Repository(repo) = a.identity else {
         return false;
     };
-    let Some(settings) = &job.cfg.settings else {
-        return true;
-    };
-    let Ok(d) = settings.decision(&repo) else {
+    let Ok(d) = decide(&repo) else {
         return true;
     };
     d.vacate || matches!(a.kind, Kind::Automated) && !d.allowed

@@ -20,7 +20,7 @@ pub struct Config {
 }
 
 /// A scheduling decision and its next change without another external event.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Decision {
     pub allowed: bool,
