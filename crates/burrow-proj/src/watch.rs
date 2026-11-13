@@ -303,7 +303,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 }
             }
         } else {
-            swap(&f, &lines).map_err(|e| io_fail(&f, e))?;
+            crate::state_reads::write(&f, &lines).map_err(|e| io_fail(&f, e))?;
         }
         drop(held);
     }
@@ -481,7 +481,12 @@ mod codex_tests {
         let due = now() + 10000;
         let await_text = format!("usage-limit\t{}\t{due}\n", now());
         fs::write(job.path("await"), &await_text).unwrap();
+        // A link the job planted at the staging name must not take the write.
+        let denied = d.path().join("denied");
+        fs::write(&denied, "host only\n").unwrap();
+        std::os::unix::fs::symlink(&denied, job.path("await.new")).unwrap();
         look(&cfg, "").unwrap();
+        assert_eq!(fs::read_to_string(&denied).unwrap(), "host only\n");
         assert_eq!(job.turns().as_deref(), Some("1"));
         assert_eq!(fs::read_to_string(job.path("await")).unwrap(), await_text);
         let wake: Value = serde_json::from_slice(&fs::read(&cfg.wake).unwrap()).unwrap();

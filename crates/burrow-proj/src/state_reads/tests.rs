@@ -321,6 +321,21 @@ fn a_one_way_timeout_never_writes_through_links_the_job_planted() {
     }
 }
 
+/// Whether `text` starts with a path built in a job's directory.
+fn is_job_dir_path(text: &str) -> bool {
+    let text = text.strip_prefix('&').unwrap_or(text);
+    ["job.", "self.", "run.job."].iter().any(|owner| {
+        ["path(", "turn("]
+            .iter()
+            .any(|f| text.starts_with(&format!("{owner}{f}")))
+    })
+}
+
+/// The records `Job::turn` keeps in the host's control root, not the job's.
+fn is_host_record(call: &str) -> bool {
+    call.contains("\"retry-") && !call.contains("\"retry-wake\"") || call.contains("\"execution\"")
+}
+
 /// Every host write into a job's directory goes through `state_reads`: the
 /// plain writers follow a link the job planted at the name, or at `NAME.new`.
 /// A record `Job::turn` keeps in the host's control root is not the job's.
@@ -345,17 +360,32 @@ fn host_writes_into_job_directories_go_through_the_confined_writer() {
             let text = fs::read_to_string(&path).unwrap();
             let code = text.split("#[cfg(test)]").next().unwrap();
             let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+            // Locals bound to a job-directory path: `let f = job.path("await")`.
+            let mut aliases = Vec::new();
+            for (at, _) in flat.match_indices("let") {
+                let rest = &flat[at + 3..];
+                let rest = rest.strip_prefix("mut").unwrap_or(rest);
+                let Some((name, value)) = rest.split_once('=') else { continue };
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                let value = &value[..value.len().min(80)];
+                if is_job_dir_path(value) && !is_host_record(value) {
+                    aliases.push(name.to_owned());
+                }
+            }
             for writer in ["fs::write(", "swap(", "File::create(", ".open("] {
                 for (at, _) in flat.match_indices(writer) {
                     let args = &flat[at + writer.len()..];
                     let args = args.strip_prefix('&').unwrap_or(args);
-                    let into_job = ["job.", "self.", "run.job."].iter().any(|owner| {
-                        ["path(", "turn("]
-                            .iter()
-                            .any(|f| args.starts_with(&format!("{owner}{f}")))
-                    });
                     let call = &args[..args.len().min(80)];
-                    let host = call.contains("\"retry-") || call.contains("\"execution\"");
+                    let host = is_host_record(call);
+                    let aliased = aliases.iter().any(|a| {
+                        args.strip_prefix(a.as_str()).is_some_and(|r| {
+                            r.starts_with([',', ')', '.'])
+                        })
+                    });
+                    let into_job = is_job_dir_path(args) || aliased;
                     if into_job && !host {
                         found.push(format!(
                             "{}: {writer}{call}",
