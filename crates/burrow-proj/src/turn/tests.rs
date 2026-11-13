@@ -139,16 +139,31 @@ fn a_handoff_that_cant_move_every_record_moves_none() {
     fs::write(&pending, first).unwrap();
     let second = r#"{"default":"go","one_way":false,"turn":"1"}"#;
     fs::write(job.path("ask.next"), second).unwrap();
-    // The second record can't be replaced.
-    fs::create_dir(job.path("ask.next.new")).unwrap();
+    // A planted link at the old staging name is never followed.
+    let secret = tmp.path().join("secret");
+    fs::write(&secret, "host data").unwrap();
+    std::os::unix::fs::symlink(&secret, job.path("ask.next.new")).unwrap();
+    super::handoff::retarget(&job, "1", "2").unwrap();
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "host data");
+    super::handoff::retarget(&job, "2", "1").unwrap();
+    fs::remove_file(job.path("ask.next.new")).unwrap();
+    // A record or archive that is a link is refused, not copied or followed.
+    fs::remove_file(job.path("ask.next")).unwrap();
+    std::os::unix::fs::symlink(&secret, job.path("ask.next")).unwrap();
     assert!(super::handoff::retarget(&job, "1", "2").is_err());
-    assert_eq!(fs::read_to_string(&pending).unwrap(), first);
-    assert_eq!(fs::read_to_string(job.path("ask.next")).unwrap(), second);
+    fs::remove_file(job.path("ask.next")).unwrap();
+    std::os::unix::fs::symlink(&secret, job.turn("1", "github-awaits")).unwrap();
+    assert!(super::handoff::take_over(&job, "1", "2").is_err());
+    assert!(!job.turn("2", "github-awaits").exists());
+    assert!(!job.turn("2", super::CARRY).exists());
+    fs::remove_file(job.turn("1", "github-awaits")).unwrap();
+    fs::write(job.path("ask.next"), second).unwrap();
     // One that can't be read is the same.
-    fs::remove_dir(job.path("ask.next.new")).unwrap();
     fs::write(job.path("ask.next"), "not json").unwrap();
     assert!(super::handoff::retarget(&job, "1", "2").is_err());
-    assert_eq!(fs::read_to_string(&pending).unwrap(), first);
+    let kept: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pending).unwrap()).unwrap();
+    assert_eq!(kept["turn"], "1");
 }
 
 // The old turn's captured awaits go with the records, so the successor's own
@@ -186,19 +201,33 @@ fn a_numbered_successor_is_accepted_only_once_launched_or_queued() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (mut cfg, id) = handoff_job(&tmp);
     cfg.tools.systemctl = tmp.path().join("systemctl");
-    burrow_test::executable(&cfg.tools.systemctl, "#!/bin/sh\necho not-found\n");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *LoadState*) echo not-found ;; esac\n",
+    );
     let job = crate::job::Job::new(&cfg, &id);
     job.set_turns(2).unwrap();
-    assert!(!super::handoff::accepted(&cfg, &job, "2"));
+    use super::handoff::{Fate, fate};
+    assert_eq!(fate(&cfg, &job, "2"), Fate::Unaccepted);
+    // Recovery's synthetic outcome for an unlaunched successor proves nothing.
+    fs::write(job.turn("2", "outcome"), "failed\n").unwrap();
+    assert_eq!(fate(&cfg, &job, "2"), Fate::Unaccepted);
+    // A unit that can't be asked about is unknown, never absent.
+    burrow_test::executable(&cfg.tools.systemctl, "#!/bin/sh\nexit 1\n");
+    assert_eq!(fate(&cfg, &job, "2"), Fate::Unknown);
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in *LoadState*) echo not-found ;; esac\n",
+    );
     fs::write(job.turn("2", "slot"), "").unwrap();
-    assert!(super::handoff::accepted(&cfg, &job, "2"));
+    assert_eq!(fate(&cfg, &job, "2"), Fate::Accepted);
     fs::remove_file(job.turn("2", "slot")).unwrap();
     fs::write(
         crate::policy::path(&job, "park"),
         r#"{"state":"queued","turn":"2","first":false,"at":0}"#,
     )
     .unwrap();
-    assert!(super::handoff::accepted(&cfg, &job, "2"));
+    assert_eq!(fate(&cfg, &job, "2"), Fate::Accepted);
     // Giving the unaccepted one up puts the job back at the old turn.
     fs::remove_file(crate::policy::path(&job, "park")).unwrap();
     fs::write(job.path("prompt.2"), "p").unwrap();

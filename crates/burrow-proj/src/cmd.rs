@@ -481,7 +481,17 @@ fn end(cfg: &Config, job: &Job, withdraw: bool, how: Handoff) -> Result<(), Fail
     // A stop is the job's end, a handoff it was in the middle of included: that
     // one is finished stopping, whatever its turn is doing, and its marker
     // stays until everything below has been done.
-    let unwinding = how == Handoff::No && job.path(scratch::HANDOFF).exists();
+    // Only while no successor of it was accepted: an accepted one owns a slot
+    // or a place in line, and a withdrawal must leave a running turn be.
+    let unwinding = how == Handoff::No
+        && read(&job.path(scratch::HANDOFF)).is_some_and(|from| {
+            let from = from.trim();
+            job.turns().as_deref() == Some(from)
+                || n.as_deref().is_some_and(|n| {
+                    crate::turn::handoff::fate(cfg, job, n)
+                        == crate::turn::handoff::Fate::Unaccepted
+                })
+        });
     if unwinding
         && let Some(from) = read(&job.path(scratch::HANDOFF))
         && job.turns().as_deref() != Some(from.trim())

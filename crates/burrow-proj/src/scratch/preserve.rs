@@ -25,7 +25,7 @@
 //! is printed. A submodule whose commit the superproject's change moved is
 //! kept with its objects even when its own files are clean.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Component, Path, PathBuf};
@@ -116,8 +116,13 @@ impl Grants {
                 .canonicalize()
                 .map_err(|e| format!("{}: {e}", scratch.display()))?,
         ];
-        if let Some(p) = crate::read(&job.path("project"))
-            && let Ok(p) = Path::new(p.trim()).canonicalize()
+        // The project granted at launch, from the host's own record: the job
+        // writes its own state, so what it says of its project grants nothing.
+        // It must also be one of the machine's projects.
+        if let Ok(bytes) = crate::state_reads::bytes(&crate::ask::host_path(job, "project"))
+            && let Ok(p) = Path::new(String::from_utf8_lossy(&bytes).trim()).canonicalize()
+            && let Ok(all) = job.cfg.projects.canonicalize()
+            && p.starts_with(&all)
         {
             roots.push(p);
         }
@@ -289,6 +294,56 @@ fn global_ignore(cfg: &Config) -> Option<PathBuf> {
     .filter(|p| p.is_file())
 }
 
+/// Whether a repository config's `extensions.objectformat` is sha256: the
+/// setting itself, not any mention of the word (a remote's URL, say).
+pub(super) fn object_format_is_sha256(config: &str) -> bool {
+    let mut section = String::new();
+    let mut sha256 = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix('[') {
+            section = rest
+                .split(']')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+        } else if section == "extensions"
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("objectformat")
+        {
+            sha256 = value
+                .split(['#', ';'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"')
+                .eq_ignore_ascii_case("sha256");
+        }
+    }
+    sha256
+}
+
+/// A config value, quoted so that `#`, `;`, quotes and backslashes in it are
+/// its own characters.
+pub(super) fn quote_config(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The git dir this process runs git on in place of the job's. The job's own
 /// `info/exclude` goes with it as data, the one place git reads ignore rules
 /// that isn't in the working tree.
@@ -306,9 +361,7 @@ fn sanitized(
     for d in ["refs/heads", "objects/info", "info"] {
         fs::create_dir_all(at.join(d)).map_err(|e| format!("{}/{d}: {e}", at.display()))?;
     }
-    let sha256 = g
-        .read(&common.join("config"))?
-        .is_some_and(|c| c.to_ascii_lowercase().contains("sha256"));
+    let sha256 = object_format_is_sha256(&g.read(&common.join("config"))?.unwrap_or_default());
     let mut config = String::from(if sha256 {
         "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n"
     } else {
@@ -317,7 +370,7 @@ fn sanitized(
     if let Some(global) = global_ignore(cfg) {
         config.push_str(&format!(
             "[core]\n\texcludesFile = {}\n",
-            global.to_string_lossy()
+            quote_config(&global.to_string_lossy())
         ));
     }
     w("config", config.as_bytes())?;
@@ -347,17 +400,24 @@ fn sanitized(
     Ok(())
 }
 
-/// The paths a diff's raw output (`-z`) shows a submodule's commit changed at.
-fn gitlinks(raw: &[u8]) -> Vec<String> {
+/// The submodules a diff's raw output (`-z`) shows a commit changed at: each
+/// path with the commits on both sides, none of which may be lost.
+fn gitlinks(raw: &[u8]) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     let mut parts = raw.split(|b| *b == 0).filter(|p| !p.is_empty());
     while let Some(head) = parts.next() {
         let head = String::from_utf8_lossy(head);
         let mut fields = head.trim_start_matches(':').split(' ');
         let (old, new) = (fields.next(), fields.next());
+        let shas: Vec<String> = [fields.next(), fields.next()]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty() && s.bytes().any(|b| b != b'0'))
+            .map(str::to_owned)
+            .collect();
         let Some(path) = parts.next() else { break };
         if old == Some("160000") || new == Some("160000") {
-            out.push(String::from_utf8_lossy(path).into_owned());
+            out.push((String::from_utf8_lossy(path).into_owned(), shas));
         }
     }
     out
@@ -376,7 +436,13 @@ pub(super) fn unfinished(cfg: &Config, id: &str) -> Result<(), String> {
     let grants = Grants::new(&job, &root)?;
     // Submodules whose commit a tree's change moved: kept, clean or not, since
     // that commit may exist nowhere but in them.
-    let mut linked: HashSet<PathBuf> = HashSet::new();
+    // A submodule's worktree is kept with every commit the superproject's saved
+    // states name there (its base, index and files), not only its checkout.
+    let mut linked: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut found = found;
+    // A superproject before the submodules inside it, whatever order the
+    // directories were read in.
+    found.sort();
     for tree in found {
         let rel = tree.strip_prefix(&root).unwrap_or(&tree);
         let name = rel.to_string_lossy().replace('/', "-");
@@ -392,11 +458,14 @@ pub(super) fn unfinished(cfg: &Config, id: &str) -> Result<(), String> {
         let part = base.join(format!(".{name}.{n}.partial"));
         let _ = fs::remove_dir_all(&part);
         fs::create_dir_all(&part).map_err(|e| format!("{}: {e}", part.display()))?;
-        let force = linked.contains(&tree);
-        let (kept, links) = keep(cfg, &grants, &tree, &part, force).inspect_err(|_| {
-            let _ = fs::remove_dir_all(&part);
-        })?;
-        linked.extend(links.into_iter().map(|l| tree.join(l)));
+        let named = linked.get(&tree);
+        let (kept, links) = keep(cfg, &grants, &tree, &part, named.map(Vec::as_slice))
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&part);
+            })?;
+        for (link, shas) in links {
+            linked.entry(tree.join(link)).or_default().extend(shas);
+        }
         if !kept {
             let _ = fs::remove_dir_all(&part);
             continue;
@@ -412,15 +481,21 @@ pub(super) fn unfinished(cfg: &Config, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Submodule paths with the commits a change names there.
+type Links = Vec<(String, Vec<String>)>;
+
 /// The tree's unfinished work into `to`: whether there was any, and the
-/// submodules its change moved. `force` keeps it though it has none.
+/// submodules its change moved. `named` is Some for a submodule the
+/// superproject's change moved: kept though it has no changes, with the
+/// commits the superproject names there.
 fn keep(
     cfg: &Config,
     g: &Grants,
     tree: &Path,
     to: &Path,
-    force: bool,
-) -> Result<(bool, Vec<String>), String> {
+    named: Option<&[String]>,
+) -> Result<(bool, Links), String> {
+    let force = named.is_some();
     let (gitdir, common) = g.locate(tree)?;
     let (branch, sha) = g.head(&gitdir, &common)?;
     let own = to.join(".gitdir");
@@ -479,12 +554,19 @@ fn keep(
             .iter()
             .any(|d| d.starts_with(scratch))
         {
-            git.git(&[
-                "bundle",
-                "create",
-                &to.join("base.bundle").to_string_lossy(),
-                "HEAD",
-            ])?;
+            // Each commit the superproject names is a ref of this process's own
+            // git dir, so the bundle carries it though it isn't in HEAD's history.
+            let mut revs = vec![String::from("HEAD")];
+            for (i, sha) in named.unwrap_or_default().iter().enumerate() {
+                git.git(&["cat-file", "-e", &format!("{sha}^{{commit}}")])?;
+                let name = format!("refs/preserved/{i}");
+                git.git(&["update-ref", &name, sha])?;
+                revs.push(name);
+            }
+            let out = to.join("base.bundle").to_string_lossy().into_owned();
+            let mut args = vec!["bundle", "create", out.as_str()];
+            args.extend(revs.iter().map(String::as_str));
+            git.git(&args)?;
         }
     }
     let untracked = to.join("untracked");

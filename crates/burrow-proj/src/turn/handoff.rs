@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::job::Job;
-use crate::{read, systemd};
+use crate::systemd;
 
 /// A turn that took over a handed-off one's waits: whose turn it took over.
 pub(crate) const CARRY: &str = "carry";
@@ -23,6 +23,25 @@ pub(crate) fn start_handoff(cfg: &Config, id: &str, msg: &str) -> Result<(), Str
     super::start_with(cfg, id, msg, false, crate::question::Answer::Handoff, None)
 }
 
+/// The most a record that names a turn may hold, and a captured-awaits archive.
+const RECORD_LIMIT: u64 = 1 << 20;
+const ARCHIVE_LIMIT: u64 = 16 << 20;
+
+/// A job-state file read through the confined state APIs, which refuse a link
+/// or a special file anywhere on its path, and no more than `limit` bytes of
+/// it. None when it isn't there; too large, redirected or unreadable is an
+/// error, never skipped.
+fn read_bounded(path: &std::path::Path, limit: u64) -> Result<Option<Vec<u8>>, String> {
+    match crate::state_reads::prefix(path, limit + 1) {
+        Ok(bytes) if bytes.len() as u64 > limit => {
+            Err(format!("{}: larger than {limit} bytes", path.display()))
+        }
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 /// The records that name a turn, as files: where each is, and what it holds.
 fn records(job: &Job) -> [PathBuf; 2] {
     [job.path(crate::github_quota::PENDING), job.path("ask.next")]
@@ -34,10 +53,12 @@ fn records(job: &Job) -> [PathBuf; 2] {
 pub(super) fn retarget(job: &Job, from: &str, to: &str) -> Result<(), String> {
     let mut changes = Vec::new();
     for path in records(job) {
-        let text = match fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+        let text = match read_bounded(&path, RECORD_LIMIT) {
+            Ok(Some(bytes)) => {
+                String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(e),
         };
         let mut value: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -48,10 +69,10 @@ pub(super) fn retarget(job: &Job, from: &str, to: &str) -> Result<(), String> {
         changes.push((path, text, value.to_string()));
     }
     for (i, (path, _, new)) in changes.iter().enumerate() {
-        if let Err(e) = crate::swap(path, new) {
+        if let Err(e) = crate::state_reads::write(path, new) {
             let mut said = format!("{}: {e}", path.display());
             for (path, old, _) in &changes[..i] {
-                if let Err(e) = crate::swap(path, old) {
+                if let Err(e) = crate::state_reads::write(path, old) {
                     said.push_str(&format!("; and couldn't restore {}: {e}", path.display()));
                 }
             }
@@ -91,11 +112,9 @@ pub(super) fn take_over(job: &Job, from: &str, to: &str) -> Result<(), String> {
     crate::state_reads::write(&marker, format!("{from}\n"))
         .map_err(|e| format!("{}: {e}", marker.display()))?;
     let result = (|| {
-        match fs::read(archive(job, from)) {
-            Ok(bytes) => crate::state_reads::write(archive(job, to), bytes)
-                .map_err(|e| format!("{}: {e}", archive(job, to).display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{}: {e}", archive(job, from).display())),
+        if let Some(bytes) = read_bounded(&archive(job, from), ARCHIVE_LIMIT)? {
+            crate::state_reads::write(archive(job, to), bytes)
+                .map_err(|e| format!("{}: {e}", archive(job, to).display()))?;
         }
         retarget(job, from, to)
     })();
@@ -118,18 +137,45 @@ pub(super) fn give_back(job: &Job, from: &str, to: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether turn `n`, a handoff's replacement, was accepted: launched, queued
-/// for a slot, or past that. Having a number says nothing; it is written before
-/// the turn's records are.
-pub(crate) fn accepted(cfg: &Config, job: &Job, n: &str) -> bool {
+/// What is known of turn `n`, a handoff's replacement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Fate {
+    /// Launched, queued for a slot, or past that.
+    Accepted,
+    /// Known never to have been accepted: its preparation was abandoned, or
+    /// its unit is confirmed absent with nothing queued.
+    Unaccepted,
+    /// The host can't tell (a failed query, a unit changing state): the
+    /// successor stays owned by the handoff, neither adopted nor dropped.
+    Unknown,
+}
+
+/// Whether turn `n` was accepted, from what the host wrote or systemd says.
+/// Having a number says nothing, and neither does an outcome: recovery writes
+/// `failed` for a successor that was never accepted.
+pub(crate) fn fate(cfg: &Config, job: &Job, n: &str) -> Fate {
     let parked = fs::read(crate::policy::path(job, "park"))
         .ok()
         .and_then(|b| serde_json::from_slice::<crate::policy::Park>(&b).ok())
         .is_some_and(|p| p.turn == n);
-    parked
-        || job.turn(n, "slot").exists()
-        || read(&job.turn(n, "outcome")).is_some_and(|o| !o.trim().is_empty())
-        || systemd::show(cfg, &job.unit(), "LoadState") == "loaded"
+    if parked || job.turn(n, "slot").exists() {
+        return Fate::Accepted;
+    }
+    match crate::question::receipt_state(job, n) {
+        Ok(Some((true, _))) => return Fate::Accepted,
+        Ok(Some((false, true))) => return Fate::Unaccepted,
+        Ok(_) => {}
+        Err(_) => return Fate::Unknown,
+    }
+    let pending = systemd::pending(cfg, &job.unit());
+    match (
+        pending,
+        systemd::show(cfg, &job.unit(), "LoadState").as_str(),
+    ) {
+        (Some(true), _) | (_, "loaded") => Fate::Accepted,
+        (Some(false), "not-found") => Fate::Unaccepted,
+        _ => Fate::Unknown,
+    }
 }
 
 /// A replacement that was numbered but never accepted, given up: its prompt and

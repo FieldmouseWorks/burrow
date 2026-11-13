@@ -89,19 +89,14 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
     Ok(Some(pending.recommendation))
 }
 
-/// Whether a one-way recommendation is recorded for the open question and not
-/// yet committed to it, whichever turn left it (a handoff's successor may never
-/// run to commit it). Such a question is one-way already: its default never
+/// Whether a one-way recommendation is active for the open question and not
+/// yet committed to it: one [`pending`] still counts, so a superseded one
+/// (a later `done` or `await` marker) or another turn's doesn't. A handoff
+/// moves the recommendation to its successor's turn with the question, so a
+/// carried one counts. Such a question is one-way already: its default never
 /// runs on its own.
 fn one_way_pending(job: &Job) -> Result<bool, String> {
-    let Some(text) =
-        crate::github_quota::state(&job.path("ask.next")).map_err(|e| format!("{:?}", e.say))?
-    else {
-        return Ok(false);
-    };
-    serde_json::from_str::<PendingRecommendation>(&text)
-        .map(|p| p.recommendation.one_way)
-        .map_err(|e| e.to_string())
+    Ok(pending(job)?.is_some_and(|r| r.one_way))
 }
 
 /// The end marker commits the active declaration; only asks keep a pending
@@ -468,6 +463,33 @@ mod tests {
         assert!(!job.path("prompt.2").exists(), "no engine ran the default");
         assert_eq!(read(&job.turn("2", "end")).as_deref(), Some("done"));
         assert!(host_path(&job, "question-needs-owner").exists());
+    }
+    // A one-way recommendation that was superseded (a later marker committed
+    // before its removal failed) or belongs to another turn doesn't make the
+    // question one-way.
+    #[test]
+    fn a_superseded_or_foreign_one_way_recommendation_does_not_hold_the_question() {
+        for (end, turn) in [(Some("done"), "1"), (None, "7")] {
+            let (_dir, cfg) = fixture();
+            let job = asking(&cfg, false);
+            if let Some(end) = end {
+                fs::write(job.path("end.next"), format!("{end}\n")).unwrap();
+            }
+            fs::write(
+                job.path("ask.next"),
+                format!(r#"{{"default":"delete it","one_way":true,"turn":"{turn}"}}"#),
+            )
+            .unwrap();
+            assert!(!one_way_pending(&job).unwrap());
+        }
+        let (_dir, cfg) = fixture();
+        let job = asking(&cfg, false);
+        fs::write(
+            job.path("ask.next"),
+            r#"{"default":"delete it","one_way":true,"turn":"1"}"#,
+        )
+        .unwrap();
+        assert!(one_way_pending(&job).unwrap());
     }
     // What a job still holds open (Job::holds), through each end its
     // question can come to: the steward and claims take one that holds

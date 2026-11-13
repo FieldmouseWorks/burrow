@@ -28,6 +28,7 @@ impl Box {
         cfg.tools.git = "git".into();
         cfg.jobs = root.path().join("jobs");
         cfg.scratch = root.path().join("scratch");
+        cfg.projects = root.path().to_path_buf();
         fs::create_dir_all(cfg.scratch.join("jobs")).unwrap();
         Box { root, cfg }
     }
@@ -188,11 +189,17 @@ fn clearing_takes_its_worktrees_off_their_repos() {
 
 /// The job's project is the folder the test's repos are in.
 fn grant(b: &Box, id: &str) {
+    grant_to(b, id, b.root.path());
+}
+
+/// The project the host granted job `id` at launch, in its own record.
+fn grant_to(b: &Box, id: &str, project: &Path) {
     let job = Job::new(&b.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
-    fs::write(
-        job.path("project"),
-        format!("{}\n", b.root.path().display()),
+    crate::ask::ensure(&job).unwrap();
+    crate::state_reads::write(
+        crate::ask::host_path(&job, "project"),
+        format!("{}\n", project.display()),
     )
     .unwrap();
 }
@@ -263,6 +270,7 @@ fn unfinished(b: &Box) -> PathBuf {
     fs::write(job.path("turns"), "1\n").unwrap();
     fs::write(job.turn("1", "stopped"), "").unwrap();
     fs::write(job.path("project"), format!("{}\n", repo.display())).unwrap();
+    grant_to(b, "u", &repo);
     wt
 }
 
@@ -551,11 +559,7 @@ fn keeping_work_follows_alternates_all_the_way() {
     assert!(keep_err(&b).contains("outside the job's granted paths"));
     // Granted, through the project: the chain ends in the scratch, so the
     // base is bundled.
-    fs::write(
-        Job::new(&b.cfg, "u").path("project"),
-        format!("{}\n", b.path("mid").display()),
-    )
-    .unwrap();
+    grant_to(&b, "u", &b.path("mid"));
     super::preserve::unfinished(&b.cfg, "u").unwrap();
     assert!(kept(&b, "clone.1").join("base.bundle").exists());
 }
@@ -590,6 +594,52 @@ fn keeping_work_keeps_a_clean_submodule_whose_commit_moved() {
     assert!(k.join("base.bundle").exists(), "{:?}", left(&b.cfg));
     let outer = fs::read_to_string(kept(&b, "clone.1").join("staged.patch")).unwrap();
     assert!(outer.contains("Subproject commit"), "{outer}");
+}
+
+// The commit the index names in a submodule is kept though the submodule is
+// checked out at another: its bundle carries both.
+#[test]
+fn keeping_work_keeps_a_staged_submodule_commit_that_is_not_checked_out() {
+    let b = Box::new();
+    let sub = b.repo("subsrc");
+    let at = clone_in_scratch(&b);
+    git(
+        &at,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "mod",
+        ],
+    );
+    git(&at, &["commit", "-q", "-m", "add sub"]);
+    let inner = at.join("mod");
+    fs::write(inner.join("x.txt"), "inside\n").unwrap();
+    git(&inner, &["add", "x.txt"]);
+    git(&inner, &["commit", "-q", "-m", "unpublished"]);
+    let out = |dir: &Path, args: &[&str]| {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    };
+    let staged = out(&inner, &["rev-parse", "HEAD"]);
+    git(&at, &["add", "mod"]);
+    git(&inner, &["checkout", "-q", "--detach", "HEAD~1"]);
+    clear(&b.cfg, "u");
+    let bundle = kept(&b, "clone-mod.1").join("base.bundle");
+    assert!(bundle.exists(), "{:?}", left(&b.cfg));
+    let heads = out(
+        bundle.parent().unwrap(),
+        &["bundle", "list-heads", "base.bundle"],
+    );
+    assert!(heads.contains(&staged), "{heads}");
 }
 
 // Ignore rules kept in the repository's own info/exclude still apply, so a
@@ -635,4 +685,43 @@ fn keeping_work_never_writes_through_a_link() {
     clear(&b.cfg, "u");
     assert!(wt.join("tracked.txt").exists(), "the scratch stays");
     assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+// The sanitized config keeps the real object format and the whole ignore path.
+#[test]
+fn sanitized_config_reads_the_setting_and_quotes_paths() {
+    use super::preserve::{object_format_is_sha256 as sha, quote_config};
+    assert!(!sha("[remote \"o\"]\n\turl = https://x/sha256-tool\n"));
+    assert!(sha(
+        "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tObjectFormat = SHA256\n"
+    ));
+    assert!(!sha("[extensions]\n\tobjectformat = sha1\n"));
+    assert_eq!(quote_config("/a #b/c;d"), "\"/a #b/c;d\"");
+    assert_eq!(quote_config("/a\\\"b"), "\"/a\\\\\\\"b\"");
+}
+
+// A project the job names in its own state grants nothing: only the host's
+// record of what it launched the job in does, and only a project of the
+// machine's.
+#[test]
+fn a_project_the_job_names_itself_grants_nothing() {
+    let b = Box::new();
+    let wt = unfinished(&b);
+    let other = b.repo("other");
+    let dotgit = wt.join(".git");
+    fs::write(
+        &dotgit,
+        format!("gitdir: {}\n", other.join(".git").display()),
+    )
+    .unwrap();
+    let job = Job::new(&b.cfg, "u");
+    // The job widens its own record to everything.
+    fs::write(job.path("project"), "/\n").unwrap();
+    assert!(keep_err(&b).contains("outside the job's granted paths"));
+    // A host record outside the machine's projects is no grant either.
+    let mut elsewhere = Box::new();
+    elsewhere.cfg.projects = elsewhere.path("only-here");
+    fs::create_dir_all(&elsewhere.cfg.projects).unwrap();
+    unfinished(&elsewhere);
+    assert!(keep_err(&elsewhere).contains("outside the job's granted paths"));
 }

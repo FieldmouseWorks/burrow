@@ -170,6 +170,16 @@ pub(crate) fn accept(job: &Job, n: &str) -> Result<(), String> {
     apply_receipt(&path, &job.dir)
 }
 
+/// What the host's receipt for turn `n` says: `(accepted, applied)`, or None
+/// when there is none. An unreadable receipt is an error, never "none".
+pub(crate) fn receipt_state(job: &Job, n: &str) -> Result<Option<(bool, bool)>, String> {
+    let Some(text) = read_state(&receipt_path(job, n))? else {
+        return Ok(None);
+    };
+    let r: Receipt = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(Some((r.accepted, r.applied)))
+}
+
 /// A published prompt whose unit has not recorded acceptance must not let
 /// an expired older question execute its default while _exec reconciles.
 pub(crate) fn acceptance_pending(job: &Job) -> Result<bool, String> {

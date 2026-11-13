@@ -292,3 +292,36 @@ fn a_failed_stop_keeps_the_handoff() {
     assert!(super::halt(&cfg, &job, false).is_err());
     assert!(job.path(crate::scratch::HANDOFF).exists());
 }
+
+// A withdrawal keeps its no-slot safeguard once a handoff's successor was
+// accepted, or can't be told: only a successor known never accepted unwinds.
+#[test]
+fn withdrawing_leaves_an_accepted_or_unknown_handoff_successor_be() {
+    for (stub, slot) in [("echo not-found", true), ("exit 1", false)] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = crate::config::tests::example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let mut cfg: Config = serde_json::from_value(v).unwrap();
+        cfg.tools.systemctl = tmp.path().join("systemctl");
+        burrow_test::executable(
+            &cfg.tools.systemctl,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *ActiveState*) echo active ;; *LoadState*) {stub} ;; esac\n"
+            ),
+        );
+        fs::create_dir(tmp.path().join("j")).unwrap();
+        let job = Job::new(&cfg, "j");
+        fs::write(job.path("turns"), "2\n").unwrap();
+        fs::write(job.turn("1", "stopped"), "").unwrap();
+        fs::write(job.path(crate::scratch::HANDOFF), "1\n").unwrap();
+        if slot {
+            fs::write(job.turn("2", "slot"), "").unwrap();
+        }
+        super::halt(&cfg, &job, true).unwrap_or(());
+        assert!(
+            job.path(crate::scratch::HANDOFF).exists(),
+            "the handoff and the running successor are left be"
+        );
+        assert!(!job.turn("2", "stopped").exists());
+    }
+}

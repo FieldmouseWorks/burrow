@@ -5,6 +5,7 @@ use std::fs;
 use super::{end, put};
 use crate::config::Config;
 use crate::job::Job;
+use crate::turn::handoff::Fate;
 use crate::{Fail, io_fail, read, scratch};
 
 /// `proj handoff ID`: the job's waiting turn is given up for a new one, which
@@ -35,13 +36,23 @@ pub fn handoff(cfg: &Config, id: &str) -> Result<(), Fail> {
         // The turn count moved on, which says only that a successor was
         // numbered. It is adopted once it was accepted; one that wasn't is
         // given up and started again.
-        if crate::turn::handoff::accepted(cfg, &job, &n) {
-            settle_handoff(&job)?;
-            put("handed off\n");
-            return Ok(());
+        match crate::turn::handoff::fate(cfg, &job, &n) {
+            Fate::Accepted => {
+                settle_handoff(&job)?;
+                put("handed off\n");
+                return Ok(());
+            }
+            Fate::Unaccepted => {
+                crate::turn::handoff::abandon(&job, from, &n).map_err(|e| Fail::new(1, e))?;
+                n = from.clone();
+            }
+            Fate::Unknown => {
+                return Err(Fail::new(
+                    1,
+                    format!("proj: can't tell whether {id}'s new turn {n} was accepted; try again"),
+                ));
+            }
         }
-        crate::turn::handoff::abandon(&job, from, &n).map_err(|e| Fail::new(1, e))?;
-        n = from.clone();
     }
     end(
         cfg,

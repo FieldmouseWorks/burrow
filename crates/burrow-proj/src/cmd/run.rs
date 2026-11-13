@@ -404,6 +404,12 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
     };
     write("project", &format!("{project}\n"))?;
+    // The grant preservation reads a project's repository under: a record the
+    // job itself can't write, unlike the file above.
+    crate::ask::ensure(&job).map_err(|e| Fail::new(1, e))?;
+    let granted = crate::ask::host_path(&job, "project");
+    crate::state_reads::write(&granted, format!("{project}\n"))
+        .map_err(|e| io_fail(&granted, e))?;
     if new.inbox_issue {
         write("inbox-issue", "true\n")?;
     }
