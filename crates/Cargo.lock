@@ -510,6 +510,12 @@ dependencies = [
 [[package]]
 name = "burrow-flake-check"
 version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "burrow-test",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "burrow-github"
