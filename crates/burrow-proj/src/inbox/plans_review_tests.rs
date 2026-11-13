@@ -11,7 +11,7 @@ fn every_plan_scan_uses_the_complete_repository_identity() {
         fs::rename(&local, local.with_file_name(foreign)).unwrap();
         let mut pass = b.pass();
         assert!(pass.child_admissible("sam/box", "8"), "{foreign}");
-        assert!(pass.child_can_close("sam/box", "8", None), "{foreign}");
+        assert!(pass.child_can_close("sam/box", "8", None).closes(), "{foreign}");
         pass.sequence("sam/box", &[parent]);
         assert!(b.log().is_empty(), "{}", b.log());
     }

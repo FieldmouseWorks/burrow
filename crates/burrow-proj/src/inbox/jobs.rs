@@ -254,6 +254,12 @@ impl Pass<'_> {
             // be stopped (proj stop says why) is tried again in five minutes;
             // the rest are still seen to.
             let Some(listed_now) = now_open else {
+                // A child closed before its finished job's close keeps the
+                // PR that job awaited: the record goes, the evidence stays.
+                if !self.keep_landing(repo, n, &job, &d, observed) {
+                    self.miss(repo);
+                    continue;
+                }
                 self.retire_record(repo, n, &id, &d)?;
                 continue;
             };
@@ -327,14 +333,23 @@ impl Pass<'_> {
             // since: the issue may be closed with it, so what's open is what's
             // still to do. The stuck issue isn't the job's to close: the
             // steward closes it once nothing is stuck.
-            let closable = !needs_owner
+            // A task list's child closes once its landed PR is tied to it,
+            // even in the repair lane: the list's sequencer would close it.
+            let completed = !needs_owner
                 && msg.is_empty()
                 && young.is_none()
                 && k >= turns
                 && st == "done"
-                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
-                && !self.lane(listed_now)
-                && self.child_can_close(repo, n, Some(&job));
+                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done");
+            let closing = if completed
+                && (!self.lane(listed_now)
+                    || n.parse().is_ok_and(|c| self.inbox.planning && self.is_child(repo, c)))
+            {
+                self.child_can_close(repo, n, Some(&job))
+            } else {
+                super::plans::Closing::No
+            };
+            let closable = closing.closes();
             // Stopped, with a conversation no turn continues again: no reply
             // is handed on, the issue hears why once, and no pass retries it.
             // One with no session is started over below, as ever.
@@ -390,6 +405,18 @@ impl Pass<'_> {
                         && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                     {
                         super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
+                        // The awaited PR becomes the child's landed PR only
+                        // now: this completion is accepted, and no turn
+                        // starts before the issue closes.
+                        if let super::plans::Closing::Record(pr) = &closing
+                            && !n
+                                .parse()
+                                .is_ok_and(|c| self.record_landing(repo, c, pr))
+                        {
+                            drop(held);
+                            self.retry(repo);
+                            continue;
+                        }
                         if !self.close(repo, n, "completed") {
                             drop(held);
                             self.miss(repo);

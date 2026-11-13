@@ -166,6 +166,21 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     ))
     .and_then(|r| r.json().ok())
     .and_then(|v| v["id"].as_u64());
+    // Under the pass lock, as passes and `forget` are: the child's place on
+    // its list and the record land together, with no pass writing beside it.
+    let lock = PathBuf::from(format!("{}.lock", inbox.wake.display()));
+    let held = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&lock)
+        .map_err(|e| io_fail(&lock, e))?;
+    if !lock_within(&held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? {
+        return Err(Fail::new(
+            1,
+            "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
+        ));
+    }
+    let permit = resumption::Permit::new(held);
     let p = Pass {
         cfg,
         inbox,
@@ -177,6 +192,7 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         scope: None,
     };
     let repo = p.plan_done(child, pr, caller)?;
+    drop(permit);
     crate::job::kick(cfg, [format!("proj-inbox/{repo}")]);
     println!(
         "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."

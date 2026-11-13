@@ -329,38 +329,43 @@ impl Pass<'_> {
         true
     }
     /// A child's issue closes with its job only once a merged PR is tied to
-    /// it: one that closes it, or one its job awaited ([`Pass::record_awaited`]).
-    pub(super) fn child_can_close(&mut self, repo: &str, n: &str, job: Option<&Job>) -> bool {
+    /// it: one that closes it, or one its job awaited
+    /// ([`Pass::awaited_landing`]), which the caller records only once it has
+    /// accepted the job's completion, under the lock it closes the issue under.
+    pub(super) fn child_can_close(&mut self, repo: &str, n: &str, job: Option<&Job>) -> Closing {
         if !self.inbox.planning {
-            return true;
+            return Closing::Yes;
         }
         for d in self.plan_dirs(repo) {
             let Ok(bytes) = fs::read(d.join("tasks.json")) else {
                 continue;
             };
             let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
-                return false;
+                return Closing::No;
             };
             if list
                 .children
                 .iter()
                 .any(|c| c.number.map(|v| v.to_string()).as_deref() == Some(n))
             {
-                let Ok(n) = n.parse() else { return false };
-                let landed = match self.landed_child(repo, n) {
-                    Some(None) => job.map_or(Some(None), |job| self.record_awaited(repo, n, job)),
-                    landed => landed,
+                let Ok(n) = n.parse() else {
+                    return Closing::No;
                 };
-                return match landed {
-                    Some(pr) => pr.is_some(),
-                    None => {
-                        self.miss(repo);
-                        false
-                    }
+                let closing = match self.landed_child(repo, n) {
+                    Some(Some(_)) => Some(Closing::Yes),
+                    Some(None) => job.map_or(Some(Closing::No), |job| {
+                        self.awaited_landing(job)
+                            .map(|pr| pr.map_or(Closing::No, Closing::Record))
+                    }),
+                    None => None,
                 };
+                return closing.unwrap_or_else(|| {
+                    self.miss(repo);
+                    Closing::No
+                });
             }
         }
-        true
+        Closing::Yes
     }
     fn plan_dir(&self, repo: &str, n: &str) -> PathBuf {
         self.inbox
@@ -728,12 +733,17 @@ impl Pass<'_> {
                 continue;
             }
             let Some(index) = list.next() else {
+                self.reconcile_notice(repo, n, None);
                 if !self.close(repo, n, "completed") {
                     self.miss(repo);
                 }
                 continue;
             };
             let child = list.children[index].number.unwrap();
+            // Moved on, or replanned, past the child a notice was about.
+            if self.notice_owed(repo, n).is_some_and(|on| on != child) {
+                self.reconcile_notice(repo, n, None);
+            }
             let Some(issue) = api(self.cfg, &format!("repos/{repo}/issues/{child}")) else {
                 self.miss(repo);
                 continue;
@@ -768,42 +778,28 @@ impl Pass<'_> {
                     self.miss(repo);
                     continue;
                 }
-                let waited = list.children[index].waits;
                 list.children[index].merged_pr = Some(pr);
                 list.children[index].waits = false;
                 if !self.save_list(repo, n, &list) {
                     self.retry(repo);
                     continue;
                 }
-                if waited {
-                    self.notify(&[
-                        "close",
-                        &Self::waits_key(repo, n),
-                        "The task list moved on.",
-                    ]);
-                }
                 advanced = true;
             } else if issue["state"] == "closed" {
-                // Closed by hand: a no-op, said once on the checklist and to
-                // the owner, never left to wait in silence.
+                // Closed by hand: a no-op, said once on the checklist, and to
+                // the owner until the list moves on, never left in silence.
                 if !list.children[index].waits {
                     list.children[index].waits = true;
                     if !self.save_list(repo, n, &list) {
                         self.retry(repo);
                         continue;
                     }
-                    if !self.render_list(repo, n, &mut list) {
-                        self.miss(repo);
-                    }
-                    self.notify(&[
-                        "open",
-                        &Self::waits_key(repo, n),
-                        &format!("{repo}#{n}'s task list waits on #{child}"),
-                        &format!(
-                            "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{n} waits and its next child doesn't start. If its work landed, record the PR with `proj plan done {repo}#{child} PR-URL`; otherwise reopen it."
-                        ),
-                    ]);
                 }
+                if !self.render_list(repo, n, &mut list) {
+                    self.miss(repo);
+                }
+                self.reconcile_notice(repo, n, Some(child));
+                continue;
             } else if !list.children[index].offered
                 && self.engine(&issue).is_none()
                 && !self.has_task_list(Some(repo), &child.to_string())
@@ -819,6 +815,7 @@ impl Pass<'_> {
                     }
                 }
             }
+            self.reconcile_notice(repo, n, None);
             if advanced {
                 if self.render_list(repo, n, &mut list) {
                     // Next pass admits the next child from the persisted list.
@@ -829,25 +826,11 @@ impl Pass<'_> {
             }
         }
     }
-    fn waits_key(repo: &str, parent: &str) -> String {
-        format!("proj-plan-{}-{parent}", key(repo))
-    }
-    /// Tell the owner (burrow.tools.notify), where there's a notifier.
-    fn notify(&self, args: &[&str]) {
-        if let Some(notify) = &self.cfg.notify
-            && !std::process::Command::new(notify)
-                .args(args)
-                .status()
-                .is_ok_and(|s| s.success())
-        {
-            eprintln!("proj-inbox: couldn't tell the owner: {}", args.join(" "));
-        }
-    }
 }
 
 #[path = "landed.rs"]
 mod landed;
-pub(super) use landed::PLAN_USAGE;
+pub(super) use landed::{Closing, PLAN_USAGE};
 
 #[cfg(test)]
 #[path = "plans_tests.rs"]
