@@ -1,10 +1,14 @@
 //! One handler's line: the passes due, and when.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
+
+use crate::told::{First, Told};
 
 /// A repo's first event waits this long for the ones that follow it.
 pub const DEBOUNCE: f64 = 5.0;
@@ -49,23 +53,29 @@ impl std::fmt::Display for Pass {
     }
 }
 
-/// What a pass looks at: everything it covers, or only the issues its events
-/// were about (a handler told them, `issueDir`, whose pass had nothing but
-/// issue events booked).
+/// What a pass looks at: everything it covers, or what its events were
+/// about (a handler told them, `issueDir` or `prDir`, whose pass had
+/// nothing but such events booked): told.rs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     All,
-    Issues(BTreeSet<u64>),
+    Told(BTreeSet<Told>),
 }
 
 #[derive(Default)]
 struct State {
     /// When each pass is due to look at everything.
     due: HashMap<Pass, f64>,
-    /// When each pass is due to look at only some issues, and which: kept
-    /// apart from `due`, so a look at everything booked for later (a
-    /// wake-up) doesn't turn an issue's event into one now.
-    issues: HashMap<Pass, (f64, BTreeSet<u64>)>,
+    /// When each pass is due to look at only what it's told, and what:
+    /// kept apart from `due`, so a look at everything booked for later (a
+    /// wake-up) doesn't turn a told event into one now.
+    told: HashMap<Pass, (f64, BTreeSet<Told>)>,
+    /// The passes booked for an event about a PR that goes first (`firsts`):
+    /// they start ahead of every other, the full pass's too.
+    first: HashSet<Pass>,
+    /// The PRs that go first, by repo, as the handler's passes last listed
+    /// them.
+    firsts: BTreeMap<String, Vec<First>>,
     /// When each pass last started.
     last: HashMap<Pass, f64>,
     /// Passes in a row that failed, by pass.
@@ -78,6 +88,9 @@ struct State {
 pub struct Line {
     /// How far apart one pass's starts are, at least.
     gap: f64,
+    /// A file that's there while a pass for a first PR waits to start, for
+    /// the handler's passes to see (`firstMarker`): one running yields to it.
+    marker: Option<PathBuf>,
     state: Mutex<State>,
     cond: Condvar,
 }
@@ -92,15 +105,43 @@ impl Line {
     pub fn new(gap: f64) -> Line {
         Line {
             gap,
+            marker: None,
             state: Mutex::default(),
             cond: Condvar::new(),
         }
+    }
+
+    /// With the file that says a first PR's pass waits (`marker`).
+    pub fn with_marker(mut self, marker: Option<PathBuf>) -> Line {
+        self.marker = marker;
+        // Whatever an earlier run left says nothing of this one's line.
+        self.mark(false);
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         // A thread that panicked holding it left the maps whole: each change
         // is one insert or remove.
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The marker there or not, as `first` is: called holding the lock, so
+    /// what it says and the line agree.
+    fn mark(&self, waiting: bool) {
+        let Some(m) = &self.marker else { return };
+        let done = if waiting {
+            m.parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::write(m, ""))
+        } else {
+            match fs::remove_file(m) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        };
+        if let Err(e) = done {
+            eprintln!("{}: {e}", m.display());
+        }
     }
 
     fn book(s: &mut State, pass: Pass, at: f64) {
@@ -116,16 +157,40 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// An event about issue `n` came in for this pass: unless a look at
-    /// everything is due first, the pass looks at the burst's issues alone.
-    pub fn issue(&self, pass: Pass, n: u64, now: f64) {
+    /// An event about these (issues, PRs, branches, commits) came in for
+    /// this pass: unless a look at everything is due first, the pass looks
+    /// at the burst's alone. One about a PR that goes first puts the pass
+    /// ahead of the rest. `only_first`: an event that counts only for one
+    /// (`firstOnly`), booking nothing otherwise. Whether it was for one.
+    pub fn told(&self, pass: Pass, items: Vec<Told>, now: f64, only_first: bool) -> bool {
         let mut s = self.lock();
+        let first = match &pass {
+            Pass::Repo(repo) => s
+                .firsts
+                .get(repo)
+                .is_some_and(|fs| items.iter().any(|t| fs.iter().any(|f| f.matches(t)))),
+            Pass::Full => false,
+        };
+        if only_first && !first {
+            return false;
+        }
         let at = now + DEBOUNCE;
-        let (due, ns) = s.issues.entry(pass).or_insert((at, BTreeSet::new()));
+        let (due, ns) = s.told.entry(pass.clone()).or_insert((at, BTreeSet::new()));
         *due = due.min(at);
-        ns.insert(n);
+        ns.extend(items);
+        if first {
+            s.first.insert(pass);
+            self.mark(true);
+        }
         s.news = true;
         self.cond.notify_all();
+        first
+    }
+
+    /// The PRs that go first, as the handler's passes list them
+    /// (told::firsts), replacing the last list.
+    pub fn firsts(&self, firsts: BTreeMap<String, Vec<First>>) {
+        self.lock().firsts = firsts;
     }
 
     /// The wake file: only a wake-up booked after the pass's last start is
@@ -147,9 +212,11 @@ impl Line {
         self.cond.notify_all();
     }
 
-    /// The passes that start now, the full pass first, each with what it
-    /// looks at, and how long until the next one is due (None: nothing is).
-    /// A pass due to look at everything sees to its issues' events as well.
+    /// The passes that start now, each with what it looks at, and how long
+    /// until the next one is due (None: nothing is). Those for a first PR
+    /// come before anything else, alone; then the full pass, which sees to
+    /// every repo whose event has come in as well; then the rest. A pass
+    /// due to look at everything sees to what it's told as well.
     pub fn take(&self, now: f64) -> (Vec<(Pass, Scope)>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;
@@ -157,31 +224,35 @@ impl Line {
         let ready_at = |s: &State, pass: &Pass, at: f64| {
             at.max(s.last.get(pass).copied().unwrap_or(0.0) + gap)
         };
-        let passes: BTreeSet<Pass> = s.due.keys().chain(s.issues.keys()).cloned().collect();
+        let passes: BTreeSet<Pass> = s.due.keys().chain(s.told.keys()).cloned().collect();
         let mut ready: Vec<(Pass, Scope)> = passes
             .into_iter()
             .filter_map(|p| {
                 if s.due.get(&p).is_some_and(|&at| ready_at(&s, &p, at) <= now) {
                     Some((p, Scope::All))
                 } else {
-                    let (at, ns) = s.issues.get(&p)?;
-                    (ready_at(&s, &p, *at) <= now).then(|| (p, Scope::Issues(ns.clone())))
+                    let (at, ns) = s.told.get(&p)?;
+                    (ready_at(&s, &p, *at) <= now).then(|| (p, Scope::Told(ns.clone())))
                 }
             })
             .collect();
-        if ready.first().is_some_and(|(p, _)| *p == Pass::Full) {
+        if ready.iter().any(|(p, _)| s.first.contains(p)) {
+            // A first PR's waits for nothing else: what else is due, the
+            // full pass too, stays due for the next take.
+            ready.retain(|(p, _)| s.first.contains(p));
+        } else if ready.first().is_some_and(|(p, _)| *p == Pass::Full) {
             // It sees to every repo whose event has come in as well, GAP or
             // not.
             let seen: Vec<Pass> = s
                 .due
                 .iter()
-                .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
-                .filter(|&(p, &at)| *p != Pass::Full && at <= now)
+                .chain(s.told.iter().map(|(p, (at, _))| (p, at)))
+                .filter(|&(p, &at)| *p != Pass::Full && at <= now && !s.first.contains(p))
                 .map(|(p, _)| p.clone())
                 .collect();
             for pass in seen {
                 s.due.remove(&pass);
-                s.issues.remove(&pass);
+                s.told.remove(&pass);
                 s.last.insert(pass, now);
             }
             ready = vec![(Pass::Full, Scope::All)];
@@ -190,13 +261,17 @@ impl Line {
             if *scope == Scope::All {
                 s.due.remove(pass);
             }
-            s.issues.remove(pass);
+            s.told.remove(pass);
+            s.first.remove(pass);
             s.last.insert(pass.clone(), now);
+        }
+        if !ready.is_empty() && s.first.is_empty() {
+            self.mark(false);
         }
         let next = s
             .due
             .iter()
-            .chain(s.issues.iter().map(|(p, (at, _))| (p, at)))
+            .chain(s.told.iter().map(|(p, (at, _))| (p, at)))
             .map(|(p, &at)| ready_at(&s, p, at))
             .fold(None, |m: Option<f64>, at| Some(m.map_or(at, |m| m.min(at))));
         (ready, next.map(|at| at - now))
@@ -247,12 +322,12 @@ impl Line {
     pub fn clear(&self) {
         let mut s = self.lock();
         s.due.clear();
-        s.issues.clear();
+        s.told.clear();
     }
 
     #[cfg(test)]
-    pub fn issues(&self) -> HashMap<Pass, (f64, BTreeSet<u64>)> {
-        self.lock().issues.clone()
+    pub fn told_now(&self) -> HashMap<Pass, (f64, BTreeSet<Told>)> {
+        self.lock().told.clone()
     }
 }
 
@@ -266,6 +341,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{DEBOUNCE, Line, Pass, Scope};
+    use crate::told::{First, Told};
 
     /// The passes that start now, every one looking at everything.
     fn took(line: &Line, now: f64) -> (Vec<Pass>, Option<f64>) {
@@ -423,34 +499,122 @@ mod tests {
     fn issues() {
         let line = Line::default();
         line.wakes(&booked(json!({"sam/r": 500})));
-        line.issue(r("sam/r"), 7, 100.0);
-        line.issue(r("Sam/R"), 9, 102.0);
-        line.issue(r("sam/q"), 7, 102.0);
+        line.told(r("sam/r"), vec![Told::Issue(7)], 100.0, false);
+        line.told(r("Sam/R"), vec![Told::Issue(9)], 102.0, false);
+        line.told(r("sam/q"), vec![Told::Issue(7)], 102.0, false);
         assert_eq!(line.take(104.0), (vec![], Some(1.0)));
         assert_eq!(
             line.take(105.0),
-            (vec![(r("sam/r"), Scope::Issues([7, 9].into()))], Some(2.0))
+            (
+                vec![(
+                    r("sam/r"),
+                    Scope::Told([Told::Issue(7), Told::Issue(9)].into())
+                )],
+                Some(2.0)
+            )
         );
         assert_eq!(line.due(), due(&[(r("sam/r"), 500.0)]));
         assert_eq!(
             line.take(107.0).0,
-            vec![(r("sam/q"), Scope::Issues([7].into()))]
+            vec![(r("sam/q"), Scope::Told([Told::Issue(7)].into()))]
         );
-        line.issue(r("sam/r"), 3, 200.0);
+        line.told(r("sam/r"), vec![Told::Issue(3)], 200.0, false);
         line.event(r("sam/r"), 200.0);
         assert_eq!(line.take(205.0), (vec![(r("sam/r"), Scope::All)], None));
-        assert!(line.issues().is_empty());
-        line.issue(r("sam/r"), 4, 300.0);
+        assert!(line.told_now().is_empty());
+        line.told(r("sam/r"), vec![Told::Issue(4)], 300.0, false);
         line.event(Pass::Full, 300.0);
         assert_eq!(line.take(305.0), (vec![(Pass::Full, Scope::All)], None));
-        assert!(line.issues().is_empty());
-        line.issue(r("sam/r"), 5, 400.0);
+        assert!(line.told_now().is_empty());
+        line.told(r("sam/r"), vec![Told::Issue(5)], 400.0, false);
         assert_eq!(
             line.take(405.0).0,
-            vec![(r("sam/r"), Scope::Issues([5].into()))]
+            vec![(r("sam/r"), Scope::Told([Told::Issue(5)].into()))]
         );
         line.done(&r("sam/r"), false, 406.0);
         assert_eq!(line.due(), due(&[(r("sam/r"), 466.0)]));
-        assert!(line.issues().is_empty());
+        assert!(line.told_now().is_empty());
+    }
+
+    fn firsts(repo: &str, n: u64, branch: &str) -> std::collections::BTreeMap<String, Vec<First>> {
+        [(
+            repo.to_owned(),
+            vec![First {
+                number: n,
+                branch: Some(branch.into()),
+                head: Some("abcdef1".into()),
+            }],
+        )]
+        .into()
+    }
+
+    // An event about a PR that goes first starts its pass ahead of every
+    // other due then, the full pass's too, which still runs after; one
+    // about any other PR waits its turn among the rest.
+    #[test]
+    fn firsts_go_first() {
+        let line = Line::default();
+        line.firsts(firsts("sam/z", 4, "fix"));
+        line.event(Pass::Full, 100.0 - DEBOUNCE);
+        line.event(r("sam/a"), 100.0);
+        assert!(!line.told(r("sam/b"), vec![Told::Pr(9)], 100.0, false));
+        assert!(line.told(r("Sam/Z"), vec![Told::Branch("fix".into())], 100.0, false));
+        assert_eq!(
+            line.take(105.0).0,
+            vec![(r("sam/z"), Scope::Told([Told::Branch("fix".into())].into()))]
+        );
+        assert_eq!(line.take(105.0).0, vec![(Pass::Full, Scope::All)]);
+        // Its gap still holds: a first PR's pass is no faster than its own
+        // last one allows.
+        assert!(line.told(r("sam/z"), vec![Told::Pr(4)], 106.0, false));
+        assert_eq!(line.take(111.0), (vec![], Some(14.0)));
+        assert_eq!(
+            line.take(125.0).0,
+            vec![(r("sam/z"), Scope::Told([Told::Pr(4)].into()))]
+        );
+    }
+
+    // An event that counts only for a first PR (a check run) books nothing
+    // for any other, or before the passes have listed any.
+    #[test]
+    fn only_first() {
+        let line = Line::default();
+        assert!(!line.told(r("sam/z"), vec![Told::Pr(4)], 100.0, true));
+        line.firsts(firsts("sam/z", 4, "fix"));
+        assert!(!line.told(r("sam/z"), vec![Told::Pr(5)], 100.0, true));
+        assert!(line.told_now().is_empty());
+        assert!(line.told(
+            r("sam/z"),
+            vec![Told::Commit("ABCDEF1".into())],
+            100.0,
+            true
+        ));
+        assert_eq!(line.take(105.0).0.len(), 1);
+    }
+
+    // The marker is there from the event about a first PR until its pass
+    // starts, and never for any other; one an earlier run left is gone.
+    #[test]
+    fn marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("autoland/.first");
+        std::fs::create_dir_all(m.parent().unwrap()).unwrap();
+        std::fs::write(&m, "").unwrap();
+        let line = Line::default().with_marker(Some(m.clone()));
+        assert!(!m.exists());
+        line.firsts(firsts("sam/z", 4, "fix"));
+        line.told(r("sam/b"), vec![Told::Pr(4)], 100.0, false);
+        line.event(r("sam/z"), 100.0);
+        assert!(!m.exists());
+        line.told(r("sam/z"), vec![Told::Pr(4)], 100.0, false);
+        assert!(m.exists());
+        assert_eq!(line.take(104.0).0, vec![]);
+        assert!(m.exists());
+        assert_eq!(line.take(105.0).0, vec![(r("sam/z"), Scope::All)]);
+        assert!(!m.exists());
+        assert_eq!(
+            line.take(105.0).0,
+            vec![(r("sam/b"), Scope::Told([Told::Pr(4)].into()))]
+        );
     }
 }

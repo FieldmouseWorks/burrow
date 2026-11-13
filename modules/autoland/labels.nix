@@ -32,7 +32,9 @@ in
         steward) put it on, as GitHub's labelled event says by account id. A
         PR closing an issue an author labelled with it gets it from the
         steward, and proj-inbox puts that issue ahead in its drain and its
-        job ahead for a slot (docs/front-door.md).
+        job ahead for a slot (docs/front-door.md). Its own events step it
+        ahead of every other pass, and what's open on it goes to a Claude
+        job at once (autoland/expedite.py).
       '';
     };
     batch = mkOption {

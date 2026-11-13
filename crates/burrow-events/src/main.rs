@@ -41,7 +41,7 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
     let lines: Lines = Arc::new(
         handlers
             .iter()
-            .map(|(name, h)| (name.clone(), Line::new(h.gap)))
+            .map(|(name, h)| (name.clone(), Line::new(h.gap).with_marker(h.marker())))
             .collect::<BTreeMap<_, _>>(),
     );
     for line in lines.values() {

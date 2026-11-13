@@ -426,14 +426,15 @@ def kick(repo):
     poke(f"{CFG['kick']}/{repo}")
 
 
-def poke(url):
+def poke(url, body=b""):
     """Start the pass a burrow-events kick URL names, now: this steward's for
     a repo, or another handler's (the watchdog's, when what it waits on
-    changed). Best effort, like kick."""
+    changed). Best effort, like kick. body: what the repo's pass is about,
+    in burrow-events' told lines (expedite.py)."""
     if DRY:
         return
     try:
-        urllib.request.urlopen(urllib.request.Request(url, data=b"", method="POST"), timeout=5).close()
+        urllib.request.urlopen(urllib.request.Request(url, data=body, method="POST"), timeout=5).close()
         return True
     except OSError as e:
         log(f"couldn't kick {url}: {e}")

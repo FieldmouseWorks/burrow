@@ -181,6 +181,9 @@ let
     inherit (cfg) pipelineRepos leadRepos;
     kick = stewardKick;
     continuationKick = "${config.burrow.events.kick}/autoland-continue";
+    # There while a pass for a first PR waits to start: a pass running
+    # yields to it, and a continuation waits (burrow.events' firsts).
+    firstMarker = config.burrow.events.firstMarkers.autoland;
     reviewers = {
       codex = { inherit (rv.codex) enable; };
     };
@@ -435,7 +438,8 @@ in
       default = 10;
       description = ''
         How long open findings or red CI sit with nobody pushing or replying
-        before a Claude job on this machine takes them.
+        before a Claude job on this machine takes them: no time at all on a
+        PR an author labelled `labels.first`.
       '';
     };
 
@@ -880,8 +884,16 @@ in
       # statuses (a proof's verdict), and the repo itself: made (the App's
       # own webhook sends that, burrow-upkeep's hook.rs), renamed, archived.
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
-        "pull_request_review_thread" "issue_comment" "check_suite" "status" "repository" ]
+        "pull_request_review_thread" "issue_comment" "check_suite" "check_run" "status" "repository" ]
         ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
+      # A repo's pass is told which PRs its events were about, and those
+      # about a PR an author put first (labels.first, firsts.py) start ahead
+      # of every other pass: steward.py's expedited step. A check run, which
+      # comes for every check, counts only for those (red before its suite
+      # ends); the suite's own end is every PR's.
+      prTargets = true;
+      firsts = "${stateDir}/autoland/firsts.json";
+      firstOnly = [ "check_run" ];
       # Of the issues, only Renovate's dashboard and flaky tests'
       # (burrow-upkeep's; the flaky tool's test.rs has the title).
       issueTitles = lib.optional cfg.dashboard.enable dashboardTitle

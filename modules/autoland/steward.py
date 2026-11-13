@@ -73,6 +73,7 @@ import sys
 
 import common as C
 from batch import Batch
+import expedite as X
 import proofs as P
 import repos as R
 import reviewers as V
@@ -162,13 +163,16 @@ def main():
         except BlockingIOError:
             # A queued unit must not spend its hard deadline waiting for the
             # other handler. Requeue on the same line without touching files
-            # owned by the pass that has the lock.
-            endpoint = CFG["continuationKick"] if continuing else CFG["kick"]
-            for repo in kick or [""]:
-                if C.poke(endpoint + (f"/{repo}" if repo else "")) is False:
-                    # The event runner's failed-unit retry is the durable
-                    # alternative when its HTTP listener cannot take this.
-                    sys.exit(75)
+            # owned by the pass that has the lock, still told what it was
+            # (expedite.py): a first PR's stays first.
+            requeue(kick, continuing, X.told())
+            return
+        if continuing and X.waiting():
+            # A first PR's pass waits for the lock: it goes before the rest
+            # of a batch, which continues after it.
+            log("a first PR's pass waits: the continuation goes after it")
+            lock.close()
+            requeue(kick, continuing, None)
             return
     try:
         with C.pass_deadline(C.PASS_SECONDS):
@@ -185,6 +189,51 @@ def main():
     finally:
         if C.LIMITED and C.LIMITED[0] > C.NOW:
             C.after_limit(kick)
+
+
+def requeue(kick, continuing, about):
+    """Put this pass back on its line, as burrow-events took it: told what
+    it was about, if it was."""
+    endpoint = CFG["continuationKick"] if continuing else CFG["kick"]
+    for repo in kick or [""]:
+        body = X.lines(about).encode() if about and repo else b""
+        if C.poke(endpoint + (f"/{repo}" if repo else ""), body) is False:
+            # The event runner's failed-unit retry is the durable
+            # alternative when its HTTP listener cannot take this.
+            sys.exit(75)
+
+
+def expedite(r, info, prs, chosen, first, mine, batch):
+    """expedite.py's step: the chosen PRs (and a red default branch's held
+    fixes, which every pass steps first), each as the ordinary pass steps
+    it, and nothing else of the repo's. Its digest lines replace theirs
+    alone, and a batch under way keeps its place."""
+    repo = r["repo"]
+    numbers = [pr["number"] for pr in chosen]
+    mine[:] = [tuple(x) for x in X.keep(repo, load("digest-repos.json", {}).get(repo, []), numbers)]
+    held = R.watch_default(r, info, prs, mine) or {}
+    steps = chosen + [pr for pr in prs if pr["number"] in held and pr not in chosen]
+    mine[:] = X.keep(repo, mine, [pr["number"] for pr in steps])
+    heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
+    log(f"{repo}: expedited: " + ", ".join(f"#{pr['number']}" for pr in steps))
+    for pr in steps:
+        n = pr["number"]
+        T.STOPPED.pop(repo, None)
+        seated = T.seat(repo, n)
+        seen_to = True
+        try:
+            step.handle(repo, pr, info, mine, held.get(n), heads.get(pr["baseRefName"]), first=n in first)
+        except Exception as e:  # one bad PR mustn't stop the rest
+            log(f"{repo}#{n}: {e}")
+            waits.failed(repo, pr)
+            seen_to = False
+            if T.seat(repo, n) is not None:
+                T.stop(repo, f"#{n} wasn't seen to")
+        if seated is None and T.seat(repo, n) is not None:
+            # Just joined its train, which only the repo's ordinary pass
+            # steps, once it has seen every PR.
+            C.wake(repo, C.NOW + 1)  # ends: the ordinary pass that steps the train
+        batch.expedited(repo, pr, info, mine, C.WAKE.get(repo), seen_to, T.STOPPED.get(repo))
 
 
 # How many repos this pass has searched for a dashboard (burrow-upkeep's
@@ -270,6 +319,10 @@ def retire_deleted(known, failed, digest):
 def run_pass(kick, continuing=False):
     waits.begin()
     batch = Batch(kick, continuing)
+    # What this pass's events were about, if burrow-events told it, and the
+    # repos it took an expedited step in (expedite.py).
+    about = X.told() if kick is not None and not continuing else None
+    expedited = set()
     if not batch.active(kick):
         batch.end(True, kick)
         return
@@ -346,9 +399,14 @@ def run_pass(kick, continuing=False):
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
                 first = firsts(repo, prs)
+                X.remember(repo, prs, first)
                 P.begin(repo, (pr["number"] for pr in prs), first)
                 T.begin(repo)
                 waits.read(repo, prs)
+                if (chosen := X.picked(kick, about, prs, first)) is not None:
+                    expedited.add(repo.lower())
+                    expedite(r, info, prs, chosen, first, mine, batch)
+                    continue
                 pending = batch.pending(repo, prs, mine, info)
                 # First, so a red-branch fix it holds isn't merged by this same pass.
                 held = R.watch_default(r, info, prs, mine) or {}
@@ -382,7 +440,8 @@ def run_pass(kick, continuing=False):
                     T.STOPPED.pop(repo, None)
                     seen_to = True
                     try:
-                        step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
+                        step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]),
+                                    first=pr["number"] in first)
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)
@@ -432,6 +491,8 @@ def run_pass(kick, continuing=False):
                 log(f"{repo}: {e}")
                 waits.failed(repo)
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
+            if repo.lower() in expedited:
+                continue  # the rest is the repo's ordinary pass's
             upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
@@ -452,12 +513,16 @@ def run_pass(kick, continuing=False):
                 retry = batch.state["retry"].get(r["repo"].lower(), 0)
                 C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
     inventory = {r["repo"] for r in all_repos}
-    names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
+    names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen} - expedited
     visited.update(r.lower() for r in kick or () if r.lower() not in names)
     wakes = {k: max(v, C.NOW + 1) for k, v in load("wake.json", {}).items()
              if k.lower() not in visited and (k == "" or k.lower() in names or v > C.NOW)
              and (k != "" or kick is not None or continuing or v > C.NOW)}
-    save("wake.json", {**wakes, **C.WAKE})
+    booked = {**wakes, **C.WAKE}
+    # An expedited repo's other PRs keep the wake-up they had booked: what
+    # its step books comes sooner, or waits behind theirs.
+    booked.update({k: min(v, wakes[k]) for k, v in C.WAKE.items() if k.lower() in expedited and k in wakes})
+    save("wake.json", booked)
     digest = {**{k: v for k, v in load("digest-repos.json", {}).items()
                  if k not in seen and (kick is not None or k in inventory)}, **digest}
     digest = {k: list(dict.fromkeys(tuple(x) for x in v)) for k, v in digest.items()}
@@ -485,7 +550,12 @@ def run_pass(kick, continuing=False):
         # Wake-ups are persisted before publishing GitHub issues: their
         # failure mustn't lose the remainder of this batch.
         log("pass yielded; continuing from its saved PR and repo cursors")
-    batch.end(complete, kick)
+    if expedited:
+        # Its kick owes nothing more and ends no batch: a continuation the
+        # repo has booked still comes.
+        batch.keep()
+    else:
+        batch.end(complete, kick)
     if kick is None and batch.traversal_full and complete:
         R.hooks(all_repos)
     # Last: GitHub failing it leaves the pass's state saved. A line more than

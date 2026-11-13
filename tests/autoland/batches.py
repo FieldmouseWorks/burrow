@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory() as tmp:
     prs = {'a': [pr(1)], 'b': [pr(n) for n in range(1, 8)], 'c': [pr(1)]}
     clock, handled, trains, branches, hooks, publications = [0], [], [], [], [], []
 
-    def handle(repo, pr, info, mine, *args):
+    def handle(repo, pr, info, mine, *args, **kw):
         handled.append((repo, pr['number']))
         clock[0] += 200  # nine normal steps take thirty minutes in total
         if repo == 'sam/b' and pr['number'] == 1:

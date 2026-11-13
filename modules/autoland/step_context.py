@@ -63,6 +63,7 @@ class Context:
         self.digest = digest
         self.held = held
         self.below = below
+        self.first = False  # step.handle's first
         self.rc = repo_cfg(self.repo)
         self.n, self.head = self.pr["number"], self.pr["headRefOid"]
         self.by_train = T.rides(self.repo, self.pr, self.repo_info)

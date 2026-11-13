@@ -21,14 +21,16 @@ let
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
     handlers = lib.mapAttrs (name: h: {
-      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap;
+      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap firsts firstOnly;
       issueDir = if h.issueNumbers then "${issueDir}/${name}" else null;
+      prDir = if h.prTargets then "${issueDir}/${name}" else null;
     }) cfg.handlers;
   });
-  # Where a pass is told its issues (`issueNumbers`): burrow-events' own
-  # runtime directory, gone with it, so nothing it told outlives it.
+  # Where a pass is told its issues (`issueNumbers`) or PRs (`prTargets`):
+  # burrow-events' own runtime directory, gone with it, so nothing it told
+  # outlives it.
   issueDir = "/run/burrow-events";
-  told = lib.filterAttrs (_: h: h.issueNumbers) cfg.handlers;
+  told = lib.filterAttrs (_: h: h.issueNumbers || h.prTargets) cfg.handlers;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-events;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
   # Each one best-effort: burrow-events down (restarting, say) runs every
@@ -174,6 +176,42 @@ in
               `perRepo`.
             '';
           };
+          prTargets = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Whether the repo's pass is told which PRs, branches and commits
+              its events were about (a PR's own events, comments on it, its
+              checks, statuses and pushes), as `issueNumbers` tells issues:
+              while such a pass runs, the file its unit's BURROW_EVENTS_PRS
+              names holds them, one a line (`pr N`, `branch NAME`, `commit
+              SHA`). A kick may carry the same lines. Needs `perRepo`, and
+              rules out `issueNumbers`.
+            '';
+          };
+          firsts = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = ''
+              A JSON file the handler's passes write, {"OWNER/REPO":
+              [{"number": N, "branch": NAME, "head": SHA}]}: the PRs whose
+              events start their repo's pass ahead of every other pass of
+              the handler, its full pass too. While one waits to start,
+              `firstMarkers.NAME` is there, for a pass already running to
+              yield to it. Read when any pass ends, and when burrow-events
+              starts. Needs `prTargets`.
+            '';
+          };
+          firstOnly = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            example = [ "check_run" ];
+            description = ''
+              Of `events`, those that start a pass only when they're about
+              one of `firsts`' PRs: one that comes for every check of every
+              PR is worth a pass only for those.
+            '';
+          };
           ownStatuses = mkOption {
             type = types.listOf types.str;
             default = [ ];
@@ -240,12 +278,27 @@ in
       description = "The hooks' URL, if the machine takes deliveries.";
     };
 
+    firstMarkers = mkOption {
+      type = types.attrsOf types.str;
+      readOnly = true;
+      default = lib.mapAttrs (name: _: "${issueDir}/${name}/.first")
+        (lib.filterAttrs (_: h: h.firsts != null) cfg.handlers);
+      description = ''
+        By handler with `firsts`, the file that's there while a pass for one
+        of its first PRs waits to start.
+      '';
+    };
+
     kick = mkOption {
       type = types.str;
       readOnly = true;
       default = "http://127.0.0.1:${toString cfg.kickPort}/kick";
       defaultText = lib.literalExpression ''"http://127.0.0.1:''${toString kickPort}/kick"'';
-      description = "Where to kick a handler: POST to KICK/HANDLER or KICK/HANDLER/OWNER/REPO.";
+      description = ''
+        Where to kick a handler: POST to KICK/HANDLER or KICK/HANDLER/OWNER/REPO.
+        For a handler told them (`issueNumbers`, `prTargets`), the body may say
+        what the repo's pass is about, in its told file's lines.
+      '';
     };
 
     hookEvents = mkOption {
@@ -270,6 +323,12 @@ in
     }] ++ lib.mapAttrsToList (name: h: {
       assertion = h.perRepo;
       message = "burrow.events.handlers.${name}: issueNumbers tells a pass over one repo its issues, so it needs perRepo.";
+    }) cfg.handlers ++ lib.mapAttrsToList (name: h: {
+      assertion = !h.prTargets || (h.perRepo && !h.issueNumbers);
+      message = "burrow.events.handlers.${name}: prTargets tells a pass over one repo its PRs, so it needs perRepo, and its file can't be issueNumbers' too.";
+    }) cfg.handlers ++ lib.mapAttrsToList (name: h: {
+      assertion = h.firsts == null || h.prTargets;
+      message = "burrow.events.handlers.${name}: firsts puts the passes about its PRs first, so it needs prTargets.";
     }) told;
 
     # The repos' hooks are the steward's to keep (burrow-upkeep's hook.rs).
@@ -387,7 +446,7 @@ in
       # A told handler's pass over a repo finds its issues in its instance's
       # file (%i, as burrow-events escapes the repo), when there are some.
       (lib.mapAttrs' (name: h: lib.nameValuePair "${h.unit}@" {
-        environment.BURROW_EVENTS_ISSUES = "${issueDir}/${name}/%i";
+        environment.${if h.prTargets then "BURROW_EVENTS_PRS" else "BURROW_EVENTS_ISSUES"} = "${issueDir}/${name}/%i";
       }) told)
       (lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
       description = "burrow-events: a full pass of ${name} when a switch changes it";

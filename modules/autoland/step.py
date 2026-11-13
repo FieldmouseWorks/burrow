@@ -42,8 +42,11 @@ from step_actions import Actions
 __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_STEPS", "STRIKES"]
 
 
-def handle(repo, pr, repo_info, digest, held=None, below=None):
+def handle(repo, pr, repo_info, digest, held=None, below=None, first=False):
+    """first: an author put it first (firsts.py), so what's open on it is
+    handed to a Claude job at once (step_actions' hand_off)."""
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
+    p.first = first
     try:
         if C.paused(repo):
             raise C.JobPaused(f"{repo}: repository work paused")
@@ -283,6 +286,7 @@ class Pass(Context, Jobs, Actions):
             self.strike,
             self.cleared,
             lambda: T.review(self.repo, self.pr),
+            self.first,
         )
 
         live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service, unreviewed = looked

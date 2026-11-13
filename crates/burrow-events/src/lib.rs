@@ -46,6 +46,7 @@ pub mod kick;
 pub mod line;
 pub mod passes;
 pub mod routes;
+pub mod told;
 
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};

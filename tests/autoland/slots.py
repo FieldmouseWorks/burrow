@@ -157,7 +157,7 @@ S.R.settle_repo = lambda r, known: False
 S.R.publish = lambda *a: None
 S.open_prs = lambda owner, name: (info, [pr(2), pr(9, (first,)), pr(1, closes=(11,)), pr(7, (first,)),
                                          pr(8, (first,)), pr(3, closes=(13,)), pr(6, (first,))])
-S.step.handle = lambda repo, pr, *a: order.append(pr["number"])
+S.step.handle = lambda repo, pr, *a, **k: order.append(pr["number"])
 S.main()
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle = kept_fns
 assert order == [1, 8, 9, 2, 3, 6, 7], order

@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::glob;
 use crate::line::Pass;
+use crate::told::{self, Told};
 
 /// The service's config, the JSON file EVENTS_CONFIG names.
 #[derive(Debug, Deserialize)]
@@ -52,6 +53,21 @@ pub struct Handler {
     /// None: every pass looks at everything.
     #[serde(default)]
     pub issue_dir: Option<PathBuf>,
+    /// Where its passes over a repo are told which PRs, branches and
+    /// commits their events were about, as `issue_dir` does issues
+    /// (told.rs has the lines). None: every pass looks at everything.
+    #[serde(default)]
+    pub pr_dir: Option<PathBuf>,
+    /// A JSON file its passes write, {"OWNER/REPO": [{number, branch,
+    /// head}]}: the PRs whose events start their pass ahead of every other
+    /// (line.rs), read after any pass ends and when the service starts.
+    #[serde(default)]
+    pub firsts: Option<PathBuf>,
+    /// The events that start a pass only when they're about one of those
+    /// PRs (a check run, which would otherwise start one for every check
+    /// of every PR).
+    #[serde(default)]
+    pub first_only: Vec<String>,
     /// Seconds one of its passes starts after the last, at least.
     #[serde(default = "gap")]
     pub gap: f64,
@@ -157,13 +173,20 @@ impl Handler {
         }
     }
 
-    /// The issue an `issues` or `issue_comment` delivery is about, for a
-    /// handler told them (`issue_dir`) that has a pass over one repo. None:
-    /// its pass looks at everything. An issue deleted, or moved to another
-    /// repo, is no longer there under its number to look at.
-    pub fn issue(&self, event: &str, payload: &Value) -> Option<u64> {
+    /// What a delivery is about, for a handler told it (`issue_dir`,
+    /// `pr_dir`) that has a pass over one repo: the issue an `issues` or
+    /// `issue_comment` delivery is about, or the PRs, branches or commits
+    /// of one about a PR (told::prs). None: its pass looks at everything.
+    /// An issue deleted, or moved to another repo, is no longer there
+    /// under its number to look at.
+    pub fn told(&self, event: &str, payload: &Value) -> Option<Vec<Told>> {
+        if !self.per_repo {
+            return None;
+        }
+        if self.pr_dir.is_some() {
+            return told::prs(event, payload);
+        }
         if self.issue_dir.is_none()
-            || !self.per_repo
             || !matches!(event, "issues" | "issue_comment")
             || (event == "issues"
                 && matches!(
@@ -173,16 +196,43 @@ impl Handler {
         {
             return None;
         }
-        at(payload, &["issue", "number"]).and_then(Value::as_u64)
+        at(payload, &["issue", "number"])
+            .and_then(Value::as_u64)
+            .map(|n| vec![Told::Issue(n)])
     }
 
-    /// The file a pass over a repo is told its issues in, if the handler is
-    /// told them.
-    pub fn issue_file(&self, pass: &Pass) -> Option<PathBuf> {
+    /// Whether its passes can be told this (a kick's body): issues for one
+    /// told issues, the rest for one told PRs.
+    pub fn accepts(&self, t: &Told) -> bool {
+        self.per_repo
+            && if t.about_pr() {
+                self.pr_dir.is_some()
+            } else {
+                self.issue_dir.is_some()
+            }
+    }
+
+    /// The file a pass over a repo is told what it's about in, if the
+    /// handler is told that.
+    pub fn told_file(&self, pass: &Pass) -> Option<PathBuf> {
         match pass {
-            Pass::Repo(repo) => self.issue_dir.as_ref().map(|d| d.join(escape(repo))),
+            Pass::Repo(repo) => self
+                .issue_dir
+                .as_ref()
+                .or(self.pr_dir.as_ref())
+                .map(|d| d.join(escape(repo))),
             Pass::Full => None,
         }
+    }
+
+    /// The file that's there while a pass for a first PR waits to start
+    /// (line.rs): `.first` in its told directory, which no repo's escaped
+    /// name can be.
+    pub fn marker(&self) -> Option<PathBuf> {
+        self.firsts
+            .as_ref()
+            .and(self.pr_dir.as_ref())
+            .map(|d| d.join(".first"))
     }
 
     /// The unit that is this pass.
@@ -256,6 +306,7 @@ mod tests {
 
     use super::{Handler, Pushes, escape};
     use crate::line::Pass;
+    use crate::told::Told;
 
     fn handler(events: &[&str], unit: &str) -> Handler {
         Handler {
@@ -562,27 +613,63 @@ mod tests {
     fn issue_numbers() {
         let mut h = handler(&["issues", "issue_comment", "pull_request"], "proj-inbox");
         let p = |action: &str| payload("sam/r", json!({"action": action, "issue": {"number": 7}}));
-        assert_eq!(h.issue("issues", &p("opened")), None);
+        assert_eq!(h.told("issues", &p("opened")), None);
         h.issue_dir = Some("/run/burrow-events/inbox".into());
-        assert_eq!(h.issue("issues", &p("labeled")), Some(7));
-        assert_eq!(h.issue("issue_comment", &p("created")), Some(7));
-        assert_eq!(h.issue("issue_comment", &p("deleted")), Some(7));
-        assert_eq!(h.issue("issues", &p("deleted")), None);
-        assert_eq!(h.issue("issues", &p("transferred")), None);
+        assert_eq!(h.told("issues", &p("labeled")), Some(vec![Told::Issue(7)]));
+        assert_eq!(
+            h.told("issue_comment", &p("created")),
+            Some(vec![Told::Issue(7)])
+        );
+        assert_eq!(
+            h.told("issue_comment", &p("deleted")),
+            Some(vec![Told::Issue(7)])
+        );
+        assert_eq!(h.told("issues", &p("deleted")), None);
+        assert_eq!(h.told("issues", &p("transferred")), None);
         let pr = payload(
             "sam/r",
             json!({"action": "closed", "pull_request": {"number": 7}}),
         );
-        assert_eq!(h.issue("pull_request", &pr), None);
+        assert_eq!(h.told("pull_request", &pr), None);
         let odd = payload("sam/r", json!({"issue": {"number": "7"}}));
-        assert_eq!(h.issue("issues", &odd), None);
+        assert_eq!(h.told("issues", &odd), None);
         assert_eq!(
-            h.issue_file(&Pass::repo("Sam/my-r")),
+            h.told_file(&Pass::repo("Sam/my-r")),
             Some("/run/burrow-events/inbox/sam-my\\x2dr".into())
         );
-        assert_eq!(h.issue_file(&Pass::Full), None);
+        assert_eq!(h.told_file(&Pass::Full), None);
         h.per_repo = false;
-        assert_eq!(h.issue("issues", &p("opened")), None);
+        assert_eq!(h.told("issues", &p("opened")), None);
+    }
+
+    // A handler told PRs gets what a PR's event is about (told::prs), and
+    // takes kicks telling it the same, but not issues; one told issues
+    // takes those alone. Its marker is in its told directory, and only
+    // when it lists first PRs.
+    #[test]
+    fn pr_targets() {
+        let mut h = handler(&["pull_request", "issue_comment"], "autoland");
+        let p = payload("sam/r", json!({"pull_request": {"number": 7}}));
+        assert_eq!(h.told("pull_request", &p), None);
+        assert!(!h.accepts(&Told::Pr(7)) && h.marker().is_none());
+        h.pr_dir = Some("/run/burrow-events/autoland".into());
+        assert_eq!(h.told("pull_request", &p), Some(vec![Told::Pr(7)]));
+        let c = payload("sam/r", json!({"issue": {"number": 7}}));
+        assert_eq!(h.told("issue_comment", &c), None);
+        assert!(h.accepts(&Told::Branch("fix".into())) && !h.accepts(&Told::Issue(7)));
+        assert_eq!(
+            h.told_file(&Pass::repo("sam/r")),
+            Some("/run/burrow-events/autoland/sam-r".into())
+        );
+        assert_eq!(h.marker(), None);
+        h.firsts = Some("/var/lib/autoland/firsts.json".into());
+        assert_eq!(
+            h.marker(),
+            Some("/run/burrow-events/autoland/.first".into())
+        );
+        h.per_repo = false;
+        assert_eq!(h.told("pull_request", &p), None);
+        assert!(!h.accepts(&Told::Pr(7)));
     }
 
     // One with no pass over one repo gets its full pass for a repo's event.

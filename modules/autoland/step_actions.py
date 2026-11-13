@@ -56,9 +56,13 @@ class Actions:
         open (running's "awaiting": a fix elsewhere, or a person's answer to
         its question) still is: the PR waits on that, as on a hold
         (waits.HOLD), until proj resumes the job. describe: only
-        its description is to fix, with no push (tasks.describe_task)."""
+        its description is to fix, with no push (tasks.describe_task). One
+        an author put first (step.handle's first) doesn't wait to be handed,
+        unless a Claude session that opened it has it: that session is at
+        work on its branch, as a job would be."""
         if at is _HEAD:
             at = self.head
+        wait = wait and not (self.first and not self.session)
         ours = ours and not self.requested  # Renovate would redo its branch
         retry = self.st.get(kind) == at
         state = retry and self.running(kind, at)

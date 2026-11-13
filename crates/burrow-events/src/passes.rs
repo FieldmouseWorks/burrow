@@ -1,5 +1,6 @@
 //! Starting a handler's passes as they come due.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use crate::handler::Handler;
 use crate::line::{Line, Pass, Scope};
 use crate::now;
 use crate::routes::{Handlers, Lines};
+use crate::told::{self, First, Told};
 
 /// What starts a pass: systemd, or a stand-in for it.
 pub trait Units {
@@ -53,18 +55,28 @@ pub fn booked(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Tell a pass about to start which issues to look at, if its handler is
-/// told them: its file has their numbers, one a line, or isn't there for a
-/// look at everything (whatever a pass before it left). The file to remove
-/// once it's done; a pass that can't be told looks at everything.
+/// The firsts file's first PRs (told::firsts); none when it's missing or
+/// isn't an object.
+pub fn firsts(path: &Path) -> BTreeMap<String, Vec<First>> {
+    fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .map(|v| told::firsts(&v))
+        .unwrap_or_default()
+}
+
+/// Tell a pass about to start what to look at, if its handler is told
+/// that: its file has told.rs's lines, one each, or isn't there for a look
+/// at everything (whatever a pass before it left). The file to remove once
+/// it's done; a pass that can't be told looks at everything.
 fn tell(name: &str, h: &Handler, pass: &Pass, scope: &Scope) -> Option<PathBuf> {
-    let f = h.issue_file(pass)?;
+    let f = h.told_file(pass)?;
     let told = match scope {
         Scope::All => match fs::remove_file(&f) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => return None,
         },
-        Scope::Issues(ns) => {
+        Scope::Told(ns) => {
             // Whole or not at all: a pass reading half the list would leave
             // the rest of its issues unlooked at.
             let text: String = ns.iter().map(|n| format!("{n}\n")).collect();
@@ -88,11 +100,19 @@ fn tell(name: &str, h: &Handler, pass: &Pass, scope: &Scope) -> Option<PathBuf> 
 /// owning line directly, preserving the recorded deadlines. No HTTP kick
 /// can fail between the durable write and this notification; failed units
 /// are refreshed too, and startup recovers files left before a restart.
+/// The first PRs its passes list are read again with them.
 pub fn refresh(handlers: &Handlers, lines: &Lines) {
     for (name, h) in handlers.iter() {
-        if let Some(wake) = &h.wake {
-            lines[name].wakes(&booked(wake));
-        }
+        read(h, &lines[name]);
+    }
+}
+
+fn read(h: &Handler, line: &Line) {
+    if let Some(wake) = &h.wake {
+        line.wakes(&booked(wake));
+    }
+    if let Some(f) = &h.firsts {
+        line.firsts(firsts(f));
     }
 }
 
@@ -106,17 +126,21 @@ pub fn serve(
     once: bool,
     refresh: impl Fn(),
 ) {
-    if let Some(wake) = &h.wake {
-        line.wakes(&booked(wake));
-    }
+    read(h, line);
     loop {
         let (ready, wait) = line.take(now());
         for (pass, scope) in &ready {
             let unit = h.unit(pass);
             match scope {
                 Scope::All => eprintln!("{name}: {pass}"),
-                Scope::Issues(ns) => {
-                    let ns: Vec<String> = ns.iter().map(|n| format!("#{n}")).collect();
+                Scope::Told(ns) => {
+                    let ns: Vec<String> = ns
+                        .iter()
+                        .map(|n| match n {
+                            Told::Issue(i) => format!("#{i}"),
+                            t => format!("({t})"),
+                        })
+                        .collect();
                     eprintln!("{name}: {pass} {}", ns.join(" "));
                 }
             }
@@ -158,6 +182,7 @@ mod tests {
     use super::{Units, serve};
     use crate::handler::Handler;
     use crate::line::{Line, Pass};
+    use crate::told::Told;
 
     /// systemd, stood in for: which units were started, and a pass that
     /// books its next wake-up as it runs.
@@ -397,8 +422,8 @@ mod tests {
         h.issue_dir = Some(told.clone());
         fake.told = Some(told.clone());
         let line = Line::new(0.0);
-        line.issue(Pass::repo("sam/r"), 9, -100.0);
-        line.issue(Pass::repo("Sam/R"), 7, -100.0);
+        line.told(Pass::repo("sam/r"), vec![Told::Issue(9)], -100.0, false);
+        line.told(Pass::repo("Sam/R"), vec![Told::Issue(7)], -100.0, false);
         serve("autoland", &h, &line, &fake, true, || {});
         assert!(!told.join("sam-r").exists());
         fs::write(told.join("sam-r"), "3\n").unwrap();

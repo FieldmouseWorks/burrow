@@ -4,10 +4,19 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use crate::told::Told;
+
 /// POST to URL (`http://HOST:PORT/kick/HANDLER[/OWNER/REPO]`, the kick
 /// port's), with nothing in the body: the handler's pass over that repo, or
 /// its full pass. Ok once burrow-events took it; otherwise why not.
 pub fn kick(url: &str, timeout: Duration) -> Result<(), String> {
+    told(url, &[], timeout)
+}
+
+/// kick, telling the repo's pass what it's about (told.rs), for a handler
+/// told that.
+pub fn told(url: &str, about: &[Told], timeout: Duration) -> Result<(), String> {
+    let body: String = about.iter().map(|t| format!("{t}\n")).collect();
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| format!("{url} isn't an http:// URL"))?;
@@ -27,7 +36,8 @@ pub fn kick(url: &str, timeout: Duration) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     s.write_all(
         format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
         )
         .as_bytes(),
     )
@@ -53,8 +63,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::kick;
+    use super::{kick, told};
     use crate::http::listen;
+    use crate::told::Told;
 
     // A kick the port takes is Ok; one it turns away, or no port at all,
     // says why.
@@ -65,7 +76,11 @@ mod tests {
         let (port, _) = listen(
             0,
             Arc::new(move |req| {
-                seen.lock().unwrap().push(req.target.clone());
+                seen.lock().unwrap().push(format!(
+                    "{}{}",
+                    req.target,
+                    String::from_utf8_lossy(&req.body)
+                ));
                 if req.target == "/kick/nope" { 404 } else { 202 }
             }),
         )
@@ -79,7 +94,22 @@ mod tests {
             kick(&format!("http://127.0.0.1:{port}/kick/nope"), t),
             Err("HTTP 404".into())
         );
-        assert_eq!(*got.lock().unwrap(), ["/kick/autoland/sam/r", "/kick/nope"]);
+        assert_eq!(
+            told(
+                &format!("http://127.0.0.1:{port}/kick/autoland/sam/r"),
+                &[Told::Pr(4), Told::Branch("fix".into())],
+                t
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            *got.lock().unwrap(),
+            [
+                "/kick/autoland/sam/r",
+                "/kick/nope",
+                "/kick/autoland/sam/rpr 4\nbranch fix\n"
+            ]
+        );
         let closed = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()

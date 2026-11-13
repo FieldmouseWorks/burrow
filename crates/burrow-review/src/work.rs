@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use burrow_events::told::Told;
 use serde_json::{Value, json};
 
 use crate::queue::{self, Item};
@@ -105,8 +106,14 @@ pub fn review(s: &Service, name: &str) {
     }
     let _ = fs::remove_file(&path);
     if let Some(repo) = tag(&raw, "repo").as_str() {
+        // Told its PR: one that goes first is seen to ahead of the rest.
         let url = format!("{}/{repo}", s.cfg.kick);
-        if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
+        let about: Vec<Told> = tag(&raw, "number")
+            .as_u64()
+            .map(Told::Pr)
+            .into_iter()
+            .collect();
+        if let Err(e) = burrow_events::kick::told(&url, &about, Duration::from_secs(5)) {
             s.say(&format!("couldn't kick {url}: {e}"));
         }
     }

@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::handler::Handler;
 use crate::http::{Request, signed};
 use crate::line::{DEBOUNCE, Line, Pass};
+use crate::told::Told;
 use burrow_github::repo_name;
 
 use crate::now;
@@ -41,8 +42,13 @@ pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request)
     }
     for (name, h) in handlers.iter() {
         if h.takes(event, &payload) {
-            match h.issue(event, &payload) {
-                Some(n) => lines[name].issue(h.place(repo), n, now()),
+            let only_first = h.first_only.iter().any(|e| e == event);
+            match h.told(event, &payload) {
+                Some(told) => {
+                    lines[name].told(h.place(repo), told, now(), only_first);
+                }
+                // One that counts only for a first PR is about none.
+                None if only_first => {}
                 None => lines[name].event(h.place(repo), now()),
             }
         }
@@ -51,7 +57,10 @@ pub fn delivery(handlers: &Handlers, lines: &Lines, secret: &str, req: &Request)
 }
 
 /// POST /kick/HANDLER[/OWNER/REPO], from this machine. A repo the handler
-/// doesn't take (`repos`) is no kick.
+/// doesn't take (`repos`) is no kick. A body, told.rs's lines, tells the
+/// repo's pass what the kick is about, as an event about them would (a
+/// review back for a PR, a pass that couldn't start putting its own back):
+/// for a handler told that, and nothing else.
 pub fn kick(handlers: &Handlers, lines: &Lines, req: &Request) -> u16 {
     let path = req.target.split('?').next().unwrap_or("");
     let parts: Vec<&str> = path.split('/').collect();
@@ -61,7 +70,23 @@ pub fn kick(handlers: &Handlers, lines: &Lines, req: &Request) -> u16 {
     }
     let h = &handlers[parts[2]];
     let repo = parts[3..].join("/");
-    if repo.is_empty() {
+    let Ok(body) = std::str::from_utf8(&req.body) else {
+        return 400;
+    };
+    let told: Option<Vec<Told>> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| Told::parse(l).filter(|t| h.accepts(t)))
+        .collect();
+    let Some(told) = told else {
+        return 400;
+    };
+    if !told.is_empty() {
+        if !(repo_name(&repo) && h.covers(&repo)) {
+            return if repo.is_empty() { 400 } else { 404 };
+        }
+        lines[parts[2]].told(h.place(&repo), told, now(), false);
+    } else if repo.is_empty() {
         // Due at once: nothing follows a full pass's kick to wait for.
         lines[parts[2]].event(Pass::Full, now() - DEBOUNCE);
     } else if repo_name(&repo) && h.covers(&repo) {
@@ -83,7 +108,8 @@ mod tests {
     use crate::handler::{Handler, Pushes};
     use crate::http::listen;
     use crate::http::tests::{post, sign};
-    use crate::line::{Line, Pass};
+    use crate::line::{Line, Pass, Scope};
+    use crate::told::{First, Told};
 
     fn setup() -> (Handlers, Lines, u16, u16) {
         let h = |events: &[&str], unit: &str| Handler {
@@ -226,8 +252,8 @@ mod tests {
         assert_eq!(signed_delivery(hooks, issue(9), "issues"), 202);
         assert_eq!(due(&lines, "inbox"), repos(&[]));
         assert_eq!(
-            lines["inbox"].issues()[&Pass::repo("sam/r")].1,
-            BTreeSet::from([7, 9])
+            lines["inbox"].told_now()[&Pass::repo("sam/r")].1,
+            BTreeSet::from([Told::Issue(7), Told::Issue(9)])
         );
         let pr = json!({"repository": {"full_name": "sam/r"}});
         assert_eq!(signed_delivery(hooks, pr, "pull_request"), 202);
@@ -322,5 +348,205 @@ mod tests {
             ),
             404
         );
+    }
+
+    /// The steward as modules/autoland.nix has it: told PRs, with its first
+    /// PRs listed, and check runs only for those.
+    fn steward() -> (Handlers, Lines, u16, u16) {
+        let handlers: Handlers = Arc::new(BTreeMap::from([(
+            "autoland".into(),
+            Handler {
+                events: [
+                    "push",
+                    "pull_request",
+                    "pull_request_review",
+                    "pull_request_review_comment",
+                    "pull_request_review_thread",
+                    "issue_comment",
+                    "check_suite",
+                    "check_run",
+                    "status",
+                    "repository",
+                ]
+                .map(String::from)
+                .to_vec(),
+                unit: "autoland".into(),
+                per_repo: true,
+                pr_dir: Some("/run/burrow-events/autoland".into()),
+                firsts: Some("/nowhere".into()),
+                first_only: vec!["check_run".into()],
+                ..Handler::default()
+            },
+        )]));
+        let lines: Lines = Arc::new(BTreeMap::from([("autoland".into(), Line::default())]));
+        lines["autoland"].firsts(BTreeMap::from([(
+            "sam/r".into(),
+            vec![First {
+                number: 4,
+                branch: Some("fix".into()),
+                head: Some("abcdef1".into()),
+            }],
+        )]));
+        let (hs, ls) = (handlers.clone(), lines.clone());
+        let (hooks, _) = listen(
+            0,
+            Arc::new(move |req| delivery(&hs, &ls, "hook-secret", req)),
+        )
+        .unwrap();
+        let (hs, ls) = (handlers.clone(), lines.clone());
+        let (kicks, _) = listen(0, Arc::new(move |req| kick(&hs, &ls, req))).unwrap();
+        (handlers, lines, hooks, kicks)
+    }
+
+    // Each event the steward takes about a first PR (a push to its branch,
+    // its own events, a review, a comment, its checks and statuses, a
+    // label) starts that PR's pass ahead of every other, told what it's
+    // about; one about an ordinary PR waits its turn, told the same; one
+    // about no PR is a look at everything. Check runs count only for a
+    // first PR. Two of the same are one.
+    #[test]
+    fn steward_events() {
+        let (_h, lines, hooks, _k) = steward();
+        let pr = json!({"repository": {"full_name": "sam/r", "default_branch": "main"}});
+        let with = |extra: serde_json::Value| {
+            let mut p = pr.clone();
+            p.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            p
+        };
+        let first = [
+            (
+                "push",
+                with(json!({"ref": "refs/heads/fix"})),
+                Told::Branch("fix".into()),
+            ),
+            (
+                "pull_request",
+                with(
+                    json!({"action": "labeled", "label": {"name": "hold"}, "pull_request": {"number": 4}}),
+                ),
+                Told::Pr(4),
+            ),
+            (
+                "pull_request_review",
+                with(json!({"pull_request": {"number": 4}})),
+                Told::Pr(4),
+            ),
+            (
+                "pull_request_review_comment",
+                with(json!({"pull_request": {"number": 4}})),
+                Told::Pr(4),
+            ),
+            (
+                "pull_request_review_thread",
+                with(json!({"pull_request": {"number": 4}})),
+                Told::Pr(4),
+            ),
+            (
+                "issue_comment",
+                with(json!({"issue": {"number": 4, "pull_request": {}}})),
+                Told::Pr(4),
+            ),
+            (
+                "check_suite",
+                with(
+                    json!({"check_suite": {"pull_requests": [], "head_branch": "fix", "head_sha": "abcdef1"}}),
+                ),
+                Told::Branch("fix".into()),
+            ),
+            (
+                "check_run",
+                with(
+                    json!({"action": "completed", "check_run": {"pull_requests": [], "head_sha": "abcdef1", "check_suite": {"head_branch": null}}}),
+                ),
+                Told::Commit("abcdef1".into()),
+            ),
+            (
+                "status",
+                with(json!({"sha": "abcdef1", "context": "ci"})),
+                Told::Commit("abcdef1".into()),
+            ),
+        ];
+        for (i, (event, payload, want)) in first.into_iter().enumerate() {
+            lines["autoland"].clear();
+            assert_eq!(signed_delivery(hooks, payload.clone(), event), 202);
+            assert_eq!(signed_delivery(hooks, payload, event), 202);
+            let other =
+                json!({"repository": {"full_name": "sam/q"}, "pull_request": {"number": 9}});
+            assert_eq!(signed_delivery(hooks, other, "pull_request_review"), 202);
+            let at = crate::now() + 10.0 + 30.0 * i as f64;
+            assert_eq!(
+                lines["autoland"].take(at).0,
+                vec![(Pass::repo("sam/r"), Scope::Told([want].into()))],
+                "{event}"
+            );
+            assert_eq!(
+                lines["autoland"].take(at).0,
+                vec![(Pass::repo("sam/q"), Scope::Told([Told::Pr(9)].into()))],
+                "{event}"
+            );
+        }
+        // An ordinary PR's: told, but no first; its check runs, nothing.
+        lines["autoland"].clear();
+        let run = with(
+            json!({"action": "completed", "check_run": {"pull_requests": [], "head_sha": "1234567", "check_suite": {"head_branch": "other"}}}),
+        );
+        assert_eq!(signed_delivery(hooks, run, "check_run"), 202);
+        let started = with(
+            json!({"action": "created", "check_run": {"pull_requests": [], "head_sha": "abcdef1", "check_suite": {"head_branch": "fix"}}}),
+        );
+        assert_eq!(signed_delivery(hooks, started, "check_run"), 202);
+        assert!(lines["autoland"].told_now().is_empty() && lines["autoland"].due().is_empty());
+        let other = with(json!({"pull_request": {"number": 9}}));
+        assert_eq!(signed_delivery(hooks, other, "pull_request_review"), 202);
+        assert_eq!(
+            lines["autoland"].told_now()[&Pass::repo("sam/r")].1,
+            BTreeSet::from([Told::Pr(9)])
+        );
+        // The repo's own event, or a push to its default branch: everything.
+        lines["autoland"].clear();
+        assert_eq!(
+            signed_delivery(hooks, with(json!({"ref": "refs/heads/main"})), "push"),
+            202
+        );
+        assert_eq!(due(&lines, "autoland"), repos(&["sam/r"]));
+    }
+
+    // A kick may tell a repo's pass what it's about, in told.rs's lines,
+    // for a handler told that: a review back for a first PR goes first;
+    // a line it can't be told, or a full pass's kick with lines, is turned
+    // away and books nothing.
+    #[test]
+    fn told_kicks() {
+        let (_h, lines, _d, kicks) = steward();
+        assert_eq!(post(kicks, "/kick/autoland/sam/r", b"pr 4\n", &[]), 202);
+        assert_eq!(
+            lines["autoland"].told_now()[&Pass::repo("sam/r")].1,
+            BTreeSet::from([Told::Pr(4)])
+        );
+        assert!(due(&lines, "autoland").is_empty());
+        for (path, body) in [
+            ("/kick/autoland/sam/r", &b"7\n"[..]),
+            ("/kick/autoland/sam/r", b"pr x\n"),
+            ("/kick/autoland", b"pr 4\n"),
+            ("/kick/autoland/sam/r", b"\xff"),
+        ] {
+            lines["autoland"].clear();
+            assert_eq!(post(kicks, path, body, &[]), 400, "{body:?}");
+            assert!(lines["autoland"].told_now().is_empty() && due(&lines, "autoland").is_empty());
+        }
+        // An empty body is the kick it always was.
+        assert_eq!(post(kicks, "/kick/autoland/sam/r", b"\n", &[]), 202);
+        assert_eq!(due(&lines, "autoland"), repos(&["sam/r"]));
+        // The inbox is told issues by kick too, and nothing else.
+        let (_h, lines, _d, kicks) = setup();
+        assert_eq!(post(kicks, "/kick/inbox/sam/r", b"7\n", &[]), 202);
+        assert_eq!(
+            lines["inbox"].told_now()[&Pass::repo("sam/r")].1,
+            BTreeSet::from([Told::Issue(7)])
+        );
+        assert_eq!(post(kicks, "/kick/inbox/sam/r", b"pr 7\n", &[]), 400);
+        assert_eq!(post(kicks, "/kick/autoland/sam/r", b"pr 7\n", &[]), 400);
     }
 }

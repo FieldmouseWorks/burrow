@@ -309,7 +309,11 @@ label, `burrow.autoland.labels.first`) goes ahead of every priority, oldest
 first among them: the drain hands it on even from `later`, `later` doesn't
 park it, its job takes the next free slot of its engine ahead of jobs without
 it (never a running turn's), and the steward puts `first` on the PR that
-closes it, which takes it ahead in the proof-slot line and each pass. Who put
+closes it, which takes it ahead in the proof-slot line and each pass. Its
+PR's own events (a push, a review, a check, a comment, a label) start an
+expedited step of it ahead of every other pass, which a running pass yields
+to, and what's open on it goes to a fix job at once rather than after
+`handoffAfterMinutes` (`modules/autoland/expedite.py`). Who put
 the label on is read from GitHub's labelled event, by account id: one the
 machinery's App or anyone else put on counts for nothing, on the issue or on
 the PR. It changes order only. Triage includes a priority in its verdict and adds it only if no priority

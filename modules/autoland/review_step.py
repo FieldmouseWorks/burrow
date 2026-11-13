@@ -27,12 +27,13 @@ class Looked(NamedTuple):
     unreviewed: bool  # it needs no review round: documentation alone, not R2
 
 
-def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, needed):
+def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, needed, first=False):
     """The reviewers' part of the PR's step this pass. key, st and lost_on
     are its state file's name, its state and the findings its reviewers
     couldn't post; digest and line its listing; age how long its head has
     been seen; after, strike and cleared its step's own (step.py); needed,
-    whether its head needs a review round at all (train.review)."""
+    whether its head needs a review round at all (train.review); first, an
+    author put it first (step.handle's)."""
     rc = repo_cfg(repo)
     head = pr["headRefOid"]
     tag = f"{repo}#{pr['number']}"
@@ -278,8 +279,9 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared, 
         return bool(V.in_queue(key, r, base) or V.answered(key, r) or base in lost_on.get(r, {}))
     # Findings on this head this pass posted are threads it never read: one
     # out now isn't waited for, and past the limit or with no review round
-    # no look follows to cover them, so they hold the pass back.
-    late += [head[:7] for r in found if r not in live or capped or unreviewed]
+    # no look follows to cover them, so they hold the pass back. On a first
+    # PR they're handed on in this same step, not the next pass's.
+    late += [head[:7] for r in found if r not in live or capped or unreviewed or first]
 
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN

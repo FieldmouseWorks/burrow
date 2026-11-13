@@ -239,7 +239,7 @@ S.R.publish = published.append
 S.open_prs = lambda owner, name: (info, [mkpr(), mkpr(number=6, sha="b" * 40, branch="fix", base="release"),
                                          mkpr(number=7, sha="c" * 40, branch="next", base="feat")])
 below = {}
-S.step.handle = lambda repo, pr, info, digest, held, under: below.setdefault(pr["number"], under)
+S.step.handle = lambda repo, pr, info, digest, held, under, first=False: below.setdefault(pr["number"], under)
 
 
 def watch_default(r, *a):

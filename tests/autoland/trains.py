@@ -396,7 +396,7 @@ assert "sam/r: train: #4 merged; #5 out, no longer settled; #6 back in alone, R2
 # Nor is it stepped when a PR in it wasn't seen to at all: it may not be
 # settled any more. One that isn't in it stops nothing.
 kept_handle = S.step.handle
-S.step.handle = lambda *a: (_ for _ in ()).throw(RuntimeError("GitHub said 502"))
+S.step.handle = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("GitHub said 502"))
 assert kicked(show=train([5]))[-1] == SHOW, cn_runs()
 assert kicked(show=train([9], joined=(9,)))[-1] == STEP, cn_runs()
 S.step.handle = kept_handle

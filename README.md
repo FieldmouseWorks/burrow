@@ -285,7 +285,10 @@ Each has an entry below, and each can be imported on its own.
   pushes to the default branch, only the other events about some branches, and
   only the issue events about issues with some titles; one told issues has an
   issue's event's pass look at that issue alone (`issueNumbers`, the inbox's),
-  rather than list every one. A turn ending, a review
+  rather than list every one, and one told PRs (`prTargets`, the steward's)
+  has its pass told which PRs, branches and commits its events were about,
+  those about a PR its passes list as first (`firsts`) ahead of every other
+  pass. A turn ending, a review
   coming back and the passes' own wake-ups (a settle delay, a reviewer's
   timeout) kick them locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never

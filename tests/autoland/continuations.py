@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory() as tmp:
         prs = [pr(1), pr(2)]
         info = {'defaultBranchRef': {'name': 'main', 'target': {'oid': 'base'}}}
 
-        def handle(repo, p, info, mine, held, under):
+        def handle(repo, p, info, mine, held, under, first=False):
             handled.append((p['number'], facts['local'], under))
             clock[0] += 1
 
@@ -99,8 +99,8 @@ with tempfile.TemporaryDirectory() as tmp:
         C.save('wake.json', {'sam/a': C.NOW - 50, 'sam/b': C.NOW - 40, '': C.NOW - 30})
         original = S.step.handle
 
-        def long(*args):
-            original(*args)
+        def long(*args, **kw):
+            original(*args, **kw)
             clock[0] += 9 * 60
 
         with patch.object(S.step, 'handle', long):
@@ -127,8 +127,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 prs[1]['headRefName'] = 'main'
             original = S.step.handle
 
-            def long(*args):
-                original(*args)
+            def long(*args, **kw):
+                original(*args, **kw)
                 clock[0] += 9 * 60
 
             with patch.object(S.step, 'handle', long):
@@ -149,8 +149,8 @@ with tempfile.TemporaryDirectory() as tmp:
         batch.end(False, ['sam/r'])
         original = S.step.handle
 
-        def long(*args):
-            original(*args)
+        def long(*args, **kw):
+            original(*args, **kw)
             clock[0] += 9 * 60
 
         with patch.object(S.step, 'handle', long):
@@ -193,8 +193,8 @@ with tempfile.TemporaryDirectory() as tmp:
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             original = S.step.handle
 
-            def long(*args):
-                original(*args)
+            def long(*args, **kw):
+                original(*args, **kw)
                 clock[0] += 9 * 60
 
             with patch.object(S.step, 'handle', long):
@@ -227,8 +227,8 @@ with tempfile.TemporaryDirectory() as tmp:
         operations = []
         original = S.step.handle
 
-        def long(*args):
-            original(*args)
+        def long(*args, **kw):
+            original(*args, **kw)
             clock[0] += 9 * 60
 
         with patch.object(S.T, 'step', operations.append):
@@ -244,8 +244,8 @@ with tempfile.TemporaryDirectory() as tmp:
         repos[:] = [{'repo': 'sam/r', 'default': 'main'}, {'repo': 'sam/s', 'default': 'main'}]
         original = S.step.handle
 
-        def long(*args):
-            original(*args)
+        def long(*args, **kw):
+            original(*args, **kw)
             clock[0] += 9 * 60
 
         with patch.object(S.step, 'handle', long):
@@ -317,7 +317,7 @@ with tempfile.TemporaryDirectory() as tmp:
         kicks = []
         for argv, endpoint in ((['steward', 'kick', 'sam/r'], '/autoland/sam/r'),
                                (['steward', 'continue', 'sam/r'], '/autoland-continue/sam/r')):
-            with patch.object(sys, 'argv', argv), patch.object(S.fcntl, 'flock', side_effect=BlockingIOError), patch.object(C, 'poke', kicks.append):
+            with patch.object(sys, 'argv', argv), patch.object(S.fcntl, 'flock', side_effect=BlockingIOError), patch.object(C, 'poke', lambda url, body=b'': kicks.append(url)):
                 S.main()
             assert kicks[-1].endswith(endpoint), kicks
         assert not (state / 'wake.json').exists()
@@ -358,8 +358,8 @@ with tempfile.TemporaryDirectory() as tmp:
         repos.append({'repo': 'Sam/S', 'default': 'main'})
         original = S.step.handle
 
-        def slow_repo(*args):
-            original(*args)
+        def slow_repo(*args, **kw):
+            original(*args, **kw)
             clock[0] += 9 * 60
 
         with patch.object(S.step, 'handle', slow_repo):
@@ -399,8 +399,8 @@ with tempfile.TemporaryDirectory() as tmp:
                         S.run_pass(['sam/r'])
                     C.WAKE.clear()
                     if mid_traversal:
-                        def retry_one(*args):
-                            original(*args)
+                        def retry_one(*args, **kw):
+                            original(*args, **kw)
                             clock[0] += 9 * 60
 
                         with patch.object(S.step, 'handle', retry_one):

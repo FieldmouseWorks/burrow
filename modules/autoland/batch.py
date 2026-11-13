@@ -12,6 +12,7 @@ import json
 import time
 
 import common as C
+import expedite as X
 
 FILE = "pass-progress.json"
 SECONDS = 8 * C.MIN  # soft work slice, also bounded by C.PASS_SECONDS
@@ -44,6 +45,7 @@ class Batch:
         self.state["retry"] = {k.lower(): v for k, v in self.state.get("retry", {}).items()}
         self.done = set()
         self.left = False  # PRs or repos still unvisited, not only retries
+        self.yielded = False  # to a first PR's pass (expired)
         self.later = None  # when an unavailable operation may be retried
         self.traversal_full = self.state.get("full", False) or (self.full and not continuing)
 
@@ -90,6 +92,13 @@ class Batch:
             if now >= self.until:
                 self.until = min(now + SECONDS, self.hard_until)
             return False
+        # A first PR's pass waits for this one's lock (expedite.py): the rest
+        # of this batch continues after it, from its saved cursor.
+        if X.waiting():
+            if not self.yielded:
+                C.log("a first PR's pass waits: yielding to it")
+            self.yielded = True
+            return True
         return now >= self.until
 
     def retry(self, repo, at):
@@ -165,6 +174,33 @@ class Batch:
         st["unseen"] = sorted(unseen)
         st["wake"] = C.WAKE.get(repo)
         self.advanced = True
+
+    def expedited(self, repo, pr, info, mine, wake, seen_to=True, stopped=None):
+        """An expedited step of the PR (expedite.py), outside any traversal:
+        a repo with a batch under way has its receipt for the PR, so the
+        batch needn't step it again unless it changes, and its digest lines
+        and carried wake-up take in the step's, leaving every other PR's.
+        A repo with none gets none: it owes nothing more."""
+        st = self.state["repos"].get(repo.lower())
+        if st is None:
+            return
+        key = str(pr["number"])
+        st["sequence"] = st.get("sequence", 1) + 1
+        st.setdefault("visits", {})[key] = st["sequence"]
+        st.setdefault("done", {})[key] = self.rev(pr, info)
+        st["digest"] = X.keep(repo, st.get("digest", []), [pr["number"]]) + [
+            list(x) for x in mine if x[1].startswith(X.about(repo, pr["number"]))]
+        if wake:
+            st["wake"] = min(st.get("wake") or wake, wake)
+        st.setdefault("stops", {}).pop(key, None)
+        if stopped:
+            st["stops"][key] = stopped
+        st["unseen"] = sorted(set(st.get("unseen", [])) - {key} | (set() if seen_to else {key}))
+
+    def keep(self):
+        """Save the cursor as it is, its owed repos and continuations
+        untouched: an expedited pass ends nothing of a batch's."""
+        C.save(FILE, self.state)
 
     def finish(self, repo):
         self.advanced = True
