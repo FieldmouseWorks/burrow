@@ -169,25 +169,37 @@ fn lookup_url(url: &str) -> bool {
         return false;
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port))
-            if !host.ends_with(':')
-                && (host.starts_with('[') == host.ends_with(']'))
-                && !port.contains(']') =>
-        {
-            (host, Some(port))
+    // A bracketed IPv6 literal, or a name or IPv4 address with no colon in
+    // it; then maybe `:port`.
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let Some((v6, after)) = inner.split_once(']') else {
+            return false;
+        };
+        if v6.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
         }
-        _ => (authority, None),
+        let port = match after.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if after.is_empty() => None,
+            None => return false,
+        };
+        (&authority[..v6.len() + 2], port)
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
     };
     let port_ok =
         port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()));
     let host_ok = if local {
         matches!(host, "127.0.0.1" | "localhost" | "[::1]")
     } else {
-        !host.is_empty()
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        host.starts_with('[')
+            || !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
     };
     port_ok && host_ok
 }
@@ -441,6 +453,11 @@ mod tests {
             "http://[::1]:9/gate",
             "http://[::1]",
             "https://conary.example:8443/gate?x=1",
+            "https://203.0.113.7/gate",
+            "https://203.0.113.7:8443/gate",
+            "https://[::1]:8443/gate",
+            "https://[2001:db8::7]/gate",
+            "https://[2001:db8::7]:443",
         ] {
             assert!(lookup_url(url), "{url}");
         }
@@ -466,6 +483,15 @@ mod tests {
             "https://conary.example:/gate",
             "https://:443/gate",
             "HTTP://localhost/gate",
+            "http://[2001:db8::7]/gate",
+            "http://[::2]/gate",
+            "https://[not:v6]/gate",
+            "https://[2001:db8::7]x/gate",
+            "https://[2001:db8::7]:/gate",
+            "https://2001:db8::7/gate",
+            "https://[::1%25eth0]/gate",
+            "https://user@[::1]/gate",
+            "https://a.example:1:2/gate",
         ] {
             assert!(!lookup_url(url), "{url}");
         }
