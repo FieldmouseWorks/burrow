@@ -14,7 +14,7 @@ use crate::job::Job;
 use crate::pick::demoted;
 use crate::systemd;
 use crate::turn::start;
-use crate::{Fail, filled, io_fail, now};
+use crate::{Fail, filled, io_fail, now, read};
 
 /// A new job's settings: `proj run`'s flags.
 #[derive(Clone, Debug, Default)]
@@ -403,13 +403,16 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     let write = |name: &str, text: &str| {
         fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
     };
-    write("project", &format!("{project}\n"))?;
-    // The grant preservation reads a project's repository under: a record the
-    // job itself can't write, unlike the file above.
-    crate::ask::ensure(&job).map_err(|e| Fail::new(1, e))?;
-    let granted = crate::ask::host_path(&job, "project");
-    crate::state_reads::write(&granted, format!("{project}\n"))
-        .map_err(|e| io_fail(&granted, e))?;
+    // What every turn of it runs as, kept where the job can't write it.
+    let mut request = crate::job::Request {
+        project: project.clone(),
+        engine: new.engine,
+        role: new.role.clone(),
+        app: new.app.clone(),
+        agent: None,
+        owned: new.owned,
+    };
+    request.save(&job).map_err(|e| Fail::new(1, e))?;
     if new.inbox_issue {
         write("inbox-issue", "true\n")?;
     }
@@ -451,9 +454,6 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
                 .collect::<String>(),
         )?;
     }
-    if let Some(engine) = new.engine {
-        write("engine", engine.name())?;
-    }
     if let Some(t) = &new.limit {
         write("timeout", &format!("{t}\n"))?;
     }
@@ -468,9 +468,6 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             eprintln!("proj: {id} {why}");
         }
     }
-    if new.owned {
-        write("owned", "")?;
-    }
     if new.unstick {
         write("unstick", "")?;
     }
@@ -480,12 +477,6 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     }
     if let Some(t) = &new.since {
         write("since", &format!("{t}\n"))?;
-    }
-    if let Some(a) = &new.app {
-        write("app", &format!("{a}\n"))?;
-    }
-    if let Some(r) = &new.role {
-        write("role", &format!("{r}\n"))?;
     }
     if new.vm {
         let out = File::create(job.path("agent")).map_err(|e| io_fail(&job.path("agent"), e))?;
@@ -497,6 +488,8 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         if !s.success() {
             return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
         }
+        request.agent = read(&job.path("agent")).filter(|a| !a.is_empty());
+        request.save(&job).map_err(|e| Fail::new(1, e))?;
     }
     let given = if let Some(source) = &new.task_source {
         write("task-source", source)?;

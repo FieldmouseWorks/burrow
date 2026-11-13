@@ -57,6 +57,7 @@ impl Box {
     fn over(&self, files: &[&str]) -> bool {
         let job = Job::new(&self.cfg, "j");
         let _ = fs::remove_dir_all(&job.dir);
+        let _ = fs::remove_dir_all(crate::ask::host_path(&job, ""));
         fs::create_dir_all(&job.dir).unwrap();
         for f in files {
             match f.split_once(' ') {
@@ -192,15 +193,15 @@ fn grant(b: &Box, id: &str) {
     grant_to(b, id, b.root.path());
 }
 
-/// The project the host granted job `id` at launch, in its own record.
+/// The project the host granted job `id` at launch, in its request.
 fn grant_to(b: &Box, id: &str, project: &Path) {
     let job = Job::new(&b.cfg, id);
     fs::create_dir_all(&job.dir).unwrap();
-    crate::ask::ensure(&job).unwrap();
-    crate::state_reads::write(
-        crate::ask::host_path(&job, "project"),
-        format!("{}\n", project.display()),
-    )
+    crate::job::Request {
+        project: project.display().to_string(),
+        ..Default::default()
+    }
+    .save(&job)
     .unwrap();
 }
 
@@ -269,7 +270,6 @@ fn unfinished(b: &Box) -> PathBuf {
     fs::create_dir_all(&job.dir).unwrap();
     fs::write(job.path("turns"), "1\n").unwrap();
     fs::write(job.turn("1", "stopped"), "").unwrap();
-    fs::write(job.path("project"), format!("{}\n", repo.display())).unwrap();
     grant_to(b, "u", &repo);
     wt
 }
@@ -718,6 +718,12 @@ fn a_project_the_job_names_itself_grants_nothing() {
     // The job widens its own record to everything.
     fs::write(job.path("project"), "/\n").unwrap();
     assert!(keep_err(&b).contains("outside the job's granted paths"));
+    // With no request on the host at all, what the job wrote isn't adopted
+    // as one, not even a project of the machine's.
+    fs::remove_file(crate::ask::host_path(&job, "request")).unwrap();
+    fs::write(job.path("project"), format!("{}\n", other.display())).unwrap();
+    assert!(keep_err(&b).contains("outside the job's granted paths"));
+    assert!(!crate::ask::host_path(&job, "request").exists());
     // A host record outside the machine's projects is no grant either.
     let mut elsewhere = Box::new();
     elsewhere.cfg.projects = elsewhere.path("only-here");

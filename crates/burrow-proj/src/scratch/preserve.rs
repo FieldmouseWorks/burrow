@@ -119,11 +119,11 @@ impl Grants {
                 .canonicalize()
                 .map_err(|e| format!("{}: {e}", scratch.display()))?,
         ];
-        // The project granted at launch, from the host's own record: the job
-        // writes its own state, so what it says of its project grants nothing.
-        // It must also be one of the machine's projects.
-        if let Ok(bytes) = crate::state_reads::bytes(&crate::ask::host_path(job, "project"))
-            && let Ok(p) = Path::new(String::from_utf8_lossy(&bytes).trim()).canonicalize()
+        // The project granted at launch, from the job's request on the host:
+        // the job writes its own state, so what it says of its project grants
+        // nothing. It must also be one of the machine's projects.
+        if let Some(request) = crate::job::Request::recorded(job)
+            && let Ok(p) = Path::new(request.project.trim()).canonicalize()
             && let Ok(all) = job.cfg.projects.canonicalize()
             && p.starts_with(&all)
         {
