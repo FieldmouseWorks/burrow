@@ -106,6 +106,7 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             told()
         },
         drain_at: None,
+        skipped: Vec::new(),
     };
     // `drain`: the drain's own pass, from the saved ready lists alone.
     let result = if only == "drain" {
@@ -265,6 +266,10 @@ struct Pass<'a> {
     /// When the drain's own pass is wanted, as this pass works out
     /// (drain.rs): written to the drain's wake file as it ends.
     drain_at: Option<i64>,
+    /// Repos this pass looked at in part, leaving the listing of every
+    /// open issue to a later pass (scope.rs): it says nothing of whether
+    /// that listing reaches GitHub again.
+    skipped: Vec<String>,
 }
 
 impl Pass<'_> {
@@ -654,6 +659,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                     None => {
                         if let Some(due) = self.listing_due(&repo) {
                             self.book(&repo, due);
+                            self.skipped.push(repo.clone());
                             continue;
                         }
                         let Some(all) = self.list_all(&repo)? else {
@@ -743,18 +749,24 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         swap(wake, &format!("{text}\n")).map_err(|e| io_fail(wake, e))?;
         self.wake_drain(now)?;
 
-        // Since when each repo has been out of reach, until a pass reaches it
-        // again in full: a scoped success hasn't verified the failed work.
+        // Since when each repo has been out of reach (the drain's misses
+        // too, whatever pass it ran in), until a pass reaches it again in
+        // full: a scoped success, or a pass that left the listing to a later
+        // one, hasn't verified the failed work.
         let gone = self.inbox.state.join(".unreached");
         fs::create_dir_all(&gone).map_err(|e| io_fail(&gone, e))?;
-        for repo in &self.looked {
+        for repo in &self.unreached {
             let f = gone.join(key(repo));
-            if self.unreached.contains(repo) {
-                if !f.exists() {
-                    fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
-                }
-            } else if self.scope.is_none() {
-                let _ = fs::remove_file(&f);
+            if !f.exists() {
+                fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
+            }
+        }
+        for repo in &self.looked {
+            if self.scope.is_none()
+                && !self.unreached.contains(repo)
+                && !self.skipped.contains(repo)
+            {
+                let _ = fs::remove_file(gone.join(key(repo)));
             }
         }
         let left = || -> Vec<(String, PathBuf)> {

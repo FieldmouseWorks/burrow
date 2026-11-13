@@ -51,6 +51,7 @@ fn pass(cfg: &Config) -> Pass<'_> {
         observe: false,
         scope: None,
         drain_at: None,
+        skipped: Vec::new(),
     }
 }
 

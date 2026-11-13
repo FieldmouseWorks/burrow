@@ -107,20 +107,19 @@ impl Pass<'_> {
             .map(|at| at + LISTING_GAP)
     }
 
-    /// Every open issue of the repo, listed, the listing's time kept for
-    /// [`Pass::listing_due`]; None when GitHub can't be asked.
+    /// Every open issue of the repo, listed; None when GitHub can't be
+    /// asked. The attempt's time is kept for [`Pass::listing_due`] before
+    /// the first page is asked for, so one that fails, on any page, holds
+    /// the next off for the gap as well.
     pub(super) fn list_all(&self, repo: &str) -> Result<Option<Vec<Value>>, Fail> {
-        let Some(all) = every(
-            self.cfg,
-            &format!("repos/{repo}/issues?state=open&per_page=100"),
-        ) else {
-            return Ok(None);
-        };
         let dir = self.inbox.state.join(LISTED);
         fs::create_dir_all(&dir).map_err(|e| io_fail(&dir, e))?;
         let f = dir.join(key(repo));
         fs::write(&f, format!("{}\n", now())).map_err(|e| io_fail(&f, e))?;
-        Ok(Some(all))
+        Ok(every(
+            self.cfg,
+            &format!("repos/{repo}/issues?state=open&per_page=100"),
+        ))
     }
 
     /// Whether this pass looks at issue `n`: it's in the scope, or the pass

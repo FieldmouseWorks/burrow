@@ -170,3 +170,71 @@ fn no_room_asks_nothing() {
         b.log()
     );
 }
+
+// A listing that fails holds the next off for the gap too, so an outage
+// isn't asked about again on every kick; the ready list it had stays.
+#[test]
+fn a_failed_listing_holds_the_next_off_too() {
+    let mut b = Box::new();
+    b.cfg.notify = None;
+    fs::write(b.path("repos_sam_box_issues"), "[]").unwrap();
+    b.pass()
+        .note_ready("sam/box", &[found(7, &["ready"])])
+        .unwrap();
+    on_github(&b, &found(7, &["ready"]));
+    fs::write(b.path("fail"), "issues?state=open\n").unwrap();
+    for _ in 0..3 {
+        let mut p = b.pass();
+        p.run("sam/box").unwrap();
+        p.finish("sam/box").unwrap();
+    }
+    assert_eq!(listings(&b), 1, "{}", b.log());
+    let state = &b.cfg.inbox.as_ref().unwrap().state;
+    let list = fs::read_to_string(state.join(".ready/sam_box")).unwrap();
+    assert!(list.contains("\"number\":7"), "{list}");
+}
+
+// A repo out of reach stays so, its first miss's time kept, until a pass
+// lists it again in full: not one that left the listing to a later pass.
+// The drain's own pass's misses count too.
+#[test]
+fn only_a_full_look_says_a_repo_is_reached_again() {
+    let mut b = Box::new();
+    b.cfg.notify = None;
+    let state = b.cfg.inbox.as_ref().unwrap().state.clone();
+    let marker = state.join(".unreached/sam_box");
+    fs::write(b.path("repos_sam_box_issues"), "[]").unwrap();
+    fs::write(b.path("fail"), "issues?state=open\n").unwrap();
+    let mut p = b.pass();
+    p.run("sam/box").unwrap();
+    p.finish("sam/box").unwrap();
+    let since = fs::read_to_string(&marker).unwrap();
+
+    fs::write(b.path("fail"), "").unwrap();
+    let mut p = b.pass();
+    p.run("sam/box").unwrap();
+    p.finish("sam/box").unwrap();
+    assert_eq!(p.skipped, ["sam/box"]);
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        since,
+        "listing left for later"
+    );
+
+    let long_ago = format!("{}\n", now() - LISTING_GAP);
+    fs::write(state.join(LISTED).join("sam_box"), &long_ago).unwrap();
+    let mut p = b.pass();
+    p.run("sam/box").unwrap();
+    p.finish("sam/box").unwrap();
+    assert!(!marker.exists(), "listed in full");
+
+    // The drain's own pass, GitHub not saying about its pick.
+    b.pass()
+        .note_ready("sam/box", &[found(7, &["ready"])])
+        .unwrap();
+    fs::write(b.path("fail"), "repos/sam/box/issues/7\n").unwrap();
+    let mut p = b.pass();
+    p.drain_once().unwrap();
+    p.finish("drain").unwrap();
+    assert!(marker.exists(), "{}", b.log());
+}

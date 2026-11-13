@@ -156,6 +156,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
             observe: false,
             scope: None,
             drain_at: None,
+            skipped: Vec::new(),
         }
     }
 
