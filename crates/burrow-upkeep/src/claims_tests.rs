@@ -18,7 +18,7 @@ fn handing() -> Handing {
         body: "Does it.".into(),
         at: 1_793_558_866.0,
         looked: BTreeMap::new(),
-        taken: None,
+        taken: Vec::new(),
         posted: None,
         waits: false,
         resumes: false,
@@ -494,7 +494,7 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
     assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
     // What went up resumes it: still at work, for the steward.
     let kept = &s.answering["job-1"];
-    assert!(kept.taken.is_some() && kept.head == HANDED);
+    assert!(kept.taken.len() == 1 && kept.head == HANDED);
     assert!(kept.waits && kept.resumes && kept.posted == Some(1));
     // The same answers, looked at again: nothing asked, nothing posted.
     let mut hub = Hub::default();
@@ -560,6 +560,147 @@ fn each_turn_awaiting_its_own_pr_has_its_new_answers_posted_once() {
     assert_eq!(s.answered[0].outcome, "posted", "{:?}", s.answered);
     assert_eq!(writes(&hub), ["POST repos/sam/r/issues/5/comments"]);
     assert!(s.answering.is_empty());
+}
+
+// Every answers file taken stays taken: A, then B, then A again is not A
+// replayed over B's newer description.
+#[test]
+fn an_answers_file_taken_earlier_is_never_replayed_after_another() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = jobs.path().join("job-1");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+    let mut l = at(HANDED, jobs.path(), true);
+    let write = |n: u32, d: &str| {
+        std::fs::write(dir.join("turns"), n.to_string()).unwrap();
+        std::fs::write(
+            dir.join("answers.json"),
+            json!({"pushed": null, "threads": [], "description": d}).to_string(),
+        )
+        .unwrap();
+    };
+    let step = |l: &mut Look, hub: &mut Hub| {
+        let (s, _) = seen(hub, "done", l);
+        l.answering = s.answering.clone();
+        s
+    };
+    write(1, "A");
+    let s = step(&mut l, &mut github(HANDED, "Does it.", json!([])));
+    assert_eq!(s.answered.len(), 1);
+    write(2, "B");
+    let s = step(&mut l, &mut github(HANDED, "A", json!([])));
+    assert_eq!(s.answered.len(), 1);
+    write(3, "A");
+    let mut hub = Hub::default();
+    let s = step(&mut l, &mut hub);
+    assert!(s.answered.is_empty() && hub.asked.is_empty(), "{s:?}");
+    assert_eq!(s.answering["job-1"].taken.len(), 2);
+}
+
+// A description is no news to proj (github.rs's fingerprint), an empty
+// answer or one whose comment is already up writes nothing: none of them
+// reserves the branch as resuming.
+#[test]
+fn only_a_new_comment_makes_a_job_resume() {
+    for (answers, comments, resumes) in [
+        (
+            json!({"pushed": null, "description": "New."}),
+            json!([]),
+            false,
+        ),
+        (json!({"pushed": null}), json!([]), false),
+        (
+            json!({"pushed": null, "comment": "Hm."}),
+            json!([{"user": {"login": "steward[bot]"}, "body": "**Claude job**\n\nHm."}]),
+            false,
+        ),
+        (json!({"pushed": null, "comment": "Hm."}), json!([]), true),
+    ] {
+        let jobs = tempfile::tempdir().unwrap();
+        let dir = jobs.path().join("job-1");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+        std::fs::write(dir.join("turns"), "1").unwrap();
+        std::fs::write(dir.join("answers.json"), answers.to_string()).unwrap();
+        let mut hub = github(HANDED, "Does it.", json!([]));
+        hub.on(
+            "GET",
+            "repos/sam/r/issues/5/comments?",
+            reply(200, comments),
+        );
+        let (s, _) = seen(&mut hub, "done", &at(HANDED, jobs.path(), true));
+        let kept = &s.answering["job-1"];
+        assert!(kept.waits, "{answers}");
+        assert_eq!(kept.resumes, resumes, "{answers}");
+    }
+}
+
+// Turns that finished between two passes each keep the answers they left
+// (proj's N.answers), taken in order, each on the claim the one before left.
+#[test]
+fn answers_of_each_finished_turn_are_taken_in_order() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = jobs.path().join("job-1");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    std::fs::write(
+        dir.join("1.answers"),
+        json!({"pushed": null, "comment": "Blocked."}).to_string(),
+    )
+    .unwrap();
+    // Turn 2 overwrote answers.json: its own is all there is of it.
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": null, "description": "Second."}).to_string(),
+    )
+    .unwrap();
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    let (s, _) = seen(&mut hub, "done", &at(HANDED, jobs.path(), true));
+    assert_eq!(s.answered.len(), 2, "{s:?}");
+    assert_eq!(
+        writes(&hub),
+        [
+            "POST repos/sam/r/issues/5/comments",
+            "PATCH repos/sam/r/pulls/5"
+        ]
+    );
+    assert_eq!(s.answering["job-1"].taken.len(), 2);
+}
+
+// A fix kept in a later turn's file, its thread resolved by an earlier
+// turn's post, isn't a fix claimed with no new commit; on a thread still
+// open, it is.
+#[test]
+fn a_later_turn_keeps_the_fixes_already_posted() {
+    let kept = |resolved: bool| {
+        let jobs = tempfile::tempdir().unwrap();
+        let dir = jobs.path().join("job-1");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+        std::fs::write(dir.join("turns"), "2").unwrap();
+        std::fs::write(
+            dir.join("answers.json"),
+            json!({"pushed": PUSHED, "threads": [{"id": "T1", "fixed": true, "reply": "Fixed."}],
+                   "comment": "Also this."})
+            .to_string(),
+        )
+        .unwrap();
+        let open = json!([{"id": "T1", "isResolved": resolved, "comments": {"nodes": [{"body": "**Codex · P1** x"}]}}]);
+        let mut hub = github(PUSHED, "Does it.", open);
+        let mut l = at(PUSHED, jobs.path(), true);
+        l.answering.get_mut("job-1").unwrap().head = PUSHED.into();
+        let (s, _) = seen(&mut hub, "done", &l);
+        (s.answered[0].outcome, writes(&hub))
+    };
+    assert_eq!(
+        kept(true),
+        (
+            "posted",
+            vec!["POST repos/sam/r/issues/5/comments".to_string()]
+        )
+    );
+    assert_eq!(kept(false), ("wrong", vec![]));
 }
 
 // Between turns, a job awaiting its own PR is still at work on the branch:

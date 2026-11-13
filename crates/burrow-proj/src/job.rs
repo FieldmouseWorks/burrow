@@ -17,7 +17,8 @@
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
 //! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
 //! one of its commands waits in line for), `N.waits` (where they say so),
-//! `N.cut` (what it was told when its answer was cut short), and `N.late`,
+//! `N.cut` (what it was told when its answer was cut short), `N.answers`
+//! (the job's answers.json as the turn left it, if there was one), and `N.late`,
 //! `N.quiet` and `N.stopped` (what stopped it). And `await` (each PR or
 //! issue an ended turn awaits: TARGET, since, its fingerprint then, a tab
 //! apart), with the running turn's own in `await.next` and `end.next`.

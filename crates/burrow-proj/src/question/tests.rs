@@ -74,6 +74,19 @@ esac
 }
 
 #[test]
+fn a_turn_keeps_the_answers_file_as_it_left_it() {
+    let f = Fixture::new();
+    f.ending(1, "ask");
+    fs::write(f.job().path("answers.json"), "first").unwrap();
+    crate::cmd::finish(&f.cfg, "j1").unwrap();
+    fs::write(f.job().path("answers.json"), "second").unwrap();
+    assert_eq!(
+        fs::read_to_string(f.job().turn("1", "answers")).unwrap(),
+        "first"
+    );
+}
+
+#[test]
 fn notifications_disabled_do_not_add_watcher_kicks() {
     use std::sync::{Arc, Mutex};
     let mut f = Fixture::new();

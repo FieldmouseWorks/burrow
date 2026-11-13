@@ -79,6 +79,9 @@ pub enum Posted {
 pub struct Took {
     pub head: String,
     pub description: Option<String>,
+    /// A new comment went up on the PR: the one write of theirs proj's
+    /// fingerprint sees (github.rs), so the one that wakes a job awaiting it.
+    pub woke: bool,
 }
 
 /// Why nothing (more) went up.
@@ -129,7 +132,7 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// The answers file, or why it won't do.
-fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
+fn read(text: &str) -> Result<Answers, Unposted> {
     let a: Answers = serde_json::from_str(text).map_err(|e| {
         Unposted::Wrong(format!(
             "its answers file isn't what its brief asks for: {e}"
@@ -142,7 +145,6 @@ fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
             "its answers say it pushed {c:?}, which isn't a commit's full name"
         )));
     }
-    let new = a.pushed.as_deref().filter(|c| *c != h.head);
     let mut seen = BTreeSet::new();
     for r in &a.threads {
         if r.id.trim().is_empty() || r.reply.trim().is_empty() {
@@ -153,12 +155,6 @@ fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
         if !seen.insert(r.id.as_str()) {
             return Err(Unposted::Wrong(format!(
                 "its answers reply on thread {} twice",
-                r.id
-            )));
-        }
-        if r.fixed && new.is_none() {
-            return Err(Unposted::Wrong(format!(
-                "its answers say it fixed thread {}, but it pushed no new commit",
                 r.id
             )));
         }
@@ -195,7 +191,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
     let Some(text) = &h.answers else {
         return Ok(Posted::Nothing);
     };
-    let a = read(h, text)?;
+    let a = read(text)?;
     let (repo, n) = (p.repo, h.number);
     let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
     let data = query(
@@ -266,6 +262,17 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         )));
     }
     let pushed = a.pushed.as_deref().filter(|c| *c != h.head);
+    // A fix needs a commit new since the claim's head, but for a thread an
+    // earlier turn's answers fixed and resolved, which a later turn keeps in
+    // its file.
+    if let Some(r) = a.threads.iter().find(|r| {
+        r.fixed && pushed.is_none() && threads[r.id.as_str()]["isResolved"] != json!(true)
+    }) {
+        return Err(Unposted::Wrong(format!(
+            "its answers say it fixed thread {}, but it pushed no new commit",
+            r.id
+        )));
+    }
     for r in &a.threads {
         let t = threads[r.id.as_str()];
         // Resolved since (by someone, or by this on an earlier try): it's
@@ -299,6 +306,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         call_once(p.api, "PATCH", &path, Some(&json!({"body": new})))
             .map_err(|e| unposted(p.noted(e)))?;
     }
+    let mut woke = false;
     if let Some(c) = &a.comment {
         let text = comment_text(c, &h.engine);
         let since = jiff::Timestamp::from_second(h.at as i64)
@@ -316,6 +324,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
             let path = format!("repos/{repo}/issues/{n}/comments");
             call(p.api, "POST", &path, Some(&json!({"body": text})), None)
                 .map_err(|e| unposted(p.noted(e)))?;
+            woke = true;
         }
     }
     eprintln!(
@@ -327,6 +336,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
     Ok(Posted::Answers(Took {
         head: want.to_owned(),
         description: a.description,
+        woke,
     }))
 }
 

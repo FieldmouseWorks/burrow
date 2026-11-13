@@ -12,7 +12,7 @@ import os
 
 import proofs as P
 import waits
-from harness import CI_GREEN, HELD, JOBS, STATES, STOPPED, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
+from harness import CI_GREEN, HELD, JOBS, STATES, STOPPED, UNSTOPPABLE, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
 
 stand_in()
 kept = C.job
@@ -196,8 +196,15 @@ for t in (7500, 7600):
 # branch.
 claimed(waits=True, resumes=False)
 first = ISSUED[-1]
-run(clean(**threads), 7700)
-status, digest = run(clean(**threads), 7800)
+# One proj won't stop is no one retired: no second job is handed the branch
+# while it's at large, on this pass or the next.
+UNSTOPPABLE.add(first)
+for t in (7700, 7800):
+    status, digest = run(clean(**threads), t)
+    assert JOBS == [] and first not in STOPPED, (t, status, JOBS)
+UNSTOPPABLE.clear()
+run(clean(**threads), 7900)
+status, digest = run(clean(**threads), 8000)
 assert len(JOBS) == 1 and "awaits" not in status and digest == [], (status, JOBS)
 assert first in STOPPED, (first, STOPPED)
 STATES.clear()

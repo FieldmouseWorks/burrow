@@ -65,12 +65,13 @@ pub struct Handing {
     /// How many times its pass has looked for who pushed each head.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub looked: BTreeMap<String, u32>,
-    /// The answers file whose answers were last dealt with (posted, or
-    /// found wrong), by its SHA-256: a later turn's go up only once that
-    /// turn has written new ones.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub taken: Option<String>,
-    /// The turn whose answers last went up.
+    /// Every answers file whose answers were dealt with (posted, or found
+    /// wrong), by its SHA-256: never again, whatever came between.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taken: Vec<String>,
+    /// The turn whose answers last went up with a comment, the one change
+    /// of theirs that proj's fingerprint sees (github.rs), so the one that
+    /// wakes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posted: Option<u64>,
     /// Its turn is over, awaiting this PR: proj resumes it on the PR's next
@@ -197,87 +198,118 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             });
             continue;
         }
-        let answers = match dir.text("answers.json") {
-            Ok(text) => Some(text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
+        // Every turn's answers, each as its turn ended (proj keeps them in
+        // N.answers, since its next turn rewrites answers.json before this
+        // pass can look); a latest turn with none kept is read from the
+        // file itself. In turn order, each on the claim the one before left.
+        let latest = number.unwrap_or(0);
+        let mut found: Vec<(String, String, String)> = Vec::new();
+        let mut unreadable = None;
+        for n in 1..=latest {
+            let name = format!("{n}.answers");
+            let name = if dir.text(&name).is_ok() || n < latest {
+                name
+            } else {
+                "answers.json".to_owned()
+            };
+            match dir.text(&name) {
+                Ok(text) => found.push((n.to_string(), digest(&text), text)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => unreadable = Some(e),
+            }
+        }
+        if number.is_none() {
+            match dir.text("answers.json") {
+                Ok(text) => found.push(("invalid-turn".into(), digest(&text), text)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => unreadable = Some(e),
+            }
+        }
+        if let Some(e) = unreadable {
+            seen.answered.push(Answered {
+                jid: jid.clone(),
+                kind: rec.kind.clone(),
+                outcome: "wrong",
+                why: Some(format!("its answers file can't be read: {e}")),
+            });
+        }
+        let mut retry = false;
+        for (turn, sum, text) in found {
+            if rec.taken.contains(&sum) {
+                continue;
+            }
+            let engine = dir.text(&format!("{turn}.engine")).unwrap_or_default();
+            let engine = match engine.trim() {
+                "codex" => "Codex",
+                "claude" | "" => "Claude",
+                _ => "Unknown",
+            }
+            .to_owned();
+            let h = Handed {
+                engine,
+                number: l.number,
+                head: rec.head.clone(),
+                description: rec.body.clone(),
+                at: rec.at,
+                answers: Some(text),
+            };
+            let (outcome, why) = match answer::answer(p, &h) {
+                Ok(Posted::Answers(Took {
+                    head,
+                    description,
+                    woke,
+                })) => {
+                    rec.head = head;
+                    if woke {
+                        rec.posted = turn.parse().ok();
+                    }
+                    if let Some(d) = description {
+                        rec.body = d;
+                    }
+                    ("posted", None)
+                }
+                Ok(Posted::Nothing) => ("nothing", None),
+                Err(Unposted::Wrong(why)) => ("wrong", Some(why)),
+                Err(Unposted::Unpushed(why)) => ("unpushed", Some(why)),
+                Err(Unposted::Moved(why)) => ("moved", Some(why)),
+                Err(Unposted::Refused(why)) => ("refused", Some(why)),
+                Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
+            };
+            let again = matches!(outcome, "refused" | "unanswered");
+            if !again && outcome != "nothing" {
+                rec.taken.push(sum);
+            }
+            if outcome != "nothing" {
                 seen.answered.push(Answered {
                     jid: jid.clone(),
                     kind: rec.kind.clone(),
-                    outcome: "wrong",
-                    why: Some(format!("its answers file can't be read: {e}")),
+                    outcome,
+                    why,
                 });
-                if between {
-                    seen.answering.insert(jid.clone(), rec.between(number));
-                }
-                continue;
             }
-        };
-        let digest = answers.as_deref().map(|t| {
-            Sha256::digest(t.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        });
-        if digest.is_some() && digest == rec.taken {
-            // What it left is what an earlier turn's answers already were.
-            if between {
-                seen.answering.insert(jid.clone(), rec.between(number));
+            if again {
+                // Retried next pass, with the turns after it.
+                retry = true;
+                break;
             }
-            continue;
-        }
-        let turn = number.map_or_else(|| "invalid-turn".to_owned(), |n| n.to_string());
-        let engine = dir.text(&format!("{turn}.engine")).unwrap_or_default();
-        let engine = match engine.trim() {
-            "codex" => "Codex",
-            "claude" | "" => "Claude",
-            _ => "Unknown",
-        }
-        .to_owned();
-        let h = Handed {
-            engine,
-            number: l.number,
-            head: rec.head.clone(),
-            description: rec.body.clone(),
-            at: rec.at,
-            answers,
-        };
-        let (outcome, why) = match answer::answer(p, &h) {
-            Ok(Posted::Answers(Took { head, description })) => {
-                rec.head = head;
-                rec.posted = number;
-                if let Some(d) = description {
-                    rec.body = d;
-                }
-                ("posted", None)
+            if outcome == "moved" {
+                break;
             }
-            Ok(Posted::Nothing) => ("nothing", None),
-            Err(Unposted::Wrong(why)) => ("wrong", Some(why)),
-            Err(Unposted::Unpushed(why)) => ("unpushed", Some(why)),
-            Err(Unposted::Moved(why)) => ("moved", Some(why)),
-            Err(Unposted::Refused(why)) => ("refused", Some(why)),
-            Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
-        };
-        let again = matches!(outcome, "refused" | "unanswered");
-        if !again && outcome != "nothing" {
-            rec.taken = digest;
         }
         if between {
-            seen.answering
-                .insert(jid.clone(), rec.clone().between(number));
-        } else if again {
-            seen.answering.insert(jid.clone(), rec.clone());
-        }
-        if outcome != "nothing" {
-            seen.answered.push(Answered {
-                jid: jid.clone(),
-                kind: rec.kind,
-                outcome,
-                why,
-            });
+            seen.answering.insert(jid.clone(), rec.between(number));
+        } else if retry {
+            seen.answering.insert(jid.clone(), rec);
         }
     }
     seen
+}
+
+fn digest(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn short(c: &str) -> &str {

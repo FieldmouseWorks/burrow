@@ -242,7 +242,7 @@ fn a_fix_with_no_new_commit_is_no_answer() {
                 "its answers say it fixed thread PRRT_a, but it pushed no new commit".into()
             ))
         );
-        assert!(hub.asked.is_empty(), "{:?}", hub.paths());
+        assert_eq!(changed(&hub), vec![]);
     }
 }
 
