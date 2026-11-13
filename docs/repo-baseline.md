@@ -282,8 +282,9 @@ owner, since nothing else merges it.
   `concurrency` included) that calls the shared
   [`codeql.yml`](../.github/workflows/codeql.yml) with the repo's CodeQL
   languages, and GitHub's default setup off (the two can't both upload). A
-  PR scans the languages its files are in; a push to the default branch
-  scans them all.
+  PR scans the languages its changed paths might be input to, and all of
+  them for a path nothing classifies; a push to the default branch scans
+  them all ([which, and how](../crates/burrow-codeql/src/lib.rs)).
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
   existing text.

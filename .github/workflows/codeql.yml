@@ -3,9 +3,11 @@
 # setup, which ran every language on every PR push and held a hosted runner
 # for each, whatever the PR changed.
 #
-# A PR scans only the languages its changed files are in (`pick` below). A
-# push to the default branch scans every language, so each merged tree is
-# scanned whole and the code-scanning alerts stay current.
+# A PR scans only the languages its changed paths might be input to, and
+# every language for a path nothing classifies; a push to the default branch
+# scans every language, so each merged tree is scanned whole and the
+# code-scanning alerts stay current. crates/burrow-codeql decides, and says
+# how.
 #
 # It takes only the languages CodeQL analyzes on Linux with no build
 # (`build-mode: none`): actions, c-cpp, javascript-typescript, python, ruby
@@ -36,59 +38,29 @@ jobs:
     outputs:
       languages: ${{ steps.pick.outputs.languages }}
     steps:
+      # The picker, from this workflow's own commit, which job.workflow_sha
+      # names whoever calls it, built on the runner's cargo in the crates'
+      # directory as the house action builds its check: rustup reads the
+      # toolchain crates/rust-toolchain.toml pins from where cargo runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .codeql-pick
+          persist-credentials: false
+          sparse-checkout: crates
       - id: pick
         shell: bash
+        working-directory: .codeql-pick/crates
         env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-pick
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           LANGUAGES: ${{ inputs.languages }}
         run: |
-          set -euo pipefail
-          # The files each language's extractor reads, matched without
-          # regard to case. A pattern errs wide: a file it might read
-          # counts.
-          declare -A match=(
-            [actions]='(^|/)\.github/(workflows|actions)/.*\.ya?ml$|(^|/)action\.ya?ml$'
-            [c-cpp]='\.(c|cc|cp|cpp|cxx|c\+\+|h|hh|hp|hpp|hxx|h\+\+|inl|ipp|tcc|tpp|ixx|cppm|ii|i)$|(^|/)(cmakelists\.txt|makefile|meson\.build)$'
-            [javascript-typescript]='\.(js|jsx|mjs|cjs|es|es6|ts|tsx|mts|cts|vue|svelte|html?|xhtml?|xht|ejs|hbs|handlebars|njk|json|jsonc|json5|ya?ml|raml)$|(^|/)(\.babelrc|\.eslintrc|\.npmrc|tsconfig[^/]*|jsconfig[^/]*)$'
-            [python]='\.(py|pyi|pyw)$|(^|/)(pyproject\.toml|setup\.cfg|requirements[^/]*\.txt|pipfile(\.lock)?)$'
-            [ruby]='\.(rb|erb|rake|gemspec|ru|rbw|builder|jbuilder|thor)$|(^|/)(gemfile(\.lock)?|rakefile|guardfile|vagrantfile)$'
-            [rust]='\.rs$|(^|/)(cargo\.(toml|lock)|rust-toolchain(\.toml)?)$'
-          )
-          all=$(jq -c . <<<"$LANGUAGES")
-          while read -r lang; do
-            if [ -z "${match[$lang]:-}" ]; then
-              echo "::error::$lang: this workflow doesn't analyze it (it takes $(printf '%s ' "${!match[@]}")); give it a setup of its own."
-              exit 1
-            fi
-          done < <(jq -r '.[]' <<<"$all")
-          if [ "$EVENT" != pull_request ]; then
-            echo "Not a PR: every language, $all."
-            echo "languages=$all" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Every path the PR touches, deleted ones and renames' old paths
-          # included. GitHub lists at most 3000; a PR that big scans
-          # everything.
-          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
-            --jq '.[] | .filename, (.previous_filename // empty)')
-          if [ "$(grep -c . <<<"$files" || true)" -ge 3000 ]; then
-            echo "3000 or more changed files: every language, $all."
-            echo "languages=$all" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          picked=()
-          while read -r lang; do
-            if grep -Eiq "${match[$lang]}" <<<"$files"; then
-              echo "$lang: the PR changes its files."
-              picked+=("$lang")
-            else
-              echo "$lang: the PR changes none of its files, so not scanned here (the merge's push scans it)."
-            fi
-          done < <(jq -r '.[]' <<<"$all")
-          out=$(printf '%s\n' "${picked[@]}" | jq -Rnc '[inputs | select(. != "")]')
-          echo "languages=$out" >> "$GITHUB_OUTPUT"
+          cargo build --release --locked --quiet -p burrow-codeql
+          "$CARGO_TARGET_DIR/release/burrow-codeql" pick
   analyze:
     needs: pick
     if: needs.pick.outputs.languages != '[]'
