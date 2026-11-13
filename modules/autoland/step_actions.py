@@ -385,7 +385,7 @@ class Actions:
                 self.ends["proved"] = "failed"
             else:
                 note = P.note(jid, said) if self.st.get("provedSaid") != jid else None
-                if note is not None and C.comment(self.repo, self.n, note) is not None:
+                if note is not None and (C.comment(self.repo, self.n, note) is not None or C.DRY):
                     self.st["provedSaid"] = jid
                 said_all = note is None or self.st.get("provedSaid") == jid
                 done = "built" if builds else "ran"
@@ -414,6 +414,11 @@ class Actions:
             self.retry_at("proved")
         slots = self.rc.get("proofSlots")
         outs = P.outputs(self.repo, self.pr, checks, self.st) if slots or builds else None
+        if builds and outs is None and P.untold(self.repo, self.pr, checks, self.st):
+            # A status run's: it works no eval out, so has no failure of one
+            # to count, only the live passes' (outputs).
+            self.settle("pending", f"Settled; what {names} builds is worked out on the steward's next pass"[:140], stage=S.PROOF)
+            return
         if builds and outs is None:
             # Nothing to build without its derivations: tried again on a
             # later pass (outputs).

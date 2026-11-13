@@ -15,7 +15,12 @@
 //!     it names (`repos`), only pushes to a repo's default branch (`pushes`),
 //!     only the other events about some branches (`branches`), and only
 //!     `issues` events about an issue whose title matches one of some globs
-//!     (`issueTitles`).
+//!     (`issueTitles`). A handler told issues (`issueNumbers`) has an
+//!     `issues` or `issue_comment` event's pass look at that issue alone: a
+//!     burst's numbers go together, one a line in the file its unit's
+//!     BURROW_EVENTS_ISSUES names while the pass runs. With anything else
+//!     due for the repo by then, the pass looks at everything, as every
+//!     kick, wake-up and retry does.
 //!   - A kick on the local port: POST /kick/HANDLER/OWNER/REPO for one repo,
 //!     or /kick/HANDLER for a full pass. Something on this machine that just
 //!     changed what a pass would find kicks it: a proj job's turn starting or

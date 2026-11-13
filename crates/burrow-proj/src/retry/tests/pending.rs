@@ -52,10 +52,9 @@ fn busy_job_lock_is_reported_for_retry_and_a_stopped_checkpoint_is_not_launched(
     let job = Job::new(&r.cfg, "p");
     pending(&r, "p", true);
     let held = job.lock().unwrap();
-    let _inherited_copy = held.try_clone().unwrap();
+    let _inherited_copy = held.as_fd().try_clone_to_owned().unwrap();
     assert_eq!(pass(&r.cfg).unwrap_err().kind(), io::ErrorKind::WouldBlock);
     // A concurrent fork may still hold its copy when recovery runs again.
-    held.unlock().unwrap();
     drop(held);
     fs::write(job.turn("1", "stopped"), "").unwrap();
     assert!(pass(&r.cfg).is_ok());

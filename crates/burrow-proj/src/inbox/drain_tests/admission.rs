@@ -9,6 +9,7 @@ fn opt_in_and_pipeline_scope_gate_the_real_drain() {
         overlay: b.path("settings-overlay.json"),
         allowed: vec!["sam/box".into()],
         pipeline_repos: vec!["sam/box".into()],
+        ..Default::default()
     };
     b.cfg.settings = Some(settings.clone());
     let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();

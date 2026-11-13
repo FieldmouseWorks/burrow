@@ -7,6 +7,7 @@ for the agent and its sandbox; and PRs shaped like its query's."""
 import http.server
 import json
 import os
+import pathlib
 import shlex
 import shutil
 import subprocess
@@ -118,6 +119,7 @@ UPKEEP_RUN = f"{tmp}/upkeep-run"
 with open(UPKEEP_RUN, "w") as f:
     f.write(f"""#!/bin/sh
 [ "$2" = commits ] && PATH={shlex.quote(COMPARE_BIN)}:$PATH
+[ "$2" = ci ] && PATH={shlex.quote(tmp + "/ci-bin")}:$PATH
 exec {shlex.quote(UPKEEP)} "$@"
 """)
 os.chmod(UPKEEP_RUN, 0o755)
@@ -136,7 +138,7 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict|carry|commits) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|sweep|verdict|carry|commits|ci) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
@@ -270,7 +272,7 @@ WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for
     ("review", "review"), ("reviewer", "reviewer"), ("fix", "fix"), ("ci", "CI"), ("proofSlot", "proof slot"),
     ("proof", "machine checks"), ("releaseAge", "release age"), ("train", "train"), ("merge", "merge"),
     ("owner", "Sam"), ("base", "base branch"))}
-# The example machine's class policy (burrow.ledger.policy), as cn reads it.
+# The example machine's generated CONARY_POLICY, including hidden paths.
 POLICY = sys.argv[2]
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
@@ -315,6 +317,8 @@ import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
 REAL_TOKEN = C.token
+REAL_UPKEEP = C.upkeep
+from selection import shape  # noqa: E402 (needs prs, set up above)
 # The App's installation tokens, one an owner (passes.py checks the real one).
 C.token = lambda owner: f"ghs_app_{owner}"
 # A second reviewer beside Codex, standing in for any a machine adds: the
@@ -395,7 +399,56 @@ FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless set, or what GitHub raises
-ATTEMPTS = {}  # a run's run_attempt, by its id: 1 unless set
+
+
+RERUNS = []  # the workflow runs (by id) the steward ran again
+RERUN_FAILS = {}  # a run's id to what its rerun raises: none unless set
+RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion: attempt 1, cancelled, unless set
+
+
+# The CI owner runs as compiled Rust, against an HTTP transport fixture.
+CI_ASKED = []  # requests made by the compiled CI owner
+CI_FIXTURE = f"{tmp}/ci.json"
+os.makedirs(f"{tmp}/ci-bin")
+with open(f"{tmp}/ci-bin/gh", "w") as f:
+    f.write(f"#!{sys.executable}\n" + pathlib.Path(__file__).with_name("ci_github.py").read_text())
+os.chmod(f"{tmp}/ci-bin/gh", 0o755)
+os.environ["CI_FIXTURE"] = CI_FIXTURE
+
+
+def ci_upkeep(*args, **kw):
+    if args[0] != "ci":
+        return REAL_UPKEEP(*args, **kw)
+
+    def error(e):
+        import re
+        match = re.search(r"HTTP (\d+)", str(e))
+        return {"error": str(e), "status": 503 if isinstance(e, C.Unavailable) else int(match[1]) if match else 422}
+
+    data = {"runs": RUN_INFO, "failures": {k: error(v) for k, v in RERUN_FAILS.items()},
+            "annotations": {k: error(v) if isinstance(v, Exception) else v for k, v in ANNOTATIONS.items()},
+            "fork": FORK, "forks": FORKS, "reruns": [], "asked": [],
+            "app": C.token(args[1].split("/")[0].lower()) if kw.get("as_app", True) and not C.DRY else None}
+    with open(CI_FIXTURE, "w") as f:
+        json.dump(data, f)
+    # The PR as the steward's query fetches it: no field it doesn't ask for.
+    asked = json.loads(kw["input"])
+    kw["input"] = json.dumps({**asked, "pr": shape(asked["pr"])})
+    old = C.CFG["upkeep"]
+    C.CFG["upkeep"] = upkeep_config(f"{tmp}/ci-config.json")
+    try:
+        return REAL_UPKEEP(*args, **kw)
+    finally:
+        C.CFG["upkeep"] = old
+        with open(CI_FIXTURE) as f:
+            got = json.load(f)
+        CI_ASKED[:] = got["asked"]
+        RUN_INFO.update(got["runs"])
+        RERUNS.extend(got["reruns"])
+        FORKS[:] = got["forks"]
+
+
+C.upkeep = ci_upkeep
 
 
 def gh_stub(*a, **k):
@@ -415,26 +468,10 @@ def gh_stub(*a, **k):
                 raise got
             return None
         return got
-    if a[:3] == ("api", "--paginate", "--slurp") and a[3].startswith("repos/sam/r/check-runs/") \
-            and a[3].endswith("/annotations?per_page=100"):
-        got = ANNOTATIONS.get(int(a[3].split("/")[-2]), [])
-        if isinstance(got, Exception):
-            raise got
-        msgs = [{"message": m} for m in got]
-        return [msgs[i:i + 100] for i in range(0, len(msgs), 100)] or [[]]  # --slurp: the pages
-    if a[:1] == ("api",) and "/actions/runs/" in a[1] and "--jq" in a:
-        return ATTEMPTS.get(int(a[1].split("/")[-1]), 1)
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
         return PR_DIFF["v"]
-    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/compare/") and "{fork: .merge_base_commit.sha}" in a:
-        # Read as GitHub reads its URL: a `#` ends it, a `?` starts its
-        # query, and what's left is decoded once.
-        path = a[1].removeprefix("repos/sam/r/compare/").partition("#")[0].partition("?")[0]
-        base, dots, _ = path.partition("...")
-        fork = FORKS.pop(0) if FORKS else FORK.get(urllib.parse.unquote(base), FORK["v"]) if dots else None
-        return {"fork": fork} if fork else None
     return ""
 
 
@@ -479,7 +516,6 @@ def compare_calls():
     return open(COMPARE_CALLED).read().splitlines()
 
 
-SILENT = []  # writes GitHub doesn't answer, by a piece of their arguments
 FAIL = []  # writes that fail, by a piece of their arguments: gh's None, or with check what gh() raises
 # What GitHub says to each, as gh prints it: two lines, as it can be.
 REFUSAL = "Repository rule violations found\nMerge method squash is not allowed for this base branch (HTTP 405)"
@@ -488,8 +524,6 @@ REFUSAL = "Repository rule violations found\nMerge method squash is not allowed 
 def write(*a, **k):
     acting()
     WROTE.append(" ".join(a))
-    if any(f in " ".join(a) for f in SILENT):
-        raise C.Unavailable("gh api: HTTP 502")
     if not any(f in " ".join(a) for f in FAIL):
         return {}
     if k.get("check", True):
@@ -677,7 +711,7 @@ def fresh_pr_state():
         os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
-REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
+REAL = {"write": C.write, "job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
         "onto": H.onto, "carry": V.carry}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.

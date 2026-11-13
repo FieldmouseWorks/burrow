@@ -9,6 +9,7 @@ publish.workspace = true
 # Tests only: outside `cargo test` the crate is empty, so it has no
 # package.
 [dev-dependencies]
+burrow-upkeep = { path = "../burrow-upkeep" }
 proc-macro2 = "1"
 syn = { version = "3", features = ["full", "visit"] }
 burrow-test = { path = "../burrow-test" }

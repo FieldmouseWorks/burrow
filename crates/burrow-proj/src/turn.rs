@@ -46,8 +46,13 @@ pub(crate) fn start_answer(cfg: &Config, id: &str, msg: &str, first: bool) -> Re
 
 /// The deadline's reversible default answers the question: the launch's
 /// receipt carries that as the question's cause.
-pub(crate) fn start_default(cfg: &Config, id: &str, msg: &str) -> Result<(), String> {
-    start_with(cfg, id, msg, false, Answer::Deadline, None)
+pub(crate) fn start_default(
+    cfg: &Config,
+    id: &str,
+    msg: &str,
+    capacity: &crate::inbox::resumption::Resume,
+) -> Result<(), String> {
+    start_with(cfg, id, msg, false, Answer::Deadline, Some(capacity))
 }
 
 /// Restoration already owns the serialized inbox admission permit.
@@ -56,7 +61,7 @@ pub(crate) fn start_admitted(
     id: &str,
     msg: &str,
     first: bool,
-    permit: &crate::inbox::resumption::Permit,
+    permit: &crate::inbox::resumption::Resume,
 ) -> Result<(), String> {
     start_with(cfg, id, msg, first, Answer::Update, Some(permit))
 }
@@ -77,7 +82,7 @@ fn start_with(
     msg: &str,
     first: bool,
     answer: Answer,
-    permit: Option<&crate::inbox::resumption::Permit>,
+    permit: Option<&crate::inbox::resumption::Resume>,
 ) -> Result<(), String> {
     let job = Job::new(cfg, id);
     crate::inbox::enrollment::admit(&job)?;
@@ -137,11 +142,15 @@ fn start_with(
         undo();
         return Err(format!("proj: {}: {e}", prompt.display()));
     }
-    let capacity = if permit.is_some() {
-        None
+    let acquired;
+    let capacity = if let Some(permit) = permit {
+        permit
     } else {
         match crate::inbox::resumption::admission(cfg, &job) {
-            Ok(gate) => Some(gate),
+            Ok(gate) => {
+                acquired = gate;
+                &acquired
+            }
             Err(error) => {
                 undo();
                 return Err(error);
@@ -166,10 +175,8 @@ fn start_with(
     );
     let started = if crate::policy::denied(&job)
         || crate::policy::parked(&job)
-        || matches!(
-            capacity.as_ref(),
-            Some(crate::inbox::resumption::Resume::Waiting)
-        ) {
+        || matches!(capacity, crate::inbox::resumption::Resume::Waiting)
+    {
         crate::policy::mark(&job, "queued", first)?;
         true
     } else {

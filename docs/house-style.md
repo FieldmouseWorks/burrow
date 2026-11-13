@@ -116,7 +116,9 @@ Every repo with code gets a `flake.nix` from the template
   title is `area: plain sentence`, and a PR that adds Python or grows Python
   and shell past a fix, adds a timer, grows a code file past 1,000 lines,
   grows an AGENTS.md's own part past 100 lines or names a model has the line
-  in its body that says why, with a reason. Each
+  in its body that says why, with a reason. A PR whose head is under
+  `renovate/` fails unless Renovate opened it, since Renovate takes every
+  branch there as its own. Each
   rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
   by the next run's, so fixing the title or body clears it; a fork's PR,
   whose token can't post them, gets them as the job's result. A repo can set
