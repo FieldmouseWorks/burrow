@@ -129,16 +129,23 @@ mod tests {
                 "[ \"$GH_REPO\" = '{repo}' ] || exit 1\nprintf '%s\\n' \"$GH_REPO\" >>'{}'\n",
                 b.path("routes").display()
             );
-            fs::write(
+            // Install, never rewrite in place: a test forking meanwhile would
+            // hold the writer and make running the stand-in ETXTBSY.
+            burrow_test::executable(
                 gh,
                 script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{guard}"), 1),
-            )
-            .unwrap();
+            );
             let graphql = b.path("graphql");
             let script = fs::read_to_string(&graphql).unwrap();
             // First page asks for another page; second page completes the
             // same empty comment list. Keep the real fixture's provenance.
-            fs::write(&graphql, format!("{} | jq --arg args \"$*\" '.data.repository.issue.comments.pageInfo = (if ($args | contains(\"cursor=\")) then {{hasNextPage:false,endCursor:null}} else {{hasNextPage:true,endCursor:\"next\"}} end)'\n", script.trim_end())).unwrap();
+            burrow_test::executable(
+                &graphql,
+                format!(
+                    "{} | jq --arg args \"$*\" '.data.repository.issue.comments.pageInfo = (if ($args | contains(\"cursor=\")) then {{hasNextPage:false,endCursor:null}} else {{hasNextPage:true,endCursor:\"next\"}} end)'\n",
+                    script.trim_end()
+                ),
+            );
             assert!(b.pass().written(repo, &issue(7, "sam", &[])).is_some());
             assert_eq!(
                 fs::read_to_string(b.path("routes")).unwrap(),
