@@ -330,7 +330,10 @@ Each has an entry below, and each can be imported on its own.
   follows the journal for systemd's word of a failure and systemd-coredump's
   of a dump and asks for a pass, touching no unit's own settings. The
   watchdog's job clears a crash whose cause it fixed with
-  `burrow-units clear EXE`, and a later one is back. With
+  `burrow-units clear EXE`, and a later one is back. Clear uses a host
+  acknowledgement socket, so sandboxed jobs need no host state or journal
+  access: the host holds the units lock, records the clearance and requests
+  a pass. Only executable names cross the socket. With
   `degradations.enable`, repeated soft CI failures feed the same ladder:
   [workflow degradations](docs/degradations.md) describes the signal and options.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
