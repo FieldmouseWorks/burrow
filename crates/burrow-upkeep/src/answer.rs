@@ -30,6 +30,11 @@ pub struct Handed {
     pub head: String,
     /// Its description then.
     pub description: String,
+    /// The descriptions this job's earlier turns' answers wrote, or may
+    /// have (a write whose answer was lost, or whose pass stopped before it
+    /// kept what it did): the PR's description is the job's own when it is
+    /// one of these, and an edit to anything else is someone else's.
+    pub also: Vec<String>,
     /// When, in Unix seconds.
     pub at: f64,
     /// The job's answers file as it left it, or None for none.
@@ -252,7 +257,9 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unp
     // else's PR now, whether the job writes one or not.
     let body = pr["body"].as_str().unwrap_or_default();
     let ours = a.description.as_deref().is_some_and(|new| same(new, body));
-    if !same(body, &h.description) && !ours {
+    let handed = same(body, &h.description);
+    let earlier = h.also.iter().any(|d| same(d, body));
+    if !handed && !ours && !earlier {
         return Err(Unposted::Moved(
             "its description was edited since the job was handed it".into(),
         ));
@@ -351,9 +358,12 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unp
         a.threads.len(),
         pushed.map_or(String::new(), |c| format!(", on its push of {}", short(c)))
     );
+    // Resting on an earlier turn's description, that is the PR's now: the
+    // claim keeps it, confirmed.
+    let left = a.description.or_else(|| (!handed).then(|| body.to_owned()));
     Ok(Posted::Answers(Took {
         head: want.to_owned(),
-        description: a.description,
+        description: left,
     }))
 }
 

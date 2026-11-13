@@ -675,6 +675,8 @@ fn answers_of_each_finished_turn_are_taken_in_order() {
         json!({"pushed": null, "comment": "Blocked."}).to_string(),
     )
     .unwrap();
+    // proj keeps what it held beside it, written first.
+    std::fs::write(dir.join("1.holds"), "await SAM/R#5").unwrap();
     // Turn 2 overwrote answers.json: its own is all there is of it.
     std::fs::write(
         dir.join("answers.json"),

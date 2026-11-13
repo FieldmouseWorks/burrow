@@ -65,10 +65,10 @@ def look(repo, pr, st, tag, strike, cleared, after):
 def see(repo, pr, st, tag, strike, cleared, after, retire=False):
     """The PR's fix jobs, seen to by `claims`. The PR's status when the
     pass is to stop here, or None (and what claims said, for `see`): answers
-    went up (what it read of the PR
-    is stale; a pass is booked for now), or GitHub turned them away (tried
-    again on a later pass, a strike each time, and nothing else is handed
-    out meanwhile). A job it names to stop that proj won't is left to
+    went up (what it read of the PR is stale; a pass is booked for now), or
+    GitHub turned them away, or what the job's turn held can't be read
+    (tried again on a later pass, a strike each time, and nothing else is
+    handed out meanwhile). A job it names to stop that proj won't is left to
     stopping.py, as a new head's jobs are. Why a job's answers didn't go up
     for want of a push or of answers is kept by its kind (KIND +
     "Unposted"), for its next job's brief."""
@@ -94,6 +94,12 @@ def see(repo, pr, st, tag, strike, cleared, after, retire=False):
         if outcome in ("refused", "unanswered"):
             strike("answer", why)
             status = "GitHub didn't take a Claude job's answers: they go up next try"
+            continue
+        if outcome == "pending":
+            # What its turn held can't be read: its answers wait, read again
+            # next try, a strike each time, and nothing else is handed out.
+            strike("answer", why)
+            status = status or "A Claude job's turn can't be read yet: its answers wait"
             continue
         cleared("answer")
         if outcome == "posted":

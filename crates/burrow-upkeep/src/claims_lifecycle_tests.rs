@@ -357,3 +357,136 @@ fn a_description_written_before_a_failed_post_stays_the_jobs_baseline() {
     let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
     assert_eq!(outcomes, ["moved", "moved"], "{:?}", s.answered);
 }
+
+// What an earlier turn held is known only from its N.holds: missing,
+// unreadable or not text, it authorizes nothing. Its answers (and the later
+// turns', in turn order) wait, the job kept, until the record can be read;
+// then a held turn's are left and one that held nothing has them posted.
+#[test]
+fn a_turn_whose_holds_cant_be_read_waits_until_they_can() {
+    type Spoil = fn(&std::path::Path);
+    let unreadable: [(&str, Spoil); 3] = [
+        ("missing", |p| std::fs::remove_file(p).unwrap()),
+        ("a directory", |p| {
+            std::fs::remove_file(p).unwrap();
+            std::fs::create_dir(p).unwrap();
+        }),
+        ("not text", |p| std::fs::write(p, b"\xff\xfeask").unwrap()),
+    ];
+    let comment = |c: &str| json!({"pushed": null, "comment": c});
+    for (how, spoil) in unreadable {
+        // The latest turn running, or over (its own answers read whatever it
+        // held, from the lifecycle): either way, turn 1's are unknown.
+        for state in ["running", "done"] {
+            let jobs = tempfile::tempdir().unwrap();
+            let dir = folder(jobs.path());
+            std::fs::write(dir.join("turns"), "2").unwrap();
+            kept_turn(&dir, 1, "ask", comment("intermediate"));
+            kept_turn(&dir, 2, "", comment("final"));
+            let holds = dir.join("1.holds");
+            spoil(&holds);
+            let mut l = at(HANDED, jobs.path(), true);
+            let mut hub = github(HANDED, "Does it.", json!([]));
+            let s = looked(&mut hub, &l, state, &[]);
+            let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+            assert_eq!(outcomes, ["pending"], "{how}, {state}: {:?}", s.answered);
+            assert!(writes(&hub).is_empty(), "{how}, {state}");
+            let kept = &s.answering["job-1"];
+            assert!(kept.taken.is_empty(), "{how}, {state}");
+            // Readable again, saying it held a question: only the final
+            // turn's answers go up, never the intermediate one.
+            if holds.is_dir() {
+                std::fs::remove_dir(&holds).unwrap();
+            }
+            std::fs::write(&holds, "ask").unwrap();
+            l.answering = s.answering;
+            let mut hub = github(HANDED, "Does it.", json!([]));
+            let s = looked(&mut hub, &l, state, &[]);
+            let posted: Vec<_> = hub
+                .asked
+                .iter()
+                .filter(|(m, _, _, _)| m == "POST")
+                .filter_map(|(_, _, _, b)| b.as_ref()?["body"].as_str().map(String::from))
+                .collect();
+            assert_eq!(posted.len(), 1, "{how}, {state}: {:?}", s.answered);
+            assert!(posted[0].contains("final"), "{how}, {state}");
+        }
+    }
+    // Known to have held nothing (an empty N.holds): its answers go up.
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = folder(jobs.path());
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    kept_turn(&dir, 1, "", comment("first"));
+    kept_turn(&dir, 2, "", comment("second"));
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    let s = looked(&mut hub, &at(HANDED, jobs.path(), true), "running", &[]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["posted", "posted"], "{:?}", s.answered);
+}
+
+// A turn's description PATCH whose answer was lost, or a pass that stopped
+// before it kept what it did: the description is the job's own all the same
+// once its next turn pushed on, so that turn's answers still go up. An edit
+// to anything else, or to a held turn's description that never went up,
+// stands it down.
+#[test]
+fn a_description_whose_write_was_lost_stays_the_jobs_own() {
+    let one = json!({"pushed": null, "description": "New.", "threads": [{"id": "T1", "fixed": false, "reply": "No."}]});
+    let two = json!({"pushed": PUSHED, "description": null, "comment": "Two."});
+    let open = json!([{"id": "T1", "isResolved": false, "comments": {"nodes": [{"body": "**Codex · P1** x"}]}}]);
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = folder(jobs.path());
+    std::fs::write(dir.join("turns"), "1").unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+    std::fs::write(dir.join("answers.json"), one.to_string()).unwrap();
+    // The reply went up (and woke the job); the PATCH's answer was lost,
+    // though it landed.
+    let mut hub = github(HANDED, "Does it.", open);
+    hub.on("PATCH", "repos/sam/r/pulls/5$", reply(502, json!({})));
+    let mut l = at(HANDED, jobs.path(), true);
+    let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+    assert_eq!(s.answered[0].outcome, "unanswered");
+    assert_eq!(s.answering["job-1"].body, "Does it.");
+    assert!(s.answering["job-1"].resumes);
+    let after_lost = s.answering;
+    // Turn 2 pushed and left the description as it is.
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    kept_turn(&dir, 1, "await SAM/R#5", one.clone());
+    kept_turn(&dir, 2, "await SAM/R#5", two.clone());
+    l.head = PUSHED.into();
+    // Both what the lost pass kept, and nothing at all (the pass stopped
+    // before it kept anything): turn 1's are for a head the PR has left,
+    // and turn 2's go up, resting on turn 1's description, which the claim
+    // then keeps.
+    for (kept, was) in [
+        (after_lost, "lost"),
+        (BTreeMap::from([("job-1".into(), handing())]), "stopped"),
+    ] {
+        l.answering = kept;
+        let mut hub = github(PUSHED, "New.", json!([]));
+        let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+        let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+        assert_eq!(outcomes, ["moved", "posted"], "{was}: {:?}", s.answered);
+        assert_eq!(
+            writes(&hub),
+            ["POST repos/sam/r/issues/5/comments"],
+            "{was}"
+        );
+        assert_eq!(s.answering["job-1"].body, "New.", "{was}");
+    }
+    // Someone else's edit is still theirs.
+    l.answering = BTreeMap::from([("job-1".into(), handing())]);
+    let mut hub = github(PUSHED, "Edited by someone.", json!([]));
+    let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["moved", "moved"], "{:?}", s.answered);
+    assert!(writes(&hub).is_empty());
+    // A held turn's description never went up: the PR's matching it is
+    // someone else's edit.
+    kept_turn(&dir, 1, "ask", one);
+    let mut hub = github(PUSHED, "New.", json!([]));
+    let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["moved"], "{:?}", s.answered);
+    assert!(writes(&hub).is_empty());
+}

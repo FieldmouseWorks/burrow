@@ -101,6 +101,7 @@ fn handed(answers: Option<String>) -> Handed {
         number: 7,
         head: HANDED.into(),
         description: BODY.into(),
+        also: Vec::new(),
         at: 1_793_558_866.0,
         answers,
     }

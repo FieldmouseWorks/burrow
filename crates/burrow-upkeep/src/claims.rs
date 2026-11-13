@@ -143,8 +143,9 @@ pub struct Stop {
 }
 
 /// What came of a job's answers: posted, nothing, wrong, unpushed, moved,
-/// refused or unanswered (answer.rs), and why. A refused or unanswered one
-/// is kept, to go again next pass.
+/// refused or unanswered (answer.rs), or pending (what its turn held can't
+/// be read yet), and why. A refused, unanswered or pending one is kept, to
+/// go again next pass.
 #[derive(Debug, PartialEq, Serialize)]
 pub struct Answered {
     pub jid: String,
@@ -237,18 +238,32 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         // with none kept that is over is read from the file itself. In turn
         // order, each on the claim the one before left, whatever the latest
         // turn is doing now.
+        // What a turn held is known only from its N.holds, which proj
+        // writes before its N.answers (empty when it held nothing): one
+        // missing or unreadable beside them says nothing, so that turn's
+        // answers wait, and the turns after it with them, keeping turn
+        // order, until it can be read.
         let latest = number.unwrap_or(0);
         let mut found: Vec<(String, String, String)> = Vec::new();
         let mut unreadable = None;
+        let mut unknown = None;
         for n in 1..=latest {
             let name = format!("{n}.answers");
             let kept = dir.text(&name);
             let final_turn = n == latest && !at_work;
             let text = match kept {
                 Ok(text) => {
-                    let holds = dir.text(&format!("{n}.holds")).unwrap_or_default();
-                    if !final_turn && !holds_only(&holds, &own) {
-                        continue;
+                    if !final_turn {
+                        match dir.text(&format!("{n}.holds")) {
+                            Ok(holds) if holds_only(&holds, &own) => {}
+                            Ok(_) => continue,
+                            Err(e) => {
+                                unknown = Some(format!(
+                                    "what its turn {n} held can't be read ({e}): its answers wait for it"
+                                ));
+                                break;
+                            }
+                        }
                     }
                     Ok(text)
                 }
@@ -279,8 +294,16 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             });
         }
         let mut retry = false;
+        // Each turn's description, once its answers may have gone up (taken
+        // on an earlier pass, or tried now), may be the PR's by this job's
+        // own write, kept or not: the turns after it rest on it too.
+        let mut also: Vec<String> = Vec::new();
         for (turn, sum, text) in found {
+            let described = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v["description"].as_str().map(String::from));
             if rec.taken.contains(&sum) {
+                also.extend(described);
                 continue;
             }
             let engine = dir.text(&format!("{turn}.engine")).unwrap_or_default();
@@ -295,9 +318,11 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 number: l.number,
                 head: rec.head.clone(),
                 description: rec.body.clone(),
+                also: also.clone(),
                 at: rec.at,
                 answers: Some(text),
             };
+            also.extend(described);
             let mut wrote = Wrote::default();
             let (outcome, why) = match answer::answer(p, &h, &mut wrote) {
                 Ok(Posted::Answers(Took { head, description })) => {
@@ -341,6 +366,19 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
             }
             // A turn whose head the PR has left (outcome "moved") says
             // nothing of the later turns, each checked on its own.
+        }
+        if let Some(why) = unknown
+            && !retry
+        {
+            // Kept, to be read again next pass; never taken for held
+            // nothing.
+            seen.answered.push(Answered {
+                jid: jid.clone(),
+                kind: rec.kind.clone(),
+                outcome: "pending",
+                why: Some(why),
+            });
+            retry = true;
         }
         if at_work {
             keep(&mut seen, jid, rec, true);
@@ -409,15 +447,16 @@ fn await_line(dir: &burrow_process::state_reads::Dir, own: &str) -> Option<(f64,
 fn woken(p: &mut Pass, l: &Look, rec: &Handing, line: Option<(f64, String)>) -> bool {
     let Some(w) = rec.woke_at else { return false };
     // Wrote, and the await can't be read: it may have woken it.
-    let Some((since, was)) = line else { return true };
+    let Some((since, was)) = line else {
+        return true;
+    };
     if w != since {
         return w > since;
     }
     let was: serde_json::Value = serde_json::from_str(&was).unwrap_or_default();
-    let (Some(comments), Some(review)) = (
-        was["comments"].as_u64(),
-        was["review_comments"].as_u64(),
-    ) else {
+    let (Some(comments), Some(review)) =
+        (was["comments"].as_u64(), was["review_comments"].as_u64())
+    else {
         return true;
     };
     let now = |p: &mut Pass, path: String, key: &str| p.get(&path).ok()?[key].as_u64();
