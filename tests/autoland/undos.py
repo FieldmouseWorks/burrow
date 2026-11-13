@@ -262,6 +262,29 @@ finally:
 assert red()["undos"] == [40] and red()["undoTries"] == 1, red()
 assert R.watch_default(repo, default("PENDING"), [undo_pr()], mine) == {40: "Waiting for CI on main: it lands only while main is red"}
 
+# In a pass, cn gets only what's left of the pass's remote-call deadline:
+# it mustn't run the unit past the time the pass keeps to save its progress.
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+given = []
+
+
+def cut(args, **kw):
+    given.append(kw["timeout"])
+    raise R.subprocess.TimeoutExpired(args, kw["timeout"], output=(json.dumps(ROW) + "\n").encode())
+
+
+R.subprocess.run = cut
+try:
+    with C.pass_deadline(30):
+        assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
+finally:
+    R.subprocess.run = kept_run
+assert len(given) == 1 and 0 < given[0] <= 30, given
+assert red()["undos"] == [40] and red()["undoTries"] == 1, red()
+assert R.watch_default(repo, default("PENDING"), [undo_pr()], mine) == {40: "Waiting for CI on main: it lands only while main is red"}
+
 # An undo cn found open that this red didn't ask for (the door's, say) is
 # that PR's undo in hand: no other job starts while it's open, but it's no
 # fix of this red's, never held or closed for it.

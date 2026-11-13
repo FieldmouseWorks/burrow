@@ -310,6 +310,39 @@ with tempfile.TemporaryDirectory() as tmp:
                 with patch.object(C.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{"limited": null}')) as ran:
                     C.upkeep('branches', 'sam/r', bounded=bounded)
                 assert ran.call_args.kwargs['timeout'] == 60, ran.call_args.kwargs
+        # So must a job's first clone, which an upkeep job can start in an
+        # operation-only continuation: gh has no timeout of its own.
+        clock[0] = 0
+        with C.pass_deadline(18 * 60), patch.dict(C.CFG, {'projectsDir': tmp}), \
+                patch.object(C, 'follow_renames', lambda *a: None), patch.object(C, 'retiring', lambda *a: False), \
+                patch.object(C, 'project_dir', lambda *a: None):
+            clock[0] = 17 * 60
+            with patch.object(C.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as ran:
+                C.checkout('sam/cloned')
+            assert ran.call_args.args[0][:3] == ['gh', 'repo', 'clone'], ran.call_args
+            assert ran.call_args.kwargs.get('timeout') == 60, ran.call_args.kwargs
+
+    # A pass's own subprocesses are local commands. One that reaches GitHub
+    # (gh, cn, burrow-upkeep) goes through C.remote, or is given what is
+    # left of the pass's deadline (C.within), so none outlives the reserve
+    # the pass keeps to publish its progress.
+    import ast
+    local = {"'git'", "'systemctl'", "'systemd-run'", "CFG['proj']", "C.CFG['proj']", "settings['command']",
+             "CFG['inbox']['command']", "f\"{CFG['nix']}/{args[0]}\"", "f\"{CFG['nix']}/nix-store\"",
+             "*starter", "cmd", "command"}
+    direct = []
+    for source in sorted(Path(C.__file__).parent.glob('*.py')):
+        for node in ast.walk(ast.parse(source.read_text())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == 'subprocess'
+                    and node.func.attr in ('run', 'Popen', 'call', 'check_call', 'check_output')):
+                continue
+            argv = node.args[0] if node.args else None
+            first = ast.unparse(argv.elts[0]) if isinstance(argv, ast.List) and argv.elts else ast.unparse(argv)
+            bounded = any(k.arg == 'timeout' and 'within(' in ast.unparse(k.value) for k in node.keywords)
+            if first not in local and not bounded:
+                direct.append(f'{source.name}:{node.lineno} {first}')
+    assert not direct, ('remote work outside the pass deadline', direct)
 
     # Contending units requeue on their own line, without a blocking lock or
     # rewriting wake files owned by the current pass.

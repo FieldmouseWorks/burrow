@@ -92,12 +92,24 @@ def pass_deadline(seconds):
         REMOTE_DEADLINE = previous
 
 
+def within(timeout):
+    """timeout (None: none of its own), cut to what is left of the pass's
+    remote-call deadline. Raises Unavailable once nothing is left: the call
+    would outlive the reserve the pass keeps to publish its progress."""
+    if REMOTE_DEADLINE is None:
+        return timeout
+    remaining = REMOTE_DEADLINE - time.monotonic()
+    timeout = remaining if timeout is None else min(timeout, remaining)
+    if timeout <= 0:
+        raise Unavailable("pass remote-call deadline reached")
+    return timeout
+
+
 def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
-    if REMOTE_DEADLINE is not None:
-        remaining = REMOTE_DEADLINE - time.monotonic()
-        timeout = remaining if timeout is None else min(timeout, remaining)
-        if timeout <= 0:
-            raise Unavailable("pass remote-call deadline reached")
+    """A call that reaches GitHub, held to the pass's deadline. A command
+    that must keep what it printed before a timeout passes within() as its
+    own timeout instead (repos.undo_red); every other one comes here."""
+    timeout = within(timeout)
     try:
         return subprocess.run(command, timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired:
@@ -698,7 +710,10 @@ def checkout(repo):
         return None
     # The project's clone is the machine user's, for its jobs to push from as
     # them: cloned as them, not as the App.
-    subprocess.run(["gh", "repo", "clone", repo, path], check=False)
+    try:
+        remote(["gh", "repo", "clone", repo, path], timeout=None, check=False)
+    except Unavailable as e:
+        log(f"{repo}: its clone: {e}")
     return project_dir(repo)
 
 
