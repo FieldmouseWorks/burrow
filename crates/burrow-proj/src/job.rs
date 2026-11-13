@@ -536,7 +536,7 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-fn valid_turn(n: &str) -> bool {
+pub(crate) fn valid_turn(n: &str) -> bool {
     !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok_and(|v| v > 0)
 }
 

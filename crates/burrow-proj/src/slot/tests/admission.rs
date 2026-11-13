@@ -819,3 +819,91 @@ fn enabling_the_watchdog_preserves_watch_eligibility_for_owned_and_refused_work(
         "{asked}"
     );
 }
+
+/// A denied job whose turn failed, its repo `sam/web` paused.
+fn denied_failure(cfg: &Config, id: &str) {
+    let job = Job::new(cfg, id);
+    fs::create_dir_all(&job.dir).unwrap();
+    job.set_turns(1).unwrap();
+    fs::write(job.path("prompt.1"), "work").unwrap();
+    crate::policy::bind(
+        &job,
+        crate::policy::Identity::Repository("sam/web".into()),
+        crate::policy::Kind::Automated,
+    )
+    .unwrap();
+}
+
+fn adoption_cfg(tmp: &TempDir) -> (Config, std::path::PathBuf) {
+    let jobs = jobs_dir(tmp);
+    let mut cfg = config(&jobs, 1);
+    cfg.waits = Some(tmp.path().join("waits.json"));
+    cfg.tools.systemctl = tmp.path().join("systemctl");
+    burrow_test::executable(
+        &cfg.tools.systemctl,
+        "#!/bin/sh\ncase \"$*\" in\n*is-active*) exit 3 ;;\n*ActiveState*) echo inactive ;;\n*LoadState*) echo not-found ;;\nesac\n",
+    );
+    (cfg, jobs)
+}
+
+fn say(cfg: &Config, words: &[&str]) {
+    cfg.settings
+        .as_ref()
+        .unwrap()
+        .command(
+            &words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            "test",
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_denied_failure_in_a_stretch_without_the_watchdog_is_found_when_it_returns() {
+    let tmp = TempDir::new().unwrap();
+    let (mut cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/.adopted").exists());
+    // The watchdog is off; a job fails, its repo is paused.
+    let waits = cfg.waits.take();
+    denied_failure(&cfg, "late");
+    say(&cfg, &["pause", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(
+        !jobs.join(".waits-held/.adopted").exists(),
+        "a stretch without the watchdog left the marker"
+    );
+    cfg.waits = waits;
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/late").exists());
+    say(&cfg, &["allow", "sam/web"]);
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits/late").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_waits_for_an_unreadable_job_to_be_readable() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let (cfg, jobs) = adoption_cfg(&tmp);
+    say(&cfg, &["allow", "sam/web"]);
+    denied_failure(&cfg, "legacy");
+    say(&cfg, &["pause", "sam/web"]);
+    let job = Job::new(&cfg, "legacy");
+    let outcome = job.turn("1", "outcome");
+    fs::write(&outcome, "failed").unwrap();
+    fs::set_permissions(&outcome, fs::Permissions::from_mode(0)).unwrap();
+    if fs::read(&outcome).is_ok() {
+        return; // running as root: nothing is unreadable
+    }
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(
+        !jobs.join(".waits-held/.adopted").exists(),
+        "adoption completed past a file it couldn't read"
+    );
+    fs::set_permissions(&outcome, fs::Permissions::from_mode(0o644)).unwrap();
+    crate::policy::reconcile(&cfg).unwrap();
+    assert!(jobs.join(".waits-held/legacy").exists());
+    assert!(jobs.join(".waits-held/.adopted").exists());
+}
