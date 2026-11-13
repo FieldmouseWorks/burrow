@@ -167,6 +167,17 @@ impl Request {
         ])
     }
 
+    /// The request a turn runs as, its published copy put back first so
+    /// nothing reads what the job wrote of itself since.
+    pub fn restore(job: &Job) -> Result<Self, String> {
+        let request =
+            Self::load(job).map_err(|e| format!("couldn't read the job's request: {e}"))?;
+        request
+            .publish(job)
+            .map_err(|e| format!("couldn't publish the job's request: {e}"))?;
+        Ok(request)
+    }
+
     /// The published copy, put back as the record has it.
     pub fn publish(&self, job: &Job) -> io::Result<()> {
         let files: BTreeMap<&str, Option<String>> = BTreeMap::from([

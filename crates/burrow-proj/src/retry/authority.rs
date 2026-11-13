@@ -92,10 +92,10 @@ impl Identity {
         names.sort_unstable();
         let mut captures = Vec::new();
         for (_, stem) in names {
-            if let Some(identity) = Self::load(job, &stem)? {
-                if !identity.files.is_empty() {
-                    captures.push(identity.files);
-                }
+            if let Some(identity) = Self::load(job, &stem)?
+                && !identity.files.is_empty()
+            {
+                captures.push(identity.files);
             }
         }
         let Some(latest) = captures.last().cloned() else {

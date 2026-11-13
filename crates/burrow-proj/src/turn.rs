@@ -296,16 +296,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         crate::retry::Checkpoint::load(&job, &n).map_err(|e| Fail::new(1, e.to_string()))?;
     // What it was started as, never what the job wrote of itself since: its
     // published copy goes back to match before anything reads it.
-    let request = match crate::job::Request::load(&job) {
+    let request = match crate::job::Request::restore(&job) {
         Ok(r) => r,
         Err(e) => {
-            outcome(&format!("couldn't read the job's request: {e}"));
+            outcome(&e);
             return Err(Fail::quiet(1));
         }
     };
-    request
-        .publish(&job)
-        .map_err(|e| Fail::new(1, format!("couldn't publish the job's request: {e}")))?;
     let agent = request.agent.clone();
     // Its scratch, made before it takes a slot: one that can't be made fails
     // the turn rather than leave its work nowhere to go. A sandbox's job works
