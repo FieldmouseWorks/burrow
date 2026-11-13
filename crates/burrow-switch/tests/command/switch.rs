@@ -284,13 +284,16 @@ fn an_activation_with_errors_or_past_its_deadline_isnt_kept() {
     );
 }
 
+fn job(id: u32, unit: &str, kind: &str, state: &str) -> String {
+    format!(
+        r#"[{id},"{unit}","{kind}","{state}","/org/freedesktop/systemd1/job/{id}","/unit/{unit}"]"#
+    )
+}
+
 /// A sweep restarted behind a long run that was going before the
 /// activation, as burrow#811's: in systemd's queue, and in what
 /// switch-to-configuration lists.
 fn behind_a_long_run(m: &Machine) {
-    let job = |id: u32, unit: &str, kind: &str, state: &str| {
-        format!(r#"[{id},"{unit}","{kind}","{state}","/org/freedesktop/systemd1/job/{id}","/u"]"#)
-    };
     m.set(
         "jobs",
         &format!(
@@ -301,9 +304,22 @@ fn behind_a_long_run(m: &Machine) {
     );
     m.set("before-9", &job(1, "renovate.service", "start", "running"));
     m.set("lists", "renovate-sweep.service\n");
+    // Nothing to wait for if it isn't let go.
+    m.set("lists-ticks", "30");
 }
 
 const LET_GO: &str = "renovate-sweep.service restart waited behind renovate.service (job 1, running since before the activation): queued again, not waited for\n";
+
+fn live(two: &str) -> String {
+    format!("live: {two}\nrun box-confirm within 10min to keep it (and make it the boot default)\n")
+}
+
+/// Whether the sweep was left waiting: nothing was cancelled or queued.
+fn left_waiting(m: &Machine) {
+    let two = m.sys("two");
+    assert_eq!(said(&m.switch(&["--toplevel", &two])), ok(&live(&two)));
+    assert_eq!(m.fake("busctl"), "");
+}
 
 #[test]
 fn an_activation_doesnt_wait_behind_a_run_that_was_already_going() {
@@ -312,16 +328,7 @@ fn an_activation_doesnt_wait_behind_a_run_that_was_already_going() {
     behind_a_long_run(&m);
     let out = m.switch(&["--toplevel", &two]);
     // Let go, and queued again, so it still restarts after the run.
-    assert_eq!(
-        said(&out),
-        (
-            Some(0),
-            format!(
-                "live: {two}\nrun box-confirm within 10min to keep it (and make it the boot default)\n"
-            ),
-            LET_GO.into()
-        )
-    );
+    assert_eq!(said(&out), (Some(0), live(&two), LET_GO.into()));
     assert_eq!(
         m.fake("busctl"),
         "cancel 9\nRestartUnit renovate-sweep.service replace\n"
@@ -342,14 +349,160 @@ fn an_activation_doesnt_wait_behind_a_run_that_was_already_going() {
     let m = Machine::new(false);
     behind_a_long_run(&m);
     m.set("fail-cancel", "");
-    let out = m.switch(&["--toplevel", &two]);
-    assert_eq!(
-        said(&out),
-        ok(&format!(
-            "live: {two}\nrun box-confirm within 10min to keep it (and make it the boot default)\n"
-        ))
-    );
+    let two = m.sys("two");
+    assert_eq!(said(&m.switch(&["--toplevel", &two])), ok(&live(&two)));
     assert_eq!(m.fake("busctl"), "");
+}
+
+#[test]
+fn a_job_that_has_started_or_whose_run_has_ended_since_it_was_read_is_kept() {
+    // Read as waiting, started by the time it's about to be let go.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("state-9", "running");
+    left_waiting(&m);
+    // The run ended meanwhile.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("state-1", "done");
+    left_waiting(&m);
+}
+
+#[test]
+fn what_requires_a_job_or_must_follow_it_keeps_it_waited_for() {
+    // A queued unit that requires the sweep would fail with its cancelling.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set(
+        "RequiredBy-renovate-sweep.service",
+        r#"["consumer.service"]"#,
+    );
+    m.set(
+        "jobs",
+        &format!(
+            "{},{},{}",
+            job(1, "renovate.service", "start", "running"),
+            job(9, "renovate-sweep.service", "restart", "waiting"),
+            job(10, "consumer.service", "start", "waiting")
+        ),
+    );
+    left_waiting(&m);
+    // Bound to it, or its requisite, the same.
+    for prop in ["BoundBy", "RequisiteOf"] {
+        let m = Machine::new(false);
+        behind_a_long_run(&m);
+        m.set(
+            "jobs",
+            &format!(
+                "{},{},{}",
+                job(1, "renovate.service", "start", "running"),
+                job(9, "renovate-sweep.service", "restart", "waiting"),
+                job(10, "consumer.service", "start", "waiting")
+            ),
+        );
+        m.set(
+            &format!("{prop}-renovate-sweep.service"),
+            r#"["consumer.service"]"#,
+        );
+        left_waiting(&m);
+    }
+    // One with no job queued is no reason.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("RequiredBy-renovate-sweep.service", r#"["idle.service"]"#);
+    let two = m.sys("two");
+    assert_eq!(
+        said(&m.switch(&["--toplevel", &two])),
+        (Some(0), live(&two), LET_GO.into())
+    );
+    // A service ordered after it would start before it, in the gap; a
+    // target after it is let through.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("after-9", &job(10, "consumer.service", "start", "waiting"));
+    left_waiting(&m);
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("after-9", &job(10, "multi-user.target", "start", "waiting"));
+    let two = m.sys("two");
+    assert_eq!(
+        said(&m.switch(&["--toplevel", &two])),
+        (Some(0), live(&two), LET_GO.into())
+    );
+}
+
+#[test]
+fn a_target_is_not_let_go_while_it_waits_on_something_that_may_hang() {
+    // multi-user.target waits on the sweep (behind the run) and on a new
+    // unit that is starting: only the sweep is let go, so the switch still
+    // waits for the new unit.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    // The new unit starts after the activation has begun.
+    m.set(
+        "jobs-later",
+        &format!(
+            "{},{},{},{}",
+            job(1, "renovate.service", "start", "running"),
+            job(9, "renovate-sweep.service", "restart", "waiting"),
+            job(10, "hung.service", "start", "running"),
+            job(11, "multi-user.target", "start", "waiting")
+        ),
+    );
+    m.set("lists", "renovate-sweep.service\nmulti-user.target\n");
+    m.set(
+        "before-11",
+        &format!(
+            "{},{}",
+            job(9, "renovate-sweep.service", "restart", "waiting"),
+            job(10, "hung.service", "start", "running")
+        ),
+    );
+    let two = m.sys("two");
+    assert_eq!(
+        said(&m.switch(&["--toplevel", &two])),
+        (Some(0), live(&two), LET_GO.into())
+    );
+    assert_eq!(
+        m.fake("busctl"),
+        "cancel 9\nRestartUnit renovate-sweep.service replace\n"
+    );
+}
+
+#[test]
+fn a_job_that_was_running_only_after_the_activation_began_is_no_run_to_wait_behind() {
+    // Job 2 waited as the activation began and runs now.
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("jobs", &job(1, "renovate.service", "start", "waiting"));
+    // The look reads the queue as it begins: nothing running, nothing to see.
+    m.set("lists", "app.service\n");
+    m.set("before-9", &job(1, "renovate.service", "start", "running"));
+    left_waiting(&m);
+}
+
+#[test]
+fn a_job_let_go_that_cant_be_queued_again_fails_the_activation() {
+    let m = Machine::new(false);
+    behind_a_long_run(&m);
+    m.set("fail-requeue", "");
+    let two = m.sys("two");
+    let out = m.switch(&["--toplevel", &two]);
+    let (code, stdout, stderr) = said(&out);
+    assert_eq!(code, Some(1));
+    assert!(!stdout.contains("live:"), "{stdout}");
+    assert!(
+        stderr.contains("renovate-sweep.service was let go and could not be queued again: its start would be lost"),
+        "{stderr}"
+    );
+    // Never said to be queued again.
+    assert!(!stderr.contains("queued again, not waited for"), "{stderr}");
+    assert!(m.fake("journal").contains("could not be queued again"));
+    // The revert's activation fails the same way: it says so, and in the
+    // journal with the exit the revert records.
+    let out = m.switch(&["--revert-to", &m.sys("one")]);
+    assert!(said(&out).2.contains("its start would be lost"));
+    assert!(m.fake("journal").contains("(activation exit 127)"));
 }
 
 #[test]
