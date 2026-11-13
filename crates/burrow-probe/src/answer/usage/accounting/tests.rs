@@ -134,3 +134,20 @@ fn crash_fields_are_recovered_independently_without_discarding_valid_fields() {
     let next = decode(vec![result(80, 2.0)].into_iter(), &mut sessions, "3");
     assert_eq!(next.cost, 0.5);
 }
+
+#[test]
+fn recovery_tracks_every_gap_including_appended_runs_and_separate_jobs() {
+    let mut sessions = BTreeMap::new();
+    decode(vec![result(100, 1.5)].into_iter(), &mut sessions, "job-a/1");
+    let first = decode(vec![crash()].into_iter(), &mut sessions, "job-a/2");
+    let second = decode(
+        vec![crash(), result(80, 2.0)].into_iter(),
+        &mut sessions,
+        "job-a/3",
+    );
+    assert_eq!(second.recovered.len(), 2);
+    assert!(first.missing.is_subset(&second.recovered));
+    assert!(second.missing.is_subset(&second.recovered));
+    let other = decode(vec![crash()].into_iter(), &mut BTreeMap::new(), "job-b/2");
+    assert!(other.missing.is_disjoint(&second.recovered));
+}

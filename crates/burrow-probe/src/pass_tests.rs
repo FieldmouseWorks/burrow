@@ -1,6 +1,10 @@
 use burrow_github::fake::{Fake, ok};
 use serde_json::{Value, json};
 
+use std::fs;
+
+use burrow_door::MAX_COMMENT;
+
 use super::{Done, MAX_QUESTIONS, pass};
 use crate::query::Query;
 use crate::{Config, Journal, Tools};
@@ -585,15 +589,23 @@ fn a_comment_always_fits() {
     let body = &bodies(&gh)[0];
     assert!(body.len() < 2_000, "{}", body.len());
     assert!(body.contains("more characters)"), "{body}");
-    // Ten answers whose fences grow with their backticks: each fits its
-    // share, so only the comment's own cut holds them.
+    // Fences count toward pagination too; no outer cut can eat answers.
     let ticks = "`".repeat(4_500);
     let many = ["memory"; MAX_QUESTIONS].join("\n");
     let mut gh = github(true, json!([issue(6, "sam", "x", json!(many))]));
     pass(&mut gh, &config(), &mut |_| Ok(ticks.clone()), "now").unwrap();
-    let body = &bodies(&gh)[0];
-    assert!(body.len() <= 60_000, "{}", body.len());
-    assert!(body.ends_with("(cut here, past what a comment holds)"));
+    let pages = bodies(&gh);
+    assert!(pages.len() > 1);
+    assert!(pages.iter().all(|b| b.len() <= MAX_COMMENT));
+    assert_eq!(
+        pages
+            .iter()
+            .flat_map(|b| b.lines())
+            .filter(|l| *l == ticks)
+            .count(),
+        MAX_QUESTIONS
+    );
+    assert!(!pages.iter().any(|b| b.contains("cut here")));
 }
 
 #[test]
@@ -722,3 +734,211 @@ fn a_permission_failure_mixed_with_a_rate_limit_remains_a_failure() {
         "{error}"
     );
 }
+
+/// A usage answer far past what a comment holds still posts every role's
+/// total: the table leads, and only per-turn detail is cut, saying how much.
+#[test]
+fn a_usage_answer_too_big_for_a_comment_keeps_every_total() {
+    usage_totals_survive(25, 4, false);
+}
+
+#[test]
+fn usage_totals_survive_multiple_questions_and_oversized_tables() {
+    usage_totals_survive(25, 4, true);
+    usage_totals_survive(65, 8, true);
+}
+
+fn usage_totals_survive(role_count: usize, project_count: usize, multiple: bool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let jobs = tmp.path().join("jobs");
+    let roles: Vec<String> = (0..role_count)
+        .map(|r| {
+            if role_count > 25 {
+                format!("role-{r:02}-{}", "long".repeat(20))
+            } else {
+                format!("role-{r:02}")
+            }
+        })
+        .collect();
+    let projects: Vec<String> = (0..project_count)
+        .map(|j| {
+            if role_count > 25 {
+                format!("project-{j}-{}", "wide".repeat(20))
+            } else {
+                format!("project-{j}")
+            }
+        })
+        .collect();
+    // The large case grows the required table, not optional turn detail.
+    let per_job = if role_count > 25 { 1 } else { 12 };
+    let mut turns = 0;
+    for (r, role) in roles.iter().enumerate() {
+        for (j, project) in projects.iter().enumerate() {
+            let job = jobs.join(format!("job-{r:02}-{j}"));
+            fs::create_dir_all(&job).unwrap();
+            fs::write(job.join("role"), role).unwrap();
+            fs::write(job.join("project"), format!("/src/{project}")).unwrap();
+            for n in 1..=per_job {
+                let usage = json!({"type":"result","session_id":format!("s{r}-{j}"),
+                    "usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4},
+                    "total_cost_usd":n as f64 * 0.25});
+                fs::write(job.join(format!("{n}.jsonl")), usage.to_string()).unwrap();
+                fs::write(job.join(format!("{n}.started")), (100 + n).to_string()).unwrap();
+                turns += 1;
+            }
+        }
+    }
+    let mut cfg = config();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.jobs = Some(jobs);
+    let m = crate::answer::Machine {
+        cfg: &cfg,
+        root: "/".into(),
+        now: 1000,
+        uid: 1,
+        run: &crate::answer::Commands,
+    };
+    let whole = m.answer(&Query::parse("usage @0").unwrap()).unwrap();
+    assert!(
+        whole.len() > MAX_COMMENT,
+        "{} bytes fit already",
+        whole.len()
+    );
+    for totals in [false, true] {
+        let query = if totals {
+            "usage @0 --totals"
+        } else {
+            "usage @0"
+        };
+        let questions = if multiple {
+            format!("memory\nunits\n{query}\nqueue\ndeployed")
+        } else {
+            query.into()
+        };
+        let mut gh = github(true, json!([issue(9, "sam", "x", json!(questions))]));
+        pass(
+            &mut gh,
+            &cfg,
+            &mut |q| {
+                if matches!(q, Query::Usage { .. }) {
+                    m.answer(q)
+                } else {
+                    Ok(format!("answer to {q}"))
+                }
+            },
+            "now",
+        )
+        .unwrap();
+        let pages = bodies(&gh);
+        assert!(pages.iter().all(|p| p.len() <= MAX_COMMENT));
+        if role_count > 25 {
+            assert!(pages.len() > 1);
+        }
+        let body = pages.join("\n");
+        // Every line of the required prefix appears verbatim, including the
+        // summary's accounting qualifications and all four aggregation levels.
+        let required = m
+            .answer(&Query::parse("usage @0 --totals").unwrap())
+            .unwrap();
+        for line in required.lines() {
+            assert!(body.lines().any(|l| l == line), "missing {line}");
+        }
+        if multiple {
+            for q in ["memory", "units", "queue", "deployed"] {
+                assert!(body.contains(&format!("answer to {q}")));
+            }
+        }
+        let rows: Vec<String> = body
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        let row = |r: &str| rows.iter().any(|l| l == r);
+        assert!(
+            row(&format!(
+                "claude all all {turns} {turns} {} {} {} ${:.2} 0 0 0 0 0",
+                2 * turns,
+                3 * turns,
+                4 * turns,
+                turns as f64 * 0.25
+            )),
+            "{body}"
+        );
+        for role in &roles {
+            assert!(
+                row(&format!(
+                    "claude {role} all {} {} {} {} {} ${:.2} 0 0 0 0 0",
+                    per_job * project_count,
+                    per_job * project_count,
+                    2 * per_job * project_count,
+                    3 * per_job * project_count,
+                    4 * per_job * project_count,
+                    0.25 * (per_job * project_count) as f64
+                )),
+                "{role}: {body}"
+            );
+            for project in &projects {
+                assert!(
+                    row(&format!(
+                        "claude {role} {project} {per_job} {per_job} {} {} {} ${:.2} 0 0 0 0 0",
+                        2 * per_job,
+                        3 * per_job,
+                        4 * per_job,
+                        0.25 * per_job as f64
+                    )),
+                    "{role}: {body}"
+                );
+            }
+        }
+        assert!(body.contains("Cost:"));
+        if !totals {
+            assert!(body.contains("more lines cut, past what a comment holds)"));
+        }
+    }
+}
+
+#[test]
+fn a_failed_usage_continuation_does_not_close_the_issue() {
+    let mut gh = github(
+        true,
+        json!([issue(9, "sam", "x", json!("usage @0 --totals"))]),
+    );
+    for (method, path, replies) in &mut gh.answers {
+        if method == "POST" && path.contains("/issues/") {
+            *replies = vec![
+                ok(201, json!({}), &[]),
+                ok(500, json!({"message":"unavailable"}), &[]),
+            ]
+            .into();
+        }
+    }
+    let result = pass(
+        &mut gh,
+        &config(),
+        &mut |_| Ok("required row\n".repeat(20_000)),
+        "now",
+    );
+    assert!(result.is_err());
+    assert!(comments(&gh).len() >= 2);
+    assert!(gh.asked("PATCH").is_empty());
+}
+
+#[test]
+fn paginated_required_usage_is_scrubbed_before_splitting_and_fenced_safely() {
+    let mut gh = github(true, json!([issue(9, "sam", "x", json!("usage --totals"))]));
+    let secret = format!("gh{}_{}", "p", "Zz9".repeat(12));
+    let line = format!("é{} {secret}\n", "`".repeat(65_000));
+    pass(&mut gh, &config(), &mut |_| Ok(line.clone()), "now").unwrap();
+    let pages = bodies(&gh);
+    assert!(pages.len() > 1);
+    assert!(
+        pages
+            .iter()
+            .all(|p| p.len() <= MAX_COMMENT && !p.contains(&secret))
+    );
+    assert!(pages.join("\n").contains("[redacted]"));
+    assert!(pages.join("\n").contains('é'));
+    assert_eq!(gh.asked("PATCH").len(), 1);
+}
+
+#[path = "pass_secret_tests.rs"]
+mod secret_tests;

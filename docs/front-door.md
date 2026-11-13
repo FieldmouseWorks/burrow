@@ -74,10 +74,21 @@ own, say), in seconds and without starting a Claude.
   - `contains REPO COMMIT`: whether a commit is an ancestor of the running
     input revision, using its repository identity and local history; unavailable
     or ambiguous history is reported as unknown
-  - `usage [SINCE]`: engine turns by role, inbox label and opener category,
-    or starter; defaults to `-5h`. Claude turns include stream token counts
-    and cost. Result tokens are per invocation; only session cost totals are
-    subtracted across resumes. Every appended invocation is accounted for,
+  - `usage [SINCE] [--totals]`: engine turns, tokens and cost; defaults to
+    `-5h`. It leads with a table of totals by engine, by engine and role, by
+    engine and project (the job's checkout) and by all three. The leading
+    summary and every aggregate distinguish cost still missing, cost recovered
+    from selected turns, recovered cost potentially belonging outside the span,
+    unread engine streams and partial token counts. Recovery is matched by run
+    identity, so including both a crash and its recovery does not claim the
+    recovered cost is still missing. `--totals` gives only this required section.
+    Project basenames, including leading dots and underscores, remain distinct;
+    names are escaped for display. Meter readings follow, then each turn by
+    role, inbox label and opener category, or starter. Optional detail is cut
+    to its question's budget with a count of omitted lines; required sections
+    span multiple comments when necessary, including multi-question issues.
+    Claude turns include stream token counts and cost. Result tokens are per
+    invocation; only session cost totals are subtracted across resumes. Every appended invocation is accounted for,
     including unfinished runs and zeroed crash results. Partial input/cache
     tokens exclude duplicate message IDs; output counts completed runs only.
     Incomplete cost is labelled `known-cost`, with unavailable coverage and
@@ -96,14 +107,19 @@ own, say), in seconds and without starting a Claude.
 
   A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
   or `@EPOCH`, in UTC. An empty body asks its title.
-- **Answer:** one comment with every answer, then the issue is closed.
+- **Answer:** comments with every answer, split when required totals exceed
+  one comment. The issue closes only after every comment succeeds.
   Reopen it to ask again. An issue whose body or title someone else changed
   (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
 - **What keeps it safe:** no shell, and nothing of the issue's text reaches a
   command but a unit name, exact executable path or time the grammar made; unit journals only of the
   units on the allowlist; no answer at all in a repo GitHub doesn't call
   private; and every answer through a secret scrubber first
-  (`tests/probe.nix` plants a token to prove it). Anyone else's issue runs
+  (`tests/probe.nix` plants a token to prove it). Private keys come out of
+  request titles and bodies, each block whole, before questions are read,
+  limited or replies split, so an echoed refusal can't separate a key's
+  markers from its payload. Every other question runs as asked, and its echo
+  is scrubbed after the line before it. Anyone else's issue runs
   nothing.
 - On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
   the machine says it.
