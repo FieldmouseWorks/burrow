@@ -41,6 +41,10 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 const USAGE: &str = "usage:
+  burrow-upkeep CONFIG checkout OWNER/REPO PATH UNTIL
+      clone privately as the machine user, kill and reap clone descendants
+      at UNTIL (CLOCK_MONOTONIC seconds), and publish PATH only on success;
+      exit status 75 leaves the checkout retryable
   burrow-upkeep CONFIG token OWNER
       a token of the App's installation on OWNER, minted with its key
       (systemd's credential app-key), and when it expires, as JSON on
@@ -207,6 +211,19 @@ fn run(args: &[String]) -> Result<(), Stop> {
     let (config, words) = args
         .split_first()
         .ok_or_else(|| Stop::Usage("no config".into()))?;
+    if let [word, repo, path, until] = words
+        && word == "checkout"
+    {
+        if !burrow_github::repo_name(repo) {
+            return Err(Stop::Usage("checkout needs OWNER/REPO".into()));
+        }
+        let until = until
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .ok_or_else(|| Stop::Usage("checkout needs a monotonic deadline".into()))?;
+        return burrow_upkeep::checkout::clone(repo, Path::new(path), until).map_err(Stop::Later);
+    }
     if let [word, owner] = words
         && word == "token"
     {

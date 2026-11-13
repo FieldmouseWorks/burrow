@@ -800,6 +800,7 @@ dependencies = [
  "gh-token",
  "jiff",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

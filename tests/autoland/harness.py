@@ -88,6 +88,7 @@ PROJ_ASK_SRC = sys.argv[8]
 # which ask GitHub nothing, its `carry`, which reads the stand-in for
 # GitHub's git remote, and its `commits`, which reads GitHub's compare as
 # serve_compare has it, on the config upkeep_config writes (UPKEEP_REAL).
+# Its `checkout` also runs as it is, with the tests' gh making the clone.
 # Those it starts as they are, from sh: every pass's PRs read their verdicts,
 # and a Python's start for each would be most of the Python check's time.
 UPKEEP_RAN, UPKEEP_REAL, UPKEEP_FAKE = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json", f"{tmp}/upkeep-fake"
@@ -136,7 +137,7 @@ print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", 
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!/bin/sh
 case "$2" in
-token|sweep|verdict|carry|commits) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+token|sweep|verdict|carry|commits|checkout) shift; exec {shlex.quote(UPKEEP_RUN)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
 esac
 exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)

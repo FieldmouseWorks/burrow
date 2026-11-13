@@ -313,14 +313,14 @@ with tempfile.TemporaryDirectory() as tmp:
         # So must a job's first clone, which an upkeep job can start in an
         # operation-only continuation: gh has no timeout of its own.
         clock[0] = 0
-        with C.pass_deadline(18 * 60), patch.dict(C.CFG, {'projectsDir': tmp}), \
+        with C.pass_deadline(18 * 60), patch.dict(C.CFG, {'projectsDir': tmp, 'upkeep': ['upkeep', 'config']}), \
                 patch.object(C, 'follow_renames', lambda *a: None), patch.object(C, 'retiring', lambda *a: False), \
                 patch.object(C, 'project_dir', lambda *a: None):
             clock[0] = 17 * 60
             with patch.object(C.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as ran:
                 C.checkout('sam/cloned')
-            assert ran.call_args.args[0][:3] == ['gh', 'repo', 'clone'], ran.call_args
-            assert ran.call_args.kwargs.get('timeout') == 60, ran.call_args.kwargs
+            assert ran.call_args.args[0][:3] == ['upkeep', 'config', 'checkout'], ran.call_args
+            assert float(ran.call_args.args[0][-1]) == 18 * 60, ran.call_args
 
     # A pass's own subprocesses are local commands. One that reaches GitHub
     # (gh, cn, burrow-upkeep) goes through C.remote, or is given what is
@@ -340,7 +340,14 @@ with tempfile.TemporaryDirectory() as tmp:
             argv = node.args[0] if node.args else None
             first = ast.unparse(argv.elts[0]) if isinstance(argv, ast.List) and argv.elts else ast.unparse(argv)
             bounded = any(k.arg == 'timeout' and 'within(' in ast.unparse(k.value) for k in node.keywords)
-            if first not in local and not bounded:
+            # checkout's Rust supervisor owns its deadline and must remain
+            # alive to reap children. Its real process test covers that
+            # boundary; require the handoff here instead of an outer kill.
+            checkout = source.name == 'checkouts.py' and first == "*C.CFG['upkeep']" \
+                and ast.unparse(argv.elts[1]) == "'checkout'" \
+                and ast.unparse(argv.elts[-1]) == 'str(until)' \
+                and 'until = time.monotonic() + C.within(C.PASS_SECONDS)' in source.read_text()
+            if first not in local and not bounded and not checkout:
                 direct.append(f'{source.name}:{node.lineno} {first}')
     assert not direct, ('remote work outside the pass deadline', direct)
 
