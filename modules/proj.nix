@@ -793,6 +793,9 @@ in
       unit = "proj-inbox";
       # The inbox reads a PR only when it closes an issue a job holds.
       pullRequestActions = [ "closed" ];
+      # An issue's event has its pass look at that issue alone, rather than
+      # list every open one (inbox.rs, `Pass::scope`).
+      issueNumbers = true;
       wake = inboxWake;
     };
     systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {

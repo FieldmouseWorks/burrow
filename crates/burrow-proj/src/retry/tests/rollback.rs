@@ -142,7 +142,7 @@ fn legacy_refusals_stay_in_the_cohort_when_queue_publication_is_delayed() {
             start(&mut r, &format!("w{i}"), "old-delayed", "/ordinary");
         }
         usage::back(&r.cfg, None);
-        let cutoff = usage::admission_cutoff(&r.cfg).unwrap().unwrap();
+        let cutoff = usage::tests::cutoff(&r.cfg).unwrap();
         for i in 0..5 {
             let id = format!("w{i}");
             let job = Job::new(&r.cfg, &id);

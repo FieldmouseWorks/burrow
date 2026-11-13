@@ -13,7 +13,7 @@
 use yaml_serde::Value;
 
 use crate::expr::{Ctx, V, condition, value};
-use crate::harness::{repo_file, script, steps, text, workflow, yaml};
+use crate::harness::{repo_file, script, step, steps, text, workflow, yaml};
 
 fn job() -> Value {
     workflow(".github/workflows/flake-check.yml")["jobs"]["check"].clone()
@@ -317,6 +317,71 @@ fn a_negative_restores_every_legs_kept_builds() {
                 required,
                 "{id}: {hit}"
             );
+        }
+    }
+}
+
+/// A PR leg that would build cold waits for the base's push to keep the
+/// builds, then restores them (#863): only a PR of this repo, only when the
+/// restore didn't find the base's own kept builds, before the gate.
+#[test]
+fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert!(at("kept-restore") < at("kept-wait") && at("kept-wait") < at("kept-rewait"));
+    assert!(at("kept-rewait") < at("gate"));
+    let wait = &all[at("kept-wait")];
+    assert_eq!(wait["continue-on-error"], true);
+    let c = |event: &str, head: &str, hit: &str| {
+        ctx(&[
+            ("inputs.keep-builds", true.into()),
+            ("inputs.install-nix", true.into()),
+            ("github.event_name", event.into()),
+            ("github.repository", "o/r".into()),
+            ("github.event.pull_request.head.repo.full_name", head.into()),
+            ("steps.kept-restore.outputs.cache-hit", hit.into()),
+        ])
+    };
+    let on = |c: &Ctx| value(text(&wait["if"]), c).truthy();
+    assert!(on(&c("pull_request", "o/r", "")));
+    assert!(!on(&c("pull_request", "o/r", "true")));
+    assert!(!on(&c("pull_request", "someone/r", "")));
+    assert!(!on(&c("push", "", "")));
+}
+
+#[test]
+fn the_waiters_api_token_has_actions_read_through_every_local_caller() {
+    let check = job();
+    assert!(
+        check.get("permissions").is_none(),
+        "inherit the caller token, including optional actions access"
+    );
+    assert_eq!(
+        step(&check, "kept-wait")["env"]["GH_TOKEN"],
+        "${{ github.token }}"
+    );
+    for path in [
+        ".github/workflows/flake.yml",
+        ".github/workflows/flake-retarget.yml",
+        "templates/project/.github/workflows/flake.yml",
+        "templates/project/.github/workflows/flake-retarget.yml",
+    ] {
+        let wf = workflow(path);
+        for (name, job) in wf["jobs"].as_mapping().unwrap() {
+            if job["uses"]
+                .as_str()
+                .is_some_and(|u| u.contains("/flake-check.yml"))
+            {
+                for (scope, level) in [
+                    ("actions", "read"),
+                    ("contents", "read"),
+                    ("id-token", "write"),
+                    ("attestations", "write"),
+                ] {
+                    assert_eq!(job["permissions"][scope], level, "{path} {name:?}: {scope}");
+                }
+            }
         }
     }
 }
