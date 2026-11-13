@@ -18,7 +18,7 @@ if [ "$1" = wait ]; then
   "$work/runner" cold
   # Only the API waiter needs Cargo and the shared GitHub client. The gate
   # and negative runner keep their direct, dependency-free compilation.
-  (cd -- "$work" && PATH="$compiler/bin:$PATH" RUSTC="$compiler/bin/rustc" RUSTC_WRAPPER= "$compiler/bin/cargo" build --locked --quiet --manifest-path "$here/../../crates/Cargo.toml" --target-dir "$work/target" -p burrow-flake-check --bin burrow-flake-wait)
+  (cd -- "$work" && PATH="$compiler/bin:$PATH" RUSTC="$compiler/bin/rustc" RUSTC_WRAPPER='' "$compiler/bin/cargo" build --locked --quiet --manifest-path "$here/../../crates/Cargo.toml" --target-dir "$work/target" -p burrow-flake-check --bin burrow-flake-wait)
   "$work/target/debug/burrow-flake-wait"
 else
   "$work/runner" "$1"
