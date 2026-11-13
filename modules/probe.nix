@@ -2,11 +2,11 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `rc`, `queue`, `deployed`, `usage [SINCE]`, `oom [SINCE]`): the
+# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
-# Nothing of the issue's text reaches a command but a unit name or a time the
+# Nothing of the issue's text reaches a command but a unit name, executable path or time the
 # probe's grammar made, journals are read only for the units on the
 # allowlist, a repo GitHub doesn't call private gets no answer, and every
 # answer goes through the secret scrubber before it's posted
@@ -192,7 +192,7 @@ in
     burrow.claude.machineMd = lib.mkOrder 702 ''
       Read-only questions about this machine need no Claude: open an issue in
       ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
-      (`memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
+      (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
       `usage [SINCE]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.
     '';
