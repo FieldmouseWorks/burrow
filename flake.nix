@@ -98,7 +98,8 @@
       # to read their origins, gh-token's make keys with openssl, lock-age's
       # check its wait against what the steward reads (lock_wait.py), and
       # house-sync's read burrow's own house blocks, and attestation's ask a
-      # token server of their own with curl.
+      # token server of their own with curl, and rc-scan's run the shell it
+      # replaced beside it, which needs pgrep (procps).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -113,7 +114,7 @@
             "modules/autoland/lock_wait.py"
             "house"
           ];
-          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl ];
+          testInputs = pkgs: [ pkgs.rustc pkgs.git pkgs.gh pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl pkgs.curl pkgs.procps ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

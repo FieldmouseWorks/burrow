@@ -34,6 +34,7 @@ members = [
     "burrow-renovate",
     "burrow-review",
     "burrow-robot",
+    "burrow-rc-scan",
     "burrow-rustc-wrapper",
     "burrow-switch",
     "burrow-systemd",
