@@ -7,8 +7,9 @@
 //! asks again.
 //!
 //! What keeps it read-only and keeps secrets in: no shell, and nothing of the
-//! issue's text reaches a command but a unit name or a time query.rs made;
-//! journals only of the units on its allowlist; a repo that isn't private
+//! issue's text reaches a command but a unit name, executable path or time
+//! query.rs made; unit journals only of the units on its allowlist, and crash
+//! reports only of an exact executable with selected diagnostic fields; a repo that isn't private
 //! gets no answer at all; and every answer goes through the scrubber
 //! (scrub.rs) before it leaves. `burrow-probe CONFIG ask QUESTION` answers
 //! one here, on the terminal, as it is: whoever runs it can read the same

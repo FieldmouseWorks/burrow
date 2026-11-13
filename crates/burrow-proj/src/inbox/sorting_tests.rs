@@ -100,7 +100,8 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         let systemctl = script(
             "systemctl",
             format!(
-                "case \"$*\" in\n  *is-active*) [ -e '{}' ] && exit 0; exit 3 ;;\n  *show*) echo inactive ;;\nesac\nexit 0\n",
+                "case \"$*\" in\n  *is-active*) [ -e '{}' ] && exit 0; exit 3 ;;\n  *ActiveState*) if [ -e '{}' ]; then echo active; else echo inactive; fi ;;\n  *Job*) ;;\nesac\nexit 0\n",
+                at("active").display(),
                 at("active").display()
             ),
         );
@@ -982,3 +983,6 @@ fn the_machinery_apps_issues_are_sorted_and_ranked() {
     stranger["repository_url"] = json!("https://api.github.com/repos/sam/box");
     assert_eq!(p.pick_ready(&t, &[stranger]), None);
 }
+
+#[path = "sorting_slot_tests.rs"]
+mod slot_tests;

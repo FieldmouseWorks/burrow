@@ -106,7 +106,8 @@ class Pass(Context, Jobs, Actions):
             return
 
         self.machine = C.machine(self.rc)  # the checks a machine runs, not CI, and how
-        self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved_from(self.repo, self.pr, self.st), self.repo)
+        moved = moved_from(self.repo, self.pr, self.st)
+        self.ci, self.ci_names, docs = ci_state(self.pr, self.machine, moved, self.repo)
         # A head with no live run (one GitHub never started, or one cancelled
         # that nothing ran through since) is asked to run it again, through
         # GitHub's own re-run, once per run: never an empty commit or a
@@ -115,7 +116,7 @@ class Pass(Context, Jobs, Actions):
         # request GitHub couldn't take just now (Unavailable) isn't counted:
         # the next pass asks again; one it refused is, since asking again
         # would get the same answer.
-        if self.ci != "green" and (dead := dead_runs(self.pr, self.repo)):
+        if self.ci != "green" and (dead := dead_runs(self.pr, self.repo, moved=moved)):
             asked = self.st.get("rerun") if (self.st.get("rerun") or {}).get("head") == self.head else {"head": self.head, "runs": []}
             asked.setdefault("pending", {})  # run -> its attempt number when we last meant to ask
             for run in [r for r in dead if r not in asked["runs"]]:

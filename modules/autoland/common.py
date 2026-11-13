@@ -76,15 +76,34 @@ LIMITED = []
 # A network call must return before the unit's twenty-minute deadline so
 # the pass can report what stalled and book its normal unavailable retry.
 REMOTE_TIMEOUT = 120
+PASS_SECONDS = 18 * MIN
+REMOTE_DEADLINE = None
+
+
+@contextlib.contextmanager
+def pass_deadline(seconds):
+    """Leave time to publish local state before systemd's hard timeout."""
+    global REMOTE_DEADLINE
+    previous = REMOTE_DEADLINE
+    REMOTE_DEADLINE = time.monotonic() + seconds
+    try:
+        yield
+    finally:
+        REMOTE_DEADLINE = previous
 
 
 def remote(command, *, timeout=REMOTE_TIMEOUT, **kwargs):
+    if REMOTE_DEADLINE is not None:
+        remaining = REMOTE_DEADLINE - time.monotonic()
+        timeout = remaining if timeout is None else min(timeout, remaining)
+        if timeout <= 0:
+            raise Unavailable("pass remote-call deadline reached")
     try:
         return subprocess.run(command, timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired:
         # Command arguments can contain API bodies or credentials. Only
         # identify the executable here, never captured output or the env.
-        raise Unavailable(f"{os.path.basename(command[0])} timed out after {timeout}s") from None
+        raise Unavailable(f"{os.path.basename(command[0])} timed out after {timeout:g} seconds") from None
 
 
 def limited(stderr, env):
@@ -135,7 +154,7 @@ def token(owner):
     have = _tokens.get(owner)
     if have and have[1] - time.time() > 600:
         return have[0]
-    p = subprocess.run([*CFG["upkeep"], "token", owner], capture_output=True, text=True, timeout=UPKEEP_TIMEOUT)
+    p = remote([*CFG["upkeep"], "token", owner], capture_output=True, text=True, timeout=UPKEEP_TIMEOUT)
     said = p.stderr.strip()
     if p.returncode:
         raise (Unavailable if p.returncode == 75 else RuntimeError)(said.splitlines()[-1] if said else
@@ -171,12 +190,13 @@ def upkeep(*args, input=None, as_app=True, bounded=True):
     Not `as_app`, it's handed no token: `hooks` mints its own, for each
     owner it's about, and `sweep` asks GitHub nothing. What it says of
     itself goes to the journal; one that fails, or runs past UPKEEP_TIMEOUT
-    while it's `bounded`, raises. A fetch into the steward's mirror isn't:
-    it takes as long as git does while GitHub keeps answering, and fails
-    once GitHub goes quiet (mirror.rs's STALL)."""
-    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
-                       stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
-                       timeout=UPKEEP_TIMEOUT if bounded else None)
+    while it's `bounded`, raises. A fetch into the steward's mirror isn't
+    bounded individually: it takes as long as git does while GitHub keeps
+    answering, and fails once GitHub goes quiet (mirror.rs's STALL); every
+    call still shares the pass's remote-call deadline."""
+    p = remote([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
+               stdout=subprocess.PIPE, text=True, env=gh_env() if as_app else None,
+               timeout=UPKEEP_TIMEOUT if bounded else None)
     if p.returncode:
         raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
@@ -389,6 +409,7 @@ def ts(s):
 # burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
+RETRY_AFTER = "retry-after.json"  # rate limits apply across both event lines
 
 
 def wake(repo, at):
@@ -413,8 +434,10 @@ def poke(url):
         return
     try:
         urllib.request.urlopen(urllib.request.Request(url, data=b"", method="POST"), timeout=5).close()
+        return True
     except OSError as e:
         log(f"couldn't kick {url}: {e}")
+        return False
 
 
 def load(name, default):
@@ -955,6 +978,9 @@ def after_limit(kick):
     booked before it was met and other passes'. None sooner could do
     anything, and none then waits on another event or the hourly pass."""
     at = LIMITED[0] + 1
+    save(RETRY_AFTER, at)
+    continuations = load("continue.json", {})
+    save("continue.json", {k: max(v, at) for k, v in continuations.items()})
     again = [""] if kick is None else kick
     wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
              if v > NOW and k.lower() not in {r.lower() for r in again}}

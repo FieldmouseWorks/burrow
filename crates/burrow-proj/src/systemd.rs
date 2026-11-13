@@ -70,6 +70,7 @@ pub fn show(cfg: &Config, unit: &str, property: &str) -> String {
         .stderr(Stdio::null())
         .output()
         .ok()
+        .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_owned())
         .unwrap_or_default()
 }
@@ -95,6 +96,14 @@ pub fn gone(cfg: &Config, unit: &str) -> bool {
         show(cfg, unit, "ActiveState").as_str(),
         "inactive" | "failed"
     )
+}
+
+/// Positively observed termination, with no start or stop queued. Read the
+/// queue first: a queued start can become active between observations, while
+/// callers holding the launcher lock prevent a new start after an empty queue.
+/// Failed queries and transitional states are never proof of completion.
+pub(crate) fn terminated(cfg: &Config, unit: &str) -> bool {
+    pending(cfg, unit) == Some(false) && gone(cfg, unit)
 }
 
 /// A unit that failed is forgotten, so its name can be used again.

@@ -72,6 +72,7 @@ import os
 import sys
 
 import common as C
+from batch import Batch
 import proofs as P
 import repos as R
 import reviewers as V
@@ -121,13 +122,27 @@ def main():
     # the hooks of repos it no longer sees to, another try at what GitHub
     # said no to about a branch (its archive, a read its judgment needed),
     # and whatever no event reported.
-    kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
+    continuing = sys.argv[1:2] == ["continue"]
+    kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] or (continuing and len(sys.argv) > 2) else None
     if not DRY:
         # One pass at a time, full or kicked: two would act on the same PRs.
         lock = open(os.path.join(STATE, "pass.lock"), "w")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # A queued unit must not spend its hard deadline waiting for the
+            # other handler. Requeue on the same line without touching files
+            # owned by the pass that has the lock.
+            endpoint = CFG["continuationKick"] if continuing else CFG["kick"]
+            for repo in kick or [""]:
+                if C.poke(endpoint + (f"/{repo}" if repo else "")) is False:
+                    # The event runner's failed-unit retry is the durable
+                    # alternative when its HTTP listener cannot take this.
+                    sys.exit(75)
+            return
     try:
-        run_pass(kick)
+        with C.pass_deadline(C.PASS_SECONDS):
+            run_pass(kick, continuing)
     except C.Unavailable as e:
         # GitHub didn't answer where no repo's own pass catches it (finding
         # the repos, the owner's issue): no failed unit for the watchdog to
@@ -222,9 +237,21 @@ def retire_deleted(known, failed, digest):
             digest[x["name"]] = [(C.RETIRING, x["name"], f"{x['for']} took on its name, and gets no job until this is done (journalctl -u autoland)")]
 
 
-def run_pass(kick):
+def run_pass(kick, continuing=False):
     waits.begin()
-    repos = R.discover()
+    batch = Batch(kick, continuing)
+    if not batch.active(kick):
+        batch.end(True, kick)
+        return
+    if (at := load(C.RETRY_AFTER, 0)) > C.NOW:
+        # Even discovery is remote work. A startup or local event must not
+        # spend the rate limit again before either handler's saved reset.
+        C.LIMITED[:] = [at - 1]
+        C.after_limit(kick)
+        batch.end(False, kick)
+        return
+    all_repos = R.discover()
+    repos = batch.repos(all_repos)
     if kick is not None:
         repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind
     # Repos whose baseline job has started. A repo not in it gets one, a few
@@ -236,14 +263,24 @@ def run_pass(kick):
     started = 0
     # What waits for the owner, by repo: a kicked pass replaces its repos'.
     digest = {}
-    if kick is None and not DRY:
-        C.follow_renames({r["repo"].lower() for r in repos})
+    if kick is None and batch.traversal_full and not DRY:
+        C.follow_renames({r["repo"].lower() for r in all_repos})
         retire_deleted(known, failed, digest)
     live = {}  # the repos whose PRs it read: their heads' snapshots
     covered = []
+    seen = set()
+    deferred = set()
+    complete = True
     for r in repos:
+        if batch.expired() and seen:
+            complete = False
+            batch.left = True
+            break
         repo = r["repo"]
-        digest[repo] = mine = []
+        seen.add(repo)
+        deferred.add(repo)
+        operations_complete = True
+        digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
             try:
                 # First: nothing of a deleted repo's may act on the one that
@@ -253,12 +290,15 @@ def run_pass(kick):
                 log(f"{repo}: starting it over as new: {e}")
                 waits.failed(repo)
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                batch.finish(repo)
                 continue
             try:
                 new = R.settle_repo(r, known)
                 if r["default"] is None:
                     # No commit yet: its settings and hook are set, so its
                     # first push is heard, and that push's pass does the rest.
+                    batch.finish(repo)
+                    deferred.discard(repo)
                     continue
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
                         and C.NOW - failed.get(repo, 0) > 86400 and not C.taken(repo) and not C.paused(repo)):
@@ -283,24 +323,38 @@ def run_pass(kick):
                 P.begin(repo, (pr["number"] for pr in prs), first)
                 T.begin(repo)
                 waits.read(repo, prs)
+                pending = batch.pending(repo, prs, mine, info)
                 # First, so a red-branch fix it holds isn't merged by this same pass.
                 held = R.watch_default(r, info, prs, mine) or {}
+                pending = [pr for pr in prs if pr in pending or pr["number"] in held]
                 # Every open PR's branches, head and base, drafts and forks' PRs
                 # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
                 in_use = set()
-                seen_to = True
-                snaps = set()  # its open PRs' heads' snapshots
+                snaps = set()
                 # Each open PR by its head branch, to name the one a stacked PR
                 # is on. .get: one bad PR mustn't stop the rest (it fails in its
                 # own step below).
                 heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                # Then in the proof line's order, so proofSlots go to PRs in it.
-                for pr in sorted(prs, key=lambda pr: (pr["number"] not in held, P.place(repo, pr["number"]))):
+                # Preserve first-labelled priority, then finish unvisited
+                # PRs before revisiting changed ones from an earlier batch.
+
+                def order(pr):
+                    n = pr["number"]
+                    return n not in held, n not in first, batch.visited(repo, pr), P.place(repo, n)
+
+                partial = False
+                for pr in sorted(pending, key=order):
+                    if batch.expired():
+                        partial = True
+                        batch.left = True
+                        break
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                    T.STOPPED.pop(repo, None)
+                    seen_to = True
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]), heads.get(pr["baseRefName"]))
                     except Exception as e:  # one bad PR mustn't stop the rest
@@ -310,10 +364,27 @@ def run_pass(kick):
                         if T.seat(repo, pr["number"]) is not None:
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
+                    batch.note(repo, pr, mine, seen_to, info, T.STOPPED.get(repo))
                 # Swept only once it has every open PR's head: one whose look
                 # failed before then would have the sweep take what's theirs.
+                if partial or batch.expired():
+                    complete = False
+                    batch.left = True
+                    continue
+                # A partial traversal leaves all reviewer files alone. Once
+                # complete, include the snapshots carried from earlier batches
+                # before sweeping, just as a single complete pass does.
+                for pr in prs:
+                    if pr not in pending:
+                        in_use.update((pr["headRefName"], pr["baseRefName"]))
+                        snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 live[repo] = snaps
-                if seen_to:
+                if why := batch.stopped(repo):
+                    T.stop(repo, why)
+                    # Receipts keep the train safe across batches; a fresh
+                    # ordinary look must revalidate the PR that stopped it.
+                    C.wake(repo, C.NOW + 5 * MIN)  # ends: the stopping PR is revalidated
+                if batch.seen_to(repo):
                     covered.append(r)
                 else:
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
@@ -323,12 +394,14 @@ def run_pass(kick):
                         T.step(repo)
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
+                        operations_complete = False
+                        batch.retry(repo, max(C.NOW + 5 * MIN, C.LIMITED[0] + 1 if C.LIMITED else 0))
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
-                branches(repo, r["default"], in_use, mine, full=kick is None)
+                branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
@@ -336,20 +409,44 @@ def run_pass(kick):
             upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
+            if operations_complete:
+                batch.finish(repo)
+                deferred.discard(repo)
+            else:
+                complete = False
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
-    seen = {r["repo"] for r in repos}
-    wakes = {k: v for k, v in load("wake.json", {}).items() if v > C.NOW and k not in seen}
+    if kick is None and not continuing:
+        # Line.take consumed the full pass's repository requests. Any repo
+        # this batch skipped still owes a fresh look, for events, local
+        # completions and retries alike. Do not let the continuation line
+        # acknowledge those obligations.
+        for r in all_repos:
+            if r["repo"] not in seen or r["repo"] in deferred:
+                retry = batch.state["retry"].get(r["repo"].lower(), 0)
+                C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
+    inventory = {r["repo"] for r in all_repos}
+    names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
+    visited.update(r.lower() for r in kick or () if r.lower() not in names)
+    wakes = {k: max(v, C.NOW + 1) for k, v in load("wake.json", {}).items()
+             if k.lower() not in visited and (k == "" or k.lower() in names or v > C.NOW)
+             and (k != "" or kick is not None or continuing or v > C.NOW)}
     save("wake.json", {**wakes, **C.WAKE})
-    if kick is not None:
-        digest = {**{k: v for k, v in load("digest-repos.json", {}).items() if k not in seen}, **digest}
+    digest = {**{k: v for k, v in load("digest-repos.json", {}).items()
+                 if k not in seen and (kick is not None or k in inventory)}, **digest}
+    digest = {k: list(dict.fromkeys(tuple(x) for x in v)) for k, v in digest.items()}
     save("digest-repos.json", digest)
-    waits.publish(seen, digest, kick is None)
-    if kick is None:
+    waits.publish(seen, digest, False, inventory=inventory if kick is None else None, deferred=deferred)
+    if kick is None and batch.traversal_full:
         # For renovate-sweep: it lists the ok majors of the repos this pass
         # didn't see to (one whose pass failed among them), and tells its
         # jobs how every repo's proofs run.
-        save("repos.json", C.coverage(repos, covered))
+        coverage = C.coverage(all_repos, covered)
+        old = load("repos.json", {}).get("repos", {})
+        for repo in inventory:
+            if repo.lower() in batch.state["finished"] and repo not in seen:
+                coverage["repos"][repo]["covered"] = old.get(repo, {}).get("covered", False)
+        save("repos.json", coverage)
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     if not DRY:
@@ -358,8 +455,13 @@ def run_pass(kick):
                 V.sweep(repo, snaps)
             except Exception as e:  # one repo's mustn't stop the rest, or the pass's end
                 log(f"{repo}: couldn't sweep what its reviewers left: {e}")
-    if kick is None:
-        R.hooks(repos)
+    if not complete:
+        # Wake-ups are persisted before publishing GitHub issues: their
+        # failure mustn't lose the remainder of this batch.
+        log("pass yielded; continuing from its saved PR and repo cursors")
+    batch.end(complete, kick)
+    if kick is None and batch.traversal_full and complete:
+        R.hooks(all_repos)
     # Last: GitHub failing it leaves the pass's state saved. A line more than
     # one repo has (a reviewer out of service) is listed once. The stalls the
     # watchdog took past a Claude job go on the stuck issue with the rest.

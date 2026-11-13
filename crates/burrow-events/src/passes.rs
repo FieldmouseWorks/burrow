@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use crate::handler::Handler;
 use crate::line::Line;
 use crate::now;
+use crate::routes::{Handlers, Lines};
 
 /// What starts a pass: systemd, or a stand-in for it.
 pub trait Units {
@@ -51,9 +52,28 @@ pub fn booked(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// A completed unit may publish another handler's wakes. Notify every
+/// owning line directly, preserving the recorded deadlines. No HTTP kick
+/// can fail between the durable write and this notification; failed units
+/// are refreshed too, and startup recovers files left before a restart.
+pub fn refresh(handlers: &Handlers, lines: &Lines) {
+    for (name, h) in handlers.iter() {
+        if let Some(wake) = &h.wake {
+            lines[name].wakes(&booked(wake));
+        }
+    }
+}
+
 /// Start each of the handler's due passes, for as long as the service runs
 /// (`once`: one round, for the tests).
-pub fn serve(name: &str, h: &Handler, line: &Line, units: &impl Units, once: bool) {
+pub fn serve(
+    name: &str,
+    h: &Handler,
+    line: &Line,
+    units: &impl Units,
+    once: bool,
+    refresh: impl Fn(),
+) {
     if let Some(wake) = &h.wake {
         line.wakes(&booked(wake));
     }
@@ -76,11 +96,7 @@ pub fn serve(name: &str, h: &Handler, line: &Line, units: &impl Units, once: boo
                     (again - now()).round()
                 );
             }
-        }
-        if !ready.is_empty()
-            && let Some(wake) = &h.wake
-        {
-            line.wakes(&booked(wake));
+            refresh();
         }
         if once {
             return;
@@ -106,6 +122,7 @@ mod tests {
     /// books its next wake-up as it runs.
     struct Fake {
         wake: PathBuf,
+        contents: String,
         started: RefCell<Vec<String>>,
         running: HashSet<String>,
         failing: HashSet<String>,
@@ -123,7 +140,7 @@ mod tests {
 
         fn start(&self, unit: &str) -> bool {
             self.started.borrow_mut().push(unit.into());
-            fs::write(&self.wake, r#"{"sam/next": 1}"#).unwrap();
+            fs::write(&self.wake, &self.contents).unwrap();
             !self.failing.contains(unit)
         }
     }
@@ -140,6 +157,7 @@ mod tests {
         };
         let fake = Fake {
             wake,
+            contents: r#"{"sam/next": 1}"#.into(),
             started: RefCell::default(),
             running: HashSet::new(),
             failing: HashSet::new(),
@@ -154,10 +172,14 @@ mod tests {
         let (_dir, h, fake) = setup();
         let line = Line::default();
         line.event(Pass::Full, -100.0);
-        serve("autoland", &h, &line, &fake, true);
+        serve("autoland", &h, &line, &fake, true, || {
+            line.wakes(&super::booked(h.wake.as_ref().unwrap()));
+        });
         assert_eq!(*fake.started.borrow(), ["autoland.service"]);
         assert_eq!(line.due(), HashMap::from([(Pass::repo("sam/next"), 1.0)]));
-        serve("autoland", &h, &line, &fake, true);
+        serve("autoland", &h, &line, &fake, true, || {
+            line.wakes(&super::booked(h.wake.as_ref().unwrap()));
+        });
         assert_eq!(
             *fake.started.borrow(),
             ["autoland.service", "autoland@sam-next.service"]
@@ -173,7 +195,9 @@ mod tests {
         fake.running.insert("autoland.service".into());
         let line = Line::default();
         line.event(Pass::Full, -100.0);
-        serve("autoland", &h, &line, &fake, true);
+        serve("autoland", &h, &line, &fake, true, || {
+            line.wakes(&super::booked(h.wake.as_ref().unwrap()));
+        });
         assert_eq!(
             *fake.started.borrow(),
             ["autoland.service", "autoland.service"]
@@ -189,9 +213,100 @@ mod tests {
         let line = Line::default();
         line.event(Pass::Full, -100.0);
         let before = crate::now();
-        serve("autoland", &h, &line, &fake, true);
+        serve("autoland", &h, &line, &fake, true, || {
+            line.wakes(&super::booked(h.wake.as_ref().unwrap()));
+        });
         let at = line.due()[&Pass::Full];
         assert!(before + 60.0 <= at && at <= crate::now() + 60.0, "{at}");
+    }
+
+    #[test]
+    fn refreshes_each_completed_pass() {
+        let (_dir, h, fake) = setup();
+        let line = Line::default();
+        line.event(Pass::repo("sam/a"), -100.0);
+        line.event(Pass::repo("sam/b"), -100.0);
+        let notifications = RefCell::new(Vec::new());
+        serve("autoland", &h, &line, &fake, true, || {
+            notifications.borrow_mut().push(fake.started.borrow().len());
+        });
+        assert_eq!(*notifications.borrow(), [1, 2]);
+    }
+
+    // Completing either event line delivers cross-handler publications to
+    // an idle owner. Decision, unavailable and rate-limit deadlines retain
+    // their times, including after a unit fails or the runner restarts.
+    #[test]
+    fn cross_handler_wakes() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use serde_json::json;
+
+        for (source, target) in [("ordinary", "continuation"), ("continuation", "ordinary")] {
+            for failed in [false, true] {
+                let (dir, mut target_handler, mut fake) = setup();
+                let future = crate::now().ceil() + 3600.0;
+                fake.contents = json!({
+                    "sam/next": 1,
+                    "sam/decision": future,
+                    "sam/unavailable": future + 300.0,
+                    "sam/limited": future + 600.0,
+                })
+                .to_string();
+                target_handler.unit = target.into();
+                let source_handler = Handler {
+                    unit: source.into(),
+                    wake: Some(dir.path().join("source.json")),
+                    ..Handler::default()
+                };
+                if failed {
+                    fake.failing.insert(format!("{source}.service"));
+                }
+                let handlers = Arc::new(BTreeMap::from([
+                    (source.to_owned(), source_handler),
+                    (target.to_owned(), target_handler),
+                ]));
+                let lines = Arc::new(BTreeMap::from([
+                    (source.to_owned(), Line::default()),
+                    (target.to_owned(), Line::default()),
+                ]));
+                assert!(lines[target].take(crate::now()).0.is_empty());
+                lines[source].event(Pass::Full, -100.0);
+                serve(
+                    source,
+                    &handlers[source],
+                    &lines[source],
+                    &fake,
+                    true,
+                    || {
+                        super::refresh(&handlers, &lines);
+                    },
+                );
+                assert_eq!(lines[target].due()[&Pass::repo("sam/decision")], future);
+                assert_eq!(
+                    lines[target].due()[&Pass::repo("sam/unavailable")],
+                    future + 300.0
+                );
+                assert_eq!(
+                    lines[target].due()[&Pass::repo("sam/limited")],
+                    future + 600.0
+                );
+                assert_eq!(lines[target].take(crate::now()).0, [Pass::repo("sam/next")]);
+
+                // Durable files also recover a publication if the process
+                // stops before notification. Startup needs no other event.
+                let recovered = Line::default();
+                fake.contents = json!({"sam/limited": future + 600.0}).to_string();
+                fs::write(&fake.wake, &fake.contents).unwrap();
+                serve(target, &handlers[target], &recovered, &fake, true, || {});
+                assert_eq!(recovered.take(future + 599.0).0, []);
+                assert_eq!(
+                    recovered.take(future + 600.0).0,
+                    [Pass::repo("sam/limited")]
+                );
+            }
+        }
     }
 
     // A wake file that's missing or isn't an object books nothing.
