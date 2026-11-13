@@ -3,6 +3,8 @@ about one: how its CI stands, its `review-settled` status, its stage
 label, the merge."""
 
 import json
+import os
+import re
 import subprocess
 import urllib.parse
 
@@ -107,6 +109,43 @@ def open_prs(owner, name):
                 older = got["node"][field]
                 pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
     return info, prs
+
+
+def stage_item(was, repo, n, stage, by, on):
+    """A PR's saved stage record, for proj's snapshot: `since` is when it came
+    to this stage, kept while it stays in it (a null stage, a draft or a held
+    PR, is a stage too) and started when there's no record of one. A change
+    of the record is news for the snapshot's subscribers (stage_news)."""
+    same = isinstance(was, dict) and "stage" in was and was["stage"] == stage and isinstance(was.get("since"), (int, float))
+    item = {"repo": repo, "number": n, "stage": stage, "by": by, "on": on, "since": was["since"] if same else C.NOW}
+    if item != was:
+        C.STAGE_NEWS.append((repo, n))
+    return item
+
+
+def retire_stages(repo, numbers):
+    """The repo's open PRs are `numbers`, all pages of them: a closed or
+    merged PR's record leaves the snapshot, and a reopened one starts its
+    stage anew. The state file's other facts stay."""
+    k = re.escape(repo.replace("/", "_"))
+    for name in sorted(os.listdir(C.STATE)):
+        m = re.fullmatch(rf"pr-{k}-(\d+)\.json", name)
+        if m and int(m[1]) not in numbers:
+            st = C.load(name, {})
+            if st.pop("stage", None) is not None:
+                C.save(name, st)
+                C.STAGE_NEWS.append((repo, int(m[1])))
+
+
+def stage_news():
+    """Tell proj's snapshot subscribers, once the pass's state is saved,
+    that PRs' stages changed in it."""
+    if C.STAGE_NEWS and not DRY:
+        try:
+            subprocess.run([CFG["proj"], "_notify"], capture_output=True, timeout=30, check=True)
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"couldn't tell proj's snapshot about {len(C.STAGE_NEWS)} stage changes: {e}")
+    C.STAGE_NEWS.clear()
 
 
 def has_ci(pr, proofs=()):

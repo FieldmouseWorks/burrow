@@ -40,5 +40,8 @@
   "jobs": [
     {"id": "burrow-20261110-181200-QwEr", "state": "parked", "vm": [], "apps": [], "demoted": null, "waitingInLine": [], "awaits": ["https://github.com/FieldmouseWorks/burrow/pull/690"], "ends": ["await"], "answer": "Opened the PR; waiting for the steward."},
     {"id": "lok-20261110-203000-ZxCv", "state": "parked", "vm": [], "apps": ["fieldmouseworks-workers"], "demoted": "its repo left the pipeline", "waitingInLine": [], "awaits": ["https://github.com/FieldmouseWorks/lok/pull/209"], "ends": ["await"], "answer": "CI is red on the merge train."}
+  ],
+  "items": [
+    {"repo": "FieldmouseWorks/burrow", "number": 690, "stage": "ci", "by": "steward", "on": "Settled; waiting for CI", "since": 1794397800, "age": 600}
   ]
 }

@@ -270,6 +270,11 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some("_watch") => watch::look(cfg, args.get(1).map_or("", String::as_str)),
         Some("_ended") => ended(cfg),
+        // The steward saved PRs' stages: news for the stream's subscribers.
+        Some("_notify") => {
+            crate::snapshot::stream::notify(cfg);
+            Ok(())
+        }
         Some("_handover_format") => {
             put(&format!("{}\n", slot::HANDOVER_FORMAT));
             Ok(())

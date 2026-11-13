@@ -9,7 +9,7 @@ import train as T
 import waits
 from common import CFG, DRY, MIN, load, log, repo_cfg, ts
 from tasks import judged_on
-from prs import MERGE_STEPS, post_status, show_waiting
+from prs import MERGE_STEPS, post_status, show_waiting, stage_item
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -168,11 +168,8 @@ class Context:
         # mark or the hold label says so: no stage's label, whatever said it.
         stage = S.NONE if self.pr["isDraft"] or CFG["labels"]["hold"] in self.labels else stage
         show_waiting(self.repo, self.pr, self.labels, stage)
-        # Where it stands, for proj's snapshot (crates/burrow-proj/src/snapshot.rs):
-        # `since` is when it came to this stage, kept while it stays in it.
-        was = self.st.get("stage") or {}
-        self.st["stage"] = {"repo": self.repo, "number": self.n, "stage": stage, "by": wait, "on": desc,
-                            "since": was["since"] if was.get("stage") == stage else C.NOW}
+        # Where it stands, for proj's snapshot (crates/burrow-proj/src/snapshot.rs).
+        self.st["stage"] = stage_item(self.st.get("stage"), self.repo, self.n, stage, wait, desc)
         if why:
             self.digest.append((why, self.line, desc))
         self.refresh["usage_release"] = self.usage_grace()

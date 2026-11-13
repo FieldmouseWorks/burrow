@@ -112,6 +112,7 @@
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/lock_wait.py"
+            "modules/autoland/stages.py"
             "modules/autoland/step_jobs.py"
             "house"
             "docs/settings-reference.md"
