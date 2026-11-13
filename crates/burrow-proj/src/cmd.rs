@@ -67,8 +67,11 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             cfg.check_config().map_err(|e| Fail::new(1, e))
         }
         Some("engines") => {
-            let said = crate::setups::Store::new(&cfg.roles)
-                .command(&args[1..])
+            let said = cfg
+                .settings
+                .as_ref()
+                .ok_or_else(|| Fail::new(1, "settings are not configured"))?
+                .command(args, "proj engines")
                 .map_err(|e| Fail::new(1, e))?;
             put(&said);
             Ok(())

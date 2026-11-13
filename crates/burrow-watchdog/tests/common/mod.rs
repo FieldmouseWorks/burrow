@@ -146,6 +146,7 @@ impl Machine {
                 overlay: dir.path().join("overlay.json"),
                 allowed: vec!["sam/r".into(), "sam/q".into()],
                 pipeline_repos: vec!["sam/r".into()],
+                ..Default::default()
             }),
             state_dir: state,
             sources: BTreeMap::from([

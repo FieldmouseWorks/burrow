@@ -72,6 +72,7 @@ fn kind_type(kind: &Kind) -> String {
         Kind::Bool => "boolean".into(),
         Kind::Count { .. } => "integer".into(),
         Kind::Text => "text".into(),
+        Kind::Percent => "number".into(),
         Kind::OneOf(_) => "word".into(),
         Kind::Repo => "repository".into(),
         Kind::Maybe(kind) => format!("{} or null", kind_type(kind)),
@@ -94,6 +95,7 @@ fn allowed(kind: &Kind) -> String {
     match kind {
         Kind::Bool => "`true`, `false`".into(),
         Kind::Count { min } => format!("{min} or more"),
+        Kind::Percent => "0 to 100".into(),
         Kind::Text | Kind::Object => "any".into(),
         Kind::OneOf(words) => words.iter().map(|w| code(w)).collect::<Vec<_>>().join(", "),
         Kind::Repo => "`OWNER/NAME`".into(),
@@ -136,7 +138,7 @@ mod tests {
             assert_eq!(text.matches(&row).count(), 1, "{}", s.name);
         }
         assert!(text.contains(
-            "| `proj.roles` | map of text | any | `{}` | yes | proj | `~/.config/proj/roles` |"
+            "| `settings.pipelineUntil` | integer or null | 0 or more, or `null` | `null` | yes | proj | `settings/overlay.json` |"
         ));
         // A pipe in a cell would end it.
         assert!(text.contains(r#"`["(^\|/)secrets?/","#), "pipes escaped");

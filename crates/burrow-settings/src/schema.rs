@@ -22,6 +22,8 @@ pub enum Kind {
         min: u64,
     },
     Text,
+    /// A number from 0 to 100, fractions included.
+    Percent,
     /// One of these words.
     OneOf(&'static [&'static str]),
     /// A GitHub repository, OWNER/NAME.
@@ -127,14 +129,36 @@ pub fn find(name: &str) -> Option<&'static Setting> {
 
 /// The one runtime settings overlay, under `burrow.stateDir`.
 const OVERLAY: &str = "settings/overlay.json";
+/// Role routing and tuning, beside it under the same lock (roles::store).
+const ROLES_OVERLAY: &str = "settings/overlay.roles.json";
 const REPOS: Kind = Kind::List(&Kind::Repo);
 const MINUTES: Kind = Kind::Count { min: 1 };
 const SLOTS: Kind = Kind::Count { min: 1 };
 const ENGINE: Kind = Kind::OneOf(&["claude", "codex"]);
 const DRAIN: Kind = Kind::Maybe(&ENGINE);
 const EFFORT: Kind = Kind::OneOf(&["low", "medium", "high", "xhigh"]);
-const ROLES: Kind = Kind::Map(&Kind::Text);
 const MAYBE_TEXT: Kind = Kind::Maybe(&Kind::Text);
+const OVERFLOW: Kind = Kind::Maybe(&Kind::Record(&[
+    Field {
+        name: "pct",
+        kind: &Kind::Percent,
+    },
+    Field {
+        name: "engine",
+        kind: &ENGINE,
+    },
+]));
+const ROUTE: Kind = Kind::Record(&[
+    Field {
+        name: "engine",
+        kind: &ENGINE,
+    },
+    Field {
+        name: "over",
+        kind: &OVERFLOW,
+    },
+]);
+const ROLES: Kind = Kind::Map(&ROUTE);
 const TUNING: Kind = Kind::Record(&[
     Field {
         name: "model",
@@ -146,6 +170,27 @@ const TUNING: Kind = Kind::Record(&[
     },
 ]);
 const MODELS: Kind = Kind::Map(&TUNING);
+const WORDS: Kind = Kind::List(&Kind::Text);
+const OFFERS: Kind = Kind::Map(&Kind::Record(&[
+    Field {
+        name: "models",
+        kind: &WORDS,
+    },
+    Field {
+        name: "efforts",
+        kind: &WORDS,
+    },
+]));
+const SETUP: Kind = Kind::Record(&[
+    Field {
+        name: "roles",
+        kind: &ROLES,
+    },
+    Field {
+        name: "models",
+        kind: &MODELS,
+    },
+]);
 const SETUPS: Kind = Kind::Record(&[
     Field {
         name: "active",
@@ -153,7 +198,7 @@ const SETUPS: Kind = Kind::Record(&[
     },
     Field {
         name: "saved",
-        kind: &Kind::Map(&ROLES),
+        kind: &Kind::Map(&SETUP),
     },
 ]);
 const STAMP: Kind = Kind::Count { min: 0 };
@@ -457,23 +502,30 @@ pub static SETTINGS: &[Setting] = &[
     live(
         "proj.roles",
         &ROLES,
-        "{}",
-        "~/.config/proj/roles",
-        "Which engine runs each role (ROLE or ROLE@OWNER/REPO): ENGINE [over PCT ENGINE]. A role with no line runs on Claude.",
+        r#"{"*": {"engine": "claude", "over": null}, "planner": {"engine": "codex", "over": null}}"#,
+        ROLES_OVERLAY,
+        "Which engine runs each role (ROLE, ROLE@OWNER/REPO, * for every role, *@OWNER/REPO), and the engine it moves to when its own is short (over PCT ENGINE). The closest key wins: a named role over *, a repo's over the bare one.",
     ),
     live(
         "proj.models",
         &MODELS,
-        "{}",
-        "~/.config/proj/models",
-        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE). A role with no line keeps the engine's own.",
+        r#"{"* claude": {"model": null, "effort": null}, "* codex": {"model": null, "effort": null}}"#,
+        ROLES_OVERLAY,
+        "Each role's model and effort on each engine (ROLE[@OWNER/REPO] ENGINE), keyed as proj.roles is; null is the engine's own setting. Each must be one proj.engineOffers lists.",
+    ),
+    live(
+        "proj.engineOffers",
+        &OFFERS,
+        r#"{"claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"]}, "codex": {"models": [], "efforts": ["minimal", "low", "medium", "high", "xhigh"]}}"#,
+        ROLES_OVERLAY,
+        "The models and efforts each engine offers on the machine: the only ones proj.models may name. Model ids live here, never in a tracked file.",
     ),
     live(
         "proj.engineSetups",
         &SETUPS,
         r#"{"active": null, "saved": {}}"#,
-        "roles.d/",
-        "Saved engine setups (proj engines save/use), each a whole roles file, and the one in force.",
+        ROLES_OVERLAY,
+        "Saved engine setups (proj engines save/use), each a named set of proj.roles and proj.models values, and the one in force.",
     ),
     live(
         "proj.usageHold",
@@ -491,6 +543,7 @@ impl Kind {
             Kind::Bool => json!({"type": "boolean"}),
             Kind::Count { min } => json!({"type": "integer", "minimum": min}),
             Kind::Text => json!({"type": "string"}),
+            Kind::Percent => json!({"type": "number", "minimum": 0, "maximum": 100}),
             Kind::OneOf(words) => json!({"enum": words}),
             Kind::Repo => json!({"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}),
             Kind::Maybe(kind) => json!({"anyOf": [{"type": "null"}, kind.schema()]}),
@@ -513,6 +566,11 @@ impl Kind {
             (Kind::Bool, Value::Bool(_)) | (Kind::Text, Value::String(_)) => Ok(()),
             (Kind::Object, Value::Object(_)) => Ok(()),
             (Kind::Count { min }, Value::Number(n)) if n.as_u64().is_some_and(|n| n >= *min) => {
+                Ok(())
+            }
+            (Kind::Percent, Value::Number(n))
+                if n.as_f64().is_some_and(|n| (0.0..=100.0).contains(&n)) =>
+            {
                 Ok(())
             }
             (Kind::OneOf(words), Value::String(s)) if words.contains(&s.as_str()) => Ok(()),
@@ -544,6 +602,7 @@ impl Kind {
             Kind::Bool => "true or false".into(),
             Kind::Count { min } => format!("a whole number from {min}"),
             Kind::Text => "text".into(),
+            Kind::Percent => "a number from 0 to 100".into(),
             Kind::OneOf(words) => format!("one of {}", words.join(", ")),
             Kind::Repo => "OWNER/NAME".into(),
             Kind::Maybe(kind) => format!("null or {}", kind.describe()),
@@ -648,6 +707,15 @@ mod tests {
             .check(&json!({"fix codex": {"model": "m", "effort": 3}}))
             .unwrap_err();
         assert!(err.starts_with("fix codex: effort: "), "{err}");
+        assert!(
+            ROLES
+                .check(&json!({"fix": {"engine": "codex", "over": null}}))
+                .is_ok()
+        );
+        let err = ROLES
+            .check(&json!({"fix": {"engine": "gemini", "over": null}}))
+            .unwrap_err();
+        assert!(err.starts_with("fix: engine: "), "{err}");
     }
 
     #[test]

@@ -106,7 +106,7 @@ Each has an entry below, and each can be imported on its own.
   on); anything that breaks reverts and goes to a Claude job. It deploys main
   too, so a merged PR goes live the same way. The `proj-config` health check
   runs `proj check-config` as `burrow.user`, validating the deployed config
-  and every line of the machine’s roles and models files before confirmation. Failed
+  and the role settings every turn reads before confirmation. Failed
   checks include stderr diagnostics in the rollback notice. Plus Renovate for every repo you
   own (`renovate`, merged on green CI, stuck PRs handed to Claude; a repo's
   push to its default branch and its Renovate PRs' CI start both for that
@@ -198,13 +198,9 @@ Each has an entry below, and each can be imported on its own.
   turns while the pre-reset queue drains, including pipeline turns. The emergency
   `--unstick` slot and Codex remain independent; ordinary concurrency returns
   once no pre-reset turn remains queued.
-  Roles (`proj.roles`) pick `claude` or `codex`, and an
-  overflow to the other engine when its own is short and the other has
-  room; models (`proj.models`) give each role its model and effort on
-  each engine, and keep them when an engine setup switches
-  ([front door](docs/front-door.md); where each is kept: the
-  [settings reference](docs/settings-reference.md)). A `ROLE@OWNER/REPO` key overrides
-  the bare role for that repo, matched case-insensitively.
+  Each role's engine (`claude` or `codex`, with an overflow to the other
+  when its own is short), model and effort are live settings
+  ([settings](docs/settings.md#engines-models-and-efforts-per-role)).
   Machine starters always name a role: `flaky`, `dependency-dashboard`,
   `baseline`, `stuck`, `advisory`, `backup`, `firmware`, `update`,
   `red-main`, `renovate-sweep`, `watchdog`, `triage`, `planner`, and the
@@ -215,9 +211,9 @@ Each has an entry below, and each can be imported on its own.
   career drift), including machines without an App; the unstick label
   wins over that map. Engine labels enroll
   these issues but their roles choose
-  the engine each turn, defaulting to Claude when no line matches.
+  the engine each turn, at the declared default when no setting matches.
   The authors' own issues run as `burrow.proj.inbox.ownerRole` when it's
-  set, so the models file can tune them; their engine label still picks
+  set, so the settings can tune them; their engine label still picks
   the engine.
   A machine unit invoking `proj run` must supply `--role`, including units
   declared by the machine itself. Remote Control sessions and existing
@@ -253,10 +249,10 @@ Each has an entry below, and each can be imported on its own.
   [the deployment protocol](docs/proj-deploy.md) keeps their turn and legacy
   usage records intact.
 
-  Saved engine setups (`proj.engineSetups`), each a whole roles file:
-  `proj engines save NAME`, `proj engines use NAME` and `use back` check and
-  switch them; `proj engines` lists them. `proj check-config` uses the turn's
-  parser and must pass the update's health check before confirmation.
+  Saved engine setups are named sets of those settings: `proj engines save
+  NAME`, `proj engines use NAME` and `use back` check and switch them;
+  `proj engines` lists them. `proj check-config` reads them as a turn does
+  and must pass the update's health check before confirmation.
   With `engines.door.enable`, an author's `engines` issue in `engines.door.repo`
   switches setups without an agent ([engines door](docs/front-door.md#engines-with-no-agent)).
 
