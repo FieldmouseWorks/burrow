@@ -1,7 +1,7 @@
 //! GitHub Actions expressions (`${{ ... }}`, or text with some in it), worked
 //! out as GitHub works them out, for what the workflows' `if:`s and
 //! concurrency groups use: context paths, string, number, boolean and null
-//! literals, `format()`, `cancelled()`, `!`, `<`, `<=`, `>`, `>=`, `==`, `!=`,
+//! literals, `format()`, `startsWith()`, `cancelled()`, `!`, `<`, `<=`, `>`, `>=`, `==`, `!=`,
 //! `&&` and `||` (which give an operand's value), and parentheses.
 
 use std::collections::HashMap;
@@ -157,6 +157,14 @@ fn eval(e: &E, ctx: &Ctx) -> V {
                 out = out.replace(&format!("{{{i}}}"), a);
             }
             V::Str(out)
+        }
+        // Ignoring case, as GitHub's does.
+        E::Call(f, args) if f == "startsWith" => {
+            let [s, prefix] = &args[..] else {
+                panic!("startsWith takes two arguments")
+            };
+            let (s, prefix) = (eval(s, ctx).text(), eval(prefix, ctx).text());
+            V::Bool(s.to_lowercase().starts_with(&prefix.to_lowercase()))
         }
         E::Call(f, args) if args.is_empty() => eval(&E::Ctx(format!("{f}()")), ctx),
         E::Call(f, _) => panic!("no function {f} here"),
@@ -347,4 +355,9 @@ fn expressions_work_out_as_githubs_do() {
         V::Bool(true)
     );
     assert!(!condition("nil", &ctx));
+    assert_eq!(v("${{ startsWith(a.b, 'X') }}"), V::Bool(true));
+    assert_eq!(
+        v("${{ startsWith('x', a.b) && !startsWith(a.b, 'xy') }}"),
+        V::Bool(true)
+    );
 }

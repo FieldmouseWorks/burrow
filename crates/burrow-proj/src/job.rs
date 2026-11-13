@@ -383,9 +383,10 @@ impl<'a> Job<'a> {
             }
             None => false,
         };
-        if there(&crate::ask::host_path(self, "question-needs-owner"))? {
+        let question = text(&crate::ask::host_path(self, "question"))?.is_some();
+        if text(&crate::ask::host_path(self, "question-needs-owner"))?.is_some() {
             held.push("owner".to_owned());
-        } else if asked || there(&crate::ask::host_path(self, "question"))? {
+        } else if asked || question {
             held.push("ask".to_owned());
         }
         for a in awaits(&text(&self.path("await"))?.unwrap_or_default()) {

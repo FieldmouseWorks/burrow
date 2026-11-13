@@ -883,7 +883,8 @@ fn drain_counts_turns_instead_of_parked_jobs() {
                 assert!(!super::job_paused(&b.cfg, &id));
             }
         }
-        if matches!(state, "queued" | "running" | "paused") {
+        // The paused case models a parked job after its unit has stopped.
+        if matches!(state, "queued" | "running") {
             fs::write(b.path("active"), "").unwrap();
         }
         let ready = found("sam/game", 4, "sam", &["ready"], "2026-11-01");

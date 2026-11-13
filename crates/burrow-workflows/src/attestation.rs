@@ -1,8 +1,9 @@
 //! The shared CI's attestation step, its own script run with curl and gh
-//! stood in for: a private repo's job signs its gate's result with its own
+//! stood in for: every repo's job signs its gate's result with its own
 //! token, whose audience names the digest of the statement it keeps beside
-//! the token (FieldmouseWorks/Conary, docs/ci-attestation.md), a failed gate
-//! is attested as failed, a public repo's is left to actions/attest, and a
+//! the token (FieldmouseWorks/Conary, docs/ci-attestation.md), the only
+//! evidence Conary's train reads, a public repo's too, whose result
+//! actions/attest also bundles; a failed gate is attested as failed, and a
 //! run with no OIDC token attests nothing. With legs, no leg attests: the
 //! gate job does, with the same steps, and passes only when every leg passed
 //! on its commit, each sharing out one plan, its log the legs' own, each as
@@ -42,10 +43,9 @@ fn every_push_and_pr_attests_and_uploads() {
         step["if"],
         "${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1 && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
     );
-    assert_eq!(
-        step["env"]["PRIVATE"],
-        "${{ github.event.repository.private }}"
-    );
+    // Whether the repo is private doesn't decide whether it signs: Conary's
+    // train reads only the token, a public repo's candidates' too.
+    assert!(step["env"].get("PRIVATE").is_none(), "{:?}", step["env"]);
     assert_eq!(step["env"]["OUTCOME"], "${{ steps.gate.outcome }}");
     // After it: the log, the token's attestation (only when there is one),
     // and the Sigstore bundle, for a public repo only.
@@ -136,7 +136,6 @@ impl Repo {
             ("GITHUB_REPOSITORY", "owner/repo"),
             ("OUTCOME", c.outcome),
             ("SKIP", "agents"),
-            ("PRIVATE", if c.private { "true" } else { "false" }),
             ("PR_HEAD", &pr_head),
             ("CURL_LOG", curl_log.to_str().unwrap()),
             ("CURL_FAIL", if c.token_fails { "1" } else { "" }),
@@ -180,10 +179,9 @@ impl Repo {
     }
 }
 
-/// A run of the step: a private repo's push with a passing gate and an OIDC
-/// token, unless it says otherwise.
+/// A run of the step: a push with a passing gate and an OIDC token, unless
+/// it says otherwise. Public or private, a repo's run signs the same.
 struct Case<'a> {
-    private: bool,
     outcome: &'a str,
     event: &'a str,
     oidc: bool,
@@ -199,7 +197,6 @@ struct Case<'a> {
 impl Default for Case<'_> {
     fn default() -> Self {
         Case {
-            private: true,
             outcome: "success",
             event: "push",
             oidc: true,
@@ -224,11 +221,14 @@ fn predicate(statement: &str, line: usize) -> serde_json::Value {
     serde_json::from_str(statement.lines().nth(line).expect("a predicate")).unwrap()
 }
 
-/// A private repo's push: the subject, the predicate on one line, the token.
-/// Its audience names the statement's digest, the request carries the run's
-/// own request token, and the attestation's artifact shares the log's uuid.
+/// A push: the subject, the predicate on one line, the token. Its audience
+/// names the statement's digest, the request carries the run's own request
+/// token, and the attestation's artifact shares the log's uuid. A public
+/// repo's too: Conary's train reads only this, never the Sigstore bundle
+/// (Conary's docs/ci-attestation.md, "Checking one"), and the steps after
+/// this one leave the bundle to a public repo alone.
 #[test]
-fn a_private_repos_push_attests_with_its_own_token() {
+fn a_push_attests_with_its_own_token() {
     let r = Repo::new();
     let a = r.run(Case::default());
     assert_eq!(a.code, 0);
@@ -293,22 +293,6 @@ fn a_failed_gate_attests_a_fail() {
     assert_eq!(a.code, 0);
     let (statement, _) = statement_of(a.attested.as_deref().expect("an attestation"));
     assert_eq!(predicate(&statement, 2)["result"], "fail");
-}
-
-/// A public repo's: the subject for actions/attest, no token asked for.
-#[test]
-fn a_public_repos_is_left_to_the_sigstore_bundle() {
-    let r = Repo::new();
-    let a = r.run(Case {
-        private: false,
-        ..Case::default()
-    });
-    assert!(
-        a.code == 0 && a.attested.is_none() && a.curl.is_empty(),
-        "{:?}",
-        a.curl
-    );
-    assert_eq!(a.outputs.keys().collect::<Vec<_>>(), ["log", "path"]);
 }
 
 /// No OIDC token: nothing attested, and the job goes on.
@@ -390,10 +374,10 @@ fn a_token_request_answered_try_later_is_asked_again() {
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-/// A private repo's PR: the revision, the merge step's merge of the head
-/// onto the base branch's tip.
+/// A PR: the revision, the merge step's merge of the head onto the base
+/// branch's tip.
 #[test]
-fn a_private_repos_pr_attests_its_revision() {
+fn a_pr_attests_its_revision() {
     let r = Repo::new();
     let head = r.merge_a_pr();
     let a = r.run(Case {

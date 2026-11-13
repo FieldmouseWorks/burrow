@@ -152,8 +152,8 @@ or, for Claude, the machine already out of Claude's usage. It moves only
 when the other engine's meter has room: credits, or no window used up.
 Missing readings, or readings an hour old, move nothing.
 `burrow.usageReset` supplies both meters. Each engine keeps its own
-conversation when a role moves between them. A steward judge always runs
-on Claude.
+conversation when a role moves between them. A steward judge follows its
+role like any other.
 
 Nothing is an implicit fallback: the schema declares each default and
 `proj settings show` shows it as one. Every role runs on Claude (`*`)
@@ -162,7 +162,7 @@ a role with no model runs at its engine's own (`* claude`, `* codex`,
 model and effort null): for Claude, the job user's
 `~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`;
 for Codex, the job user's `.codex/config.toml`. The tuning for the engine a
-turn ends on applies, overflow and the judge's Claude included. New sandbox
+turn ends on applies, overflow included. New sandbox
 guests (`agent new`, `proj run --vm`) copy the user's Claude `model` and its
 `env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE`
 at creation.
