@@ -500,7 +500,6 @@ pub(crate) mod tests {
 
     #[test]
     fn check_config_requires_a_runnable_agent_tool() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(example()).unwrap();
         cfg.roles = dir.path().join("roles");
@@ -520,7 +519,7 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .contains("not an executable file")
         );
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        burrow_test::executable(&tool, "#!/bin/sh\n");
         cfg.check_config().unwrap();
         cfg.agent_tool = Some(dir.path().to_owned());
         assert!(
