@@ -32,6 +32,11 @@
   assert inbox.config.burrow.events.handlers.proj-inbox.issueNumbers;
   assert inbox.config.systemd.services."proj-inbox@".environment.BURROW_EVENTS_ISSUES == "/run/burrow-events/proj-inbox/%i";
   assert inbox.config.systemd.services.burrow-events.serviceConfig.RuntimeDirectory == "burrow-events";
+  # A turn's end kicks the drain's own pass (inbox/drain.rs, DRAIN_KICK):
+  # one unit, no repo's, that lists nothing.
+  assert inbox.config.burrow.events.handlers.proj-inbox-drain.unit == "proj-inbox-drain";
+  assert !inbox.config.burrow.events.handlers.proj-inbox-drain.perRepo;
+  assert pkgs.lib.hasSuffix "/proj-inbox drain" inbox.config.systemd.services.proj-inbox-drain.serviceConfig.ExecStart;
   pkgs.runCommand "proj-config-check" { } ''
     got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
     [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }

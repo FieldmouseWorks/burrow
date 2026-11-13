@@ -3,14 +3,27 @@
 //! for by number (modules/events.nix's `issueNumbers`). An issue's event
 //! (opened, labelled, commented on) then costs GitHub a read of that issue,
 //! not a listing of every one per label and another for triage.
+//!
+//! The listing of every open issue a repo has, which triage and the drain
+//! read, is the costly one: a repo's passes make it at most once a
+//! [`LISTING_GAP`], however many kicks and wake-ups come in it. A pass that
+//! comes sooner books the repo's pass for the gap's end, which lists.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use serde_json::Value;
 
-use super::{Pass, raw, uri};
+use super::{Pass, key, raw, uri};
 use crate::github::every;
+use crate::{Fail, io_fail, now};
+
+/// In the inbox's state: a file for each repo (its key), when its passes
+/// last listed every open issue it has (epoch seconds).
+pub(super) const LISTED: &str = ".listed";
+
+/// Seconds between two listings of every open issue of a repo, at least.
+pub(super) const LISTING_GAP: i64 = 120;
 
 /// The issues burrow-events says this repo's pass is for (the file
 /// BURROW_EVENTS_ISSUES names holds their numbers, one a line, while it
@@ -82,6 +95,32 @@ impl Pass<'_> {
             }
         }
         Some(open)
+    }
+
+    /// When the repo may be listed again, if a listing within the last
+    /// [`LISTING_GAP`] means it may not be now.
+    pub(super) fn listing_due(&self, repo: &str) -> Option<i64> {
+        let now = now();
+        crate::read(&self.inbox.state.join(LISTED).join(key(repo)))
+            .and_then(|t| t.parse::<i64>().ok())
+            .filter(|at| *at <= now && now < at + LISTING_GAP)
+            .map(|at| at + LISTING_GAP)
+    }
+
+    /// Every open issue of the repo, listed, the listing's time kept for
+    /// [`Pass::listing_due`]; None when GitHub can't be asked.
+    pub(super) fn list_all(&self, repo: &str) -> Result<Option<Vec<Value>>, Fail> {
+        let Some(all) = every(
+            self.cfg,
+            &format!("repos/{repo}/issues?state=open&per_page=100"),
+        ) else {
+            return Ok(None);
+        };
+        let dir = self.inbox.state.join(LISTED);
+        fs::create_dir_all(&dir).map_err(|e| io_fail(&dir, e))?;
+        let f = dir.join(key(repo));
+        fs::write(&f, format!("{}\n", now())).map_err(|e| io_fail(&f, e))?;
+        Ok(Some(all))
     }
 
     /// Whether this pass looks at issue `n`: it's in the scope, or the pass
