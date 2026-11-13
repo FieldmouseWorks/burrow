@@ -9,7 +9,7 @@ use burrow_github::{Error, call, pages};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ci_runs::{self, After, cancelled, suite, workflow_name};
+use crate::ci_runs::{self, cancelled, suite, workflow_name};
 use crate::pass::Pass;
 
 // The shared workflows' contract tests use the CI owner's names and
@@ -70,6 +70,8 @@ struct Recovery {
     // A never-started run needs the whole workflow; cancellations need
     // only failed jobs, preserving successful independent jobs.
     due: BTreeMap<String, &'static str>,
+    /// Check runs GitHub stopped for running past their timeout.
+    timed_out: BTreeSet<u64>,
 }
 
 #[derive(Deserialize)]
@@ -99,12 +101,9 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     }
     let contexts = array(&contexts["nodes"]);
     let runs = ci_runs::runs(p, ask, contexts);
-    let mut timed_out = BTreeSet::new();
-    for c in contexts.iter().filter(|c| {
-        cancelled(c)
-            && !runs.stale.contains(text(&suite(c)["id"]).unwrap_or(""))
-            && ci_runs::after(c, contexts, &runs.stale) == After::None
-    }) {
+    let mut recovery = Recovery::default();
+    let effective = ci_runs::effective(contexts, &runs.stale, ci_runs::docs_lane(ask));
+    for c in effective.iter().filter(|c| cancelled(c)) {
         if ask.remote
             && let Some(id) = c["databaseId"].as_u64().filter(|id| *id > 0)
         {
@@ -114,18 +113,17 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
                 text(&a["message"])
                     .is_some_and(|m| m.contains("has exceeded the maximum execution time"))
             }) {
-                timed_out.insert(id);
+                recovery.timed_out.insert(id);
             }
         }
     }
-    let mut recovery = Recovery::default();
     let got = classify(
         p,
         ask,
+        &effective,
         contexts,
         array(&suites["nodes"]),
         &runs,
-        &timed_out,
         &mut recovery,
     );
     if !ask.recover || !ask.remote || recovery.lookup.is_empty() {
@@ -135,10 +133,10 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     let got = classify(
         p,
         ask,
+        &effective,
         contexts,
         array(&suites["nodes"]),
         &runs,
-        &timed_out,
         &mut recovery,
     );
     if p.dry || recovery.due.is_empty() {
@@ -165,10 +163,10 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
     Ok(classify(
         p,
         ask,
+        &effective,
         contexts,
         array(&suites["nodes"]),
         &runs,
-        &timed_out,
         &mut recovery,
     ))
 }
@@ -186,10 +184,10 @@ fn read(p: &mut Pass, recovery: &mut Recovery) -> Result<(), Error> {
 fn classify(
     p: &Pass,
     ask: &Ask,
+    effective: &[&Value],
     contexts: &[Value],
     suites: &[Value],
     runs: &ci_runs::Runs,
-    timed_out: &BTreeSet<u64>,
     recovery: &mut Recovery,
 ) -> Verdict {
     recovery.due.clear();
@@ -236,30 +234,33 @@ fn classify(
             }
         }
     }
-    for c in contexts {
+    for c in effective.iter().copied() {
         if c["__typename"] == "CheckRun" {
-            if runs.stale.contains(text(&suite(c)["id"]).unwrap_or("")) {
-                continue;
-            }
-            let after = if cancelled(c) {
-                ci_runs::after(c, contexts, &runs.stale)
-            } else {
-                After::None
-            };
-            if after == After::Finished {
-                continue;
-            }
             seen += 1;
             let name = text(&c["name"]).unwrap_or("");
             if c["status"] != "COMPLETED" || suite(c)["status"] != "COMPLETED" {
                 going.insert(run_id(c));
             }
-            if c["status"] != "COMPLETED" || after == After::Going {
+            // A replacement run is alive: wait for its verdict before asking
+            // GitHub to start this workflow yet again.
+            let replaced = cancelled(c)
+                && workflow(c).is_some()
+                && contexts.iter().any(|x| {
+                    x["__typename"] == "CheckRun"
+                        && workflow(x) == workflow(c)
+                        && suite(x)["id"] != suite(c)["id"]
+                        && suite(x)["status"] != "COMPLETED"
+                });
+            let timed = cancelled(c)
+                && c["databaseId"]
+                    .as_u64()
+                    .is_some_and(|id| recovery.timed_out.contains(&id));
+            if c["status"] != "COMPLETED" || (replaced && !timed) {
                 pending.push(name.into());
             } else if cancelled(c)
                 && c["databaseId"]
                     .as_u64()
-                    .is_some_and(|id| timed_out.contains(&id))
+                    .is_some_and(|id| recovery.timed_out.contains(&id))
             {
                 red.push(format!("{name} (timed out)"));
                 broken.insert(run_id(c));

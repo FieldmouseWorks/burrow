@@ -20,7 +20,7 @@ def stopped(*names):
 
 def state(*checks, base="main"):
     with C.acting_for("sam/r"):
-        return ci_state(clean(checks=[c for run in checks for c in run], base=base), repo="sam/r")[:2]
+        return ci_state(clean(checks=[c for run in checks for c in run], base=base), repo="sam/r", moved=())[:2]
 
 
 def going(suite):
@@ -108,8 +108,10 @@ ANNOTATIONS.clear()
 # whose suite says nothing. Pending, not red: it waits to be run again, and
 # no fix job is sent for a run that found nothing.
 assert state(old) == stopped(CHECK)
+RUN_INFO.clear(); RERUNS.clear()  # earlier passes above asked for reruns of this same run
 status, landed = at(clean(checks=old))
-assert not landed and JOBS == [] and "waiting for CI: check / check (cancelled, to be run again)" in status, (status, JOBS)
+# The pass asks GitHub to run it again (once), and reads the new attempt back.
+assert not landed and JOBS == [] and len(RERUNS) == 1 and "waiting for CI: check / check (cancelled, run again)" in status, (status, JOBS, RERUNS)
 assert state(old, whole(suite="s2", conclusion=CANCEL)) == stopped(CHECK)
 assert state(old, [check("report", suite="s2", workflow="report")]) == stopped(CHECK)
 other_app = check("scan", CANCEL, app="some-app", suite="a1")

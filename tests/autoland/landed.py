@@ -2,8 +2,8 @@
 never merged: its head merged into the base's tip has the tip's own tree,
 because another PR made the same change (two fixes for a red main, say).
 onto reads that from the steward's mirror, fetched from the repo's real
-remote here; handle() closes such a PR with a comment, and leaves a
-dependency bot's to its bot, never clearing it to merge. A fix for red main
+remote here; handle() closes such a PR with a comment, including a
+dependency bot's, never clearing it to merge. A fix for red main
 lands only on the tip the pass saw red."""
 
 from harness import ALREADY, REAL, TIP, WROTE, C, S, clean, cn, cn_runs, fresh_pr_state, info, merged, mkpr, pr_state, run, sh, \
@@ -124,17 +124,15 @@ run(clean(), 900)
 assert not any(a[:2] == ["train", "join"] for a in cn_runs()) and any(x.startswith("pr close 5") for x in WROTE), (cn_runs(), WROTE)
 del S.CFG["repos"]["sam/r"]
 cn()
-# A dependency bot's is left to its bot, which closes its own: closed under
-# it, it's an update the bot ignores from then on. That's so for one the
-# steward would merge (Dependabot's) and one it would only clear for
-# Renovate to merge: it isn't cleared.
+# Dependency updates already present on the base close too: their bot may
+# not run again promptly, so handing closure to it leaves a permanent wait.
 for bump in ({"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13},
              {"branch": "renovate/foo-1.x", "title": "deps: update foo to v1.5", "number": 14}):
     fresh_pr_state()
     ALREADY[bump["number"]] = later
     status, _ = run(mkpr(**bump), 900)
-    assert not merged() and not any(x.startswith("pr close") for x in WROTE), (bump, WROTE)
-    assert "state=pending" in status and "Already landed" in status and "its bot closes it" in status, (bump, status)
+    assert not merged() and any(x.startswith("pr close") for x in WROTE), (bump, WROTE)
+    assert "state=pending" in status and "Already landed" in status and "closing it" in status, (bump, status)
     # Nor is one whose merge git can't work out.
     ALREADY[bump["number"]] = RuntimeError("git fetch: no network")
     status, _ = run(mkpr(**bump), 1000)

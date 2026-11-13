@@ -133,13 +133,9 @@ class Actions:
     def already_landed(self, tip):
         """Its merge would change nothing on its base, at tip (onto):
         taken back from anything that would merge it, and closed, saying so.
-        A dependency bot's is left to its bot, which closes its own once it
-        sees there's nothing left to update: one closed under it is an update
-        it would ignore from then on."""
+        Dependency updates close here too: their bots may not run again
+        promptly. There is no update left to suppress on this base."""
         said = f"{self.pr['baseRefName']} at {tip[:7]} already has everything it changes"
-        if self.dep:
-            self.settle("pending", f"Already landed: {said}; its bot closes it"[:140], stage=S.MERGE)
-            return
         self.settle("pending", f"Already landed: {said}; closing it"[:140], stage=S.MERGE)
         if (
             C.write(

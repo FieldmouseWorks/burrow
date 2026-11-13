@@ -180,6 +180,7 @@ let
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
     kick = stewardKick;
+    continuationKick = "${config.burrow.events.kick}/autoland-continue";
     reviewers = {
       codex = { inherit (rv.codex) enable; };
     };
@@ -889,7 +890,12 @@ in
       ownStatuses = [ cfg.context ];
       ownLabels = lib.mapAttrsToList (_: l: l.name) cfg.labels.waiting;
     };
-    systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
+    burrow.events.handlers.autoland-continue = {
+      events = [ ];
+      unit = "autoland-continue";
+      wake = "${stateDir}/autoland/continue.json";
+    };
+    systemd.services = lib.genAttrs [ "autoland" "autoland@" "autoland-continue" "autoland-continue@" ] (name: {
       description = if name == "autoland"
         then "autoland: settle and merge every PR, keep every repo at the baseline"
         else "autoland: settle and merge the PRs of %I";
@@ -900,13 +906,15 @@ in
         Type = "oneshot";
         User = user;
         ExecStart = "${steward}/bin/autoland-steward"
-          + (if cfg.dryRun then " status" else lib.optionalString (name == "autoland@") " kick %I");
+          + (if cfg.dryRun then " status"
+            else if lib.hasPrefix "autoland-continue" name then " continue" + lib.optionalString (lib.hasSuffix "@" name) " %I"
+            else lib.optionalString (name == "autoland@") " kick %I");
         TimeoutStartSec = "20min";
         Nice = 10;
         LoadCredential = credentials;
       };
       # Conary's flow beside a shadowed repo's pass, once it's done.
-      unitConfig.OnSuccess = lib.optionals (name == "autoland@") shadow.onSuccess;
+      unitConfig.OnSuccess = lib.optionals (lib.hasSuffix "@" name) shadow.onSuccess;
     }) // lib.optionalAttrs (cfg.shadow != [ ]) { "autoland-shadow@" = shadow.service; };
     # The steward's state, and the reviews: it queues them and takes the
     # snapshots (their checkouts in snapDir, what each keeps of its base in

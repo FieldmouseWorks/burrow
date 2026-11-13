@@ -23,7 +23,7 @@ def suite(id, age, jobs=0, status="QUEUED", run=77):
             "workflowRun": {"databaseId": run, "createdAt": stamp(NOW - age), "workflow": {"name": "flake"}}}
 
 
-def dead_runs(pr, repo, now=None):
+def dead_runs(pr, repo, now=None, moved=None):
     # Exercise the real recovery command against the transport fixture;
     # keep each classification case independent of previous rerun attempts.
     import copy
@@ -34,7 +34,7 @@ def dead_runs(pr, repo, now=None):
         C.NOW = now
     try:
         with C.acting_for(repo):
-            _ci_state(pr, repo=repo, recover=True)
+            _ci_state(pr, repo=repo, moved=moved, recover=True)
         return [int(key) for key in RERUNS]
     finally:
         RUN_INFO.clear()
@@ -208,6 +208,39 @@ assert dead_runs(cut, "sam/r") == []
 cut = head([suite("s1", old)])
 cut["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] = {"hasNextPage": True}
 assert dead_runs(cut, "sam/r") == []
+
+# Recovery and CI share the same ordered replacement decision. A skipped
+# retry or an older success cannot discharge the latest cancellation; only
+# a later completed attempt can. The rollup's ordering changes neither.
+from copy import deepcopy
+for replacement, replacement_suite, expected in [
+    ("SUCCESS", "s1", [88]),
+    ("SUCCESS", "s3", []),
+    ("SKIPPED", "s3", [88]),
+    ("CANCELLED", "s3", [88, 89]),
+]:
+    latest = whole(suite="s2", conclusion="CANCELLED")
+    other_checks = whole(suite=replacement_suite, conclusion=replacement)
+    for checks, run_id in ((latest, 88), (other_checks, 89)):
+        for c in checks:
+            c["checkSuite"]["workflowRun"]["databaseId"] = run_id
+    for checks in (latest + other_checks, list(reversed(latest + other_checks))):
+        assert sorted(dead_runs(head(checks=checks), "sam/r")) == expected, replacement
+# An active retry keeps the cancellation pending, but does not start a
+# competing retry; a timeout remains red and is never retried automatically.
+active = whole(suite="s3", done="IN_PROGRESS")
+assert dead_runs(head(checks=latest + active), "sam/r") == []
+timed = deepcopy(latest)
+ANNOTATIONS[timed[1]["databaseId"]] = ["The job has exceeded the maximum execution time of 5 minutes."]
+assert dead_runs(head(checks=timed), "sam/r") == []
+ANNOTATIONS.clear()
+# A docs verdict covers a cancelled gate only with known rename facts,
+# exactly as CI's effective check set requires.
+for c in latest:
+    c["checkSuite"]["workflowRun"]["databaseId"] = 88
+pr = head(checks=latest + docs(suite="s3"))
+assert dead_runs(pr, "sam/r", moved=()) == []
+assert dead_runs(pr, "sam/r", moved=None) == [88]
 
 # Many cancelled jobs of one run: its annotations are read once per job, not
 # once per cancelled job per job.

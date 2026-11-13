@@ -58,13 +58,22 @@ pub fn gate(job: &str) -> bool {
             && (b'2'..=b'8').contains(&leg[9]))
 }
 
-fn same_work(a: &Value, b: &Value) -> bool {
+/// The same job, or explicit gate coverage in one validated shared call. A
+/// docs verdict replaces only gate work, and the whole gate can cover a
+/// previous docs job or leg. One leg never stands for a different leg.
+fn same_work(a: &Value, b: &Value, shared: bool, docs: bool) -> bool {
     if a["name"] == b["name"] {
         return true;
     }
     let (ac, aj) = job(a);
     let (bc, bj) = job(b);
-    ac == bc && ((aj.starts_with(LANE) && bj.starts_with(LANE)) || (gate(aj) && gate(bj)))
+    if !shared || ac != bc {
+        return false;
+    }
+    if aj.starts_with(LANE) && bj.starts_with(LANE) {
+        return true;
+    }
+    ran(b) && ((gate(aj) && bj == "check") || (docs && gate(aj) && bj.starts_with(DOCS)))
 }
 
 fn sha(s: &str) -> bool {
@@ -151,7 +160,7 @@ pub fn runs(p: &mut Pass, ask: &Ask, contexts: &[Value]) -> Runs {
     }
 }
 
-fn docs_lane(ask: &Ask) -> bool {
+pub(crate) fn docs_lane(ask: &Ask) -> bool {
     let Some(moved) = &ask.moved else {
         return false;
     };
@@ -166,64 +175,94 @@ fn docs_lane(ask: &Ask) -> bool {
         .any(|p| p == ".github" || p.starts_with(".github/"))
 }
 
-#[derive(PartialEq)]
-pub enum After {
-    Finished,
-    Going,
-    None,
+fn ran(c: &Value) -> bool {
+    c["status"] == "COMPLETED" && c["conclusion"] != "SKIPPED" && c["conclusion"] != "CANCELLED"
 }
 
-pub fn after(c: &Value, contexts: &[Value], stale: &BTreeSet<String>) -> After {
-    let Some(mine) = text(&suite(c)["id"]) else {
-        return After::None;
-    };
-    let Some(flow) = workflow(c) else {
-        return After::None;
-    };
-    let same: Vec<_> = contexts
+fn id(c: &Value) -> Option<u64> {
+    c["databaseId"].as_u64()
+}
+
+/// The checks that still speak for the head, after one ordered replacement
+/// relation for failures and cancellations alike. A later check replaces
+/// earlier work only in its own workflow and PR lane; skips did nothing;
+/// a cancelled check waits for completed work. Only larger check ids
+/// replace predecessors. Display names are not job ids: a name is usable
+/// across suites only when unambiguous in both, and within one suite only
+/// an explicit matching `externalId` identifies a retry.
+pub fn effective<'a>(
+    contexts: &'a [Value],
+    stale: &BTreeSet<String>,
+    docs: bool,
+) -> Vec<&'a Value> {
+    let checks: Vec<_> = contexts
         .iter()
-        .filter(|x| workflow(x) == Some(flow))
+        .filter(|c| c["__typename"] == "CheckRun")
         .collect();
-    let others: Vec<_> = same
-        .iter()
-        .copied()
-        .filter(|x| text(&suite(x)["id"]) != Some(mine))
-        .collect();
-    let mut gone = stale.clone();
-    gone.extend(
-        others
+    fn sid(c: &Value) -> Option<&str> {
+        text(&suite(c)["id"])
+    }
+    let unique = |c: &Value| {
+        let mut who = BTreeSet::new();
+        for x in checks
             .iter()
-            .filter(|x| cancelled(x))
-            .filter_map(|x| text(&suite(x)["id"]).map(String::from)),
-    );
-    let done: Vec<_> = others
+            .filter(|x| sid(x) == sid(c) && x["name"] == c["name"])
+        {
+            who.insert(
+                text(&x["externalId"])
+                    .map(String::from)
+                    .or_else(|| id(x).map(|i| i.to_string()))
+                    .unwrap_or_else(|| format!("{:p}", *x)),
+            );
+        }
+        who.len() == 1
+    };
+    let replaces = |c: &Value, x: &Value| {
+        let (Some(mine), Some(newer), Some(flow)) = (id(c), id(x), workflow(c)) else {
+            return false;
+        };
+        if newer <= mine
+            || workflow(x) != Some(flow)
+            || sid(c).is_none()
+            || sid(x).is_none()
+            || stale.contains(sid(x).unwrap_or(""))
+            || x["conclusion"] == "SKIPPED"
+            || !unique(c)
+            || !unique(x)
+        {
+            return false;
+        }
+        if sid(c) == sid(x)
+            && !(text(&c["externalId"]).is_some() && c["externalId"] == x["externalId"])
+        {
+            return false;
+        }
+        if cancelled(c) && (!ran(x) || suite(x)["status"] != "COMPLETED") {
+            return false;
+        }
+        // A shared call is identified even when its lane was skipped before
+        // GitHub filled in the name. A sibling call cannot vouch for it.
+        let shared = checks.iter().any(|y| {
+            workflow(y) == Some(flow) && job(y).0 == job(c).0 && job(y).1.starts_with(LANE)
+        });
+        if shared
+            && !checks.iter().any(|y| {
+                sid(y) == sid(x)
+                    && job(y).0 == job(c).0
+                    && ran(y)
+                    && judged(y).is_some()
+                    && !stale.contains(sid(y).unwrap_or(""))
+            })
+        {
+            return false;
+        }
+        same_work(c, x, shared, docs)
+    };
+    contexts
         .iter()
-        .copied()
-        .filter(|x| {
-            suite(x)["status"] == "COMPLETED"
-                && !gone.contains(text(&suite(x)["id"]).unwrap_or(""))
-                && x["status"] == "COMPLETED"
-                && x["conclusion"] != "SKIPPED"
-                && x["conclusion"] != "CANCELLED"
+        .filter(|c| {
+            c["__typename"] != "CheckRun"
+                || (!stale.contains(sid(c).unwrap_or("")) && !checks.iter().any(|x| replaces(c, x)))
         })
-        .collect();
-    let shared = same
-        .iter()
-        .any(|x| job(x).1.starts_with(LANE) && job(x).0 == job(c).0);
-    if done.iter().any(|x| {
-        same_work(c, x)
-            && (!shared
-                || done.iter().any(|lane| {
-                    judged(lane).is_some()
-                        && suite(lane)["id"] == suite(x)["id"]
-                        && job(lane).0 == job(x).0
-                }))
-    }) {
-        return After::Finished;
-    }
-    if others.iter().any(|x| suite(x)["status"] != "COMPLETED") {
-        After::Going
-    } else {
-        After::None
-    }
+        .collect()
 }

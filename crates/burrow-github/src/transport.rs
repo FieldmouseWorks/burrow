@@ -26,6 +26,10 @@ pub struct Gh {
     /// the machine's user): it runs `gh ...` itself, in this program's
     /// environment. Empty, gh is run as this program runs.
     pub via: Vec<OsString>,
+    /// The account every call is about, when they name none (`rate_limit`):
+    /// an App's gh takes its installation's token, as a GraphQL call's
+    /// account, whatever repo or checkout is around.
+    pub owner: Option<String>,
 }
 
 impl Api for Gh {
@@ -36,7 +40,7 @@ impl Api for Gh {
         body: Option<&Value>,
         etag: Option<&str>,
     ) -> Result<Response, Failed> {
-        gh_api(self, method, path, body, etag, None)
+        gh_api(self, method, path, body, etag, self.owner.as_deref())
     }
 
     fn pause(&mut self, secs: u64) {

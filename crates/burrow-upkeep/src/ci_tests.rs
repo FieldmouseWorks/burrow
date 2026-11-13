@@ -279,3 +279,55 @@ fn only_old_complete_snapshots_without_jobs_authorize_unstarted_recovery() {
     assert_eq!(run(&mut h, &a, false).unwrap().state, "pending");
     assert_eq!(posts(&h), 0);
 }
+
+fn house_run(id: u64, suite: &str, conclusion: &str) -> Value {
+    json!({"__typename": "CheckRun", "databaseId": id, "name": "house", "status": "COMPLETED",
+           "conclusion": conclusion,
+           "checkSuite": {"id": suite, "status": "COMPLETED", "app": {"slug": "github-actions"},
+                          "workflowRun": {"file": {"path": ".github/workflows/house.yml"},
+                                          "workflow": {"id": "house", "name": "house"}}}})
+}
+
+#[test]
+fn a_later_completed_run_replaces_earlier_work_but_a_skip_or_older_one_does_not() {
+    let none = BTreeSet::new();
+    let ids = |c: &[Value]| -> Vec<u64> {
+        ci_runs::effective(c, &none, false)
+            .iter()
+            .map(|x| x["databaseId"].as_u64().unwrap())
+            .collect()
+    };
+    // The newer pass replaces an older failure or cancellation, in any order.
+    for old in ["FAILURE", "CANCELLED"] {
+        assert_eq!(
+            ids(&[house_run(10, "s1", old), house_run(11, "s2", "SUCCESS")]),
+            [11]
+        );
+        assert_eq!(
+            ids(&[house_run(11, "s2", "SUCCESS"), house_run(10, "s1", old)]),
+            [11]
+        );
+        // A skip did no work; an older success cannot replace a newer check.
+        assert_eq!(
+            ids(&[house_run(10, "s1", old), house_run(11, "s2", "SKIPPED")]),
+            [10, 11]
+        );
+        assert_eq!(
+            ids(&[house_run(10, "s1", "SUCCESS"), house_run(11, "s2", old)]),
+            [11]
+        );
+    }
+    // A cancelled check is not cleared by a newer cancelled one.
+    assert_eq!(
+        ids(&[
+            house_run(10, "s1", "CANCELLED"),
+            house_run(11, "s2", "CANCELLED")
+        ]),
+        [10, 11]
+    );
+    // Another workflow's namesake clears nothing.
+    let mut other = house_run(11, "s2", "SUCCESS");
+    other["checkSuite"]["workflowRun"]["workflow"]["id"] = json!("other");
+    other["checkSuite"]["workflowRun"]["file"]["path"] = json!(".github/workflows/other.yml");
+    assert_eq!(ids(&[house_run(10, "s1", "FAILURE"), other]), [10, 11]);
+}

@@ -39,9 +39,12 @@ const LOCKED: &str = r#"locked() {
 
 const STAND_INS: [(&str, &str); 4] = [
     (
-        // GitHub: a repo as it spells it (none for OWNER/gone), and what
-        // each owner's installation reaches (FAKE/OWNER-repos, or
-        // FAKE/OWNER-fails to fail).
+        // GitHub: a repo as it spells it (none for OWNER/gone), what each
+        // owner's installation reaches (FAKE/OWNER-repos, or FAKE/OWNER-fails
+        // to fail), and the allowance of the account it's asked as, routed
+        // as gh as the App routes it (GH_REPO, then GH_TOKEN_OWNER; the
+        // user's login without the App's socket): spent
+        // till the time in FAKE/OWNER-spent (FAKE/user-spent for the user's).
         "gh",
         r#"echo "gh $* owner=${GH_TOKEN_OWNER-} socket=${GH_TOKEN_SOCKET-}" >>"$FAKE/log"
 if [ "$1" = api ]; then
@@ -62,6 +65,22 @@ if [ "$1" = api ]; then
     exit 1
   fi
   case "$path" in
+    rate_limit)
+      if [ -e "$FAKE/quota-response" ]; then
+        printf 'HTTP/2.0 200 OK\n\n'; cat "$FAKE/quota-response"; exit 0
+      fi
+      # gh as the App (burrow.github's appGh) sets GH_TOKEN empty over
+      # whatever it's given, so a token handed to it is no token.
+      [ -z "${GH_TOKEN_SOCKET-}" ] || GH_TOKEN=
+      echo "rate_limit token=${GH_TOKEN-} owner=${GH_TOKEN_OWNER-} repo=${GH_REPO-} dir=$PWD" >>"$FAKE/log"
+      if [ -z "${GH_TOKEN_SOCKET-}" ]; then who=user
+      elif [ -n "${GH_REPO-}" ]; then who=${GH_REPO%%/*}
+      else who=${GH_TOKEN_OWNER:-nobody}
+      fi
+      spent=$FAKE/$who-spent
+      left=4999 reset=1
+      [ ! -e "$spent" ] || { left=0; reset=$(cat "$spent"); }
+      printf 'HTTP/2.0 200 OK\n\n{"resources":{"core":{"remaining":%s,"reset":%s},"graphql":{"remaining":5000,"reset":1}}}' "$left" "$reset" ;;
     repos/*)
       case "$path" in
         repos/sam/r) repo=Sam/R ;;
@@ -105,6 +124,11 @@ if [ -e "$FAKE/renovate-outlives" ]; then
   while [ -e "/proc/$PPID" ] && [ "$(cut -d' ' -f3 "/proc/$PPID/stat")" != Z ]; do sleep 0.05; done
   locked "renovate after renovate-run"
 fi
+if [ -n "${RENOVATE_LOG_FILE-}" ] && [ -e "$FAKE/renovate-errors" ]; then
+  [ "$RENOVATE_LOG_FILE_LEVEL $RENOVATE_LOG_FILE_FORMAT" = 'error json' ] || exit 2
+  cat "$FAKE/renovate-errors" >>"$RENOVATE_LOG_FILE"
+fi
+[ ! -e "$FAKE/renovate-exit" ] || exit "$(cat "$FAKE/renovate-exit")"
 [ ! -e "$FAKE/renovate-fails" ] || case "$*" in *"$(cat "$FAKE/renovate-fails")"*) exit 1 ;; esac
 "#,
     ),
@@ -137,7 +161,9 @@ impl Machine {
         let b = bin();
         let app = app.map(|owners| {
             serde_json::json!({
-                "env": {"GH_TOKEN_SOCKET": "/run/gh-token/workers.sock"},
+                // As burrow.github's appEnv has it: a token the process
+                // has is none.
+                "env": {"GH_TOKEN_SOCKET": "/run/gh-token/workers.sock", "GH_TOKEN": ""},
                 "owners": owners, "ghToken": b.join("gh-token"),
             })
         });
@@ -163,14 +189,22 @@ impl Machine {
     }
 
     fn run(&self, words: &[&str]) -> Said {
-        let out = Command::new(RENOVATE_RUN)
-            .arg(self.path("config.json"))
+        self.run_in(words, None)
+    }
+
+    /// A run started in a checkout of `repo`'s, GH_REPO naming it.
+    fn run_in(&self, words: &[&str], repo: Option<&str>) -> Said {
+        let mut run = Command::new(RENOVATE_RUN);
+        run.arg(self.path("config.json"))
             .args(words)
             .env("FAKE", self.path("fake"))
             .env_remove("GH_TOKEN_SOCKET")
             .env_remove("GH_TOKEN_OWNER")
-            .output()
-            .unwrap();
+            .env_remove("GH_REPO");
+        if let Some(repo) = repo {
+            run.env("GH_REPO", repo);
+        }
+        let out = run.output().unwrap();
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -652,4 +686,162 @@ fn a_wait_it_cant_book_is_a_failure() {
     let (code, _, err) = m.run(&["sam/r"]);
     assert_eq!(code, Some(1));
     assert!(err.starts_with("renovate-run: "), "{err}");
+}
+
+const QUOTA_ERRORS: &str = concat!(
+    r#"{"level":50,"msg":"GitHub getRepos error","err":{"message":"rate-limit-exceeded"}}"#,
+    "\n",
+    r#"{"level":60,"msg":"Unknown error","err":{"message":"rate-limit-exceeded"}}"#,
+    "\n",
+);
+
+#[test]
+fn a_run_renovate_stops_on_a_spent_allowance_is_booked_again_not_failed() {
+    // Renovate meets the limit mid-run and fails; GitHub's rate_limit says
+    // the owner's installation is spent: booked for when it lifts.
+    let at = in_an_hour();
+    let met = |what: &str| {
+        format!(
+            "{}: Renovate's run met GitHub's rate limit\n",
+            booked_again(what, at)
+        )
+    };
+    // The owner as GitHub spells it, whose installation the token is for.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("Sam-spent", &at.to_string());
+    m.set("renovate-errors", QUOTA_ERRORS);
+    m.set("renovate-fails", "Sam/R");
+    // Started in another owner's checkout, which gh-token would go by,
+    // whose allowance isn't spent.
+    assert_eq!(m.run_in(&["sam/r"], Some("kim/x")), ok(&met("sam/r")));
+    assert_eq!(m.booked(), serde_json::json!({"sam/r": at}));
+    // Asked as the account whose token Renovate ran with, whatever repo
+    // is around, through gh as the App.
+    let calls = m.calls();
+    assert!(
+        calls.contains(&"rate_limit token= owner=Sam repo= dir=/".to_string()),
+        "{calls:#?}"
+    );
+
+    // In a full run, the rest of that owner's repos are booked with it,
+    // and another owner's installation has an allowance of its own.
+    let m = Machine::new(Some(&["sam", "kim"]));
+    m.set("sam-repos", "sam/a\nsam/b\n");
+    m.set("kim-repos", "kim/c\n");
+    m.set("sam-spent", &at.to_string());
+    m.set("renovate-errors", QUOTA_ERRORS);
+    m.set("renovate-fails", "sam/a");
+    assert_eq!(
+        m.run(&[]),
+        ok(&format!("{}{}\n", met("sam/a"), booked_again("sam/b", at)))
+    );
+    assert_eq!(m.runs(), [filter("sam/a"), filter("kim/c")]);
+    assert_eq!(m.booked(), serde_json::json!({"sam/a": at, "sam/b": at}));
+
+    // As the user, the one run over everything, by the login's allowance.
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    m.set("renovate-errors", QUOTA_ERRORS);
+    m.set("renovate-fails", "");
+    assert_eq!(m.run(&[]), ok(&met("every repo")));
+    assert_eq!(m.booked(), serde_json::json!({"": at}));
+
+    // A runner that never got Renovate going failed, whatever the
+    // allowance: its token, or its lock.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("Sam-spent", &at.to_string());
+    m.set("gh-token-fails", "3");
+    assert_eq!(m.run(&["sam/r"]), (Some(3), String::new(), String::new()));
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    fs::create_dir(m.path("fake/lock")).unwrap();
+    let (code, _, err) = m.run(&[]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("renovate-run: "), "{err}");
+    assert_eq!(m.booked(), serde_json::json!({}));
+
+    // With allowance left, a run that fails failed.
+    let m = Machine::new(Some(&["sam"]));
+    m.set("renovate-fails", "Sam/R");
+    assert_eq!(m.run(&["sam/r"]), (Some(1), String::new(), String::new()));
+    assert_eq!(m.booked(), serde_json::json!({}));
+}
+
+#[test]
+fn an_unrelated_subprocess_failure_is_not_excused_by_a_spent_allowance() {
+    for errors in [
+        "",
+        r#"{"level":60,"err":{"message":"bad-credentials"}}"#,
+        concat!(
+            r#"{"level":50,"err":{"message":"rate-limit-exceeded"}}"#,
+            "\n",
+            r#"{"level":60,"err":{"message":"configuration-error"}}"#
+        ),
+        r#"{"level":60,"msg":"rate-limit-exceeded"}"#,
+        "invalid json",
+    ] {
+        let m = Machine::new(Some(&["sam"]));
+        m.set("Sam-spent", &in_an_hour().to_string());
+        m.set("renovate-fails", "Sam/R");
+        m.set("renovate-errors", errors);
+        assert_eq!(
+            m.run(&["sam/r"]),
+            (Some(1), String::new(), String::new()),
+            "{errors}"
+        );
+        assert_eq!(m.booked(), serde_json::json!({}), "{errors}");
+    }
+}
+
+#[test]
+fn subprocess_quota_evidence_needs_a_live_reset_and_a_normal_failure_exit() {
+    for response in [
+        r#"{"resources":{"core":{"remaining":0,"reset":1}}}"#,
+        r#"{"resources":{"core":{"remaining":1,"reset":9999999999}}}"#,
+        r#"{"resources":{"core":{"remaining":0}}}"#,
+        "invalid json",
+    ] {
+        let m = Machine::new(None);
+        m.set("renovate-fails", "");
+        m.set("renovate-errors", QUOTA_ERRORS);
+        m.set("quota-response", response);
+        assert_eq!(
+            m.run(&[]),
+            (Some(1), String::new(), String::new()),
+            "{response}"
+        );
+        assert_eq!(m.booked(), serde_json::json!({}));
+    }
+    let m = Machine::new(None);
+    let at = in_an_hour();
+    m.set("renovate-fails", "");
+    m.set("renovate-errors", QUOTA_ERRORS);
+    m.set(
+        "quota-response",
+        &serde_json::json!({"resources":{
+            "core":{"remaining":20,"reset":at - 100},
+            "graphql":{"remaining":0,"reset":at},
+        }})
+        .to_string(),
+    );
+    assert_eq!(m.run(&[]).0, Some(0));
+    assert_eq!(m.booked(), serde_json::json!({"": at}));
+
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    m.set("renovate-exit", "2");
+    m.set("renovate-errors", QUOTA_ERRORS);
+    assert_eq!(m.run(&[]), (Some(2), String::new(), String::new()));
+    assert_eq!(m.booked(), serde_json::json!({}));
+
+    // The run couldn't be noted: infrastructure failures remain failures.
+    let m = Machine::new(None);
+    m.set("user-spent", &at.to_string());
+    m.set("renovate-fails", "");
+    m.set("renovate-errors", QUOTA_ERRORS);
+    fs::write(m.path("runs"), "not a directory").unwrap();
+    let (code, _, err) = m.run(&[]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("renovate-run: "), "{err}");
+    assert_eq!(m.booked(), serde_json::json!({}));
 }

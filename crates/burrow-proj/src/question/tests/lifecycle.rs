@@ -539,6 +539,7 @@ fn each_question_keeps_its_own_closing_cause() {
         answered: true,
         clear: true,
         deadline,
+        awaited: None,
         accepted,
         applied: false,
     };
@@ -572,7 +573,7 @@ fn a_default_after_an_automatic_update_keeps_its_cause() {
     // Its deadline default is the next accepted answer.
     let ask = crate::ask::load(&f.job());
     assert!(ask.is_some());
-    let resume = Resume::prepare_as(&f.job(), true, true).unwrap();
+    let resume = Resume::prepare_as(&f.job(), Answer::Deadline).unwrap();
     crate::turn::write_prompt(
         &f.job().path("prompt.3"),
         &resume.prompt("No answer by x. Take it"),
@@ -598,6 +599,7 @@ fn a_reply_after_the_question_ended_does_not_answer_it() {
         answered: true,
         clear: true,
         deadline,
+        awaited: None,
         accepted: true,
         applied: true,
     };
@@ -678,4 +680,74 @@ fn a_young_legacy_question_keeps_its_notice() {
     crate::watch::look(&f.cfg, "").unwrap();
     assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
     assert!(!f.job().turn("1", "question-lapsed").exists());
+}
+
+/// Question 1 is open (reversible or one-way) and the job, resumed by an
+/// automatic update, awaits o/r#5, which a stand-in gh says is merged now.
+fn awaiting_a_merge(one_way: bool) -> Fixture {
+    let mut f = watched();
+    recording(&f);
+    let gh = f.dir.path().join("gh");
+    burrow_test::executable(
+        &gh,
+        r#"#!/bin/sh
+for a; do ep=${a%%\?*}; done
+printf 'HTTP/2.0 200 OK\n\n'
+case $ep in
+  */comments | */reviews) echo '[]' ;;
+  */status) echo '{"total_count": 0, "state": "pending"}' ;;
+  */check-runs) echo '{"check_runs": []}' ;;
+  repos/o/r/issues/5) echo '{"pull_request": {}, "state": "closed"}' ;;
+  repos/o/r/pulls/5) echo '{"state": "closed", "merged": true, "head": {"sha": "abc"}, "review_comments": 0}' ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    f.cfg.tools.gh = gh;
+    question(&f, one_way, crate::now() + 3600);
+    publish(&f, false, false);
+    accept(&f.job(), "2").unwrap();
+    f.ending(2, "await");
+    fs::write(
+        f.job().path("await"),
+        format!(
+            "o/r#5\t{}\t{}\n",
+            crate::now(),
+            r#"{"state":"open","merged":false,"head":"abc","comments":0,"review_comments":0,"reviews":{},"checks":""}"#
+        ),
+    )
+    .unwrap();
+    assert!(crate::ask::load(&f.job()).is_some());
+    crate::watch::look(&f.cfg, "").unwrap();
+    assert_eq!(f.job().turns().as_deref(), Some("3"));
+    crate::watch::look(&f.cfg, "").unwrap();
+    f
+}
+
+#[test]
+fn what_the_job_awaited_closing_settles_a_reversible_question() {
+    let f = awaiting_a_merge(false);
+    let prompt = read(&f.job().path("prompt.3")).unwrap();
+    assert!(prompt.contains("o/r#5: "), "{prompt}");
+    assert!(prompt.contains("Your open question is closed"), "{prompt}");
+    assert!(!prompt.contains(OPEN_UPDATE), "{prompt}");
+    assert!(crate::ask::load(&f.job()).is_none());
+    assert!(!f.dir.path().join("remote-proj-question-j1-1").exists());
+    assert!(f.job().turn("1", "question-closed").exists());
+    assert!(
+        closed_with(&f).contains("what the job awaited closed (o/r#5 was merged)"),
+        "{}",
+        closed_with(&f)
+    );
+}
+
+#[test]
+fn what_the_job_awaited_closing_leaves_a_one_way_question_open() {
+    let f = awaiting_a_merge(true);
+    let prompt = read(&f.job().path("prompt.3")).unwrap();
+    assert!(prompt.contains(OPEN_UPDATE), "{prompt}");
+    assert!(crate::ask::load(&f.job()).is_some());
+    assert!(f.dir.path().join("remote-proj-question-j1-1").exists());
+    assert!(!f.job().turn("1", "question-close").exists());
+    assert_eq!(closed_with(&f), "");
 }

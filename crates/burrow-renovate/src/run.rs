@@ -14,14 +14,22 @@
 //! holds off, and the rest of its owner's in a full run, is booked again in
 //! the renovate handler's wake file (burrow-events) for when it lifts, as is
 //! the full pass when an owner's repos can't be listed; the pass exits 0
-//! unless something else failed.
+//! unless something else failed. Renovate meets the limit too, mid-run (it
+//! stops with "rate-limit-exceeded"): a run of Renovate's that fails while
+//! GitHub's `rate_limit`, asked as the account whose token it ran with,
+//! says that allowance is spent is booked the same way, not failed. Every
+//! error in its structured error log must identify that quota failure; an
+//! unrelated failure is not excused by a coincidentally spent budget. A run
+//! that never got Renovate going (its lock, its token) or couldn't be noted fails
+//! whatever the allowance.
 //!
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Seek};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -94,7 +102,11 @@ impl Config {
             };
         }
         let Some(app) = &self.app else {
-            return self.renovate("", &[]).max(self.used_up("", started));
+            let rc = match self.renovate("", &[]) {
+                Ok(rc) => rc,
+                Err(held) => self.held("", &held),
+            };
+            return rc.max(self.used_up("", started));
         };
         // Every repo the installations reach, a run each. One that fails
         // doesn't hold up the rest, but fails the pass. Each owner's
@@ -143,7 +155,7 @@ impl Config {
     /// code applies its autodiscoverFilter here, to the repo as GitHub
     /// spells it (burrow-events has it in lower case, and a /regex/ filter
     /// can mind case). Then its own autodiscovery, narrowed to this repo,
-    /// applies the rest (topics, forks, archived, mirrors).
+    /// applies the rest (topics, forks, archived, mirrors, per-repo config).
     fn one(&self, repo: &str) -> Result<u8, burrow_github::Error> {
         let mut gh = self.github();
         let asked = match burrow_github::call(&mut gh, "GET", &format!("repos/{repo}"), None, None)
@@ -173,7 +185,34 @@ impl Config {
             }
         }
         let filter = serde_json::Value::from(vec![repo.as_str()]);
-        Ok(self.renovate(&repo, &[format!("--autodiscover-filter={filter}")]))
+        self.renovate(&repo, &[format!("--autodiscover-filter={filter}")])
+    }
+
+    /// After a run of Renovate's failed: GitHub's rate limit, as an error
+    /// that holds the run off, when `rate_limit` (which costs nothing
+    /// against it) says the allowance Renovate ran on is spent. As the App,
+    /// that's `owner`'s installation's, whose token the run was given (gh
+    /// as the App, bound to that account whatever repo or checkout is
+    /// around, as GraphQL's calls are); as the user, the login's. None when
+    /// it isn't, or GitHub won't say: then the run failed.
+    fn spent(&self, owner: Option<&str>) -> Option<burrow_github::Error> {
+        let mut gh = burrow_github::Gh {
+            owner: self.app.as_ref().and(owner).map(str::to_owned),
+            ..self.github()
+        };
+        let budget = burrow_github::call(&mut gh, "GET", "rate_limit", None, None)
+            .ok()?
+            .json()
+            .ok()?;
+        let at = now();
+        let mut meter = burrow_github::quota::Meter::new("", "", at);
+        meter.budget(&budget);
+        let lifts = meter.until(at)?;
+        Some(burrow_github::Error {
+            why: "Renovate's run met GitHub's rate limit".into(),
+            unanswered: true,
+            retry_at: Some(lifts),
+        })
     }
 
     /// The repos `owner`'s installation reaches, archived ones aside.
@@ -234,23 +273,25 @@ impl Config {
 
     /// Renovate with `args` on `repo` (every repo, as the user, when it's
     /// empty), in its turn, with a token asked for once it's its turn.
-    fn renovate(&self, repo: &str, args: &[String]) -> u8 {
+    /// Renovate's exit, once its run is noted, or a verified quota wait.
+    /// Infrastructure failures are exits which no rate limit excuses.
+    fn renovate(&self, repo: &str, args: &[String]) -> Result<u8, burrow_github::Error> {
         let lock = match OpenOptions::new()
             .append(true)
             .create(true)
             .open(&self.run_lock)
         {
             Ok(lock) => lock,
-            Err(e) => return self.broke(&self.run_lock, e),
+            Err(e) => return Ok(self.broke(&self.run_lock, e)),
         };
         if let Err(e) = flock(&lock, FlockOperation::LockExclusive) {
-            return self.broke(&self.run_lock, e.into());
+            return Ok(self.broke(&self.run_lock, e.into()));
         }
         // Renovate holds it too, until it's gone: a renovate-run killed
         // while its Renovate still runs (or shuts down) leaves no gap for
         // another run on the same clones.
         if let Err(e) = fcntl_setfd(&lock, FdFlags::empty()) {
-            return self.broke(&self.run_lock, e.into());
+            return Ok(self.broke(&self.run_lock, e.into()));
         }
         let mut asked = match &self.app {
             Some(app) => {
@@ -266,22 +307,40 @@ impl Config {
         };
         let token = match asked.stderr(Stdio::inherit()).output() {
             Ok(out) if out.status.success() => trimmed(out.stdout),
-            Ok(out) => return exit_of(out.status),
+            Ok(out) => return Ok(exit_of(out.status)),
             Err(e) => {
                 complain(&format!(
                     "{}: {}: {e}",
                     self.name,
                     asked.get_program().display()
                 ));
-                return NOT_RUN;
+                return Ok(NOT_RUN);
             }
         };
+        // An unlinked private file keeps the structured errors separate from
+        // the normal journal output. Pass its inherited descriptor rather
+        // than a path: no log remains after the run, even if it is killed.
+        let mut errors = match tempfile::tempfile() {
+            Ok(file) => file,
+            Err(e) => return Ok(self.broke(Path::new("Renovate error log"), e)),
+        };
+        if let Err(e) = fcntl_setfd(&errors, FdFlags::empty()) {
+            return Ok(self.broke(Path::new("Renovate error log"), e.into()));
+        }
         let ran = self
             .command(&self.tools.renovate)
             .args(args)
             .env("RENOVATE_TOKEN", &token)
             .env("GITHUB_COM_TOKEN", &token)
+            .env(
+                "RENOVATE_LOG_FILE",
+                format!("/dev/fd/{}", errors.as_raw_fd()),
+            )
+            .env("RENOVATE_LOG_FILE_LEVEL", "error")
+            .env("RENOVATE_LOG_FILE_FORMAT", "json")
             .status();
+        let quota_failure =
+            ran.as_ref().is_ok_and(|s| s.code() == Some(1)) && only_quota_errors(&mut errors);
         let rc = match ran {
             Ok(status) => exit_of(status),
             Err(e) => {
@@ -293,10 +352,15 @@ impl Config {
                 NOT_RUN
             }
         };
-        match self.ran(if repo.is_empty() { "all" } else { repo }) {
-            Ok(()) => rc,
-            Err((path, e)) => self.broke(&path, e),
+        if let Err((path, e)) = self.ran(if repo.is_empty() { "all" } else { repo }) {
+            return Ok(self.broke(&path, e));
         }
+        if quota_failure
+            && let Some(held) = self.spent(repo.split('/').next().filter(|s| !s.is_empty()))
+        {
+            return Err(held);
+        }
+        Ok(rc)
     }
 
     /// When a run on `name` ended: the last ten, in a file named for the
@@ -354,6 +418,33 @@ impl Config {
         complain(&format!("{}: {}: {e}", self.name, path.display()));
         1
     }
+}
+
+/// Renovate's Bunyan error records, rather than its human log messages.
+/// Every error must be a quota error: mixed, empty, malformed or unreadable
+/// evidence fails closed. These records are an error log, not arbitrary
+/// occurrences of the error string in a repository name, stack or message.
+fn only_quota_errors(file: &mut fs::File) -> bool {
+    if file.rewind().is_err() {
+        return false;
+    }
+    let records = serde_json::Deserializer::from_reader(io::BufReader::new(file))
+        .into_iter::<serde_json::Value>();
+    let mut found = false;
+    for record in records {
+        let Ok(record) = record else { return false };
+        let Some(level) = record["level"].as_u64() else {
+            return false;
+        };
+        if level < 50 {
+            continue;
+        }
+        if record["err"]["message"] != "rate-limit-exceeded" {
+            return false;
+        }
+        found = true;
+    }
+    found
 }
 
 /// The time now, in seconds since the epoch, as wake files have it.
