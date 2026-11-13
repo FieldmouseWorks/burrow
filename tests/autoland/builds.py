@@ -203,6 +203,55 @@ assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes"
                     f"git+file://{mirror}?ref=refs/pr/{n}&rev={heads[n]}#checks.x86_64-linux.proof.drvPath"]
                    for n in (1, 2)], evals()
 
+# A status run (dry, with state of its own) works no eval out: it has what
+# the live passes worked out on the head, and reads their state without
+# writing it. Outputs of theirs all in the store are taken from there; a
+# failure of theirs still standing is theirs, one more in their run of
+# strikes and no more however often status runs; and a head they haven't
+# worked out yet is no failure at all, and no strike.
+AUTOLAND = os.path.dirname(P.__file__)
+
+
+def dry(n, t):
+    """A status run's pass on PR n, t seconds on; its status, its state."""
+    mods = [m for m in list(sys.modules.values()) if os.path.dirname(getattr(m, "__file__", None) or "") == AUTOLAND
+            and isinstance(vars(m).get("DRY"), bool)]
+    live = {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")}
+    kept_state, C.STATE = C.STATE, f"{tmp}/state/dry"
+    os.makedirs(C.STATE, exist_ok=True)
+    for m in mods:
+        m.DRY = True
+    try:
+        status = line(n, t)
+    finally:
+        for m in mods:
+            m.DRY = False
+        C.STATE = kept_state
+    assert {f: open(f"{tmp}/state/{f}").read() for f in os.listdir(f"{tmp}/state") if f.startswith("pr-")} == live
+    return status, json.load(open(f"{tmp}/state/dry/pr-sam_r-{n}.json"))
+
+
+UNTOLD = "Settled; what remi-proof builds is worked out on the steward's next pass"
+fresh_pr_state()
+VALID[:] = [X]
+nix_knows()
+P.begin("sam/r", {1, 5, 6})
+assert STORE in line(1) and line(5) and pr_state(5)["strikes"] == {"eval": 1}, pr_state(5)
+open(NIX_LOG, "w").close()
+for t in (800, 900):
+    status, st = dry(1, t)
+    assert STORE in status and CANT not in status and "eval" not in st["strikes"], (status, st)
+    status, st = dry(5, t)
+    assert CANT in status and st["strikes"] == {"eval": 2}, (status, st)
+    status, st = dry(6, t)
+    assert UNTOLD in status and CANT not in status and st["strikes"] == {} and "proofOutputs" not in st, (status, st)
+assert evals() == [] and JOBS == [], (evals(), JOBS)
+# Past EVAL_RETRY the live passes try the failure again: until they do,
+# a status run can't say how that goes.
+status, st = dry(5, 700 + P.EVAL_RETRY * 60)
+assert UNTOLD in status and st["strikes"] == {"eval": 1} and evals() == [], (status, st)
+VALID[:] = [Z]
+
 # A build whose eval fails has nothing to build: no build and no slot, a
 # strike, and the eval tried again EVAL_RETRY minutes on. A check with no
 # attribute is never worked out: a Claude job's, waiting its turn.
@@ -214,6 +263,7 @@ status = line(5)
 assert CANT in status and JOBS == [] and pr_state(5)["strikes"] == {"eval": 1}, (status, JOBS)
 assert CANT in line(5, 800) and len(evals()) == 2, evals()
 assert CANT in line(5, 700 + P.EVAL_RETRY * 60) and len(evals()) == 3, evals()
+
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
 VALID.append(W)  # PR 6's, had it been asked
 nix_knows()
