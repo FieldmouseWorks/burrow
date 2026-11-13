@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 burrow-codex = { path = "../burrow-codex" }
 burrow-events = { path = "../burrow-events" }
+burrow-process = { path = "../burrow-process" }
 burrow-settings = { path = "../burrow-settings" }
 jiff.workspace = true
 rustix = { version = "1.1.6", features = ["fs", "process"] }
