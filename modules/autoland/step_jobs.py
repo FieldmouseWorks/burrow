@@ -132,7 +132,7 @@ class Jobs:
         if at is _HEAD:
             at = self.head
         if kind in claims.KINDS and not claims.stand_down(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
-            log(f"{self.tag}: no new {kind} job while an earlier one on the branch won't stop")
+            log(f"{self.tag}: no new {kind} job yet: an earlier one on the branch may still push, or its answers just went up")
             self.after(C.NOW, 1)  # ends: the next try to stop it
             return False
         jid = begin() if begin else C.job(self.repo, task, since=ts(self.pr["createdAt"]), role=f"steward-{kind}")

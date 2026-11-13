@@ -110,7 +110,7 @@ fn answered(hub: &mut Hub, h: &Handed) -> Result<Posted, Unposted> {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let (_, got) = look(&cfg, hub, &mut States::new("done"), 0.0, |p| {
-        Ok(answer(p, h, &mut false))
+        Ok(answer(p, h, &mut Wrote::default()))
     });
     got.unwrap()
 }

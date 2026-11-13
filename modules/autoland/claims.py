@@ -48,10 +48,13 @@ def stand_down(repo, pr, st, tag, strike, cleared, after):
     keeps between turns on it (it names them to stop, and keeps them until
     proj says each is over). True once none may still push to the branch;
     False while any may (a stop proj refused, one resumed meanwhile): no new
-    job is handed the branch meanwhile. Which jobs those are is claims.rs's
-    to say: this only runs what it names."""
-    _, out = see(repo, pr, st, tag, strike, cleared, after, retire=True)
-    return out is None or out["clear"]
+    job is handed the branch meanwhile. Also False when this look posted a
+    job's answers or left them to go again (GitHub turned them away): what
+    it read of the PR is stale, so replacement work is decided on a later
+    pass that reads it again. Which jobs those are is claims.rs's to say:
+    this only runs what it names."""
+    status, out = see(repo, pr, st, tag, strike, cleared, after, retire=True)
+    return status is None and (out is None or out["clear"])
 
 
 def look(repo, pr, st, tag, strike, cleared, after):

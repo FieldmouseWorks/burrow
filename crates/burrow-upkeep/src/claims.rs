@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::answer::{self, Handed, Head, Posted, Took, Unposted};
+use crate::answer::{self, Handed, Head, Posted, Took, Unposted, Wrote};
 use crate::pass::Pass;
 
 /// Each looked for the push behind a head this many times at most, a few
@@ -78,7 +78,7 @@ pub struct Handing {
     /// wrong), by its SHA-256: never again, whatever came between.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taken: Vec<String>,
-    /// When (Unix seconds) its answers last made a write that proj's
+    /// When (GitHub's clock, Unix seconds) its answers last made a write that proj's
     /// fingerprint sees (github.rs: a reply on a thread, a comment), or may
     /// have (one whose answer was lost): what wakes a job awaiting the PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,16 +105,11 @@ pub struct Handing {
 }
 
 impl Handing {
-    /// Kept for its next turn, awaiting the PR since `since` (if it can be
-    /// read).
-    fn between(mut self, since: Option<f64>) -> Handing {
+    /// Kept for its next turn, awaiting the PR, `resumes` when a write of its
+    /// answers is the change that wakes it (`woken`).
+    fn between(mut self, resumes: bool) -> Handing {
         self.waits = true;
-        self.resumes = match (self.woke_at, since) {
-            (Some(w), Some(s)) => w >= s,
-            // Wrote, and the await can't be read: it may have woken it.
-            (Some(_), None) => true,
-            (None, _) => false,
-        };
+        self.resumes = resumes;
         self
     }
 
@@ -303,7 +298,7 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 at: rec.at,
                 answers: Some(text),
             };
-            let mut wrote = false;
+            let mut wrote = Wrote::default();
             let (outcome, why) = match answer::answer(p, &h, &mut wrote) {
                 Ok(Posted::Answers(Took { head, description })) => {
                     rec.head = head;
@@ -319,8 +314,13 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
                 Err(Unposted::Refused(why)) => ("refused", Some(why)),
                 Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
             };
-            if wrote {
-                rec.woke_at = Some(p.now);
+            // Whatever came of the rest: the description it wrote is the
+            // PR's now, so the turns after it are checked against it.
+            if let Some(d) = wrote.description {
+                rec.body = d;
+            }
+            if let Some(at) = wrote.at {
+                rec.woke_at = Some(rec.woke_at.map_or(at as f64, |w| w.max(at as f64)));
             }
             let again = matches!(outcome, "refused" | "unanswered");
             if !again && outcome != "nothing" {
@@ -345,8 +345,8 @@ pub fn claims(p: &mut Pass, l: &Look) -> Seen {
         if at_work {
             keep(&mut seen, jid, rec, true);
         } else if between {
-            let since = await_since(&dir, &own);
-            let mut rec = rec.between(since);
+            let resumes = woken(p, l, &rec, await_line(&dir, &own));
+            let mut rec = rec.between(resumes);
             if l.retire && !rec.resumes {
                 rec.retire();
                 retire(&mut seen, jid, rec, "a new fix job is to be handed the PR");
@@ -389,18 +389,44 @@ fn holds_only(holds: &str, own: &str) -> bool {
         })
 }
 
-/// When, in Unix seconds, the job's await of `own` began (proj's `await`
-/// file: TARGET, since and its fingerprint then, a tab apart).
-fn await_since(dir: &burrow_process::state_reads::Dir, own: &str) -> Option<f64> {
-    dir.text("await")
-        .ok()?
-        .lines()
-        .filter_map(|l| {
-            let mut f = l.splitn(3, '\t');
-            let (target, since) = (f.next()?, f.next()?);
-            target.trim().eq_ignore_ascii_case(own).then_some(since)
-        })
-        .find_map(|s| s.trim().parse::<f64>().ok())
+/// The job's await of `own` (proj's `await` file: TARGET, since and its
+/// fingerprint then, a tab apart): when it began, in Unix seconds, and what
+/// the PR was then.
+fn await_line(dir: &burrow_process::state_reads::Dir, own: &str) -> Option<(f64, String)> {
+    dir.text("await").ok()?.lines().find_map(|l| {
+        let mut f = l.splitn(3, '\t');
+        let (target, since, was) = (f.next()?, f.next()?, f.next().unwrap_or_default());
+        target.trim().eq_ignore_ascii_case(own).then_some(())?;
+        Some((since.trim().parse::<f64>().ok()?, was.to_owned()))
+    })
+}
+
+/// Whether a write of the job's answers is the change that wakes it from its
+/// await: one made after the await began is; one made before it, in the
+/// baseline it took, isn't. Both are whole seconds, so a write in the
+/// await's own second is told apart by the baseline itself: the PR's
+/// comment counts then, against what it counted.
+fn woken(p: &mut Pass, l: &Look, rec: &Handing, line: Option<(f64, String)>) -> bool {
+    let Some(w) = rec.woke_at else { return false };
+    // Wrote, and the await can't be read: it may have woken it.
+    let Some((since, was)) = line else { return true };
+    if w != since {
+        return w > since;
+    }
+    let was: serde_json::Value = serde_json::from_str(&was).unwrap_or_default();
+    let (Some(comments), Some(review)) = (
+        was["comments"].as_u64(),
+        was["review_comments"].as_u64(),
+    ) else {
+        return true;
+    };
+    let now = |p: &mut Pass, path: String, key: &str| p.get(&path).ok()?[key].as_u64();
+    let (repo, n) = (p.repo, l.number);
+    let counts = (
+        now(p, format!("repos/{repo}/issues/{n}"), "comments"),
+        now(p, format!("repos/{repo}/pulls/{n}"), "review_comments"),
+    );
+    counts != (Some(comments), Some(review))
 }
 
 fn digest(text: &str) -> String {

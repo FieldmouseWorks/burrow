@@ -205,4 +205,14 @@ with tempfile.TemporaryDirectory() as tmp:
         proj.chmod(0o755)
         assert C.lifecycle('job') == want, (out, code, C.lifecycle('job'))
     assert C.at_work('job') is True, 'unknown is kept'
+# A retirement look that posts answers, or leaves them to go again, hands the
+# branch to no new fix job though no job owns it: the PR it read is stale.
+import claims
+for status, clear, want in ((None, True, True), (None, False, False),
+                            ('A Claude job\'s answers went up: reading the PR again', True, False),
+                            ("GitHub didn't take a Claude job's answers: they go up next try", True, False)):
+    with patch.object(claims, 'see', lambda *a, **k: (status, {'clear': clear})):
+        assert claims.stand_down('r', {}, {}, 't', None, None, None) is want, (status, clear)
+with patch.object(claims, 'see', lambda *a, **k: (None, None)):
+    assert claims.stand_down('r', {}, {}, 't', None, None, None) is True
 print('Python lifecycle and handoff: ok')

@@ -62,6 +62,20 @@ struct Reply {
     reply: String,
 }
 
+/// What an attempt to post left on the PR, whether it got to the end or not:
+/// the claim keeps it, so a later turn or try starts from what is really
+/// there.
+#[derive(Debug, Default)]
+pub struct Wrote {
+    /// When (GitHub's wall time, whole seconds, taken once the call
+    /// returned, so after the write could have landed) its last write that
+    /// proj's fingerprint sees went, or may have gone (one whose answer was
+    /// lost, or a later one failed): a reply on a thread, a new comment.
+    pub at: Option<u64>,
+    /// The description it wrote, once GitHub took it.
+    pub description: Option<String>,
+}
+
 /// What went up.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Posted {
@@ -185,11 +199,12 @@ fn unposted(e: Error) -> Unposted {
 /// Everything is checked before anything goes up: a thread that isn't the
 /// PR's, or a fix claimed with no new commit, posts none of it.
 ///
-/// `wrote` is set before each write of theirs that proj's fingerprint sees
-/// (github.rs: a reply on a thread, a new comment), so it says a job
-/// awaiting the PR may have been woken, even when the write's answer was
-/// lost, or a later one failed.
-pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut bool) -> Result<Posted, Unposted> {
+/// `wrote` records what it did to the PR even when a later write fails: when
+/// each write that proj's fingerprint sees (github.rs: a reply on a thread,
+/// a new comment) went, so a job awaiting the PR may have been woken even
+/// when the write's answer was lost, and the description it wrote, which is
+/// the PR's now whatever came of the rest.
+pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unposted> {
     let Some(text) = &h.answers else {
         return Ok(Posted::Nothing);
     };
@@ -285,9 +300,9 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut bool) -> Result<Posted, Unpo
         let text = reply_text(r, pushed, &h.engine);
         let last = t["comments"]["nodes"][0]["body"].as_str();
         if !last.is_some_and(|l| same(l, &text)) {
-            *wrote = true;
-            mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}))
-                .map_err(|e| unposted(p.noted(e)))?;
+            let said = mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}));
+            wrote.at = Some(p.api.now());
+            said.map_err(|e| unposted(p.noted(e)))?;
         }
         mutate(p.api, owner, RESOLVE, json!({"t": r.id})).map_err(|e| unposted(p.noted(e)))?;
     }
@@ -308,6 +323,7 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut bool) -> Result<Posted, Unpo
         }
         call_once(p.api, "PATCH", &path, Some(&json!({"body": new})))
             .map_err(|e| unposted(p.noted(e)))?;
+        wrote.description = Some(new.clone());
     }
     if let Some(c) = &a.comment {
         let text = comment_text(c, &h.engine);
@@ -324,9 +340,9 @@ pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut bool) -> Result<Posted, Unpo
         });
         if !had {
             let path = format!("repos/{repo}/issues/{n}/comments");
-            *wrote = true;
-            call(p.api, "POST", &path, Some(&json!({"body": text})), None)
-                .map_err(|e| unposted(p.noted(e)))?;
+            let said = call(p.api, "POST", &path, Some(&json!({"body": text})), None);
+            wrote.at = Some(p.api.now());
+            said.map_err(|e| unposted(p.noted(e)))?;
         }
     }
     eprintln!(

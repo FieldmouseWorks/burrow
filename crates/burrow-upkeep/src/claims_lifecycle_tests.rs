@@ -251,3 +251,109 @@ fn what_may_have_woken_a_job_is_counted_against_its_await() {
     let kept = run(&mut hub, json!({"pushed": null, "comment": "Hm."}), "0");
     assert!(kept.resumes && kept.taken.is_empty());
 }
+
+/// A write is stamped when it went up, not when the steward's pass began: a
+/// job's await registered after the pass started, but before the write, is
+/// woken by it. In the await's own second the baseline it took says whether
+/// the write is already in it.
+#[test]
+fn a_write_is_ordered_by_when_it_went_up_and_by_the_awaits_baseline() {
+    let run = |hub: &mut Hub, since: u64, was: &str| {
+        let jobs = tempfile::tempdir().unwrap();
+        let dir = folder(jobs.path());
+        std::fs::write(dir.join("turns"), "1").unwrap();
+        std::fs::write(dir.join("await"), format!("SAM/R#5\t{since}\t{was}\n")).unwrap();
+        std::fs::write(
+            dir.join("answers.json"),
+            json!({"pushed": null, "comment": "Hm."}).to_string(),
+        )
+        .unwrap();
+        let s = looked(
+            hub,
+            &at(HANDED, jobs.path(), true),
+            "done",
+            &["await SAM/R#5"],
+        );
+        s.answering["job-1"].clone()
+    };
+    let t = T as u64;
+    // The pass began at T; the await at T+1; the write went at T+5.
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    hub.clock = Some(t + 5);
+    assert!(run(&mut hub, t + 1, "{}").resumes);
+    // Same second, the baseline already counting what the write added: no.
+    let counts = |comments: u64| {
+        let mut hub = github(HANDED, "Does it.", json!([]));
+        hub.on(
+            "GET",
+            "repos/sam/r/issues/5$",
+            reply(200, json!({"comments": comments})),
+        );
+        hub.on(
+            "GET",
+            "repos/sam/r/pulls/5$",
+            reply(
+                200,
+                json!({"state": "open", "head": {"sha": HANDED}, "body": "Does it.", "review_comments": 0}),
+            ),
+        );
+        hub
+    };
+    let was = r#"{"comments":1,"review_comments":0}"#;
+    assert!(!run(&mut counts(1), t, was).resumes);
+    // The PR has a comment the baseline doesn't.
+    assert!(run(&mut counts(2), t, was).resumes);
+}
+
+// A turn's description went up and its comment didn't: the description it
+// left is the job's baseline whatever came of the rest, so a later turn that
+// pushed on and left the description alone is still its own, while the push
+// a turn's answers named is no longer the head.
+#[test]
+fn a_description_written_before_a_failed_post_stays_the_jobs_baseline() {
+    let jobs = tempfile::tempdir().unwrap();
+    let dir = folder(jobs.path());
+    std::fs::write(dir.join("turns"), "1").unwrap();
+    std::fs::write(dir.join("await"), "SAM/R#5\t0\t{}\n").unwrap();
+    std::fs::write(
+        dir.join("answers.json"),
+        json!({"pushed": null, "description": "New.", "comment": "One."}).to_string(),
+    )
+    .unwrap();
+    let mut hub = github(HANDED, "Does it.", json!([]));
+    hub.on(
+        "POST",
+        "repos/sam/r/issues/5/comments$",
+        reply(502, json!({})),
+    );
+    let mut l = at(HANDED, jobs.path(), true);
+    let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+    assert_eq!(s.answered[0].outcome, "unanswered");
+    assert_eq!(s.answering["job-1"].body, "New.");
+    // Its next turn pushed, and leaves the description as it is.
+    std::fs::write(dir.join("turns"), "2").unwrap();
+    kept_turn(
+        &dir,
+        1,
+        "await SAM/R#5",
+        json!({"pushed": null, "description": "New.", "comment": "One."}),
+    );
+    kept_turn(
+        &dir,
+        2,
+        "await SAM/R#5",
+        json!({"pushed": PUSHED, "description": null, "comment": "Two."}),
+    );
+    l.head = PUSHED.into();
+    l.answering = s.answering;
+    let mut hub = github(PUSHED, "New.", json!([]));
+    let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["moved", "posted"], "{:?}", s.answered);
+    // Someone else's edit is still the PR's own.
+    l.answering = BTreeMap::from([("job-1".into(), handing())]);
+    let mut hub = github(PUSHED, "Edited by someone.", json!([]));
+    let s = looked(&mut hub, &l, "done", &["await SAM/R#5"]);
+    let outcomes: Vec<_> = s.answered.iter().map(|a| a.outcome).collect();
+    assert_eq!(outcomes, ["moved", "moved"], "{:?}", s.answered);
+}
