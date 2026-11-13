@@ -23,7 +23,7 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         "stallAfterMinutes":1, "awaitHours":1, "kick":"", "wake":dir.path().join("wake"),
         "waits":null, "inboxMark":"", "pipelineRepos":[], "leadRepos":[],
         "flake":"/unused", "deployed":"/unused", "apps":{}, "machinery":null,
-        "notify":null, "roles":"/unused", "models":"/unused", "meters":null, "codexSlots":1,
+        "notify":null, "meters":null, "codexSlots":1,
         "codexHooks":"/unused", "inbox":null,
         "tools":{"gh":"unused", "git":"git", "codex":"unused", "bwrap":"unused",
             "bash":"unused", "flock":"unused", "systemctl":systemctl,

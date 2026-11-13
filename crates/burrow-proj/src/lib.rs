@@ -178,6 +178,7 @@ pub mod probe;
 mod question;
 pub mod retry;
 pub mod scratch;
+pub mod select;
 pub mod settings;
 pub mod slot;
 pub mod snapshot;
