@@ -100,7 +100,8 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         let systemctl = script(
             "systemctl",
             format!(
-                "case \"$*\" in\n  *is-active*) [ -e '{}' ] && exit 0; exit 3 ;;\n  *show*) echo inactive ;;\nesac\nexit 0\n",
+                "case \"$*\" in\n  *is-active*) [ -e '{}' ] && exit 0; exit 3 ;;\n  *ActiveState*) if [ -e '{}' ]; then echo active; else echo inactive; fi ;;\n  *Job*) ;;\nesac\nexit 0\n",
+                at("active").display(),
                 at("active").display()
             ),
         );
@@ -939,3 +940,49 @@ fn triage_assigns_priority_but_preserves_existing_labels() {
         }
     }
 }
+
+// Issues the machinery App opens are sorted and ranked like an author's,
+// admitted by account id alone.
+#[test]
+fn the_machinery_apps_issues_are_sorted_and_ranked() {
+    let mut b = Box::new();
+    b.cfg.machinery_account = Some(burrow_github::fake::author("workers[bot]"));
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let mut p = b.pass();
+    assert!(!p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers[bot]", &[]),
+        &Default::default()
+    ));
+    assert!(p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers[bot]", &["ready"]),
+        &Default::default()
+    ));
+    assert!(p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers[bot]", &["outside text"]),
+        &Default::default()
+    ));
+    // The same name without the App's id is a stranger.
+    assert!(p.sorted(
+        "sam/box",
+        &t,
+        &issue(1, "workers", &[]),
+        &Default::default()
+    ));
+    let mut ready = issue(2, "workers[bot]", &["ready"]);
+    ready["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    ready["created_at"] = json!("2026-11-01T00:00:00Z");
+    let ranked = p.pick_ready(&t, &[ready]);
+    assert_eq!(ranked, Some(("sam/box".into(), "2".into())));
+    let mut stranger = issue(3, "workers", &["ready"]);
+    stranger["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    assert_eq!(p.pick_ready(&t, &[stranger]), None);
+}
+
+#[path = "sorting_slot_tests.rs"]
+mod slot_tests;

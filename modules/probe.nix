@@ -2,11 +2,11 @@
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
 # `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
-# UNTIL`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
+# UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
 #
-# Nothing of the issue's text reaches a command but a unit name or a time the
+# Nothing of the issue's text reaches a command but a unit name, executable path or time the
 # probe's grammar made, journals are read only for the units on the
 # allowlist, a repo GitHub doesn't call private gets no answer, and every
 # answer goes through the secret scrubber before it's posted
@@ -23,6 +23,8 @@ let
   # What crates/burrow-probe reads (its Config).
   settings = {
     inherit (cfg) repo label authors;
+    # Only where the updater is on: its repo reads the required origin.
+    systemRepo = if config.burrow.updates.enable or false then config.burrow.updates.repo else null;
     machinery = if config.burrow.github.machineApp == null then null
       else { login = "${config.burrow.github.machineApp.slug}[bot]"; id = config.burrow.github.machineApp.accountId; };
     host = config.networking.hostName;
@@ -54,6 +56,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
@@ -150,20 +153,27 @@ in
       gap = 2;
     };
 
+
+    # A pass GitHub's rate limit holds off writes this beside its wake file
+    # (burrow-github's deferred); one past its grace is a stall.
+    burrow.watchdog.sources.probe-door = {
+      file = "${lib.removeSuffix ".json" probeWake}.watch.json";
+      about = "The probe door";
+      look = "journalctl -u burrow-probe: its pass was held off by GitHub's rate limit (`gh api rate_limit` with the workers token says until when). Questions wait meanwhile; cut the other consumers' calls on the installation.";
+    };
+
     systemd.tmpfiles.rules = [
       "d ${config.burrow.stateDir}/probe-door 0755 ${user} ${config.users.users.${user}.group} -"
     ];
 
     systemd.services.burrow-probe = {
       description = "burrow-probe: answer the probe issues in ${cfg.repo}";
-      # A switch leaves a running pass be (see burrow.switch's check); the
-      # next one is the new system's.
-      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = probeWake;
+      environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";
         # The user, for its user manager (`units`, `rc`) and proj (`queue`);
@@ -182,7 +192,7 @@ in
     burrow.claude.machineMd = lib.mkOrder 702 ''
       Read-only questions about this machine need no Claude: open an issue in
       ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
-      (`memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
+      (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
       `usage [SINCE] [--totals]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.
     '';

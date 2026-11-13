@@ -47,16 +47,6 @@ impl Machine {
         self.head()
     }
 
-    /// HEAD as ride leaves it at `t`: main with the PR's head (the branch
-    /// pr) merged on top.
-    fn ride_at(&self, t: u64) {
-        self.on_main();
-        self.dated(
-            t,
-            &["merge", "-q", "--no-edit", "-m", "Ride #7 on main", "pr"],
-        );
-    }
-
     /// What a run that put HEAD's system live leaves: it runs, stamped with
     /// HEAD.
     fn live(&self) -> Running {
@@ -77,7 +67,7 @@ impl Machine {
 
 /// main with flake.lock, system.nix and a README, and its PR's branch (pr)
 /// bumping flake.lock on top of that, which main has since moved past (its
-/// README), so a ride is a merge.
+/// README).
 fn machine() -> Machine {
     let m = Machine::new();
     m.commit_at(0, "system.nix", "v1");
@@ -198,48 +188,6 @@ fn heads_system_is_built_again_stamped_as_what_runs() {
 }
 
 #[test]
-fn a_ride_made_again_runs_already_until_mains_system_moves() {
-    // The bug: riding the same PR on the same main a second time makes a
-    // new merge, so its build is a new store path though nothing in it
-    // differs. It runs already.
-    let m = machine();
-    m.ride_at(30);
-    let run = m.live();
-    m.ride_at(40);
-    assert_ne!(
-        Some(m.head()),
-        run.rev,
-        "the second ride is the first one's commit"
-    );
-    let new = build(&m.cfg).unwrap();
-    assert_ne!(
-        new, run.current,
-        "the stand-in doesn't stamp a system with its commit"
-    );
-    m.forget_nix();
-    assert_eq!(
-        runs_already(&m.cfg, &run, &new, true, true),
-        Some(Already::Current)
-    );
-    assert!(
-        m.kept("nix.log").contains("--expr"),
-        "it didn't build HEAD stamped as what runs"
-    );
-
-    // Main moves under it with what doesn't go into the system (a README, a
-    // CI pin): it still runs already. With what does, it doesn't: that goes
-    // live.
-    m.lands(50, "README", "v3");
-    m.ride_at(60);
-    let new = build(&m.cfg).unwrap();
-    assert!(runs_already(&m.cfg, &run, &new, true, true).is_some());
-    m.lands(70, "system.nix", "v2");
-    m.ride_at(80);
-    let new = build(&m.cfg).unwrap();
-    assert_eq!(runs_already(&m.cfg, &run, &new, true, true), None);
-}
-
-#[test]
 fn a_bump_made_again_runs_already_and_a_newer_one_doesnt() {
     // A bump of its own made again, the same lock (a run before put it
     // live, but its PR didn't open or its push was refused): it runs
@@ -251,11 +199,11 @@ fn a_bump_made_again_runs_already_and_a_newer_one_doesnt() {
     m.work(&["reset", "-q", "--hard", "main"]);
     m.commit_at(100, "flake.lock", "v3");
     let new = build(&m.cfg).unwrap();
-    assert!(runs_already(&m.cfg, &run, &new, true, false).is_some());
+    assert!(runs_already(&m.cfg, &run, &new, true).is_some());
     m.work(&["reset", "-q", "--hard", "main"]);
     m.commit_at(110, "flake.lock", "v4");
     let new = build(&m.cfg).unwrap();
-    assert_eq!(runs_already(&m.cfg, &run, &new, true, false), None);
+    assert_eq!(runs_already(&m.cfg, &run, &new, true), None);
 }
 
 #[test]
@@ -269,10 +217,10 @@ fn main_itself_runs_already_only_as_that_very_system() {
     m.on_main();
     let new = build(&m.cfg).unwrap();
     m.forget_nix();
-    assert_eq!(runs_already(&m.cfg, &run, &new, false, false), None);
+    assert_eq!(runs_already(&m.cfg, &run, &new, false), None);
     assert_eq!(m.kept("nix.log"), "", "it asked nix about main itself");
     assert_eq!(
-        runs_already(&m.cfg, &run, &run.current, false, false),
+        runs_already(&m.cfg, &run, &run.current, false),
         Some(Already::Current)
     );
 }
@@ -281,12 +229,14 @@ fn main_itself_runs_already_only_as_that_very_system() {
 fn a_comparison_that_cant_be_made_never_runs_already() {
     // The run goes on to put it live, as before.
     let m = machine();
-    m.ride_at(30);
+    m.on_main();
+    m.commit_at(30, "flake.lock", "v3");
     let run = m.live();
-    m.ride_at(40);
+    m.work(&["reset", "-q", "--hard", "main"]);
+    m.commit_at(40, "flake.lock", "v3");
     let new = build(&m.cfg).unwrap();
     fs::write(m.home("nix-down"), "").unwrap();
-    assert_eq!(runs_already(&m.cfg, &run, &new, true, true), None);
+    assert_eq!(runs_already(&m.cfg, &run, &new, true), None);
     // Nor a HEAD it can't read.
     fs::remove_file(m.home("nix-down")).unwrap();
     fs::remove_dir_all(m.cfg.work.join(".git")).unwrap();
@@ -296,24 +246,20 @@ fn a_comparison_that_cant_be_made_never_runs_already() {
 #[test]
 fn what_runs_already_goes_up_only_once_it_put_it_live_itself() {
     // A bump of its own: up only once HOST-update put that very system live
-    // (the switch and the health check), in a train repo or not; held when
-    // anyone else did; nothing to do while riding, or with nothing new.
-    let mut m = Machine::new();
+    // (the switch and the health check); held when
+    // anyone else did; nothing to do with nothing new.
+    let m = Machine::new();
     let run = Running {
         current: "/nix/store/sys-b".into(),
         rev: None,
     };
-    let already =
-        |m: &Machine, made, riding| runs_already(&m.cfg, &run, &run.current, made, riding);
-    assert_eq!(already(&m, true, false), Some(Already::Hold));
+    let already = |m: &Machine, made| runs_already(&m.cfg, &run, &run.current, made);
+    assert_eq!(already(&m, true), Some(Already::Hold));
     m.record("deployed", "/nix/store/sys-a");
-    assert_eq!(already(&m, true, false), Some(Already::Hold));
+    assert_eq!(already(&m, true), Some(Already::Hold));
     m.record("deployed", "/nix/store/sys-b");
-    assert_eq!(already(&m, true, false), Some(Already::Up));
-    m.cfg.train = None;
-    assert_eq!(already(&m, true, false), Some(Already::Up));
-    assert_eq!(already(&m, true, true), Some(Already::Current));
-    assert_eq!(already(&m, false, false), Some(Already::Current));
+    assert_eq!(already(&m, true), Some(Already::Up));
+    assert_eq!(already(&m, false), Some(Already::Current));
     assert_eq!(m.kept("nix.log"), "", "it asked nix about the very system");
 }
 

@@ -24,6 +24,7 @@ fn config() -> Config {
             user_units: vec![],
         },
         state_dir: "/var/lib/burrow".into(),
+        system_repo: None,
         proj: None,
         tools: Tools {
             git: "git".into(),

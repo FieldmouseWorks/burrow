@@ -88,9 +88,11 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
         }
+        let _permit = resumption::Permit::new(pass);
         return forget(&inbox.state, repo);
     }
     pass.lock().map_err(|e| io_fail(&lock, e))?;
+    let pass = resumption::Permit::new(pass);
     let mut p = Pass {
         cfg,
         inbox,
@@ -169,6 +171,15 @@ fn forget(state: &Path, repo: &str) -> Result<(), Fail> {
             {
                 fs::remove_dir_all(&path).map_err(|e| io_fail(&path, e))?;
             }
+        }
+    }
+    for (name, path) in names(&state.join(".triage-waiting")) {
+        if name
+            .to_lowercase()
+            .rsplit_once('-')
+            .is_some_and(|(k, _)| k == want)
+        {
+            fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;
         }
     }
     for (name, path) in names(&state.join(".retired")) {
@@ -345,6 +356,18 @@ impl Pass<'_> {
 
     fn allowed(&self, id: Option<u64>) -> bool {
         self.inbox.authors.iter().any(|a| a.matches(id))
+    }
+
+    /// Whether the issue's opener is one of the authors or the machinery
+    /// App, by account id.
+    fn opened_by_ours(&self, issue: &Value) -> bool {
+        let id = issue["user"]["id"].as_u64();
+        self.allowed(id)
+            || self
+                .cfg
+                .machinery_account
+                .as_ref()
+                .is_some_and(|a| a.matches(id))
     }
 
     /// A comment a job may see: one of the authors', and not the inbox's
@@ -642,6 +665,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     }
 
     fn run(&mut self, only: &str) -> Result<(), Fail> {
+        self.prune_planner_waits()?;
         let repos: Vec<(String, String)> = self
             .project
             .iter()
@@ -715,7 +739,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
                 continue;
             }
             let opener = raw(&issue["user"]["login"]);
-            if !self.allowed(issue["user"]["id"].as_u64()) && !self.generated_child(repo, issue) {
+            if !self.opened_by_ours(issue) && !self.generated_child(repo, issue) {
                 let said = format!(
                     "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
                     self.inbox.host,
@@ -779,8 +803,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     /// Whether an agent may read the issue: one of the authors opened it,
     /// and it isn't labelled outside text.
     pub(super) fn eligible(&self, repo: &str, issue: &Value) -> bool {
-        (self.allowed(issue["user"]["id"].as_u64()) || self.generated_child(repo, issue))
-            && !self.outside(issue)
+        (self.opened_by_ours(issue) || self.generated_child(repo, issue)) && !self.outside(issue)
     }
 
     /// Whether an agent may no longer read issue N: as `listed` has it, or
@@ -944,6 +967,7 @@ mod retirement;
 mod written;
 
 pub(crate) use drain::WAITING;
+mod planner_waits;
 mod sorting_questions;
 mod triage;
 mod write;

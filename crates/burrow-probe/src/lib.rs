@@ -7,8 +7,9 @@
 //! asks again.
 //!
 //! What keeps it read-only and keeps secrets in: no shell, and nothing of the
-//! issue's text reaches a command but a unit name or a time query.rs made;
-//! journals only of the units on its allowlist; a repo that isn't private
+//! issue's text reaches a command but a unit name, executable path or time
+//! query.rs made; unit journals only of the units on its allowlist, and crash
+//! reports only of an exact executable with selected diagnostic fields; a repo that isn't private
 //! gets no answer at all; and every answer goes through the scrubber
 //! (scrub.rs) before it leaves. `burrow-probe CONFIG ask QUESTION` answers
 //! one here, on the terminal, as it is: whoever runs it can read the same
@@ -29,6 +30,11 @@ use serde::Deserialize;
 pub struct Config {
     /// OWNER/NAME: the private repo whose issues it answers.
     pub repo: String,
+    /// OWNER/NAME of the machine's own flake, when it is on GitHub: the repo
+    /// whose commits `contains` checks against the configuration revision.
+    /// Independent of `repo`, which is only where the issues live.
+    #[serde(default)]
+    pub system_repo: Option<String>,
     /// The label that makes an issue a probe.
     pub label: String,
     /// Who may ask (GitHub logins, any case).

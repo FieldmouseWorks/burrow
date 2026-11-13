@@ -469,7 +469,7 @@ impl Machine {
             "-qm",
             &format!("{file}: {text}"),
             "-m",
-            "Pushed by box-update after the build, the VM tests and the health check passed.",
+            "Pushed by box-update after the build and the VM tests passed.",
         ]);
     }
 

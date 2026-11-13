@@ -1,7 +1,7 @@
 //! The probe's vocabulary: what a line of an issue may ask, and nothing else.
 //! A line is words split on spaces; the first names the question, the rest
 //! are its arguments, each held to its own shape here, so what reaches a
-//! command (answer.rs) is a unit name or a time this file made, never the
+//! command (answer.rs) is a unit name, executable path or time this file made, never the
 //! issue's text.
 
 use std::fmt;
@@ -19,6 +19,11 @@ pub enum Query {
     },
     /// Failed units and jobs under way, the system's and the user's.
     Units,
+    /// The latest crash reports for an exact absolute executable path.
+    Crashes {
+        exe: String,
+        since: When,
+    },
     /// A unit's journal between two times: one on the allowlist only.
     Journal {
         unit: Unit,
@@ -44,7 +49,7 @@ pub enum Query {
 }
 
 /// What the words are, for an answer that couldn't make sense of a line.
-pub const VOCABULARY: &str = "memory | units | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
+pub const VOCABULARY: &str = "memory | units | crashes EXE [SINCE] | journal UNIT SINCE UNTIL | rc | queue | deployed | contains REPO COMMIT | usage [SINCE] [--totals] | oom [SINCE], one a line; a time is `now`, `-30s`, `-15m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`, `2026-11-01T13:05:30Z` or `@EPOCH`, in UTC";
 
 /// The longest a time can reach back.
 const MAX_BACK: i64 = 31 * 24 * 3600;
@@ -188,6 +193,18 @@ impl Query {
         match first.to_ascii_lowercase().as_str() {
             "memory" => none(Query::Memory),
             "units" => none(Query::Units),
+            "crashes" => match args {
+                [exe] | [exe, _] if executable(exe) => Ok(Query::Crashes {
+                    exe: exe.to_string(),
+                    since: match args.get(1) {
+                        Some(since) => When::parse(since)?,
+                        None => When::Ago(86400),
+                    },
+                }),
+                _ => Err(format!(
+                    "`crashes` takes an absolute executable path and optional time ({VOCABULARY})"
+                )),
+            },
             "rc" => none(Query::Rc),
             "queue" => none(Query::Queue),
             "deployed" => none(Query::Deployed),
@@ -257,6 +274,7 @@ impl fmt::Display for Query {
                 if *totals { " --totals" } else { "" }
             ),
             Query::Units => f.write_str("units"),
+            Query::Crashes { exe, since } => write!(f, "crashes {exe} {}", show(*since)),
             Query::Rc => f.write_str("rc"),
             Query::Queue => f.write_str("queue"),
             Query::Contains { repo, commit } => write!(f, "contains {repo} {commit}"),
@@ -281,6 +299,19 @@ fn show(w: When) -> String {
             |t| t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
         ),
     }
+}
+
+fn executable(path: &str) -> bool {
+    path.len() <= 4096
+        && path.starts_with('/')
+        && path.split('/').skip(1).all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._+-@".contains(&b))
+        })
 }
 
 pub fn repository(repo: &str) -> bool {

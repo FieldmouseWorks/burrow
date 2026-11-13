@@ -134,7 +134,7 @@ def failed(repo, pr=None):
                         "kick": kick, "rev": None}
 
 
-def publish(seen, digest, full):
+def publish(seen, digest, full, inventory=None, deferred=()):
     """watch.json: this pass's waits for the repos it saw, and a kicked pass
     keeps the other repos' as they were. An open PR it noted nothing for
     (every one, in a repo whose PRs it couldn't read) keeps the wait it had.
@@ -144,8 +144,13 @@ def publish(seen, digest, full):
     if not CFG["watch"]:
         return
     was = load("watch.json", {}).get("items", {})
-    items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full}
+    items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full
+             and (inventory is None or repo_of(k) in inventory)}
     for repo in seen:
+        if repo in deferred and repo in was:
+            # The operation that failed has not been retried by this batch.
+            # Its clock belongs to that operation, not the PR traversal.
+            items[repo] = was[repo]
         noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
 

@@ -644,6 +644,14 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0
+        },
+        "waiting": {
+          "description": "Issues waiting for sorting admission or verdict application, each with why.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false,

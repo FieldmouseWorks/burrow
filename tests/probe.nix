@@ -103,7 +103,7 @@ pkgs.testers.runNixOSTest {
       "f /var/lib/gh/repo 0666 root root - {\"private\": true}"
       "f /var/lib/gh/issues 0666 root root - []"
     ];
-    environment.systemPackages = [ pkgs.curl ];
+    environment.systemPackages = [ pkgs.curl pkgs.util-linux ];
   };
 
   testScript = ''
@@ -125,17 +125,32 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("user@1001.service")
     machine.succeed("systemctl start leaky.service unlisted.service")
     machine.succeed("systemctl --user -M dev@ start claude-rc@web.service")
+    # Structured coredump journal fixtures: exercise the real journalctl
+    # selection without crashing a process or needing any core-file access.
+    machine.succeed("logger --journald <<'EOF'\n"
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1\n"
+        "COREDUMP_EXE=/bin/probe-example\nCOREDUMP_PID=123\nCOREDUMP_SIGNAL=6\n"
+        "COREDUMP_USER_UNIT=proj-example.service\n"
+        f"MESSAGE=Stack trace of thread 123: abort token={token}\n"
+        "COREDUMP_ENVIRON=plain private environment\n"
+        "COREDUMP_CMDLINE=plain private argument\nEOF")
+    machine.succeed("logger --journald <<'EOF'\n"
+        "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1\n"
+        "COREDUMP_EXE=/bin/other-example\nMESSAGE=unrelated crash\nEOF\njournalctl --sync")
 
     with subtest("the control: the journal, and the probe here, hold the secrets as they are"):
         journal = machine.succeed("journalctl -u leaky.service")
         assert token in journal and password in journal, journal
         out = machine.succeed("burrow-probe ask journal leaky -1h now")
         assert token in out and password in out, out
+        crash = machine.succeed("burrow-probe ask crashes /bin/probe-example -1h")
+        assert "COREDUMP_PID: 123" in crash and token in crash, crash
+        assert "plain private" not in crash and "unrelated crash" not in crash, crash
 
     with subtest("an author's probe is answered once, scrubbed, and closed"):
         github("repo", {"private": True})
         github("issues", [
-            issue(1, "sam", "journal leaky -1h now\njournal unlisted -1h now\nmemory\nunits\nrc\ndeployed\noom\nqueue\nrm -rf /"),
+            issue(1, "sam", "journal leaky -1h now\njournal unlisted -1h now\ncrashes /bin/probe-example -1h\nmemory\nunits\nrc\ndeployed\noom\nqueue\nrm -rf /"),
             issue(2, "mallory", "journal leaky -1h now"),
         ])
         machine.succeed("systemctl start burrow-probe.service")
@@ -144,6 +159,9 @@ pkgs.testers.runNixOSTest {
         assert "leaky: cloning with [redacted] now" in body, body
         assert "leaky: db password=[redacted]" in body, body
         assert "leaky: done" in body, body
+        assert "COREDUMP_PID: 123" in body and "proj-example.service" in body, body
+        assert "Stack trace of thread 123: abort token=[redacted]" in body, body
+        assert "plain private" not in body and "unrelated crash" not in body, body
         assert "unlisted.service isn't on the journal allowlist" in body, body
         assert "the probe never reads this" not in body, body
         assert "RAM " in body and "The 20 cgroups holding the most" in body, body

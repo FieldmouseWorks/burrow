@@ -5,6 +5,7 @@
 //! (pass.rs); here it's as the machine said it.
 
 mod contains;
+mod crashes;
 mod memory;
 mod system;
 #[cfg(test)]
@@ -159,6 +160,7 @@ impl Machine<'_> {
             Query::Contains { repo, commit } => contains::answer(self, repo, commit),
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),
+            Query::Crashes { exe, since } => crashes::answer(self, exe, since.at(self.now)),
         }
     }
 

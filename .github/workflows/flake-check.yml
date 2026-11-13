@@ -22,7 +22,10 @@
 # its inputs and the PR (or the run), and a leg's its leg too, so calls in one
 # workflow with inputs of their own (a matrix's legs, say) never cancel each
 # other, nor do the gate's own legs; two calls alike would be the same check
-# twice.
+# twice. A job's group cancels its last only once it's queued itself, after
+# the new run's first job got a runner, so a caller (the template's, and
+# burrow's own) has a group of its own on the same key too, which cancels the
+# PR's last run whole as the new one is made (burrow#815).
 name: flake-check
 on:
   workflow_call:
@@ -40,7 +43,9 @@ on:
           Keep what each push to the default branch's gate needed that no
           public cache has (what it built, a patched package or the flake's
           own checks, what it took from these kept builds, and what they
-          hold that its checks were built from) in the Actions cache, and
+          hold that its checks were built from), whether or not the gate
+          passed (a check that failed leaves nothing to keep), in the
+          Actions cache, and
           let every later run's gate substitute from them, a leg from the
           same leg's, and a PR's negative run from every leg's: a hosted
           runner starts with an empty store, and builds all of that again
@@ -416,12 +421,14 @@ jobs:
           path: ${{ runner.temp }}/flake.log
       # The gate's result, signed with this job's own GitHub identity, in the
       # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
-      # a public repo's as a Sigstore bundle, and a private repo's, which
-      # GitHub attests only on Enterprise Cloud, with the job's own token,
-      # whose audience names the digest of what it attests. A run with no OIDC
-      # token (a fork's PR, Dependabot's) can't sign, so it gets none and its
-      # result doesn't count as evidence. With legs, the gate job attests
-      # them, with this same script.
+      # every repo's with the job's own token, whose audience names the digest
+      # of what it attests, which is what Conary's train reads, and a public
+      # repo's as a Sigstore bundle too (GitHub attests a private repo's only
+      # on Enterprise Cloud). The token can say nothing else: its audience is
+      # this statement's, and it expires minutes after the job asks for it. A
+      # run with no OIDC token (a fork's PR, Dependabot's) can't sign, so it
+      # gets none and its result doesn't count as evidence. With legs, the
+      # gate job attests them, with this same script.
       - id: subject
         if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1 && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
@@ -430,7 +437,6 @@ jobs:
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PRIVATE: ${{ github.event.repository.private }}
         run: &subject |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -465,20 +471,18 @@ jobs:
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
-          if [ "$PRIVATE" = true ]; then
-            # The statement is the subject, then the predicate on one line.
-            # The file keeps the token after it, as its last line.
-            attestation="$dir/conary-attestation"
-            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
-            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
-            echo "signing with this job's token, audience $audience"
-            # Nothing in the audience needs escaping in a URL. GitHub's token
-            # service answers a 503 now and then; --retry asks again after any
-            # answer that says try later, rather than fail a gate that passed.
-            curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
-            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
-          fi
+          # The statement is the subject, then the predicate on one line.
+          # The file keeps the token after it, as its last line.
+          attestation="$dir/conary-attestation"
+          { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+          audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+          echo "signing with this job's token, audience $audience"
+          # Nothing in the audience needs escaping in a URL. GitHub's token
+          # service answers a 503 now and then; --retry asks again after any
+          # answer that says try later, rather than fail a gate that passed.
+          curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+          { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
       - &log
         if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -502,10 +506,17 @@ jobs:
         if: ${{ always() && steps.kept-lookup.outputs.cache-hit != '' && steps.kept-restore.outputs.cache-hit == '' }}
         shell: bash
         run: echo 'degraded/kept-restore' >> "$GITHUB_STEP_SUMMARY"
-      # keep-builds, on a push to the default branch whose gate passed: what
-      # crates/burrow-keep says, in place of the kept builds it restored and
-      # under the path it restored them to (the cache keeps what it saves for
-      # a restore of the same path only). The tool comes from this workflow's
+      # keep-builds, on a push to the default branch whose gate ran, passed
+      # or failed: a build is no less reusable for a different check having
+      # failed, and a red default branch that kept nothing left every later
+      # leg to build cold (#812). A failed check leaves no output, so the
+      # gate stays red. A leg that starts while a push is still building
+      # takes what the push before it kept rather than wait for it: waiting
+      # would hold a runner doing nothing, when runners are what ran out.
+      # What crates/burrow-keep says, told how the gate went, in place of
+      # the kept builds it restored and under the path it restored them to
+      # (the cache keeps what it saves for a restore of the same path only).
+      # The tool comes from this workflow's
       # own commit, which job.workflow_sha names whoever calls it, built on
       # the runner's cargo in the crates' directory as the house action
       # builds its check: rustup reads the toolchain
@@ -514,7 +525,7 @@ jobs:
       # result as it is.
       - id: keep-tool
         name: soft/keep-tool
-        if: ${{ inputs.keep-builds && inputs.install-nix && steps.gate.outcome == 'success' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        if: ${{ !cancelled() && inputs.keep-builds && inputs.install-nix && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure') && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -525,18 +536,19 @@ jobs:
           sparse-checkout: crates
       - id: keep
         name: soft/keep-builds
-        if: steps.keep-tool.outcome == 'success'
+        if: ${{ !cancelled() && steps.keep-tool.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         working-directory: .flake-check-keep/crates
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
+          GATE: ${{ steps.gate.outcome }}
         run: |
           cargo build --release --locked --quiet -p burrow-keep
-          "$CARGO_TARGET_DIR/release/burrow-keep" "$RUNNER_TEMP"
+          "$CARGO_TARGET_DIR/release/burrow-keep" --gate "$GATE" "$RUNNER_TEMP"
       - id: keep-save
         name: soft/keep-save
-        if: steps.keep.outcome == 'success'
+        if: ${{ !cancelled() && steps.keep.outcome == 'success' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -887,7 +899,6 @@ jobs:
         env:
           FORK: ${{ steps.paths.outputs.fork }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -909,15 +920,13 @@ jobs:
             "$RUNNER_TEMP/negative.json" > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
-          if [ "$PRIVATE" = true ]; then
-            attestation="$dir/conary-attestation"
-            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
-            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
-            echo "signing with this job's token, audience $audience"
-            curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
-            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
-          fi
+          attestation="$dir/conary-attestation"
+          { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+          audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+          echo "signing with this job's token, audience $audience"
+          curl -fsS --retry 4 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+          { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

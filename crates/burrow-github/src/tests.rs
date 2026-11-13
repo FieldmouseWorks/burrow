@@ -607,6 +607,13 @@ fn runs_gh_under_its_via() {
     // GraphQL as the account it's about, through whatever runs gh.
     let r = gh.graphql("sam", &json!({"query": "q"})).unwrap();
     assert_eq!(r.body, "gh api -i -X POST graphql --input -|sam");
+    // A REST call bound to an account goes as that account, as GraphQL's.
+    let mut bound = Gh {
+        owner: Some("kim".into()),
+        ..under("GH_TOKEN_OWNER")
+    };
+    let r = bound.request("GET", "rate_limit", None, None).unwrap();
+    assert_eq!(r.body, "gh api -i -X GET rate_limit|kim");
     let mut gh = Gh {
         token: Some("ghs_x".into()),
         ..under("GH_TOKEN")
