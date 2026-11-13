@@ -331,7 +331,10 @@ impl Machine<'_> {
                 listing.hidden += 1;
                 continue;
             }
-            match self.command(&g, &asked) {
+            // Walked by the directory's own spelling, so a `..` after a
+            // link leads where the system would take it.
+            let walked = format!("{}/{name}", dir.trim_end_matches('/'));
+            match self.command(&g, &walked) {
                 Ok(Some(real)) => listing.entries.push(Entry {
                     name,
                     link: (kind == FileType::Symlink).then_some(real),
@@ -352,14 +355,16 @@ impl Machine<'_> {
         let g = self.guard()?;
         let real = self.resolve_with(&g, dir)?.real;
         let full = format!("{}/{name}", real.trim_end_matches('/'));
-        // Held to the directory's name as asked for too, and walked by it,
-        // so every link on the way is checked as a link.
+        // Held to the directory's name as asked for too (lexically), and
+        // walked by its own spelling, so every link on the way is checked
+        // as a link and a `..` after one is taken as the system takes it.
         let logical = normal(&[], dir.split('/'));
         let asked = format!("{}/{name}", logical.trim_end_matches('/'));
         if g.hidden_any(&full) || g.hidden_any(&asked) {
             return Err(Unread::Hidden);
         }
-        let Some(file) = self.command(&g, &asked)? else {
+        let walked = format!("{}/{name}", dir.trim_end_matches('/'));
+        let Some(file) = self.command(&g, &walked)? else {
             return Ok(None);
         };
         Ok(Some(Entry {

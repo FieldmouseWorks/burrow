@@ -212,7 +212,9 @@ pkgs.testers.runNixOSTest {
         assert f"rustc unknown: not found in the directories searched; the probe could not search /opt/runner/bin {hide}, /opt/sneaky {hide}" in out, out
         assert f"cargo unknown: not found in the directories searched; the probe could not search /opt/sneaky {hide}" in out, out
         assert "rustup unknown: not found in the directories searched" in out, out
-        assert "cargo not on PATH" not in out and "rustup not on PATH" not in out, out
+        named, fresh = out.split("burrow-fresh-runner@INSTANCE:", 1)
+        assert "cargo not on PATH" not in named and "rustup not on PATH" not in named, named
+        assert "cargo not on PATH" in fresh and "rustup not on PATH" in fresh, fresh
         assert "default toolchain: unknown: a toolchain command on PATH isn't read" in out, out
         assert "burrow-fresh-runner@INSTANCE: runners started fresh for one job each, for sam/homelab" in out, out
         assert "configured: user a dynamic user of its own, HOME /var/lib/private/burrow-fresh-runner/%i" in out, out

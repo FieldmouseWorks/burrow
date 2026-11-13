@@ -557,3 +557,78 @@ fn a_visible_rustup_does_not_make_an_unsearched_compiler_known() {
     let got = runner(&cfg, root, &Fake::default());
     assert!(got.contains("default toolchain: unknown: a toolchain command on PATH isn't read; rustup's own answer: 1.91.0"), "{got}");
 }
+
+#[test]
+fn a_command_is_held_to_the_name_of_the_link_its_directory_was_reached_by() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    exe(&root.join("srv/rustup/rustc"));
+    exe(&root.join("srv/rustup/other"));
+    fs::create_dir_all(root.join("home/ci")).unwrap();
+    symlink("/srv/rustup", root.join("home/ci/private")).unwrap();
+    symlink("private", root.join("home/ci/again")).unwrap();
+    symlink("../../srv/rustup", root.join("home/ci/rel")).unwrap();
+    let mut cfg = config(root);
+    cfg.hidden = vec!["^private/rustc$".into(), "^again/other$".into()];
+    let fake = Fake::default();
+    let m = machine(&cfg, root, &fake);
+    assert_eq!(
+        m.entry("/home/ci/private", "rustc").unwrap_err(),
+        Unread::Hidden
+    );
+    // A chained link, and a relative one that isn't named by a pattern.
+    assert_eq!(
+        m.entry("/home/ci/again", "other").unwrap_err(),
+        Unread::Hidden
+    );
+    assert!(m.entry("/home/ci/rel", "rustc").unwrap().is_some());
+    let listing = m.list("/home/ci/private").unwrap();
+    assert_eq!(
+        listing
+            .entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect::<Vec<_>>(),
+        ["other"],
+        "{listing:?}"
+    );
+    assert_eq!(listing.hidden, 1, "{listing:?}");
+    let listing = m.list("/home/ci/again").unwrap();
+    // Through the chain, `again/other` is hidden by its name, and
+    // `rustc` by the `private/rustc` the chain's inner link makes.
+    assert_eq!(
+        (listing.entries.len(), listing.hidden),
+        (0, 2),
+        "{listing:?}"
+    );
+}
+
+#[test]
+fn dot_dot_after_a_link_leads_where_the_system_takes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // /opt/link -> /srv/sub, so /opt/link/.. is /srv, not /opt.
+    exe(&root.join("srv/rustc"));
+    exe(&root.join("opt/tool"));
+    fs::create_dir_all(root.join("srv/sub")).unwrap();
+    symlink("/srv/sub", root.join("opt/link")).unwrap();
+    let cfg = config(root);
+    let fake = Fake::default();
+    let m = machine(&cfg, root, &fake);
+    let e = m.entry("/opt/link/..", "rustc").unwrap();
+    assert!(e.is_some(), "the command in /srv is found");
+    assert_eq!(
+        m.entry("/opt/link/..", "tool").unwrap().map(|e| e.name),
+        None
+    );
+    let listing = m.list("/opt/link/..").unwrap();
+    assert_eq!(listing.real, "/srv", "{listing:?}");
+    assert_eq!(
+        listing
+            .entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect::<Vec<_>>(),
+        ["rustc"]
+    );
+}
