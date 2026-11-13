@@ -280,7 +280,8 @@ def record(repo, pr, verdicts):
     one's status posts nothing again, and one added, remapped or set back
     to pending since is posted, and a red one is left red. A context is the
     same one however it's spelled: GitHub ignores its case. False if GitHub
-    didn't answer or take one: what's left is posted next time."""
+    didn't answer or take one: what's left is posted next time. A status
+    run logs each write but skips it; that is no posting failure."""
     head = pr["headRefOid"]
     now = C.gh("api", f"repos/{repo}/commits/{head}/status?per_page=100", check=False)
     if not isinstance(now, dict):
@@ -292,7 +293,7 @@ def record(repo, pr, verdicts):
         if c.lower() in settled:
             continue
         if C.write("api", f"repos/{repo}/statuses/{head}", "-f", f"state={state}", "-f", f"context={c}",
-                   "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None:
+                   "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None and not C.DRY:
             return False
     return True
 

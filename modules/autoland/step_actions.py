@@ -385,7 +385,7 @@ class Actions:
                 self.ends["proved"] = "failed"
             else:
                 note = P.note(jid, said) if self.st.get("provedSaid") != jid else None
-                if note is not None and C.comment(self.repo, self.n, note) is not None:
+                if note is not None and (C.comment(self.repo, self.n, note) is not None or C.DRY):
                     self.st["provedSaid"] = jid
                 said_all = note is None or self.st.get("provedSaid") == jid
                 done = "built" if builds else "ran"
