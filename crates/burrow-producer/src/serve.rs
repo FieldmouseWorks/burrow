@@ -106,11 +106,30 @@ impl Server {
     }
 
     /// Serve every connection, each on its own thread, until accepting
-    /// fails.
+    /// fails for good. Running short of descriptors or memory, or a peer
+    /// gone before it was accepted, only waits a moment.
     pub fn serve(&self, handler: impl Handler + 'static) -> io::Result<()> {
+        use rustix::io::Errno;
         let handler = Arc::new(handler);
         for stream in self.listener.incoming() {
-            let stream = stream?;
+            let stream = match stream {
+                Ok(stream) => stream,
+                Err(e)
+                    if [
+                        Errno::MFILE,
+                        Errno::NFILE,
+                        Errno::NOBUFS,
+                        Errno::NOMEM,
+                        Errno::CONNABORTED,
+                    ]
+                    .iter()
+                    .any(|n| e.raw_os_error() == Some(n.raw_os_error())) =>
+                {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let (handler, controller) = (handler.clone(), self.controller);
             thread::spawn(move || connection(stream, controller, &*handler));
         }
@@ -191,11 +210,24 @@ impl Drop for Closing<'_> {
 }
 
 /// Answer with why there's no answer, then read and drop what the plugin
-/// is still sending, a bounded amount for a bounded time, so that it reads
-/// the reason rather than a reset.
+/// is still sending, at most a request's worth and for two seconds in all,
+/// so that it reads the reason rather than a reset.
 fn refuse(stream: &UnixStream, why: String) {
     let _ = wire::send(&mut &*stream, &Reply::Refused(why));
     let _ = stream.shutdown(std::net::Shutdown::Write);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = io::copy(&mut stream.take(wire::MOST + 1), &mut io::sink());
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut left = wire::MOST + 1;
+    let mut buf = [0u8; 8192];
+    while left > 0 {
+        let wait = until.saturating_duration_since(Instant::now());
+        if wait.is_zero() || stream.set_read_timeout(Some(wait)).is_err() {
+            return;
+        }
+        match (&*stream).read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => left = left.saturating_sub(n as u64),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
 }

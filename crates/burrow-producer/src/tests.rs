@@ -368,6 +368,43 @@ fn a_committed_record_is_published_even_once_its_work_is_abandoned() {
 }
 
 #[test]
+fn a_published_result_survives_a_crash_before_its_end_was_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records");
+    let records = Records::open(&path).unwrap();
+    let signer = Signer::for_tests("kit", SECRET);
+    let mut api = github();
+    let mut record: Record<sign::Proof> = records.begin(proof(true).target()).unwrap();
+    publish::start(&mut api, &records, &mut record).unwrap();
+    records.keep(&mut record, proof(true)).unwrap();
+    let before = std::fs::read(path.join(format!("{}.json", record.id()))).unwrap();
+    publish::finish(&mut api, &records, &signer, false, &mut record).unwrap();
+    // The crash: GitHub has the result, and the record's end was lost.
+    let file = path.join(format!("{}.json", record.id()));
+    let mut kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_ne!(std::fs::read(&file).unwrap(), before);
+    kept["end"] = Value::Null;
+    std::fs::write(&file, kept.to_string()).unwrap();
+    assert_eq!(
+        publish::reconcile::<sign::Proof>(&mut api, &records, &signer),
+        Ok(1)
+    );
+    assert_eq!(
+        conclusions(&api),
+        ["success", "success"],
+        "published again, never withdrawn"
+    );
+    // Nor can anything withdraw a committed record by hand.
+    let mut committed: Record<sign::Judgment> = records.begin(judgment().target()).unwrap();
+    publish::start(&mut api, &records, &mut committed).unwrap();
+    records.keep(&mut committed, judgment()).unwrap();
+    records.commit(&mut committed).unwrap();
+    assert!(publish::withdraw(&mut api, &records, &mut committed).is_err());
+    assert_eq!(committed.end(), None);
+    assert_eq!(conclusions(&api), ["success", "success"]);
+}
+
+#[test]
 fn every_request_runs_its_handler_and_answers_only_with_what_it_returned() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("p.sock");

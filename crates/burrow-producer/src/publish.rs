@@ -53,14 +53,19 @@ pub fn complete<T: Signable>(
 }
 
 /// Withdraw `record`: complete its check run, if it started one, as
-/// `cancelled`, and end it so that nothing ever publishes it.
+/// `cancelled`, and end it so that nothing ever publishes it. A committed
+/// record is never withdrawn: what went out stands, and startup publishes
+/// it.
 pub fn withdraw<T: Serialize + Clone>(
     api: &mut dyn Api,
     records: &Records,
     record: &mut Record<T>,
 ) -> Result<(), String> {
-    if record.end() == Some(End::Published) {
-        return Err(format!("record {} was published", record.id()));
+    if record.committed() || record.end() == Some(End::Published) {
+        return Err(format!(
+            "record {} is committed, so it's never withdrawn",
+            record.id()
+        ));
     }
     if let Some(run) = record.run() {
         patch(
@@ -122,11 +127,23 @@ pub(crate) fn finish<T: Signable>(
     }
     let signed = match signer.signed(record) {
         Ok(signed) if signed.check() == record.target().check => signed,
-        Ok(_) | Err(_) => {
+        _ if record.committed() => {
+            return Err(format!(
+                "record {} is committed but can't be signed; startup tries again",
+                record.id()
+            ));
+        }
+        _ => {
             withdraw(api, records, record)?;
             return Err(format!("record {} holds nothing to publish", record.id()));
         }
     };
+    // The point of no return, before anything goes out: a crash after it
+    // is finished at startup by publishing the same result again (signing
+    // is deterministic), never by withdrawing what may already be out.
+    if !record.committed() {
+        records.commit(record)?;
+    }
     if record.run().is_none() {
         start(api, records, record)?;
     }
