@@ -141,6 +141,10 @@ fn what_it_cannot_classify_scans_everything() {
         "crates/x/.cargo/config",
         "web/.babelrc",
         "web/.prettierignore",
+        "tools/..md",
+        "tools/...sh",
+        "tools/..js",
+        "tools/...",
         "src/thing.xyz",
     ] {
         let (got, said) = pr(BURROW, changed(&[file, "a.rs"]));

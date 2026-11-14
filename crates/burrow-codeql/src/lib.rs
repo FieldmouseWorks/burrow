@@ -158,11 +158,13 @@ const INERT: &[&str] = &[
 pub fn readers(path: &str) -> Option<BTreeSet<Language>> {
     let path = path.to_ascii_lowercase();
     let name = path.rsplit('/').next().unwrap_or(&path);
-    // A dotfile's leading dot starts no extension, as Python's and Java's
-    // own path splitting have it: `.babelrc` has none.
-    let ext = match name.rfind('.') {
-        Some(i) if i > 0 => &name[i + 1..],
-        _ => "",
+    // Leading dots start no extension, as Python's `os.path.splitext` has
+    // it (`.babelrc`, `..md` and `...` have none), which is the widest
+    // reading any extractor takes: one with none counts for every language.
+    let stem = name.trim_start_matches('.');
+    let ext = match stem.rfind('.') {
+        Some(i) => &stem[i + 1..],
+        None => "",
     };
     if ext.is_empty() {
         // The JavaScript and Python extractors read a path with no
