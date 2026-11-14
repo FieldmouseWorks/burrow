@@ -241,20 +241,28 @@ impl Line {
         Some(at)
     }
 
-    /// Hear news: a line that yields to another hears each of that one's
-    /// passes end.
+    /// Whether a pass is running: the handler a yielding one yields to
+    /// (`yieldTo`) waits it out, since the two share a lock, and one started
+    /// beside it would only find the lock held and come back every GAP.
+    pub fn running(&self) -> bool {
+        self.lock().running > 0
+    }
+
+    /// Hear news: two lines where one yields to the other hear each of the
+    /// other's passes end.
     pub fn nudge(&self) {
         self.lock().news = true;
         self.cond.notify_all();
     }
 
-    /// Whether `first`, the line this one yields to, holds it off now; if
-    /// so, wait for news (one of its passes ending, say). The news is
-    /// cleared before `first` is asked, so a pass of its ending after that
-    /// is never slept through.
-    pub fn hold(&self, first: &Line, now: f64) -> bool {
+    /// Whether `held` says another line holds this one off now (the one it
+    /// yields to, busy, or one yielding to it, running); if so, wait for
+    /// news (one of that line's passes ending, say). The news is cleared
+    /// before `held` is asked, so a pass ending after that is never slept
+    /// through.
+    pub fn hold(&self, held: impl FnOnce() -> bool) -> bool {
         self.lock().news = false;
-        let held = first.busy(now);
+        let held = held();
         if held {
             self.wait(None);
         }
@@ -417,7 +425,8 @@ mod tests {
     }
 
     // A handler that yields to this line holds off while one of its passes
-    // runs or is due, and not once it has none.
+    // runs or is due, and not once it has none; the one it yields to waits
+    // out only a pass of the yielder's that runs.
     #[test]
     fn busy_while_due_or_running() {
         let line = Line::default();
@@ -425,10 +434,13 @@ mod tests {
         line.wakes(&booked(json!({"sam/r": 200})));
         assert!(!line.busy(199.0));
         assert!(line.busy(200.0));
+        assert!(!line.running(), "due isn't running");
         assert_eq!(took(&line, 200.0).0, vec![r("sam/r")]);
         assert!(line.busy(200.0), "its pass is running");
+        assert!(line.running());
         line.done(&r("sam/r"), true, 300.0);
         assert!(!line.busy(300.0));
+        assert!(!line.running());
         line.issue(r("sam/r"), 7, 300.0);
         assert!(line.busy(300.0 + DEBOUNCE));
     }
@@ -440,12 +452,12 @@ mod tests {
         let first = Arc::new(Line::default());
         let line = Arc::new(Line::default());
         line.event(r("sam/r"), 0.0);
-        assert!(!line.hold(&first, 100.0));
+        assert!(!line.hold(|| first.busy(100.0)));
         first.event(r("sam/q"), 0.0);
         line.event(r("sam/r"), 1.0);
         let waiting = {
             let (first, line) = (first.clone(), line.clone());
-            thread::spawn(move || line.hold(&first, 100.0))
+            thread::spawn(move || line.hold(|| first.busy(100.0)))
         };
         thread::sleep(Duration::from_millis(200));
         assert!(!waiting.is_finished(), "old news ended the hold");

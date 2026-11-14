@@ -58,7 +58,8 @@ pub struct Handler {
     /// Another handler whose passes go first: this one starts none while
     /// that one's line has a pass running or due (the steward's
     /// continuations yield to its passes over new work, which share its
-    /// lock). None: it yields to none.
+    /// lock), which in turn waits out a pass of this one's that runs. None:
+    /// it yields to none.
     #[serde(default)]
     pub yield_to: Option<String>,
 }

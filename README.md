@@ -288,7 +288,8 @@ Each has an entry below, and each can be imported on its own.
   rather than list every one. A repo's pass runs beside its handler's full
   pass, never folded into it (the steward's full pass yields after a slice),
   and a handler can yield to another (`yieldTo`, the steward's
-  continuations), starting nothing while that one is busy. A turn ending, a review
+  continuations), starting nothing while that one is busy, which in turn waits
+  out a pass of the yielder's that runs. A turn ending, a review
   coming back and the passes' own wake-ups (a settle delay, a reviewer's
   timeout) kick them locally, and so does a switch that changes a handler's
   units. The one timer is an hourly catch-up, for deliveries GitHub never

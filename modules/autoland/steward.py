@@ -130,9 +130,11 @@ def main():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            # A queued unit must not spend its hard deadline waiting for the
-            # other handler. Requeue on the same line without touching files
-            # owned by the pass that has the lock.
+            # burrow-events starts no pass beside the other handler's
+            # (`yieldTo`), so this is only two that started at once. A
+            # queued unit must not spend its hard deadline waiting for the
+            # other: requeue on the same line, which waits that one out,
+            # without touching files owned by the pass that has the lock.
             endpoint = CFG["continuationKick"] if continuing else CFG["kick"]
             for repo in kick or [""]:
                 if C.poke(endpoint + (f"/{repo}" if repo else "")) is False:
