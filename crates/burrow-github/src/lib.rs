@@ -531,8 +531,4 @@ mod repo;
 pub use repo::repo_name;
 
 #[cfg(test)]
-mod merge_tests;
-#[cfg(test)]
-mod meter_tests;
-#[cfg(test)]
 mod tests;

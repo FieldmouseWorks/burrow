@@ -425,9 +425,7 @@ impl Hooks<'_> {
     /// What a look at one repo said back, in the word's: a rate limit's
     /// reset, and what wouldn't save.
     fn noted(&mut self, out: Out) {
-        if self.out.limited.is_none() {
-            self.out.limited = out.limited;
-        }
+        self.out.limited = self.out.limited.or(out.limited);
         self.out.failed.extend(out.failed);
     }
 }
