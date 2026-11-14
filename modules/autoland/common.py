@@ -68,6 +68,12 @@ class Gone(RuntimeError):
 UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake|something went wrong while executing your query", re.I)
 
 
+class TooBig(Unavailable):
+    """GitHub ran out of time on a query (a gateway's 502 or 504, GraphQL's
+    "something went wrong", a body cut short): the same for less can answer."""
+TOO_BIG = re.compile(r"HTTP 50[24]\b|unexpected end of JSON input|something went wrong while executing your query", re.I)
+
+
 # When the rate limit that turned one of this pass's calls away resets, once
 # a call has met it: no pass of any repo before then could do anything.
 LIMITED = []
@@ -214,7 +220,7 @@ def gh(*args, input=None, check=True):
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
         limited(p.stderr, env)
         if check:
-            raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
+            raise (TooBig if TOO_BIG.search(p.stderr) else Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
         log("  failed:", why)
         return None
     out = p.stdout.strip()
@@ -279,7 +285,10 @@ def graphql(query, **variables):
     for k, v in variables.items():
         if v is not None:
             args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
-    return gh(*args)["data"]
+    got = gh(*args)  # gh exits 0 on an empty or cut-short body: not an object
+    if not isinstance(got, dict) or not isinstance(got.get("data"), dict):
+        raise TooBig(f"gh api graphql: an empty or cut-short body ({len(str(got))} characters)")
+    return got["data"]
 
 
 def comment(repo, n, body):

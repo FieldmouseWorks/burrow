@@ -25,11 +25,11 @@ MERGE_STEPS = {
 }
 
 PRS = """
-query($owner: String!, $name: String!, $cursor: String) {
+query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
     defaultBranchRef { name target { ... on Commit { %s } } }
-    pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+    pullRequests(states: OPEN, first: $first, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
@@ -84,15 +84,29 @@ query($id: ID!, $cursor: String) {
 OLDER_PAGES = 9
 
 
+# Open PRs asked for a page at a time. Each brings its files, threads,
+# checks and suites, so a page of long-lived PRs can run past GitHub's time
+# (C.TooBig): that page is asked again at half the size, down to one PR, and
+# the pass goes on at the size that answered.
+PR_PAGE = 30
+
+
 def open_prs(owner, name):
     """The repo's merge settings and every open PR, all pages, with the
     reviews and comments of each it acts on, up to OLDER_PAGES older pages:
     a long PR's verdicts, markers and rounds can be older than the last 100.
     An outside contribution's older pages aren't read: it's the owner's
     anyway."""
-    prs, cursor = [], None
+    prs, cursor, size = [], None, PR_PAGE
     while True:
-        info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
+        try:
+            info = C.graphql(PRS, owner=owner, name=name, cursor=cursor, first=size)["repository"]
+        except C.TooBig as e:
+            if size == 1:
+                raise
+            size //= 2
+            log(f"{owner}/{name}: open PRs: {e}; asking {size} at a time")
+            continue
         page = info.pop("pullRequests")
         prs += page["nodes"]
         if not page["pageInfo"]["hasNextPage"]:

@@ -208,6 +208,7 @@ with C.acting_for("sam/r"):
     for said, unavailable in (("gh: API rate limit exceeded for user ID 1. (HTTP 403)", True),
                               ("gh: Server Error (HTTP 502)", True),
                               ('Post "https://api.github.com/graphql": unexpected EOF', True),
+                              ("unexpected end of JSON input", True),
                               ("dial tcp: connect: network is unreachable", True),
                               ("gh: Validation Failed (HTTP 422)", False)):
         with open(f"{fake}/gh", "w") as f:
