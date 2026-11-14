@@ -204,3 +204,16 @@ fn a_reason_refresh_never_brings_back_a_park_a_stop_removed() {
     assert!(!crate::policy::parked(&job));
     assert!(!launched.exists());
 }
+
+#[test]
+fn only_the_locked_refresh_rewrites_a_parks_reason() {
+    let mut fixture = Box::new();
+    drained_pair(&mut fixture);
+    let job = Job::new(&fixture.cfg, "waiting");
+    crate::turn::start(&fixture.cfg, job.id, "the await changed", false).unwrap();
+    let before = fs::read(crate::policy::path(&job, "park")).unwrap();
+    // The denial path's unlocked mark of a park it found already made, for
+    // the same turn, leaves it exactly as it is.
+    crate::policy::mark(&job, "queued", true, Some(crate::policy::DENIED)).unwrap();
+    assert_eq!(fs::read(crate::policy::path(&job, "park")).unwrap(), before);
+}

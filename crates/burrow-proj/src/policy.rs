@@ -148,23 +148,15 @@ pub(crate) fn waits_for(job: &Job) -> Option<String> {
 }
 
 /// Park the job's latest turn, waiting for `wait`; None keeps what an
-/// earlier park of the job said. A park of the same turn only takes the new
-/// wait.
+/// earlier park of the job said. A park of the same turn is left as it is:
+/// its reason changes only through [`refresh`], under the job's lock.
 pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Result<(), String> {
     let turn = job.turns().unwrap_or_default();
     let mut waiting = wait.map(str::to_owned);
     if let Ok(bytes) = fs::read(path(job, "park")) {
-        let mut prior: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let prior: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if prior.turn == turn {
-            if waiting.is_none() || prior.wait == waiting {
-                return Ok(());
-            }
-            prior.wait = waiting;
-            return swap(
-                &path(job, "park"),
-                &serde_json::to_string(&prior).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string());
+            return Ok(());
         }
         first |= prior.first;
         waiting = waiting.or(prior.wait);
