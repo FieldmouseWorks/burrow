@@ -43,7 +43,8 @@ The modules, by job:
   `heartbeat`, `robot`
 - **Doing the work:** `remote-control`, `proj`, `probe`, `agents`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
-- **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`
+- **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`,
+  `builds`
 - **Keeping it current:** `updates`, `house`, `notify`
 
 Each has an entry below, and each can be imported on its own.
@@ -425,6 +426,16 @@ Each has an entry below, and each can be imported on its own.
   user of its own that no authoring job, sandbox or proj run shares, on state
   only it reads,
   and only it may reach a producer's socket under `/run/conary-producers`.
+- **`builds`** (`burrow.builds`): The machine's build store
+  ([gate design](docs/gate-design.md#2-one-build-store-written-by-whoever-may-sign)):
+  a Nix binary cache nginx serves at `https://HOST/PATH`, signed with a key
+  the machine makes on first start and never hands out (its public half at
+  `PATH/public-key`). A run writes it through the door
+  ([crates/burrow-builds](crates/burrow-builds)) at `PATH/upload`: its
+  manifest, NARs and its job's OIDC token, whose audience names the
+  manifest. The door asks Conary's `cn attest job` whether the job may sign,
+  takes only a public repo in `repos`, writes each NAR only once its hash is
+  the manifest's, and past `maxSize` drops what nginx served longest ago.
 - **`agents`** (`burrow.agents`): `agent new PROJECT`: a microVM per task
   (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with
   permissions bypassed inside, egress only through an allowlist proxy, no

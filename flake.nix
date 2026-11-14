@@ -38,7 +38,7 @@
       # build theirs with a stand-in for its `cn`, which passes the policy
       # file their build checks (`cn policy`) and nothing else.
       cnStandIn = pkgs.writeShellScriptBin "cn" ''[ "$1" = policy ] && exit 0; exit 1'';
-      names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" ];
+      names = [ "settings" "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" "dashboard" "builds" ];
       # Each module on its own, with only what it imports, in a check of its
       # own (standalone-NAME), so the gate's legs share the evaluations out:
       # evaluating is the check, so these build nothing. A service that says
@@ -82,6 +82,7 @@
             (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.probe = { repo = "sam/homelab"; authors = [ { login = "sam"; id = 1; } ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
+            (nixpkgs.lib.optionalAttrs (name == "builds") { burrow.builds = { host = "example.org"; repos = [ "sam/homelab" ]; }; burrow.ledger = { enable = true; package = cnStandIn; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; }; burrow.github = { machinery = "workers"; apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }; })
             (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
             # github has no switch: it's on with an App to serve.
             (if name == "settings" then { }
