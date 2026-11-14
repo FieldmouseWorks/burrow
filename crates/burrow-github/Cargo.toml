@@ -14,6 +14,7 @@ fake = []
 burrow-process = { path = "../burrow-process" }
 serde_json.workspace = true
 serde.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

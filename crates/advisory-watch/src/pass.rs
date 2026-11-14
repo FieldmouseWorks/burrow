@@ -160,17 +160,7 @@ fn installed(cfg: &Config) -> Result<BTreeSet<String>, String> {
 /// hosting providers' addresses (403); CISA's own GitHub copy is the same
 /// list. What the places said is said only when none had it.
 fn kev(urls: &[String]) -> Option<Kev> {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let tls = TlsConfig::builder()
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(KEV_FOR))
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into();
+    let agent = burrow_github::outbound::agent(KEV_FOR, 0);
     let mut failed = Vec::new();
     for url in urls {
         let got = agent

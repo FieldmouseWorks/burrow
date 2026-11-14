@@ -18,7 +18,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -114,7 +114,7 @@ pub fn end(dir: &Path, how: &Ended) -> Result<Value, String> {
     ));
     save(&dir.join(END), &said).map_err(|e| format!("{}: {e}", dir.join(END).display()))?;
     if let Ok(Some(url)) = rec.as_ref().map(|r| r.kick.as_deref())
-        && let Err(e) = kick(url)
+        && let Err(e) = burrow_events::kick::kick(url, burrow_events::kick::KICK_TIMEOUT)
     {
         note(&format!("couldn't kick {url}: {e}"));
     }
@@ -137,18 +137,4 @@ fn own_trees(rec: &Record, id: &str) -> Vec<String> {
                 .map(|err| format!("can't remove {}: {err}", e.path().display()))
         })
         .collect()
-}
-
-/// The pass URL names, started now (burrow-events' kick). Best effort: the
-/// steward's hourly pass is there for one that doesn't get through.
-pub fn kick(url: &str) -> Result<(), String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(5)))
-        .build()
-        .into();
-    agent
-        .post(url)
-        .send_empty()
-        .map(drop)
-        .map_err(|e| e.to_string())
 }

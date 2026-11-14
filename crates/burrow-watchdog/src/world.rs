@@ -1,7 +1,6 @@
 //! What a pass acts through: proj, burrow-events' kick port and notify.
 
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use crate::config::Config;
 
@@ -38,7 +37,7 @@ impl World for Real<'_> {
 
     fn kick(&self, path: &str) {
         let url = format!("{}/{path}", self.0.kick);
-        if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
+        if let Err(e) = burrow_events::kick::kick(&url, burrow_events::kick::KICK_TIMEOUT) {
             println!("couldn't kick {path}: {e}");
         }
     }

@@ -210,17 +210,7 @@ pub const AGAIN: [Duration; 3] = [
 /// The agent the beat pings through: the machine's own trust (its CA
 /// bundle), `TRY_FOR` a try, and no redirect followed, as curl without `-L`.
 pub fn agent() -> ureq::Agent {
-    use ureq::tls::{RootCerts, TlsConfig};
-    let tls = TlsConfig::builder()
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(TRY_FOR))
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into()
+    burrow_github::outbound::agent(TRY_FOR, 0)
 }
 
 /// Sends `ping` to `url/key/check`, trying again after a timeout, a 408, a

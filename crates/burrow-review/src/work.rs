@@ -106,7 +106,7 @@ pub fn review(s: &Service, name: &str) {
     let _ = fs::remove_file(&path);
     if let Some(repo) = tag(&raw, "repo").as_str() {
         let url = format!("{}/{repo}", s.cfg.kick);
-        if let Err(e) = burrow_events::kick::kick(&url, Duration::from_secs(5)) {
+        if let Err(e) = burrow_events::kick::kick(&url, burrow_events::kick::KICK_TIMEOUT) {
             s.say(&format!("couldn't kick {url}: {e}"));
         }
     }
