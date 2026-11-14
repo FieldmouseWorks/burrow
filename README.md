@@ -56,9 +56,12 @@ Each has an entry below, and each can be imported on its own.
   one-way doors (R2: destroying pools, wiping disks, flashing firmware,
   deleting remote data, force-pushing `main`). A PreToolUse guard snapshots
   before anything deletes files (R1) and asks before force-pushing a default
-  branch; `proj` makes the same guard Codex's managed hook for its Codex jobs
-  (`/etc/codex/requirements.toml`), on their commands and apply_patch, refusing
-  where it would ask. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
+  branch. It refuses any branch's force-push with no lease on the head its
+  pusher saw (`--force-with-lease --force-if-includes`, or one naming the
+  commit), so a job can't drop what another pushed to the same PR. `proj`
+  makes the same guard Codex's managed hook for its Codex jobs
+  (`/etc/codex/requirements.toml`), on their commands and apply_patch,
+  refusing where it would ask. Also writes the machine's `/etc/claude-code/CLAUDE.md` from what the
   other modules contribute.
 - **`undo`** (`burrow.undo`): The guard's `@pre-*` ZFS snapshots: lets the
   user take them without sudo, prunes them after a few days.

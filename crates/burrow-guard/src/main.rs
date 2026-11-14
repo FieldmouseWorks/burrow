@@ -2,7 +2,8 @@
 //! hooks run it: the hook's JSON on stdin, and nothing (allow) or a decision on
 //! stdout. Claude Code's asks the owner; Codex's (`--codex-user`) refuses,
 //! since a Codex job has no one to ask and Codex runs what its hook asks
-//! about.
+//! about. What has a safe spelling of its own both refuse
+//! ([`Guard::refusal`]).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -25,14 +26,14 @@ fn main() {
     let _ = CODEX.set(args.first().is_some_and(|a| a == "--codex-user"));
     // A guard that can't read what it guards asks (or, Codex's, refuses),
     // rather than let the command through with no undo and no question.
-    let question = check(&args).unwrap_or_else(|e| {
-        Some(format!(
+    let decision = check(&args).unwrap_or_else(|e| {
+        Some(answer(&format!(
             "The guard couldn't check this command ({e}), so it asks."
-        ))
+        )))
     });
     ANSWER.call_once(|| {
-        if let Some(q) = question {
-            println!("{}", answer(&q));
+        if let Some(d) = decision {
+            println!("{d}");
         }
     });
 }
@@ -62,7 +63,7 @@ fn ask_after(seconds: u64) {
     });
 }
 
-fn check(args: &[String]) -> Result<Option<String>, String> {
+fn check(args: &[String]) -> Result<Option<Value>, String> {
     let (user, path) = match args {
         [path] => (None, path),
         [flag, user, path] if flag == "--codex-user" => (Some(user), path),
@@ -93,5 +94,8 @@ fn check(args: &[String]) -> Result<Option<String>, String> {
         mark: runtime.join("claude-guard-last-snapshot"),
         namespace: Namespace::here(),
     };
-    Ok(guard.check(&hook, SystemTime::now()))
+    if let Some(reason) = guard.refusal(&hook) {
+        return Ok(Some(deny(&reason)));
+    }
+    Ok(guard.check(&hook, SystemTime::now()).map(|q| answer(&q)))
 }
