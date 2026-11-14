@@ -471,6 +471,10 @@ pub mod tests {
         pub instances: Vec<String>,
         /// Why they couldn't be listed, if they couldn't.
         pub unlisted: Option<String>,
+        /// Once the first path is read, the second answers this instead:
+        /// what moved on while the first was read.
+        pub moves: BTreeMap<String, (String, Value)>,
+        pub moved: RefCell<BTreeMap<String, Value>>,
     }
 
     impl Fake {
@@ -486,10 +490,18 @@ pub mod tests {
 
     impl World for Fake {
         fn github(&self, path: &str) -> Result<Value, String> {
-            self.github
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| Err(format!("GET {path}: HTTP 404")))
+            let got = match self.moved.borrow().get(path) {
+                Some(v) => Ok(v.clone()),
+                None => self
+                    .github
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| Err(format!("GET {path}: HTTP 404"))),
+            };
+            if let Some((other, v)) = self.moves.get(path) {
+                self.moved.borrow_mut().insert(other.clone(), v.clone());
+            }
+            got
         }
         fn unit(&self, unit: &str) -> Unit {
             let mut looks = self.looks.borrow_mut();
