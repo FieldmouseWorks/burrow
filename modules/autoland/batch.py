@@ -143,6 +143,22 @@ class Batch:
         key = str(pr["number"])
         return st.get("visits", {}).get(key, 1) if key in st.get("done", {}) else 0
 
+    def due(self, repo, pr):
+        """Whether PR hasn't had its look this round. A kicked pass starts
+        every PR over (pending), so without rounds the ones it puts first
+        would take each slice again and the rest wait for good: each open
+        PR gets a look before any gets its second."""
+        return self.visited(repo, pr) <= self.state["repos"].get(repo.lower(), {}).get("round", 0)
+
+    def turn(self, repo, pending):
+        """Starts the next round once each pending PR has had its look in
+        this one. The pass calls it before every visit, so the round ends
+        where its last look did: a look past it, later in the same slice,
+        counts in the next round rather than making its PR due again."""
+        st = self.state["repos"].get(repo.lower())
+        if st and pending and not any(self.due(repo, pr) for pr in pending):
+            st["round"] = st.get("sequence", 1)
+
     def stopped(self, repo):
         return next(iter(self.state["repos"].get(repo.lower(), {}).get("stops", {}).values()), None)
 

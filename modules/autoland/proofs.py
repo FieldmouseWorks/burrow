@@ -2,7 +2,9 @@
 or running at once, for proofs that take the whole machine (the rest would
 only wait out their timeout). The others wait their turn, the PRs labelled
 `first` (labels.first) ahead of the rest and the oldest first within each,
-and the end of a job's turn kicks the repo's pass, which starts the next.
+among those the pass looks at in the same round (batch.due: every open PR's
+look before any one's second), and the end of a job's turn kicks the repo's
+pass, which starts the next.
 
 What a slot is held by is a build: a running proof job with store paths
 still to build that the jobs started before it aren't building (its
@@ -104,7 +106,8 @@ def begin(repo, numbers, first=()):
 def place(repo, n):
     """Where PR n stands in its repo's line this pass: one labelled first
     ahead of every one that isn't, and the oldest first within each. The
-    pass takes the PRs in this order, so a slot goes to the first in line."""
+    pass takes the PRs due a look this round in this order (batch.due), so
+    a slot goes to the first in line among them."""
     return n not in FIRST.get(repo, ()), n
 
 
