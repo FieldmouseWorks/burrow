@@ -518,9 +518,11 @@ jobs:
       # as the gate does, stopped before building, with a nix cache of its
       # own so the substituter's misses it saw aren't remembered by the gate.
       # It waits only while that push's own leg is running on a runner, and
-      # then until it ends, with no cap: one still queued may be queued for
-      # the very runner this leg holds, and one cut off part way would have
-      # cost the wait and saved nothing (#929). The token inherits actions:
+      # then until it ends, with no cap of its own: one still queued may be
+      # queued for the very runner this leg holds, and one cut off part way
+      # would have cost the wait and saved nothing (#929). A leg past its
+      # deadline, hours from its own start, isn't waited for (#1102,
+      # crates/burrow-flake-check/README.md). The token inherits actions:
       # read when the caller grants it. Missing permission, other runtime API
       # errors and a request past its deadline fail this step softly and
       # leave the gate to build cold.
