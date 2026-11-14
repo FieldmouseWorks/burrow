@@ -2,7 +2,9 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
-use crate::machine::{BIN, Machine, USAGE, ok, said};
+use burrow_test::said;
+
+use crate::machine::{BIN, Machine, USAGE, ok};
 
 #[test]
 fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {

@@ -9,9 +9,11 @@
 //! FAKE/rest-N (Renovate's comments on PR N) that names who it was asked
 //! about.
 //!
-//! The stand-ins note how they were run in FAKE/log; each job and notice is
-//! a file of its own, its words \0-separated. A file in FAKE makes one fail
-//! or answer otherwise.
+//! The stand-ins note how they were run in FAKE/log. proj is burrow_test's:
+//! the jobs it was asked for are kept in FAKE/proj, and FAKE/proj.says is
+//! what this sweep's proj does after that (see PROJ_SAYS). Each notice is a
+//! file of its own, FAKE/notice-N, its words \0-separated. A file in FAKE
+//! makes one fail or answer otherwise.
 //!
 //! handing.rs is which PRs go to a job and which verdicts count, refreshes.rs
 //! the lock file refreshes, and passes.rs what a pass tells the owner and
@@ -35,11 +37,19 @@ const SWEEP: &str = env!("CARGO_BIN_EXE_burrow-renovate-sweep");
 const REPO: &str = "sam/r";
 const LOCK: &str = "Lock file maintenance (cargo)";
 
+/// What proj does once it has kept a run's words, in FAKE/proj.says (sourced
+/// by the shared proj stand-in): it starts once FAKE/proj-blocks is gone, and
+/// says FAKE/proj-held-lock when it was handed the sweep's lock. `ls` errors
+/// are dropped: a descriptor that closes while it looks is no failure.
+const PROJ_SAYS: &str = r#"if ls -l /proc/$$/fd 2>/dev/null | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
+while [ -e "$FAKE/proj-blocks" ]; do sleep 0.05; done
+"#;
+
 /// Shared stand-ins, installed by burrow_test and cached for the test binary.
 fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&["proj"]);
         for (name, text) in STAND_INS {
             let path = bin.path().join(name);
             burrow_test::executable(&path, format!("#!/bin/sh\n{text}"));
@@ -49,7 +59,7 @@ fn bin() -> &'static Path {
     .path()
 }
 
-const STAND_INS: [(&str, &str); 6] = [
+const STAND_INS: [(&str, &str); 5] = [
     (
         // GitHub: the user's login (FAKE/user-fails to fail), a repo's
         // Renovate PRs (FAKE/prs-OWNER_REPO, or FAKE/prs for every repo),
@@ -137,19 +147,8 @@ jq -r --arg who "$1" '.[][] | select(.user.login == $who) | .body'
 "#,
     ),
     (
-        // A job, kept whether or not it starts (FAKE/proj-fails), that
-        // starts once FAKE/proj-blocks is gone. FAKE/proj-held-lock says it
-        // was handed the sweep's lock. ls says nothing on stderr, which the
-        // sweep passes on: a descriptor that closes while it lists them
-        // (one the shell had for a moment) is no failure of the sweep's.
-        "proj",
-        r#"n=$(ls "$FAKE" | grep -c '^job-'); printf '%s\0' "$@" >"$FAKE/job-$n"
-if ls -l /proc/$$/fd 2>/dev/null | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
-while [ -e "$FAKE/proj-blocks" ]; do sleep 0.05; done
-[ ! -e "$FAKE/proj-fails" ] || exit 3
-"#,
-    ),
-    (
+        // Its own notifier, kept as \0-separated words: a notice's body runs
+        // over lines, which box-notify's | joined log can't carry.
         "notify",
         r#"n=$(ls "$FAKE" | grep -c '^notice-'); printf '%s\0' "$@" >"$FAKE/notice-$n"
 [ ! -e "$FAKE/notify-fails" ] || exit 4
@@ -246,6 +245,7 @@ impl Machine {
         let root = dir.path().to_path_buf();
         fs::create_dir(root.join("fake")).unwrap();
         fs::create_dir(root.join("projects")).unwrap();
+        fs::write(root.join("fake/proj.says"), PROJ_SAYS).unwrap();
         let m = Machine {
             _dir: dir,
             root,
@@ -351,7 +351,7 @@ impl Machine {
         let fake = self.path("fake");
         for e in fs::read_dir(&fake).unwrap() {
             let name = e.unwrap().file_name().into_string().unwrap();
-            if name == "log" || name.starts_with("job-") || name.starts_with("notice-") {
+            if matches!(name.as_str(), "log" | "proj" | "proj.n") || name.starts_with("notice-") {
                 fs::remove_file(fake.join(name)).unwrap();
             }
         }
@@ -379,7 +379,7 @@ impl Machine {
             code: out.status.code(),
             out: String::from_utf8_lossy(&out.stdout).into_owned(),
             err: String::from_utf8_lossy(&out.stderr).into_owned(),
-            jobs: said("job-"),
+            jobs: burrow_test::proj_jobs(&fake),
             notices: said("notice-"),
             log: fs::read_to_string(fake.join("log"))
                 .unwrap_or_default()

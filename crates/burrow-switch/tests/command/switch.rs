@@ -4,7 +4,9 @@ use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
-use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said, unit_path};
+use burrow_test::{chown, root, said};
+
+use crate::machine::{CONFIRM, Machine, SWITCH, ok, refused, unit_path};
 
 const USAGE: &str =
     "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]\n";
@@ -607,7 +609,7 @@ fn the_revert_puts_the_confirmed_system_back() {
     assert!(m.fake("journal").ends_with("(activation exit 4)\n"));
     // What the journal won't take is said on stderr.
     let m = Machine::switched(false);
-    m.set("fail-logger", "");
+    m.set("fail-systemd-cat", "");
     assert_eq!(
         said(&m.switch(&["--revert-to", &one])),
         (
@@ -692,11 +694,16 @@ fn a_revert_that_doesnt_get_back_says_so_and_status_too() {
 fn an_activation_killed_at_its_deadline_starts_the_revert_at_once() {
     let m = Machine::switched(false);
     let two = m.sys("two");
-    // As the activation's unit runs it: with systemd's bare PATH, which on
-    // NixOS has no coreutils.
+    // As the activation's unit runs it: as root, straight from systemd (no
+    // sudo, which would strip SERVICE_RESULT), with systemd's bare PATH,
+    // which on NixOS has no coreutils. `__through-sudo` says it's root
+    // already.
     let stopped = |result: &str, system: &str| {
         let out = m
-            .command(SWITCH, &["--activation-stopped", system])
+            .command(
+                SWITCH,
+                &["__through-sudo", "10min", "--activation-stopped", system],
+            )
             .env("SERVICE_RESULT", result)
             .env("PATH", "/var/empty")
             .output()

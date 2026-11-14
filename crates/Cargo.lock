@@ -780,6 +780,7 @@ dependencies = [
 name = "burrow-test"
 version = "0.0.0"
 dependencies = [
+ "rustix",
  "tempfile",
 ]
 

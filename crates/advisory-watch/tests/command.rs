@@ -12,34 +12,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const BIN: &str = env!("CARGO_BIN_EXE_advisory-watch");
 
-use burrow_test::executable as script;
+use burrow_test::{executable as script, root};
 
-/// Shared stand-ins, installed by burrow_test and cached for the test binary.
+/// The shared stand-ins (sudo, runuser, proj), installed by burrow_test, and
+/// the scanners' beside them, cached for the test binary.
 fn stand_ins() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = burrow_test::stand_ins(&["sudo", "runuser", "proj"]);
         let b = bin.path();
-        burrow_test::permissions(b, 0o755);
-        // Runs it as it is, and never under itself.
-        script(
-            b.join("sudo"),
-            r#"#!/bin/sh
-echo "$*" >>"$FAKE/sudo"
-[ "$IN_SUDO" = "" ] && [ "$1" = -- ] || exit 9
-shift
-IN_SUDO=1 exec "$@"
-"#,
-        );
-        script(
-            b.join("runuser"),
-            r#"#!/bin/sh
-[ "$1" = -u ] && [ "$3" = -- ] || exit 9
-echo "$2 ${XDG_RUNTIME_DIR-unset} ${4##*/}" >>"$FAKE/runuser"
-shift 3
-exec "$@"
-"#,
-        );
         script(
             b.join("nix-store"),
             r#"#!/bin/sh
@@ -65,23 +46,6 @@ echo "$*" >>"$FAKE/osv-scanner"
 [ ! -e "$d/osv.json" ] || cat "$d/osv.json"
 echo noise >&2
 exit "$(cat "$d/osv-exit" 2>/dev/null || echo 0)"
-"#,
-        );
-        // Keeps each job's words and its task, and says its id.
-        script(
-            b.join("proj"),
-            r#"#!/bin/sh
-if [ -e "$FAKE/proj-exit" ]; then echo "proj: no" >&2; exit "$(cat "$FAKE/proj-exit")"; fi
-n=$(( $(cat "$FAKE/jobs" 2>/dev/null || echo 0) + 1 ))
-echo "$n" >"$FAKE/jobs"
-words=
-i=0
-for a; do
-  i=$((i + 1))
-  if [ "$i" -lt "$#" ]; then words="$words $a"; else printf '%s' "$a" >"$FAKE/job-$n.task"; fi
-done
-echo "${words# }" >"$FAKE/job-$n.words"
-echo "job-$n"
 "#,
         );
         bin
@@ -287,15 +251,23 @@ impl Machine {
         fs::read_to_string(self.path(&format!("state/{name}"))).unwrap_or_default()
     }
 
-    /// Each job proj was asked for: its words, and its task.
+    /// Each run of proj, as its words but the task, and the task (its last
+    /// word). A run that failed is one too: proj logs it before it fails.
     fn jobs(&self) -> Vec<(String, String)> {
-        let n: usize = self.fake("jobs").trim().parse().unwrap_or(0);
-        (1..=n)
-            .map(|i| {
-                let words = self.fake(&format!("job-{i}.words")).trim_end().to_owned();
-                (words, self.fake(&format!("job-{i}.task")))
+        burrow_test::proj_jobs(&self.path("fake"))
+            .into_iter()
+            .map(|mut words| {
+                let task = words.pop().unwrap();
+                (words.join(" "), task)
             })
             .collect()
+    }
+
+    /// How many times runuser ran `program` as sam, in every pass so far. The
+    /// log keeps each run's words whole, and a task runs over lines of its own.
+    fn runuser_runs(&self, program: &str) -> usize {
+        let prefix = format!("-u sam -- {} ", stand_ins().join(program).display());
+        self.fake("runuser").matches(&prefix).count()
     }
 
     fn seen(&self) -> Vec<String> {
@@ -309,10 +281,6 @@ fn stderr(out: &Output) -> String {
 
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn root() -> bool {
-    rustix::process::geteuid().is_root()
 }
 
 /// The log's lines without their dates.
@@ -358,10 +326,16 @@ fn a_first_pass_only_records_what_is_there() {
             src.display()
         )
     );
+    let osv = stand_ins().join("osv-scanner");
     assert_eq!(
         m.fake("runuser"),
-        "sam unset osv-scanner\nsam unset osv-scanner\n"
+        format!(
+            "-u sam -- {0} scan source --recursive --format json {1}/app\n-u sam -- {0} scan source --recursive --format json {1}/box\n",
+            osv.display(),
+            src.display()
+        )
     );
+    assert_eq!(m.fake("runuser.xdg"), "unset\nunset\n");
     assert_eq!(m.kev.asked(), ["/first.json", "/second.json"]);
     // KEV's refusal at the first place isn't news when the second had it,
     // and what the scanners say on stderr is theirs.
@@ -422,10 +396,9 @@ fn a_later_pass_hands_whats_new_to_each_projects_job() {
         "kev:CVE-4".to_owned(),
         "osv:box:RUSTSEC-3:serde".to_owned(),
     ]));
-    assert!(
-        m.fake("runuser")
-            .ends_with("sam unset proj\nsam unset proj\n")
-    );
+    assert_eq!(m.runuser_runs("proj"), 2);
+    // Every run through runuser had no runtime dir of root's.
+    assert!(m.fake("runuser.xdg").lines().all(|x| x == "unset"));
     // Nothing new, nothing handed over.
     m.pass();
     assert_eq!(m.jobs().len(), 2);
@@ -436,13 +409,19 @@ fn a_job_that_cant_start_waits_for_the_next_pass() {
     let m = Machine::new();
     m.pass();
     m.set_kev(&[("CVE-3", "Exim", "Exim")]);
-    fs::write(m.path("fake/proj-exit"), "1").unwrap();
+    fs::write(m.path("fake/fail-proj"), "1").unwrap();
     let out = m.pass();
     assert_eq!(
         stderr(&out),
         "proj: no\nadvisory-watch: box: proj run: exit status: 1\n"
     );
-    assert!(m.jobs().is_empty());
+    // The run is kept though it failed: that is the one attempt so far.
+    assert_eq!(m.jobs().len(), 1);
+    assert!(
+        m.jobs()[0]
+            .1
+            .contains("\n- CVE-3 (KNOWN EXPLOITED): Exim bug\n")
+    );
     assert!(!m.seen().contains(&"kev:CVE-3".to_owned()));
     let report = stdout(&m.run(&["report"]));
     assert!(
@@ -450,24 +429,24 @@ fn a_job_that_cant_start_waits_for_the_next_pass() {
         "{report}"
     );
     // Taken, though KEV no longer lists it; found once.
-    fs::remove_file(m.path("fake/proj-exit")).unwrap();
+    fs::remove_file(m.path("fake/fail-proj")).unwrap();
     m.set_kev(&[]);
     m.pass();
     let jobs = m.jobs();
-    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs.len(), 2);
     assert!(
-        jobs[0]
+        jobs[1]
             .1
             .contains("\n- CVE-3 (KNOWN EXPLOITED): Exim bug\n\n"),
         "{}",
-        jobs[0].1
+        jobs[1].1
     );
     assert_eq!(
         undated(&m.state("log")),
         [
             "box\tCVE-3 (KNOWN EXPLOITED): Exim bug",
             "box: not handed to Claude (proj run: exit status: 1); the next pass tries again",
-            "box: handed to Claude, proj log job-1",
+            "box: handed to Claude, proj log job-2",
         ]
     );
     assert!(m.seen().contains(&"kev:CVE-3".to_owned()));
@@ -479,12 +458,15 @@ fn a_project_whose_checkout_has_gone_drops_what_it_had_waiting() {
     let m = Machine::new();
     m.pass();
     m.set_osv("app", &[("RUSTSEC-2", "idna")]);
-    fs::write(m.path("fake/proj-exit"), "1").unwrap();
+    fs::write(m.path("fake/fail-proj"), "1").unwrap();
     m.pass();
-    fs::remove_file(m.path("fake/proj-exit")).unwrap();
+    // The one attempt so far, which failed.
+    assert_eq!(m.jobs().len(), 1);
+    fs::remove_file(m.path("fake/fail-proj")).unwrap();
     fs::remove_dir_all(m.path("src/app/.git")).unwrap();
     m.pass();
-    assert!(m.jobs().is_empty());
+    // Nothing is asked for it once its checkout has gone.
+    assert_eq!(m.jobs().len(), 1);
     assert!(
         m.state("log")
             .ends_with(" app: its checkout is gone, so what it had waiting is dropped\n"),
@@ -495,22 +477,20 @@ fn a_project_whose_checkout_has_gone_drops_what_it_had_waiting() {
     m.set_kev(&[("CVE-3", "Exim", "Exim")]);
     fs::remove_dir_all(m.path("src/box/.git")).unwrap();
     m.pass();
-    assert_eq!(m.jobs().len(), 1);
-    assert_eq!(
-        m.jobs()[0].0,
-        "run --first --role advisory --app box-bot box"
-    );
+    let jobs = m.jobs();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[1].0, "run --first --role advisory --app box-bot box");
     // Back, it's new again.
     fs::create_dir(m.path("src/app/.git")).unwrap();
     m.pass();
     let jobs = m.jobs();
-    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs.len(), 3);
     assert!(
-        jobs[1]
+        jobs[2]
             .1
             .contains("\n- RUSTSEC-2 in idna 1.0 (severity 7.5)\n"),
         "{}",
-        jobs[1].1
+        jobs[2].1
     );
 }
 

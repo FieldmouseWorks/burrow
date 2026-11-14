@@ -1,6 +1,8 @@
 use std::fs;
 
-use crate::machine::{Machine, ok, queued, said};
+use burrow_test::said;
+
+use crate::machine::{Machine, ok, queued};
 
 #[test]
 fn a_notice_that_wont_open_or_close_fails_check_and_settles_it_all_the_same() {

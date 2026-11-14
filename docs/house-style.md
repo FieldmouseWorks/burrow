@@ -183,6 +183,15 @@ The test process never opens the executable for writing, so a concurrent
 fork cannot inherit a writer and cause ETXTBSY. No spawn lock is needed.
 Caches may still share fixtures across tests.
 
+To fake the machine (sudo, systemctl, journalctl, systemd-cat, runuser,
+box-notify, proj), a harness asks `burrow_test::stand_ins` for them and
+adds only stand-ins for programs of its own. How they behave, what they
+keep in `$FAKE` and how a machine makes one answer is in
+[`burrow-test`'s docs](../crates/burrow-test/src/standins.rs); don't
+describe the pattern anywhere else. The `owned` test in
+[`burrow-test`](../crates/burrow-test/tests/owned.rs) fails when a harness
+defines a stand-in for one of them.
+
 For directory permissions and non-executable file metadata, use
 `burrow_test::permissions(path, mode)`. It refuses execute bits on a file. `burrow_test::copy_file(from, to)`
 copies data fixtures and refuses executable sources or destinations.

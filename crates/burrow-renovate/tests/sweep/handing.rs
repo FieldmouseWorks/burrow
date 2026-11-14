@@ -398,21 +398,25 @@ fn a_majors_job_is_handed_its_verdicts_sealed_on_the_head_and_base_it_reads() {
 fn a_job_that_doesnt_start_keeps_nothing_and_fails_the_pass() {
     let m = Machine::new();
     m.prs(&[pr(1)]);
-    m.set("proj-fails", "");
+    m.set("fail-proj", "3");
     let p = m.sweep(&[]);
     assert_eq!(p.code, Some(1));
-    assert_eq!(p.err, "renovate-sweep: sam/r: proj run: exit status: 3\n");
+    // proj's own complaint comes first, on the same stderr.
+    assert_eq!(
+        p.err,
+        "proj: no\nrenovate-sweep: sam/r: proj run: exit status: 3\n"
+    );
     assert_eq!(p.out, "");
     assert_eq!(p.jobs.len(), 1);
     // The PR's key isn't kept: the next pass hands it over again. The
     // notices go out all the same.
     assert_eq!(m.key(1, ""), "");
     assert_eq!(p.majors().0, "close");
-    m.unset("proj-fails");
+    m.unset("fail-proj");
     assert!(m.pass().task().contains("#1 "));
     // One handed over before, for another head, goes back to that.
     m.keep(1, "", "old red\n");
-    m.set("proj-fails", "");
+    m.set("fail-proj", "3");
     assert_eq!(m.sweep(&[]).code, Some(1));
     assert_eq!(m.key(1, ""), "old red\n");
 }
