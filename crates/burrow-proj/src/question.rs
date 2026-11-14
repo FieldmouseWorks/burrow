@@ -8,6 +8,24 @@ use std::path::{Path, PathBuf};
 
 use crate::{job::Job, read, swap};
 
+/// What a job's question notice is keyed by: the notifier titles its issue
+/// `[proj-question-JOB-TURN] …`.
+const NOTICE: &str = "proj-question-";
+
+/// The notifier's key for the question job `id` asked at `turn`.
+fn notice_key(id: &str, turn: &str) -> String {
+    format!("{NOTICE}{id}-{turn}")
+}
+
+/// Whether an issue is one of these questions' notices. Only a person
+/// answers one (`proj reply` from a job is an update, not an answer), so
+/// nothing hands one to a job: the inbox neither sorts it nor drains it.
+pub(crate) fn is_notice(issue: &serde_json::Value) -> bool {
+    issue["title"]
+        .as_str()
+        .is_some_and(|t| t.strip_prefix('[').is_some_and(|t| t.starts_with(NOTICE)))
+}
+
 const OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask --default \"TEXT\" [--one-way]` again with the same recommendation without restating the question if it still needs an answer.";
 
 const LEGACY_OPEN_UPDATE: &str = "Your open question is still posted. This update is not a person's reply. Do not repeat the question or ping the owner again. Handle the update, then run `proj ask` again without restating the question if it still needs an answer.";
@@ -693,7 +711,7 @@ pub(crate) fn notify(cfg: &crate::config::Config, job: &Job) -> Result<bool, Str
         if closed.exists() {
             continue;
         }
-        let key = format!("proj-question-{}-{turn}", job.id);
+        let key = notice_key(job.id, turn);
         let hidden = job.turn(turn, "question-hidden");
         let outstanding = !finished && active.as_deref() == Some(turn);
         if outstanding && let Some(leader) = &leader {

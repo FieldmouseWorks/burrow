@@ -418,6 +418,9 @@ deadline. Active units and unknown lifecycle states stay protected.
 Completion (native or VM) or an explicit stop also closes the notice; a later question gets its own key even if
 an older close is still pending. Notification errors do not interrupt turn
 finalization, watchdog updates, completion kicks or scratch cleanup.
+The inbox never sorts or drains a question's notice (titled
+`[proj-question-JOB-TURN]`), whatever its labels: only a person answers it, and
+a job's `proj reply` is an update, not an answer.
 
 ### GitHub's installation quota
 

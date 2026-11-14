@@ -97,6 +97,7 @@ pub fn label(api: &mut dyn Api, repo: &str, label: &str, name: &str) -> Result<(
 /// and still answers 201, so its answer is read: a label it dropped is asked
 /// for again on its own, and if that fails too the issue stands, bare, which
 /// `open_issues` still finds, and the failure is the caller's to report.
+/// Its number, once GitHub has made it.
 pub fn create(
     api: &mut dyn Api,
     repo: &str,
@@ -104,7 +105,7 @@ pub fn create(
     body: &str,
     label: &str,
     assignee: Option<&str>,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     let mut issue = json!({"title": title, "body": body, "labels": [label]});
     if let Some(who) = assignee {
         issue["assignees"] = json!([who]);
@@ -117,14 +118,14 @@ pub fn create(
         None,
     )?
     .json()?;
-    if carries(&made, label) {
-        return Ok(());
-    }
     let n = made["number"].as_u64().ok_or_else(|| {
         Error::said(format!(
             "POST repos/{repo}/issues: its answer has no number"
         ))
     })?;
+    if carries(&made, label) {
+        return Ok(n);
+    }
     call(
         api,
         "POST",
@@ -132,7 +133,7 @@ pub fn create(
         Some(&json!({"labels": [label]})),
         None,
     )
-    .map(drop)
+    .map(|_| n)
 }
 
 pub fn comment(api: &mut dyn Api, repo: &str, n: u64, body: &str) -> Result<(), Error> {
