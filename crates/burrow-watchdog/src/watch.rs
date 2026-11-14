@@ -118,8 +118,9 @@ fn item(it: &Value) -> Option<Item> {
 }
 
 /// A stall: the item, in the phase it entered at `since`. A new phase is
-/// another stall, from the first step, but for one that clears and is back in
-/// the same phase while more time a job gave it still runs (ladder's `resting`).
+/// another stall, from the first step, but for one that clears and is back,
+/// in the same phase or under the same sid, while more time a job gave it
+/// still runs (ladder's `resting`).
 pub fn sid(source: &str, key: &str, since: f64) -> String {
     format!("{source}\t{key}\t{since:.0}")
 }

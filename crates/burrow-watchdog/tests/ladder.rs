@@ -869,6 +869,59 @@ fn snooze_outlasts_a_clear() {
     assert_eq!(m.runs().len(), 2);
 }
 
+// A deploy wait behind its update's own PR is the update run's while one
+// looks (not overdue), and back from its old since once the run has, its
+// phase quoting that run's word: the very same stall, so the more time a job
+// gave it holds through every run, with no second job.
+#[test]
+fn snooze_outlasts_a_run_that_looks() {
+    let behind = |said: &str| {
+        let mut it = named(
+            "sam/r's main going live",
+            &format!("3 commits; behind box-update's own PR #405; its last run: {said}"),
+            T - 5.0 * H,
+            T - MIN,
+        );
+        it["kick"] = "update".into();
+        it
+    };
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"deploy/sam/r": behind("current at noon")}),
+        T,
+    );
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "deploy/sam/r",
+        360,
+        "its PR waits on a fix in review",
+        T + MIN,
+    )
+    .unwrap();
+    let until = T + MIN + 360.0 * MIN;
+    let running = named(
+        "sam/r's main going live",
+        "box-update has been putting it live since then",
+        T + 20.0 * MIN,
+        T + 80.0 * MIN,
+    );
+    m.write(&m.steward, json!({"deploy/sam/r": running}), T + 21.0 * MIN);
+    assert_eq!(m.run(T + 21.0 * MIN).1, BTreeMap::new());
+    m.write(
+        &m.steward,
+        json!({"deploy/sam/r": behind("current at one")}),
+        T + 25.0 * MIN,
+    );
+    let (wake, stalls) = m.run(T + 25.0 * MIN);
+    assert_eq!(
+        (wake, stalls.len(), m.kicks().len(), m.runs().len()),
+        (Some(until), 1, 1, 0)
+    );
+}
+
 // What a source writes that isn't an item is left out, not a crash, and half
 // a file is no file.
 #[test]

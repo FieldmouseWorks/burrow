@@ -57,8 +57,11 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         println!("moving again: {}", line(&st.item));
         withdraw.extend(st.job.clone());
         // A failed unit a switch resets clears for a while with nothing
-        // fixed, and fails again from a new `since`: its more time still
-        // holds if it's back in the same phase before that's up.
+        // fixed, and fails again from a new `since`; a deploy wait is a run's
+        // while the run looks, and back from its old `since` once it has,
+        // its phase saying that run's word: its more time still holds if
+        // it's back before that's up, in the same phase or as the very same
+        // stall (its sid: the wait never started over).
         if st.snoozed.is_some_and(|t| t > now) {
             resting.insert(s.clone(), st.clone());
         }
@@ -82,8 +85,11 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         .filter_map(|(s, cur)| {
             resting
                 .iter()
-                .find(|(_, st)| {
-                    st.source == cur.source && st.key == cur.key && st.item.phase == cur.item.phase
+                .find(|(was, st)| {
+                    *was == s
+                        || (st.source == cur.source
+                            && st.key == cur.key
+                            && st.item.phase == cur.item.phase)
                 })
                 .map(|(was, _)| (was.clone(), s.clone()))
         })
