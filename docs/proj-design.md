@@ -315,7 +315,7 @@ run the jobs. proj decides when a job may run on this machine and says how
 it went. The two keep their jobs:
 
 - The flow's plugins start, read and stop proj jobs through the record
-  (`proj state --json`), never through `lifecycle`'s lines. A caller waiting
+  (`proj why JOB --json`), never through `lifecycle`'s lines. A caller waiting
   on a job reads the job's `overdue_at` and books its own deadline from it,
   so "waiting on a job with no deadline" can't be written.
 - proj's pass has the flow's shape (facts and record in, steps and record
