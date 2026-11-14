@@ -90,12 +90,16 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert (state / 'watch.json').exists(), (kick, name)
     print('slow preparation makes durable progress: passed')
 
-    # A normal full pass consumes repository events in Line.take. Finished
-    # and unvisited repos, including expired retries, must get ordinary work
-    # requests back, separate from the internal continuation line.
+    # A full pass over new work that yields keeps the wake-ups of the repos
+    # it didn't reach, and its rest goes to the continuation line. The
+    # repos its traversal finished before the new work came, with a wake-up
+    # or not, and the ones whose receipts the continuation would keep, owe a
+    # pass of their own. One the traversal hasn't entered gets its look from
+    # the traversal, and burrow-events keeps each repo's own requests beside
+    # the full pass (its line.rs), so none is booked for it.
     with fixture() as (clock, handled, facts, repos, prs, info):
-        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'arb']
-        C.save('pass-progress.json', {'full': True, 'finished': ['sam/a'], 'repos': {}})
+        repos[:] = [{'repo': f'sam/{n}', 'default': 'main'} for n in 'adrbc']
+        C.save('pass-progress.json', {'full': True, 'finished': ['sam/a', 'sam/d'], 'repos': {}})
         C.save('wake.json', {'sam/a': C.NOW - 50, 'sam/b': C.NOW - 40, '': C.NOW - 30})
         original = S.step.handle
 
@@ -106,10 +110,11 @@ with tempfile.TemporaryDirectory() as tmp:
         with patch.object(S.step, 'handle', long):
             S.run_pass(None)
         wakes = C.load('wake.json', {})
-        assert wakes['sam/a'] > C.NOW and wakes['sam/b'] > C.NOW, wakes
+        assert all(wakes[f'sam/{n}'] > C.NOW for n in 'adrb'), wakes
+        assert 'sam/c' not in wakes, wakes
         assert '' not in wakes, wakes
         assert '' in C.load('continue.json', {}), C.load('continue.json', {})
-    print('full passes preserve skipped event and deadline obligations: passed')
+    print('a yielding full pass books finished and carried repos, not unentered ones: passed')
 
     # Local completions/availability, lifecycle/held answers and sibling PR
     # changes all arrive on the ordinary line. Invalidate decisions on that

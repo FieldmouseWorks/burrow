@@ -26,7 +26,7 @@ pub struct Config {
 }
 
 /// A scheduling decision and its next change without another external event.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Decision {
     pub allowed: bool,
@@ -34,7 +34,7 @@ pub struct Decision {
     pub vacate: bool,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Overlay {
     #[serde(default)]
@@ -43,6 +43,34 @@ struct Overlay {
     pipeline_until: Option<i64>,
     #[serde(default)]
     receipts: BTreeMap<String, String>,
+}
+
+/// One immutable policy generation, including the time used for scope expiry.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Snapshot {
+    config: Config,
+    state: Overlay,
+    at: i64,
+}
+
+impl Snapshot {
+    pub fn decision(&self, repo: &str) -> Decision {
+        let allowed = self.config.permits_at(&self.state, repo, self.at);
+        Decision {
+            allowed,
+            vacate: self.state.repos.get(&repo.to_ascii_lowercase()) == Some(&false)
+                || (self.state.pipeline_until.is_some_and(|t| t > self.at)
+                    && !self
+                        .config
+                        .pipeline_repos
+                        .iter()
+                        .any(|r| r.eq_ignore_ascii_case(repo))),
+            retry_at: self
+                .state
+                .pipeline_until
+                .filter(|t| !allowed && *t > self.at),
+        }
+    }
 }
 
 impl live::Document for Overlay {
@@ -111,17 +139,16 @@ impl Config {
     }
 
     pub fn decision(&self, repo: &str) -> Result<Decision, String> {
-        let state = self.read()?;
-        let allowed = self.permits(&state, repo);
-        Ok(Decision {
-            allowed,
-            vacate: state.repos.get(&repo.to_ascii_lowercase()) == Some(&false)
-                || (state.pipeline_until.is_some_and(|t| t > now())
-                    && !self
-                        .pipeline_repos
-                        .iter()
-                        .any(|r| r.eq_ignore_ascii_case(repo))),
-            retry_at: state.pipeline_until.filter(|t| !allowed && *t > now()),
+        Ok(self.snapshot()?.decision(repo))
+    }
+
+    /// Freeze both the overlay and scope clock for a durable batch operation.
+    /// Ordinary admission still reloads the live policy on every decision.
+    pub fn snapshot(&self) -> Result<Snapshot, String> {
+        Ok(Snapshot {
+            config: self.clone(),
+            state: self.read()?,
+            at: now(),
         })
     }
 
@@ -130,13 +157,17 @@ impl Config {
     }
 
     fn permits(&self, state: &Overlay, repo: &str) -> bool {
+        self.permits_at(state, repo, now())
+    }
+
+    fn permits_at(&self, state: &Overlay, repo: &str, at: i64) -> bool {
         let allowed = state
             .repos
             .get(&repo.to_ascii_lowercase())
             .copied()
             .unwrap_or_else(|| self.allowed.iter().any(|r| r.eq_ignore_ascii_case(repo)));
         allowed
-            && (!state.pipeline_until.is_some_and(|t| t > now())
+            && (!state.pipeline_until.is_some_and(|t| t > at)
                 || self
                     .pipeline_repos
                     .iter()
