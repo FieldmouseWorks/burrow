@@ -1,8 +1,8 @@
 //! What a job of the steward's that settles a PR leaves for the
 //! steward to post (tasks.py `fix_task`): its replies on the PR's review
 //! threads, each resolved after it, the PR's new description and a comment.
-//! The job pushes and writes them to its answers file; once the job is over
-//! the PR's pass reads it (claims.rs), and they go up as the steward's App
+//! The job pushes and writes them to its answers file; once the job is over,
+//! or a turn of its that awaits the PR is, the PR's pass reads it (claims.rs), and they go up as the steward's App
 //! only while the PR's head is the job's own push, or the head it was handed
 //! when it pushed nothing. So a job can't say it fixed something in a commit
 //! GitHub doesn't have, and a job whose PR someone else moved on meanwhile
@@ -30,6 +30,11 @@ pub struct Handed {
     pub head: String,
     /// Its description then.
     pub description: String,
+    /// The descriptions this job's earlier turns' answers wrote, or may
+    /// have (a write whose answer was lost, or whose pass stopped before it
+    /// kept what it did): the PR's description is the job's own when it is
+    /// one of these, and an edit to anything else is someone else's.
+    pub also: Vec<String>,
     /// When, in Unix seconds.
     pub at: f64,
     /// The job's answers file as it left it, or None for none.
@@ -62,13 +67,37 @@ struct Reply {
     reply: String,
 }
 
+/// What an attempt to post left on the PR, whether it got to the end or not:
+/// the claim keeps it, so a later turn or try starts from what is really
+/// there.
+#[derive(Debug, Default)]
+pub struct Wrote {
+    /// When (GitHub's wall time, whole seconds, taken once the call
+    /// returned, so after the write could have landed) its last write that
+    /// proj's fingerprint sees went, or may have gone (one whose answer was
+    /// lost, or a later one failed): a reply on a thread, a new comment.
+    pub at: Option<u64>,
+    /// The description it wrote, once GitHub took it.
+    pub description: Option<String>,
+}
+
 /// What went up.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Posted {
-    /// Its answers, every one.
-    Answers,
+    /// Its answers, every one: on the head they were checked against, and
+    /// with the description they wrote, if any.
+    Answers(Took),
     /// Nothing: it left no answers file.
     Nothing,
+}
+
+/// Where a job's answers left the PR: the head they went up on (its push,
+/// or the head it was handed), and its description if they wrote one. A
+/// job that goes on to another turn is checked against these next.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Took {
+    pub head: String,
+    pub description: Option<String>,
 }
 
 /// Why nothing (more) went up.
@@ -119,7 +148,7 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// The answers file, or why it won't do.
-fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
+fn read(text: &str) -> Result<Answers, Unposted> {
     let a: Answers = serde_json::from_str(text).map_err(|e| {
         Unposted::Wrong(format!(
             "its answers file isn't what its brief asks for: {e}"
@@ -132,7 +161,6 @@ fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
             "its answers say it pushed {c:?}, which isn't a commit's full name"
         )));
     }
-    let new = a.pushed.as_deref().filter(|c| *c != h.head);
     let mut seen = BTreeSet::new();
     for r in &a.threads {
         if r.id.trim().is_empty() || r.reply.trim().is_empty() {
@@ -143,12 +171,6 @@ fn read(h: &Handed, text: &str) -> Result<Answers, Unposted> {
         if !seen.insert(r.id.as_str()) {
             return Err(Unposted::Wrong(format!(
                 "its answers reply on thread {} twice",
-                r.id
-            )));
-        }
-        if r.fixed && new.is_none() {
-            return Err(Unposted::Wrong(format!(
-                "its answers say it fixed thread {}, but it pushed no new commit",
                 r.id
             )));
         }
@@ -181,11 +203,17 @@ fn unposted(e: Error) -> Unposted {
 /// The job's answers, posted if the PR is still where the job left it.
 /// Everything is checked before anything goes up: a thread that isn't the
 /// PR's, or a fix claimed with no new commit, posts none of it.
-pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
+///
+/// `wrote` records what it did to the PR even when a later write fails: when
+/// each write that proj's fingerprint sees (github.rs: a reply on a thread,
+/// a new comment) went, so a job awaiting the PR may have been woken even
+/// when the write's answer was lost, and the description it wrote, which is
+/// the PR's now whatever came of the rest.
+pub fn answer(p: &mut Pass, h: &Handed, wrote: &mut Wrote) -> Result<Posted, Unposted> {
     let Some(text) = &h.answers else {
         return Ok(Posted::Nothing);
     };
-    let a = read(h, text)?;
+    let a = read(text)?;
     let (repo, n) = (p.repo, h.number);
     let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
     let data = query(
@@ -229,7 +257,9 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
     // else's PR now, whether the job writes one or not.
     let body = pr["body"].as_str().unwrap_or_default();
     let ours = a.description.as_deref().is_some_and(|new| same(new, body));
-    if !same(body, &h.description) && !ours {
+    let handed = same(body, &h.description);
+    let earlier = h.also.iter().any(|d| same(d, body));
+    if !handed && !ours && !earlier {
         return Err(Unposted::Moved(
             "its description was edited since the job was handed it".into(),
         ));
@@ -256,6 +286,17 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         )));
     }
     let pushed = a.pushed.as_deref().filter(|c| *c != h.head);
+    // A fix needs a commit new since the claim's head, but for a thread an
+    // earlier turn's answers fixed and resolved, which a later turn keeps in
+    // its file.
+    if let Some(r) = a.threads.iter().find(|r| {
+        r.fixed && pushed.is_none() && threads[r.id.as_str()]["isResolved"] != json!(true)
+    }) {
+        return Err(Unposted::Wrong(format!(
+            "its answers say it fixed thread {}, but it pushed no new commit",
+            r.id
+        )));
+    }
     for r in &a.threads {
         let t = threads[r.id.as_str()];
         // Resolved since (by someone, or by this on an earlier try): it's
@@ -266,8 +307,9 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         let text = reply_text(r, pushed, &h.engine);
         let last = t["comments"]["nodes"][0]["body"].as_str();
         if !last.is_some_and(|l| same(l, &text)) {
-            mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}))
-                .map_err(|e| unposted(p.noted(e)))?;
+            let said = mutate(p.api, owner, REPLY, json!({"t": r.id, "b": text}));
+            wrote.at = Some(p.api.now());
+            said.map_err(|e| unposted(p.noted(e)))?;
         }
         mutate(p.api, owner, RESOLVE, json!({"t": r.id})).map_err(|e| unposted(p.noted(e)))?;
     }
@@ -288,6 +330,7 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         }
         call_once(p.api, "PATCH", &path, Some(&json!({"body": new})))
             .map_err(|e| unposted(p.noted(e)))?;
+        wrote.description = Some(new.clone());
     }
     if let Some(c) = &a.comment {
         let text = comment_text(c, &h.engine);
@@ -304,8 +347,9 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         });
         if !had {
             let path = format!("repos/{repo}/issues/{n}/comments");
-            call(p.api, "POST", &path, Some(&json!({"body": text})), None)
-                .map_err(|e| unposted(p.noted(e)))?;
+            let said = call(p.api, "POST", &path, Some(&json!({"body": text})), None);
+            wrote.at = Some(p.api.now());
+            said.map_err(|e| unposted(p.noted(e)))?;
         }
     }
     eprintln!(
@@ -314,7 +358,13 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         a.threads.len(),
         pushed.map_or(String::new(), |c| format!(", on its push of {}", short(c)))
     );
-    Ok(Posted::Answers)
+    // Resting on an earlier turn's description, that is the PR's now: the
+    // claim keeps it, confirmed.
+    let left = a.description.or_else(|| (!handed).then(|| body.to_owned()));
+    Ok(Posted::Answers(Took {
+        head: want.to_owned(),
+        description: left,
+    }))
 }
 
 /// A branch and its head.

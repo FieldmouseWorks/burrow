@@ -97,16 +97,27 @@ fn admission(job: &Job) -> Result<Admission, String> {
     }
 }
 pub fn denied(job: &Job) -> bool {
+    denied_by(job, |repo| {
+        job.cfg
+            .settings
+            .as_ref()
+            .map_or(Err(String::new()), |s| s.decision(repo))
+    })
+}
+
+/// [`denied`] by the decision `decide` gives for a repository, so a scan can
+/// ask the settings once per repository and judge every job by the same one.
+pub fn denied_by(
+    job: &Job,
+    mut decide: impl FnMut(&str) -> Result<burrow_settings::Decision, String>,
+) -> bool {
     let Ok(a) = admission(job) else {
         return true;
     };
     let Identity::Repository(repo) = a.identity else {
         return false;
     };
-    let Some(settings) = &job.cfg.settings else {
-        return true;
-    };
-    let Ok(d) = settings.decision(&repo) else {
+    let Ok(d) = decide(&repo) else {
         return true;
     };
     d.vacate || matches!(a.kind, Kind::Automated) && !d.allowed
@@ -126,20 +137,40 @@ pub struct Park {
     pub turn: String,
     pub first: bool,
     pub at: i64,
+    /// What it waits for, as `proj status` says it: [`DENIED`] or an inbox
+    /// [`crate::inbox::resumption::Wait`]. None in a park from before it was
+    /// kept.
+    #[serde(default)]
+    pub wait: Option<String>,
 }
+
+/// What a job parked by the policy (its repository paused or not allowed
+/// automated work) waits for.
+pub(crate) const DENIED: &str = "its repository to be allowed";
 
 pub fn parked(job: &Job) -> bool {
     path(job, "park").exists()
 }
 
-pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
+/// What a parked job waits for, if its park says.
+pub(crate) fn waits_for(job: &Job) -> Option<String> {
+    let bytes = fs::read(path(job, "park")).ok()?;
+    serde_json::from_slice::<Park>(&bytes).ok()?.wait
+}
+
+/// Park the job's latest turn, waiting for `wait`; None keeps what an
+/// earlier park of the job said. A park of the same turn is left as it is:
+/// its reason changes only through [`refresh`], under the job's lock.
+pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Result<(), String> {
     let turn = job.turns().unwrap_or_default();
+    let mut waiting = wait.map(str::to_owned);
     if let Ok(bytes) = fs::read(path(job, "park")) {
         let prior: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if prior.turn == turn {
             return Ok(());
         }
         first |= prior.first;
+        waiting = waiting.or(prior.wait);
     }
     let retry = crate::retry::Checkpoint::load(job, &turn).ok().flatten();
     if let Some(checkpoint) = &retry {
@@ -150,6 +181,7 @@ pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
         turn: turn.clone(),
         first,
         at: now(),
+        wait: waiting,
     };
     let mut order = None;
     if let Ok(entries) = fs::read_dir(job.cfg.jobs.join(".queue")) {
@@ -181,6 +213,29 @@ pub fn mark(job: &Job, state: &str, mut first: bool) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     wake(job.cfg);
     Ok(())
+}
+
+/// A parked job now waits for `wait`. Under the job's lock (`_held`), which
+/// stops and turn starts take, so it reads the park as it stands: only a
+/// park of the job's latest turn takes the reason, and nothing else in it
+/// changes. One a stop removed, or a newer turn's start replaced, is left as
+/// it is, and no park is ever made here.
+fn refresh(job: &Job, _held: &crate::held::Held, wait: &str) -> Result<(), String> {
+    let bytes = match fs::read(path(job, "park")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut park: Park = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if job.turns().as_deref() != Some(park.turn.as_str()) || park.wait.as_deref() == Some(wait) {
+        return Ok(());
+    }
+    park.wait = Some(wait.to_owned());
+    swap(
+        &path(job, "park"),
+        &serde_json::to_string(&park).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Runs in its own independent unit, so vacating the caller cannot kill the
@@ -341,7 +396,11 @@ fn reconcile_job(
             let first = job
                 .turns()
                 .is_some_and(|n| read(&job.turn(&n, "priority")).as_deref() == Some("first"));
-            mark(&job, &state, first)?;
+            mark(&job, &state, first, Some(DENIED))?;
+        } else if let Some(held) = job.try_lock().map_err(|e| e.to_string())? {
+            // A stop or a turn start holding it is changing the park; the
+            // next pass says what's left. Vacating never waits for either.
+            refresh(&job, &held, DENIED)?;
         }
         // stop kills the complete cgroup: inherited job, heavy and engine
         // locks are freed even when descendants ignored TERM.
@@ -373,8 +432,8 @@ fn reconcile_job(
         // pass spent the installation's hourly allowance on jobs it couldn't
         // start (two thousand reads an hour with 127 parked).
         let capacity = crate::inbox::resumption::admission(cfg, &job)?;
-        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
-            return Ok(());
+        if let crate::inbox::resumption::Resume::Waiting(wait) = capacity {
+            return refresh(&job, &held, wait.says());
         }
         match crate::inbox::enrollment::check(&job)? {
             crate::inbox::enrollment::Admission::Ready => (),
