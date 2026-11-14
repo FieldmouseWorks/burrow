@@ -176,6 +176,17 @@ class Batch:
         if self.traversal_full and repo not in self.state["finished"]:
             self.state["finished"].append(repo)
 
+    def failed(self, repo):
+        """The repo's turn ends on a failure, as finish's does, so the
+        traversal goes on without it, but its PR cursor stays: the next
+        traversal takes first the PRs this one never reached. Dropping it
+        would start the repo again at its first PR, and a repo that fails
+        now and then would never get to its newest ones."""
+        cursor = self.state["repos"].get(repo.lower())
+        self.finish(repo)
+        if cursor is not None:
+            self.state["repos"][repo.lower()] = cursor
+
     def end(self, complete, kick):
         if C.LIMITED and C.LIMITED[0] > C.NOW:
             at = C.LIMITED[0] + 1

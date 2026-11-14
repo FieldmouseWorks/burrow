@@ -139,4 +139,47 @@ with tempfile.TemporaryDirectory() as tmp:
     assert batch.pending('sam/b', [updated], [], info) == []
     updated['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'].append({'context': 'ci', 'state': 'FAILURE'})
     assert batch.pending('sam/b', [updated], [], info) == [updated]
+
+    # A failure reading a repo's PRs must keep its cursor. Burrow's pass
+    # failed on a 504 now and then; each failure dropped the cursor, so
+    # every traversal started again at its lowest PR and its newest PRs
+    # went unvisited for hours.
+    C.save('pass-progress.json', {})
+    C.save('continue.json', {})
+    C.save('wake.json', {})
+    one = [{'repo': 'sam/d', 'default': 'main'}]
+    reads, seen_d = [0], []
+
+    def read(owner, name):
+        reads[0] += 1
+        if reads[0] == 2:
+            raise RuntimeError('gh api graphql -f: unexpected end of JSON input')
+        return info, [pr(n) for n in range(1, 7)]
+
+    def take(repo, pr, *args):
+        seen_d.append(pr['number'])
+        clock[0] += 200
+
+    with ExitStack() as stack:
+        for obj, name, value in (
+            (S.R, 'discover', lambda: one), (S.R, 'restart', lambda *a: None),
+            (S.R, 'settle_repo', lambda *a: False), (S.R, 'watch_default', lambda *a: {}),
+            (S.R, 'publish', lambda rows: None), (S.R, 'hooks', lambda *a: None),
+            (S, 'open_prs', read), (S.P, 'begin', lambda *a: None), (S.P, 'place', lambda repo, n: n),
+            (S.T, 'begin', lambda repo: None), (S.T, 'on', lambda *a: False), (S.step, 'handle', take),
+            (S, 'branches', lambda *a, **k: None), (S, 'upkeep', lambda *a: None),
+            (S.V, 'sweep', lambda *a: None), (C, 'follow_renames', lambda names: None),
+            (W, 'failed', lambda *a, **k: None),
+            (C, 'taken', lambda *a: None), (C, 'coverage', coverage), (C, 'poke', lambda *a: None),
+        ):
+            stack.enter_context(patch.object(obj, name, value))
+        stack.enter_context(patch('time.monotonic', side_effect=lambda: clock[0]))
+        S.run_pass(None)  # visits 1 to 3, then yields
+        assert seen_d == [1, 2, 3], seen_d
+        C.NOW += 601
+        S.run_pass(['sam/d'])  # a kicked pass fails to read the PRs
+        assert seen_d == [1, 2, 3], seen_d
+        C.NOW += 601
+        S.run_pass(['sam/d'])
+        assert seen_d[3:6] == [4, 5, 6], ('a failure dropped the cursor', seen_d)
 print('bounded steward batches: passed')
