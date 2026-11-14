@@ -644,7 +644,7 @@ fn finalization_runs_every_obligation_despite_notification_errors() {
         let calls = got.lock().unwrap();
         for expected in [
             "/kick/completion",
-            "/kick/proj-inbox/sam/repo",
+            "/kick/proj-inbox-drain",
             "/kick/proj-watch",
         ] {
             assert!(calls.iter().any(|s| s == expected), "{failure}: {calls:?}");

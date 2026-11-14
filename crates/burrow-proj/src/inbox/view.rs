@@ -37,6 +37,8 @@ pub(crate) fn view(cfg: &Config, at: i64) -> View {
         looked: Vec::new(),
         observe: true,
         scope: None,
+        drain_at: None,
+        skipped: Vec::new(),
     };
     pass.view(t, at)
 }
