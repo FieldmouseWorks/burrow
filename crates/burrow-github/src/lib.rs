@@ -77,6 +77,11 @@ fn by_name(asked: &str, next: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Error {
     pub why: String,
+    /// `why` before GitHub's own words were cut to a few hundred
+    /// characters: all of them, or, past WHOLE_MAX, one fixed line. For a caller that must scrub a
+    /// diagnostic before it shortens it: a cut can take the part of a
+    /// credential that makes it one.
+    pub whole: String,
     /// GitHub didn't answer: a rate limit, a 5xx, no connection. Nothing
     /// asked for was wrong, and the same ask can go again later. Told by
     /// the status and the transport, never by the words, which name
@@ -90,15 +95,24 @@ pub struct Error {
 impl Error {
     /// GitHub's no, or an answer that won't do.
     pub fn said(why: impl Into<String>) -> Self {
+        let why = why.into();
         Self {
-            why: why.into(),
+            whole: why.clone(),
+            why,
             unanswered: false,
             retry_at: None,
         }
     }
 
+    /// This error, its whole diagnostic being `whole`.
+    fn in_full(mut self, whole: String) -> Self {
+        self.whole = whole;
+        self
+    }
+
     fn unanswered(why: String) -> Self {
         Self {
+            whole: why.clone(),
             why,
             unanswered: true,
             retry_at: None,
@@ -107,6 +121,7 @@ impl Error {
     /// Add context without losing the cause's retry classification.
     pub fn context(mut self, context: impl fmt::Display) -> Self {
         self.why = format!("{context}: {}", self.why);
+        self.whole = format!("{context}: {}", self.whole);
         self
     }
 
@@ -118,6 +133,11 @@ impl Error {
             .then(|| errors.iter().filter_map(|e| e.retry_at).max())
             .flatten();
         Self {
+            whole: errors
+                .iter()
+                .map(|e| e.whole.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
             why: errors
                 .iter()
                 .map(|e| e.why.as_str())
@@ -341,14 +361,16 @@ fn graphql(
             .iter()
             .map(|e| e["message"].as_str().unwrap_or("an error"))
             .collect();
-        let said: String = said.join("; ").chars().take(300).collect();
-        let why = format!("{what}: {said}");
+        let said = said.join("; ");
+        let why = format!("{what}: {}", cut(&said));
+        let whole = format!("{what}: {}", kept_whole(said));
         return Err(
             if !errors.is_empty() && errors.iter().all(graphql_rate_error) {
                 limited(why, &r, at, limited_until)
             } else {
                 Error::said(why)
-            },
+            }
+            .in_full(whole),
         );
     }
     Ok(answer["data"].take())
@@ -440,14 +462,16 @@ fn kept(what: &str, received: Received, allowed: &[u16]) -> Result<Response, Err
         return Ok(r);
     }
     let said = message(&r.body);
-    let why = format!("{what}: HTTP {}: {said}", r.status);
+    let why = format!("{what}: HTTP {}: {}", r.status, cut(&said));
+    let whole = format!("{what}: HTTP {}: {}", r.status, kept_whole(said));
     Err(if rate_limited(&r) {
         limited(why, &r, at, limited_until)
     } else if r.status >= 500 {
         Error::unanswered(why)
     } else {
         Error::said(why)
-    })
+    }
+    .in_full(whole))
 }
 
 fn rate_limited(r: &Response) -> bool {
@@ -490,6 +514,7 @@ fn retry_at(r: &Response, at: u64) -> u64 {
 
 fn limited(why: String, r: &Response, at: u64, earlier: Option<u64>) -> Error {
     Error {
+        whole: why.clone(),
         why,
         unanswered: true,
         retry_at: Some(retry_at(r, at).max(earlier.unwrap_or(0))),
@@ -500,8 +525,26 @@ fn message(body: &str) -> String {
     let m = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| v["message"].as_str().map(String::from));
-    let m = m.unwrap_or_else(|| body.trim().to_string());
-    m.chars().take(300).collect()
+    m.unwrap_or_else(|| body.trim().to_string())
+}
+
+/// The most of GitHub's words kept whole in an Error.
+const WHOLE_MAX: usize = 64 * 1024;
+
+/// GitHub's words for an Error's `whole`: all of them, or, past WHOLE_MAX,
+/// a fixed line instead. A cut would leave a credential's fragment that a
+/// scrub, which can only take what it recognizes, would let through.
+fn kept_whole(said: String) -> String {
+    if said.chars().count() > WHOLE_MAX {
+        format!("GitHub's message is over {WHOLE_MAX} characters, so none of it is kept")
+    } else {
+        said
+    }
+}
+
+/// GitHub's words as an Error's `why` says them.
+fn cut(whole: &str) -> String {
+    whole.chars().take(300).collect()
 }
 
 /// A value that goes into a path, as one part of it or in its query

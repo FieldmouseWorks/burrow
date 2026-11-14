@@ -72,7 +72,11 @@ fn config(state: &Path) -> Config {
             git: "git".into(),
             journalctl: "/bin/journalctl".into(),
             systemctl: "/bin/systemctl".into(),
+            gh: None,
         },
+        runners: vec![],
+        trust: None,
+        hidden: vec![],
     }
 }
 

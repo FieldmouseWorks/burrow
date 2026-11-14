@@ -269,11 +269,13 @@ Each has an entry below, and each can be imported on its own.
 
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
-  (`burrow.probe.repo`) and answered there in seconds, with no Claude:
-  `memory`, `units`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
-  `oom [SINCE]`, one a line, above any `---` rule (a signature under it is
-  left be). No shell, journals only of the units on its allowlist, every
-  answer through a secret scrubber before it's posted, and only `authors` get
+  (`burrow.probe.repo`) and answered there in seconds, with no Claude: the
+  questions [docs/front-door.md](docs/front-door.md#probes-facts-with-no-claude)
+  lists, among them the runners' toolchains (`runners`), the deployed trust
+  lists (`trust`) and an issue's writers (`issue REPO N`), one a line, above
+  any `---` rule (a signature under it is left be). No shell, journals only of
+  the units on its allowlist, no file the reviewers never read, every answer
+  through a secret scrubber before it's posted, and only `authors` get
   answers. `burrow-probe ask QUESTION` answers one on the box itself.
 - **`events`** (`burrow.events`): `burrow-events`: what happens on GitHub, or
   on the box, starts the work it calls for within seconds; nothing waits for a

@@ -6,10 +6,18 @@
 
 mod contains;
 mod crashes;
+#[cfg(test)]
+mod facts_tests;
+#[cfg(test)]
+mod guard_tests;
+mod issue;
 mod memory;
+mod runners;
+mod shown;
 mod system;
 #[cfg(test)]
 mod tests;
+pub mod trust;
 mod usage;
 
 use std::io::Read;
@@ -55,6 +63,24 @@ pub trait Run {
     /// Read local commit objects with no inherited Git overrides.
     fn history(&self, program: &Path, args: &[&str], uid: u32) -> Result<Ran, String> {
         self.run(program, args, false, uid)
+    }
+    /// A GraphQL read about OWNER's account, through the machine's gh
+    /// (`gh`, else gh from PATH): its `data`, or what went wrong.
+    fn github(
+        &self,
+        gh: Option<&Path>,
+        owner: &str,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut api = burrow_github::Gh {
+            program: gh.map(|p| p.as_os_str().to_owned()),
+            until: Some(Instant::now() + COMMAND_TIMEOUT),
+            owner: Some(owner.to_owned()),
+            ..Default::default()
+        };
+        // The whole diagnostic: the callers scrub it before they shorten it.
+        burrow_github::query(&mut api, owner, query, variables).map_err(|e| e.whole)
     }
 }
 
@@ -161,6 +187,9 @@ impl Machine<'_> {
             Query::Deployed => system::deployed(self),
             Query::Oom { since } => system::oom(self, since.at(self.now)),
             Query::Crashes { exe, since } => crashes::answer(self, exe, since.at(self.now)),
+            Query::Runners { name } => runners::answer(self, name.as_deref()),
+            Query::Trust => trust::answer(self),
+            Query::Issue { repo, number } => issue::answer(self, repo, *number),
         }
     }
 
