@@ -789,6 +789,86 @@ fn snoozes() {
     assert_eq!(m.escalated().len(), 1);
 }
 
+// A snoozed stall that clears for a while with nothing fixed (a switch
+// resets the failed unit, which fails again on its next run) is the same
+// stall when it's back before its more time is up: no second job, and the
+// next step once that time's up. Back only after it: a stall of its own.
+#[test]
+fn snooze_outlasts_a_clear() {
+    let stalled = |m: &Machine, since: f64, now: f64| {
+        m.write(
+            &m.steward,
+            json!({"sam/r#7": item(since, now - MIN, None)}),
+            now,
+        );
+    };
+    let m = Machine::new();
+    stalled(&m, T - 3.0 * H, T);
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "sam/r#7",
+        120,
+        "its fix is in review",
+        T + MIN,
+    )
+    .unwrap();
+    m.state_of("job-1", "done");
+    let until = T + MIN + 120.0 * MIN;
+    m.write(&m.steward, json!({}), T + 2.0 * MIN);
+    assert_eq!(m.run(T + 2.0 * MIN).1, BTreeMap::new());
+    stalled(&m, T + 20.0 * MIN, T + 30.0 * MIN);
+    let (wake, stalls) = m.run(T + 30.0 * MIN);
+    assert_eq!((wake, stalls.len(), m.runs().len()), (Some(until), 1, 1));
+    assert!(m.kicks().is_empty());
+    m.run(until);
+    assert_eq!((m.escalated().len(), m.runs().len()), (1, 1));
+
+    let m = Machine::new();
+    stalled(&m, T - 3.0 * H, T);
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "sam/r#7",
+        120,
+        "its fix is in review",
+        T + MIN,
+    )
+    .unwrap();
+    m.state_of("job-1", "done");
+    m.write(&m.steward, json!({}), T + 2.0 * MIN);
+    m.run(T + 2.0 * MIN);
+    m.run(T + 3.0 * H);
+    assert!(m.state().resting.is_empty());
+    stalled(&m, T + 3.0 * H, T + 4.0 * H);
+    m.run(T + 4.0 * H);
+    assert_eq!((m.runs().len(), m.escalated().len()), (2, 0));
+
+    // Back in another phase in time: a stall of its own too.
+    let m = Machine::new();
+    stalled(&m, T - 3.0 * H, T);
+    m.run(T);
+    snooze(
+        &m.cfg,
+        "autoland",
+        "sam/r#7",
+        120,
+        "its fix is in review",
+        T + MIN,
+    )
+    .unwrap();
+    m.state_of("job-1", "done");
+    m.write(&m.steward, json!({}), T + 2.0 * MIN);
+    m.run(T + 2.0 * MIN);
+    let mut next = item(T + 20.0 * MIN, T + 29.0 * MIN, None);
+    next["phase"] = "waiting for review".into();
+    m.write(&m.steward, json!({"sam/r#7": next}), T + 30.0 * MIN);
+    m.run(T + 30.0 * MIN);
+    assert_eq!(m.runs().len(), 2);
+}
+
 // What a source writes that isn't an item is left out, not a crash, and half
 // a file is no file.
 #[test]
