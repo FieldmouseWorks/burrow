@@ -32,7 +32,7 @@ pub fn bind(job: &Job, identity: Identity, kind: Kind) -> Result<(), String> {
     let record = Admission {
         identity,
         kind,
-        agent: read(&job.path("agent")).filter(|s| !s.is_empty()),
+        agent: crate::job::Request::load(job)?.agent,
     };
     swap(
         &path(job, "admission"),
@@ -81,7 +81,12 @@ fn admission(job: &Job) -> Result<Admission, String> {
                 .and_then(|s| s.split_once('#').map(|(repo, _)| repo.to_owned()));
             let identity = match source {
                 Some(repo) => Identity::Repository(repo),
-                None => identify(job.cfg, &crate::pick::project(&job.dir), true, false)?,
+                None => identify(
+                    job.cfg,
+                    &crate::job::Request::load(job)?.project,
+                    true,
+                    false,
+                )?,
             };
             // Legacy automation is never inferred to be local from a failed
             // lookup. Modern launchers bind identity before exposing job state.
@@ -362,6 +367,15 @@ fn reconcile_job(
         if &generation(cfg)? != release_generation {
             return Ok(());
         }
+        // Its place first, from files and the units that are up: a parked
+        // job with nowhere to run isn't released this pass, so GitHub isn't
+        // asked about its issue either. Asking for every parked job on every
+        // pass spent the installation's hourly allowance on jobs it couldn't
+        // start (two thousand reads an hour with 127 parked).
+        let capacity = crate::inbox::resumption::admission(cfg, &job)?;
+        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
+            return Ok(());
+        }
         match crate::inbox::enrollment::check(&job)? {
             crate::inbox::enrollment::Admission::Ready => (),
             crate::inbox::enrollment::Admission::Stopped(message) => {
@@ -371,10 +385,6 @@ fn reconcile_job(
                 eprintln!("{message}");
                 return Ok(());
             }
-        }
-        let capacity = crate::inbox::resumption::admission(cfg, &job)?;
-        if !matches!(capacity, crate::inbox::resumption::Resume::Ready(_)) {
-            return Ok(());
         }
         if &generation(cfg)? != release_generation {
             return Ok(());
