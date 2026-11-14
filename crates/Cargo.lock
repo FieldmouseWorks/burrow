@@ -698,6 +698,7 @@ dependencies = [
  "base64 0.23.1",
  "burrow-github",
  "burrow-process",
+ "burrow-test",
  "conary-core",
  "conary-github",
  "ed25519-dalek",
