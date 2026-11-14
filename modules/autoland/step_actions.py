@@ -470,11 +470,11 @@ class Actions:
             return
         if ahead is not None:
             if ahead != P.FREE:
-                P.wait(self.repo, self.n)
                 self.settle(
                     "pending",
                     f"Settled; waiting its turn to {'build' if builds else 'run'} {names} ({ahead} ahead)"[:140],
                     stage=S.PROOF_SLOT,
+                    turn=True,
                 )
                 return
             free = True
