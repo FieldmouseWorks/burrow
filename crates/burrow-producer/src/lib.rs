@@ -10,12 +10,15 @@
 //!   ask (`SO_PEERCRED`), and a request's work lives only as long as its
 //!   connection: a closed one stops it and publishes nothing.
 //! - [`records`]: what a producer keeps durably, before it publishes, to
-//!   finish publication after a crash. Never an answer to a later request.
+//!   finish publication after a crash. Never read back but at startup, so
+//!   never an answer to a later request.
 //! - [`sign`]: the producer's key, from its systemd credential only, and
-//!   typed signing of its own results. Nothing signs a statement a caller
-//!   hands it.
-//! - [`publish`]: the check run a signed result rides in, completed as
-//!   `cancelled` when its work is abandoned.
+//!   the results it signs, each from its record as it's published. Nothing
+//!   signs a statement a caller hands it.
+//! - [`publish`]: a record's check run, completed once: with its signed
+//!   result, or as `cancelled` when its work is abandoned before it's
+//!   committed; and startup reconciliation, which does the same for what a
+//!   crash left.
 
 pub mod plugin;
 pub mod publish;

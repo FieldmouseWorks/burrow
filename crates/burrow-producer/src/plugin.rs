@@ -6,7 +6,9 @@
 //! the plugin's `main` turns into a nonzero exit: Conary takes that as the
 //! plugin failing, never as a verdict.
 use crate::wire::{self, Reply};
-use conary_core::plugin::{Answer, Executed, Identity, Request, Response, Task, fixtures, version};
+use conary_core::plugin::{
+    Answer, Executed, Execution, Identity, Request, Response, Task, fixtures, version,
+};
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -48,11 +50,7 @@ impl Plugin {
             Some(answer) => Response {
                 contract: request.contract.clone(),
                 by: self.by.clone(),
-                execution: request.execution.as_ref().map(|e| Executed {
-                    model: None,
-                    effort: None,
-                    context: e.context.clone(),
-                }),
+                execution: request.execution.as_ref().map(|e| self.executed(e)),
                 answer,
             },
             None => self.forward(&request)?,
@@ -62,6 +60,23 @@ impl Plugin {
         output
             .flush()
             .map_err(|e| format!("couldn't write the answer: {e}"))
+    }
+
+    /// What its own answers report as run: the model and effort the flow
+    /// chose, or else its first offered model (a program offers none), in
+    /// the context asked for. They run no model, but Conary holds every
+    /// answer to the execution it asked for and the offers it was made.
+    fn executed(&self, asked: &Execution) -> Executed {
+        let offered = match &self.describe {
+            Answer::Describe { models, .. } => models.first().map(|m| m.id.clone()),
+            _ => None,
+        };
+        let choice = asked.choice.as_ref();
+        Executed {
+            model: choice.and_then(|c| c.model.clone()).or(offered),
+            effort: choice.and_then(|c| c.effort.clone()),
+            context: asked.context.clone(),
+        }
     }
 
     /// The answer it gives itself: `describe`, and a fixture on the
@@ -92,10 +107,17 @@ impl Plugin {
                 self.socket.display()
             )
         })?;
-        wire::send(&mut stream, request).map_err(|e| format!("couldn't ask the producer: {e}"))?;
-        let line = wire::line(&mut BufReader::new(&stream))
-            .map_err(|e| format!("couldn't read the producer's answer: {e}"))?
-            .ok_or("the producer closed the connection without answering")?;
+        // A producer that refuses may close before the whole request is
+        // sent: its reason is still there to read, and says more.
+        let sent = wire::send(&mut stream, request);
+        let line = match (wire::line(&mut BufReader::new(&stream)), sent) {
+            (Ok(Some(line)), _) => line,
+            (_, Err(e)) => return Err(format!("couldn't ask the producer: {e}")),
+            (Err(e), Ok(())) => return Err(format!("couldn't read the producer's answer: {e}")),
+            (Ok(None), Ok(())) => {
+                return Err("the producer closed the connection without answering".into());
+            }
+        };
         let reply: Reply = serde_json::from_str(&line)
             .map_err(|e| format!("the producer's answer doesn't read: {e}"))?;
         match reply {

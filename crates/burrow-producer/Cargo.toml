@@ -26,3 +26,9 @@ burrow-github = { path = "../burrow-github", features = ["fake"] }
 
 [lints]
 workspace = true
+
+# Conary's own conformance check runs this test's binary as the plugin, so
+# the test writes its own main.
+[[test]]
+name = "conformance"
+harness = false

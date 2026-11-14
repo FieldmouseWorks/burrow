@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The one account the flow runs its plugins as, which no authoring
 /// session shares (B3), by its uid.
@@ -49,12 +49,6 @@ impl Work {
         }
     }
 
-    /// Work no connection holds: finishing at startup what a crash left
-    /// ([`crate::records`]). It's never abandoned.
-    pub fn reconciling() -> Self {
-        Self::new()
-    }
-
     /// Whether its connection has ended: the work stops, and publishes
     /// nothing.
     pub fn abandoned(&self) -> bool {
@@ -87,7 +81,9 @@ pub struct Server {
 
 impl Server {
     /// Listen at `path`, in place of any socket a stopped producer left
-    /// there, for `controller` only.
+    /// there, for `controller` only. Anyone may connect: the peer check is
+    /// the gate, so the socket's mode is set to let the controller, another
+    /// user, reach it whatever the umask.
     pub fn bind(path: &Path, controller: Controller) -> io::Result<Self> {
         use std::os::unix::fs::FileTypeExt;
         match std::fs::symlink_metadata(path) {
@@ -101,8 +97,10 @@ impl Server {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
+        let listener = UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o666))?;
         Ok(Self {
-            listener: UnixListener::bind(path)?,
+            listener,
             controller,
         })
     }
@@ -128,30 +126,30 @@ impl Server {
 }
 
 fn connection(stream: UnixStream, controller: Controller, handler: &dyn Handler) {
-    let refuse = |why: String| {
-        let _ = wire::send(&mut &stream, &Reply::Refused(why));
-    };
     match socket_peercred(&stream) {
         Ok(cred) if cred.uid.as_raw() == controller.0 => {}
         Ok(cred) => {
-            return refuse(format!(
-                "only the flow's controller user may ask, and uid {} isn't it",
-                cred.uid.as_raw()
-            ));
+            return refuse(
+                &stream,
+                format!(
+                    "only the flow's controller user may ask, and uid {} isn't it",
+                    cred.uid.as_raw()
+                ),
+            );
         }
-        Err(e) => return refuse(format!("its peer can't be told: {e}")),
+        Err(e) => return refuse(&stream, format!("its peer can't be told: {e}")),
     }
     let Ok(read) = stream.try_clone() else {
-        return refuse("the connection can't be watched".into());
+        return refuse(&stream, "the connection can't be watched".into());
     };
     let mut read = BufReader::new(read);
     let request = match wire::line(&mut read) {
         Ok(Some(line)) => match serde_json::from_str::<Request>(&line) {
             Ok(request) => request,
-            Err(e) => return refuse(format!("the request doesn't read: {e}")),
+            Err(e) => return refuse(&stream, format!("the request doesn't read: {e}")),
         },
         Ok(None) => return,
-        Err(e) => return refuse(format!("the request can't be read: {e}")),
+        Err(e) => return refuse(&stream, format!("the request can't be read: {e}")),
     };
     let work = Work::new();
     // The plugin sends nothing after its request: anything that ends this
@@ -159,9 +157,18 @@ fn connection(stream: UnixStream, controller: Controller, handler: &dyn Handler)
     let watched = work.clone();
     let watch = thread::spawn(move || {
         let mut byte = [0];
-        while matches!(read.read(&mut byte), Ok(1)) {}
+        loop {
+            match read.read(&mut byte) {
+                Ok(1) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                _ => break,
+            }
+        }
         watched.gone.store(true, Ordering::SeqCst);
     });
+    // Ends the watch's read and the plugin's wait however this ends, a
+    // panicking handler included.
+    let closing = Closing(&stream);
     let answer = handler(request, &work);
     if !work.abandoned() {
         let reply = match answer {
@@ -170,7 +177,25 @@ fn connection(stream: UnixStream, controller: Controller, handler: &dyn Handler)
         };
         let _ = wire::send(&mut &stream, &reply);
     }
-    // Ends the watch's read whether or not the plugin is still there.
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    drop(closing);
     let _ = watch.join();
+}
+
+/// Shuts its connection down when dropped.
+struct Closing<'a>(&'a UnixStream);
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Answer with why there's no answer, then read and drop what the plugin
+/// is still sending, a bounded amount for a bounded time, so that it reads
+/// the reason rather than a reset.
+fn refuse(stream: &UnixStream, why: String) {
+    let _ = wire::send(&mut &*stream, &Reply::Refused(why));
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = io::copy(&mut stream.take(wire::MOST + 1), &mut io::sink());
 }

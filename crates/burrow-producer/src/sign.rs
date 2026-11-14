@@ -2,19 +2,99 @@
 //! "No signing verb"). A producer's Ed25519 key comes only from its
 //! systemd credential, which only its own user can read: never from the
 //! environment, an argument or a path. It signs only the producer's own
-//! results, each from the record of that result ([`Review`], [`Judgment`],
+//! results, each from its durable [`Record`] ([`Review`], [`Judgment`],
 //! [`Proof`]), as Conary's service statement (`attest::service`), with
-//! Conary's receipts as the log. Nothing here takes a statement to sign.
+//! Conary's receipts as the log, and only as [`crate::publish`] publishes
+//! that record. Nothing public signs, and nothing takes a statement.
+use crate::records::{Record, Target};
 use conary_core::plugin::{Judgment as Verdict, Provenance};
 use conary_github::attest::service::{self, Log, Revision, Statement};
 use conary_github::flow::{self, Recipe};
 use ed25519_dalek::SigningKey;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::OsString;
 use std::path::Path;
 
 /// The check a producer's review, judgment or proof is published as.
 const JUDGMENT: &str = "conary/judgment";
+
+/// A result a producer can publish signed: a [`Review`], a [`Judgment`] or
+/// a [`Proof`], and nothing else.
+pub trait Signable: sealed::Signs + Serialize + DeserializeOwned + Clone {
+    /// The check run it's published as.
+    fn target(&self) -> Target;
+}
+
+mod sealed {
+    /// How a result is signed. Its module is private, so only this crate
+    /// can call it or add a kind of result.
+    pub trait Signs {
+        fn signed_by(&self, signer: &super::Signer) -> super::Signed;
+    }
+}
+
+impl Signable for Review {
+    fn target(&self) -> Target {
+        Target {
+            repo: self.repo.clone(),
+            head: self.head.clone(),
+            check: format!("conary/review/{}", self.role),
+        }
+    }
+}
+
+impl sealed::Signs for Review {
+    fn signed_by(&self, signer: &Signer) -> Signed {
+        let log = flow::receipt_digest(&flow::review_receipt(&self.head, &self.body));
+        signer.sign(&self.target(), &self.tree, None, true, log)
+    }
+}
+
+impl Signable for Judgment {
+    fn target(&self) -> Target {
+        Target {
+            repo: self.repo.clone(),
+            head: self.revision.head.clone(),
+            check: JUDGMENT.into(),
+        }
+    }
+}
+
+impl sealed::Signs for Judgment {
+    fn signed_by(&self, signer: &Signer) -> Signed {
+        let receipt = flow::judgment_receipt_by(
+            &self.revision,
+            self.generation,
+            self.verdict,
+            self.provenance.as_ref(),
+        );
+        let log = flow::receipt_digest(&receipt);
+        signer.sign(&self.target(), &self.tree, None, true, log)
+    }
+}
+
+impl Signable for Proof {
+    fn target(&self) -> Target {
+        Target {
+            repo: self.repo.clone(),
+            head: self.head.clone(),
+            check: self.check.clone(),
+        }
+    }
+}
+
+impl sealed::Signs for Proof {
+    fn signed_by(&self, signer: &Signer) -> Signed {
+        let definition = flow::recipe_digest(&self.recipe);
+        signer.sign(
+            &self.target(),
+            &self.tree,
+            Some(definition),
+            self.passed,
+            self.log.clone(),
+        )
+    }
+}
 
 /// A review the flow published, as the review producer recorded the look
 /// that found it: signed as `conary/review/ROLE` over
@@ -60,7 +140,7 @@ pub struct Proof {
 }
 
 /// A signed result, as its check run's output text carries it. Only a
-/// [`Signer`] makes one.
+/// [`Signer`] makes one, from a record, as it's published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signed {
     text: String,
@@ -155,77 +235,44 @@ impl Signer {
         })
     }
 
-    /// Sign a published review the producer checked against its record.
-    pub fn review(&self, r: &Review) -> Signed {
-        let log = flow::receipt_digest(&flow::review_receipt(&r.head, &r.body));
-        self.sign(
-            &r.repo,
-            &r.head,
-            &r.tree,
-            &format!("conary/review/{}", r.role),
-            None,
-            true,
-            log,
-        )
+    /// The signed result `record` holds, for publication as its target.
+    pub(crate) fn signed<T: Signable>(&self, record: &Record<T>) -> Result<Signed, String> {
+        let data = record
+            .data()
+            .ok_or_else(|| format!("record {} holds no result to sign", record.id()))?;
+        if &data.target() != record.target() {
+            return Err(format!(
+                "record {} holds another target's result",
+                record.id()
+            ));
+        }
+        Ok(sealed::Signs::signed_by(data, self))
     }
 
-    /// Sign a judgment the producer issued.
-    pub fn judgment(&self, j: &Judgment) -> Signed {
-        let receipt =
-            flow::judgment_receipt_by(&j.revision, j.generation, j.verdict, j.provenance.as_ref());
-        let log = flow::receipt_digest(&receipt);
-        self.sign(
-            &j.repo,
-            &j.revision.head,
-            &j.tree,
-            JUDGMENT,
-            None,
-            true,
-            log,
-        )
-    }
-
-    /// Sign a proof's recorded exit, for the commit it ran on.
-    pub fn proof(&self, p: &Proof) -> Signed {
-        let definition = flow::recipe_digest(&p.recipe);
-        self.sign(
-            &p.repo,
-            &p.head,
-            &p.tree,
-            &p.check,
-            Some(definition),
-            p.passed,
-            p.log.clone(),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn sign(
         &self,
-        repo: &str,
-        head: &str,
+        target: &Target,
         tree: &str,
-        check: &str,
         definition: Option<String>,
         passed: bool,
         log: String,
     ) -> Signed {
         let statement = Statement {
             producer: self.producer.clone(),
-            repository: repo.into(),
+            repository: target.repo.clone(),
             revision: Revision {
                 base: None,
-                head: head.into(),
+                head: target.head.clone(),
             },
             tree: Some(tree.into()),
-            check: check.into(),
+            check: target.check.clone(),
             definition,
             result: if passed { "pass" } else { "fail" }.into(),
             log: Log { sha256: log },
         };
         Signed {
             text: service::sign(&statement, &self.key),
-            check: check.into(),
+            check: target.check.clone(),
             passed,
         }
     }

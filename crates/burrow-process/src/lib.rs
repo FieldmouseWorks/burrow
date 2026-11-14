@@ -194,7 +194,9 @@ mod tests {
             &format!("sleep 30 & echo $! > {}; wait", pid.display()),
         ]);
         let started = Instant::now();
-        let stop = || pid.exists();
+        // Stopped once the pid is written whole, not when the redirect
+        // makes the file.
+        let stop = || std::fs::read_to_string(&pid).is_ok_and(|p| p.ends_with('\n'));
         let out = output_unless(
             &mut command,
             None,
