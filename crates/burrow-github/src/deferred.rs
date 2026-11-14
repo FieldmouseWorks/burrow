@@ -81,10 +81,14 @@ pub fn held(hold: &Hold) -> Error {
     }
 }
 
-/// PASS under METER, the meters of an App and the owner whose installation
-/// the pass is about: held already, its hold and no call; otherwise the pass
-/// on a client that feeds the meter every answer, and a limit it meets
-/// recorded there, for the next caller on the installation.
+/// PASS under METER, the meters of an App and the owner of the
+/// installation the pass is bound to (its calls that name no other): on a
+/// client that feeds each answer to the meter of the installation it was
+/// about, and refuses, without asking GitHub, a call to one its meter
+/// holds already ([`Metered::refusing`]). A pass held off is booked for the
+/// latest hold among the installations it met one on, which the meter can
+/// know to outlast what the answer said; no other installation is held for
+/// it, the pass's own included.
 pub fn metered<T>(
     meter: Option<(&mut Meters, &str)>,
     api: &mut dyn Api,
@@ -94,28 +98,22 @@ pub fn metered<T>(
     let Some((meters, owner)) = meter else {
         return pass(api);
     };
-    if let Some(hold) = meters.held(owner, now) {
-        return Err(held(&hold));
-    }
-    let done = pass(&mut Metered {
-        api,
-        meters,
-        owner: Some(owner.into()),
-    });
-    match done {
-        Err(e) => Err(match meters.met(owner, &e, now) {
-            // The meter's hold, which can outlast what this answer said.
-            Some(hold) => Error {
-                retry_at: Some(hold.until),
-                ..e
-            },
-            None => e,
-        }),
-        Ok(done) => {
-            meters.record();
-            Ok(done)
-        }
-    }
+    let mut client = Metered::new(api, meters, Some(owner.into())).refusing();
+    let done = pass(&mut client);
+    let met = client.met().clone();
+    meters.record();
+    done.map_err(|e| match e.retry_at {
+        Some(retry_at) => Error {
+            retry_at: met
+                .iter()
+                .filter_map(|owner| meters.held(owner, now))
+                .map(|hold| hold.until)
+                .chain([retry_at])
+                .max(),
+            ..e
+        },
+        None => e,
+    })
 }
 
 /// [`run`], kicking the watchdog at KICK (a loopback http URL) when the

@@ -454,10 +454,15 @@ remain errors.
 
 The host's own passes (the issue doors, house-sync, renovate-run, the
 steward's upkeep) wait on the same meter, through burrow-github's
-`quota::Meters`. A pass asks its installation's meter before it starts, and
-a hold there books it in its wake file with no GitHub call. Every answer
-feeds the meter (`quota::Metered`). A limit met partway comes back as one
-`quota::Hold` (App, owner, until), which the pass books. A host pass may not
+`quota::Meters`. Every answer feeds the meter of the installation it was
+about (`quota::Metered`): a REST path's `repos/OWNER` or `orgs/OWNER`, a
+GraphQL call's owner, else the one the pass is bound to. A call to an
+installation its meter holds already is answered with that hold, with no
+GitHub call, and a pass held off is booked in its wake file for the latest
+hold among the installations it met one on, holding no other. A door's
+meter is the App its own gh acts as (`burrow.github.appOf`), and a door
+acting as no App has none. A spent budget holds until its reset whichever
+newer reading, of another resource or the same second, comes after it. A host pass may not
 write the door's directory, so what it meets itself counts for that pass
 only. What GitHub's answers say about limits is
 read in burrow-github and nowhere else, gh-token's observer aside. Its

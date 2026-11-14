@@ -65,15 +65,16 @@ pub fn run(
     }
     let started = now()?;
     let mut meters = Kept::meters(cfg.meters.as_ref());
+    // A held installation is asked nothing more, a call about it answered
+    // with its hold; except in a dry pass, which books nothing and asks
+    // anyway (Pass::already).
+    let client = Metered::new(api, &mut meters, None);
+    let mut client = if dry { client } else { client.refusing() };
     let mut pass = Pass {
         house: House::read(&cfg.house).map_err(|e| format!("{}: {e}", cfg.house.display()))?,
         dry,
         now: started,
-        api: &mut Metered {
-            api,
-            meters: &mut meters,
-            owner: None,
-        },
+        api: &mut client,
         out,
         failed: Vec::new(),
         mangled: Vec::new(),

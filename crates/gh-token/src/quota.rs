@@ -83,14 +83,7 @@ fn observe(trace: &std::fs::File, context: Context<'_>) -> io::Result<()> {
             headers: record.headers.unwrap_or_default(),
             body: record.body,
         };
-        let mut observed = Meter::new(app, owner, record.at);
-        observed.remaining = response
-            .header("x-ratelimit-remaining")
-            .and_then(|s| s.parse().ok());
-        observed.reset = response
-            .header("x-ratelimit-reset")
-            .and_then(|s| s.parse().ok());
-        observed.response(&response);
+        let observed = Meter::reading(app, owner, &response, record.at);
         if observed.retry_at.is_some()
             && let Some(dir) = refusals
             && let Err(e) = save(&observed, dir)

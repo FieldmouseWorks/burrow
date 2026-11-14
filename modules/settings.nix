@@ -59,7 +59,7 @@ in {
       path = [ cfg.door.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = "${stateDir}/settings-door/wake.json";
-      environment.BURROW_DOOR_METER = config.burrow.github.doorMeter cfg.door.repo;
+      environment.BURROW_DOOR_METER = config.burrow.github.doorMeter (config.burrow.github.appOf cfg.door.gh) cfg.door.repo;
       serviceConfig = {
         Type = "oneshot";
         User = user;

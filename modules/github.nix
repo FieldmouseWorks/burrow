@@ -268,24 +268,50 @@ in
     description = "`machinery`'s App, with its name, for the modules that run the jobs; null for none.";
   };
 
+  options.burrow.github.appOf = mkOption {
+    type = types.functionTo (types.nullOr types.str);
+    readOnly = true;
+    internal = true;
+    default = gh: let named = lib.attrNames (lib.filterAttrs (_: app: app.gh == gh) cfg.apps);
+      in if named == [ ] then null else lib.head named;
+    defaultText = lib.literalMD "the name of the App in `apps` whose `gh` GH is; null for any other gh";
+    description = "The App a gh package acts as: the one of `apps` it's the `gh` of, else null (a user's own login, a stand-in), which has no installation meter.";
+  };
+
+  options.burrow.github.metersOf = mkOption {
+    type = types.functionTo (types.nullOr (types.attrsOf types.str));
+    readOnly = true;
+    internal = true;
+    default = app: if app == null then null else { dir = cfg.quotaDir; inherit app; };
+    defaultText = lib.literalMD "`quotaDir` and APP; null for no App";
+    description = "Where the meters of the App APP's installations are kept (burrow-github's quota::Kept); null when APP is null, as no App is metered.";
+  };
+
   options.burrow.github.machineMeters = mkOption {
     type = types.nullOr (types.attrsOf types.str);
     readOnly = true;
     internal = true;
-    default = if cfg.machineApp == null then null else { dir = cfg.quotaDir; app = cfg.machineApp.name; };
-    defaultText = lib.literalMD "`quotaDir` and `machinery`'s App's name; null for none";
+    default = cfg.metersOf (if cfg.machineApp == null then null else cfg.machineApp.name);
+    defaultText = lib.literalMD "`metersOf` `machinery`'s App; null for none";
     description = "Where the meters of `machinery`'s installations are kept (burrow-github's quota::Kept), for the programs that act as it.";
   };
 
   options.burrow.github.doorMeter = mkOption {
-    type = types.functionTo types.str;
+    type = types.functionTo (types.functionTo types.str);
     readOnly = true;
     internal = true;
-    default = repo: if cfg.machineMeters == null then "" else builtins.toJSON (cfg.machineMeters // {
-      owner = lib.head (lib.splitString "/" repo);
-    });
-    defaultText = lib.literalMD "the installation meter of `machinery`'s App on REPO's owner, as JSON; empty for none";
-    description = "BURROW_DOOR_METER for a door acting as `machineGh` on REPO: the meter its pass is held by and feeds (burrow-github's deferred::configured).";
+    default = app: repo: let meters = cfg.metersOf app; in
+      if meters == null then "" else builtins.toJSON (meters // {
+        owner = lib.head (lib.splitString "/" repo);
+      });
+    defaultText = lib.literalMD "the meter of APP's installation on REPO's owner, as JSON; empty for no App";
+    description = ''
+      BURROW_DOOR_METER for a door acting as the App APP on REPO: the meter
+      its pass is held by and feeds (burrow-github's deferred::configured).
+      APP is the identity the door's own gh authenticates as (`appOf` its gh,
+      or what the door declares); null, for a user's login or a gh no App
+      owns, is no meter, never another App's.
+    '';
   };
 
   options.burrow.github.machineGh = mkOption {
