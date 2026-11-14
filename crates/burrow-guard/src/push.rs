@@ -2,6 +2,11 @@
 //! every other clone depends on. What a push targets is read from its
 //! refspecs, or, with none, from the branch checked out where it runs and
 //! that branch's upstream (`git push --force` on main).
+//!
+//! And any branch's forced update is refused unless it holds a lease on
+//! the head its pusher saw ([`unleased`]): two jobs, or a job and a
+//! session, can work on one PR, and a force-push rebuilt from a stale
+//! branch drops whatever the other pushed since.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -29,6 +34,41 @@ pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
 }
 
 fn read(cmd: &str, cwd: &Path, git: &Path) -> Result<Vec<String>, Unread> {
+    let mut places = Places {
+        git,
+        seen: HashMap::new(),
+    };
+    let mut asks = Vec::new();
+    for (at, push) in pushes(cmd, cwd)? {
+        asks.extend(push.ask(&at, &mut places)?);
+    }
+    Ok(asks)
+}
+
+/// Why a push in `cmd` is refused outright, whoever runs it and whatever
+/// branch it names: it can force an update without a lease on the head
+/// its pusher saw. Git's own `--force-with-lease`, bare, compares the
+/// remote with the remote-tracking ref, which any fetch moves, so a branch
+/// rebuilt from a stale local copy after a fetch still overwrites the
+/// commits it never held; `--force-if-includes` adds that the
+/// remote-tracking tip is in the local branch's reflog, that is, was
+/// taken in. A lease naming the object it expects (`=BRANCH:SHA`) is the
+/// head the pusher saw, said outright. `-f`, `--force`, a `+` refspec or
+/// `--mirror` override any lease. A command the guard can't read is
+/// [`asks`]'s.
+pub fn unleased(cmd: &str, cwd: &Path) -> Option<String> {
+    let pushes = pushes(cmd, cwd).ok()?;
+    pushes
+        .iter()
+        .any(|(_, p)| !p.leased())
+        .then(|| UNLEASED.to_owned())
+}
+
+/// What [`unleased`] says.
+pub const UNLEASED: &str = "Force-push without a lease on the head you last saw: another job or session may have pushed to this branch since, and this would drop their commits. Fetch, take the remote branch in (rebase onto it, or reset to it and redo your change), then push with --force-with-lease --force-if-includes and no -f, --force or +refspec, or name the commit you mean to replace with --force-with-lease=BRANCH:SHA.";
+
+/// Each push in `cmd`, with where it runs.
+fn pushes(cmd: &str, cwd: &Path) -> Result<Vec<(PathBuf, Push)>, Unread> {
     let mut found = Vec::new();
     walk::walk(cmd, &mut |word, rest, budget, more| {
         if runs_git(word, rest.iter(budget).next())
@@ -39,15 +79,7 @@ fn read(cmd: &str, cwd: &Path, git: &Path) -> Result<Vec<String>, Unread> {
         }
         Ok(())
     })?;
-    let mut places = Places {
-        git,
-        seen: HashMap::new(),
-    };
-    let mut asks = Vec::new();
-    for (at, push) in found {
-        asks.extend(push.ask(&at, &mut places)?);
-    }
-    Ok(asks)
+    Ok(found)
 }
 
 /// How many places a command's pushes with no refspec may ask git about.
@@ -114,6 +146,24 @@ struct Push {
     /// whatever files match it: any number of words, which may force
     /// (`-f`, `+…`) and name any branch.
     globbed: bool,
+    /// Its forcing options as git reads them, for [`Push::leased`].
+    lease: Lease,
+}
+
+/// What a push forces with, as git reads its options: the last of each
+/// wins.
+#[derive(Debug, Default)]
+struct Lease {
+    /// `-f` or `--force` (undone by a later `--no-force`), which overrides
+    /// any lease.
+    force: bool,
+    /// `--mirror`, which force-updates every ref.
+    mirror: bool,
+    /// Each `--force-with-lease` since the last `--no-force-with-lease`:
+    /// the object it expects, or None for the remote-tracking ref's.
+    leases: Vec<Option<String>>,
+    /// `--force-if-includes` (undone by a later `--no-force-if-includes`).
+    if_includes: bool,
 }
 
 impl Push {
@@ -135,6 +185,7 @@ impl Push {
                 w if shell::is_only_a_parameter_text(w) => {}
                 w if let Some(option) = w.strip_prefix("--") => {
                     let (name, value) = option.split_once('=').unzip();
+                    p.lease.read(name.unwrap_or(option), value);
                     match long(name.unwrap_or(option)) {
                         Long::Force => p.force = true,
                         Long::All => p.all = true,
@@ -150,7 +201,8 @@ impl Push {
                 w if w.starts_with('-') => {
                     for (i, c) in w.char_indices().skip(1) {
                         match c {
-                            'f' | 'd' => p.force = true,
+                            'f' => (p.force, p.lease.force) = (true, true),
+                            'd' => p.force = true,
                             'o' => {
                                 if i + 1 == w.len() {
                                     words.next();
@@ -173,6 +225,26 @@ impl Push {
     fn positional(&mut self, word: &str) {
         self.force |= word.starts_with('+') || (word.starts_with(':') && word != ":");
         self.positional.push(word.to_owned());
+    }
+
+    /// Whether it can force an update only where the remote still holds
+    /// what its pusher saw ([`unleased`]): each lease checks an object id
+    /// it names or, with `--force-if-includes`, a remote-tracking tip the
+    /// local branch took in, and nothing overrides them. One that forces
+    /// nothing is leased: git only fast-forwards it. One the guard can't
+    /// read is [`Push::ask`]'s.
+    fn leased(&self) -> bool {
+        let lease = &self.lease;
+        if self.globbed || self.more {
+            return true;
+        }
+        if lease.force || lease.mirror || self.positional.iter().any(|w| w.starts_with('+')) {
+            return false;
+        }
+        lease.leases.iter().all(|expect| match expect {
+            None => lease.if_includes,
+            Some(oid) => oid.is_empty() || is_object_id(oid),
+        })
     }
 
     fn ask(&self, at: &Path, places: &mut Places<'_>) -> Result<Option<String>, Unread> {
@@ -240,6 +312,35 @@ impl Places<'_> {
         }
         Ok(&self.seen[at])
     }
+}
+
+impl Lease {
+    /// Takes in `--NAME[=VALUE]` as git reads it: the option named so, or
+    /// the only one NAME begins, undone by `--no-` before it.
+    fn read(&mut self, name: &str, value: Option<&str>) {
+        let (negated, name) = name
+            .strip_prefix("no-")
+            .map_or((false, name), |rest| (true, rest));
+        match (resolve(name), negated) {
+            (Some("force"), _) => self.force = !negated,
+            (Some("mirror"), false) => self.mirror = true,
+            (Some("force-with-lease"), false) => self.leases.push(
+                value
+                    .and_then(|v| v.split_once(':'))
+                    .map(|(_, expect)| expect.to_owned()),
+            ),
+            (Some("force-with-lease"), true) => self.leases.clear(),
+            (Some("force-if-includes"), _) => self.if_includes = !negated,
+            _ => {}
+        }
+    }
+}
+
+/// Whether `text` is a whole object id, as a lease's expected value must
+/// be to name the commit its pusher saw: not a ref (`origin/x`, which a
+/// fetch moves) nor an expansion the guard can't read.
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// What `refspec` updates, if that can be a shared branch: its destination,
@@ -345,13 +446,20 @@ const LONG: [(&str, Long); 28] = [
 /// forces nothing, and one that's unknown or could be several stops git
 /// before it pushes.
 fn long(name: &str) -> Long {
-    if let Some(&(_, long)) = LONG.iter().find(|(n, _)| *n == name) {
-        return long;
+    resolve(name)
+        .and_then(|name| LONG.iter().find(|(n, _)| *n == name))
+        .map_or(Long::Other, |&(_, long)| long)
+}
+
+/// The full name of the option `--NAME`, if git takes it for one.
+fn resolve(name: &str) -> Option<&'static str> {
+    if let Some(&(n, _)) = LONG.iter().find(|(n, _)| *n == name) {
+        return Some(n);
     }
     let mut begun = LONG.iter().filter(|(n, _)| n.starts_with(name));
     match (begun.next(), begun.next()) {
-        (Some(&(_, long)), None) => long,
-        _ => Long::Other,
+        (Some(&(n, _)), None) => Some(n),
+        _ => None,
     }
 }
 
@@ -374,7 +482,7 @@ fn run(git: &Path, at: &Path, args: &[&str]) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use super::asks;
+    use super::{asks, unleased};
 
     /// What the guard asks of `cmd`; each names its refspecs, so git is
     /// never asked.
@@ -487,6 +595,65 @@ mod tests {
                 ["Force-push or delete of 'main' (R2: rewrites history other clones depend on)."],
                 "{cmd:?}"
             );
+        }
+    }
+
+    /// git's forcing options as git reads them: the last of each wins, an
+    /// abbreviation is the one option it begins, and `-f`, `--force`, `+`
+    /// and `--mirror` override any lease.
+    #[test]
+    fn a_force_push_needs_a_lease_on_what_its_pusher_saw() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let oid256 = "0123456789abcdef".repeat(4);
+        for cmd in [
+            "git push -f origin pr".to_owned(),
+            "git push --force origin pr".to_owned(),
+            "git push -uf origin pr".to_owned(),
+            "git push origin +pr".to_owned(),
+            "git push origin +HEAD:refs/heads/pr".to_owned(),
+            "git push --force-with-lease --force-if-includes origin -- +pr".to_owned(),
+            "git push --mirror".to_owned(),
+            "git push --force-with-lease origin pr".to_owned(),
+            "git push --force-with-l origin pr".to_owned(),
+            "git push --force-with-lease=pr origin pr".to_owned(),
+            "git push --force-with-lease=pr:origin/pr origin pr".to_owned(),
+            "git push --force-with-lease=pr:$(git rev-parse origin/pr) origin pr".to_owned(),
+            format!("git push --force-with-lease=pr:{} origin pr", &oid[..12]),
+            "git push --force-with-lease --force-if-includes -f origin pr".to_owned(),
+            "git push --force-with-lease --force-if-includes --no-force-if-includes origin pr"
+                .to_owned(),
+            "git push --no-force -f --force-with-lease --force-if-includes origin pr".to_owned(),
+            format!("git push --force-with-lease=a:{oid} --force-with-lease=b origin a b"),
+            "git push origin x && git push -f origin pr".to_owned(),
+            "bash -c 'git push -f origin pr'".to_owned(),
+            "git -C ../x push --force origin pr".to_owned(),
+        ] {
+            assert_eq!(
+                unleased(&cmd, Path::new("/")).as_deref(),
+                Some(super::UNLEASED),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "git push origin pr".to_owned(),
+            "git push -u origin HEAD".to_owned(),
+            "git push --force-with-lease --force-if-includes origin pr".to_owned(),
+            "git push --force-if-includes --force-with-lease origin HEAD:pr".to_owned(),
+            "git push --force-with-l --force-if-i origin pr".to_owned(),
+            "git push --force-with-lease=pr --force-if-includes origin pr".to_owned(),
+            format!("git push --force-with-lease=pr:{oid} origin pr"),
+            format!("git push --force-with-lease=pr:{oid256} origin pr"),
+            "git push --force-with-lease=pr: origin pr".to_owned(),
+            "git push -f --no-force --force-with-lease --force-if-includes origin pr".to_owned(),
+            "git push --force-with-lease --no-force-with-lease origin pr".to_owned(),
+            "git push --force-if-includes origin pr".to_owned(),
+            // A delete rewrites nothing onto a stale branch.
+            "git push -d origin pr".to_owned(),
+            "git push origin :pr".to_owned(),
+            "git push -o ci.skip origin pr".to_owned(),
+            "echo git push -o -f".to_owned(),
+        ] {
+            assert_eq!(unleased(&cmd, Path::new("/")), None, "{cmd}");
         }
     }
 }

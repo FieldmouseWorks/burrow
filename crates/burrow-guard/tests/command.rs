@@ -88,7 +88,7 @@ fn a_guard_that_takes_too_long_asks() {
         r#"{{"git": "{}", "zfs": "/no-such-zfs", "systemdRun": "/no-such-systemd-run", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
         git.display()
     );
-    let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push -f"}, "cwd": "/"}"#;
+    let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push --force-with-lease --force-if-includes"}, "cwd": "/"}"#;
     let started = Instant::now();
     let out: serde_json::Value = serde_json::from_str(&hook(&config, input)).unwrap();
     assert!(started.elapsed() < Duration::from_secs(20));
@@ -97,4 +97,20 @@ fn a_guard_that_takes_too_long_asks() {
         "The guard couldn't check this command (no answer after 1 s), so it asks."
     );
     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
+}
+
+/// A force-push with no lease on the head its pusher saw has a safe
+/// spelling, so the guard refuses it rather than ask, Claude's guard too.
+#[test]
+fn an_unleased_force_push_is_refused_not_asked() {
+    let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push -f origin feature"}, "cwd": "/"}"#;
+    let out: serde_json::Value = serde_json::from_str(&hook(CONFIG, input)).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("--force-with-lease --force-if-includes"),
+        "{reason}"
+    );
 }
