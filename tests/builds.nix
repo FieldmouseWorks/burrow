@@ -74,11 +74,15 @@ pkgs.testers.runNixOSTest {
             "--data-binary @/tmp/body http://localhost/builds/upload"
         )
 
+    # Nix remembers a missing narinfo for an hour: a path refused first
+    # would read as missing when it's later admitted.
+    fresh = "--option narinfo-cache-negative-ttl 0"
+
     def substitute(path, root):
         key = machine.succeed("curl -fsS http://localhost/builds/public-key").strip()
         return machine.execute(
             f"nix copy --from http://localhost/builds --to 'local?root={root}' {path} "
-            f"--option trusted-public-keys '{key}' --option substituters '''"
+            f"--option trusted-public-keys '{key}' --option substituters ''' {fresh}"
         )[0]
 
     start_all()
@@ -116,7 +120,8 @@ pkgs.testers.runNixOSTest {
         # Another key isn't trusted.
         assert machine.execute(
             "nix copy --from http://localhost/builds --to 'local?root=/tmp/d' ${two} "
-            "--option trusted-public-keys 'other-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --option substituters '''"
+            "--option trusted-public-keys 'other-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --option substituters ''' "
+            + fresh
         )[0] != 0
 
     with subtest("uploaded again, it's stored once"):
