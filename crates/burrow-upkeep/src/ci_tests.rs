@@ -14,9 +14,11 @@ struct Hub {
     status: u16,
     lost: bool,
     annotation_failure: bool,
-    /// The failed jobs' steps, and the conclusion a finished run ends with
-    /// (cancelled when unset).
+    /// The failed jobs' steps, the run attempt they ran in (the run's own
+    /// when unset), and the conclusion a finished run ends with (cancelled
+    /// when unset).
     steps: Value,
+    job_attempt: Option<u64>,
     ended: Option<&'static str>,
 }
 
@@ -38,7 +40,11 @@ impl Api for Hub {
             }
             (200, json!([]))
         } else if path.contains("/actions/jobs/") {
-            (200, json!({"steps": self.steps}))
+            (
+                200,
+                json!({"steps": self.steps,
+                       "run_attempt": self.job_attempt.unwrap_or(self.attempt.max(1))}),
+            )
         } else if method == "POST" {
             if self.status == 0 || self.status == 201 || self.lost {
                 self.attempt += 1;
@@ -412,4 +418,105 @@ fn any_other_failed_step_keeps_a_failure_red() {
     let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE"), lint]);
     assert_eq!(run(&mut h, &a, false).unwrap().state, "red");
     assert_eq!(posts(&h), 0);
+}
+
+#[test]
+fn an_attestation_failure_in_a_job_that_continues_on_error_is_run_again_once() {
+    // The job failed, but its workflow run succeeded around it.
+    let mut h = Hub {
+        attempt: 1,
+        steps: steps(&[ATTEST_RUN]),
+        ended: Some("success"),
+        ..Hub::default()
+    };
+    let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+    assert_eq!(run(&mut h, &a, false).unwrap().state, "pending");
+    assert_eq!(posts(&h), 1);
+    h.going = false;
+    let got = run(&mut h, &a, false).unwrap();
+    assert_eq!(got.state, "red");
+    assert_eq!(
+        got.names,
+        ["train / negative (attestation upload failed again after a rerun)"]
+    );
+    assert_eq!(posts(&h), 1);
+}
+
+#[test]
+fn an_attestation_failure_from_an_earlier_attempt_waits_for_the_later_one() {
+    // A newer attempt of the run has finished, however it ended: this
+    // check run is its earlier attempt's, so the newer one's decides.
+    for ended in ["success", "failure"] {
+        let mut h = Hub {
+            attempt: 2,
+            job_attempt: Some(1),
+            steps: steps(&[ATTEST_RUN]),
+            ended: Some(ended),
+            ..Hub::default()
+        };
+        let a = ask(vec![check_run("train / negative", 11, 7, "FAILURE")]);
+        let got = run(&mut h, &a, false).unwrap();
+        assert_eq!(got.state, "pending", "{ended}");
+        assert_eq!(
+            got.names,
+            ["train / negative (attestation upload failed, run again)"],
+            "{ended}"
+        );
+        assert_eq!(posts(&h), 0, "{ended}");
+    }
+}
+
+/// A check run moved into a workflow known by its id and file.
+fn in_workflow(c: Value, id: &str, path: &str) -> Value {
+    let mut c = c;
+    c["checkSuite"]["workflowRun"]["workflow"]["id"] = json!(id);
+    c["checkSuite"]["workflowRun"]["file"] = json!({"path": path});
+    c
+}
+
+#[test]
+fn an_attestation_failure_waits_for_a_replacement_run_of_its_workflow() {
+    const FLAKE: &str = ".github/workflows/flake.yml";
+    const RETARGET: &str = ".github/workflows/flake-retarget.yml";
+    // A newer run on the head has started (its setup job done, the rest
+    // not yet) in the same workflow, or in flake-retarget.yml, which is
+    // flake.yml's: no rerun before it ends, and no red on attempt 2.
+    for (id, path) in [("w7", FLAKE), ("twin", RETARGET)] {
+        for attempt in [1, 2] {
+            let mut h = Hub {
+                attempt,
+                steps: steps(&[ATTEST_RUN]),
+                ended: Some("failure"),
+                ..Hub::default()
+            };
+            let mut setup = in_workflow(check_run("setup", 21, 8, "SUCCESS"), id, path);
+            setup["checkSuite"]["status"] = json!("IN_PROGRESS");
+            let a = ask(vec![
+                in_workflow(check_run("train / negative", 11, 7, "FAILURE"), "w7", FLAKE),
+                setup,
+            ]);
+            let got = run(&mut h, &a, false).unwrap();
+            assert_eq!(got.state, "pending", "{path} attempt {attempt}");
+            assert_eq!(posts(&h), 0, "{path} attempt {attempt}");
+        }
+    }
+    // Another workflow's run going stands in for nothing: run again once.
+    let mut h = Hub {
+        attempt: 1,
+        steps: steps(&[ATTEST_RUN]),
+        ended: Some("failure"),
+        ..Hub::default()
+    };
+    let mut other = in_workflow(
+        check_run("setup", 21, 8, "SUCCESS"),
+        "other",
+        ".github/workflows/other.yml",
+    );
+    other["checkSuite"]["status"] = json!("IN_PROGRESS");
+    let a = ask(vec![
+        in_workflow(check_run("train / negative", 11, 7, "FAILURE"), "w7", FLAKE),
+        other,
+    ]);
+    run(&mut h, &a, false).unwrap();
+    assert_eq!(posts(&h), 1);
 }

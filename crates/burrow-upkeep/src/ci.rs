@@ -75,8 +75,9 @@ struct Recovery {
     due: BTreeMap<String, &'static str>,
     /// Check runs GitHub stopped for running past their timeout.
     timed_out: BTreeSet<u64>,
-    /// Failed check runs whose only failed steps uploaded the attestation.
-    attest_only: BTreeSet<u64>,
+    /// Failed check runs whose only failed steps uploaded the attestation,
+    /// with the run attempt their job ran in.
+    attest_only: BTreeMap<u64, u64>,
 }
 
 #[derive(Deserialize)]
@@ -117,8 +118,8 @@ pub fn check(p: &mut Pass, ask: &Ask) -> Result<Verdict, Error> {
         {
             // An Actions check run's id is its job's.
             let job = p.get(&format!("repos/{}/actions/jobs/{id}", p.repo))?;
-            if attest_only(&job) {
-                recovery.attest_only.insert(id);
+            if let Some(attempt) = attest_only(&job) {
+                recovery.attest_only.insert(id, attempt);
             }
         }
     }
@@ -194,31 +195,56 @@ fn failed(c: &Value) -> bool {
     c["status"] == "COMPLETED" && c["conclusion"] == "FAILURE"
 }
 
-/// Whether a job failed only in its attestation upload: at least one step
-/// failed, and every one that did was actions/attest.
-fn attest_only(job: &Value) -> bool {
+/// The run attempt of a job that failed only in its attestation upload: at
+/// least one step failed, and every one that did was actions/attest.
+fn attest_only(job: &Value) -> Option<u64> {
     let failed: Vec<_> = array(&job["steps"])
         .iter()
         .filter(|s| s["conclusion"] == "failure")
         .collect();
-    !failed.is_empty()
+    let only = !failed.is_empty()
         && failed
             .iter()
-            .all(|s| text(&s["name"]).is_some_and(|n| n.starts_with(ATTEST)))
+            .all(|s| text(&s["name"]).is_some_and(|n| n.starts_with(ATTEST)));
+    job["run_attempt"].as_u64().filter(|a| only && *a > 0)
 }
 
-/// Why a completed check run may be run again once, and the conclusion its
-/// workflow run ends with before that: a cancellation, or an attestation
-/// upload alone failing.
-fn retryable(c: &Value, recovery: &Recovery) -> Option<(&'static str, &'static str)> {
+/// Why a completed check run may be run again once.
+enum Retry {
+    Cancelled,
+    /// Its attestation upload alone failed, in this attempt of its run.
+    Attest(u64),
+}
+
+impl Retry {
+    fn said(&self) -> &'static str {
+        match self {
+            Retry::Cancelled => "cancelled",
+            Retry::Attest(_) => "attestation upload failed",
+        }
+    }
+
+    /// Whether its workflow run, read back, has gone on past this check
+    /// run: still going, or another attempt since. A job's own attempt says
+    /// so for an attestation; a run's conclusion needn't be its failed
+    /// job's (a job may continue on error).
+    fn moved_on(&self, r: &Run) -> bool {
+        r.status != "completed"
+            || match self {
+                Retry::Cancelled => r.conclusion.as_deref() != Some("cancelled"),
+                Retry::Attest(attempt) => r.run_attempt != *attempt,
+            }
+    }
+}
+
+fn retryable(c: &Value, recovery: &Recovery) -> Option<Retry> {
     if cancelled(c) {
-        Some(("cancelled", "cancelled"))
-    } else if failed(c)
-        && c["databaseId"]
+        Some(Retry::Cancelled)
+    } else if failed(c) {
+        c["databaseId"]
             .as_u64()
-            .is_some_and(|id| recovery.attest_only.contains(&id))
-    {
-        Some(("attestation upload failed", "failure"))
+            .and_then(|id| recovery.attest_only.get(&id))
+            .map(|a| Retry::Attest(*a))
     } else {
         None
     }
@@ -295,8 +321,9 @@ fn classify(
                 going.insert(run_id(c));
             }
             // A replacement run is alive: wait for its verdict before asking
-            // GitHub to start this workflow yet again.
-            let replaced = cancelled(c)
+            // GitHub to start this workflow yet again, or calling it red.
+            let retry = retryable(c, recovery);
+            let replaced = retry.is_some()
                 && workflow(c).is_some()
                 && contexts.iter().any(|x| {
                     x["__typename"] == "CheckRun"
@@ -317,7 +344,8 @@ fn classify(
             {
                 red.push(format!("{name} (timed out)"));
                 broken.insert(run_id(c));
-            } else if let Some((said, ended)) = retryable(c, recovery) {
+            } else if let Some(retry) = retry {
+                let said = retry.said();
                 let key = if ask.recover { rerun_key(c) } else { None };
                 let info = key.as_ref().and_then(|k| recovery.runs.get(k));
                 match key {
@@ -330,10 +358,7 @@ fn classify(
                             recovery.lookup.insert(k);
                             pending.push(format!("{name} ({said}, to be run again)"));
                         }
-                        Some(r)
-                            if r.status != "completed"
-                                || r.conclusion.as_deref() != Some(ended) =>
-                        {
+                        Some(r) if retry.moved_on(r) => {
                             pending.push(format!("{name} ({said}, run again)"))
                         }
                         Some(r) if r.run_attempt >= 2 => {

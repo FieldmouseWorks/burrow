@@ -404,6 +404,7 @@ ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless 
 RERUNS = []  # the workflow runs (by id) the steward ran again
 RERUN_FAILS = {}  # a run's id to what its rerun raises: none unless set
 RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion: attempt 1, cancelled, unless set
+ACTIONS_JOBS = {}  # an Actions job's run_attempt and steps, by its id: attempt 1, its own step failed, unless set
 
 
 # The CI owner runs as compiled Rust, against an HTTP transport fixture.
@@ -427,6 +428,7 @@ def ci_upkeep(*args, **kw):
 
     data = {"runs": RUN_INFO, "failures": {k: error(v) for k, v in RERUN_FAILS.items()},
             "annotations": {k: error(v) if isinstance(v, Exception) else v for k, v in ANNOTATIONS.items()},
+            "jobs": ACTIONS_JOBS,
             "fork": FORK, "forks": FORKS, "reruns": [], "asked": [],
             "app": C.token(args[1].split("/")[0].lower()) if kw.get("as_app", True) and not C.DRY else None}
     with open(CI_FIXTURE, "w") as f:

@@ -40,6 +40,10 @@ elif "/actions/runs/" in path:
             status, body = 201, {}
     else:
         body = info
+elif "/actions/jobs/" in path:
+    # A job none set failed in a step of its own: a genuine failure.
+    body = data["jobs"].get(path.rsplit("/", 1)[1],
+                            {"run_attempt": 1, "steps": [{"name": "Run the check", "conclusion": "failure"}]})
 elif "/compare/" in path:
     base = urllib.parse.unquote(path.split("/compare/", 1)[1].split("...", 1)[0])
     fork = data["forks"].pop(0) if data["forks"] else data["fork"].get(base, data["fork"]["v"])
