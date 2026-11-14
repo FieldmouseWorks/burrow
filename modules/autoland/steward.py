@@ -280,6 +280,7 @@ def run_pass(kick, continuing=False):
         seen.add(repo)
         deferred.add(repo)
         operations_complete = True
+        seen_all = True  # its PRs: False once its look fails short of them
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
             try:
@@ -405,12 +406,13 @@ def run_pass(kick, continuing=False):
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
+                seen_all = False
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
             upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
             if operations_complete:
-                batch.finish(repo)
+                batch.finish(repo, seen_all)
                 deferred.discard(repo)
             else:
                 complete = False
