@@ -32,6 +32,8 @@ members = [
     "burrow-proj",
     "burrow-settings",
     "burrow-process",
+    "burrow-brief",
+    "burrow-producer",
     "burrow-proof",
     "burrow-renovate",
     "burrow-review",

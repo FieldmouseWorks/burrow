@@ -176,6 +176,7 @@ pub mod pick;
 pub mod planning;
 pub mod probe;
 mod question;
+pub mod record;
 pub mod retry;
 pub mod scratch;
 pub mod select;

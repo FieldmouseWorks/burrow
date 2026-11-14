@@ -295,7 +295,7 @@ did.
 | The four derivations in `job.rs`, the snapshot's, the inbox view's and pass's, and the lines `proj lifecycle` prints for the steward and burrow-upkeep to parse | rule 1: they read the record |
 | The state markers in a job's directory, the policy's park, order and restoring files | rule 1: they are fields |
 | Free-form holds; parking without a release | rule 2: `Wait` |
-| The watcher, the policy unit, the turn-ended unit's fan-out of kicks, the three wake files, the lists of who is waiting on a sorting slot, the drain or a hold | rules 3 and 5: one pass, one wake |
+| The watcher, the policy unit, the turn-ended unit's fan-out of kicks, the four wake files and `proj-inbox-drain`, the lists of who is waiting on a sorting slot, the drain or a hold | rules 3 and 5: one pass, one wake |
 | The inbox's local bookkeeping inside its GitHub pass | rule 3: the local half |
 | The process line, the poll, the deploy handover, `retry.rs` and its fixtures, the retry barrier and transfer units | rule 4 |
 | The watchdog's per-source timeouts | rule 5: one rule |
@@ -381,7 +381,8 @@ The rules the stages keep:
 
 ### Where it stands
 
-Stage 0 is in flight: #957 has landed. Nothing else has landed.
+Stage 0 has landed: #957, #970 (as #1136), #943 (as #1137) and #1110.
+Its review leftovers are #1138. No later stage has landed.
 
 ## What this doesn't do
 
