@@ -414,10 +414,22 @@ def run_pass(kick, continuing=False):
                 deferred.discard(repo)
             else:
                 complete = False
+    # A full pass over new work (a bare kick: settings or admission changed,
+    # a job's question, the catch-up) is news to every repo. The rest of the
+    # traversal still reaches the ones it hasn't entered, with no receipts
+    # to keep. The ones it finished, and the ones whose receipts its
+    # continuation would keep, owe a pass of their own, which burrow-events
+    # runs beside the full one (its line.rs); a repo's own kicks and events
+    # stay on its line meanwhile.
+    if kick is None and not continuing:
+        cursors = batch.state["finished"] + list(batch.state["repos"])
+        for r in all_repos:
+            repo = r["repo"].lower()
+            if (r["repo"] not in seen or repo in batch.state["repos"]) and repo in cursors:
+                retry = batch.state["retry"].get(repo, 0)
+                C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
     # This pass's wake-ups and owner's lines replace the ones it had for the
-    # repos it saw; a full pass's, all of them. A repo this batch didn't
-    # reach keeps its own requests: burrow-events runs a repo's pass beside
-    # the full one (its line.rs), and keeps the wake-ups below.
+    # repos it saw; a full pass's, all of them.
     inventory = {r["repo"] for r in all_repos}
     names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
     visited.update(r.lower() for r in kick or () if r.lower() not in names)

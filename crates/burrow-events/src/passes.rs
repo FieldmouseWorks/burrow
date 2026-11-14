@@ -140,27 +140,40 @@ pub fn serve(
             }
         }
         let (ready, wait) = line.take(now());
-        for (pass, scope) in &ready {
-            let unit = h.unit(pass);
-            match scope {
-                Scope::All => eprintln!("{name}: {pass}"),
-                Scope::Issues(ns) => {
-                    let ns: Vec<String> = ns.iter().map(|n| format!("#{n}")).collect();
-                    eprintln!("{name}: {pass} {}", ns.join(" "));
-                }
-            }
+        let started = !ready.is_empty();
+        let mut ready = ready.into_iter();
+        while let Some((pass, scope)) = ready.next() {
+            let unit = h.unit(&pass);
             // One already running (from before this service started, say)
             // began before this pass was due, and asking for it again only
             // waits for that one: so it runs again once that one is done.
             if units.state(&unit) == "activating" {
                 units.start(&unit);
             }
-            let told = tell(name, h, pass, scope);
+            // Yielding is at every pass's start: the line it yields to may
+            // have got work while the one before ran. What hasn't started
+            // goes back, as it was, for once that line is idle.
+            if first.is_some_and(|f| f.busy(now())) {
+                let at = now();
+                line.untake(&pass, &scope, at);
+                for (pass, scope) in ready.by_ref() {
+                    line.untake(&pass, &scope, at);
+                }
+                break;
+            }
+            match &scope {
+                Scope::All => eprintln!("{name}: {pass}"),
+                Scope::Issues(ns) => {
+                    let ns: Vec<String> = ns.iter().map(|n| format!("#{n}")).collect();
+                    eprintln!("{name}: {pass} {}", ns.join(" "));
+                }
+            }
+            let told = tell(name, h, &pass, &scope);
             let ok = units.start(&unit);
             if let Some(f) = told {
                 let _ = fs::remove_file(f);
             }
-            if let Some(again) = line.done(pass, ok, now()) {
+            if let Some(again) = line.done(&pass, ok, now()) {
                 eprintln!(
                     "{name}: {pass} failed; again in {}s",
                     (again - now()).round()
@@ -171,7 +184,7 @@ pub fn serve(
         if once {
             return;
         }
-        if ready.is_empty() {
+        if !started {
             line.wait(wait);
         }
     }
@@ -199,7 +212,11 @@ mod tests {
         /// Where the passes are told their issues: what each read there.
         told: Option<PathBuf>,
         seen: RefCell<Vec<(String, Option<String>)>>,
+        /// What else happens as a unit starts.
+        hook: Option<Hook>,
     }
+
+    type Hook = Box<dyn Fn(&str)>;
 
     impl Units for Fake {
         fn state(&self, unit: &str) -> String {
@@ -213,6 +230,9 @@ mod tests {
 
         fn start(&self, unit: &str) -> bool {
             self.started.borrow_mut().push(unit.into());
+            if let Some(hook) = &self.hook {
+                hook(unit);
+            }
             if let Some(told) = &self.told {
                 let instance = unit
                     .trim_start_matches("autoland@")
@@ -243,6 +263,7 @@ mod tests {
             failing: HashSet::new(),
             told: None,
             seen: RefCell::default(),
+            hook: None,
         };
         (dir, h, fake)
     }
@@ -305,6 +326,49 @@ mod tests {
         first.done(&Pass::repo("sam/r"), true, crate::now());
         serve("continue", &h, &line, Some(&first), &fake, true, || {});
         assert_eq!(*fake.started.borrow(), ["autoland-continue.service"]);
+    }
+
+    // Yielding is at every pass's start: work the line it yields to got
+    // while one pass ran holds off the rest of the take, which goes back as
+    // it was (an issue's look stays one) and starts once that line is idle.
+    #[test]
+    fn yields_between_passes() {
+        use std::sync::Arc;
+
+        let (_dir, mut h, mut fake) = setup();
+        h.unit = "autoland-continue".into();
+        h.wake = None;
+        let first = Arc::new(Line::default());
+        let line = Line::default();
+        line.event(Pass::Full, -100.0);
+        line.event(Pass::repo("sam/a"), -100.0);
+        line.issue(Pass::repo("sam/b"), 7, -100.0);
+        let kicked = first.clone();
+        fake.hook = Some(Box::new(move |unit| {
+            if unit.contains("sam-a") {
+                kicked.event(Pass::repo("sam/r"), -100.0);
+            }
+        }));
+        serve("continue", &h, &line, Some(&first), &fake, true, || {});
+        assert_eq!(*fake.started.borrow(), ["autoland-continue@sam-a.service"]);
+        assert!(line.due().contains_key(&Pass::Full));
+        assert_eq!(line.issues()[&Pass::repo("sam/b")].1, [7].into());
+        serve("continue", &h, &line, Some(&first), &fake, true, || {});
+        assert_eq!(fake.started.borrow().len(), 1, "still held off");
+        let (ready, _) = first.take(crate::now());
+        for (pass, _) in ready {
+            first.done(&pass, true, crate::now());
+        }
+        serve("continue", &h, &line, Some(&first), &fake, true, || {});
+        assert_eq!(
+            *fake.started.borrow(),
+            [
+                "autoland-continue@sam-a.service",
+                "autoland-continue@sam-b.service",
+                "autoland-continue.service"
+            ]
+        );
+        assert!(!line.busy(crate::now()), "every pass taken is done");
     }
 
     // Yielding goes one step, to a handler there is: none holds another off

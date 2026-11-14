@@ -193,6 +193,26 @@ impl Line {
         (ready, next.map(|at| at - now))
     }
 
+    /// A pass taken that didn't start (its handler yielded first) goes
+    /// back: due now, with what it was to look at, and ready as soon as
+    /// the line is free again, its GAP already served.
+    pub fn untake(&self, pass: &Pass, scope: &Scope, now: f64) {
+        let mut s = self.lock();
+        s.running = s.running.saturating_sub(1);
+        match scope {
+            Scope::All => Self::book(&mut s, pass.clone(), now),
+            Scope::Issues(ns) => {
+                let (due, all) = s
+                    .issues
+                    .entry(pass.clone())
+                    .or_insert((now, BTreeSet::new()));
+                *due = due.min(now);
+                all.extend(ns);
+            }
+        }
+        s.last.insert(pass.clone(), now - self.gap);
+    }
+
     /// Whether a pass is running, or due by now: a handler that yields to
     /// this one (`yieldTo`) starts none of its own meanwhile.
     pub fn busy(&self, now: f64) -> bool {
