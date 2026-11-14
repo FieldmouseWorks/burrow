@@ -58,6 +58,14 @@ fn session(line: &str) -> Option<(Engine, String)> {
                 .map(|s| (engine, s.to_owned()))
         })
 }
+/// The session a turn's stream names, as its engine named it first.
+pub fn stream_session(stream: &Path) -> Option<String> {
+    lines(stream, 0)
+        .ok()?
+        .map_while(Result::ok)
+        .find_map(|l| session(&l))
+        .map(|(_, id)| id)
+}
 pub fn names_session(text: &str) -> bool {
     text.lines().any(|l| session(l).is_some())
 }

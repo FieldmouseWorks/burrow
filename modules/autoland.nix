@@ -314,6 +314,7 @@ in
   imports = [
     (import ./common.nix inputs)
     (import ./autoland/review.nix inputs)
+    (import ./autoland/fix.nix inputs)
     (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }

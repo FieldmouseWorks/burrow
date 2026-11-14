@@ -140,7 +140,8 @@ Each has an entry below, and each can be imported on its own.
   biggest process there, the session that grew or a build it ran, and nothing
   else.
 - **`proj`** (`burrow.proj`): `proj run PROJECT "task"`: the operator hands
-  work to a headless agent inside that project, as a systemd unit, and checks
+  work to a headless agent inside that project (or the repo's own clone, for
+  `proj run OWNER/NAME "task"`), as a systemd unit, and checks
   on it later (`status`, `log`, `reply`, `stop`; `proj state --json` is the
   live snapshot those print from: the ready queue, every slot and what holds
   it, the meters and holds, its schema in `crates/burrow-proj/state.schema.json`). At most `maxJobs` Claude turns run at
@@ -327,6 +328,10 @@ Each has an entry below, and each can be imported on its own.
   Conary's landing flow, the steward's replacement, decide beside each pass
   without acting (`cn flow compare`, in `autoland-shadow@`'s journal after
   each pass), showing where the two part before a repo switches over.
+  `plugins.fix.enable` (off) runs Conary's fix plugin and its broker
+  (crates/burrow-fix): the flow's fixes run as proj jobs on the fixing role
+  (`plugins.fix.role`), one live fix a PR, stopped when the flow's request
+  is; it needs `burrow.ledger.controllerUser`.
 - **`watchdog`** (`burrow.watchdog`): `burrow-watchdog`: work that has stopped
   moving gets a look before anyone has to notice it. Each source keeps a file
   of what it waits on now and by when that should be over: the steward, every

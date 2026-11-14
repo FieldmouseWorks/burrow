@@ -556,6 +556,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-fix"
+version = "0.0.0"
+dependencies = [
+ "burrow-brief",
+ "burrow-github",
+ "burrow-producer",
+ "burrow-settings",
+ "conary-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-flake-check"
 version = "0.0.0"
 dependencies = [
