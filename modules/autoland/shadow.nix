@@ -14,7 +14,7 @@
 # seal keys stay out of it: they're secrets, and a config is a store path.
 # Until the flow reads its producers' signed evidence instead (Conary#256,
 # 5b), a PR waiting on a sealed verdict can show as a disagreement.
-{ lib, pkgs, cfg, settings, ledger, steward, user, credentials }:
+{ lib, pkgs, cfg, settings, ledger, steward, credentials }:
 let
   minutes = m: m * 60;
   bot = lib.hasSuffix "[bot]";
@@ -93,12 +93,13 @@ in
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     unitConfig.ConditionPathExists = config;
-    environment = ledger.env // {
+    environment = ledger.env // ledger.flow.env // {
       CONARY_TOKEN_COMMAND = "${steward}/bin/autoland-steward token";
     };
     serviceConfig = {
       Type = "oneshot";
-      User = user;
+      # The flow's controller where it has one (burrow.ledger.controllerUser).
+      User = ledger.flow.user;
       ExecStart = "${ledger.package}/bin/cn flow compare %I --config ${config}";
       # Well inside the next pass's: a compare is one read of each PR.
       TimeoutStartSec = "10min";

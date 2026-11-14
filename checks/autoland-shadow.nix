@@ -34,6 +34,25 @@ let
   withApp = read machine;
   noApp = read (base false);
   none = (self.nixosConfigurations.example.extendModules { modules = [ ]; }).config.systemd.services;
+  # With a controller of its own (burrow.ledger.controllerUser), the flow
+  # runs as it, on state of its own.
+  controlled = (self.nixosConfigurations.example.extendModules {
+    modules = [{
+      burrow.autoland.shadow = [ "sam/plain" ];
+      burrow.ledger.controllerUser = "conary-flow";
+    }];
+  }).config;
+  controlledShadow = controlled.systemd.services."autoland-shadow@";
+  # Someone else's user as the controller is refused, and so is a
+  # producer's wiring with no controller at all.
+  taken = (self.nixosConfigurations.example.extendModules {
+    modules = [{
+      burrow.autoland.shadow = [ "sam/plain" ];
+      burrow.ledger.controllerUser = "autoland-review";
+    }];
+  }).config;
+  failed = map (a: a.message) (lib.filter (a: !a.assertion) taken.assertions);
+  uncontrolled = builtins.tryEval (builtins.deepSeq (machine.burrow.ledger.flow.producer "x") true);
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
@@ -53,7 +72,13 @@ let
     noPost = !(units."autoland@".serviceConfig ? ExecStartPost);
     exec = shadow.serviceConfig.ExecStart == "${machine.burrow.ledger.package}/bin/cn flow compare %I --config ${configs}/%I.json";
     timeout = shadow.serviceConfig.TimeoutStartSec == "10min";
-    user = shadow.serviceConfig.User == machine.burrow.user;
+    user = shadow.serviceConfig.User == machine.burrow.user && !(shadow.environment ? CONARY_DATA);
+    controlledHolds = lib.all (a: a.assertion) controlled.assertions;
+    taken = lib.any (lib.hasInfix "autoland-review is already someone else's") failed;
+    producerNeedsController = !uncontrolled.success && controlled.burrow.ledger.flow.controller == "conary-flow"
+      && machine.burrow.ledger.flow.controller == null;
+    controller = controlledShadow.serviceConfig.User == "conary-flow"
+      && controlledShadow.environment.CONARY_DATA == "${controlled.burrow.stateDir}/flow";
     ledger = shadow.environment.CONARY_LEDGER == machine.burrow.ledger.dir;
     token = lib.hasSuffix "/bin/autoland-steward token" shadow.environment.CONARY_TOKEN_COMMAND;
     packageCarriesGit = !(lib.elem machine.programs.git.package shadow.path);

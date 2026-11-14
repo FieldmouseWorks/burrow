@@ -30,6 +30,8 @@ let
   inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
   # burrow-upkeep, what keeps up each repo besides its PRs.
   burrowUpkeep = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-upkeep;
+  # burrow-brief, the briefs' policy text, which the steward's tasks read.
+  burrowBrief = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-brief;
   # burrow-proof, what runs a proof that's a command (a repo's proofRuns).
   burrowProof = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof;
 
@@ -143,6 +145,9 @@ let
     # dashboard and flaky tests when they're on (crates/burrow-upkeep),
     # with its config.
     upkeep = [ "${burrowUpkeep}/bin/burrow-upkeep" "${upkeepConfig}" ];
+    # The fix job's and the judge's policy text (crates/burrow-brief), which
+    # the steward's tasks (autoland/tasks.py) hold no copy of.
+    brief = [ "${burrowBrief}/bin/burrow-brief" ];
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
     watch = if watchdog then {
@@ -303,7 +308,7 @@ let
   # token.rs), and the steward's token.
   credentials = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
   # Conary's flow beside each pass of a shadowed repo (autoland/shadow.nix).
-  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward user credentials; };
+  shadow = import ./autoland/shadow.nix { inherit lib pkgs cfg settings ledger steward credentials; };
 in
 {
   imports = [

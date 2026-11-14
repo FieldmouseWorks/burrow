@@ -18,9 +18,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else
                 str(Path(__file__).resolve().parents[2] / 'modules/autoland'))
+# burrow-brief (argv[2]), which the steward's tasks read their policy text
+# from as they're imported.
+BRIEF = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
+                        str(Path(__file__).resolve().parents[2] / 'crates/target/debug/burrow-brief'))
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / 'config.json'
-    cfg.write_text(json.dumps(dict(
+    cfg.write_text(json.dumps(dict(brief=[BRIEF], owner='Sam',
         context='test', stateDir=tmp, snapDir=tmp,
         conary={'cn': 'cn', 'env': {}}, trainContext='train', baselineJobs=False,
         labels={'first': 'first', 'waiting': {'ci': {'name': 'waiting: CI'}}},
