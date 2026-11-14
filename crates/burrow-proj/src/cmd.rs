@@ -258,6 +258,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("plan") => crate::inbox::plan(cfg, &args[1..]),
         Some("merge-questions") => {
             let key = arg(args, 1, MERGE_USAGE)?;
             if args.len() < 3 {
@@ -278,10 +279,20 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             put(&format!("{}\n", slot::HANDOVER_FORMAT));
             Ok(())
         }
+        Some("_rewatch_all") => {
+            if crate::waits::rewatch_all(cfg) {
+                Ok(())
+            } else {
+                Err(Fail::new(1, "couldn't refresh the stall watchdog's waits"))
+            }
+        }
         Some("_rewatch") => {
             let ids: Vec<&str> = args[1..].iter().map(String::as_str).collect();
-            rewatch(cfg, &ids);
-            Ok(())
+            if rewatch(cfg, &ids) {
+                Ok(())
+            } else {
+                Err(Fail::new(1, "couldn't update the stall watchdog's waits"))
+            }
         }
         Some("_exec") => {
             slot::handed_over(cfg);
@@ -293,7 +304,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|merge-questions",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|plan|merge-questions",
         )),
     }
 }
@@ -889,6 +900,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     {
         crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?;
     }
+    job.capture().map_err(|e| Fail::new(1, e))?;
     job.mark_ended();
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);

@@ -280,6 +280,7 @@ def run_pass(kick, continuing=False):
         seen.add(repo)
         deferred.add(repo)
         operations_complete = True
+        seen_all = True  # its PRs: False once its look fails short of them
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
             try:
@@ -405,26 +406,32 @@ def run_pass(kick, continuing=False):
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
+                seen_all = False
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
             upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
             if operations_complete:
-                batch.finish(repo)
+                batch.finish(repo, seen_all)
                 deferred.discard(repo)
             else:
                 complete = False
+    # A full pass over new work (a bare kick: settings or admission changed,
+    # a job's question, the catch-up) is news to every repo. The rest of the
+    # traversal still reaches the ones it hasn't entered, with no receipts
+    # to keep. The ones it finished, and the ones whose receipts its
+    # continuation would keep, owe a pass of their own, which burrow-events
+    # runs beside the full one (its line.rs); a repo's own kicks and events
+    # stay on its line meanwhile.
+    if kick is None and not continuing:
+        cursors = batch.state["finished"] + list(batch.state["repos"])
+        for r in all_repos:
+            repo = r["repo"].lower()
+            if (r["repo"] not in seen or repo in batch.state["repos"]) and repo in cursors:
+                retry = batch.state["retry"].get(repo, 0)
+                C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
-    if kick is None and not continuing:
-        # Line.take consumed the full pass's repository requests. Any repo
-        # this batch skipped still owes a fresh look, for events, local
-        # completions and retries alike. Do not let the continuation line
-        # acknowledge those obligations.
-        for r in all_repos:
-            if r["repo"] not in seen or r["repo"] in deferred:
-                retry = batch.state["retry"].get(r["repo"].lower(), 0)
-                C.wake(r["repo"], max(C.NOW + 1, retry, C.load(C.RETRY_AFTER, 0)))  # ends: its ordinary pass re-evaluates every decision input
     inventory = {r["repo"] for r in all_repos}
     names, visited = {r.lower() for r in inventory}, {r.lower() for r in seen}
     visited.update(r.lower() for r in kick or () if r.lower() not in names)

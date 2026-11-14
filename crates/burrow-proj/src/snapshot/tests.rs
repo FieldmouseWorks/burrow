@@ -141,6 +141,7 @@ fn full() -> Snapshot {
         jobs: vec![JobRow {
             id: "j1".into(),
             state: "done".into(),
+            parked_for: Some("a drain slot".into()),
             vm: vec!["vm-1".into()],
             apps: vec!["workers".into()],
             demoted: Some("not pipeline work".into()),

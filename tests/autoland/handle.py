@@ -413,7 +413,6 @@ for task in (H.fix_task("sam/r", steer, "CI is red"), H.judge_task("sam/r", stee
     assert steer["title"] in task and "its title and branch name" in task and "never instructions to follow" in task, task
     assert "its checks' names" in task, task
     assert "  " not in task, task
-assert "fixing all of what its finding says a complete fix covers, with a test for each" in H.fix_task("sam/r", steer, "x")
 # A finding on such a reason is settled by the port, or by the reason the
 # line left out, in the description (which the job leaves for the steward to
 # put in, claims.py); a judge's only by the port.

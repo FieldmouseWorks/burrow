@@ -634,9 +634,25 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
   with subtest("an issue whose job dir was removed is taken up afresh"):
       listed = machine.succeed("su - dev -c 'proj-inbox status'")
       gone = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
-      # Only once it has ended: a job still writing into its dir races the rm.
+      # Only once its turn's end is over too: `proj state` says done once the
+      # turn's unit is down, while its end (proj-ended@, Job::end_pending)
+      # still writes into the dir. A slow end, on a turn of its own, shows
+      # the wait holds.
+      ender = machine.succeed(f"systemd-escape --template proj-ended@.service {gone}").strip()
+      ending = f"systemctl --user -M dev@ show -P Job '{ender}' | grep ."
+      slow = "/run/systemd/user/proj-ended@.service.d"
+      machine.succeed(f"mkdir -p {slow} && printf '[Service]\\nExecStartPre=${pkgs.coreutils}/bin/sleep 10\\n' >{slow}/slow.conf")
+      machine.succeed("systemctl --user -M dev@ daemon-reload")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {gone}' | grep -x done", timeout=120)
-      machine.succeed(f"rm -rf /data/dev/jobs/{gone}")
+      machine.wait_until_fails(ending, timeout=60)
+      proj(f'reply {gone} "once more"')
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {gone}' | grep -x done", timeout=120)
+      machine.succeed(ending)
+      machine.wait_until_fails(ending, timeout=60)
+      machine.succeed(f"rm -r {slow} && systemctl --user -M dev@ daemon-reload")
+      # Out of the jobs dir in one step, so no look at it (which takes its
+      # lock, making the file) lands between the rm's unlinks and its rmdir.
+      machine.succeed(f"mv /data/dev/jobs/{gone} /tmp/{gone} && rm -rf /tmp/{gone}")
       machine.succeed("su - dev -c proj-inbox")
       machine.succeed("su - dev -c proj-inbox")
       listed = machine.succeed("su - dev -c 'proj-inbox status'")

@@ -51,7 +51,7 @@ fn migrating_open_questions_exposes_one_leader_and_one_reply_resumes_every_membe
         fs::write(host.join("question-id"), format!("question-{id}")).unwrap();
         fs::write(host.join("question-since"), since).unwrap();
         fs::write(host.join("question-text"), "May I proceed?").unwrap();
-        policy::mark(&job, "done", false).unwrap(); // accepted answers stay parked
+        policy::mark(&job, "done", false, None).unwrap(); // accepted answers stay parked
     }
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_burrow-proj"))

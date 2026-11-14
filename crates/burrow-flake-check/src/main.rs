@@ -1,12 +1,15 @@
-//! The shared gate and negative runner. No Rust dependencies: callers compile
-//! these pinned sources directly with rustc, without a registry or cargo build.
+//! The shared gate and negative runner, and gate-reuse's lookup. No Rust
+//! dependencies: callers compile these pinned sources directly with rustc,
+//! without a registry or cargo build.
 //! jq is the JSON codec (already required by the workflow), not the scheduler.
 mod build;
 mod gate;
 mod memory;
 mod negative;
 mod plan;
+mod reuse;
 mod snapshot;
+mod source;
 
 use std::{
     env, fs,
@@ -24,9 +27,29 @@ fn var(k: &str) -> String {
 fn temp() -> PathBuf {
     PathBuf::from(var("RUNNER_TEMP"))
 }
+/// Where git finds a repository, when the environment says: once gate-reuse's
+/// private source is entered, no command inherits these (source.rs).
+const GIT_LOCATIONS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+];
+static PRIVATE_SOURCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn cmd(p: &str, args: &[&str]) -> Command {
     let mut c = Command::new(p);
     c.args(args);
+    if PRIVATE_SOURCE.load(std::sync::atomic::Ordering::SeqCst) {
+        for k in GIT_LOCATIONS {
+            c.env_remove(k);
+        }
+    }
     c
 }
 fn exit_code(status: std::process::ExitStatus) -> i32 {
@@ -177,6 +200,18 @@ fn main() {
             Ok(false) => std::process::exit(1),
             Err(e) => {
                 eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    // gate-reuse's lookup, before anything is built; its answer goes to
+    // the step's outputs.
+    if mode == "reuse" {
+        match reuse::reuse() {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("gate-reuse: can't tell ({e}), so the gate runs");
                 std::process::exit(1);
             }
         }

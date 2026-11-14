@@ -95,7 +95,7 @@ let
     required = cfg.requiredHealth;
     inherit user;
     systemctl = lib.getExe' config.systemd.package "systemctl";
-    checkTimeout = 30;
+    checkTimeout = 90;
     settle = 20;
   });
   healthTool = pkgs.runCommand health {
@@ -691,6 +691,21 @@ in
         claude = ''
           if [ "$(id -un)" = ${user} ]; then claude --version
           else runuser -u ${user} -- env HOME=${account.home} claude --version; fi
+        '';
+        # Whether Claude Code can authenticate: a live reading of its usage
+        # meter, which only an answer from its endpoint is (burrow-claude-login,
+        # of crates/burrow-usage-reset; no model call, and the token never
+        # leaves Claude Code). An expired login fails every server and job turn
+        # at once, so this names it rather than its symptoms.
+        claude-login = let
+          probe = "${inputs.self.packages.${system}.burrow-usage-reset}/bin/burrow-claude-login";
+          claude = lib.getExe' config.burrow.claude.package "claude";
+        in ''
+          if [ "$(id -un)" = ${user} ]; then ${probe} ${claude}
+          else runuser -u ${user} -- env HOME=${account.home} ${probe} ${claude}; fi || {
+            echo "Claude Code can't authenticate as ${user}: its login expired. Log in again on this machine as ${user} (run claude, then /login)." >&2
+            exit 1
+          }
         '';
       });
 

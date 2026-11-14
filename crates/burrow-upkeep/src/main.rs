@@ -86,10 +86,14 @@ const USAGE: &str = "usage:
       a PR's steward Claude jobs that settle it, seen to; a JSON object on
       stdin gives the PR's number, its head and branch, the login its jobs
       push as (or null), proj's jobs dir, its jobs as its state keeps them
-      and who pushed a head as last found: each one that's over has its
+      and who pushed a head as last found: each one that's over (or between
+      turns, awaiting the PR, each turn's new ones) has its
       answers posted only while the PR's head is its push (or the head it
       was handed, when it pushed none), and each at work on a head someone
-      else moved the PR past is named to stop; the jobs to keep, who pushed
+      else moved the PR past is named to stop, and is kept, retiring, until
+      proj says it's over; with retire true (a new fix job is to be handed
+      the PR) so is each one waiting between turns, and clear says when no
+      kept job may still push; the jobs to keep, who pushed
       the head, the jobs to stop, what came of each one's answers (posted,
       wrong, unpushed, moved, refused or unanswered), when to look again and
       a rate limit's reset, as JSON on stdout

@@ -894,6 +894,10 @@ in
       events = [ ];
       unit = "autoland-continue";
       wake = "${stateDir}/autoland/continue.json";
+      # A continuation carries on a pass that yielded, and shares its lock:
+      # it waits for the steward's line to have nothing running or due, so
+      # a repo's kick, event or wake-up never waits out a run of them.
+      yieldTo = "autoland";
     };
     systemd.services = lib.genAttrs [ "autoland" "autoland@" "autoland-continue" "autoland-continue@" ] (name: {
       description = if name == "autoland"

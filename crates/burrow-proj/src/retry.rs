@@ -402,7 +402,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         };
         if crate::policy::denied(&job) {
-            crate::policy::mark(&job, "queued", state.first).map_err(io::Error::other)?;
+            crate::policy::mark(&job, "queued", state.first, Some(crate::policy::DENIED))
+                .map_err(io::Error::other)?;
             continue;
         }
         // The ordered policy reconciler owns restoration of parked work.
@@ -412,12 +413,15 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if systemd::active(cfg, &job.unit()) {
             continue;
         }
-        let crate::inbox::resumption::Resume::Ready(_capacity) =
-            crate::inbox::resumption::admission(cfg, &job).map_err(io::Error::other)?
-        else {
-            crate::policy::mark(&job, "queued", state.first).map_err(io::Error::other)?;
-            continue;
-        };
+        let _capacity =
+            match crate::inbox::resumption::admission(cfg, &job).map_err(io::Error::other)? {
+                crate::inbox::resumption::Resume::Ready(capacity) => capacity,
+                crate::inbox::resumption::Resume::Waiting(wait) => {
+                    crate::policy::mark(&job, "queued", state.first, Some(wait.says()))
+                        .map_err(io::Error::other)?;
+                    continue;
+                }
+            };
         systemd::reset_failed(cfg, &job.unit());
         // A unit still ending is deferred, without holding up other pools.
         if systemd::show(cfg, &job.unit(), "LoadState") == "loaded" || job.end_pending() {

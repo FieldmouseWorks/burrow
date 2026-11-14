@@ -4,14 +4,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Command, ExitStatus};
 use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::config::Config;
-use crate::engine::{self, Engine, LONG, NEXT, Said, answer, is_error};
+use crate::engine::{self, Engine, LONG, NEXT, answer, is_error};
 use crate::job::{Job, USAGE_LIMIT, kick};
 use crate::pick::{Class, demoted};
 use crate::question::Answer;
@@ -19,9 +19,9 @@ use crate::waits::{rewatch, rewatch_later};
 use crate::{
     Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, systemd, usage,
 };
-use clock::Clock;
 use handoff::failed;
 pub(crate) use handoff::{CARRY, start_handoff};
+use watch::Run;
 
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
@@ -118,6 +118,11 @@ fn start_with(
         }
         sleep(Duration::from_millis(500));
     }
+    // The last turn's answers are kept before the next rewrites them (its
+    // end may not have run, or failed): no turn starts on a capture that
+    // failed.
+    job.capture()
+        .map_err(|e| format!("proj: {id}'s last turn's answers aren't kept yet: {e}"))?;
     let last: u64 = match job.turns() {
         None => 0,
         Some(t) => t
@@ -187,11 +192,19 @@ fn start_with(
         job.turn(&n.to_string(), "priority"),
         if first { "first" } else { "normal" },
     );
-    let started = if crate::policy::denied(&job)
-        || crate::policy::parked(&job)
-        || matches!(capacity, crate::inbox::resumption::Resume::Waiting)
-    {
-        crate::policy::mark(&job, "queued", first)?;
+    // What it parks waiting for: None, not parked; Some(None), behind an
+    // earlier park of the job, whose wait it keeps.
+    let wait = if crate::policy::denied(&job) {
+        Some(Some(crate::policy::DENIED))
+    } else if let crate::inbox::resumption::Resume::Waiting(wait) = capacity {
+        Some(Some(wait.says()))
+    } else if crate::policy::parked(&job) {
+        Some(None)
+    } else {
+        None
+    };
+    let started = if let Some(wait) = wait {
+        crate::policy::mark(&job, "queued", first, wait)?;
         true
     } else {
         launch(cfg, &job, first)
@@ -779,81 +792,6 @@ fn code(status: ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
-/// A run being watched.
-struct Run<'a> {
-    cfg: &'a Config,
-    job: &'a Job<'a>,
-    n: &'a str,
-    waitdir: &'a Path,
-    /// Nanoseconds its stream may say nothing before it's stuck; 0 for no limit.
-    quiet: i64,
-}
-
-impl Run<'_> {
-    /// Until the run is over: its exit status, and whether its answer cut
-    /// it short. The answer ends the turn: a few seconds to exit by itself,
-    /// then Claude and whatever it left in the background are stopped (the
-    /// unit takes the rest when the turn ends), and the slot goes with them.
-    /// Meanwhile its clock is read once a second, sooner when its deadline
-    /// is closer ([`Clock`]).
-    fn watch(&self, mut child: Child, from: u64) -> (ExitStatus, bool) {
-        let pid = Pid::from_child(&child);
-        let mut said = Said::new(self.job, self.n, from);
-        let mut answered: Option<Instant> = None;
-        let mut cut = false;
-        let mut clock = Clock {
-            last: now_nanos(),
-            was: None,
-            done: false,
-            next: Instant::now(),
-        };
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => (),
-                Err(_) => match child.wait() {
-                    Ok(status) => break status,
-                    Err(_) => break ExitStatus::default(),
-                },
-            }
-            if answered.is_none() || !said.named {
-                said.look(false);
-            }
-            if answered.is_none() && said.answered {
-                answered = Some(Instant::now());
-            }
-            if !cut && answered.is_some_and(|t| t.elapsed() >= Duration::from_secs(10)) {
-                cut = true;
-                stop(pid);
-            }
-            if !clock.done && Instant::now() >= clock.next {
-                clock.tick(self, pid);
-            }
-            let poll = Instant::now() + Duration::from_millis(100);
-            let until = if clock.done {
-                poll
-            } else {
-                poll.min(clock.next)
-            };
-            sleep(until.saturating_duration_since(Instant::now()));
-        };
-        // What it said last, before it went, can be what names its session.
-        if !said.named {
-            said.look(true);
-        }
-        clock.finish(self);
-        (status, cut)
-    }
-}
-
-/// Stop a run: TERM to its timeout(1), which passes it on to all of it.
-fn stop(pid: Pid) {
-    let _ = kill_process(pid, Signal::TERM);
-}
-
-/// Everything in this process's unit but itself: what a run left behind, in
-/// whatever process group, TERM first, then KILL. False if any of it is
-/// still there after that.
 /// Whether sandbox `id`'s VM, and so everything a run left in it, is
 /// stopped: `agent stop` (as `agent`, the command) said so.
 fn stopped(agent: &str, id: &str) -> bool {
@@ -868,6 +806,9 @@ fn stopped(agent: &str, id: &str) -> bool {
     ok
 }
 
+/// Everything in this process's unit but itself: what a run left behind, in
+/// whatever process group, TERM first, then KILL. False if any of it is
+/// still there after that.
 fn reap() -> bool {
     let me = process::id();
     let Some(cgroup) = cgroup() else {
@@ -919,8 +860,9 @@ fn oom_kills() -> u64 {
         .unwrap_or(0)
 }
 
-mod clock;
 pub(crate) mod handoff;
+mod watch;
+
 #[cfg(test)]
 mod tests;
 

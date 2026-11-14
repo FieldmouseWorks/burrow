@@ -87,7 +87,7 @@ fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
     fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(!b.pass().child_admissible("sam/box", "9"));
-    assert!(!b.pass().child_can_close("sam/box", "8"));
+    assert!(!b.pass().child_can_close("sam/box", "8", None).closes());
     fs::write(b.path("merged-8"), json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[{"merged":true,"url":"https://github.com/sam/box/pull/10"}]}}}}}).to_string()).unwrap();
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(b.pass().child_admissible("sam/box", "9"));
@@ -95,7 +95,7 @@ fn events_drain_one_child_and_only_a_landed_pr_advances_the_parent() {
         b.pass().pick_ready(t, &[ready(9)]),
         Some(("sam/box".into(), "9".into()))
     );
-    assert!(b.pass().child_can_close("sam/box", "8"));
+    assert!(b.pass().child_can_close("sam/box", "8", None).closes());
     let stored: List = serde_json::from_slice(
         &fs::read(b.pass().plan_dir("sam/box", "7").join("tasks.json")).unwrap(),
     )

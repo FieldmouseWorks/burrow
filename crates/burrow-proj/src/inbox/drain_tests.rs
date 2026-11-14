@@ -887,7 +887,7 @@ fn drain_counts_turns_instead_of_parked_jobs() {
                 fs::write(job.turn("1", "slot"), "1").unwrap();
             }
             if state == "paused" {
-                crate::policy::mark(&job, "running", false).unwrap();
+                crate::policy::mark(&job, "running", false, None).unwrap();
                 b.cfg
                     .settings
                     .as_mut()

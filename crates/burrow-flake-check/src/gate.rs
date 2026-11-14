@@ -179,13 +179,24 @@ fn apart(skip: &str, legs: usize, leg: usize, mode: Mode) -> Result<bool> {
         Mode::Build => build::checks(None, &targets, &roots)?,
     } && ok)
 }
+/// `args` for a nix command on the flake, which with gate-reuse may not
+/// change its lock file: the pass it attests is the tree's, so the inputs
+/// it evaluates are the ones the tree locks (eval-apart's snapshot refuses
+/// a lock that needs changing already).
+fn locked<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut v = args.to_vec();
+    if var("TREE_SOURCE") == "true" {
+        v.insert(args.len().min(2), "--no-update-lock-file");
+    }
+    v
+}
 fn whole(skip: &str, mode: Mode) -> Result<bool> {
     let work = Work::new("roots")?;
     let roots = &work.0;
     let mut failed = false;
     let mut built = false;
     let plan = (|| -> Result<Vec<String>> {
-        let metadata = checked(cmd("nix", &["flake", "metadata", "--json", "."]))?;
+        let metadata = checked(cmd("nix", &locked(&["flake", "metadata", "--json", "."])))?;
         let url = jq(&metadata, ".url")?;
         let args = plan_args(&url, &system()?, skip);
         let mut c = cmd("nix-instantiate", &["--eval", "--strict", "--json"]);
@@ -231,7 +242,7 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
             } else {
                 let _ = run(cmd(
                     "nix",
-                    &["flake", "check", "--no-build", "-L", "--keep-going"],
+                    &locked(&["flake", "check", "--no-build", "-L", "--keep-going"]),
                 ));
                 return Ok(false);
             }
@@ -245,13 +256,16 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
     }
     if skip.is_empty() {
         let ok = if built {
-            run(cmd("nix", &["flake", "check", "-L", "--keep-going"]))?
+            run(cmd(
+                "nix",
+                &locked(&["flake", "check", "-L", "--keep-going"]),
+            ))?
         } else {
-            build::slot(&["flake", "check", "-L", "--keep-going"])?
+            build::slot(&locked(&["flake", "check", "-L", "--keep-going"]))?
         };
         return Ok(ok && !failed);
     }
-    if !run(cmd("nix", &["flake", "check", "--no-build", "-L"]))? {
+    if !run(cmd("nix", &locked(&["flake", "check", "--no-build", "-L"])))? {
         return Ok(false);
     }
     if built {
@@ -272,13 +286,13 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
     ))?;
     let names = string(cmd(
         "nix",
-        &[
+        &locked(&[
             "eval",
             "--raw",
             &format!(".#checks.{system}"),
             "--apply",
             "cs: toString (builtins.attrNames cs)",
-        ],
+        ]),
     ))?;
     let mut args = vec![
         "build".to_owned(),
@@ -294,7 +308,7 @@ fn whole(skip: &str, mode: Mode) -> Result<bool> {
         }
     }
     let refs: Vec<_> = args.iter().map(String::as_str).collect();
-    Ok(build::slot(&refs)? && !failed)
+    Ok(build::slot(&locked(&refs))? && !failed)
 }
 pub fn gate() -> Result<bool> {
     check(Mode::Build)
@@ -326,6 +340,12 @@ fn check(mode: Mode) -> Result<bool> {
             "legs need eval-apart: without it, the gate is one nix flake check, which can't be split",
         ));
     }
+    // gate-reuse: Nix reads the commit of the tree alone (source.rs).
+    let _source = if var("TREE_SOURCE") == "true" {
+        Some(super::source::TreeSource::enter()?)
+    } else {
+        None
+    };
     if var("APART") == "true" {
         apart(&var("SKIP"), legs, leg, mode)
     } else {

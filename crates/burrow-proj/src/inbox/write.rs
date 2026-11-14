@@ -2,7 +2,7 @@
 //! its labels, who it's assigned to, and closing it.
 
 use super::Pass;
-use serde_json::json;
+use serde_json::{Value, json};
 
 impl Pass<'_> {
     pub(super) fn remove_label(&self, repo: &str, n: &str, label: &str) -> bool {
@@ -18,13 +18,18 @@ impl Pass<'_> {
     }
     /// Close the issue with GitHub's completed or not_planned reason.
     pub(super) fn close(&self, repo: &str, n: &str, reason: &str) -> bool {
+        self.closed_issue(repo, n, reason).is_some()
+    }
+    /// [`Pass::close`], answering the issue as GitHub closed it (null when
+    /// its answer wasn't JSON).
+    pub(super) fn closed_issue(&self, repo: &str, n: &str, reason: &str) -> Option<Value> {
         crate::github::reported(burrow_github::call_once(
             &mut crate::github::client(self.cfg),
             "PATCH",
             &format!("repos/{repo}/issues/{n}"),
             Some(&json!({"state":"closed", "state_reason":reason})),
         ))
-        .is_some()
+        .map(|r| r.json().unwrap_or(Value::Null))
     }
     pub(super) fn add_label(&self, repo: &str, n: &str, label: &str) -> bool {
         crate::github::reported(burrow_github::call_repeating(

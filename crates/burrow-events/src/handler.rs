@@ -55,6 +55,12 @@ pub struct Handler {
     /// Seconds one of its passes starts after the last, at least.
     #[serde(default = "gap")]
     pub gap: f64,
+    /// Another handler whose passes go first: this one starts none while
+    /// that one's line has a pass running or due (the steward's
+    /// continuations yield to its passes over new work, which share its
+    /// lock). None: it yields to none.
+    #[serde(default)]
+    pub yield_to: Option<String>,
 }
 
 fn yes() -> bool {
@@ -601,7 +607,7 @@ mod tests {
             "kickPort": 8788, "port": null,
             "handlers": {"update": {"events": ["push"], "unit": "remi-update", "wake": null, "ownStatuses": [], "ownLabels": [],
                                     "perRepo": false, "repos": ["sam/r"], "pushes": "default", "branches": null,
-                                    "issueTitles": null, "issueDir": null}}
+                                    "issueTitles": null, "issueDir": null, "yieldTo": null}}
         }))
         .unwrap();
         let h = &cfg.handlers["update"];
