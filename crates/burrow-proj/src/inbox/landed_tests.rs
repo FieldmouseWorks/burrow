@@ -98,22 +98,35 @@ fn moved_on(b: &Box) -> bool {
     b.pass().child_admissible("sam/box", "9")
 }
 
+/// What the host kept of what #7's job awaited.
+fn kept(b: &Box) -> Option<String> {
+    crate::read(&b.pass().plan_dir("sam/box", "7").join("awaited"))
+}
+
+/// GitHub has #7 closed now, as it was.
+fn closed(b: &Box) {
+    let mut now: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
+    now["state"] = json!("closed");
+    fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+}
+
 /// FieldmouseWorks/Conary#304 and #310: the job awaited its PR, which said
 /// `Refs`, in the child's repo or another, and said `proj done` once it
-/// merged. No closing reference: the pass accepts the completion, records
-/// the PR as the child's landed PR, closes it, and the list moves on.
+/// merged. No closing reference: the pass accepts the completion, closes
+/// the child, keeps what the job awaited, and the list moves on.
 #[test]
 fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
     for repo in ["sam/box", "sam/machine"] {
         let (b, d, parent) = child_job(&format!("{repo}#10"), "done", "open", &["claude"]);
         let url = pr(&b, repo, 10, true);
-        // Asked alone, nothing is recorded: only an accepted completion is.
+        // Asked alone, nothing is kept: only a close that went through is.
         assert_eq!(
             b.pass()
                 .child_can_close("sam/box", "7", Some(&crate::job::Job::new(&b.cfg, "j1"))),
-            Closing::Record(url.clone())
+            Closing::Awaited(url.clone())
         );
-        assert!(b.pass().recorded_landing("sam/box", 7).is_none(), "{repo}");
+        assert_eq!(kept(&b), None, "{repo}");
         jobs(&b, true);
         assert!(
             b.log()
@@ -122,20 +135,24 @@ fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
             b.log()
         );
         assert!(!d.exists(), "{repo}");
-        assert_eq!(
-            b.pass().recorded_landing("sam/box", 7).as_deref(),
-            Some(url.as_str())
-        );
-        let mut closed = issue(7, "sam", &["claude"]);
-        closed["state"] = json!("closed");
-        fs::write(b.path("repos_sam_box_issues_7"), closed.to_string()).unwrap();
+        assert_eq!(kept(&b), Some(format!("{repo}#10")), "{repo}");
+        closed(&b);
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
         assert!(moved_on(&b), "{repo}");
+        assert_eq!(
+            stored_at(&b, "6").children[0].merged_pr.as_deref(),
+            Some(url.as_str())
+        );
     }
 }
 
-/// Edited while the job ran: the job is handed the issue again, and its
-/// awaited PR isn't the child's landed PR.
+fn stored_at(b: &Box, parent: &str) -> List {
+    serde_json::from_slice(&fs::read(b.pass().plan_dir("sam/box", parent).join("tasks.json")).unwrap())
+        .unwrap()
+}
+
+/// Edited while the job ran: the job is handed the issue again, and what it
+/// awaited isn't kept.
 #[test]
 fn an_edit_while_the_job_ran_records_nothing() {
     let (mut b, d, _) = child_job("sam/box#10", "done", "open", &["claude"]);
@@ -150,45 +167,107 @@ fn an_edit_while_the_job_ran_records_nothing() {
     jobs(&b, true);
     assert!(!b.log().contains("state=closed"), "{}", b.log());
     assert!(d.exists());
-    assert!(b.pass().recorded_landing("sam/box", 7).is_none());
+    assert_eq!(kept(&b), None);
 }
 
-/// Closed by hand before the pass saw the job finish: the awaited PR is
-/// kept before the record goes. Not for a job that hadn't finished, nor
-/// one whose issue was edited after it was handed it.
+/// A close that didn't go through keeps nothing: the child stays open, its
+/// list where it was, and the job's record stays for the next pass.
+#[test]
+fn a_failed_close_keeps_no_evidence() {
+    let (b, d, parent) = child_job("sam/box#10", "done", "open", &["claude"]);
+    pr(&b, "sam/box", 10, true);
+    fs::write(b.path("fail"), "state=closed\n").unwrap();
+    jobs(&b, true);
+    assert!(d.exists());
+    assert_eq!(kept(&b), None);
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+}
+
+/// Closed by hand before the pass saw the job finish: what the job awaited
+/// is kept before the record goes. Not for a job that hadn't finished, nor
+/// one whose issue was edited after it was handed it, nor a one-way
+/// question's timeout, whose synthetic `done` leaves the owner's answer owed.
 #[test]
 fn a_hand_close_after_the_jobs_done_keeps_its_landing() {
-    for (end, edited, kept) in [
-        ("done", false, true),
-        ("await", false, false),
-        ("done", true, false),
+    for (case, end, keeps) in [
+        ("done", "done", true),
+        ("await", "await", false),
+        ("edited", "done", false),
+        ("timeout", "done", false),
     ] {
         let (b, d, parent) = child_job("sam/machine#1218", end, "closed", &["claude"]);
-        if edited {
-            let mut now = issue(7, "sam", &["claude"]);
-            now["state"] = json!("closed");
-            now["body"] = json!("It's broken, and the docs need it too.");
-            fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+        match case {
+            "edited" => {
+                let mut now = issue(7, "sam", &["claude"]);
+                now["state"] = json!("closed");
+                now["body"] = json!("It's broken, and the docs need it too.");
+                fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+            }
+            "timeout" => {
+                let job = crate::job::Job::new(&b.cfg, "j1");
+                fs::write(job.turn("1", "timeout"), "one-way\n").unwrap();
+                fs::write(
+                    crate::ask::host_path(&job, "question-needs-owner"),
+                    "keep it",
+                )
+                .unwrap();
+            }
+            _ => {}
         }
-        let url = pr(&b, "sam/machine", 1218, true);
+        pr(&b, "sam/machine", 1218, true);
         jobs(&b, false);
-        assert!(!d.exists(), "{end}");
+        assert!(!d.exists(), "{case}");
         assert_eq!(
-            b.pass().recorded_landing("sam/box", 7),
-            kept.then_some(url),
-            "{end} {edited}: {}",
+            kept(&b).is_some(),
+            keeps,
+            "{case}: {}",
             b.log()
         );
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-        assert_eq!(moved_on(&b), kept, "{end} {edited}");
+        assert_eq!(moved_on(&b), keeps, "{case}");
     }
+}
+
+/// The awaited PR hadn't merged when the child closed: the list waits, and
+/// moves on once it does, with no job left to revive. Reopened, the child
+/// drops what its earlier job awaited.
+#[test]
+fn an_awaited_pr_that_merges_after_the_close_lands_it_then() {
+    let (b, _, parent) = child_job("sam/machine#1218", "done", "closed", &["claude"]);
+    pr(&b, "sam/machine", 1218, false);
+    jobs(&b, false);
+    assert_eq!(kept(&b).as_deref(), Some("sam/machine#1218"));
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    assert!(p.wake.contains_key("sam/box"), "a later look is booked");
+    // Reopened while it waits: what the old job awaited goes.
+    let mut now = issue(7, "sam", &["claude"]);
+    now["state"] = json!("open");
+    fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert_eq!(kept(&b), None);
+    // Kept again, and merged since.
+    let (b, _, parent) = child_job("sam/machine#1218", "done", "closed", &["claude"]);
+    pr(&b, "sam/machine", 1218, false);
+    jobs(&b, false);
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    let url = pr(&b, "sam/machine", 1218, true);
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(moved_on(&b));
+    assert_eq!(
+        stored_at(&b, "6").children[0].merged_pr.as_deref(),
+        Some(url.as_str())
+    );
 }
 
 /// A child that inherited the repair lane closes with its landed PR too.
 #[test]
 fn a_repair_lane_child_closes_with_its_landing() {
     let (b, _, _) = child_job("sam/box#10", "done", "open", &["claude", "stuck"]);
-    let url = pr(&b, "sam/box", 10, true);
+    pr(&b, "sam/box", 10, true);
     jobs(&b, true);
     assert!(
         b.log()
@@ -196,7 +275,7 @@ fn a_repair_lane_child_closes_with_its_landing() {
         "{}",
         b.log()
     );
-    assert_eq!(b.pass().recorded_landing("sam/box", 7), Some(url));
+    assert_eq!(kept(&b).as_deref(), Some("sam/box#10"));
 }
 
 #[test]
@@ -206,7 +285,7 @@ fn an_awaited_pr_that_never_merged_lands_nothing() {
     jobs(&b, true);
     assert!(!b.log().contains("state=closed"), "{}", b.log());
     assert!(d.exists());
-    assert!(b.pass().recorded_landing("sam/box", 7).is_none());
+    assert_eq!(kept(&b), None);
 }
 
 #[test]
@@ -285,7 +364,9 @@ fn a_child_closed_by_hand_waits_and_says_so_once() {
     // One notice, ensured each pass: asking again never opens another.
     let notices = fs::read_to_string(b.path("notices")).unwrap();
     assert!(
-        notices.lines().all(|l| l == "ensure proj-plan-sam_box-7"),
+        notices
+            .lines()
+            .all(|l| ["ensure proj-plan-sam_box-7", "pending proj-plan-sam_box-7"].contains(&l)),
         "{notices}"
     );
     assert!(notice_open(&b));
@@ -303,8 +384,13 @@ fn a_child_closed_by_hand_waits_and_says_so_once() {
             .contains("the list waits")
     );
     assert!(notice_open(&b));
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(notice_open(&b));
+    assert!(p.wake.contains_key("sam/box"), "the close is tried again");
+    // The parent leaves the open list meanwhile: the close still goes on.
     fs::remove_file(b.path("close-fails")).unwrap();
-    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    b.pass().sequence("sam/box", &[]);
     assert!(!notice_open(&b));
     // Known closed: not asked again.
     let before = fs::read_to_string(b.path("notices")).unwrap();

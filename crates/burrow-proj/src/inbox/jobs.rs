@@ -406,12 +406,8 @@ impl Pass<'_> {
                         && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                     {
                         super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
-                        // The awaited PR becomes the child's landed PR only
-                        // now: this completion is accepted, and no turn
-                        // starts before the issue closes.
-                        if let super::plans::Closing::Record(pr) = &closing
-                            && !n.parse().is_ok_and(|c| self.record_landing(repo, c, pr))
-                        {
+                        let awaited = matches!(closing, super::plans::Closing::Awaited(_));
+                        if awaited && !super::plans::declared_done(&job) {
                             drop(held);
                             self.retry(repo);
                             continue;
@@ -419,6 +415,17 @@ impl Pass<'_> {
                         if !self.close(repo, n, "completed") {
                             drop(held);
                             self.miss(repo);
+                            continue;
+                        }
+                        // What the job awaited is the child's only once the
+                        // close went through. Not kept: the record stays, and
+                        // the next pass, finding the child closed, keeps it
+                        // under the same checks (keep_landing).
+                        if awaited
+                            && !n.parse().is_ok_and(|c| self.keep_awaited(repo, c, &job))
+                        {
+                            drop(held);
+                            self.retry(repo);
                             continue;
                         }
                         if let Err(f) = halt(self.cfg, &job, false) {

@@ -330,8 +330,8 @@ impl Pass<'_> {
     }
     /// A child's issue closes with its job only once a merged PR is tied to
     /// it: one that closes it, or one its job awaited
-    /// ([`Pass::awaited_landing`]), which the caller records only once it has
-    /// accepted the job's completion, under the lock it closes the issue under.
+    /// ([`Pass::awaited_landing`]), which the caller keeps only once the
+    /// close it made on the job's accepted completion has gone through.
     pub(super) fn child_can_close(&mut self, repo: &str, n: &str, job: Option<&Job>) -> Closing {
         if !self.inbox.planning {
             return Closing::Yes;
@@ -351,12 +351,14 @@ impl Pass<'_> {
                 let Ok(n) = n.parse() else {
                     return Closing::No;
                 };
-                let closing = match self.landed_child(repo, n) {
+                let closing = match self.landed_child(repo, n, false) {
                     Some(Some(_)) => Some(Closing::Yes),
-                    Some(None) => job.map_or(Some(Closing::No), |job| {
-                        self.awaited_landing(job)
-                            .map(|pr| pr.map_or(Closing::No, Closing::Record))
-                    }),
+                    Some(None) => match job.filter(|job| landed::declared_done(job)) {
+                        Some(job) => self
+                            .awaited_landing(job)
+                            .map(|pr| pr.map_or(Closing::No, Closing::Awaited)),
+                        None => Some(Closing::No),
+                    },
                     None => None,
                 };
                 return closing.unwrap_or_else(|| {
@@ -692,6 +694,7 @@ impl Pass<'_> {
         if !self.inbox.planning || self.cfg.paused(repo) {
             return;
         }
+        self.settle_notices(repo, all);
         for d in self.plan_dirs(repo) {
             let Some(name) = d.file_name().and_then(|s| s.to_str()) else {
                 continue;
@@ -765,12 +768,17 @@ impl Pass<'_> {
             // A child is done when a merged PR is tied to it, whatever its
             // issue's state: an open one recorded so is closed with it.
             let landed = if issue["state"] == "closed" {
-                let Some(landed) = self.landed_child(repo, child) else {
+                let Some(landed) = self.landed_child(repo, child, true) else {
                     self.miss(repo);
                     continue;
                 };
                 landed
             } else {
+                // Reopened: what an earlier job awaited no longer counts.
+                if !self.drop_awaited(repo, child) {
+                    self.retry(repo);
+                    continue;
+                }
                 self.recorded_landing(repo, child)
             };
             if let Some(pr) = landed {
@@ -830,7 +838,7 @@ impl Pass<'_> {
 
 #[path = "landed.rs"]
 mod landed;
-pub(super) use landed::{Closing, PLAN_USAGE};
+pub(super) use landed::{Closing, PLAN_USAGE, declared_done};
 
 #[cfg(test)]
 #[path = "plans_tests.rs"]
