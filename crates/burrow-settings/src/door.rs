@@ -56,7 +56,7 @@ pub fn pass(api: &mut dyn Api, cfg: &DoorConfig) -> Result<(), Error> {
             _ => Vec::new(),
         };
         let body = if !crate::valid_command(&args) {
-            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, pipeline TIMESTAMP or back.".into()
+            "Nothing changed. Ask show, allow OWNER/REPO, pause OWNER/REPO, land OWNER/REPO#N HEAD, pipeline TIMESTAMP or back.".into()
         } else {
             cfg.settings.request(
                 &receipt,
@@ -144,5 +144,30 @@ mod tests {
         );
         pass(&mut github("sam", None, "bad request"), &cfg).unwrap();
         assert!(cfg.settings.allows("sam/code").unwrap());
+    }
+
+    #[test]
+    fn only_authorized_requests_hand_a_pr_to_the_steward() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = DoorConfig {
+            repo: "sam/box".into(),
+            label: "settings".into(),
+            authors: vec![burrow_github::fake::author("sam")],
+            state: dir.path().join("door"),
+            settings: Config {
+                overlay: dir.path().join("overlay.json"),
+                ..Default::default()
+            },
+        };
+        let ask = format!("land sam/game#4 {}", "d".repeat(40));
+        for (author, editor) in [("outsider", None), ("sam", Some("outsider"))] {
+            pass(&mut github(author, editor, &ask), &cfg).unwrap();
+            assert!(cfg.settings.decision("sam/game").unwrap().handed.is_empty());
+        }
+        pass(&mut github("sam", None, &ask), &cfg).unwrap();
+        let handed = cfg.settings.decision("sam/game").unwrap().handed;
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].actor, "github:sam/box#1:sam");
+        assert!(!cfg.settings.allows("sam/game").unwrap());
     }
 }

@@ -45,11 +45,18 @@ __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_
 def handle(repo, pr, repo_info, digest, held=None, below=None):
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
     try:
-        if C.paused(repo):
+        # A PR handed to the steward (admission.py) gets its own pass in a
+        # paused repo: whatever else it needs (a Claude job, a proof, a
+        # review) is still paused, and keeps it waiting here.
+        if C.paused(repo, pr):
             raise C.JobPaused(f"{repo}: repository work paused")
         p.run()
-    except C.JobPaused:
-        p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
+    except C.JobPaused as e:
+        if C.handed(repo, pr):
+            why = str(e).split(": ", 1)[-1]
+            p.settle("pending", f"Handed to the steward, but waiting: {why} with its repo", stage=S.REVIEW, wait=None)
+        else:
+            p.settle("pending", "Automated jobs paused by configuration", stage=S.REVIEW, wait=None)
         save(p.key, p.st)
 
 

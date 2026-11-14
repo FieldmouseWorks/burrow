@@ -67,7 +67,7 @@ def cn(*args):
     """What cn answered, as JSON. GitHub unavailable (cn's exit 75): C.Unavailable."""
     me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steward.py")
     env = {**os.environ, **CONARY["env"], "CONARY_TOKEN_COMMAND": f"{sys.executable} -E -s {me} token"}
-    if len(args) >= 3 and args[0] == "train" and args[1] in ("join", "step") and C.paused(args[2]):
+    if len(args) >= 3 and args[0] == "train" and args[1] in ("join", "step") and not admitted(*args[1:]):
         raise C.JobPaused(f"{args[2]}: repository work paused before train write")
     p = C.remote([CONARY["cn"], *args], timeout=300, env=env, capture_output=True, text=True)
     what = f"cn {' '.join(args[:3])}"
@@ -76,6 +76,21 @@ def cn(*args):
     if p.returncode:
         raise RuntimeError(f"{what}: {p.stderr.strip()[-300:]}")
     return json.loads(p.stdout)
+
+
+def admitted(action, repo, *args):
+    """Whether the train may take this write now, admission read afresh. In
+    a paused repo: a join only of a PR handed to the steward at the head it
+    joins at, and a step only while every PR in the train is one, so a
+    handoff never lands another PR with it."""
+    if not C.paused(repo):
+        return True
+    if action == "join":
+        head = args[args.index("--head") + 1] if "--head" in args[:-1] else None
+        return bool(args and args[0].isdigit() and head) and not C.paused(repo, {"number": int(args[0]), "headRefOid": head})
+    t = TRAINS.get(repo)
+    handed = {h["pr"] for h in (C.decision(repo) or {}).get("handed", ())}
+    return bool(t and t["joined"]) and all(m["pr"] in handed for m in t["joined"])
 
 
 def classed(repo, pr):
@@ -194,7 +209,7 @@ def ride(repo, pr, st, desc, settle, strike, said, reviewed):
     (step.py); said is what GitHub said when it refused its merge, as the
     train's status on the head has it; reviewed, whether its reviewers had
     a round on it (join)."""
-    if C.paused(repo):
+    if C.paused(repo, pr):
         raise C.JobPaused(f"{repo}: repository work paused before train admission")
     n, head = pr["number"], pr["headRefOid"]
     if C.queued(pr) and not C.unland(repo, pr):
@@ -260,7 +275,7 @@ def step(repo):
     GitHub says it is. What it did shows on the PRs'
     heads (the train's status), and each change it makes on GitHub is an
     event that starts the repo's next pass."""
-    if C.paused(repo):
+    if not admitted("step", repo):
         return
     t = TRAINS.get(repo)
     if t is None or idle(t):
