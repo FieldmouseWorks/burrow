@@ -66,7 +66,7 @@ fn refuses_the_original_keep_builds_steps() {
                 .remove(Value::String("name".into()));
         }
     }
-    assert_eq!(unreported(&old).len(), 4);
+    assert_eq!(unreported(&old).len(), 6);
 }
 
 #[test]
@@ -79,6 +79,8 @@ fn reporters_distinguish_soft_failure_cache_miss_and_extraction_failure() {
         ("keep-tool", "keep-tool"),
         ("keep", "keep-builds"),
         ("keep-save", "keep-save"),
+        ("keep-newer", "keep-newer"),
+        ("keep-prune", "keep-prune"),
     ] {
         let reporter = steps(job)
             .iter()

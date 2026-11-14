@@ -33,10 +33,16 @@ jobs:
   check:
     if: github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/conary/train/')
     uses: ./.github/workflows/flake-check.yml
-    # What the shared workflow needs to attest its result.
+    # What the shared workflow needs to attest its result, and actions:
+    # write for a push to main's legs to delete the kept builds their own
+    # supersedes (flake-check.yml's keep-newer and keep-prune, #1011). A
+    # permission can't depend on the event, so a PR's run has it too, and
+    # `train` and flake-retarget.yml's calls grant the same as this one: it
+    # gives nothing a branch of this repo couldn't take by editing this
+    # file, and a PR from a fork gets a read-only token whatever this says.
     permissions:
       contents: read
-      actions: read
+      actions: write
       id-token: write
       attestations: write
     with:
@@ -105,7 +111,7 @@ jobs:
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
     permissions:
       contents: read
-      actions: read
+      actions: write
       id-token: write
       attestations: write
     with:

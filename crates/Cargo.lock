@@ -602,6 +602,7 @@ dependencies = [
 name = "burrow-keep"
 version = "0.0.0"
 dependencies = [
+ "burrow-github",
  "burrow-test",
  "serde_json",
  "sha2",

@@ -41,6 +41,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub mod nix;
+pub mod prune;
 
 /// The local store's paths, by full name (`/nix/store/…`).
 #[derive(Debug, Default)]
