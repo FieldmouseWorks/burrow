@@ -145,7 +145,7 @@ fn child() {
 case $1 in
   _handover_format) echo 1 ;;
   _retry_format) echo 4 ;;
-  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
+  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/.handed" && mv "{jobs}/$2/.handed" "{jobs}/$2/handed" ;;
 esac
 "#
             ),
@@ -166,7 +166,7 @@ esac
             take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
         } else {
             held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
-            fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+            publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
         }
     }
     if what == "codex" {
@@ -182,7 +182,7 @@ esac
             )
             .unwrap(),
         );
-        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+        publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
     }
     if what == "soon" {
         cfg.max_wait = 4;
@@ -207,10 +207,18 @@ esac
                     .success()
             );
         }
-        fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+        publish(&cfg.jobs.join(&id).join("took"), &now().to_string());
     }
     let _ = std::io::stdin().read(&mut [0]);
     drop(held);
+}
+
+/// Writes what the child tells the test as a whole file or none: a temp file
+/// renamed into place, so a test that sees `path` exist never reads it empty.
+fn publish(path: &Path, content: &str) {
+    let tmp = path.with_file_name(format!(".{}", path.file_name().unwrap().to_string_lossy()));
+    fs::write(&tmp, content).unwrap();
+    fs::rename(&tmp, path).unwrap();
 }
 
 fn until(what: &str, mut done: impl FnMut() -> bool) {
