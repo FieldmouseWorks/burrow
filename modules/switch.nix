@@ -228,6 +228,30 @@ in
       environment.systemPackages = [ switchTool confirmTool ];
       burrow.tools = { switch = switchTool; confirm = confirmTool; };
 
+      # switch-to-configuration waits on every job it queues, so a unit it
+      # restarts that is ordered after a long oneshot already running (a
+      # sweep after a two-hour renovate) would hold the activation past its
+      # deadline, and the switch would revert with nothing wrong in it
+      # (burrow#811). Patched to stop waiting on jobs that wait on nothing
+      # but runs going since before the activation: they stay queued as they
+      # are and run once the run ends (held.rs says how it tells). The setup
+      # sysinit-reactivation.target reruns is still waited for whole: the
+      # rest of the system counts on it. The revert's activation is a system
+      # built with it too. The patch stops applying, and the build says so,
+      # if nixpkgs' main.rs moves under it.
+      nixpkgs.overlays = [
+        (_: prev: {
+          switch-to-configuration-ng = prev.switch-to-configuration-ng.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [ ../patches/switch-to-configuration-ng/main.patch ];
+            postPatch = (old.postPatch or "") + ''
+              cp ${../patches/switch-to-configuration-ng/held.rs} src/held.rs
+              mkdir -p src/held
+              cp ${../patches/switch-to-configuration-ng/held/tests.rs} src/held/tests.rs
+            '';
+          });
+        })
+      ];
+
       # The commit the system was built from, `-dirty` from a dirty tree:
       # `nixos-version --configuration-revision` says it, and HOST-update and
       # the pipeline dispatcher read it to tell what's running.

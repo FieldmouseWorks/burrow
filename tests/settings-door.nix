@@ -31,6 +31,9 @@ JSON
   '';
 in pkgs.testers.runNixOSTest {
   name = "settings-door";
+  # burrow.updates turns on burrow.switch, whose module patches
+  # switch-to-configuration with an overlay.
+  node.pkgsReadOnly = false;
   nodes.machine = { config, lib, ... }: {
     imports = [ self.nixosModules.autoland self.nixosModules.updates ((import ../examples/machine.nix { inherit lib; }) // { nixpkgs = { }; fileSystems = { }; boot = { }; }) ];
     burrow.claude.package = pkgs.hello;
