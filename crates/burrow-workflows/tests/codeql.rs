@@ -2,8 +2,17 @@
 //! from the workflow's own commit and runs it with the event (its own tests
 //! say what it picks), the analyze matrix is what it picked, and burrow's
 //! caller reruns on a retarget and cancels a PR's last run whole.
+//!
+//! An integration test, where the crate's other workflows' tests are its
+//! modules: Cargo finds this file by itself, so it builds wherever the crate
+//! does, a tree without the workflows it reads included, rather than waiting
+//! on a module declaration to take it in.
 
-use crate::harness::{script, step, text, workflow};
+#[allow(dead_code)]
+#[path = "../src/harness.rs"]
+mod harness;
+
+use harness::{script, step, text, workflow};
 
 fn jobs() -> yaml_serde::Value {
     workflow(".github/workflows/codeql.yml")["jobs"].clone()
