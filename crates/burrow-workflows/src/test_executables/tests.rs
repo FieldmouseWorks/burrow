@@ -173,6 +173,142 @@ fn writes_cannot_hide_from_the_guard() {
     assert!(!fixture_findings(module).is_empty(), "accepted: {module}");
 }
 
+/// Only a formatting macro's format string starts its named arguments:
+/// in any other macro, `name = value` after a string assigns.
+#[test]
+fn macro_assignments_are_seen_after_strings() {
+    let switch = "let mut p = bin.join(\"data\"); executable(bin.join(\"gh\"), GH);";
+    for code in [
+        "dbg!(\"switch\", p = bin.join(\"gh\"));",
+        "wrapper!(\"switch\", p = bin.join(\"gh\"));",
+        "wrapper!(dbg!(\"switch\", p = bin.join(\"gh\")));",
+        "dbg!(wrapper!(\"switch\", p = bin.join(\"gh\")));",
+        // A string in a formatting macro's operands isn't its format string.
+        "assert_eq!(\"switch\", p = bin.join(\"gh\"));",
+        "assert!(\"switch\".is_empty(), p = bin.join(\"gh\"));",
+    ] {
+        let code = format!("fn fixture() {{ {switch} {code} fs::write(&p, OTHER).unwrap(); }}");
+        assert!(!fixture_findings(&code).is_empty(), "accepted: {code}");
+    }
+    let says = "let p = bin.join(\"says\"); executable(bin.join(\"gh\"), GH);";
+    for code in [
+        "println!(\"{p:?}\", p = bin.join(\"gh\"));",
+        "assert_eq!(a, b, \"{p:?}\", p = bin.join(\"gh\"));",
+        "assert!(ready, \"{p:?}\", p = bin.join(\"gh\"));",
+        "write!(out, \"{p:?}\", p = bin.join(\"gh\")).unwrap();",
+        "wrapper!(std::println!(\"{p:?}\", p = bin.join(\"gh\")));",
+    ] {
+        let code = format!("fn fixture() {{ {says} {code} fs::write(&p, \"[]\").unwrap(); }}");
+        assert_eq!(fixture_findings(&code), BTreeSet::new(), "{code}");
+    }
+}
+
+/// Each `use` means what it meant where it was declared: a child's import
+/// of its parent's alias reaches what the alias stands for, and an inner
+/// alias of the same name changes nothing an outer `use` brought in.
+#[test]
+fn imports_resolve_where_they_were_declared() {
+    let script = "(&p, \"#!/bin/sh\\n\").unwrap();";
+    let over = "(bin.join(\"gh\"), GH); fs::write(bin.join(\"gh\"), OTHER).unwrap();";
+    for code in [
+        // A parent's import, by the same name and renamed.
+        format!(
+            "use std::fs as files; mod tests {{ use super::files; fn t() {{ files::write{script} }} }}"
+        ),
+        format!(
+            "use std::fs as files; mod tests {{ use super::files as f; fn t() {{ f::write{script} }} }}"
+        ),
+        format!(
+            "use burrow_test as bt; mod tests {{ use super::bt; fn t() {{ bt::executable{over} }} }}"
+        ),
+        format!(
+            "use burrow_test as bt; mod tests {{ use super::bt as b; fn t() {{ b::executable{over} }} }}"
+        ),
+        // Through `self::`, `super::super::` and `crate::`.
+        format!(
+            "use std::fs as files; mod a {{ mod tests {{ use super::super::files::write as put; fn t() {{ put{script} }} }} }}"
+        ),
+        format!(
+            "use std::fs as files; mod tests {{ use crate::files::write as put; fn t() {{ put{script} }} }}"
+        ),
+        format!(
+            "use std::fs as files; mod tests {{ use self::super::files; fn t() {{ files::write{script} }} }}"
+        ),
+        format!(
+            "use burrow_test as bt; mod tests {{ use crate::bt::executable as script; fn t() {{ script{over} }} }}"
+        ),
+        format!(
+            "use burrow_test as bt; mod a {{ mod tests {{ use super::super::bt; fn t() {{ bt::executable{over} }} }} }}"
+        ),
+        // An inner alias of the name an outer explicit or glob import used.
+        format!(
+            "fn fixture() {{ use std::fs as files; use files::write as put; {{ use std::io as files; put{script} }} }}"
+        ),
+        format!(
+            "fn fixture() {{ use std::fs as files; use files::*; {{ use std::io as files; write{script} }} }}"
+        ),
+        format!(
+            "use std::fs as files; use files::write as put; mod tests {{ use std::io as files; fn t() {{ put{script} }} }}"
+        ),
+        format!(
+            "fn fixture() {{ use burrow_test as bt; use bt::executable as script; {{ use other as bt; script{over} }} }}"
+        ),
+        format!(
+            "fn fixture() {{ use burrow_test as bt; use bt::*; {{ use other as bt; executable{over} }} }}"
+        ),
+        format!(
+            "use burrow_test as bt; use bt::*; mod tests {{ use other as bt; fn t() {{ executable{over} }} }}"
+        ),
+    ] {
+        assert!(!fixture_findings(&code).is_empty(), "accepted: {code}");
+    }
+    // A child's own alias hides its parent's.
+    for code in [
+        "use std::fs as files; mod tests { use std::io as files; fn t() { executable(bin.join(\"gh\"), GH); files::write(bin.join(\"gh\"), \"[]\"); } }",
+        "use burrow_test::executable as script; mod tests { use other::install as script; fn t() { script(bin.join(\"gh\"), GH); fs::write(bin.join(\"gh\"), \"[]\").unwrap(); } }",
+    ] {
+        assert_eq!(fixture_findings(code), BTreeSet::new(), "{code}");
+    }
+}
+
+/// A loop's body and a closure may run again after what they or later code
+/// assign: a write sees every path its next run may be given.
+#[test]
+fn writes_see_what_later_runs_assign() {
+    let setup = "let mut p = bin.join(\"data\"); let mut q = bin.join(\"data\"); executable(bin.join(\"gh\"), GH);";
+    for code in [
+        "for _ in 0..2 { fs::write(&p, OTHER).unwrap(); p = bin.join(\"gh\"); }",
+        "while ready { fs::write(&p, OTHER).unwrap(); p = bin.join(\"gh\"); }",
+        "loop { fs::write(&p, OTHER).unwrap(); p = bin.join(\"gh\"); }",
+        // A write in the condition, and a `while let`.
+        "while fs::write(&p, OTHER).is_ok() { p = bin.join(\"gh\"); }",
+        "while let Ok(()) = fs::write(&p, OTHER) { p = bin.join(\"gh\"); }",
+        // Reached through `continue`, and through nested loops.
+        "for x in xs { fs::write(&p, OTHER).unwrap(); if x { p = bin.join(\"gh\"); continue; } }",
+        "for _ in xs { for _ in ys { fs::write(&p, OTHER).unwrap(); } p = bin.join(\"gh\"); }",
+        // Two runs before the stand-in's path reaches the write.
+        "loop { fs::write(&p, OTHER).unwrap(); p = q.clone(); q = bin.join(\"gh\"); }",
+        // A closure called again after its captured path changes.
+        "let w = || fs::write(&p, OTHER); w().unwrap(); p = bin.join(\"gh\"); w().unwrap();",
+        "let mut w = || { fs::write(&p, OTHER).unwrap(); p = bin.join(\"gh\"); }; w(); w();",
+        "let w = || fs::write(&q, OTHER); q = p.clone(); p = bin.join(\"gh\"); q = p.clone(); w().unwrap();",
+        "let fut = async { fs::write(&p, OTHER).unwrap() }; p = bin.join(\"gh\"); fut.await;",
+        "let install = || executable(&p, GH); p = bin.join(\"gh\"); install(); fs::write(bin.join(\"gh\"), OTHER).unwrap();",
+    ] {
+        let code = format!("fn fixture() {{ {setup} {code} }}");
+        assert!(!fixture_findings(&code).is_empty(), "accepted: {code}");
+    }
+    for code in [
+        "let p = bin.join(\"says\"); executable(bin.join(\"gh\"), GH); for _ in xs { fs::write(&p, \"[]\").unwrap(); }",
+        "for _ in xs { let mut q = bin.join(\"gh\"); executable(&q, GH); q = bin.join(\"says\"); fs::write(&q, \"[]\").unwrap(); }",
+        "let p = bin.join(\"says\"); executable(bin.join(\"gh\"), GH); let w = || fs::write(&p, \"[]\"); w().unwrap(); w().unwrap();",
+        "let p = bin.join(\"says\"); executable(bin.join(\"gh\"), GH); loop { let w = |p: &Path| fs::write(p, \"[]\"); w(&p).unwrap(); }",
+    ] {
+        let code = format!("fn fixture() {{ {code} }}");
+        assert_eq!(fixture_findings(&code), BTreeSet::new(), "{code}");
+    }
+}
+
 /// What names nothing, or names something else by the time it's written,
 /// is plain data beside a stand-in.
 #[test]

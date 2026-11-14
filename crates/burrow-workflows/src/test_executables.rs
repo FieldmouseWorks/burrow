@@ -1,10 +1,16 @@
 //! The workspace has one way to install executable fixtures. Follow test
 //! modules from Cargo's entry points, including helpers with arbitrary names.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
+
+use imports::{Imports, Kind};
+use lets::{Lets, Name, Names, local, name};
+
+mod imports;
+mod lets;
 
 fn test_cfg(meta: &syn::Meta) -> bool {
     match meta {
@@ -31,9 +37,9 @@ struct Guard {
     testing: bool,
     findings: BTreeSet<String>,
     /// Each file's stand-ins: what its `executable` calls named.
-    installed: BTreeSet<(PathBuf, String)>,
+    installed: BTreeSet<(PathBuf, Name)>,
     /// Each file's plain writes, by the name of the path written.
-    written: BTreeSet<(PathBuf, String)>,
+    written: BTreeSet<(PathBuf, Name)>,
     /// The current function's locals, by the names of the paths each may hold.
     lets: Lets,
     /// How many conditional or deferred bodies (branches, loops, closures,
@@ -63,13 +69,23 @@ impl Guard {
     /// writes a script, or writes where its file installed a stand-in, holds
     /// a writer that a concurrent fork can keep open until the exec.
     fn finish(mut self) -> BTreeSet<String> {
-        for (file, name) in &self.written {
-            if self.installed.contains(&(file.clone(), name.clone())) {
-                self.findings.insert(format!(
-                    "{}: writes over the stand-in `{name}`: use burrow_test",
-                    file.display()
-                ));
-            }
+        let files = |names: &BTreeSet<(PathBuf, Name)>| {
+            names
+                .iter()
+                .flat_map(|(file, name)| {
+                    self.lets
+                        .files(name)
+                        .into_iter()
+                        .map(move |n| (file.clone(), n))
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let installed = files(&self.installed);
+        for (file, name) in files(&self.written).intersection(&installed) {
+            self.findings.insert(format!(
+                "{}: writes over the stand-in `{name}`: use burrow_test",
+                file.display()
+            ));
         }
         self.findings
     }
@@ -105,12 +121,11 @@ impl<'ast> Visit<'ast> for Guard {
         self.testing |= test_attrs(&m.attrs);
         if let Some((_, items)) = &m.content {
             self.modules.push(m.ident.to_string());
-            let uses = self.uses.clone();
-            self.import(items.iter());
+            self.uses.enter(Kind::Module, items.iter());
             for item in items {
                 self.visit_item(item);
             }
-            self.uses = uses;
+            self.uses.leave();
         } else {
             let explicit = m.attrs.iter().find_map(|a| {
                 if !a.path().is_ident("path") {
@@ -141,10 +156,9 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_file(&mut self, f: &'ast syn::File) {
-        let old = self.uses.clone();
-        self.import(f.items.iter());
+        self.uses.enter(Kind::Module, f.items.iter());
         visit::visit_file(self, f);
-        self.uses = old;
+        self.uses.leave();
     }
 
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
@@ -163,13 +177,9 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_block(&mut self, b: &'ast syn::Block) {
-        let old = self.uses.clone();
-        self.import(b.stmts.iter().filter_map(|s| match s {
-            syn::Stmt::Item(i) => Some(i),
-            _ => None,
-        }));
+        self.uses.enter(Kind::Block, items(&b.stmts));
         self.scope(|g| visit::visit_block(g, b));
-        self.uses = old;
+        self.uses.leave();
     }
 
     /// A `let ... else` block diverges, so what it assigns may never be seen.
@@ -200,10 +210,10 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
-        self.scope(|g| {
-            g.maybe(|g| {
+        self.deferred(|g| {
+            g.scope(|g| {
                 for input in &c.inputs {
-                    g.lets.bind(input, BTreeSet::new(), g.maybe);
+                    g.lets.bind(input, Names::new(), g.maybe);
                 }
                 visit::visit_expr_closure(g, c);
             })
@@ -211,13 +221,13 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_expr_async(&mut self, e: &'ast syn::ExprAsync) {
-        self.maybe(|g| visit::visit_expr_async(g, e));
+        self.deferred(|g| visit::visit_expr_async(g, e));
     }
 
     fn visit_arm(&mut self, a: &'ast syn::Arm) {
         self.scope(|g| {
             g.maybe(|g| {
-                g.lets.bind(&a.pat, BTreeSet::new(), g.maybe);
+                g.lets.bind(&a.pat, Names::new(), g.maybe);
                 visit::visit_arm(g, a);
             })
         });
@@ -225,16 +235,14 @@ impl<'ast> Visit<'ast> for Guard {
 
     fn visit_expr_for_loop(&mut self, f: &'ast syn::ExprForLoop) {
         self.visit_expr(&f.expr);
-        self.scope(|g| {
-            g.maybe(|g| {
-                g.lets.bind(&f.pat, BTreeSet::new(), g.maybe);
-                g.visit_block(&f.body);
-            })
+        self.repeat(|g| {
+            g.lets.bind(&f.pat, Names::new(), g.maybe);
+            g.visit_block(&f.body);
         });
     }
 
     fn visit_expr_loop(&mut self, e: &'ast syn::ExprLoop) {
-        self.maybe(|g| visit::visit_expr_loop(g, e));
+        self.repeat(|g| g.visit_block(&e.body));
     }
 
     /// A labeled block can be left before its end.
@@ -258,7 +266,7 @@ impl<'ast> Visit<'ast> for Guard {
     /// `if let` and `while let` bind for the rest of their condition and body.
     fn visit_expr_let(&mut self, e: &'ast syn::ExprLet) {
         visit::visit_expr_let(self, e);
-        self.lets.bind(&e.pat, BTreeSet::new(), self.maybe);
+        self.lets.bind(&e.pat, Names::new(), self.maybe);
     }
 
     /// The condition's bindings reach its body but not its `else`.
@@ -275,7 +283,10 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
-        self.scope(|g| g.maybe(|g| visit::visit_expr_while(g, e)));
+        self.repeat(|g| {
+            g.visit_expr(&e.cond);
+            g.visit_block(&e.body);
+        });
     }
 
     fn visit_path(&mut self, p: &'ast syn::Path) {
@@ -320,7 +331,7 @@ impl<'ast> Visit<'ast> for Guard {
 
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
         if let syn::Expr::Path(p) = &*e.func {
-            let names = self.resolve(&p.path);
+            let names = self.uses.resolve(&p.path);
             let writer = names.ends_with(&["fs".into(), "write".into()])
                 || names.ends_with(&["File".into(), "create".into()]);
             if self.testing {
@@ -369,34 +380,24 @@ impl<'ast> Visit<'ast> for Guard {
                 if let Ok(args) = m.parse_body_with(
                     syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
                 ) {
-                    let mut formatting = false;
-                    for arg in &args {
+                    let named = named_arguments(&m.path, &args.iter().collect::<Vec<_>>());
+                    for (i, arg) in args.iter().enumerate() {
                         match arg {
-                            // After a format string, `name = value` names an
-                            // argument and assigns nothing.
-                            syn::Expr::Assign(a) if formatting && local(&a.left) => {
+                            // After a formatting macro's format string,
+                            // `name = value` names an argument and assigns
+                            // nothing.
+                            syn::Expr::Assign(a) if i >= named && local(&a.left) => {
                                 g.visit_expr(&a.right)
                             }
                             _ => g.visit_expr(arg),
                         }
-                        formatting |= matches!(
-                            arg,
-                            syn::Expr::Lit(syn::ExprLit {
-                                lit: syn::Lit::Str(_),
-                                ..
-                            })
-                        );
                     }
                 } else if let Ok(stmts) = m.parse_body_with(syn::Block::parse_within) {
-                    let uses = g.uses.clone();
-                    g.import(stmts.iter().filter_map(|s| match s {
-                        syn::Stmt::Item(i) => Some(i),
-                        _ => None,
-                    }));
+                    g.uses.enter(Kind::Block, items(&stmts));
                     for stmt in &stmts {
                         g.visit_stmt(stmt);
                     }
-                    g.uses = uses;
+                    g.uses.leave();
                 }
             })
         });
@@ -444,9 +445,33 @@ impl Guard {
 
     /// Runs `visit` in a scope of its own: the locals it binds end with it.
     fn scope(&mut self, visit: impl FnOnce(&mut Self)) {
-        self.lets.0.push(BTreeMap::new());
+        self.lets.push();
         visit(self);
-        self.lets.0.pop();
+        self.lets.pop();
+    }
+
+    /// Runs a loop's body, which may run again with what its last run
+    /// assigned, until a run changes no local in scope: a write sees every
+    /// path a later run's assignment may give it. `continue` reaches the
+    /// next run with no more than the end of this one holds, since what the
+    /// body assigns to outer locals only adds to them.
+    fn repeat(&mut self, visit: impl Fn(&mut Self)) {
+        let first = self.lets.first();
+        loop {
+            let before = self.lets.rewind(first);
+            self.scope(|g| g.maybe(&visit));
+            if !self.lets.changed(&before) {
+                break;
+            }
+        }
+    }
+
+    /// Runs `visit` as code that may run later, any number of times: what
+    /// it reads from an outer local is anything that local ever holds.
+    fn deferred(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.lets.deferred += 1;
+        self.maybe(visit);
+        self.lets.deferred -= 1;
     }
 
     /// Runs `visit` as code that may not run, or may run later: what it
@@ -460,278 +485,25 @@ impl Guard {
     /// A function sees none of its caller's locals, and its parameters name
     /// nothing.
     fn function(&mut self, sig: &syn::Signature, visit: impl FnOnce(&mut Self)) {
-        let old = (std::mem::take(&mut self.lets), self.maybe);
-        self.maybe = 0;
+        let old = (self.lets.take_scopes(), self.maybe, self.lets.deferred);
+        (self.maybe, self.lets.deferred) = (0, 0);
         self.scope(|g| {
             for input in &sig.inputs {
                 if let syn::FnArg::Typed(t) = input {
-                    g.lets.bind(&t.pat, BTreeSet::new(), 0);
+                    g.lets.bind(&t.pat, Names::new(), 0);
                 }
             }
             visit(g);
         });
-        (self.lets, self.maybe) = old;
-    }
-
-    /// Records what the `use` items among `items` bring into scope. A child
-    /// module keeps its parent's, as `use super::*` would give it.
-    fn import<'a>(&mut self, items: impl Iterator<Item = &'a syn::Item>) {
-        for item in items {
-            if let syn::Item::Use(u) = item {
-                self.import_tree(&u.tree, Vec::new());
-            }
-        }
-    }
-
-    fn import_tree(&mut self, tree: &syn::UseTree, mut prefix: Vec<String>) {
-        match tree {
-            syn::UseTree::Path(p) => {
-                prefix.push(p.ident.to_string());
-                self.import_tree(&p.tree, prefix);
-            }
-            syn::UseTree::Name(n) if n.ident == "self" => {
-                if let Some(last) = prefix.last().cloned() {
-                    self.uses.names.insert(last, prefix);
-                }
-            }
-            syn::UseTree::Name(n) => {
-                prefix.push(n.ident.to_string());
-                self.uses.names.insert(n.ident.to_string(), prefix);
-            }
-            syn::UseTree::Rename(r) => {
-                if r.ident != "self" {
-                    prefix.push(r.ident.to_string());
-                }
-                self.uses.names.insert(r.rename.to_string(), prefix);
-            }
-            syn::UseTree::Glob(_) => self.uses.globs.push(prefix),
-            syn::UseTree::Group(g) => {
-                for tree in &g.items {
-                    self.import_tree(tree, prefix.clone());
-                }
-            }
-        }
-    }
-
-    /// A path's segments, spelled out through the imports in scope.
-    fn resolve(&self, path: &syn::Path) -> Vec<String> {
-        let names: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        if path.leading_colon.is_some() {
-            names
-        } else {
-            self.uses.resolve(names, true)
-        }
+        let scopes;
+        (scopes, self.maybe, self.lets.deferred) = old;
+        self.lets.restore_scopes(scopes);
     }
 
     fn reject_setter(&mut self, name: &str) {
         if matches!(name, "set_permissions" | "chmod" | "fchmod" | "copy") {
             self.reject(name);
         }
-    }
-}
-
-/// The `use` items in scope, kept as written: a `use` may start from a name
-/// another brings in, declared before or after it.
-#[derive(Clone, Default)]
-struct Imports {
-    /// What each name brought in stands for.
-    names: BTreeMap<String, Vec<String>>,
-    /// The paths a `use ...::*` brings everything in from.
-    globs: Vec<Vec<String>>,
-}
-
-impl Imports {
-    /// `path` with its head replaced by what it stands for, until the head
-    /// is nothing brought in. `self::`, `super::` and `crate::` reach the
-    /// imports in scope, since a module keeps its parent's.
-    fn resolve(&self, mut path: Vec<String>, globs: bool) -> Vec<String> {
-        let mut seen = BTreeSet::new();
-        loop {
-            while path.len() > 1 && matches!(path[0].as_str(), "self" | "super" | "crate") {
-                path.remove(0);
-            }
-            let Some(head) = path.first().cloned() else {
-                return path;
-            };
-            if !seen.insert(head.clone()) {
-                return path;
-            }
-            let full = match self.names.get(&head) {
-                Some(full) => full.clone(),
-                None if globs => match self.glob(&head) {
-                    Some(full) => full,
-                    None => return path,
-                },
-                None => return path,
-            };
-            path.splice(0..1, full);
-        }
-    }
-
-    /// What a glob brings in under `name`, for the writers and the installer.
-    fn glob(&self, name: &str) -> Option<Vec<String>> {
-        let module = match name {
-            "write" | "File" => "fs",
-            "executable" => "burrow_test",
-            _ => return None,
-        };
-        self.globs.iter().find_map(|prefix| {
-            let mut full = self.resolve(prefix.clone(), false);
-            (full.last().map(String::as_str) == Some(module)).then(|| {
-                full.push(name.into());
-                full
-            })
-        })
-    }
-}
-
-/// What a local holds, as far as the guard can tell: the names of the paths
-/// it may hold (none known for anything else, which hides any outer local of
-/// its name), and how many conditional bodies deep it was bound.
-struct Held {
-    names: BTreeSet<String>,
-    maybe: usize,
-}
-
-/// The locals in scope, innermost scope last.
-#[derive(Default)]
-struct Lets(Vec<BTreeMap<String, Held>>);
-
-impl Lets {
-    fn get(&self, local: &str) -> BTreeSet<String> {
-        self.0
-            .iter()
-            .rev()
-            .find_map(|s| s.get(local))
-            .map(|h| h.names.clone())
-            .unwrap_or_default()
-    }
-
-    /// A pattern binds a single local to `named`; any other binds each of
-    /// its locals to nothing known.
-    fn bind(&mut self, pat: &syn::Pat, named: BTreeSet<String>, maybe: usize) {
-        let mut locals = Vec::new();
-        bound(pat, &mut locals);
-        let single = match pat {
-            syn::Pat::Type(t) => matches!(&*t.pat, syn::Pat::Ident(i) if i.subpat.is_none()),
-            syn::Pat::Ident(i) => i.subpat.is_none(),
-            _ => false,
-        };
-        if self.0.is_empty() {
-            self.0.push(BTreeMap::new());
-        }
-        let scope = self.0.last_mut().unwrap();
-        for local in locals {
-            let names = if single {
-                named.clone()
-            } else {
-                BTreeSet::new()
-            };
-            scope.insert(local, Held { names, maybe });
-        }
-    }
-
-    /// An assignment changes the innermost local of its name, wherever it
-    /// was bound. Where it may not run, the local may still hold what it
-    /// did, so the new names add to the old.
-    fn assign(&mut self, local: &str, named: BTreeSet<String>, maybe: usize) {
-        if let Some(held) = self.0.iter_mut().rev().find_map(|s| s.get_mut(local)) {
-            if held.maybe == maybe {
-                held.names = named;
-            } else {
-                held.names.extend(named);
-            }
-        }
-    }
-}
-
-/// The locals a pattern binds.
-fn bound(pat: &syn::Pat, locals: &mut Vec<String>) {
-    match pat {
-        syn::Pat::Ident(i) => {
-            locals.push(i.ident.to_string());
-            if let Some((_, sub)) = &i.subpat {
-                bound(sub, locals);
-            }
-        }
-        syn::Pat::Type(t) => bound(&t.pat, locals),
-        syn::Pat::Reference(r) => bound(&r.pat, locals),
-        syn::Pat::Paren(p) => bound(&p.pat, locals),
-        syn::Pat::Tuple(t) => t.elems.iter().for_each(|p| bound(p, locals)),
-        syn::Pat::TupleStruct(t) => t.elems.iter().for_each(|p| bound(p, locals)),
-        syn::Pat::Slice(s) => s.elems.iter().for_each(|p| bound(p, locals)),
-        syn::Pat::Or(o) => o.cases.iter().for_each(|p| bound(p, locals)),
-        syn::Pat::Struct(s) => s.fields.iter().for_each(|f| bound(&f.pat, locals)),
-        _ => {}
-    }
-}
-
-/// Whether an expression is a bare local's name.
-fn local(e: &syn::Expr) -> bool {
-    matches!(e, syn::Expr::Path(p) if p.path.get_ident().is_some())
-}
-
-/// The names an expression gives the path it builds: the last file name a
-/// `join` or literal spells, else the field that holds it, or what the local
-/// holding it may hold, seen through borrows and conversions. None when it's
-/// computed some other way or comes from a parameter: a helper's `path`
-/// names nothing.
-fn name(e: &syn::Expr, lets: &Lets) -> BTreeSet<String> {
-    match e {
-        syn::Expr::Reference(r) => name(&r.expr, lets),
-        syn::Expr::Paren(p) => name(&p.expr, lets),
-        syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(s),
-            ..
-        }) => s
-            .value()
-            .rsplit('/')
-            .next()
-            .map(String::from)
-            .into_iter()
-            .collect(),
-        syn::Expr::Field(f) => match &f.member {
-            syn::Member::Named(n) => BTreeSet::from([n.to_string()]),
-            syn::Member::Unnamed(_) => BTreeSet::new(),
-        },
-        syn::Expr::Path(p) => p
-            .path
-            .get_ident()
-            .map(|i| lets.get(&i.to_string()))
-            .unwrap_or_default(),
-        syn::Expr::MethodCall(m) if m.method == "join" => {
-            m.args.first().map(|a| name(a, lets)).unwrap_or_default()
-        }
-        syn::Expr::MethodCall(m)
-            if matches!(
-                m.method.to_string().as_str(),
-                "as_ref"
-                    | "as_path"
-                    | "as_deref"
-                    | "borrow"
-                    | "clone"
-                    | "expect"
-                    | "into"
-                    | "to_owned"
-                    | "to_path_buf"
-                    | "unwrap"
-            ) =>
-        {
-            name(&m.receiver, lets)
-        }
-        syn::Expr::Call(c) => {
-            match &*c.func {
-                syn::Expr::Path(p)
-                    if p.path.segments.last().is_some_and(|s| {
-                        matches!(s.ident.to_string().as_str(), "new" | "from")
-                    }) && c.args.len() == 1 =>
-                {
-                    c.args.first().map(|a| name(a, lets)).unwrap_or_default()
-                }
-                _ => BTreeSet::new(),
-            }
-        }
-        _ => BTreeSet::new(),
     }
 }
 
@@ -758,6 +530,39 @@ fn script(e: &syn::Expr) -> bool {
             )
             .is_ok_and(|args| args.first().is_some_and(script)),
         _ => false,
+    }
+}
+
+/// The items among a block's statements.
+fn items(stmts: &[syn::Stmt]) -> impl Iterator<Item = &syn::Item> {
+    stmts.iter().filter_map(|s| match s {
+        syn::Stmt::Item(i) => Some(i),
+        _ => None,
+    })
+}
+
+/// Where a macro's named format arguments start: after its format string,
+/// for the standard formatting macros and the common ones built on them.
+/// Any other macro (`dbg!`, `vec!`, a wrapper) takes expressions, so a
+/// `name = value` in it assigns.
+fn named_arguments(path: &syn::Path, args: &[&syn::Expr]) -> usize {
+    let Some(last) = path.segments.last() else {
+        return usize::MAX;
+    };
+    let format = match last.ident.to_string().as_str() {
+        "format" | "format_args" | "print" | "println" | "eprint" | "eprintln" | "panic"
+        | "unreachable" | "todo" | "unimplemented" | "anyhow" | "bail" | "trace" | "debug"
+        | "info" | "warn" | "error" => 0,
+        "write" | "writeln" | "assert" | "debug_assert" | "ensure" => 1,
+        "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => 2,
+        _ => return usize::MAX,
+    };
+    match args.get(format) {
+        Some(syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(_),
+            ..
+        })) => format + 1,
+        _ => usize::MAX,
     }
 }
 
