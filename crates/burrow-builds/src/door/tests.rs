@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::Cursor;
-use std::os::unix::fs::PermissionsExt as _;
 
 use super::*;
 use crate::tests::{entry, key, secret};
@@ -28,8 +27,7 @@ struct Door {
 fn door() -> Door {
     let dir = tempfile::tempdir().unwrap();
     let cn = dir.path().join("cn");
-    fs::write(&cn, CN).unwrap();
-    fs::set_permissions(&cn, fs::Permissions::from_mode(0o755)).unwrap();
+    burrow_test::executable(&cn, CN);
     let cfg = Config {
         dir: dir.path().join("cache"),
         key: dir.path().join("key"),

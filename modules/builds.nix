@@ -174,12 +174,12 @@ in
       };
     };
 
-    # One door a connection, from nginx alone.
+    # One door a connection, from nginx alone. The socket listens from
+    # sockets.target, before the init service can run (it comes after
+    # basic.target): each door waits for it instead.
     systemd.sockets.${account} = {
       description = "The build store's door";
       wantedBy = [ "sockets.target" ];
-      requires = [ "${account}-init.service" ];
-      after = [ "${account}-init.service" ];
       listenStreams = [ socket ];
       socketConfig = {
         Accept = true;
@@ -192,6 +192,8 @@ in
 
     systemd.services."${account}@" = {
       description = "An upload to the build store";
+      requires = [ "${account}-init.service" ];
+      after = [ "${account}-init.service" ];
       serviceConfig = hardening // {
         ExecStart = "${lib.getExe package} door ${configFile}";
         StandardInput = "socket";
@@ -215,7 +217,8 @@ in
           alias = "${cfg.dir}/";
           extraConfig = ''
             location ~ ^${lib.escapeRegex path}/(fetched|tmp)/ { return 404; }
-            location ~ ^${lib.escapeRegex path}/nar/(?<burrow_builds_nar>[0-9a-z]{32}\.nar)$ {
+            # Quoted: nginx ends an unquoted regex at its `{`.
+            location ~ "^${lib.escapeRegex path}/nar/(?<burrow_builds_nar>[0-9a-z]{32}\.nar)$" {
               alias ${cfg.dir}/nar/$burrow_builds_nar;
               access_log ${cfg.dir}/fetched/$burrow_builds_nar burrow_builds_fetched;
             }

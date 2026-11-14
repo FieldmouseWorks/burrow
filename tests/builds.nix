@@ -45,6 +45,8 @@ pkgs.testers.runNixOSTest {
         machinery = "workers";
       };
     };
+    # burrow.user's default, whose group the ledger's directories take.
+    users.users.dev.isNormalUser = true;
     nix.settings.experimental-features = [ "nix-command" ];
     environment.systemPackages = [ pkgs.curl pkgs.jq ];
     system.extraDependencies = [ one two three ];
