@@ -274,6 +274,12 @@ fn per_project(values: &Values) -> Option<Value> {
     Some(json!(left.max(1)))
 }
 
+/// modules/updates/renovate-identity.nix: `github.machinery`, the App
+/// Renovate acts as unless it has one of its own.
+fn renovate_app(values: &Values) -> Option<Value> {
+    values.get("github.machinery").cloned()
+}
+
 /// Every option, in the order `settings show` lists them.
 pub static SETTINGS: &[Setting] = &[
     // proj: its slots and what it holds back.
@@ -497,6 +503,23 @@ pub static SETTINGS: &[Setting] = &[
         ),
         "autoland-review",
         "Path regexes left out of what the reviewers read.",
+    ),
+    flake(
+        "github.machinery",
+        &MAYBE_TEXT,
+        Is("null"),
+        "github",
+        "The App, one of burrow.github.apps, the machine's own jobs act as on GitHub; null for the user's own login.",
+    ),
+    flake(
+        "updates.renovate.app",
+        &MAYBE_TEXT,
+        Fallback::Derived {
+            says: "github.machinery",
+            from: renovate_app,
+        },
+        "renovate",
+        "The App Renovate acts as, and spends the allowance of: one of its own keeps a long pass from stalling every other job. Its bot authors Renovate's commits (gitAuthor) and is who the steward knows Renovate's PRs by.",
     ),
     // What changes live, in proj's files.
     live(

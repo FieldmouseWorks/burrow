@@ -384,7 +384,23 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         }
         let job = Job::new(cfg, &id);
-        let Some(_lock) = job.try_lock()? else {
+        // A folder with no lock is locked only for a checkpoint of its latest
+        // turn (kept in the control root, not the folder), the one thing
+        // below that acts on it: one being removed, whose own deletes wake
+        // this pass, gets no lock file put back into it.
+        let lock = match job.try_lock_existing() {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let pending = job
+                    .turns()
+                    .is_some_and(|n| job.turn(&n, "retry-migration").exists());
+                if !pending {
+                    continue;
+                }
+                job.try_lock()?
+            }
+            held => held?,
+        };
+        let Some(_lock) = lock else {
             busy = true;
             continue;
         };

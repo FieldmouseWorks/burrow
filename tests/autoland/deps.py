@@ -119,6 +119,31 @@ for who in ("author", "committer"):
     assert merged(), (who, status)
 COMMITS.pop(11)
 COMMITTERS.pop(11)
+# Renovate as an App of its own (burrow.updates.renovate.app), not the
+# machinery's: the module makes its bot one of the steward's, its login
+# Renovate's and its noreply address Renovate's commits'. Its PRs are taken
+# exactly as Renovate's were: acted on, a batch landed on CI alone while its
+# commits are the bot's alone, one a Claude job wrote to reviewed. The
+# machinery's App is still a bot of the steward's, but no longer Renovate.
+apart = {"renovate": "sam-renovate[bot]", "renovateEmail": "5+sam-renovate[bot]@users.noreply.github.com",
+         "bots": [*S.CFG["bots"], "sam-renovate"]}
+before = {k: S.CFG[k] for k in apart}
+S.CFG.update(apart)
+bot = {"login": "sam-renovate", "__typename": "Bot"}
+assert C.acted_on(mkpr(author=bot, **batch)) and C.renovated(bot) and C.renovates("sam-renovate[bot]")
+assert not C.renovated({"login": "workers", "__typename": "Bot"}) and not C.renovates("workers[bot]")
+assert not C.renovated({"login": "sam-renovate", "__typename": "User"})
+fresh_pr_state()
+COMMITS[11] = [apart["renovateEmail"]]
+status, _ = run(mkpr(author=bot, **batch), 900)
+assert merged() and "Dependency update, CI green" in status and JOBS == [], status
+for edited in ([apart["renovateEmail"], "claude@remi"], ["bot@renovateapp.com"]):
+    fresh_pr_state()
+    COMMITS[11] = edited
+    status, _ = run(mkpr(author=bot, **batch), 900)
+    assert not merged() and "Dependency update" not in status, (edited, status)
+COMMITS.pop(11)
+S.CFG.update(before)
 status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)
 assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
 assert "no reviewer reads" in JOBS[0] and "its reviewers found nothing" not in JOBS[0], JOBS[0]

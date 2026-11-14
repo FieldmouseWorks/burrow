@@ -41,10 +41,13 @@ let
     fileset = lib.fileset.unions [ ../docs ../house ../templates ../lib ];
   };
 
-  # The email Renovate commits as, when it has one of its own: any other
-  # author on a Renovate branch is a Claude fix (steward.py). Without one,
-  # Renovate commits as the user, like the fixes, and nothing tells them apart.
-  renovateAuthor = config.burrow.updates.renovate.gitAuthor or null;
+  # Who Renovate is (updates/renovate-identity.nix): the App it acts as, or
+  # null for the user. The email it commits as, when it has one of its own:
+  # any other author on a Renovate branch is a Claude fix (steward.py).
+  # Without one, Renovate commits as the user, like the fixes, and nothing
+  # tells them apart.
+  renovateApp = config.burrow.updates.renovate.actor;
+  renovateAuthor = config.burrow.updates.renovate.gitAuthor;
   renovateMatch = if renovateAuthor == null then null else builtins.match ".*<([^>]*)>.*" renovateAuthor;
 
   # renovate-sweep runs here: its verdicts on majors count, and its pass is
@@ -77,8 +80,10 @@ let
     inherit (cfg) authors;
     # The bots whose PRs and comments are the steward's authors' too, by
     # their Apps' slugs: GraphQL's logins for them, REST's without "[bot]".
-    # The machinery's App posts and pushes the steward's Claude jobs' work.
-    bots = [ "dependabot" "renovate" ] ++ lib.optional (machineApp != null) machineApp.slug;
+    # The machinery's App posts and pushes the steward's Claude jobs' work,
+    # and Renovate's App, when it's another, opens its PRs.
+    bots = lib.unique ([ "dependabot" "renovate" ] ++ lib.optional (machineApp != null) machineApp.slug
+      ++ lib.optional (renovateApp != null) renovateApp.slug);
     machinery = if machineApp == null then null else machineApp.name;
     # Its login as GitHub's record of a branch's pushes gives it, which
     # tells a fix job's own push from anyone else's (claims.py).
@@ -128,9 +133,9 @@ let
       postingAccountId = cfg.app.accountId;
       command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
     };
-    # Whose login Renovate runs as: the machine's own App, else the user
-    # (null: one of `authors`). Its PRs and dashboards are by it.
-    renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
+    # Whose login Renovate runs as: its App's bot (burrow.updates.renovate.app),
+    # else the user (null: one of `authors`). Its PRs and dashboards are by it.
+    renovate = if renovateApp == null then null else renovateApp.login;
     # What keeps up each repo's labels and settings, and its Renovate
     # dashboard and flaky tests when they're on (crates/burrow-upkeep),
     # with its config.
@@ -301,6 +306,7 @@ in
   imports = [
     (import ./common.nix inputs)
     (import ./autoland/review.nix inputs)
+    (import ./updates/renovate-identity.nix inputs)
     ./autoland/labels.nix
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     # The heavy slots its proof builds take, where the machine has them.

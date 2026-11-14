@@ -6,23 +6,28 @@ use serde_json::{Value, json};
 use super::*;
 
 /// The flake's values as tracked.nix renders them on a machine that sets
-/// nothing, but the steward's rounds.
+/// nothing, but the steward's rounds: a derived default worked out, as its
+/// module does, from the values before it.
 fn tracked() -> serde_json::Map<String, Value> {
+    let mut values = burrow_settings::schema::Values::new();
     SETTINGS
         .iter()
         .filter(|s| s.change == Change::Deploy)
         .map(|s| {
-            let entry = match s.name {
-                "autoland.rounds" => json!({"value": 3, "set": true, "default": 5}),
-                "proj.pipelineSlots" => json!({"value": 1, "set": false, "default": 1}),
-                "proj.maxJobsPerProject" => json!({"value": 2, "set": false, "default": 2}),
+            let (value, entry) = match s.name {
+                "autoland.rounds" => (json!(3), json!({"value": 3, "set": true, "default": 5})),
                 // A module the machine doesn't have: its default holds.
-                n if n.starts_with("autoland.reviewers.") => Value::Null,
+                n if n.starts_with("autoland.reviewers.") => {
+                    (s.default_value().unwrap(), Value::Null)
+                }
                 _ => {
-                    let d = s.default_value().unwrap();
-                    json!({"value": d, "set": false, "default": d})
+                    let d = s.default_given(&values).unwrap_or_else(|| {
+                        panic!("{}: no default from the values before it", s.name)
+                    });
+                    (d.clone(), json!({"value": d, "set": false, "default": d}))
                 }
             };
+            values.insert(s.name.to_owned(), value);
             (s.name.to_owned(), entry)
         })
         .collect()
@@ -61,6 +66,19 @@ fn every_option_shown_comes_from_the_schema() {
     assert_eq!(
         options["autoland.reviewers.codex.effort"],
         json!({"value": "high", "origin": "default"})
+    );
+    // Derived defaults, from the values they're worked out from.
+    assert_eq!(
+        options["proj.pipelineSlots"],
+        json!({"value": 1, "origin": "default"})
+    );
+    assert_eq!(
+        options["proj.maxJobsPerProject"],
+        json!({"value": 2, "origin": "default"})
+    );
+    assert_eq!(
+        options["updates.renovate.app"],
+        json!({"value": null, "origin": "default"})
     );
     // A role with nothing set shows the declared default, never an
     // implicit one: every role on Claude but the planner, each on its

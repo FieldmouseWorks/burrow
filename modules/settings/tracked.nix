@@ -48,4 +48,6 @@ lib.genAttrs [
   "autoland.reviewers.codex.parallel"
   "autoland.reviewers.timeoutMinutes"
   "autoland.reviewers.skipPaths"
+  "github.machinery"
+  "updates.renovate.app"
 ] read
