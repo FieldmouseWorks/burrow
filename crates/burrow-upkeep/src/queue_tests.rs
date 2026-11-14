@@ -422,3 +422,24 @@ fn an_ask_that_isnt_one_is_refused() {
     };
     assert_eq!(a.wrong(), Some("\"../x\" isn't a snapshot's name".into()));
 }
+
+#[test]
+fn a_brief_is_what_it_was_before_its_text_moved() {
+    let meta = Meta {
+        rules: "- a rule".into(),
+        house: "- a house rule".into(),
+        secret: vec!["secrets/db.yaml".into()],
+    };
+    let p = brief(
+        "Sam",
+        "sam/r",
+        &ask(&"a".repeat(40)),
+        &meta,
+        "- src/app.py:3: **Codex · P1** old",
+    );
+    let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/../burrow-brief/tests/golden/review.txt");
+    if std::env::var_os("BRIEF_GOLDEN_WRITE").is_some() {
+        fs::write(golden, &p).unwrap();
+    }
+    assert_eq!(fs::read_to_string(golden).unwrap(), p);
+}

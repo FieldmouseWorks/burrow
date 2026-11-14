@@ -19,6 +19,8 @@ import urllib.parse
 
 tmp = tempfile.mkdtemp()
 SETTINGS = os.path.abspath(sys.argv[9])
+# Where briefs.py's goldens are (crates/burrow-brief/tests/golden).
+BRIEF_GOLDEN = os.path.abspath(sys.argv[10])
 
 
 def admission(allowed, pipeline=(), until=None):
