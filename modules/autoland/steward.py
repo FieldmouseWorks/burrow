@@ -162,22 +162,22 @@ def main():
 SEARCHED = [0]
 
 
-def failing(repo, why):
-    """What of burrow-upkeep's look failed: logged, and the stall watchdog
-    watches the repo."""
+def failing(repo, why, step):
+    """What of burrow-upkeep's look at the repo's step (waits.AFTER_PRS)
+    failed: logged, and the stall watchdog watches the repo."""
     log(f"{repo}: {why}")
-    waits.failed(repo)
+    waits.failed(repo, step=step)
     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
 
-def told(repo, out, mine):
-    """What a look of burrow-upkeep's says: what it lists goes in mine, the
-    pass it books is booked, and what failed is `failing`."""
+def told(repo, out, mine, step):
+    """What a look of burrow-upkeep's at the repo's step says: what it lists
+    goes in mine, the pass it books is booked, and what failed is `failing`."""
     mine.extend(tuple(x) for x in out["stuck"])
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
     for why in out["failed"]:
-        failing(repo, why)
+        failing(repo, why, step)
 
 
 def branches(repo, default, in_use, mine, full):
@@ -186,7 +186,7 @@ def branches(repo, default, in_use, mine, full):
     also tries again what GitHub said no to. It raises when it fails, as
     the repo's other steps do."""
     told(repo, C.upkeep("branches", repo, "--default", default, *(["--full"] if full else []),
-                        input=json.dumps(sorted(in_use))), mine)
+                        input=json.dumps(sorted(in_use))), mine, "branches")
 
 
 def upkeep(repo, mine):
@@ -198,9 +198,9 @@ def upkeep(repo, mine):
     try:
         out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
     except Exception as e:
-        failing(repo, f"its upkeep: {e}")
+        failing(repo, f"its upkeep: {e}", "upkeep")
         return
-    told(repo, out, mine)
+    told(repo, out, mine, "upkeep")
     SEARCHED[0] += out["searched"]
     for j in out["jobs"]:
         try:
@@ -208,7 +208,7 @@ def upkeep(repo, mine):
         except C.JobPaused:
             continue
         except Exception as e:  # its own: the other part's job, and the pass, go on
-            failing(repo, f"its {j['part']} job didn't start: {e}")
+            failing(repo, f"its {j['part']} job didn't start: {e}", "upkeep")
             mine.extend(tuple(x) for x in j["unstarted"])
             continue
         if not jid:
@@ -280,6 +280,7 @@ def run_pass(kick, continuing=False):
         seen.add(repo)
         deferred.add(repo)
         operations_complete = True
+        past_prs = False  # what fails from here on is its branches' step (waits.AFTER_PRS)
         seen_all = True  # its PRs: False once its look fails short of them
         digest[repo] = mine = batch.digest(repo)
         with C.acting_for(repo):
@@ -372,6 +373,8 @@ def run_pass(kick, continuing=False):
                     complete = False
                     batch.left = True
                     continue
+                past_prs = True
+                waits.reached(repo, "branches")
                 # A partial traversal leaves all reviewer files alone. Once
                 # complete, include the snapshots carried from earlier batches
                 # before sweeping, just as a single complete pass does.
@@ -393,6 +396,7 @@ def run_pass(kick, continuing=False):
                     # After its PRs, so the ones settled this pass are in it.
                     try:
                         T.step(repo)
+                        waits.reached(repo, "train")
                     except C.Unavailable as e:
                         log(f"{repo}: its train: {e}")
                         operations_complete = False
@@ -400,14 +404,17 @@ def run_pass(kick, continuing=False):
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
                     except Exception as e:  # its own: the repo's PRs were seen to all the same
                         log(f"{repo}: its train: {e}")
-                        waits.failed(repo)
+                        waits.failed(repo, step="train")
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                else:
+                    waits.reached(repo, "train")  # off: nothing of it fails
                 branches(repo, r["default"], in_use, mine, full=kick is None and batch.traversal_full)
             except Exception as e:
                 log(f"{repo}: {e}")
-                waits.failed(repo)
+                waits.failed(repo, step="branches" if past_prs else None)
                 seen_all = False
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
+            waits.reached(repo, "upkeep")
             upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
@@ -443,7 +450,7 @@ def run_pass(kick, continuing=False):
                  if k not in seen and (kick is not None or k in inventory)}, **digest}
     digest = {k: list(dict.fromkeys(tuple(x) for x in v)) for k, v in digest.items()}
     save("digest-repos.json", digest)
-    waits.publish(seen, digest, False, inventory=inventory if kick is None else None, deferred=deferred)
+    waits.publish(seen, digest, False, inventory=inventory if kick is None else None)
     if kick is None and batch.traversal_full:
         # For renovate-sweep: it lists the ok majors of the repos this pass
         # didn't see to (one whose pass failed among them), and tells its

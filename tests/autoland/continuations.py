@@ -194,7 +194,8 @@ with tempfile.TemporaryDirectory() as tmp:
     for operation in ('train', 'train unavailable', 'branches', 'upkeep'):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
-                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None,
+                       after_prs=[operation.split()[0]])
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             original = S.step.handle
 
@@ -210,7 +211,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 if operation == 'train unavailable':
                     raise C.Unavailable('temporarily unavailable')
                 if operation == 'upkeep':
-                    S.failing('sam/r', 'its upkeep failed')
+                    S.failing('sam/r', 'its upkeep failed', 'upkeep')
                 else:
                     raise RuntimeError('still failing')
 
@@ -220,10 +221,119 @@ with tempfile.TemporaryDirectory() as tmp:
                 S.run_pass(None, continuing=True)
             current = C.load('watch.json', {})['items']['sam/r']
             assert current['since'] == 10 and current['due'] == 7210, (operation, current)
+            assert current['after_prs'] == [operation.split()[0]], (operation, current)
             C.NOW += 600
             S.run_pass(['sam/r'])
             assert 'sam/r' not in C.load('watch.json', {})['items'], operation
     print('deferred operation failures keep their original watchdog clocks: passed')
+
+    # A failure before the PRs (reading them, say) is retried by the next
+    # batch on its way in. Once that read succeeds, a batch that yields among
+    # the PRs must not keep the old failure: no batch would ever clear it.
+    for stage in ('open_prs', 'settle_repo', 'watch_default'):
+        with fixture() as (clock, handled, facts, repos, prs, info):
+            def broken(*args, **kwargs):
+                raise RuntimeError('gh api graphql -f: unexpected end of JSON input')
+
+            with patch.object(S if stage == 'open_prs' else S.R, stage, broken):
+                S.run_pass(['sam/r'])
+            failure = C.load('watch.json', {})['items']['sam/r']
+            assert failure['phase'] == W.FAILS and 'after_prs' not in failure, (stage, failure)
+            original = S.step.handle
+
+            def long(*args):
+                original(*args)
+                clock[0] += 9 * 60
+
+            with patch.object(S.step, 'handle', long):
+                C.NOW += 600
+                S.run_pass(['sam/r'])
+            assert C.load('pass-progress.json', {})['repos'], stage  # it yielded among the PRs
+            assert 'sam/r' not in C.load('watch.json', {})['items'], (stage, C.load('watch.json', {})['items'])
+    print('failures before the PRs clear once a yielding batch reads them: passed')
+
+    # A step after the PRs that failed stays watched, on its first clock,
+    # through a later failure before the PRs, whichever line's pass that is,
+    # and through the batches that yield among the PRs after it: none of
+    # them tried the step again. Upkeep runs after a failure before the PRs,
+    # restart's aside, so only a failed restart keeps an upkeep failure.
+    def step_fails(operation):
+        def fail(*args, **kwargs):
+            if operation == 'upkeep':
+                S.failing('sam/r', 'its upkeep failed', 'upkeep')
+            else:
+                raise RuntimeError('still failing')
+        return patch.object(*((S.T, 'step') if operation == 'train' else (S, operation)), fail)
+
+    for operation in ('train', 'branches', 'upkeep'):
+        for stage in ('restart', 'settle_repo', 'open_prs', 'watch_default'):
+            for line in ('full', 'kicked', 'continuation'):
+                case = (operation, stage, line)
+                with fixture() as (clock, handled, facts, repos, prs, info):
+                    original = S.step.handle
+
+                    def long(*args):
+                        original(*args)
+                        clock[0] += 9 * 60
+
+                    def watched():
+                        return C.load('watch.json', {})['items'].get('sam/r')
+
+                    with step_fails(operation):
+                        S.run_pass(['sam/r'])
+                    assert watched()['since'] == 1000 and watched()['after_prs'] == [operation], (case, watched())
+                    if line == 'continuation':
+                        with patch.object(S.step, 'handle', long):
+                            C.NOW += 600
+                            S.run_pass(None)
+                        assert C.load('pass-progress.json', {})['repos'], case
+                        assert watched()['after_prs'] == [operation], (case, watched())
+
+                    tried = []
+
+                    def broken(*args, **kwargs):
+                        tried.append(stage)
+                        raise RuntimeError('gh api graphql -f: unexpected end of JSON input')
+
+                    with patch.object(S if stage == 'open_prs' else S.R, stage, broken):
+                        C.NOW += 600
+                        S.run_pass(*{'full': [None], 'kicked': [['sam/r']], 'continuation': [None, True]}[line])
+                    assert tried == [stage], case
+                    kept = operation != 'upkeep' or stage == 'restart'
+                    failure = watched()
+                    assert failure['since'] == 1000 and failure['due'] == 1000 + 120 * 60, (case, failure)
+                    assert failure.get('after_prs') == ([operation] if kept else None), (case, failure)
+
+                    with patch.object(S.step, 'handle', long):
+                        C.NOW += 600
+                        S.run_pass(['sam/r'])
+                    assert C.load('pass-progress.json', {})['repos'], case  # it yielded among the PRs
+                    if kept:
+                        assert watched()['since'] == 1000 and watched()['after_prs'] == [operation], (case, watched())
+                    else:
+                        assert watched() is None, (case, watched())
+
+                    C.NOW += 600
+                    S.run_pass(['sam/r'])
+                    assert not C.load('pass-progress.json', {})['repos'], case
+                    assert watched() is None, (case, watched())
+    print('failures after the PRs outlast failures before them and yielding batches: passed')
+
+    # Two steps after the PRs failing: one tried again and passing clears it
+    # alone, the other still watched on the first clock.
+    with fixture() as (clock, handled, facts, repos, prs, info):
+        with step_fails('train'), step_fails('upkeep'):
+            S.run_pass(['sam/r'])
+        assert C.load('watch.json', {})['items']['sam/r']['after_prs'] == ['train', 'upkeep']
+        with step_fails('train'):
+            C.NOW += 600
+            S.run_pass(['sam/r'])
+        failure = C.load('watch.json', {})['items']['sam/r']
+        assert failure['after_prs'] == ['train'] and failure['since'] == 1000, failure
+        C.NOW += 600
+        S.run_pass(['sam/r'])
+        assert 'sam/r' not in C.load('watch.json', {})['items']
+    print('each step after the PRs clears on its own retry: passed')
 
     # Exhausting the work slice on the final PR still defers repository
     # operations; the continuation can run them without repeating the PR.
@@ -438,7 +548,8 @@ with tempfile.TemporaryDirectory() as tmp:
     for initial in (None, ['sam/r']):
         with fixture() as (clock, handled, facts, repos, prs, info):
             old = dict(repo='sam/r', what='sam/r', link='https://github.com/sam/r',
-                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None)
+                       phase=W.FAILS, since=10, due=7210, kick='autoland/sam/r', claude=False, rev=None,
+                       after_prs=['train'])
             C.save('watch.json', {'at': 10, 'items': {'sam/r': old}})
             attempts = []
 
