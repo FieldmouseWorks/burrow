@@ -282,6 +282,11 @@ impl Pass<'_> {
         let Some(written) = self.written(repo, issue) else {
             return false;
         };
+        // The closure kept must be the text checked: a REST read that
+        // disagrees with the verified one is read again next pass.
+        if !written.matches(issue) {
+            return false;
+        }
         let seen = number(&d.join("seen"));
         let after = |c: &Value| c["id"].as_i64().is_some_and(|i| i > seen);
         let had: Vec<Value> = written

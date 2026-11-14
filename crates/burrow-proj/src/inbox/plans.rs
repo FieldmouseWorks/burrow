@@ -351,15 +351,19 @@ impl Pass<'_> {
                 let Ok(n) = n.parse() else {
                     return Closing::No;
                 };
-                let closing = match self.landed_child(repo, n, None) {
-                    Some(Some(_)) => Some(Closing::Yes),
-                    Some(None) => match job.filter(|job| landed::declared_done(job)) {
-                        Some(job) => self
-                            .awaited_landing(job)
-                            .map(|pr| pr.map_or(Closing::No, Closing::Awaited)),
-                        None => Some(Closing::No),
-                    },
-                    None => None,
+                // Each source on its own: one that can't be read vetoes
+                // none that proves it, and is a miss only when none does.
+                let landed = self.landed_child(repo, n, None);
+                let live = match job.filter(|job| landed::declared_done(job)) {
+                    _ if matches!(landed, Some(Some(_))) => Some(None),
+                    Some(job) => self.awaited_landing(job),
+                    None => Some(None),
+                };
+                let closing = match (landed, live) {
+                    (Some(Some(_)), _) => Some(Closing::Yes),
+                    (_, Some(Some(pr))) => Some(Closing::Awaited(pr)),
+                    (Some(None), Some(None)) => Some(Closing::No),
+                    _ => None,
                 };
                 return closing.unwrap_or_else(|| {
                     self.miss(repo);

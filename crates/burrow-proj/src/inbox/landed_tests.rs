@@ -131,6 +131,9 @@ fn closed(b: &Box) {
     closed_at(b, "2026-11-13T20:00:55Z");
 }
 
+/// When the test GitHub says an issue the pass closed closed.
+const CLOSED_BY_PASS: &str = "2026-11-13T21:00:00Z";
+
 /// FieldmouseWorks/Conary#304 and #310: the job awaited its PR, which said
 /// `Refs`, in the child's repo or another, and said `proj done` once it
 /// merged. No closing reference: the pass accepts the completion, closes
@@ -154,15 +157,15 @@ fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
             "{repo}: {}",
             b.log()
         );
-        // Kept only on the closure GitHub has: the close's own pass.
-        assert!(d.exists(), "{repo}");
-        assert_eq!(kept(&b), None, "{repo}");
-        closed(&b);
-        jobs(&b, false);
+        // Kept in the same pass, on the closure GitHub answered the close
+        // with, and the job let go: the list is sequenced next in that
+        // pass, and says nothing of waiting.
         assert!(!d.exists(), "{repo}");
         assert_eq!(kept(&b), Some(format!("{repo}#10")), "{repo}");
+        closed_at(&b, CLOSED_BY_PASS);
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
         assert!(moved_on(&b), "{repo}");
+        assert!(!b.log().contains("the list waits"), "{repo}");
         assert_eq!(
             stored_at(&b, "6").children[0].merged_pr.as_deref(),
             Some(url.as_str())
@@ -305,9 +308,49 @@ fn a_repair_lane_child_closes_with_its_landing() {
         "{}",
         b.log()
     );
-    closed(&b);
-    jobs(&b, false);
     assert_eq!(kept(&b).as_deref(), Some("sam/box#10"));
+}
+
+/// The closed child's REST text isn't the text the completion was checked
+/// against (GraphQL's): nothing is kept, and the record stays to be read
+/// again.
+#[test]
+fn a_closure_whose_text_wasnt_checked_keeps_nothing() {
+    let (b, d, _) = child_job("sam/box#10", "done", "closed", &["claude"]);
+    pr(&b, "sam/box", 10, true);
+    let mut rest: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
+    rest["body"] = json!("It's broken, and the docs need it too.");
+    // Its answer posted, as the jobs pass does first.
+    fs::write(d.join("answered"), "1\n").unwrap();
+    let job = crate::job::Job::new(&b.cfg, "j1");
+    assert!(!b.pass().keep_landing("sam/box", "7", &job, &d, &rest));
+    assert_eq!(kept(&b), None);
+    let rest: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
+    assert!(b.pass().keep_landing("sam/box", "7", &job, &d, &rest));
+    assert_eq!(kept(&b).as_deref(), Some("sam/box#10"));
+}
+
+/// An open child whose closing references can't be read closes all the
+/// same by its job's merged awaited PR; with neither proving it, it's a
+/// miss.
+#[test]
+fn a_failed_closing_reference_lookup_never_vetoes_a_live_await() {
+    for merged in [true, false] {
+        let (b, _, _) = child_job("sam/box#10", "done", "open", &["claude"]);
+        let url = pr(&b, "sam/box", 10, merged);
+        fs::write(b.path("fail"), "merged-query\n").unwrap();
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        let mut p = b.pass();
+        let closing = p.child_can_close("sam/box", "7", Some(&job));
+        if merged {
+            assert_eq!(closing, Closing::Awaited(url));
+        } else {
+            assert_eq!(closing, Closing::No);
+            assert!(p.unreached.contains(&"sam/box".to_owned()));
+        }
+    }
 }
 
 /// One awaited target GitHub won't answer for vetoes nothing another

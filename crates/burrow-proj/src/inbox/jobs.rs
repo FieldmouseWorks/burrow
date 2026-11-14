@@ -412,17 +412,33 @@ impl Pass<'_> {
                             self.retry(repo);
                             continue;
                         }
-                        if !self.close(repo, n, "completed") {
+                        let Some(closed_now) = self.closed_issue(repo, n, "completed") else {
                             drop(held);
                             self.miss(repo);
                             continue;
-                        }
-                        // What the job awaited becomes the child's only on the
-                        // closure GitHub now has: the record stays, unhalted,
-                        // and the next pass (the close's own event) finds the
-                        // child closed and keeps it under the closed child's
-                        // checks, bound to that closure (keep_landing).
-                        if awaited {
+                        };
+                        // What the job awaited becomes the child's now, before
+                        // the job is let go and the list sequenced, bound to
+                        // the closure GitHub answered with, if that's the text
+                        // the completion was checked against; edited since,
+                        // it isn't kept. When it can't be kept here (no
+                        // closure in the answer, or not written), the record
+                        // stays and the close's own pass keeps it under the
+                        // closed child's checks (keep_landing).
+                        if awaited
+                            && closed_now["state"] == "closed"
+                            && closed_now["closed_at"].is_string()
+                            && written.matches(&closed_now)
+                        {
+                            if !n
+                                .parse()
+                                .is_ok_and(|c| self.keep_awaited(repo, c, &job, &closed_now))
+                            {
+                                drop(held);
+                                self.retry(repo);
+                                continue;
+                            }
+                        } else if awaited && !closed_now["closed_at"].is_string() {
                             drop(held);
                             self.book(repo, crate::now());
                             continue;
