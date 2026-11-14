@@ -9,7 +9,9 @@ A wait is the same one while its phase and what it's about (the PR's head
 and base, its `rev`) are: a new head saying the same thing is new work, with
 a deadline of its own. An open PR a pass noted nothing for (it failed on
 the repo first, or left the PR's status as it was) keeps the wait it had; a
-repo it fails on is watched itself. One whose step keeps failing the same way
+repo it fails on is watched itself, until a pass runs the operation that
+failed (its `ops`) again and it passes, however much of a long repo's
+traversal is left. One whose step keeps failing the same way
 (step.py's strike) is due at once, whatever its deadline, its phase says
 what fails, and it stays the one wait while that goes on.
 
@@ -43,6 +45,7 @@ FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
 OPEN = {}  # the keys of each repo's open PRs, as this pass read them
 FAILED = {}  # the repos this pass failed on, before, between or after their PRs
+PASSED = {}  # the operations on each repo this pass ran to the end (one that failed too is in FAILED's ops)
 FAILING = {}  # the PRs whose step keeps failing, by key: what fails, which is the stall
 SAID = {}  # what GitHub said to the latest try of each, by key: shown, but not the stall
 
@@ -51,6 +54,7 @@ def begin():
     NOTED.clear()
     OPEN.clear()
     FAILED.clear()
+    PASSED.clear()
     FAILING.clear()
     SAID.clear()
 
@@ -123,15 +127,29 @@ def overdue(repo, pr, why, said=None):
     return True
 
 
-def failed(repo, pr=None):
-    """The pass failed on the PR, or on the repo. Whatever its head, it's the
-    steward's pass that fails: no rev."""
+def failed(repo, pr=None, op=None):
+    """The pass failed on the PR, or on the repo in its operation op (one
+    of steward.py's: its settings, its PRs' read, its train, ...). Whatever
+    its head, it's the steward's pass that fails: no rev."""
     minutes, kick = repo_cfg(repo)["stallAfter"], f"autoland/{repo}"
     if pr:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, FAILS, minutes, kick, None)
     else:
+        assert op, "a repo's failure names its operation"
+        ops = FAILED.get(repo, {}).get("ops", set()) | {op}
         FAILED[repo] = {"repo": repo, "what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
-                        "kick": kick, "rev": None}
+                        "kick": kick, "rev": None, "ops": ops}
+
+
+def passed(repo, op):
+    """The pass ran the repo's operation op to its end: what failed in it
+    (failed(), before or after) still did."""
+    PASSED.setdefault(repo, set()).add(op)
+
+
+def ran(repo, op):
+    """Whether this pass ran the repo's operation op again, and it passed."""
+    return op in PASSED.get(repo, ()) and op not in FAILED.get(repo, {}).get("ops", ())
 
 
 def publish(seen, digest, full, inventory=None, deferred=()):
@@ -147,10 +165,17 @@ def publish(seen, digest, full, inventory=None, deferred=()):
     items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full
              and (inventory is None or repo_of(k) in inventory)}
     for repo in seen:
+        # The operations whose failure the repo's wait is for, carried from
+        # before: one this batch ran again and passed is over, however much
+        # of the traversal is left, and one it didn't reach (the rest of a
+        # repo's traversal is) keeps its clock. A wait from before its
+        # operations were noted (no ops) is over once the traversal is.
+        left = ()
         if repo in deferred and repo in was:
-            # The operation that failed has not been retried by this batch.
-            # Its clock belongs to that operation, not the PR traversal.
-            items[repo] = was[repo]
+            ops = was[repo].get("ops")
+            left = None if ops is None else [op for op in ops if not ran(repo, op)]
+            if left is None or left:
+                items[repo] = was[repo] if left is None else {**was[repo], "ops": left}
         noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
 
@@ -181,6 +206,8 @@ def publish(seen, digest, full, inventory=None, deferred=()):
                           # A step that keeps failing is the steward's, whatever job it has.
                           "claude": it.get("claude", False) and key not in FAILING,
                           "rev": it["rev"]}
+            if key == repo:
+                items[key]["ops"] = None if left is None else sorted(set(left) | it["ops"])
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:
         log(f"waits changed: {len(items)} watched")
