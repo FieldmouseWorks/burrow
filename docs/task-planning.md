@@ -48,9 +48,11 @@ one-way question's timeout, no owner's answer owed), and bound to that
 closure: when it closed, and the title and body it closed with. A child
 reopened, edited or closed again doesn't inherit them, whether or not a
 pass saw it open. The inbox closes an open child (repair-lane children
-included) once one of its awaited PRs has merged; the close's own pass,
-finding it closed, keeps them, as it does for a child closed first, by
-hand say, before the job's record goes. An awaited PR counts whenever it
+included) once one of its awaited PRs has merged, and keeps them in that
+pass, on the closure GitHub answers the close with, before the job is let
+go; a child closed first, by hand say, keeps them the same way before the
+job's record goes. Either way the closure's text must be the text the
+completion was checked against. An awaited PR counts whenever it
 merges, a pass looking again hourly, and a source GitHub can't answer for
 never vetoes another that proves the child done. A closed child with
 nothing tied is not done: a hand close stays a no-op, but the checklist
