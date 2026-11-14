@@ -25,6 +25,9 @@ subprocess.run([sys.executable, str(Path(__file__).with_name("batches.py")),
 subprocess.run([sys.executable, str(Path(__file__).with_name("looks.py")),
                 *sys.argv[1:]], check=True)
 
+subprocess.run([sys.executable, str(Path(__file__).with_name("listing.py")),
+                *sys.argv[1:]], check=True)
+
 subprocess.run([sys.executable, str(Path(__file__).with_name("continuations.py")),
                 *sys.argv[1:]], check=True)
 
