@@ -139,22 +139,21 @@ impl<'a> Job<'a> {
     /// them for diagnosis, without overwriting an earlier failed attempt.
     /// The caller holds the job lock and has waited out the previous unit.
     pub(crate) fn quarantine_unstarted(&self, last: u64) -> io::Result<()> {
-        let future = fs::read_dir(&self.dir)?
-            .collect::<io::Result<Vec<_>>>()?
+        let job = crate::state_reads::Dir::open(&self.dir)?;
+        let future = job
+            .names()?
             .into_iter()
-            .filter(|e| turn_number(&e.file_name().to_string_lossy()).is_some_and(|n| n > last))
+            .filter_map(|n| n.into_string().ok())
+            .filter(|n| turn_number(n).is_some_and(|k| k > last))
             .collect::<Vec<_>>();
         if future.is_empty() {
             return Ok(());
         }
-        let root = self.path(".unstarted");
-        fs::create_dir_all(&root)?;
-        let attempt = tempfile::Builder::new()
-            .prefix("attempt-")
-            .tempdir_in(root)?
-            .keep();
-        for entry in future {
-            fs::rename(entry.path(), attempt.join(entry.file_name()))?;
+        // Every step pins its directory without following a planted link.
+        let root = crate::state_reads::directory(&self.path(".unstarted"))?;
+        let (_, attempt) = root.mkdir_unique("attempt-")?;
+        for name in future {
+            job.rename_into(&name, &attempt, &name)?;
         }
         Ok(())
     }
@@ -217,9 +216,9 @@ impl<'a> Job<'a> {
             }
             let numbered = self.turn(&n, f);
             if !numbered.exists() && !newer {
-                let _ = fs::rename(&old, &numbered);
+                let _ = crate::state_reads::rename(&old, &numbered);
             } else {
-                let _ = fs::remove_file(&old);
+                let _ = crate::state_reads::remove(&old);
             }
         }
     }

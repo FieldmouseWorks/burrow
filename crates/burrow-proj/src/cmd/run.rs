@@ -401,7 +401,7 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         return Err(e);
     }
     let write = |name: &str, text: &str| {
-        fs::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
+        crate::state_reads::write(job.path(name), text).map_err(|e| io_fail(&job.path(name), e))
     };
     // What every turn of it runs as, kept where the job can't write it.
     let mut request = crate::job::Request {
@@ -479,7 +479,8 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
         write("since", &format!("{t}\n"))?;
     }
     if new.vm {
-        let out = File::create(job.path("agent")).map_err(|e| io_fail(&job.path("agent"), e))?;
+        let out = crate::state_reads::append(&job.path("agent"))
+            .map_err(|e| io_fail(&job.path("agent"), e))?;
         let s = Command::new("agent")
             .args(["new", p])
             .stdout(out)

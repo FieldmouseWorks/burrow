@@ -31,8 +31,8 @@ pub(crate) fn pending_split(job: &crate::job::Job) -> Option<String> {
 }
 
 pub(crate) fn declare_split(job: &crate::job::Job, n: &str, tasks: &[Task]) -> std::io::Result<()> {
-    crate::swap(&job.turn(n, "split"), &serde_json::to_string(tasks)?)?;
-    crate::swap(&job.path("planning-hold"), n)
+    crate::state_reads::write(job.turn(n, "split"), serde_json::to_string(tasks)?)?;
+    crate::state_reads::write(job.path("planning-hold"), n)
 }
 
 pub fn prompt(input: &str, source: &std::path::Path) -> String {

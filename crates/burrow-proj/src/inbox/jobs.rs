@@ -194,8 +194,11 @@ impl Pass<'_> {
                         self.retry(repo);
                         continue;
                     }
-                    fs::write(job.path("planning-hold"), "finishing the task split\n")
-                        .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
+                    crate::state_reads::write(
+                        job.path("planning-hold"),
+                        "finishing the task split\n",
+                    )
+                    .map_err(|e| io_fail(&job.path("planning-hold"), e))?;
                 }
                 let Some(written) = self.written(repo, parent) else {
                     self.miss(repo);
@@ -219,7 +222,7 @@ impl Pass<'_> {
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                         Err(e) => return Err(io_fail(&job.path("planning-hold"), e)),
                     }
-                    fs::rename(
+                    crate::state_reads::rename(
                         job.turn(&split_turn, "split"),
                         job.turn(&split_turn, "split-invalid"),
                     )

@@ -169,7 +169,7 @@ fn start_with(
     // what kills the turn's whole cgroup (systemd-oomd does) would take an
     // ExecStopPost with it. The name is doubled up on its backslashes, which
     // systemd-run reads as escapes.
-    let _ = fs::write(
+    let _ = crate::state_reads::write(
         job.turn(&n.to_string(), "priority"),
         if first { "first" } else { "normal" },
     );

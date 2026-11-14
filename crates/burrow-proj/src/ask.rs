@@ -1,5 +1,4 @@
 //! Defaults and deadlines belong to the question, not to any one resume.
-use crate::state_reads::write as swap;
 use crate::{config::Config, job::Job, read};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -145,7 +144,8 @@ pub(crate) fn pending(job: &Job) -> Result<Option<Recommendation>, String> {
 /// The end marker commits the active declaration; only asks keep a pending
 /// recommendation. Recovery also checks the marker if cleanup was interrupted.
 pub(crate) fn declare(job: &Job, end: &str) -> Result<(), String> {
-    swap(job.path("end.next"), format!("{end}\n")).map_err(|e| e.to_string())?;
+    crate::state_reads::write(job.path("end.next"), format!("{end}\n"))
+        .map_err(|e| e.to_string())?;
     if end != "ask" {
         retire_pending(job)?;
     }
@@ -166,7 +166,7 @@ pub(crate) fn record(job: &Job, recommendation: &Recommendation) -> Result<(), S
     if recommendation.default.trim().is_empty() || recommendation.default.len() > 16000 {
         return Err(USAGE.into());
     }
-    swap(
+    crate::state_reads::write(
         job.path("ask.next"),
         &serde_json::to_string(&PendingRecommendation {
             recommendation: recommendation.clone(),
@@ -194,12 +194,12 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             .unwrap_or_else(|| crate::now().saturating_add(cfg.ask_timeout as i64));
 
         if !host_path(job, "question-text").exists() {
-            swap(
+            crate::state_reads::write(
                 host_path(job, "question-id"),
                 crate::now_nanos().to_string(),
             )
             .map_err(|e| e.to_string())?;
-            swap(host_path(job, "question-since"), crate::now().to_string())
+            crate::state_reads::write(host_path(job, "question-since"), crate::now().to_string())
                 .map_err(|e| e.to_string())?;
             let text = job
                 .turns()
@@ -210,7 +210,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
                         .to_owned()
                 })
                 .unwrap_or_default();
-            swap(
+            crate::state_reads::write(
                 host_path(job, "question-text"),
                 burrow_probe::scrub::scrub(&text)
                     .as_str()
@@ -232,7 +232,7 @@ pub(crate) fn finish(cfg: &Config, job: &Job, end: &str) -> Result<(), String> {
             due,
         };
         let write = |q: &Question| {
-            swap(
+            crate::state_reads::write(
                 host_path(job, "question"),
                 &serde_json::to_string(q).map_err(|e| e.to_string())?,
             )
@@ -304,12 +304,12 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
         // its default. Record a completed host turn for the normal issue writer.
         let n = job.turns().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
         let ntext = n.to_string();
-        swap(
+        crate::state_reads::write(
             host_path(job, "question-released"),
             serde_json::to_string(&q).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
-        swap(
+        crate::state_reads::write(
             host_path(job, "question-needs-owner"),
             &q.recommendation.default,
         )
@@ -325,9 +325,9 @@ pub(crate) fn expire(cfg: &Config, job: &Job) -> Result<Option<i64>, String> {
             ("end", "done\n"),
             ("outcome", "done\n"),
         ] {
-            swap(job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
+            crate::state_reads::write(job.turn(&ntext, kind), value).map_err(|e| e.to_string())?;
         }
-        swap(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
+        crate::state_reads::write(job.turn(&ntext, "jsonl"), serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":text}).to_string()).map_err(|e| e.to_string())?;
         job.set_turns(n).map_err(|e| e.to_string())?;
         for path in [
             host_path(job, "question"),
