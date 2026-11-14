@@ -298,7 +298,6 @@ let
       inherit (renovateApp) env;
       inherit (cfg.renovate) owners;
       ghToken = "${tools.gh-token}/bin/gh-token";
-      meters = config.burrow.github.machineMeters;
     };
     tools = {
       gh = "${renovateGh}/bin/gh";

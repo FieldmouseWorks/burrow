@@ -27,7 +27,6 @@ let
     lock = "${lockDir}/lock";
     inherit wake;
     inherit (cfg) owners exclude dryRun;
-    meters = config.burrow.github.machineMeters;
     notify = "${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify";
   });
   sync = pkgs.runCommand "house-sync" {
