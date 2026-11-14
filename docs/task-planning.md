@@ -73,7 +73,8 @@ every writer and editor an author. The successor must be an issue in one
 of the machine's projects, and not the parent or a child on the same list.
 The list then waits on it, its checklist saying "continued as" it, with no
 notice and nothing to record by hand, looking again hourly. The child is
-done when the successor is, by the same rules as a child. A successor
+done when the successor is, by the same rules as a child, or when the
+successor is a PR, once it merges. A successor
 closed without that passes the place on to the one it names in turn; with
 none, one that's gone, or one that can't be followed, the child waits as a
 hand close does.

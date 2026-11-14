@@ -723,3 +723,30 @@ fn a_successor_closed_without_a_landing_leaves_the_child_waiting() {
     assert!(list.contains("the list waits"), "{list}");
     assert!(!list.contains("continued as"), "{list}");
 }
+
+#[test]
+fn a_successor_that_is_a_pr_lands_when_it_merges() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(&b, "sam", "Continued as #950, the PR that does it.", None);
+    let open = pr(&b, "sam/box", 950, false);
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(p.unreached.is_empty(), "a PR is no outage");
+    assert!(!advanced(&b));
+    assert!(!notice_open(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains("continued as sam/box#950")
+    );
+    pr(&b, "sam/box", 950, true);
+    sequence(&b, &parent);
+    assert!(advanced(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains(&format!("[x] #8: task 0 — {open}"))
+    );
+}

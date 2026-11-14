@@ -254,6 +254,17 @@ impl Pass<'_> {
                 return Successor::Unknown;
             };
             let closed = next["state"] == "closed";
+            // A PR named as the successor is the work itself.
+            if next.get("pull_request").is_some() {
+                if let Some(pr) = merged(&next) {
+                    return Successor::Landed(pr);
+                }
+                if closed {
+                    return Successor::None;
+                }
+                self.book(repo, crate::now() + AWAITED_LOOK);
+                return Successor::Open(format!("{at}#{m}"));
+            }
             match self.landed_child(&at, m, closed.then_some(&next)) {
                 Some(Some(pr)) => return Successor::Landed(pr),
                 None => return Successor::Unknown,
