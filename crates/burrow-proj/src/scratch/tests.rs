@@ -440,17 +440,16 @@ fn keeping_work_keeps_the_base_of_a_clone() {
 // the clearing.
 #[test]
 fn an_unreadable_directory_keeps_the_scratch() {
-    use std::os::unix::fs::PermissionsExt;
     let b = Box::new();
     let at = dir(&b.cfg, "u").join("hidden");
     fs::create_dir_all(&at).unwrap();
     fs::write(at.join("f"), "x").unwrap();
-    fs::set_permissions(&at, fs::Permissions::from_mode(0o0)).unwrap();
+    burrow_test::permissions(&at, 0o0);
     if fs::read_dir(&at).is_ok() {
         return; // as root, nothing is unreadable
     }
     clear(&b.cfg, "u");
-    fs::set_permissions(&at, fs::Permissions::from_mode(0o700)).unwrap();
+    burrow_test::permissions(&at, 0o700);
     assert!(at.join("f").exists());
 }
 
