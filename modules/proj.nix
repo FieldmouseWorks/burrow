@@ -380,8 +380,8 @@ in
     };
     hostGithubApp = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = if cfg.gh == config.burrow.github.machineGh && machineApp != null then machineApp.name else null;
-      defaultText = lib.literalMD "machinery for the default gh; null for an override";
+      default = config.burrow.github.appOf cfg.gh;
+      defaultText = lib.literalMD "the App `cfg.gh` is the gh of (`burrow.github.appOf`): machinery for the default gh; null for a gh no App owns";
       internal = true;
       description = "The installation App cfg.gh authenticates as; overrides may declare their identity here.";
     };
@@ -764,6 +764,7 @@ in
       path = [ cfg.gh ];
       environment.GH_NO_UPDATE_NOTIFIER = "1";
       environment.BURROW_DOOR_WAKE = enginesWake;
+      environment.BURROW_DOOR_METER = config.burrow.github.doorMeter cfg.hostGithubApp cfg.engines.door.repo;
       environment.BURROW_DOOR_WATCHDOG_KICK = lib.mkIf (config.burrow.watchdog.enable or false) "${config.burrow.events.kick}/watchdog";
       serviceConfig = {
         Type = "oneshot";

@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::Config;
 use crate::pass::Out;
-use crate::testing::{FRACTIONAL, Hub, States, T, answer, config, look, start};
+use crate::testing::{FRACTIONAL, Hub, States, T, answer, config, limited, look, start};
 use serde_json::json;
 
 const BODY: &str = "This issue lists Renovate updates and detected dependencies.
@@ -546,30 +546,15 @@ fn github_not_answering_keeps_all_of_it() {
         r.unwrap_err(),
         "GET repos/sam/r/issues/7: HTTP 502, 3 times"
     );
-    assert!(out.limited.is_none() && out.stuck.is_empty());
+    assert!(out.until().is_none() && out.stuck.is_empty());
     assert_eq!(state(&cfg), was);
-    // A rate limit is noted, with when it resets.
-    hub.on(
-        "GET",
-        "repos/sam/r/issues/7",
-        answer(
-            403,
-            json!({"message": "API rate limit exceeded for installation"}),
-        ),
-    );
-    hub.on(
-        "GET",
-        "rate_limit",
-        answer(
-            200,
-            json!({"resources": {"core": {"remaining": 0, "reset": 1800000999}}}),
-        ),
-    );
+    // A rate limit is noted, with when it resets, as GitHub's answer says.
+    hub.on("GET", "repos/sam/r/issues/7", limited(1800000999.0));
     let (out, r) = look(&cfg, &mut hub, &mut jobs, 60.0, |p| {
         super::watch(p, p.cfg.dashboard.as_ref().unwrap())
     });
     assert!(r.unwrap_err().contains("rate limit"));
-    assert_eq!(out.limited, Some(1800000999.0));
+    assert_eq!(out.until(), Some(1800000999.0));
     assert_eq!(state(&cfg), was);
 }
 

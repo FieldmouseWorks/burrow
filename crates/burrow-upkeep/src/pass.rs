@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use burrow_github::quota::Hold;
 use burrow_github::{Api, Error, Response, call};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -33,14 +34,23 @@ pub struct Out {
     /// What of the look failed, a line each (`its dashboard: why`): the
     /// pass logs each, and the stall watchdog watches the repo.
     pub failed: Vec<String>,
-    /// When the rate limit a call met resets (0 when GitHub won't say),
-    /// once one has.
-    pub limited: Option<f64>,
+    /// The hold GitHub put the repo's installation under, once a call met
+    /// one: its `until`, on stdout, is when the pass may ask again.
+    #[serde(serialize_with = "until")]
+    pub limited: Option<Hold>,
     /// Whether it searched for the repo's dashboard, which the pass counts
     /// against its searches (dashboard::FINDS).
     pub searched: bool,
     /// The Claude jobs it asks the pass to start.
     pub jobs: Vec<Job>,
+}
+
+impl Out {
+    /// When the pass may ask GitHub again, as the steward reads `limited`:
+    /// seconds since the epoch, or None when no call met a hold.
+    pub fn until(&self) -> Option<f64> {
+        self.limited.as_ref().map(|h| h.until as f64)
+    }
 }
 
 /// A Claude job a look asks for: the pass starts it in the repo's project,
@@ -288,17 +298,12 @@ impl Pass<'_> {
         Ok(all)
     }
 
-    /// GitHub's error, once a rate limit it met is noted: when it resets,
-    /// from `rate_limit`, which costs nothing against it. A limit with none
-    /// of it spent (a secondary one) resets at 0, which is past.
+    /// GitHub's error, once the hold it says the installation is under (as
+    /// burrow-github reads it) is noted.
     pub fn noted(&mut self, e: Error) -> Error {
-        if self.out.limited.is_none() && e.unanswered && e.why.to_lowercase().contains("rate limit")
-        {
-            let reset = call(self.api, "GET", "rate_limit", None, None)
-                .ok()
-                .and_then(|r| r.json().ok())
-                .map_or(0.0, |v| reset(&v));
-            self.out.limited = Some(reset);
+        if self.out.limited.is_none() {
+            let owner = self.repo.split('/').next().unwrap_or(self.repo);
+            self.out.limited = Hold::from_error(&self.cfg.app.slug, owner, &e);
         }
         e
     }
@@ -349,16 +354,10 @@ pub fn save<T: Serialize>(dir: &Path, name: &str, value: &T) -> Result<(), Strin
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// When the rate limits GitHub's `rate_limit` says are spent reset, the
-/// last of them; 0 for none.
-fn reset(v: &Value) -> f64 {
-    v["resources"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(_, r)| r["remaining"].as_i64() == Some(0))
-        .filter_map(|(_, r)| r["reset"].as_f64())
-        .fold(0.0, f64::max)
+/// A hold as the steward's pass reads `limited`: when it may ask again, in
+/// seconds since the epoch, or null.
+fn until<S: serde::Serializer>(hold: &Option<Hold>, s: S) -> Result<S::Ok, S::Error> {
+    hold.as_ref().map(|h| h.until as f64).serialize(s)
 }
 
 #[cfg(test)]
@@ -376,15 +375,17 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limit_resets_when_its_last_spent_one_does() {
-        let v = json!({"resources": {"core": {"remaining": 0, "reset": 1800000100},
-                                     "search": {"remaining": 0, "reset": 1800000050},
-                                     "graphql": {"remaining": 10, "reset": 1800009999}}});
-        assert_eq!(reset(&v), 1800000100.0);
+    fn a_hold_is_said_as_the_time_it_lifts() {
+        let mut out = Out::default();
+        assert_eq!(serde_json::to_value(&out).unwrap()["limited"], json!(null));
+        out.limited = Some(Hold {
+            app: "steward".into(),
+            owner: "sam".into(),
+            until: 1800000100,
+        });
         assert_eq!(
-            reset(&json!({"resources": {"core": {"remaining": 5, "reset": 1}}})),
-            0.0
+            serde_json::to_value(&out).unwrap()["limited"],
+            json!(1800000100.0)
         );
-        assert_eq!(reset(&json!({})), 0.0);
     }
 }

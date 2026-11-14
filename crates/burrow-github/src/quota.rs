@@ -1,9 +1,59 @@
-//! Installation quota evidence shared by the gh door and proj. No tokens or
-//! request bodies are kept. An installation is identified by App and owner.
-use crate::{Response, graphql_rate_error, rate_limited, retry_at};
+//! Installation quota evidence shared by the gh door, proj and every pass
+//! that asks GitHub. No tokens or request bodies are kept. An installation
+//! is identified by App and owner.
+//!
+//! The one rule: a pass asks its installation's meter before it starts
+//! ([`Meters::held`]), feeds it every answer ([`Metered`]), and when GitHub
+//! holds it off gets back one [`Hold`] (which installation, until when) to
+//! book. What a limit looks like (a 403 or 429 and its headers, a GraphQL
+//! error, `rate_limit`'s budgets) is read here and nowhere else.
+use crate::{Api, Error, Failed, Response, graphql_rate_error, rate_limited, retry_at};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{io, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    path::{Path, PathBuf},
+};
+
+/// One installation GitHub holds off until a time: the deferral every
+/// caller books, whichever of them met it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hold {
+    pub app: String,
+    pub owner: String,
+    /// Unix seconds: when the installation may be asked again.
+    pub until: u64,
+}
+
+impl Hold {
+    /// The hold E, from a call as APP on OWNER's installation, says that
+    /// installation is under: when GitHub held off every cause of it.
+    pub fn from_error(app: &str, owner: &str, e: &Error) -> Option<Self> {
+        e.retry_at.map(|until| Self {
+            app: app.into(),
+            owner: owner.to_ascii_lowercase(),
+            until,
+        })
+    }
+}
+
+/// Whether GitHub's answer is one of its limits (a 429, or a 403 its
+/// headers or message say is one): for a client that reads GitHub's answers
+/// itself, as gh-token's App does, instead of through [`crate::call`].
+pub fn limited(response: &Response) -> bool {
+    rate_limited(response)
+}
+
+/// Whether RESPONSE is GitHub holding its installation off: one of its
+/// limits, or a GraphQL answer whose every error is one.
+fn says_limit(response: &Response) -> bool {
+    let graphql = serde_json::from_str::<Value>(&response.body)
+        .ok()
+        .and_then(|v| v["errors"].as_array().cloned())
+        .is_some_and(|errors| !errors.is_empty() && errors.iter().all(graphql_rate_error));
+    rate_limited(response) || graphql
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Meter {
@@ -27,34 +77,91 @@ impl Meter {
         }
     }
     pub fn deadline(&self) -> Option<u64> {
-        self.retry_at
-            .into_iter()
-            .chain((self.remaining == Some(0)).then_some(self.reset).flatten())
-            .max()
+        self.retry_at.into_iter().chain(self.exhausted()).max()
+    }
+    /// When this reading's budget, spent, comes back: its reset, when it
+    /// says none is left.
+    fn exhausted(&self) -> Option<u64> {
+        (self.remaining == Some(0)).then_some(self.reset).flatten()
     }
     pub fn until(&self, at: u64) -> Option<u64> {
         self.deadline().filter(|t| *t > at)
     }
-    /// GET /rate_limit is free and reports both REST and GraphQL budgets.
+    /// The installation's hold at AT, if one stands.
+    pub fn hold(&self, at: u64) -> Option<Hold> {
+        self.until(at).map(|until| Hold {
+            app: self.app.clone(),
+            owner: self.owner.clone(),
+            until,
+        })
+    }
+    /// What one answer about APP's installation on OWNER, arrived at AT,
+    /// says of it: its budget headers, and any limit it says.
+    pub fn reading(app: &str, owner: &str, response: &Response, at: u64) -> Self {
+        let mut seen = Meter::new(app, owner, at);
+        seen.remaining = response
+            .header("x-ratelimit-remaining")
+            .and_then(|s| s.parse().ok());
+        seen.reset = response
+            .header("x-ratelimit-reset")
+            .and_then(|s| s.parse().ok());
+        seen.response(response);
+        seen
+    }
+    /// One answer that arrived at AT, folded in ([`Meter::merge`]).
+    pub fn observe(&mut self, response: &Response, at: u64) {
+        let seen = Meter::reading(&self.app, &self.owner, response, at);
+        self.merge(seen);
+    }
+    /// OTHER's reading of the same installation folded in: the newer budget
+    /// (one with a budget over one without; on a tie, this one's), and every
+    /// hold either knows of. A spent budget's reset is kept as a hold before
+    /// one budget is picked, since the other can be of the same second, an
+    /// older sample arriving late, or another resource's (REST's, GraphQL's)
+    /// with room left, none of which lifts it.
+    pub fn merge(&mut self, other: Meter) {
+        let hold = [
+            self.retry_at,
+            other.retry_at,
+            self.exhausted(),
+            other.exhausted(),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        if (other.remaining.is_some(), other.at) > (self.remaining.is_some(), self.at) {
+            self.at = other.at;
+            self.remaining = other.remaining;
+            self.reset = other.reset;
+        }
+        self.retry_at = hold;
+    }
+    /// The file APP's meter on OWNER's installation is kept in, in DIR.
+    pub fn file(dir: &Path, app: &str, owner: &str) -> PathBuf {
+        dir.join(format!("{}.json", key(app, &owner.to_ascii_lowercase())))
+    }
+    /// GET /rate_limit is free and reports both REST and GraphQL budgets:
+    /// REST's is the meter's budget now, and either spent is a hold, as is
+    /// the one the meter had spent already (which a budget with room, of
+    /// another resource, doesn't lift).
     pub fn budget(&mut self, body: &Value) {
         let core = &body["resources"]["core"];
+        let graphql = &body["resources"]["graphql"];
+        self.retry_at = [
+            self.retry_at,
+            self.exhausted(),
+            (graphql["remaining"].as_u64() == Some(0))
+                .then(|| graphql["reset"].as_u64())
+                .flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
         self.remaining = core["remaining"].as_u64();
         self.reset = core["reset"].as_u64();
-        let graphql = &body["resources"]["graphql"];
-        if graphql["remaining"].as_u64() == Some(0) {
-            self.retry_at = self
-                .retry_at
-                .into_iter()
-                .chain(graphql["reset"].as_u64())
-                .max();
-        }
     }
     pub fn response(&mut self, response: &Response) {
-        let graphql = serde_json::from_str::<Value>(&response.body)
-            .ok()
-            .and_then(|v| v["errors"].as_array().cloned())
-            .is_some_and(|errors| !errors.is_empty() && errors.iter().all(graphql_rate_error));
-        if rate_limited(response) || graphql {
+        if says_limit(response) {
             self.retry_at = Some(retry_at(response, self.at));
         }
     }
@@ -79,28 +186,15 @@ impl Meter {
     }
     fn record_visibility(&self, dir: &Path, public: bool) -> io::Result<()> {
         burrow_process::state_reads::directory(dir)?;
-        // Hex encodes the two components without aliases or path traversal.
-        let key = format!("{}\0{}", self.app, self.owner)
-            .bytes()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let key = key(&self.app, &self.owner);
         let lock = burrow_process::state_reads::append(&dir.join(format!("{key}.lock")))?;
         lock.lock()?;
         let file = dir.join(format!("{key}.json"));
         let mut next = self.clone();
+        // Hold-only observations do not refresh the budget's age, and no
+        // hold either knows of is lost (Meter::merge).
         if let Some(old) = Self::try_read(&file)? {
-            let hold = self
-                .retry_at
-                .into_iter()
-                .chain(old.retry_at)
-                .chain(self.until(self.at))
-                .chain(old.until(self.at))
-                .max();
-            // Hold-only observations do not refresh the budget's age.
-            if (old.remaining.is_some(), old.at) > (self.remaining.is_some(), self.at) {
-                next = old;
-            }
-            next.retry_at = hold;
+            next.merge(old);
         }
         let bytes = serde_json::to_vec(&next)?;
         if public {
@@ -108,6 +202,312 @@ impl Meter {
         } else {
             burrow_process::state_reads::write(&file, bytes)
         }
+    }
+}
+
+/// Hex encodes the two components without aliases or path traversal.
+fn key(app: &str, owner: &str) -> String {
+    format!("{app}\0{owner}")
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Where an App's installations' meters are kept, as a program's config
+/// names them: the gh door's dir (burrow.github.quotaDir) and the App's
+/// name there.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Kept {
+    pub dir: PathBuf,
+    pub app: String,
+}
+
+impl Kept {
+    /// The meters KEPT names, or this process's own when there are none.
+    pub fn meters(kept: Option<&Kept>) -> Meters {
+        match kept {
+            Some(k) => Meters::new(Some(k.dir.clone()), &k.app),
+            None => Meters::new(None, ""),
+        }
+    }
+}
+
+/// An App's installations' meters, as one process sees them: the shared
+/// ones in `dir` (the gh door's, which every caller reads) and what this
+/// process met itself, which it records there when it may.
+#[derive(Debug)]
+pub struct Meters {
+    dir: Option<PathBuf>,
+    app: String,
+    seen: BTreeMap<String, Meter>,
+    /// Whether a failure to record has been said: once a process, not per
+    /// call.
+    unrecorded: bool,
+}
+
+impl Meters {
+    /// APP's meters, shared in DIR when there is one, else this process's
+    /// alone.
+    pub fn new(dir: Option<PathBuf>, app: &str) -> Self {
+        Self {
+            dir,
+            app: app.into(),
+            seen: BTreeMap::new(),
+            unrecorded: false,
+        }
+    }
+
+    pub fn app(&self) -> &str {
+        &self.app
+    }
+
+    /// OWNER's installation's meter, with the shared one read in afresh.
+    fn meter(&mut self, owner: &str) -> &mut Meter {
+        let owner = owner.to_ascii_lowercase();
+        let shared = self
+            .dir
+            .as_deref()
+            .and_then(|dir| Meter::read(&Meter::file(dir, &self.app, &owner)))
+            .filter(|m| m.app == self.app && m.owner == owner);
+        let meter = self
+            .seen
+            .entry(owner.clone())
+            .or_insert_with(|| Meter::new(&self.app, &owner, 0));
+        if let Some(shared) = shared {
+            meter.merge(shared);
+        }
+        meter
+    }
+
+    /// The hold on OWNER's installation at NOW, whoever met it: a pass that
+    /// gets one asks GitHub nothing more there, and books it.
+    pub fn held(&mut self, owner: &str, now: u64) -> Option<Hold> {
+        self.meter(owner).hold(now)
+    }
+
+    /// Every hold this process has seen that still stands at NOW.
+    pub fn holds(&self, now: u64) -> Vec<Hold> {
+        self.seen.values().filter_map(|m| m.hold(now)).collect()
+    }
+
+    /// One answer about OWNER's installation, arrived at AT. A limit is
+    /// recorded at once, so a caller starting next finds it.
+    pub fn observe(&mut self, owner: &str, response: &Response, at: u64) {
+        let meter = self.meter(owner);
+        let before = meter.until(at);
+        meter.observe(response, at);
+        if meter.until(at) > before {
+            self.record_one(owner);
+        }
+    }
+
+    /// E, from a pass on OWNER's installation, as of NOW: its hold when E is
+    /// GitHub's limit (every cause one), recorded for the next caller.
+    pub fn met(&mut self, owner: &str, e: &Error, now: u64) -> Option<Hold> {
+        let met = Hold::from_error(&self.app, owner, e)?;
+        Some(self.hold(owner, met.until, now))
+    }
+
+    /// A hold met on OWNER's installation until UNTIL, as of NOW, recorded
+    /// for the next caller: the installation's hold with it (which can be
+    /// later, when the meter knows of a later one).
+    pub fn hold(&mut self, owner: &str, until: u64, now: u64) -> Hold {
+        let meter = self.meter(owner);
+        meter.retry_at = meter.retry_at.max(Some(until));
+        if meter.at == 0 {
+            meter.at = now;
+        }
+        let hold = meter.hold(now).unwrap_or_else(|| Hold {
+            app: meter.app.clone(),
+            owner: meter.owner.clone(),
+            until,
+        });
+        self.record_one(owner);
+        hold
+    }
+
+    /// After a run of another program as OWNER's installation failed (one
+    /// that can't feed the meter call by call, as Renovate can't): its hold,
+    /// when `rate_limit` (which costs nothing against the allowance) says
+    /// the installation's budget is spent. None when it isn't, or GitHub
+    /// won't say: then the run failed.
+    pub fn spent(&mut self, api: &mut dyn Api, owner: &str) -> Option<Hold> {
+        let budget = crate::call(api, "GET", "rate_limit", None, None)
+            .ok()?
+            .json()
+            .ok()?;
+        let at = api.now();
+        let mut read = Meter::new(&self.app, owner, at);
+        read.budget(&budget);
+        let meter = self.meter(owner);
+        meter.merge(read);
+        let hold = meter.hold(at);
+        self.record_one(owner);
+        hold
+    }
+
+    /// Record every meter this process has seen in the shared dir, as far as
+    /// it may (Meters::unrecorded).
+    pub fn record(&mut self) {
+        let owners: Vec<String> = self.seen.keys().cloned().collect();
+        for owner in owners {
+            self.record_one(&owner);
+        }
+    }
+
+    fn record_one(&mut self, owner: &str) {
+        let Some(dir) = &self.dir else { return };
+        let Some(meter) = self.seen.get(&owner.to_ascii_lowercase()) else {
+            return;
+        };
+        if meter.at == 0 && meter.retry_at.is_none() {
+            return;
+        }
+        // The shared dir is the gh door's (burrow.github.quotaDir), which
+        // records what it sees itself: a caller it doesn't let write there
+        // keeps what it met to itself. Anything else is said, once.
+        if let Err(e) = meter.record_public(dir)
+            && e.kind() != io::ErrorKind::PermissionDenied
+            && !std::mem::replace(&mut self.unrecorded, true)
+        {
+            eprintln!(
+                "burrow-github: couldn't record {}'s meter on {} in {}: {e}",
+                self.app,
+                meter.owner,
+                dir.display()
+            );
+        }
+    }
+}
+
+/// An Api whose every answer feeds the meter of the installation it was
+/// about: a REST path's `repos/OWNER/...` or `orgs/OWNER/...` (the account
+/// gh-token takes the token of), a GraphQL call's owner, else `owner` (the
+/// installation a client bound to one account is about). Made
+/// [`Metered::refusing`], a call to an installation its meter holds is
+/// answered here with that hold, and GitHub isn't asked.
+pub struct Metered<'a> {
+    api: &'a mut dyn Api,
+    pub meters: &'a mut Meters,
+    owner: Option<String>,
+    refuse: bool,
+    /// The installations, by owner in lower case, whose hold an answer met:
+    /// GitHub's limit, or the meter's refusal.
+    met: BTreeSet<String>,
+}
+
+impl<'a> Metered<'a> {
+    pub fn new(api: &'a mut dyn Api, meters: &'a mut Meters, owner: Option<String>) -> Self {
+        Self {
+            api,
+            meters,
+            owner,
+            refuse: false,
+            met: BTreeSet::new(),
+        }
+    }
+
+    /// As it is, but answering a call to a held installation with its hold.
+    pub fn refusing(self) -> Self {
+        Self {
+            refuse: true,
+            ..self
+        }
+    }
+
+    /// The installations whose hold an answer met, by owner in lower case.
+    pub fn met(&self) -> &BTreeSet<String> {
+        &self.met
+    }
+
+    /// The installation a call is about: OWNER, which it names, else the
+    /// client's own.
+    fn about(&self, owner: Option<&str>) -> Option<String> {
+        owner.or(self.owner.as_deref()).map(str::to_ascii_lowercase)
+    }
+
+    /// The meter's answer for OWNER's installation, when it holds it and
+    /// this client refuses: GitHub's own way of saying so (its budget spent
+    /// until the hold lifts), for the caller to read as it reads GitHub's.
+    fn refused(&mut self, owner: Option<&str>) -> Option<Response> {
+        let owner = owner.filter(|_| self.refuse)?;
+        let hold = self.meters.held(owner, self.api.now())?;
+        self.met.insert(owner.to_owned());
+        Some(Response {
+            status: 403,
+            headers: vec![
+                ("x-ratelimit-remaining".into(), "0".into()),
+                ("x-ratelimit-reset".into(), hold.until.to_string()),
+            ],
+            body: serde_json::json!({
+                "message": format!(
+                    "rate limit: burrow-github's meter holds {}'s installation on {} until {}; GitHub wasn't asked",
+                    hold.app, hold.owner, hold.until
+                )
+            })
+            .to_string(),
+        })
+    }
+
+    fn feed(&mut self, owner: Option<&str>, got: &Result<Response, Failed>) {
+        let (Ok(response), Some(owner)) = (got, owner) else {
+            return;
+        };
+        let at = self.api.now();
+        self.meters.observe(owner, response, at);
+        if says_limit(response) {
+            self.met.insert(owner.to_owned());
+        }
+    }
+
+    fn ask(
+        &mut self,
+        owner: Option<&str>,
+        call: impl FnOnce(&mut dyn Api) -> Result<Response, Failed>,
+    ) -> Result<Response, Failed> {
+        let owner = self.about(owner);
+        if let Some(refused) = self.refused(owner.as_deref()) {
+            return Ok(refused);
+        }
+        let got = call(&mut *self.api);
+        self.feed(owner.as_deref(), &got);
+        got
+    }
+}
+
+/// The owner a REST path names: `repos/OWNER/...` or `orgs/OWNER/...`.
+fn owner_of(path: &str) -> Option<&str> {
+    let path = path.trim_start_matches('/');
+    let path = path.strip_prefix("https://api.github.com/").unwrap_or(path);
+    let mut parts = path.split(['/', '?']);
+    match (parts.next(), parts.next()) {
+        (Some("repos" | "orgs"), Some(owner)) if !owner.is_empty() => Some(owner),
+        _ => None,
+    }
+}
+
+impl Api for Metered<'_> {
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        etag: Option<&str>,
+    ) -> Result<Response, Failed> {
+        self.ask(owner_of(path), |api| api.request(method, path, body, etag))
+    }
+
+    fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
+        self.ask(Some(owner), |api| api.graphql(owner, body))
+    }
+
+    fn now(&self) -> u64 {
+        self.api.now()
+    }
+
+    fn pause(&mut self, secs: u64) {
+        self.api.pause(secs);
     }
 }
 

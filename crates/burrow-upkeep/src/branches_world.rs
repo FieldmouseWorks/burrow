@@ -106,8 +106,15 @@ pub fn reply(status: u16, body: Value, headers: Vec<(String, String)>) -> Respon
     }
 }
 
+/// GitHub saying no. Its rate limit says so in its headers too: the
+/// installation's allowance spent until two hours on.
 pub fn no(&(status, why): &No) -> Response {
-    reply(status, json!({"message": why}), vec![])
+    let headers = if why.contains("rate limit") {
+        crate::testing::limit_headers(T + 7200.0)
+    } else {
+        vec![]
+    };
+    reply(status, json!({"message": why}), headers)
 }
 
 /// One page of a listing, with its etag (`tag`, a 304 when it's `etag`)
@@ -142,13 +149,6 @@ impl World {
         body: Option<&Value>,
         etag: Option<&str>,
     ) -> Response {
-        if path == "rate_limit" {
-            return reply(
-                200,
-                json!({"resources": {"core": {"remaining": 0, "reset": T + 7200.0}}}),
-                vec![],
-            );
-        }
         let (path, page) = match path.split_once("&page=") {
             Some((path, n)) => (path, n.parse::<usize>().unwrap()),
             None => (path, 1),

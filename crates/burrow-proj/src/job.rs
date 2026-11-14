@@ -507,9 +507,8 @@ impl<'a> Job<'a> {
                     .and_then(|s| crate::engine::Engine::parse(&s).ok())
                     .unwrap_or(crate::engine::Engine::Claude);
                 let since = mtime(&prompt).unwrap_or(0);
-                crate::github_quota::admission_reset(self.cfg, self, engine)
-                    .filter(|reset| *reset > since)
-                    .map(|reset| (since, reset))
+                crate::github_quota::admission_hold(self.cfg, self, engine, since.max(0) as u64)
+                    .map(|hold| (since, hold.until as i64))
             } else if state == "running" {
                 None
             } else {
