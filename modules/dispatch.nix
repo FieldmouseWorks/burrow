@@ -278,7 +278,7 @@ in
 
       `burrow-dispatch` restarts an Actions runner (${lib.concatStringsSep ", " (lib.attrNames cfg.runners)}) that sits idle
       with jobs queued for it, at most twice in six hours; cancels a push run on a default branch that hasn't
-      started once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
+      finished, started or not, once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
       The waits go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
     '' + lib.optionalString cfg.fresh.enable ''
       For each job queued that asks for `${cfg.fresh.label}`, it starts a runner registered for that one job,

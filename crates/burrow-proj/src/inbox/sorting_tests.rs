@@ -90,7 +90,9 @@ done
 [ "$GH_REPO" = "$owner/$name" ] || exit 1
 f='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"
 [ -e "$f" ] || f='{dir}/default-issue'
-jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{dir}/written.jq'
+c='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"'_comments'
+[ -e "$c" ] || c='{dir}/comments'
+jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.jq'
 "#,
                 dir = tmp.path().display()
             ),
@@ -114,6 +116,7 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
         let inbox = cfg.inbox.as_mut().unwrap();
         inbox.state = at("state");
         inbox.wake = at("wake.json");
+        inbox.drain_wake = at("drain-wake.json");
         inbox.outside_label = "outside text".into();
         inbox.triage = Some(Triage {
             sort_unlabelled: true,
@@ -154,6 +157,8 @@ jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{di
             looked: Vec::new(),
             observe: false,
             scope: None,
+            drain_at: None,
+            skipped: Vec::new(),
         }
     }
 

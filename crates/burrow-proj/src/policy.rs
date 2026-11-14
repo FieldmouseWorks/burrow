@@ -152,6 +152,16 @@ pub fn parked(job: &Job) -> bool {
     path(job, "park").exists()
 }
 
+/// Whether policy may still run the job's last turn again: a restoration
+/// released but not yet accepted by its `_exec` (`restoring`), which
+/// reconciliation relaunches under the same turn number, or rolls back to the
+/// parked turn, if it fails or dies first; or a park waiting for release.
+/// `restoring` is read before `park`: the unlocked rename from one to the other
+/// is then never missed, and the rename back runs under the job's lock.
+pub(crate) fn pending(job: &Job) -> bool {
+    path(job, "restoring").exists() || parked(job)
+}
+
 /// What a parked job waits for, if its park says.
 pub(crate) fn waits_for(job: &Job) -> Option<String> {
     let bytes = fs::read(path(job, "park")).ok()?;
@@ -299,8 +309,13 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
         systemd::up(cfg, "proj-*.service").ok_or("could not list the job units that are up")?;
     let mut errors = Vec::new();
     for id in ids {
+        let job = Job::new(cfg, &id);
+        let was = parked(&job);
         if let Err(error) = reconcile_job(cfg, &id, release_generation, &up) {
             errors.push(format!("{id}: {error}"));
+        }
+        if parked(&job) != was {
+            crate::record::noted(&job, "the policy's pass");
         }
     }
     if let Err(error) = crate::policy_proofs::reconcile(cfg) {

@@ -66,16 +66,38 @@ impl Request {
     /// identity), else its published files, once: from then on the record
     /// holds, as `policy`'s admission does.
     pub fn load(job: &Job) -> Result<Self, String> {
+        match Self::recorded(job)? {
+            Some(request) => Ok(request),
+            None => Self::unrecorded(job)?.adopt(job),
+        }
+    }
+
+    /// What [`Request::load`] gives, without recording one the job's files
+    /// say but nobody has recorded yet: for a reader that writes nothing
+    /// (the job's record, crate::record).
+    pub(crate) fn peek(job: &Job) -> Result<Self, String> {
+        match Self::recorded(job)? {
+            Some(request) => Ok(request),
+            None => Self::unrecorded(job),
+        }
+    }
+
+    /// The request as recorded; None when none is.
+    fn recorded(job: &Job) -> Result<Option<Self>, String> {
         match crate::state_reads::bytes(&Self::path(job)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let request = match crate::retry::Identity::legacy_files(job)? {
-                    Some(files) => Self::from(|key| files.get(key).cloned().flatten())?,
-                    None => Self::from(|key| read(&job.path(key)))?,
-                };
-                request.adopt(job)
-            }
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The request a job from before the record says, in its files.
+    fn unrecorded(job: &Job) -> Result<Self, String> {
+        match crate::retry::Identity::legacy_files(job)? {
+            Some(files) => Self::from(|key| files.get(key).cloned().flatten()),
+            None => Self::from(|key| read(&job.path(key))),
         }
     }
 

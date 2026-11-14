@@ -7,7 +7,7 @@ import json
 import time
 
 from harness import CI_GREEN, COMMITS, COMMITTERS, JOBS, C, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept, tmp
-from touches import DEPENDABOT_EMAIL
+DEPENDABOT_EMAIL = S.CFG["dependabotEmail"]
 
 other = "c" * 40  # another head
 busy = [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]

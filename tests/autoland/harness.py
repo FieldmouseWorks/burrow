@@ -19,6 +19,11 @@ import urllib.parse
 
 tmp = tempfile.mkdtemp()
 SETTINGS = os.path.abspath(sys.argv[9])
+# burrow-brief (argv[10]), which the steward's tasks read their policy text
+# from, and where briefs.py's goldens are (argv[11],
+# crates/burrow-brief/tests/golden).
+BRIEF = os.path.abspath(sys.argv[10])
+BRIEF_GOLDEN = os.path.abspath(sys.argv[11])
 
 
 def admission(allowed, pipeline=(), until=None):
@@ -275,15 +280,17 @@ WAITING = {k: {"name": f"waiting: {x}", "description": x, "color": "c5def5"} for
     ("owner", "Sam"), ("base", "base branch"))}
 # The example machine's generated CONARY_POLICY, including hidden paths.
 POLICY = sys.argv[2]
+# dependabotEmail isn't Dependabot's real address, so a test that a
+# Dependabot commit is the bot's passes only on the address the config gives.
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "settings": DEFAULT_ADMISSION,
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,
-        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
+        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "dependabotEmail": "dependabot@bots.example", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "batch": "upstream batch", "waiting": WAITING}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "unstick", "postingAccountId": 2, "authors": [{"login":"sam","id":1}]},
-        "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
+        "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"], "brief": [BRIEF],
         "defaults": {"rounds": 5,
                      "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,

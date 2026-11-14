@@ -112,7 +112,7 @@ pub(super) fn forget(cfg: &Config, state: &Path, repo: &str) -> Result<(), Fail>
             }
         }
     }
-    for dir in [".unreached", drain::READY_LISTS] {
+    for dir in [".unreached", drain::READY_LISTS, super::scope::LISTED] {
         for (name, path) in names(&state.join(dir)) {
             if !name.starts_with('.') && name.to_lowercase() == want {
                 fs::remove_file(&path).map_err(|e| io_fail(&path, e))?;

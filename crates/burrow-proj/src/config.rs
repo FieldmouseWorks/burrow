@@ -207,6 +207,8 @@ pub struct Inbox {
     pub host: String,
     /// Where it books its next look at each repo.
     pub wake: PathBuf,
+    /// Where it books the drain's own pass (`proj-inbox drain`).
+    pub drain_wake: PathBuf,
     /// The label on an issue carrying text from outside the authors, whoever
     /// filed it: never a job, never sorted or handed on. "" is none.
     #[serde(default)]
@@ -449,7 +451,7 @@ pub(crate) mod tests {
             "meters": null, "codexSlots": 2, "codexHooks": "/hooks",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "labels": {"claude": "claude", "codex": "codex"}, "unstickLabel": "stuck",
                       "authors": [burrow_github::fake::author("sam")], "vm": false, "host": "box",
-                      "wake": "/var/lib/burrow/proj-inbox/wake.json"},
+                      "wake": "/var/lib/burrow/proj-inbox/wake.json", "drainWake": "/var/lib/burrow/proj-inbox/drain-wake.json"},
             "tools": {"codex": "/bin/codex", "bwrap": "/bin/bwrap", "bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })

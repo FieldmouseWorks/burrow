@@ -39,8 +39,8 @@ mod whole;
 
 /// What the stand-ins keep beside their log, `nix.log`, cleared before
 /// each run.
-const LOGS: [&str; 9] = [
-    "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried", ".shown",
+const LOGS: [&str; 10] = [
+    "", ".links", ".slot", ".roots", ".overlap", ".valid", ".flaky", ".tried", ".shown", ".silent",
 ];
 
 /// A case's runner: real nix for evaluation, in a store under its scratch
@@ -149,6 +149,7 @@ printf '%s\n' '{}'
                 r#"case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
+    {real_nix} config show max-silent-time >> "$NIX_LOG.silent"
     if [ -n "$HEAVY_SLOT" ]; then
       echo "$*" >> "$NIX_LOG.slot"
       echo "$HEAVY_JOBS" > "$NIX_LOG.jobs"
@@ -205,6 +206,7 @@ printf '%s\n' '{}'
     exit $failed ;;
   flake) [ "$2" = check ] && {{
     echo "$*" >> "$NIX_LOG"
+    {real_nix} config show max-silent-time >> "$NIX_LOG.silent"
     if [ -n "$HEAVY_SLOT" ]; then
       echo "$*" >> "$NIX_LOG.slot"
       echo "$HEAVY_JOBS" > "$NIX_LOG.jobs"
