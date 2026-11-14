@@ -57,7 +57,11 @@ Every repo with code gets a `flake.nix` from the template
   over every tracked text file for credentials with a known shape (tokens,
   private keys), reported by file and line, never by what the file says. A
   false alarm gets `gitleaks:allow` on its line or its fingerprint in
-  `.gitleaksignore`. `flake-gate` runs it on a machine exactly as the repo's
+  `.gitleaksignore`. Every repo's Markdown also cites only paths that are
+  there (`guidance-paths`): each local link and backticked repository path,
+  and one written as burrow's against the burrow the repo pins, reported by
+  file, line and target ([crates/burrow-guidance](../crates/burrow-guidance/src/paths.rs)
+  says what counts). `flake-gate` runs it on a machine exactly as the repo's
   CI does, the workflow's own gate step with the inputs the repo gives it
   (such as `eval-apart`, for a flake too big to evaluate at once).
 - CI is `.github/workflows/flake.yml` from the template, which calls burrow's
