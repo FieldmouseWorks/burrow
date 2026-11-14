@@ -888,7 +888,7 @@ pub(crate) mod declaration_tests {
     // Exercise the command dispatcher in a child so its job environment and
     // stdout are the real ones, without mutating the test runner's environment.
     pub(crate) fn response(cfg: &Config, id: &str, how: &str) -> String {
-        let output = std::process::Command::new(env::current_exe().unwrap())
+        let output = burrow_test::command(env::current_exe().unwrap())
             .args([
                 "--exact",
                 "cmd::declaration_tests::command_child",

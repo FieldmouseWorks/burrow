@@ -94,7 +94,7 @@ impl Drop for Kid {
 
 fn spawn_child(what: &str, jobs: &Path, max_jobs: usize, args: &[String]) -> Kid {
     admission::bind_fixture(jobs, max_jobs);
-    let child = Command::new(env::current_exe().unwrap())
+    let child = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::child",
@@ -271,7 +271,7 @@ fn line_of_size(tmp: &TempDir, jobs: &Path, n: usize) -> Kid {
 #[test]
 fn a_look_runs_git_once_a_project() {
     let tmp = TempDir::new().unwrap();
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::counted_look",
@@ -656,7 +656,7 @@ fn a_place_left_by_a_hand_over() {
 #[test]
 fn who_is_handed_over_to() {
     let tmp = TempDir::new().unwrap();
-    let status = Command::new(env::current_exe().unwrap())
+    let status = burrow_test::command(env::current_exe().unwrap())
         .args([
             "--exact",
             "slot::tests::successors",

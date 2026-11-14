@@ -99,7 +99,7 @@ fn main() {
                 }
                 asked
             });
-            let result = Command::new(&exe)
+            let result = burrow_test::command(&exe)
                 .args(["case", &format!("{owner}/repo"), wrapped.to_str().unwrap()])
                 .current_dir(dir.path()) // No repository or useful checkout.
                 .env_remove("GH_TOKEN")

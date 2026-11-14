@@ -293,7 +293,7 @@ mod tests {
             assert!(super::pages_until(&cfg, "repos/sam/r/issues", None).is_none());
             return;
         }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = burrow_test::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "github::tests::review_final_diagnostics_are_visible",
