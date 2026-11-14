@@ -171,6 +171,20 @@ const TUNING: Kind = Kind::Record(&[
 ]);
 const MODELS: Kind = Kind::Map(&TUNING);
 const WORDS: Kind = Kind::List(&Kind::Text);
+/// The reasons crates/burrow-escalation knows: the only ones there are.
+const OWNER_REASONS: Kind = Kind::List(&Kind::OneOf(&burrow_escalation::reason::WORDS));
+/// Every one of them, the default: [`tests::every_reason_is_the_default`].
+const ALL_OWNER_REASONS: &str = r#"["secret-create", "secret-rotate", "secret-delete", "zfs-destroy-or-rollback", "disk-wipe-or-partition", "remote-data-delete", "default-branch-force-push", "firmware-flash", "hosting-cancel-or-reinstall", "sign-in", "two-factor", "confirm-access"]"#;
+const ACKNOWLEDGERS: Kind = Kind::List(&Kind::Record(&[
+    Field {
+        name: "login",
+        kind: &Kind::Text,
+    },
+    Field {
+        name: "id",
+        kind: &Kind::Count { min: 1 },
+    },
+]));
 const OFFERS: Kind = Kind::Map(&Kind::Record(&[
     Field {
         name: "models",
@@ -498,6 +512,35 @@ pub static SETTINGS: &[Setting] = &[
         "autoland-review",
         "Path regexes left out of what the reviewers read.",
     ),
+    // HOST-escalation: what may wait on the owner, and the route to them.
+    flake(
+        "escalation.ownerReasons",
+        &OWNER_REASONS,
+        Is(ALL_OWNER_REASONS),
+        "escalation",
+        "The one-way doors that may get the owner label (secrets, irreversible actions, human-only prompts); every other request goes to the operator.",
+    ),
+    flake(
+        "escalation.relay.repo",
+        &Kind::Maybe(&Kind::Repo),
+        Is("null"),
+        "escalation",
+        "The repo the owner's project coordinator reads requests from; null means no route, so the operator raises everything.",
+    ),
+    flake(
+        "escalation.relay.label",
+        &Kind::Text,
+        Is(r#""escalation""#),
+        "escalation",
+        "The label on each request issue there; the inbox never sorts one.",
+    ),
+    flake(
+        "escalation.relay.acknowledgers",
+        &ACKNOWLEDGERS,
+        Is("[]"),
+        "escalation",
+        "The accounts (by id) whose `delivered KEY` comment is the project's acknowledgement; only then does the owner label go on.",
+    ),
     // What changes live, in proj's files.
     live(
         "proj.roles",
@@ -716,6 +759,25 @@ mod tests {
             .check(&json!({"fix": {"engine": "gemini", "over": null}}))
             .unwrap_err();
         assert!(err.starts_with("fix: engine: "), "{err}");
+    }
+
+    #[test]
+    fn every_reason_is_the_default() {
+        let default: Vec<String> = serde_json::from_str(ALL_OWNER_REASONS).unwrap();
+        assert_eq!(default, burrow_escalation::reason::WORDS);
+        assert!(OWNER_REASONS.check(&json!(["firmware-flash"])).is_ok());
+        assert!(OWNER_REASONS.check(&json!(["hold"])).is_err());
+        assert!(
+            ACKNOWLEDGERS
+                .check(&json!([{"login": "sam", "id": 1}]))
+                .is_ok()
+        );
+        assert!(ACKNOWLEDGERS.check(&json!([{"login": "sam"}])).is_err());
+        assert!(
+            ACKNOWLEDGERS
+                .check(&json!([{"login": "sam", "id": 0}]))
+                .is_err()
+        );
     }
 
     #[test]

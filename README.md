@@ -44,7 +44,7 @@ The modules, by job:
 - **Doing the work:** `remote-control`, `proj`, `probe`, `agents`, `browser`,
   `dashboard`, `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
 - **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`
-- **Keeping it current:** `updates`, `house`, `notify`
+- **Keeping it current:** `updates`, `house`, `notify`, `escalation`
 
 Each has an entry below, and each can be imported on its own.
 
@@ -118,6 +118,14 @@ Each has an entry below, and each can be imported on its own.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as
   one GitHub issue per problem in `burrow.notify.repo`, commented at most
   daily and closed when it clears.
+- **`escalation`** (`burrow.escalation`): `HOST-escalation`: the one way the
+  owner label goes on. A request reaches the owner only for a one-way door in
+  `escalation.ownerReasons` (a secret, an irreversible action, a human-only
+  prompt), and goes to the operator otherwise; an owner's request is opened
+  for the project coordinator in `escalation.relay.repo`, and the label goes
+  on only after an acknowledger comments `delivered KEY` there. Records survive
+  failures and restarts, and `HOST-escalation pass` carries them on without a
+  second request ([front door](docs/front-door.md#asking-the-owner-escalations)).
 - **`remote-control`** (`burrow.remoteControl`): An always-on `claude
   remote-control` server for every project in `burrow.projectsDir` (a git
   checkout with an origin), found by itself (a path unit rescans when folders

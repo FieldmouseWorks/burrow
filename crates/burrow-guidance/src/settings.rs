@@ -80,7 +80,8 @@ fn names(s: &Setting) -> Regex {
 }
 
 /// What states its value: any of [`VALUE`], a word its kind allows, or
-/// its schema's JSON collection default (which may contain no value words).
+/// its schema's JSON collection or text default (which may contain no
+/// value words).
 fn values(s: &Setting) -> Regex {
     let words: Vec<_> = words(s.kind).iter().map(|w| escape(w)).collect();
     let own = if words.is_empty() {
@@ -90,7 +91,7 @@ fn values(s: &Setting) -> Regex {
     };
     let collection = s
         .default_value()
-        .filter(|value| value.is_array() || value.is_object())
+        .filter(|value| value.is_array() || value.is_object() || value.is_string())
         .map(|value| format!(r"|(?:^|[^\]]){}", collection(&value)))
         .unwrap_or_default();
     Regex::new(&format!("{VALUE}{own}{collection}")).expect("values are a regex")
