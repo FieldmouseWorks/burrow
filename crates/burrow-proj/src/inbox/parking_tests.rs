@@ -257,3 +257,47 @@ fn an_explicit_stop_without_parking_does_not_enrol_a_replacement() {
     assert_eq!(read(&record.join("job")).as_deref(), Some("j1"));
     assert!(!b.path("launched").exists());
 }
+
+// A worker stopped by hand (`proj stop`) while its issue keeps its engine
+// label: a reply isn't handed on, the issue hears why once, and no pass books
+// a retry for it. Relabelling then starts a fresh job.
+#[test]
+fn a_hand_stopped_worker_tells_its_issue_once_and_never_retries() {
+    let b = fixture();
+    let d = b.record("j1");
+    crate::cmd::stop(&b.cfg, "j1", false).unwrap();
+    let enrolled = issue(7, "sam", &["codex"]);
+    on_github(&b, &enrolled);
+    fs::write(
+        b.path("comments"),
+        json!([[{"id": 9, "user": burrow_github::fake::actor("sam"), "body": "carry on",
+                 "created_at": "2026-11-01T00:00:00Z"}]])
+        .to_string(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let mut p = b.pass();
+        p.new_issues("sam/box", std::slice::from_ref(&enrolled))
+            .unwrap();
+        p.jobs("sam/box", "box", std::slice::from_ref(&enrolled))
+            .unwrap();
+        assert!(p.wake.is_empty(), "{:?}", p.wake);
+    }
+    let job = Job::new(&b.cfg, "j1");
+    assert_eq!(job.turns().as_deref(), Some("1"));
+    assert!(!b.path("launched").exists());
+    assert_eq!(read(&d.join("job")).as_deref(), Some("j1"));
+    let posted = b.posted();
+    assert_eq!(posted.matches("was stopped").count(), 1, "{posted}");
+
+    // The label off, then on again: a fresh job, not the stopped one.
+    let unlabelled = issue(7, "sam", &[]);
+    on_github(&b, &unlabelled);
+    b.pass().jobs("sam/box", "box", &[]).unwrap();
+    on_github(&b, &enrolled);
+    b.pass().new_issues("sam/box", &[enrolled]).unwrap();
+    let fresh = read(&d.join("job")).unwrap();
+    assert_ne!(fresh, "j1");
+    assert_eq!(Job::new(&b.cfg, &fresh).turns().as_deref(), Some("1"));
+    assert_eq!(job.turns().as_deref(), Some("1"));
+}

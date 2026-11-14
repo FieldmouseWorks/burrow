@@ -144,7 +144,7 @@ fn child() {
                 r#"#!/bin/sh
 case $1 in
   _handover_format) echo 1 ;;
-  _retry_format) echo 3 ;;
+  _retry_format) echo 4 ;;
   _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
 esac
 "#
