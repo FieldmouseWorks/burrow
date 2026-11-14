@@ -119,3 +119,46 @@ fn a_reply_the_pass_hands_on_counts_capacity_under_its_lock() {
     assert!(launched.exists());
     drop(pass);
 }
+
+#[test]
+fn a_parked_job_its_repository_is_then_denied_says_so_and_keeps_its_place() {
+    let mut fixture = Box::new();
+    let launched = drained_pair(&mut fixture);
+    let overlay = fixture.path("settings.json");
+    fixture.cfg.settings.as_mut().unwrap().overlay = overlay;
+    let job = Job::new(&fixture.cfg, "waiting");
+    crate::turn::start(&fixture.cfg, job.id, "the await changed", true).unwrap();
+    assert_eq!(
+        crate::policy::waits_for(&job).as_deref(),
+        Some(Wait::Drain.says())
+    );
+    let park = |job: &Job| -> crate::policy::Park {
+        serde_json::from_slice(&fs::read(crate::policy::path(job, "park")).unwrap()).unwrap()
+    };
+    let before = park(&job);
+    let order = fs::read_to_string(crate::policy::path(&job, "order")).unwrap();
+    fixture
+        .cfg
+        .settings
+        .as_ref()
+        .unwrap()
+        .command(&["pause".into(), "sam/box".into()], "test")
+        .unwrap();
+    crate::policy::reconcile(&fixture.cfg).unwrap();
+    assert!(!launched.exists());
+    let after = park(&job);
+    assert_eq!(after.wait.as_deref(), Some(crate::policy::DENIED));
+    assert_eq!(
+        (&after.state, &after.turn, after.first, after.at),
+        (&before.state, &before.turn, before.first, before.at)
+    );
+    assert_eq!(
+        fs::read_to_string(crate::policy::path(&job, "order")).unwrap(),
+        order
+    );
+    assert!(
+        row(&job).contains("[waiting for its repository to be allowed]"),
+        "{}",
+        row(&job)
+    );
+}

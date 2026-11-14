@@ -212,6 +212,15 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
     Ok(())
 }
 
+/// A parked job now waits for `wait`: a park of its latest turn takes the
+/// new reason and keeps its state, time, priority and order ([`mark`]).
+fn waiting(job: &Job, wait: &str) -> Result<(), String> {
+    let state = read(&path(job, "park"))
+        .and_then(|p| serde_json::from_str::<Park>(&p).ok())
+        .map_or_else(|| "queued".to_owned(), |p| p.state);
+    mark(job, &state, false, Some(wait))
+}
+
 /// Runs in its own independent unit, so vacating the caller cannot kill the
 /// reconciler. All records are committed before stopping any process group.
 pub fn reconcile(cfg: &Config) -> Result<(), String> {
@@ -371,6 +380,8 @@ fn reconcile_job(
                 .turns()
                 .is_some_and(|n| read(&job.turn(&n, "priority")).as_deref() == Some("first"));
             mark(&job, &state, first, Some(DENIED))?;
+        } else {
+            waiting(&job, DENIED)?;
         }
         // stop kills the complete cgroup: inherited job, heavy and engine
         // locks are freed even when descendants ignored TERM.
@@ -403,11 +414,7 @@ fn reconcile_job(
         // start (two thousand reads an hour with 127 parked).
         let capacity = crate::inbox::resumption::admission(cfg, &job)?;
         if let crate::inbox::resumption::Resume::Waiting(wait) = capacity {
-            // Its turn is already parked: this only says what it waits for.
-            let state = read(&path(&job, "park"))
-                .and_then(|p| serde_json::from_str::<Park>(&p).ok())
-                .map_or_else(|| "queued".to_owned(), |p| p.state);
-            return mark(&job, &state, false, Some(wait.says()));
+            return waiting(&job, wait.says());
         }
         match crate::inbox::enrollment::check(&job)? {
             crate::inbox::enrollment::Admission::Ready => (),

@@ -315,11 +315,12 @@
           "type": "string"
         },
         "parkedFor": {
-          "description": "What a parked job waits for, as its park says: its repository to be\nallowed, the inbox pass, a drain slot or a sorting slot.",
+          "description": "What a parked job waits for, as its park says: its repository to be\nallowed, the inbox pass, a drain slot or a sorting slot.\nSince version 3.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": null
         },
         "state": {
           "description": "What `proj state` says.",

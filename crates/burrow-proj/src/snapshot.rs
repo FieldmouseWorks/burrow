@@ -38,7 +38,7 @@ use crate::turn::lines;
 use crate::{Fail, io_fail, mtime, now, read, usage};
 
 /// The shape's version: a reader refuses one it doesn't know.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// How many recently changed jobs it lists unless asked for another number.
 pub const JOBS: usize = 15;
@@ -298,7 +298,8 @@ pub struct JobRow {
     pub state: String,
     /// What a parked job waits for, as its park says: its repository to be
     /// allowed, the inbox pass, a drain slot or a sorting slot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Since version 3.
+    #[serde(default)]
     pub parked_for: Option<String>,
     /// Its sandbox, with --vm.
     pub vm: Vec<String>,
