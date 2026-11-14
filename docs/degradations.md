@@ -77,3 +77,16 @@ missing-runner case in [#598](https://github.com/FieldmouseWorks/burrow/issues/5
 not a degradation signal. Likewise a service that dies before writing its
 source is covered by failed-unit and stale-source watches; this signal does
 not replace those.
+
+## Anomalies
+
+`burrow.watchdog.anomalies` (modules/watchdog/anomalies.nix, policy in
+crates/burrow-watchdog/src/anomaly.rs) keeps bounded rolling history of numbers
+that sources already observe, and turns a sustained breach of a rule into an
+item in its own watch file. It is read like the degradations source, so it
+takes the same ladder and the same notice: one job, stuck issue, owner. An
+anomaly's key is `CHECK/SUBJECT` and its stall is named by the time the breach
+began, so repeated passes and restarts never open a second one. Cold starts,
+transient breaches, duplicate and late observations and missing data are
+handled in anomaly.rs's tests. `burrow-watchdog dismiss CHECK SUBJECT` holds an
+active anomaly out until it clears.

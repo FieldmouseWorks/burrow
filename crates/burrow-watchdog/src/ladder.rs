@@ -43,6 +43,8 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             .collect()
     });
     let before = published(&stalls);
+    // Its observations first: an anomaly is one more source for this pass.
+    crate::anomaly::pass(cfg, now)?;
     let (found, due) = overdue(cfg, now, &mut missing);
     let mut wakes: Vec<f64> = due.into_iter().collect();
 

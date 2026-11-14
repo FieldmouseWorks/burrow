@@ -82,6 +82,14 @@
       enable = true;
       repos."sam/homelab" = [ "flake.yml" ];
     };
+    watchdog.anomalies = {
+      enable = true;
+      inputs = [ "/var/lib/burrow/example/observations.json" ];
+      rules.latency = {
+        mode = "ratio";
+        threshold = 3.0;
+      };
+    };
     usageReset.enable = true;
     dispatch = {
       enable = true;
