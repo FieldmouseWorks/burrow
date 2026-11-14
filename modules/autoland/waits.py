@@ -158,11 +158,17 @@ def publish(seen, digest, full, inventory=None, deferred=()):
     items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full
              and (inventory is None or repo_of(k) in inventory)}
     for repo in seen:
-        if repo in deferred and repo in was and not set(was[repo].get("ops") or ["repo"]) <= RECHECKED.get(repo, set()):
-            # The operation that failed has not been retried by this batch.
-            # Its clock belongs to that operation, not the PR traversal. One
-            # whose every failed operation ran clean since has recovered.
-            items[repo] = was[repo]
+        # A deferred repo's carried failure stays for each operation in it
+        # this batch hasn't run clean (an unlabelled one's, "repo", counts
+        # as untried): its clock belongs to those operations, not the PR
+        # traversal. What's left is all it keeps, so recovery adds up
+        # across batches, and it goes once nothing is left.
+        carried = set()
+        if repo in deferred and repo in was:
+            ops = set(was[repo].get("ops") or ["repo"])
+            carried = ops - RECHECKED.get(repo, set())
+            if carried:
+                items[repo] = was[repo] if carried == ops else {**was[repo], "ops": sorted(carried)}
         noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
 
@@ -171,7 +177,10 @@ def publish(seen, digest, full, inventory=None, deferred=()):
 
         items.update({k: v for k, v in was.items() if repo_of(k) == repo and k != repo and not theirs(k)
                       and (noted is None or (k in OPEN[repo] and k not in noted))})
-        now = {**{k: v for k, v in (noted or {}).items() if v}, **({repo: FAILED[repo]} if repo in FAILED else {})}
+        # This pass's failure of the repo adds to what's still carried, never
+        # replaces it: another operation failing doesn't end an untried one.
+        now = {**{k: v for k, v in (noted or {}).items() if v},
+               **({repo: {**FAILED[repo], "ops": sorted({*FAILED[repo]["ops"], *carried})}} if repo in FAILED else {})}
         for key, it in now.items():
             if theirs(key):
                 continue
