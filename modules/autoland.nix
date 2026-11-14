@@ -119,12 +119,13 @@ let
     # What the pipeline is stuck on goes to proj's inbox, as an issue in
     # notify.repo with its label, for a Claude job to take (repos.py publish),
     # when the inbox will: notify.repo cloned in projectsDir, and the
-    # steward's App one of inbox.authors (it is: see below). Otherwise it's
+    # steward's App one of burrow.authors (it is: see below). Otherwise it's
     # the owner's. It has unstickLabel too, so that job never waits in proj's
     # line, which may be what's stuck. `command` is how the steward has the
     # inbox forget a remade repo's issues (repos.py reset).
     inbox = {
-      inherit (config.burrow.proj.inbox) enable labels unstickLabel authors;
+      inherit (config.burrow.proj.inbox) enable labels unstickLabel;
+      inherit (config.burrow) authors;
       postingAccountId = cfg.app.accountId;
       command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
     };
@@ -858,7 +859,7 @@ in
     burrow.notify.enable = true;
     # What the pipeline is stuck on goes to the inbox as an issue the App
     # opens (repos.py publish).
-    burrow.proj.inbox.authors = [ { login = "${cfg.app.slug}[bot]"; id = cfg.app.accountId; } ];
+    burrow.authors = [ { login = "${cfg.app.slug}[bot]"; id = cfg.app.accountId; } ];
 
     environment.etc."burrow/autoland.json".source = configFile;
     environment.systemPackages = [ steward ];

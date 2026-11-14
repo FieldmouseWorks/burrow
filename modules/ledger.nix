@@ -82,7 +82,8 @@ let
 
   # What crates/burrow-ledger-door reads (its Config).
   doorConfig = pkgs.writeText "burrow-ledger-door.json" (builtins.toJSON {
-    inherit (cfg.door) repo label authors;
+    inherit (cfg.door) repo label;
+    inherit (config.burrow) authors;
     host = config.networking.hostName;
     cn = lib.getExe cfg.writer;
   });
@@ -362,7 +363,7 @@ in
     door = {
       enable = lib.mkEnableOption ''
         the undo door: an issue labelled `label` in `repo`, from one of
-        `authors`, asks for one `cn undo` (a PR, a session, or since a time),
+        `burrow.authors`, asks for one `cn undo` (a PR, a session, or since a time),
         which runs as the ledger's writers do and answers with the undo's PR,
         with no Claude in between. The PR is the steward's to settle like any
         other, and an undo can itself be undone
@@ -378,12 +379,7 @@ in
         default = "undo";
         description = "The label that makes an issue an undo request.";
       };
-      authors = mkOption {
-        type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
-        default = config.burrow.probe.authors or [ ];
-        defaultText = lib.literalExpression "config.burrow.probe.authors";
-        description = "Who may ask for an undo (GitHub accounts and numeric IDs): the probe's, by default.";
-      };
+
     };
 
     writer = mkOption {
@@ -418,8 +414,8 @@ in
       assertion = cfg.reviewers != [ ];
       message = "burrow.ledger.reviewers: name the steward's App (its SLUG[bot]), or no merge could be told from a bypass.";
     } {
-      assertion = cfg.door.enable -> cfg.door.authors != [ ];
-      message = "burrow.ledger.door.authors: name who may ask for an undo.";
+      assertion = cfg.door.enable -> config.burrow.authors != [ ];
+      message = "burrow.authors: name who may ask for an undo.";
     } {
       assertion = cfg.door.enable -> cfg.door.repo != null;
       message = "burrow.ledger.door.repo: name the repo whose issues ask for undos.";
@@ -467,7 +463,7 @@ in
     };
     burrow.claude.machineMd = lib.mkIf cfg.door.enable (lib.mkOrder 703 ''
       An undo needs no Claude either: open an issue in ${cfg.door.repo} labelled
-      `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.door.authors)}), its body one line:
+      `${cfg.door.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) config.burrow.authors)}), its body one line:
       `undo OWNER/REPO#N`, `undo --actor SESSION_URL` or
       `undo --since RFC3339_TIME --repo OWNER/REPO`. The undo's PR comes back as
       a comment, and the steward settles it like any other.

@@ -39,6 +39,7 @@ in pkgs.testers.runNixOSTest {
     burrow = {
       claude.package = engine "claude";
       cpu.enable = true;
+      authors = [ { login = "sam"; id = 1; } ];
       settings.allowed = [ "o/r" "o/web" ];
       github = {
         apps.workers = { id=7; accountId=8; slug="test-workers"; keyFile="/run/keys/workers.pem"; users=[ "dev" ]; };
@@ -49,7 +50,7 @@ in pkgs.testers.runNixOSTest {
         inherit gh;
         maxJobs=1; pipelineSlots=0; maxJobsPerProject=10; minFreeMemory=0;
         codex = { slots=1; package=engine "codex"; };
-        inbox = { enable=true; planning=false; authors=[ { login = "sam"; id = 1; } ]; triage = { enable=true; drain="codex"; drainJobs=1; }; };
+        inbox = { enable=true; planning=false; triage = { enable=true; drain="codex"; drainJobs=1; }; };
       };
     };
     environment.systemPackages = [ pkgs.git pkgs.jq self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof ];

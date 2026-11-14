@@ -149,7 +149,7 @@ Each has an entry below, and each can be imported on its own.
   runs short (the kernel kills them first, and systemd-oomd watches their
   slice), and each may have a cap of its own (`jobMemoryMax`, none by
   default). With `inbox.enable`, an issue labelled `claude` or `codex` in a project's
-  GitHub repo, opened by one of `inbox.authors`, becomes a job too: the answer
+  GitHub repo, opened by one of `burrow.authors`, becomes a job too: the answer
   comes back as a comment and a reply there continues it; `proj done` closes its issue.
   Automated admission and runtime pauses use [the settings source](docs/settings.md).
   With `inbox.triage`, every other issue the
@@ -193,7 +193,7 @@ Each has an entry below, and each can be imported on its own.
   planner sizes each inbox task before implementation. Large tasks become
   ordered child issues, one outstanding child per parent, with a checklist
   updated when each child's PR lands. Durable creation receipts admit
-  generated children without widening `inbox.authors`. A worker can
+  generated children without widening `burrow.authors`. A worker can
   use `proj split FILE` when its task needs another split. See
   [task planning](docs/task-planning.md) for the state and retry protocol.
   After a reset, `burrow.proj.usageTrickle` caps concurrent Claude

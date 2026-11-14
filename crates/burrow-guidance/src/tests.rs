@@ -83,6 +83,10 @@ fn every_option_is_known_by_its_names() {
     let facts = facts();
     for s in SETTINGS {
         for name in [s.name.to_owned(), format!("burrow.{}", s.name)] {
+            // A one-part name is a common word: only `burrow.` names it.
+            if !s.name.contains('.') && name == s.name {
+                continue;
+            }
             let text = format!("`{name}` defaults to 9.");
             let hits = check_text("a.md", &text, &facts);
             assert!(

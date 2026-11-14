@@ -1,7 +1,7 @@
 # probe: read-only questions about the machine, asked on a private repo's
 # issues and answered there within seconds, with no Claude
 # (crates/burrow-probe). Label an issue `probe` in `repo`, as one of
-# `authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
+# `burrow.authors`, with a question a line (`memory`, `units`, `journal UNIT SINCE
 # UNTIL`, `crashes EXE [SINCE]`, `rc`, `queue`, `deployed`, `usage [SINCE] [--totals]`, `oom [SINCE]`): the
 # repo's issue event starts burrow-probe.service through burrow-events, which posts the answers
 # in one comment and closes the issue. Reopen it to ask again.
@@ -22,7 +22,8 @@ let
 
   # What crates/burrow-probe reads (its Config).
   settings = {
-    inherit (cfg) repo label authors;
+    inherit (cfg) repo label;
+    inherit (config.burrow) authors;
     # Only where the updater is on: its repo reads the required origin.
     systemRepo = if config.burrow.updates.enable or false then config.burrow.updates.repo else null;
     machinery = if config.burrow.github.machineApp == null then null
@@ -80,15 +81,6 @@ in
       description = "The label that makes an issue a probe.";
     };
 
-    authors = mkOption {
-      type = lib.types.listOf (import ../lib/github-author.nix { inherit lib; });
-      default = config.burrow.proj.inbox.authors or [ ];
-      defaultText = lib.literalExpression "config.burrow.proj.inbox.authors";
-      description = ''
-        The GitHub accounts, with immutable numeric IDs, whose issues are answered: the inbox's, unless set.
-        Anyone else's gets a line saying nothing ran, and is closed.
-      '';
-    };
 
     journal = {
       units = mkOption {
@@ -150,8 +142,8 @@ in
       assertion = cfg.repo != "";
       message = "burrow.probe.repo: name the private repository for issue probes.";
     } {
-      assertion = cfg.authors != [ ];
-      message = "burrow.probe.authors: name who may ask the probe.";
+      assertion = config.burrow.authors != [ ];
+      message = "burrow.authors: name who may ask the probe.";
     }];
 
     environment.systemPackages = [ probe ];
@@ -206,7 +198,7 @@ in
 
     burrow.claude.machineMd = lib.mkOrder 702 ''
       Read-only questions about this machine need no Claude: open an issue in
-      ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) cfg.authors)}), a question a line
+      ${cfg.repo} labelled `${cfg.label}` (as ${lib.concatStringsSep " or " (map (a: a.login) config.burrow.authors)}), a question a line
       (`memory`, `units`, `crashes EXE [SINCE]`, `journal UNIT SINCE UNTIL`, `rc`, `queue`, `deployed`,
       `usage [SINCE] [--totals]`, `oom [SINCE]`), and the answer comes back as a comment within seconds.
       Here, `burrow-probe ask QUESTION` answers one on the terminal.

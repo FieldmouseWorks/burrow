@@ -6,6 +6,8 @@
 
   burrow = {
     owner = "Sam";
+    # Who the inbox, probe, engines, undo and settings doors take issues from.
+    authors = [ { login = "sam"; id = 1; } ];
     undo.datasets = [ "rpool/safe/home" "rpool/safe/data" ];
     claude.enable = true;
     undo.enable = true;
@@ -41,7 +43,6 @@
     probe = {
       enable = true;
       repo = "sam/homelab";
-      authors = [ { login = "sam"; id = 1; } ];
     };
     autoland = {
       enable = true;
