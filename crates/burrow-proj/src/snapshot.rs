@@ -32,8 +32,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::host_jobs::View;
-use crate::job::{Job, awaits};
+use crate::job::Job;
 use crate::pick::demoted;
+use crate::record::Wait;
 use crate::turn::lines;
 use crate::{Fail, io_fail, mtime, now, read, usage};
 
@@ -488,20 +489,15 @@ fn recent(cfg: &Config, limit: usize, view: View) -> Result<Vec<JobRow>, Fail> {
         .collect())
 }
 
-/// A job's row, from its own records alone.
+/// A job's row: its record ([`crate::record`]) printed, with what it runs
+/// as and its latest answer.
 pub(crate) fn row(job: &Job, view: View) -> JobRow {
-    let state = job.state();
+    // The parts of its record a row prints, derived as the record is.
     let n = job.turns().unwrap_or_default();
-    let waiting_in_line = if state == "running" {
-        lines(&job.turn(&n, "wait"))
-            .iter()
-            .map(|l| l.split('\t').nth(1).unwrap_or(l).to_owned())
-            .filter(|w| !w.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let result = crate::state_reads::bytes(&job.turn(&n, "result")).unwrap_or_default();
+    let stage = crate::record::stage(job);
+    let waits = crate::record::stage_waits(job, &stage, &n);
+    let result =
+        crate::state_reads::bytes(&crate::record::turn_file(job, &n, "result")).unwrap_or_default();
     // A shortened credential may lose its closing delimiter. The bridge's
     // view redacts the complete answer first, while it still has its
     // logical boundaries.
@@ -515,22 +511,27 @@ pub(crate) fn row(job: &Job, view: View) -> JobRow {
     }
     JobRow {
         id: job.id.to_owned(),
-        parked_for: if state == "parked" {
-            crate::policy::waits_for(job)
-        } else {
-            None
-        },
+        parked_for: waits.iter().find_map(|w| match w {
+            Wait::Policy(what) => what.clone(),
+            _ => None,
+        }),
         vm: lines(&job.path("agent")),
         apps: lines(&job.path("app")),
         demoted: demoted(job.cfg, &job.dir),
-        waiting_in_line,
-        awaits: awaits(&read(&job.path("await")).unwrap_or_default())
+        waiting_in_line: waits
+            .iter()
+            .filter_map(|w| match w {
+                Wait::Line { what, .. } => Some(what.clone()),
+                _ => None,
+            })
+            .collect(),
+        awaits: crate::record::awaited(job)
             .into_iter()
             .map(|a| a.target)
             .collect(),
-        ends: lines(&job.turn(&n, "end")),
+        ends: crate::record::ends(job, &n),
         answer: String::from_utf8_lossy(&result[..cut]).replace('\n', " "),
-        state,
+        state: stage.to_string(),
     }
 }
 
@@ -545,7 +546,8 @@ pub(crate) fn job_slot(
     at: i64,
 ) -> Slot {
     let job = Job::new(cfg, id);
-    let Some(facts) = job.facts() else {
+    let record = crate::record::derive(&job);
+    let Some(facts) = record.facts else {
         // Made, its first turn not written yet.
         return Slot {
             holder: Some(Holder {
@@ -556,11 +558,10 @@ pub(crate) fn job_slot(
             ..held(kind, name, SlotState::Starting, mtime(&job.dir), at)
         };
     };
-    let asked = job
-        .holds()
-        .unwrap_or_default()
+    let asked = record
+        .wait
         .iter()
-        .any(|h| h == "ask" || h == "owner");
+        .any(|w| matches!(w, Wait::Ask | Wait::Owner));
     let since_await = facts
         .awaits
         .iter()

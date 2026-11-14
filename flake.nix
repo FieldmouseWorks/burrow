@@ -96,7 +96,8 @@
       # read these files and run git, jq and nix, and the gate's run its VM
       # tests in a slot of the real heavy (burrow-heavy); proj's clone repos
       # to read their origins, gh-token's make keys with openssl, lock-age's
-      # check its wait against what the steward reads (lock_wait.py), and
+      # check its wait against what the steward reads (lock_wait.py),
+      # burrow-brief's that none of the steward's code holds its text, and
       # house-sync's read burrow's own house blocks, burrow-settings' the
       # settings reference it writes and its house guidance, and attestation's ask a
       # token server of their own with curl. No test reads README.md,
@@ -111,8 +112,7 @@
             ".github/flake-check"
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
-            "modules/autoland/lock_wait.py"
-            "modules/autoland/step_jobs.py"
+            "modules/autoland"
             "house"
             "docs/settings-reference.md"
           ];

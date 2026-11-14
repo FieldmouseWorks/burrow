@@ -420,6 +420,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if crate::policy::denied(&job) {
             crate::policy::mark(&job, "queued", state.first, Some(crate::policy::DENIED))
                 .map_err(io::Error::other)?;
+            crate::record::noted(&job, "its transfer parked by the policy");
             continue;
         }
         // The ordered policy reconciler owns restoration of parked work.
@@ -435,6 +436,7 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
                 crate::inbox::resumption::Resume::Waiting(wait) => {
                     crate::policy::mark(&job, "queued", state.first, Some(wait.says()))
                         .map_err(io::Error::other)?;
+                    crate::record::noted(&job, "its transfer parked for capacity");
                     continue;
                 }
             };
