@@ -19,7 +19,7 @@ fn config(path: &Path, state: &Path, socket: &Path, own: &str) {
         serde_json::to_vec(&serde_json::json!({
             "file":state.join("watch.json"), "clearSocket":socket,
             "ignore":[], "grace":600, "window":86400, "systemctl":"false",
-            "journalctl":"false", "coredumpctl":"false", "own":own, "kick":null
+            "journalctl":"false", "buildGid":null, "ownedSlices":[], "own":own, "kick":null
         }))
         .unwrap(),
     )
