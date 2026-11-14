@@ -90,7 +90,9 @@ done
 [ "$GH_REPO" = "$owner/$name" ] || exit 1
 f='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"
 [ -e "$f" ] || f='{dir}/default-issue'
-jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c '{dir}/comments' -f '{dir}/written.jq'
+c='{dir}/repos_'"$owner"'_'"$name"'_issues_'"$n"'_comments'
+[ -e "$c" ] || c='{dir}/comments'
+jq -n --argjson n "$n" --slurpfile i "$f" --slurpfile c "$c" -f '{dir}/written.jq'
 "#,
                 dir = tmp.path().display()
             ),
