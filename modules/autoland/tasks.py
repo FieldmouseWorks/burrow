@@ -66,6 +66,8 @@ def answers(repo, pr):
         f"write what you have to say to {claims.brief_file()} as JSON, "
         '{"pushed": COMMIT, "threads": [{"id": THREAD_ID, "fixed": true, "reply": TEXT}], "description": TEXT, "comment": TEXT}, '
         "and the steward posts it, resolving each thread after its reply, only once the PR's head is your push. "
+        "It goes up as each turn of yours ends: one that ends awaiting this PR (proj await) is resumed by its next change, "
+        "and a later turn's answers go up only if that turn rewrites the file. "
         "pushed is the full commit your push put on the branch (git rev-parse HEAD, once git push has said it updated the branch), "
         "or null if you pushed nothing. threads has one entry for each thread you settled, by its id "
         f"(gh api graphql, the reviewThreads of PR {pr['number']} in {repo}): fixed is true only for one your push fixes, and "

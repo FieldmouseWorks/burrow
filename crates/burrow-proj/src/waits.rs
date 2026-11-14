@@ -293,55 +293,55 @@ pub fn waiting(dir: &Path) -> Option<(i64, String)> {
 /// whose deadline then catches it; one whose dir is gone has none. Without
 /// the watchdog there's no watch file: nothing to do. Never the caller's
 /// failure: a turn goes on whether or not the watchdog hears. By the deployed
-/// proj's waits, when a turn outlives a switch ([`crate::slot`]).
-pub fn rewatch(cfg: &Config, ids: &[&str]) {
-    if let Some(d) = successor(cfg)
-        && Command::new(d)
-            .arg("_rewatch")
-            .args(ids)
-            .status()
-            .is_ok_and(|s| s.success())
-    {
-        return;
+/// proj's waits, when a turn outlives a switch ([`crate::slot`]). Whether
+/// they got there.
+pub fn rewatch(cfg: &Config, ids: &[&str]) -> bool {
+    if let Some(result) = forward(cfg, "_rewatch", ids) {
+        return result;
+    }
+    // Resetting migration belongs to the deployed configuration too. Never
+    // hold this lock across a handoff, including after waiting for the lock.
+    let guard = if cfg.waits.is_none() {
+        match adoption::lock(cfg) {
+            Ok(guard) => Some(guard),
+            Err(_) => return false,
+        }
+    } else {
+        None
+    };
+    if successor(cfg).is_some() {
+        drop(guard);
+        return rewatch(cfg, ids);
     }
     if publish(cfg, ids).is_err() {
         eprintln!(
             "proj: couldn't update the stall watchdog's waits for {}",
             ids.join(" ")
         );
+        return false;
     }
+    drop(guard);
+    forward(cfg, "_rewatch", ids).unwrap_or(true)
 }
 
-/// [`rewatch`] for every job it watches, every one whose wait the policy
-/// keeps from it for now ([`HELD`]), and every one still live ([`live`]):
-/// the machine's usage changed ([`usage`]), which moves the deadline of every
-/// turn in line, or the policy did, which lets a held one back, or the
-/// watchdog was just enabled, and jobs already running never published to it.
-/// Never a settled job, whose wait ended weeks ago.
-pub fn rewatch_all(cfg: &Config) {
-    let mut ids: Vec<String> = [".waits", HELD]
-        .iter()
-        .flat_map(|d| fs::read_dir(cfg.jobs.join(d)).into_iter().flatten())
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
-        .collect();
-    // Every job there is, so each is told live from its own files and one
-    // look at the units that are up: a turn's facts ask systemd about it,
-    // which across thousands of settled jobs is minutes.
-    let up = crate::systemd::up(cfg, "proj-*.service");
-    ids.extend(
-        fs::read_dir(&cfg.jobs)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.') && live(cfg, n, up.as_ref())),
-    );
-    ids.sort();
-    ids.dedup();
-    rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+// A failed deployed owner is retryable; a retained caller must never fall
+// back to changing the current deployment's state with its old config.
+fn forward(cfg: &Config, command: &str, ids: &[&str]) -> Option<bool> {
+    successor(cfg).map(|d| {
+        Command::new(d)
+            .arg(command)
+            .args(ids)
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+mod adoption;
+
+/// Refresh every watched, held or live job, including the one-time recovery
+/// of legacy denied waits. The deployed proj owns the entire transaction.
+pub fn rewatch_all(cfg: &Config) -> bool {
+    adoption::rewatch_all(cfg)
 }
 
 /// A job with a turn queued or running, or outstanding awaits: work the
@@ -383,7 +383,9 @@ const HELD: &str = ".waits-held";
 
 fn publish(cfg: &Config, ids: &[&str]) -> io::Result<()> {
     let Some(file) = &cfg.waits else {
-        return Ok(());
+        // Nothing is held for a watchdog that isn't there, so the stretch
+        // that follows has its jobs found again.
+        return adoption::reset(cfg);
     };
     let dir = cfg.jobs.join(".waits");
     fs::create_dir_all(&dir)?;

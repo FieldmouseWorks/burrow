@@ -416,6 +416,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-codeql"
+version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-codex"
 version = "0.0.0"
 dependencies = [

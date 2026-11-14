@@ -264,6 +264,8 @@ fn retargets_and_case_variants_keep_only_their_intended_work() {
                     "needs.lane.outputs.gate".into(),
                     if lands { "train" } else { "full" }.into(),
                 ),
+                // A PR never asks gate-reuse (reuse.rs).
+                ("needs.reuse.outputs.hit".into(), V::Null),
             ]);
             assert_eq!(
                 runs(&shared["jobs"]["check"], &ctx),
@@ -314,6 +316,8 @@ fn the_train_asks_for_names_the_shared_workflow_gives() {
         ("needs.lane.result", V::from("skipped")),
         ("needs.lane.outputs.gate", V::Null),
         ("needs.check.result", V::from("success")),
+        // A candidate never asks gate-reuse (reuse.rs).
+        ("needs.reuse.outputs.hit", V::Null),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))

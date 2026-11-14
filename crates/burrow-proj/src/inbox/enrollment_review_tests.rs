@@ -42,7 +42,7 @@ fn stale_lists_cannot_restore_parking_recorded_by_resume_admission() {
                     assert!(ask::expire(&b.cfg, &old).is_err());
                 }
                 _ => {
-                    crate::policy::mark(&old, "queued", false).unwrap();
+                    crate::policy::mark(&old, "queued", false, None).unwrap();
                     crate::policy::reconcile(&b.cfg).unwrap();
                 }
             }
@@ -499,7 +499,7 @@ fn repository_release_survives_label_errors_without_other_wakes() {
             let job = Job::new(&b.cfg, "j1");
             fs::remove_file(job.path("await")).unwrap();
             ask::clear(&job);
-            crate::policy::mark(&job, state, false).unwrap();
+            crate::policy::mark(&job, state, false, None).unwrap();
             fs::write(b.path("repos_sam_box_issues_7"), "{}").unwrap();
             if unavailable {
                 fs::write(b.path("fail"), "api repos/sam/box/issues/7").unwrap();

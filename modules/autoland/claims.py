@@ -4,8 +4,10 @@ review thread, the PR's new description, a comment) in its answers file
 rather than posting them. The PR's state keeps each such job as it was
 handed the PR, and each pass hands them to burrow-upkeep `claims`
 (crates/burrow-upkeep/src/claims.rs), which decides what becomes of each:
-its answers posted once it's over, only while the PR's head is its own
-push, or the head it was handed when it pushed nothing (so a job can't say
+its answers posted once it's over (or its turn is, awaiting the PR
+itself: then again on each later turn that writes new ones), only while
+the PR's head is its own push, or the head it was handed when it pushed
+nothing (so a job can't say
 it fixed something in a commit GitHub doesn't have, as on LoK-web#695); or
 the job named to stop, when someone else has moved the PR past it. This
 keeps what it gives back in the PR's state and carries out what it says,
@@ -41,21 +43,41 @@ def handed(st, kind, jid, pr):
     st.pop(kind + "Unposted", None)
 
 
+def stand_down(repo, pr, st, tag, strike, cleared, after):
+    """Before a new fix job is handed the PR: claims retires the jobs it
+    keeps between turns on it (it names them to stop, and keeps them until
+    proj says each is over). True once none may still push to the branch;
+    False while any may (a stop proj refused, one resumed meanwhile): no new
+    job is handed the branch meanwhile. Also False when this look posted a
+    job's answers or left them to go again (GitHub turned them away): what
+    it read of the PR is stale, so replacement work is decided on a later
+    pass that reads it again. Which jobs those are is claims.rs's to say:
+    this only runs what it names."""
+    status, out = see(repo, pr, st, tag, strike, cleared, after, retire=True)
+    return status is None and (out is None or out["clear"])
+
+
 def look(repo, pr, st, tag, strike, cleared, after):
+    """The PR's fix jobs, seen to by `claims` (see)."""
+    return see(repo, pr, st, tag, strike, cleared, after)[0]
+
+
+def see(repo, pr, st, tag, strike, cleared, after, retire=False):
     """The PR's fix jobs, seen to by `claims`. The PR's status when the
-    pass is to stop here, or None: answers went up (what it read of the PR
-    is stale; a pass is booked for now), or GitHub turned them away (tried
-    again on a later pass, a strike each time, and nothing else is handed
-    out meanwhile). A job it names to stop that proj won't is left to
+    pass is to stop here, or None (and what claims said, for `see`): answers
+    went up (what it read of the PR is stale; a pass is booked for now), or
+    GitHub turned them away, or what the job's turn held can't be read
+    (tried again on a later pass, a strike each time, and nothing else is
+    handed out meanwhile). A job it names to stop that proj won't is left to
     stopping.py, as a new head's jobs are. Why a job's answers didn't go up
     for want of a push or of answers is kept by its kind (KIND +
     "Unposted"), for its next job's brief."""
     if DRY or not st.get("answering"):
-        return None
+        return None, None
     out = C.upkeep("claims", repo, input=json.dumps({
         "number": pr["number"], "head": pr["headRefOid"], "branch": pr["headRefName"],
         "machinery": CFG.get("machineryLogin"), "jobs": CFG["jobsDir"], "answering": st["answering"],
-        "pushedBy": st.get("pushedBy")}))
+        "pushedBy": st.get("pushedBy"), "retire": retire}))
     st["answering"], st["pushedBy"] = out["answering"], out["pushedBy"]
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: claims.rs's next look for who pushed the head, LOOKS at most
@@ -73,6 +95,12 @@ def look(repo, pr, st, tag, strike, cleared, after):
             strike("answer", why)
             status = "GitHub didn't take a Claude job's answers: they go up next try"
             continue
+        if outcome == "pending":
+            # What its turn held can't be read: its answers wait, read again
+            # next try, a strike each time, and nothing else is handed out.
+            strike("answer", why)
+            status = status or "A Claude job's turn can't be read yet: its answers wait"
+            continue
         cleared("answer")
         if outcome == "posted":
             log(f"{tag}: Claude job {jid}'s answers posted")
@@ -86,7 +114,7 @@ def look(repo, pr, st, tag, strike, cleared, after):
             # is told why, and a second such fails the PR for the owner.
             log(f"{tag}: Claude job {jid}'s answers not posted: {why}")
             st[a["kind"] + "Unposted"] = {"at": pr["headRefOid"], "why": why}
-    return status
+    return status, out
 
 
 def unposted(st, kind, at):

@@ -162,7 +162,7 @@ fn a_pass_asks_github_nothing_of_a_parked_job_it_has_no_place_for() {
     fs::create_dir_all(&record).unwrap();
     fs::write(record.join("job"), "waiting").unwrap();
     fs::write(record.join("drained"), "sam/web#2").unwrap();
-    crate::policy::mark(&waiting, "done", false).unwrap();
+    crate::policy::mark(&waiting, "done", false, None).unwrap();
 
     for _ in 0..2 {
         let _ = crate::policy::reconcile(&cfg);

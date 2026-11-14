@@ -88,3 +88,94 @@ The job inherits the caller's token permissions. Shipped callers grant
 existing callers without it still run the gate and report a soft wait
 failure when GitHub denies an API read. A saved cache is restored with its
 exact key before the gate runs.
+
+## Reusing an attested pass
+
+With the workflow's `gate-reuse` input on (it's off by default, and no
+caller burrow ships turns it on), a push to the default branch asks the
+caller's `gate-reuse-lookup` whether CI already attested a pass of the same
+gate on the same tree, before any job builds. `burrow-flake-check reuse`
+(`src/reuse.rs`) asks and reads the answer; the workflow's `identity` step,
+one step shared by every job that needs it, says which gate a run is.
+
+**The gate** is `$RUNNER_TEMP/gate.json`, one line of JSON with its keys
+sorted:
+
+```json
+{"inputs":{"build-skip":["agents"],"eval-apart":true,"install-nix":true,"keep-builds":true,"legs":4,"runner":"ubuntu-latest"},
+ "source":"tree","workflow":{"commit":"<sha>","file":".github/workflows/flake-check.yml","repository":"FieldmouseWorks/burrow","tree":"<tree of that commit>"}}
+```
+
+`workflow` is this workflow (`job.workflow_*`), `inputs` its inputs that
+can change a result, `build-skip` as a sorted set. With `gate-reuse` on,
+every result the workflow attests carries it as the predicate's `gate`,
+after the fields it always had, so a later push can be matched to it; off,
+the predicate is unchanged. Conary's verifier ignores fields it doesn't
+know. burrow#728 moves attestation production into Conary's `cn attest`,
+which then takes this field as given.
+
+**The request** is an HTTP POST of one line of JSON, keys sorted:
+
+```json
+{"commit":"<the push>","contract":"burrow-gate-reuse/v1","gate":{...},"repository":"owner/repo","tree":"<the push's tree>"}
+```
+
+Its query digest is the SHA-256 of those exact bytes, in lowercase hex.
+It carries `Authorization: Bearer <token>`: the job's GitHub OIDC token,
+whose audience is `burrow-gate-reuse:v1:sha256:<query digest>`, so the
+lookup can tell which repository and workflow ask, and that they asked this;
+a job that can't get one asks nothing. The URL is https, or http on the
+runner's own machine (127.0.0.1, localhost or [::1]), its authority a bare
+host and port, with no user information. Only a push to the default branch
+by its exact name asks; any other ref builds, as without gate-reuse.
+
+**The answer** is HTTP 200 with one JSON object:
+
+```json
+{"contract":"burrow-gate-reuse/v1","query":"<query digest>","evidence":"hit","run":"https://github.com/owner/repo/actions/runs/123"}
+```
+
+`evidence` is `hit`, `miss` or `unknown`. It is a hit only when the lookup
+holds CI's own attestation, verified as Conary's train verifies evidence,
+of a passing gate on exactly `tree` in `repository`, whose `gate` is the
+request's in everything but `workflow.commit`: two commits of the workflow
+with the same tree are the same files, so `workflow.tree` stands for the
+commit. burrow's own main push runs the workflow at the pushed commit, which
+no earlier run used, so only the tree can match it. `run` names the run
+whose evidence it is (`/attempts/N` or `/job/N` may follow).
+
+Equal trees are the whole match for the checked source, so with
+gate-reuse on, the gate makes its verdict the tree's (`src/source.rs`): it
+evaluates and builds, in either mode, a private checkout of the tree whose
+HEAD is a commit of that tree alone, made in a git context of its own (no
+parents, fixed authors and dates, no inherited config). Everything Nix reads
+of the commit (`self.rev`, `shortRev`, `revCount`, `lastModified`) is then
+the same for every checkout of the tree, whichever commit it was, shallow
+or full, a repository or a worktree, on the run that attests and on the
+push that asks alike; a flake reads a `revCount` and `lastModified` of 1.
+Relative submodule URLs resolve against what the checkout's would (its
+default remote's URL, or with none the checkout itself), and a checkout
+with changes it hasn't committed is refused: its tree isn't what it holds.
+Its lock file is the tree's too: a lock that needs changing fails the gate.
+The kept-build waiter plans from the same source, and the caller's checkout
+is never touched. The gate says `"source": "tree"`.
+
+Only a hit, read whole, for this request (its `query`), naming a run of this
+repository on this server, skips the gate: the job named check (the gate
+job, with legs) reports the pass, linking that run, and builds, attests and
+keeps nothing. A miss runs the whole gate. Anything else (no answer, another
+status, `unknown`, an answer that isn't one JSON object, another contract or
+query, a run that isn't this repository's, a push the event names no tree
+for, a token the job can't get) runs the whole gate too, and the lookup step
+fails softly (`degraded/gate-reuse`).
+
+A push that reuses a pass keeps no builds: it built none. The Actions cache
+lets a run restore only entries saved on its own ref and the default
+branch, so a PR's or a train candidate's builds can't warm the default
+branch or later PRs, and the default branch's entries already fill the
+repository's cache (burrow's four were 10.3 GB on 2026-11-13), so saving more
+would evict the ones every PR restores. Only a push to the default branch
+that builds keeps its builds, as without gate-reuse.
+
+Nothing on a machine runs this, so it has no NixOS option: a caller turns
+it on with the workflow's two inputs.

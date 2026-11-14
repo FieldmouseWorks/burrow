@@ -7,6 +7,8 @@ NixOS modules for a machine you run by talking to Claude. Where things live:
   undo, inbox jobs, Remote Control) and how a chat thread uses them.
 - [docs/repo-baseline.md](docs/repo-baseline.md): the steward, the PR flow and
   what every repo is held to.
+- [docs/gate-design.md](docs/gate-design.md): the CI gate's design (one build
+  store, one plan a run, the line with Conary) and its stages.
 - [docs/house-style.md](docs/house-style.md): what every repo shares (the
   house blocks in [house/](house/), the flake gate, AGENTS.md).
 - [docs/flaky-tests.md](docs/flaky-tests.md): how a flaky test is retried,

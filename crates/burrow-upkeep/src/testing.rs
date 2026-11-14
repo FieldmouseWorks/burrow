@@ -111,6 +111,8 @@ pub struct Hub {
     /// GraphQL's answers to anything else, by a word its query has: the
     /// first whose word it has answers.
     pub graphql: Vec<(String, Answer)>,
+    /// GitHub's wall time (Api::now) as a look sees it: T when None.
+    pub clock: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -147,6 +149,10 @@ impl Hub {
 }
 
 impl Api for Hub {
+    fn now(&self) -> u64 {
+        self.clock.unwrap_or(T as u64)
+    }
+
     fn request(
         &mut self,
         method: &str,

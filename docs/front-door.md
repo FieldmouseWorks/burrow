@@ -300,7 +300,9 @@ as it stands, gets
 the engine's inbox label and is a job like any other from there, closed when
 it's done. A handed-on job takes its place in line rather than going first.
 Jobs parked on awaits or questions release drain capacity; waking turns join the normal
-queue. Paused repos reserve no drain capacity and their automated wakeups wait
+queue. A waking turn that finds no drain or sorting slot is parked until one
+frees, and each inbox pass releases what it can before it ends; `proj status`
+says what a parked job waits for. Paused repos reserve no drain capacity and their automated wakeups wait
 for the pause to lift.
 Rank issues with `priority: high`, `priority: medium` or `priority: low`.
 Priority comes first (no label means medium), then pipeline repos, then oldest

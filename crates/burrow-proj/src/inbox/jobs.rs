@@ -254,6 +254,12 @@ impl Pass<'_> {
             // be stopped (proj stop says why) is tried again in five minutes;
             // the rest are still seen to.
             let Some(listed_now) = now_open else {
+                // A child closed before its finished job's close keeps the
+                // PR that job awaited: the record goes, the evidence stays.
+                if !self.keep_landing(repo, n, &job, &d, observed) {
+                    self.miss(repo);
+                    continue;
+                }
                 self.retire_record(repo, n, &id, &d)?;
                 continue;
             };
@@ -327,14 +333,24 @@ impl Pass<'_> {
             // since: the issue may be closed with it, so what's open is what's
             // still to do. The stuck issue isn't the job's to close: the
             // steward closes it once nothing is stuck.
-            let closable = !needs_owner
+            // A task list's child closes once its landed PR is tied to it,
+            // even in the repair lane: the list's sequencer would close it.
+            let completed = !needs_owner
                 && msg.is_empty()
                 && young.is_none()
                 && k >= turns
                 && st == "done"
-                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
-                && !self.lane(listed_now)
-                && self.child_can_close(repo, n);
+                && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done");
+            let closing = if completed
+                && (!self.lane(listed_now)
+                    || n.parse()
+                        .is_ok_and(|c| self.inbox.planning && self.is_child(repo, c)))
+            {
+                self.child_can_close(repo, n, Some(&job))
+            } else {
+                super::plans::Closing::No
+            };
+            let closable = closing.closes();
             // Stopped, with a conversation no turn continues again: no reply
             // is handed on, the issue hears why once, and no pass retries it.
             // One with no session is started over below, as ever.
@@ -390,9 +406,41 @@ impl Pass<'_> {
                         && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                     {
                         super::enrollment::remember(&job, repo, n).map_err(|e| Fail::new(1, e))?;
-                        if !self.close(repo, n, "completed") {
+                        let awaited = matches!(closing, super::plans::Closing::Awaited(_));
+                        if awaited && !super::plans::declared_done(&job) {
+                            drop(held);
+                            self.retry(repo);
+                            continue;
+                        }
+                        let Some(closed_now) = self.closed_issue(repo, n, "completed") else {
                             drop(held);
                             self.miss(repo);
+                            continue;
+                        };
+                        // What the job awaited becomes the child's now, before
+                        // the job is let go and the list sequenced, bound to
+                        // the closure GitHub answered with, if that's the text
+                        // the completion was checked against; edited since,
+                        // it isn't kept. When it can't be kept here (no
+                        // closure in the answer, or not written), the record
+                        // stays and the close's own pass keeps it under the
+                        // closed child's checks (keep_landing).
+                        if awaited
+                            && closed_now["state"] == "closed"
+                            && closed_now["closed_at"].is_string()
+                            && written.matches(&closed_now)
+                        {
+                            if !n
+                                .parse()
+                                .is_ok_and(|c| self.keep_awaited(repo, c, &job, &closed_now))
+                            {
+                                drop(held);
+                                self.retry(repo);
+                                continue;
+                            }
+                        } else if awaited && !closed_now["closed_at"].is_string() {
+                            drop(held);
+                            self.book(repo, crate::now());
                             continue;
                         }
                         if let Err(f) = halt(self.cfg, &job, false) {

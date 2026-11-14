@@ -3,9 +3,20 @@
 # validates against the JSON Schema burrow-settings generates (`proj
 # settings schema`), checked by a validator of its own; and a document with an option the schema doesn't declare, or
 # a value from where its option can't come, doesn't. A module default that
-# isn't the schema's, hidden by the flake's own value, fails the show.
-{ self, pkgs, ... }:
+# isn't the schema's, hidden by the flake's own value, fails the show. A
+# machine with proj alone shows its settings too, a derived one's included.
+{ self, pkgs, nixpkgs, ... }:
 let
+  # proj alone, without the modules besides it that declare its derived
+  # settings' fellows (updates, autoland): with no machinery, and with one.
+  projAlone = extra: (nixpkgs.lib.nixosSystem {
+    modules = [ self.nixosModules.proj ../examples/machine.nix { burrow.proj.enable = true; } extra ];
+  }).config.environment.etc."burrow/settings.json".text;
+  alone = pkgs.writeText "proj-alone-settings.json" (projAlone { });
+  aloneApp = pkgs.writeText "proj-alone-app-settings.json" (projAlone {
+    burrow.github.apps.workers = { id = 2; accountId = 3; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; };
+    burrow.github.machinery = "workers";
+  });
   fixture = self.nixosConfigurations.example.extendModules {
     modules = [ ({ config, ... }: {
       burrow.autoland.rounds = 3;
@@ -87,5 +98,16 @@ pkgs.runCommand "settings-check" { nativeBuildInputs = [ pkgs.jq pkgs.check-json
   jq '.["autoland.rounds"].default = 4' ${tracked} >settings.json
   if run settings show 2>err; then echo "show took a module default of 4"; exit 1; fi
   grep -F "autoland.rounds: its module's default is 4, the settings schema's is 5" err
+
+  # proj alone shows its settings, a derived one's from its fellows.
+  cp ${alone} settings.json
+  run settings show --json >alone.json
+  want() { got=$(jq -cS "$1" alone.json); [ "$got" = "$(echo "$2" | jq -cS .)" ] || { echo "proj alone: $1: $got, not $2"; exit 1; }; }
+  want '.options["updates.renovate.app"]' '{"value":null,"origin":"default"}'
+  want '.options["autoland.rounds"]' '{"value":5,"origin":"default"}'
+  cp ${aloneApp} settings.json
+  run settings show --json >alone.json
+  want '.options["github.machinery"]' '{"value":"workers","origin":"flake"}'
+  want '.options["updates.renovate.app"]' '{"value":"workers","origin":"default"}'
   touch $out
 ''

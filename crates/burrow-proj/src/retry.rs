@@ -384,7 +384,23 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         }
         let job = Job::new(cfg, &id);
-        let Some(_lock) = job.try_lock()? else {
+        // A folder with no lock is locked only for a checkpoint of its latest
+        // turn (kept in the control root, not the folder), the one thing
+        // below that acts on it: one being removed, whose own deletes wake
+        // this pass, gets no lock file put back into it.
+        let lock = match job.try_lock_existing() {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let pending = job
+                    .turns()
+                    .is_some_and(|n| job.turn(&n, "retry-migration").exists());
+                if !pending {
+                    continue;
+                }
+                job.try_lock()?
+            }
+            held => held?,
+        };
+        let Some(_lock) = lock else {
             busy = true;
             continue;
         };
@@ -402,7 +418,8 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
             continue;
         };
         if crate::policy::denied(&job) {
-            crate::policy::mark(&job, "queued", state.first).map_err(io::Error::other)?;
+            crate::policy::mark(&job, "queued", state.first, Some(crate::policy::DENIED))
+                .map_err(io::Error::other)?;
             continue;
         }
         // The ordered policy reconciler owns restoration of parked work.
@@ -412,12 +429,15 @@ pub fn pass(cfg: &Config) -> io::Result<()> {
         if systemd::active(cfg, &job.unit()) {
             continue;
         }
-        let crate::inbox::resumption::Resume::Ready(_capacity) =
-            crate::inbox::resumption::admission(cfg, &job).map_err(io::Error::other)?
-        else {
-            crate::policy::mark(&job, "queued", state.first).map_err(io::Error::other)?;
-            continue;
-        };
+        let _capacity =
+            match crate::inbox::resumption::admission(cfg, &job).map_err(io::Error::other)? {
+                crate::inbox::resumption::Resume::Ready(capacity) => capacity,
+                crate::inbox::resumption::Resume::Waiting(wait) => {
+                    crate::policy::mark(&job, "queued", state.first, Some(wait.says()))
+                        .map_err(io::Error::other)?;
+                    continue;
+                }
+            };
         systemd::reset_failed(cfg, &job.unit());
         // A unit still ending is deferred, without holding up other pools.
         if systemd::show(cfg, &job.unit(), "LoadState") == "loaded" || job.end_pending() {
