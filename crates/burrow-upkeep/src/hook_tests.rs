@@ -874,3 +874,23 @@ fn a_full_pass_hooks_the_projects_then_unhooks_the_rest() {
     h.run(&repos(&[], &["eve/p"]));
     assert_eq!(h.out.failed.len(), 2, "{:?}", h.out.failed);
 }
+
+#[test]
+fn the_word_waits_for_the_latest_limit_any_look_met() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let app = app();
+    let mut world = World::default();
+    let mut h = hooks(&cfg, &mut world, &app, 0.0);
+    let looked = |limited| Out {
+        limited,
+        ..Out::default()
+    };
+    h.noted(looked(None));
+    assert_eq!(h.out.limited, None);
+    h.noted(looked(Some(T + 60.0)));
+    h.noted(looked(Some(T + 900.0)));
+    h.noted(looked(Some(T + 300.0)));
+    h.noted(looked(None));
+    assert_eq!(h.out.limited, Some(T + 900.0));
+}
