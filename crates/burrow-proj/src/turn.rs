@@ -502,13 +502,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             crate::waits::rewatch_all(cfg);
             return Ok(());
         }
-        // Refused because the plan's usage is spent, or its login refused:
-        // so is every other turn's, until the limit resets (usage.rs) or the
-        // login works again, which the next run tests (usage/login.rs). This
-        // one gives up its slot and waits in line again, where none is
-        // handed out till then, and runs once more in its own conversation,
-        // its clock stood still meanwhile. Any other answer says usage is
-        // there.
+        // Refused because the plan's usage is spent or its login refused:
+        // so is every other turn's, until it's back (usage.rs). This one
+        // gives up its slot and waits in line again, where none is handed
+        // out till then, and runs once more in its own conversation, its
+        // clock stood still meanwhile. Any other answer says usage is there.
         let refusal = last
             .as_ref()
             .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
@@ -540,11 +538,10 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             }
         }
         match refusal {
-            Some(refused) => {
-                let said = &refused.said;
+            Some(ref refused @ engine::Refusal { ref said, .. }) => {
                 // A hold that can't be written holds nothing: this turn
                 // ends refused, as one did before the hold.
-                let spent = match usage::refused(cfg, id, &refused, now()) {
+                let spent = match usage::refused(cfg, id, refused, now()) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("{e}: so the turn ends here, refused");
