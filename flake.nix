@@ -135,7 +135,9 @@
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
-      lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; };
+      # burrow is itself, for the guidance-paths check: its burrow-guidance,
+      # and the tree paths cited as burrow's resolve against.
+      lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; burrow = self; };
 
       templates.default = {
         path = ./templates/project;

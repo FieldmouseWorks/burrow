@@ -280,9 +280,10 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
     );
 }
 
-/// burrow's docs lane, a retargeted PR's too, builds the guidance check: a
+/// burrow's docs lane, a retargeted PR's too, builds the guidance checks: a
 /// PR that changes only README.md, AGENTS.md or CLAUDE.md is still held to
-/// what the guidance may say, and AGENTS.md to the house blocks.
+/// what the guidance may say and the paths it cites, and AGENTS.md to the
+/// house blocks.
 #[test]
 fn burrows_docs_lane_runs_the_guidance_check() {
     let (flake, retarget) = CALLERS[0];
@@ -300,10 +301,12 @@ fn burrows_docs_lane_runs_the_guidance_check() {
                 .unwrap_or("")
                 .split_whitespace()
                 .collect();
-            assert!(
-                checks.contains(&"guidance"),
-                "{caller}: {name:?}'s docs lane ({docs}) doesn't run the guidance check"
-            );
+            for check in ["guidance", "crates-guidance-paths"] {
+                assert!(
+                    checks.contains(&check),
+                    "{caller}: {name:?}'s docs lane ({docs}) doesn't run {check}"
+                );
+            }
         }
     }
 }

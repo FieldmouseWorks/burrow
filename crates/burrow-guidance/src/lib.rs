@@ -8,7 +8,8 @@
 //! in, belongs to the generated reference). Another owned fact is one more
 //! source chained there. A tree that owns the house blocks (burrow's
 //! house/) is held to them too ([`house`]): its AGENTS.md carries each as
-//! house/ has it.
+//! house/ has it. And the paths the guidance cites are there ([`paths`]),
+//! the check every project's gate runs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 pub mod house;
+pub mod paths;
 pub mod settings;
 
 /// One owned fact.
@@ -128,7 +130,7 @@ pub fn check(root: &Path, facts: &[Fact]) -> Result<Vec<Finding>, String> {
 
 /// Every `.md` file under `dir`, leaving out what isn't the repo's own
 /// (`.git`, build output).
-fn markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+pub(crate) fn markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;

@@ -14,8 +14,9 @@
 # are hermetic (the Nix sandbox, no network). A repo's heavier gates (VM
 # replays, browsers, databases) stay its own and run in `nix develop`. A Rust
 # workspace's binaries are its packages.default, for machines to install.
-# Every project's gate also looks for secrets in its tracked files.
-{ nixpkgs, rust-overlay, crane }:
+# Every project's gate also looks for secrets in its tracked files, and
+# holds its Markdown to the paths it cites (guidance-paths).
+{ nixpkgs, rust-overlay, crane, burrow }:
 {
   self,
   systems ? [ "x86_64-linux" "aarch64-linux" ],
@@ -700,6 +701,18 @@ let
     touch $out
   '';
 
+  # The guidance cites only what's there: every local Markdown link and
+  # backticked repository path in the project's Markdown names a file or
+  # directory it has, and one written as burrow's (or in a house block) one
+  # this burrow has, the input the project pins (burrow-guidance paths,
+  # crates/burrow-guidance/src/paths.rs). Its input is the whole tracked
+  # tree, so deleting a script fails the doc that still cites it. It runs no
+  # tests.
+  guidancePathsCheck = pkgs: pkgs.runCommand "guidance-paths" { passthru.testFiles = [ ]; } ''
+    ${burrow.packages.${pkgs.stdenv.hostPlatform.system}.burrow-guidance}/bin/burrow-guidance paths --burrow ${burrow} ${self}
+    touch $out
+  '';
+
   pyChecks = pkgs:
     let dirs = lib.escapeShellArgs pyCfg.dirs; in
     {
@@ -727,7 +740,7 @@ in
   });
 
   checks = forAll (pkgs:
-    { secrets = secretsCheck pkgs; }
+    { secrets = secretsCheck pkgs; guidance-paths = guidancePathsCheck pkgs; }
     // lib.optionalAttrs (rust != null) (rustChecks pkgs)
     // lib.optionalAttrs (python != null) (pyChecks pkgs)
     // checks pkgs);
