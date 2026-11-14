@@ -235,7 +235,9 @@ in
             description = ''
               Another handler whose passes go first: this one starts none
               while that one has a pass running or due, and looks again as
-              each of its passes ends. For work that only carries on what
+              each of its passes ends. That one, in turn, starts none while
+              one of this one's runs, so neither starts a pass that finds
+              their shared lock held. For work that only carries on what
               the other's passes started and shares their lock (the
               steward's continuations), so it never holds a pass over new
               work off. That handler must yield to none itself.
