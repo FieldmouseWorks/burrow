@@ -316,6 +316,9 @@ def run_pass(kick, continuing=False):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
+                if not DRY:
+                    # Handoffs whose PR has landed or closed are used up.
+                    C.spend_closed(repo, {pr["number"] for pr in prs}, C.NOW)
                 # The PRs labelled to go first in the proof line. One whose
                 # labels can't be read isn't, and fails in its own step below:
                 # one bad PR mustn't stop the rest.

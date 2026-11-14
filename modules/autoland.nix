@@ -987,6 +987,10 @@ in
         lists it for them.${lib.optionalString watchdog " A hold still on after ${toString cfg.holdStallAfterMinutes} minutes gets a Claude job's look."}
         The steward's own labels (${lib.concatMapStringsSep ", " (x: "`${x.name}`") (lib.attrValues cfg.labels.waiting)})
         say which stage of the pipeline a PR is at, one at a time, as its status does: leave them to it.
+      - A PR in a repo whose automated work is paused waits with it. To have one land
+        anyway, hand it to the steward with `settings land OWNER/REPO#N HEAD` (its full
+        head commit): it lands that head once, on every check above, and the rest of the
+        repo stays paused. Never merge it yourself or have anyone else do it instead.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

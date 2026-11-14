@@ -309,11 +309,16 @@ def land(repo, pr, repo_info):
     # the house style: left to GitHub, a one-commit PR's squash would take that
     # commit's subject instead, which nothing checked.
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
-    if C.paused(repo):
+    # Read again right before it: a pause since the pass began stops it,
+    # and in a paused repo only a handoff of this PR at this head lets it by.
+    handed = C.handed(repo, pr)
+    if not handed and C.paused(repo):
         raise C.JobPaused(f"{repo}: repository work paused before merge")
     try:
         C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
                 "-f", f"merge_method={method}", *title, "-f", f"sha={pr['headRefOid']}")
     except RuntimeError as e:
         return C.said(e)
+    if handed and not DRY:
+        C.spend(repo, pr["number"], pr["headRefOid"])  # one-shot: it landed
     return None
