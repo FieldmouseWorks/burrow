@@ -83,12 +83,10 @@ query($id: ID!, $cursor: String) {
 # them again, so a PR longer than that is the owner's (the cut in handle).
 OLDER_PAGES = 9
 
-
-# Open PRs asked for a page at a time. Each brings its files, threads,
-# checks and suites, so a page of long-lived PRs can run past GitHub's time
-# (C.TooBig): that page is asked again at half the size, down to one PR, and
-# the pass goes on at the size that answered.
-PR_PAGE = 30
+# The most PRs a page of the listing asks for. Each comes with its files,
+# threads, reviews, comments and checks, so what a page costs GitHub grows
+# with how busy the repo's PRs are, not only with how many there are.
+PAGE = 30
 
 
 def open_prs(owner, name):
@@ -96,16 +94,18 @@ def open_prs(owner, name):
     reviews and comments of each it acts on, up to OLDER_PAGES older pages:
     a long PR's verdicts, markers and rounds can be older than the last 100.
     An outside contribution's older pages aren't read: it's the owner's
-    anyway."""
-    prs, cursor, size = [], None, PR_PAGE
+    anyway. A page GitHub couldn't put together (C.HEAVY) is asked for
+    again with half as many PRs, down to one, and the pages after it keep
+    that size: a busy repo's listing gets smaller pages, never no pass."""
+    prs, cursor, size = [], None, PAGE
     while True:
         try:
             info = C.graphql(PRS, owner=owner, name=name, cursor=cursor, first=size)["repository"]
-        except C.TooBig as e:
-            if size == 1:
+        except C.Unavailable as e:
+            if size == 1 or not C.HEAVY.search(str(e)):
                 raise
             size //= 2
-            log(f"{owner}/{name}: open PRs: {e}; asking {size} at a time")
+            log(f"{owner}/{name}: GitHub couldn't list a page of its PRs ({C.said(e)}); asking for {size} at a time")
             continue
         page = info.pop("pullRequests")
         prs += page["nodes"]

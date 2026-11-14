@@ -461,10 +461,11 @@ fn with_legs_the_gate_job_attests_for_them() {
         .map(|k| format!("leg-{k}: '${{{{ steps.leg.outputs.leg-{k} }}}}'\n"))
         .collect();
     assert_eq!(job["outputs"], yaml(&outputs));
-    assert_eq!(gate["needs"], yaml("[lane, check]"));
+    assert_eq!(gate["needs"], yaml("[lane, reuse, check]"));
+    // Or, with no leg run, gate-reuse's hit (reuse.rs).
     assert_eq!(
         gate["if"],
-        "${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure') }}"
+        "${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure' || needs.reuse.outputs.hit == 'true') }}"
     );
     assert_eq!(
         gate["permissions"],
@@ -483,9 +484,17 @@ fn with_legs_the_gate_job_attests_for_them() {
         g[2]["with"],
         yaml("{pattern: flake-log-leg-*, path: '${{ runner.temp }}/legs'}")
     );
-    let verdict = &g[3];
+    // gate-reuse: a hit builds and combines nothing, and the gate this run
+    // is gets named in the predicate, from the step the legs' jobs have
+    // (reuse.rs).
+    assert_eq!(g[2]["if"], "needs.reuse.outputs.hit != 'true'");
+    assert_eq!(g[3]["id"], "tools");
+    assert_eq!(g[4], *step(job, "identity"));
+    let verdict = &g[5];
     assert!(
-        verdict["id"] == "gate" && verdict["shell"] == "bash" && verdict.get("if").is_none(),
+        verdict["id"] == "gate"
+            && verdict["shell"] == "bash"
+            && verdict["if"] == "needs.reuse.outputs.hit != 'true'",
         "{verdict:?}"
     );
     assert_eq!(
@@ -495,17 +504,19 @@ fn with_legs_the_gate_job_attests_for_them() {
              OUTPUTS: '${{ toJSON(needs.check.outputs) }}'}"
         )
     );
-    assert_eq!(g[4]["id"], "subject");
-    let mut same = g[4].clone();
+    assert_eq!(g[6]["id"], "subject");
+    let mut same = g[6].clone();
     same["if"] = subject_step["if"].clone();
     assert_eq!(&same, subject_step);
     assert_eq!(
-        g[4]["if"],
+        g[6]["if"],
         "${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
     );
     // The log, the token and the bundle, as a leg attests them; the kept
     // builds (keep-builds) that follow them in a leg are the leg's alone.
-    assert_eq!(g[5..], all[at + 1..at + 4]);
+    assert_eq!(g[7..10], all[at + 1..at + 4]);
+    // Then what reports a hit, as a leg's own job does with one leg.
+    assert_eq!(g[10..], [step(job, "reused").clone()]);
 }
 
 const LEGS: usize = 3;

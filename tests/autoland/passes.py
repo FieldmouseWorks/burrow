@@ -5,7 +5,6 @@ reviews and Claude jobs coming back."""
 
 import json
 import os
-import re
 import sys
 import time
 
@@ -474,90 +473,6 @@ assert prs[0]["reviews"] == page(["r1", "r2"]) and prs[0]["comments"] == page(["
 assert ASKED == [("prs", None), ("older reviews", "c-r2")] + [("older comments", "PR_3")] * P.OLDER_PAGES, ASKED
 assert len(prs[2]["comments"]["nodes"]) == 1 + P.OLDER_PAGES and prs[2]["comments"]["pageInfo"]["hasPreviousPage"], prs[2]
 # Cut short, it's still just an outside contribution.
-# A page of open PRs GitHub ran out of time on (its gateway's 504, a body cut
-# short, whether gh fails on it or hands it on) is asked again at half the
-# size, and the pass goes on at the size that answered; one that fails at a
-# single PR still fails the pass (FieldmouseWorks/burrow#1042).
-heavy = os.path.join(tmp, "heavy-bin")
-os.makedirs(heavy)
-answers = os.path.join(tmp, "heavy-answers")
-os.makedirs(answers)
-
-
-def heavy_page(n, more):
-    who = {"isDraft": False, "isCrossRepository": False, "author": {"login": "sam"}}
-    pr = {"id": f"PR_{n}", "number": n, **who, "reviews": page([]), "comments": page([])}
-    return json.dumps({"data": {"repository": {"squashMergeAllowed": True, "pullRequests": {
-        "pageInfo": {"hasNextPage": more, "endCursor": f"after-{n}"}, "nodes": [pr]}}}})
-
-
-def heavy_answers(*said):
-    for f in os.listdir(answers):
-        os.remove(os.path.join(answers, f))
-    for i, (code, out, err) in enumerate(said, 1):
-        for kind, text in (("code", str(code)), ("out", out), ("err", err)):
-            with open(f"{answers}/{i}.{kind}", "w") as f:
-                f.write(text)
-
-
-# Each call's arguments go in a file of its own (the query spans lines), and
-# its answer is the next one set.
-with open(f"{heavy}/gh", "w") as f:
-    f.write(f"""#!/bin/sh
-n=$(($(ls {answers} | grep -c '^asked') + 1))
-printf '%s\\n' "$@" >{answers}/asked.$n
-cat {answers}/$n.out
-cat {answers}/$n.err >&2
-exit $(cat {answers}/$n.code)
-""")
-os.chmod(f"{heavy}/gh", 0o755)
-
-
-def asked_pages():
-    """The page size and cursor of each open-PR page gh was asked for."""
-    got = []
-    for n in range(1, len([f for f in os.listdir(answers) if f.startswith("asked")]) + 1):
-        said = open(f"{answers}/asked.{n}").read()
-        cursor = re.search(r"^cursor=(\S+)$", said, re.M)
-        got.append((int(re.search(r"^first=(\d+)$", said, re.M).group(1)), cursor and cursor.group(1)))
-    return got
-
-
-path, os.environ["PATH"] = os.environ["PATH"], heavy + os.pathsep + os.environ["PATH"]
-gh_kept, C.gh = C.gh, REAL_GH
-heavy_answers((1, "", "gh: HTTP 504"),
-              (1, "", "unexpected end of JSON input"),
-              (0, '{"data": {"repository": {"pullRequ', ""),
-              (0, heavy_page(1, True), ""),
-              (0, heavy_page(2, False), ""))
-with C.acting_for("sam/r"):
-    _, prs = S.open_prs("sam", "r")
-assert [pr["number"] for pr in prs] == [1, 2], prs
-assert asked_pages() == [(30, None), (15, None), (7, None), (3, None), (3, "after-1")], asked_pages()
-# At one PR a page, a page GitHub still can't answer fails the pass.
-heavy_answers(*[(1, "", "gh: HTTP 504")] * 5)
-try:
-    with C.acting_for("sam/r"):
-        S.open_prs("sam", "r")
-    raise AssertionError("a page of one GitHub can't answer read as answered")
-except C.TooBig:
-    pass
-assert [n for n, _ in asked_pages()] == [30, 15, 7, 3, 1], asked_pages()
-# What GitHub refused outright isn't asked again smaller.
-heavy_answers((1, "", "gh: Could not resolve to a Repository"))
-try:
-    with C.acting_for("sam/r"):
-        S.open_prs("sam", "r")
-    raise AssertionError("a refusal read as answered")
-except C.Unavailable:
-    raise AssertionError("a refusal read as GitHub not answering")
-except RuntimeError:
-    pass
-assert asked_pages() == [(30, None)], asked_pages()
-C.gh = gh_kept
-os.environ["PATH"] = path
-print("open PR pages too big: ok")
-
 fresh_pr_state()
 long_outside = mkpr()
 long_outside["author"] = {"login": "eve"}

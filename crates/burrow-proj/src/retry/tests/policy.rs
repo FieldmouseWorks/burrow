@@ -96,7 +96,7 @@ fn parking_a_retry_without_a_live_queue_entry_keeps_its_priority() {
         &serde_json::to_string(&checkpoint).unwrap(),
     )
     .unwrap();
-    crate::policy::mark(&job, "queued", false).unwrap();
+    crate::policy::mark(&job, "queued", false, None).unwrap();
     let parked: crate::policy::Park =
         serde_json::from_slice(&fs::read(crate::policy::path(&job, "park")).unwrap()).unwrap();
     assert!(parked.first);
