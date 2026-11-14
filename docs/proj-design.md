@@ -126,10 +126,10 @@ can park, queue or await work without constructing one.
 | `Job(id)` | that job's record is closed | that job ending | that job's `overdue_at` |
 | `Usage(engine, until)` | the engine's meter allows a turn | the meter, or the clock | `until` |
 | `Quota(until)` | GitHub's quota has reset | the clock | `until` |
-| `Changed(target, seen)` | the PR or issue no longer looks like `seen` | a GitHub event | the await limit |
-| `Answer(question)` | the question has an answer | the owner, or its default | the default's time |
-| `Plan(step)` | the step before it merged or was dropped | a merge or a close | that step's `overdue_at` |
-| `Policy(rule)` | the settings no longer deny the job | a settings change | never: it's a person's pause, and shown as one |
+| `Until(target, condition)` | the condition holds on the PR or issue | a GitHub event | the await limit, counted for checks from when they start running |
+| `Answer(question, who)` | the question has an answer | the operator, or the owner when it names a door, or its default | the default's time, set once |
+| `Plan(step)` | that step's work landed or was dropped | a merge, in any repo, or a close | that step's `overdue_at` |
+| `Policy(rule)` | the settings no longer deny the job: its repo is allowed, and in focus when there is one | a settings change | never: it's a person's pause, and shown as one |
 | `Login(engine)` | the engine's login works | the engines door | the owner's notice |
 | `Lane(holder)` | the expedite lane is empty | its holder landing or leaving | the holder's `overdue_at` |
 
@@ -146,6 +146,45 @@ Two things make this more than a label.
 
 A record read from before this type that names no wait is read as an orphan
 and handed to the stall rule, never kept quietly.
+
+Four of these waits are narrower than the ones they replace. Each was cut
+down by a stall or a bill in the days after this was first written.
+
+- **`Until` names its condition.** A job waiting on a PR used to wake on
+  any change to it: a review that found nothing, a leg cancelled, the base
+  merged in, a comment. Most of those turns looked and went back to waiting
+  ([#1043](https://github.com/FieldmouseWorks/burrow/issues/1043)). A
+  condition is one of a closed set (the head's checks have concluded, a
+  review of the head is in, the PR merged or closed, an author replied),
+  and nothing else ends the wait. The time a head's checks spend queued for
+  a runner is capacity, shown as that, and no part of the wait's deadline:
+  a slow queue is not a stall.
+- **`Answer` says who can give it, and keeps its deadline.** The owner is
+  asked only when the question names a door from the short list the
+  settings hold (a secret, a loss that can't be undone, a prompt only a
+  person can answer). Every other question is the operator's. A prompt that
+  has cleared is a fact the pass reads, so the wait ends without anyone
+  taking a label off. Asking again doesn't move the default's time, and a
+  bot's edit to the issue is not an answer
+  ([#1100](https://github.com/FieldmouseWorks/burrow/issues/1100),
+  [#1107](https://github.com/FieldmouseWorks/burrow/issues/1107),
+  [#1108](https://github.com/FieldmouseWorks/burrow/issues/1108)).
+- **`Plan` ends on a landing, wherever it merged.** A step's work may land
+  in another repo's PR, or in an issue it was continued as. The step has
+  ended when a merged PR is tied to it: one that closes it, one its job
+  awaited, or its continuation's. A hand close alone neither ends a step
+  nor strands its list. A step may also wait on a step of another list,
+  which is how a plan says "not until that cutover has settled"
+  ([#1108](https://github.com/FieldmouseWorks/burrow/issues/1108),
+  [#1110](https://github.com/FieldmouseWorks/burrow/issues/1110)).
+- **`Policy` can name less than a repo.** A pause denies a repo. A focus
+  denies everything in it but the trackers it names. Both vacate, and both
+  are shown as a person's pause. What a pause can't do is carry one PR
+  through: a PR handed over while its repo is paused gets its merge and
+  nothing it still needs ([settings](settings.md#handing-one-pr-to-the-steward)),
+  so only one that was already reviewed and proven can use that door.
+  Whether a handed PR gets its review and proofs is the landing flow's to
+  settle, not a wait's.
 
 ### 3. One pass: facts in, steps out
 
@@ -243,7 +282,7 @@ did.
   `Wait`; how they measure doesn't change.
 - Questions and their answers, and task planning's content
   ([task planning](task-planning.md)); a plan's gate on its next step
-  becomes `Wait::Plan`, released by the step before it merging or being
+  becomes `Wait::Plan`, released by the step before it landing or being
   dropped.
 - `pick`, `select` and the snapshot's schema, which gains nothing new: it
   was always meant to be the record.
@@ -282,6 +321,12 @@ it went. The two keep their jobs:
 - proj's pass has the flow's shape (facts and record in, steps and record
   out, effects with receipts, started by events and booked wakes), so the
   watchdog and the dashboard read both with one reader.
+- The fix plugin is the record's first caller outside proj: it starts a
+  job, waits on it and stops it. So stage 1 lands before that plugin is
+  written, or it is built on `lifecycle` and built again.
+- An engine session a producer runs outside a job (a review, a judgment)
+  still spends its engine's usage. The meters count it, and a pause vacates
+  it, as they do a turn.
 - When the steward is deleted, so are `lifecycle`, the `--owned` jobs made
   for it and their tests. The engines then become Conary job plugins
   ([#668](https://github.com/FieldmouseWorks/burrow/issues/668)), and what
@@ -299,15 +344,15 @@ the new, because the record can always be read from what the old code wrote.
 
 | | Stage | Lands | Deletes | Issue |
 | --- | --- | --- | --- | --- |
-| 0 | Local before remote, where it hurts today | slot release, verdicts and parked jobs' places decided before GitHub is asked | | [#970](https://github.com/FieldmouseWorks/burrow/issues/970), [#943](https://github.com/FieldmouseWorks/burrow/issues/943), [#957](https://github.com/FieldmouseWorks/burrow/pull/957) |
+| 0 | Local before remote, where it hurts today | slot release, verdicts and parked jobs' places decided before GitHub is asked; a plan's step counted as landed wherever its PR merged | | [#970](https://github.com/FieldmouseWorks/burrow/issues/970), [#943](https://github.com/FieldmouseWorks/burrow/issues/943), [#957](https://github.com/FieldmouseWorks/burrow/pull/957), [#1110](https://github.com/FieldmouseWorks/burrow/issues/1110) |
 | 1 | One derivation | a job's record, derived in one place; every reader on it; `proj why`; the record's history kept beside it. The same for the inbox's issues. | every reader's own derivation | [#969](https://github.com/FieldmouseWorks/burrow/issues/969), [#975](https://github.com/FieldmouseWorks/burrow/issues/975) |
 | 2 | Waits are a type | `Wait`, built by every path that parks, queues or awaits | free-form holds and parks | [#972](https://github.com/FieldmouseWorks/burrow/issues/972) |
 | 3 | One stall rule | the watchdog's rule over records | per-source timeouts | [#971](https://github.com/FieldmouseWorks/burrow/issues/971) |
-| 4 | One pass | `proj pass`: the local half, then the remote half; one booked wake; every event asks for a pass | the watcher, the policy unit, the kick fan-out, the wake files | [#976](https://github.com/FieldmouseWorks/burrow/issues/976) |
-| 5 | The record is the truth | every change of state is the pass writing the record | the markers | filed when 4 lands |
-| 6 | The line is records | admission as a step of the pass | the process line, the handover, the retry transfer | filed when 5 lands |
-| 7 | The inbox on the record | issue records, the effects outbox for every GitHub write, `Wait::Plan`; then the crate splits | the inbox's side files | filed when 6 lands |
-| 8 | After the steward | engines as Conary job plugins | `lifecycle`, `--owned` | [#668](https://github.com/FieldmouseWorks/burrow/issues/668) |
+| 4 | One pass | `proj pass`: the local half, then the remote half; one booked wake; every event asks for a pass | the watcher, the policy unit, the kick fan-out, the wake files | [#976](https://github.com/FieldmouseWorks/burrow/issues/976), split by [#978](https://github.com/FieldmouseWorks/burrow/issues/978) |
+| 5 | The record is the truth | every change of state is the pass writing the record | the markers | planned by [#980](https://github.com/FieldmouseWorks/burrow/issues/980) when 4 lands |
+| 6 | The line is records | admission as a step of the pass | the process line, the handover, the retry transfer | planned by [#981](https://github.com/FieldmouseWorks/burrow/issues/981) when 5 lands |
+| 7 | The inbox on the record | issue records, the effects outbox for every GitHub write, `Wait::Plan`; then the crate splits | the inbox's side files | planned by [#982](https://github.com/FieldmouseWorks/burrow/issues/982) when 6 lands |
+| 8 | After the steward | engines as Conary job plugins | `lifecycle`, `--owned` | [#668](https://github.com/FieldmouseWorks/burrow/issues/668), planned by [#983](https://github.com/FieldmouseWorks/burrow/issues/983) |
 
 The rules the stages keep:
 
@@ -323,13 +368,20 @@ The rules the stages keep:
   calls**, so they can land while Conary's flow is in shadow. Stage 4 onward
   waits until that cutover has settled: two engines swapped on one machine
   in one week is how you can't tell which one broke it.
+- **A stage is done when it is live**, not when it merges: the next stage
+  reads what the machine runs. A stage in shadow counts its quiet from its
+  deploy.
+- **The order against the other redesigns has one home.** Where these
+  stages sit beside the gate's and Conary's cutover, and which switch may
+  be open when, is
+  [Conary's m6-order.md](https://github.com/FieldmouseWorks/Conary/blob/main/docs/m6-order.md).
 - **Each stage's tests fail with its change reverted**, and stage 2 onward
   carry one test of the design itself: drop every event, run one pass, and
   everything whose condition holds has moved.
 
 ### Where it stands
 
-Stage 0 is in flight. Nothing else has landed.
+Stage 0 is in flight: #957 has landed. Nothing else has landed.
 
 ## What this doesn't do
 

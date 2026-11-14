@@ -80,7 +80,9 @@ since 2026-10-23. Their causes are five, and each is a missing owner.
    was queued for (#929, #937). Reusing a pass on the default branch means
    that push builds nothing, so it keeps nothing (#966). Each fix was right
    and each made the next one necessary: a dozen issues and PRs on this one
-   cache in two weeks.
+   cache in two weeks. On 2026-11-14 the wait, by then with no cap, held
+   the fix for a red default branch behind that branch's own hung leg
+   (#1102).
 3. **The cache is full.** burrow's four entries are 10.27 GB of the 10 GB a
    repo gets (2026-11-13), which is one generation of one branch. There is
    no room for a second writer, and an entry is one archive: a leg restores
@@ -188,6 +190,11 @@ A run is then the plan, carried out:
   nothing to build gets none: the plan job says so and ends.
 - **No leg builds what another builds, and none waits on another.** What
   they share was built before they started.
+- **A leg fails, it never hangs.** Every build the plan hands out has a
+  deadline, sized from what earlier results say it took, and a leg that
+  stops making progress ends as failed and says which build. A leg on a
+  tree that didn't compile once sat for hours with no deadline, and
+  everything behind it waited (#1102).
 - **The join** is the same program: every build the plan asked for has a
   result, on the plan's tree.
 
@@ -208,7 +215,13 @@ flaked or left to another kind of runner, how long it took and what was
 cold under it. Everything that tells anyone what happened is that file
 printed: the step summary, the predicate Conary signs, the flaky report,
 what the watchdog reads for drift (#772), and `flake-gate` on a desk.
-"Why did this leg take two hours" is a line in it.
+"Why did this leg take two hours" is a line in it. So is how long a leg
+waited for a runner, kept apart from how long it built: a full queue is
+capacity, and reads as that rather than as a slow gate.
+
+A run that can no longer matter is ended by the machine, never by a
+person: a default-branch run that a later one has replaced is cancelled
+whether or not it has started (#1108).
 
 ### 5. Conary owns evidence and when, burrow owns builds and how
 
@@ -281,11 +294,11 @@ pin moves.
 | | Stage | Lands | Deletes | Issue |
 | --- | --- | --- | --- | --- |
 | 0 | What's in flight | the wait fixed (#937), pass reuse behind its flag (#979) | | #937, #979 |
-| 1 | The build store | `burrow.builds` and its door; every run that may write does; then runs substitute from it | the kept builds, the wait | [#986](https://github.com/FieldmouseWorks/burrow/issues/986), [#988](https://github.com/FieldmouseWorks/burrow/issues/988), [#989](https://github.com/FieldmouseWorks/burrow/issues/989) |
+| 1 | The build store | `burrow.builds` and its door; every run that may write does; then runs substitute from it | the kept builds, the wait | [#993](https://github.com/FieldmouseWorks/burrow/issues/993) (Conary's check of a job's token), [#986](https://github.com/FieldmouseWorks/burrow/issues/986), [#988](https://github.com/FieldmouseWorks/burrow/issues/988), [#994](https://github.com/FieldmouseWorks/burrow/issues/994) (the machine's values), [#989](https://github.com/FieldmouseWorks/burrow/issues/989) |
 | 2 | One plan | `plan`, the plan job, legs that only build, the join and the result file in the program, the runner from the store | name-hash legs, the bootstrap | [#990](https://github.com/FieldmouseWorks/burrow/issues/990) |
-| 3 | Signed by Conary | `cn attest` reads the result file; the negative's tree and patterns come from `cn` | the attestation's copies, the second pattern list | #739, #740 |
-| 4 | The docs lane retires | a docs-only PR runs the gate, which has nothing to build | the lane | filed when 2 lands |
-| 5 | Checks say what they need | the plan leaves a check to the runner that can build it; the proof calls this program | `build-skip` | filed after the steward is gone |
+| 3 | Signed by Conary | `cn attest` reads the result file; the negative's tree and patterns come from `cn` | the attestation's copies, the second pattern list | #739, #740, #995 |
+| 4 | The docs lane retires | a docs-only PR runs the gate, which has nothing to build | the lane | #996, then #997 |
+| 5 | Checks say what they need | the plan leaves a check to the runner that can build it; the proof calls this program | `build-skip` | #998, after the steward is gone |
 
 The rules the stages keep:
 
@@ -300,6 +313,9 @@ The rules the stages keep:
   its shadow change nothing a run decides, so they can land any time. The
   switch, and stage 2, wait until that repo's cutover has settled: two
   engines swapped in one week is how you can't tell which one broke it.
+- **The order against the other redesigns has one home.** Which switch
+  may be open when, across this redesign, proj's and Conary's cutover, is
+  [Conary's m6-order.md](https://github.com/FieldmouseWorks/Conary/blob/main/docs/m6-order.md).
 - **Stage 4 is a measurement, not a promise.** The lane goes only when a
   docs-only PR's plan shows nothing to build in every repo that sets
   `docs-paths`. Where one rebuilds, the fix is that check's source, and the
@@ -310,7 +326,8 @@ The rules the stages keep:
 
 ### Where it stands
 
-Stage 0 is in flight. Nothing else has landed.
+Stage 0 has landed (#937, #979). The wait it left gets a deadline in
+#1104, which is open, and goes at stage 1. Nothing else has landed.
 
 ## What this doesn't do
 
