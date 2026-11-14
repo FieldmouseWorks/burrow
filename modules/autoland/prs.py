@@ -27,11 +27,11 @@ MERGE_STEPS = {
 }
 
 PRS = """
-query($owner: String!, $name: String!, $cursor: String) {
+query($owner: String!, $name: String!, $cursor: String, $first: Int!) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
     defaultBranchRef { name target { ... on Commit { %s } } }
-    pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+    pullRequests(states: OPEN, first: $first, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
@@ -85,16 +85,30 @@ query($id: ID!, $cursor: String) {
 # them again, so a PR longer than that is the owner's (the cut in handle).
 OLDER_PAGES = 9
 
+# The most PRs a page of the listing asks for. Each comes with its files,
+# threads, reviews, comments and checks, so what a page costs GitHub grows
+# with how busy the repo's PRs are, not only with how many there are.
+PAGE = 30
+
 
 def open_prs(owner, name):
     """The repo's merge settings and every open PR, all pages, with the
     reviews and comments of each it acts on, up to OLDER_PAGES older pages:
     a long PR's verdicts, markers and rounds can be older than the last 100.
     An outside contribution's older pages aren't read: it's the owner's
-    anyway."""
-    prs, cursor = [], None
+    anyway. A page GitHub couldn't put together (C.HEAVY) is asked for
+    again with half as many PRs, down to one, and the pages after it keep
+    that size: a busy repo's listing gets smaller pages, never no pass."""
+    prs, cursor, size = [], None, PAGE
     while True:
-        info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
+        try:
+            info = C.graphql(PRS, owner=owner, name=name, cursor=cursor, first=size)["repository"]
+        except C.Unavailable as e:
+            if size == 1 or not C.HEAVY.search(str(e)):
+                raise
+            size //= 2
+            log(f"{owner}/{name}: GitHub couldn't list a page of its PRs ({C.said(e)}); asking for {size} at a time")
+            continue
         page = info.pop("pullRequests")
         prs += page["nodes"]
         if not page["pageInfo"]["hasNextPage"]:

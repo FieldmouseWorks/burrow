@@ -290,11 +290,19 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       machine.fail("su - dev -c 'proj run --app ../workers web showenv'")
       machine.fail("su - dev -c 'proj run --vm --app workers web showenv'")
       machine.fail(f"su - dev -c 'proj reply --app workers {e} showenv'")
-      # One whose App has gone fails its turn rather than run as the user.
+      # The App is its starter's: one the job writes into its own files
+      # changes nothing, and the published copy is put back.
       machine.succeed(f"echo gone >/data/dev/jobs/{e}/app")
       proj(f"reply {e} showenv")
-      machine.wait_until_succeeds(f"grep -q 'no GitHub App gone' /data/dev/jobs/{e}/3.outcome", timeout=120)
-      assert not machine.succeed(f"cat /data/dev/jobs/{e}/3.jsonl 2>/dev/null || true").strip()
+      machine.wait_until_succeeds(f"grep -x done /data/dev/jobs/{e}/3.outcome", timeout=120)
+      acts_as_workers(e)
+      machine.succeed(f"grep -x workers /data/dev/jobs/{e}/app")
+      # One whose App has gone fails its turn rather than run as the user.
+      machine.succeed("mv /etc/gh-token/workers.env /tmp/workers.env")
+      proj(f"reply {e} showenv")
+      machine.wait_until_succeeds(f"grep -q 'no GitHub App workers' /data/dev/jobs/{e}/4.outcome", timeout=120)
+      assert not machine.succeed(f"cat /data/dev/jobs/{e}/4.jsonl 2>/dev/null || true").strip()
+      machine.succeed("mv /tmp/workers.env /etc/gh-token/workers.env")
       # One whose App goes while it waits for a slot starts as the App all
       # the same, never as the user: its env was read before it waited.
       a = proj('run web "sleep 600"')

@@ -89,13 +89,7 @@ impl Pass<'_> {
                 .and_then(|i| self.machine_role(i))
             {
                 let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
-                crate::swap(&job.path("role"), &format!("{role}\n"))
-                    .map_err(|e| io_fail(&job.path("role"), e))?;
-                match fs::remove_file(job.path("engine")) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(io_fail(&job.path("engine"), e)),
-                }
+                crate::job::Request::enroll(&job, role).map_err(|e| Fail::new(1, e))?;
             }
             // The state and the turn count, read together: a turn starts
             // (proj reply, proj _watch) holding the job's lock, and halfway
@@ -341,6 +335,14 @@ impl Pass<'_> {
                 && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done")
                 && !self.lane(listed_now)
                 && self.child_can_close(repo, n);
+            // Stopped, with a conversation no turn continues again: no reply
+            // is handed on, the issue hears why once, and no pass retries it.
+            // One with no session is started over below, as ever.
+            let stopped = super::enrollment::stopped(&job) && filled(&job.path("session"));
+            if stopped && !closable {
+                self.tell_stopped(repo, n, &job, &d)?;
+                continue;
+            }
             let listed_changed = !Self::handed(&d, &self.issue_text(repo, listed_now, &had));
             if closable
                 || !msg.is_empty()
@@ -415,6 +417,10 @@ impl Pass<'_> {
                 } else {
                     msg
                 };
+                if stopped {
+                    self.tell_stopped(repo, n, &job, &d)?;
+                    continue;
+                }
                 if needs_owner && !human_reply {
                     continue;
                 }
@@ -469,6 +475,31 @@ impl Pass<'_> {
                 .map_err(|e| io_fail(&d.join("seen"), e))?;
         }
         Ok(())
+    }
+}
+
+impl Pass<'_> {
+    /// A stopped worker on an issue still enrolled. One its labels parked
+    /// is the next enrollment's to replace (enrollment.rs); one stopped by
+    /// hand (`proj stop`) stays stopped, and its issue is told so once, with
+    /// how to start a fresh job.
+    fn tell_stopped(&mut self, repo: &str, n: &str, job: &Job, d: &Path) -> Result<(), Fail> {
+        if super::enrollment::replaceable(self.inbox, job, repo, n) {
+            return Ok(());
+        }
+        let told = d.join("stopped-told");
+        if read(&told).as_deref() == Some(job.id) {
+            return Ok(());
+        }
+        let said = format!(
+            "`proj` job `{}` was stopped, so replies here aren't handed on to it. To start a fresh job from the issue as it stands, take its engine label off and put it back, or close the issue and reopen it.",
+            job.id
+        );
+        if !self.post(repo, n, &said) {
+            self.miss(repo);
+            return Ok(());
+        }
+        fs::write(&told, format!("{}\n", job.id)).map_err(|e| io_fail(&told, e))
     }
 }
 
