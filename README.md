@@ -117,7 +117,8 @@ Each has an entry below, and each can be imported on its own.
   (offers go to you: flashing is yours) and daily `rustup update`.
 - **`notify`** (`burrow.notify`): `HOST-notify`: what the owner must know, as
   one GitHub issue per problem in `burrow.notify.repo`, commented at most
-  daily and closed when it clears.
+  daily and closed when it clears. One closed by hand while its problem
+  stands comes back a day later, saying so.
 - **`remote-control`** (`burrow.remoteControl`): An always-on `claude
   remote-control` server for every project in `burrow.projectsDir` (a git
   checkout with an origin), found by itself (a path unit rescans when folders
