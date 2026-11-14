@@ -411,7 +411,12 @@ Each has an entry below, and each can be imported on its own.
   network, and every Claude of `burrow.user` gets them, and `why`, as the
   `conary` MCP server. With `door`, an issue labelled `undo` in the probe's
   repo asks for a `cn undo` with no Claude in between
-  ([front door](docs/front-door.md#undo-with-no-claude)). `policy` is
+  ([front door](docs/front-door.md#undo-with-no-claude)). With `gateReuse`,
+  a conaryd of its own, as `burrow.user` with the ledger's GitHub tokens,
+  answers flake-check.yml's gate-reuse lookups on `listen` (loopback, for
+  this machine's runners), and over HTTPS at `path` on the events host for
+  GitHub's (Conary's docs/gate-reuse.md); the socket's conaryd stays as it
+  is. `policy` is
   Conary's class policy, which the steward asks for every PR it settles
   (`cn class`): which paths make a change R2 (CODEOWNERS and secrets by
   default), which are documentation (a change to them alone gets no review
