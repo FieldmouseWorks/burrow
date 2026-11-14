@@ -6,8 +6,7 @@ use std::fs;
 
 mod about;
 pub(crate) use about::{
-    FILE as ABOUT_FILE, cohort, follows, footer, identity, key_of, load, locked, merge, open,
-    restore, still_waiting,
+    cohort, follows, footer, identity, key_of, load, locked, merge, open, restore, still_waiting,
 };
 mod host;
 pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
@@ -258,7 +257,6 @@ pub(crate) fn clear(job: &Job) {
         "question-text",
         "question-since",
         "question-id",
-        ABOUT_FILE,
     ] {
         let _ = fs::remove_file(host_path(job, name));
     }
