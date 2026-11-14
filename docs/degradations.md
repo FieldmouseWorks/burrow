@@ -73,7 +73,8 @@ run clears the consecutive-default condition; PR signals expire with their
 24-hour window. A stall that persists keeps its original start time.
 
 A run that never starts has no step outcome to report. That is the separate
-missing-runner case in [#598](https://github.com/FieldmouseWorks/burrow/issues/598),
+missing-runner case, which the steward handles by running such a head again
+([#694](https://github.com/FieldmouseWorks/burrow/issues/694), fixed in #778),
 not a degradation signal. Likewise a service that dies before writing its
 source is covered by failed-unit and stale-source watches; this signal does
 not replace those.

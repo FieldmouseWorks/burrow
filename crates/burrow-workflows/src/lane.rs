@@ -133,8 +133,9 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
     // runs, case by case, is pr_base's). The docs lane is a job of its own,
     // under the name autoland looks for.
     let (check, docs) = (&wf["jobs"]["check"], &wf["jobs"]["docs"]);
-    assert_eq!(check["needs"], "lane");
-    assert_eq!(docs["needs"], "lane");
+    // And gate-reuse's lookup, whose hit checks nothing out (reuse.rs).
+    assert_eq!(check["needs"], crate::harness::yaml("[lane, reuse]"));
+    assert_eq!(docs["needs"], crate::harness::yaml("[lane, reuse]"));
     // Named check with one leg, as it always was, and after its leg with
     // more, each a name autoland knows for a share of the gate's work.
     assert_eq!(

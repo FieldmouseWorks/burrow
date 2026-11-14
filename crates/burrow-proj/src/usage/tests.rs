@@ -354,8 +354,18 @@ fn tended_with_no_run_to_ask() {
     fs::write(d.path().join("pending"), "").unwrap();
     back(&cfg, None);
     assert_eq!(told(&d).len(), 3);
+    // The close is retried a retry after it was last told, and never sooner
+    // than a retry after the look. The look reads the clock itself, so its
+    // own second is only known to lie between the readings around it (#556).
     let s = kept(&cfg).unwrap();
-    assert_eq!(tend(&cfg), Some(s.told + RETELL / 12));
+    let before = now();
+    let next = tend(&cfg).unwrap();
+    let after = now();
+    assert!(next >= s.told + RETELL / 12, "{next} vs told {}", s.told);
+    assert!(
+        (before + RETRY..=after + RETRY).contains(&next),
+        "{next} not a retry after {before}..={after}"
+    );
     assert_eq!(told(&d).len(), 3);
     let mut s = kept(&cfg).unwrap();
     s.told -= RETELL / 12;

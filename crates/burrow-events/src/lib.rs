@@ -35,7 +35,10 @@
 //!
 //! A repo's pass starts DEBOUNCE seconds after its first event, so a push and
 //! the events that follow it get one pass, and one repo's passes are GAP
-//! apart. A handler's passes run one at a time. When the service starts,
+//! apart. A handler's passes run one at a time, each repo's before its full
+//! pass, which never stands in for one (the steward's yields after a slice
+//! and resumes later). A handler can yield to another (`yieldTo`): it starts
+//! no pass while that one has one running or due. When the service starts,
 //! every handler gets a full pass, which catches up on whatever happened
 //! while it was down.
 
