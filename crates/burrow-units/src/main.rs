@@ -38,15 +38,21 @@ use burrow_watchdog::watch::{File as Watch, read};
 
 /// The journal entries that start a pass: systemd's own (pid 1's) word that
 /// a service or socket failed, or that a start job failed (any unit); and
-/// systemd-coredump's that a program dumped core. A user's manager says
-/// the same of its own units, which aren't the machine's.
-const FOLLOW: [&str; 5] = [
+/// systemd-coredump's that a program dumped core, or that a backtrace was
+/// submitted for one. A user's manager says the same of its own units,
+/// which aren't the machine's.
+const FOLLOW: [&str; 6] = [
     "MESSAGE_ID=d9b373ed55a64feb8242e02dbe79a49c",
     "MESSAGE_ID=be02cf6855d2428ba40df7e9d022f03d",
     "_PID=1",
     "+",
-    "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+    COREDUMP,
+    BACKTRACE,
 ];
+/// systemd-coredump's entries, the two kinds coredumpctl lists: a kernel
+/// dump, and a backtrace submitted with `systemd-coredump --backtrace`.
+const COREDUMP: &str = "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1";
+const BACKTRACE: &str = "MESSAGE_ID=1f4e0a44a88649939aaea34fc6da8c95";
 /// Units whose failures start no pass: its own, since a pass that keeps
 /// failing would otherwise ask for another for ever. The hourly catch-up
 /// still sees them failed.
@@ -303,9 +309,10 @@ fn pass(cfg: &Config) -> Result<(), String> {
                 "--quiet",
                 "--no-pager",
                 "--output=json",
-                "--output-fields=COREDUMP_EXE,COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_GID,COREDUMP_CGROUP",
+                "--output-fields=COREDUMP_EXE,COREDUMP_COMM,COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_GID,COREDUMP_CGROUP",
                 &since,
-                "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+                COREDUMP,
+                BACKTRACE,
             ],
         )?,
         &owned,

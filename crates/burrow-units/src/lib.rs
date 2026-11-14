@@ -178,9 +178,10 @@ impl Owned {
 }
 
 /// The machine's core dumps in TEXT, `journalctl -o json` of
-/// systemd-coredump's entries (an object a line), leaving out what OWNED
-/// says ran someone's own work; or why it can't be read: a dump read wrong
-/// could drop a crash that's still there.
+/// systemd-coredump's entries, kernel dumps and submitted backtraces alike
+/// (an object a line), leaving out what OWNED says ran someone's own work;
+/// or why it can't be read: a dump read wrong could drop a crash that's
+/// still there.
 pub fn cores(text: &str, owned: &Owned) -> Result<Vec<Core>, String> {
     let mut out = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -188,21 +189,26 @@ pub fn cores(text: &str, owned: &Owned) -> Result<Vec<Core>, String> {
             serde_json::from_str(line).map_err(|e| format!("the journal's dumps: {e}"))?;
         let field = |name: &str| journal_field(&d[name]);
         let number = |name: &str| field(name).and_then(|v| v.parse::<u64>().ok());
+        // Whose it was comes first: an owned dump is left out whatever
+        // else it lacks.
+        let cgroup = field("COREDUMP_CGROUP").unwrap_or_default();
+        if owned.owns(number("COREDUMP_GID"), &cgroup) {
+            continue;
+        }
         let core = || {
             Some(Core {
-                exe: field("COREDUMP_EXE")?,
+                // As coredumpctl names it: a program whose path is gone
+                // (its main thread exited first) by its command name.
+                exe: field("COREDUMP_EXE").or_else(|| field("COREDUMP_COMM"))?,
                 pid: number("COREDUMP_PID")?,
                 sig: number("COREDUMP_SIGNAL").unwrap_or(0),
-                // In microseconds: the crash's own time, else when it was logged.
-                at: number("COREDUMP_TIMESTAMP").or_else(|| number("__REALTIME_TIMESTAMP"))? as f64
-                    / 1e6,
+                // When it was logged, in microseconds: COREDUMP_TIMESTAMP
+                // is whole seconds for the kernel's dumps, too coarse to
+                // tell a crash from a clear in the same second.
+                at: number("__REALTIME_TIMESTAMP")? as f64 / 1e6,
             })
         };
-        let core = core().ok_or_else(|| format!("the journal has a dump it can't read: {d}"))?;
-        let cgroup = field("COREDUMP_CGROUP").unwrap_or_default();
-        if !owned.owns(number("COREDUMP_GID"), &cgroup) {
-            out.push(core);
-        }
+        out.push(core().ok_or_else(|| format!("the journal has a dump it can't read: {d}"))?);
     }
     Ok(out)
 }
@@ -402,10 +408,19 @@ mod tests {
         };
         let dumps = cores(
             concat!(
-                r#"{"COREDUMP_EXE":"/nix/store/x/bin/worker","COREDUMP_PID":"42","COREDUMP_SIGNAL":"6","COREDUMP_TIMESTAMP":"1793000000123456","COREDUMP_GID":"1001","COREDUMP_CGROUP":"/system.slice/worker.service"}"#,
+                // A kernel dump: its own time is whole seconds, when it was
+                // logged isn't.
+                r#"{"COREDUMP_EXE":"/nix/store/x/bin/worker","COREDUMP_PID":"42","COREDUMP_SIGNAL":"6","COREDUMP_TIMESTAMP":"1793000000000000","__REALTIME_TIMESTAMP":"1793000000123456","COREDUMP_GID":"1001","COREDUMP_CGROUP":"/system.slice/worker.service"}"#,
                 "\n",
                 // Not UTF-8, so the journal sends its bytes.
                 r#"{"COREDUMP_EXE":[47,98,105,110,47,255],"COREDUMP_PID":"7","__REALTIME_TIMESTAMP":"1793000001000000"}"#,
+                "\n",
+                // Its path gone with its main thread: named as coredumpctl
+                // names it, by its command.
+                r#"{"COREDUMP_COMM":"threads","COREDUMP_PID":"8","COREDUMP_SIGNAL":"11","__REALTIME_TIMESTAMP":"1793000002000000"}"#,
+                "\n",
+                // An owned dump is left out, whatever else it lacks.
+                r#"{"COREDUMP_GID":"30000","__REALTIME_TIMESTAMP":"1793000003000000"}"#,
                 "\n",
             ),
             &owned,
@@ -426,13 +441,45 @@ mod tests {
                     sig: 0,
                     at: 1_793_000_001.0,
                 },
+                Core {
+                    exe: "threads".into(),
+                    pid: 8,
+                    sig: 11,
+                    at: 1_793_000_002.0,
+                },
             ]
         );
         // Anything else than dumps it can read is an error, never none:
         // that would clear crashes still there. No entries is none.
         assert_eq!(cores("", &owned), Ok(Vec::new()));
         assert!(cores("No coredumps found.", &owned).is_err());
-        assert!(cores(r#"{"COREDUMP_PID":"2"}"#, &owned).is_err());
+        assert!(cores(r#"{"COREDUMP_PID":"2","__REALTIME_TIMESTAMP":"1"}"#, &owned).is_err());
+    }
+
+    #[test]
+    fn a_crash_in_the_same_second_as_its_clear_is_back() {
+        // Cleared at 100.2; the kernel's dump of a crash at 100.8 says 100.
+        let cleared = BTreeMap::from([("/bin/worker".to_owned(), 100.2)]);
+        let dump = |logged: &str| {
+            format!(
+                r#"{{"COREDUMP_EXE":"/bin/worker","COREDUMP_PID":"1","COREDUMP_TIMESTAMP":"100000000","__REALTIME_TIMESTAMP":"{logged}"}}"#
+            )
+        };
+        let pass = |logged: &str| {
+            let cores = cores(&dump(logged), &Owned::default()).unwrap();
+            items(
+                &Found {
+                    failed: &[],
+                    cores: &cores,
+                    cleared: &cleared,
+                },
+                &[],
+                600.0,
+                &BTreeMap::new(),
+            )
+        };
+        assert!(pass("100100000").is_empty(), "logged before the clear");
+        assert!(pass("100800000").contains_key("core:/bin/worker"));
     }
 
     #[test]
@@ -443,7 +490,7 @@ mod tests {
         };
         let dump = |exe: &str, gid: u64, cgroup: &str| {
             format!(
-                r#"{{"COREDUMP_EXE":"{exe}","COREDUMP_PID":"1","COREDUMP_TIMESTAMP":"1793000000000000","COREDUMP_GID":"{gid}","COREDUMP_CGROUP":"{cgroup}"}}"#
+                r#"{{"COREDUMP_EXE":"{exe}","COREDUMP_PID":"1","__REALTIME_TIMESTAMP":"1793000000000000","COREDUMP_GID":"{gid}","COREDUMP_CGROUP":"{cgroup}"}}"#
             )
         };
         let text = [
