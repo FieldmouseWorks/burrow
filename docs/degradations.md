@@ -16,8 +16,9 @@ the declarations from the keep-builds steps and proves all three are rejected.
 Caches can swallow errors as warnings, so outcome alone is insufficient:
 lookup before restore distinguishes an empty cache from an entry that failed
 to extract; exact-key lookup after save detects a save that produced no entry.
-The negative job already makes extraction failure a hard failure when its
-lookup found an entry.
+A failed restore never fails a job: the kept builds only save time, so a
+leg or the negative whose lookup found an entry it then couldn't restore
+builds without it and reports `degraded/kept-restore` (#1161).
 
 Any machine importing burrow's watchdog module can set:
 

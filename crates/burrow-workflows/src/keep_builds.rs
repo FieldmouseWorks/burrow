@@ -315,8 +315,14 @@ fn a_negative_restores_every_legs_kept_builds() {
         install["with"]["extra_nix_config"],
         gate_install["with"]["extra_nix_config"]
     );
-    // Lookup does not extract. Both an exact and a prefix hit require a
-    // successful restore; a genuine miss may build cold on first use.
+    // Lookup does not extract. A restore that fails (an entry evicted
+    // mid-download, an extraction that failed) never fails the job: it
+    // builds without that leg's builds and reports degraded/kept-restore,
+    // as a leg does (#1161), when its lookup found an entry it didn't
+    // restore.
+    let reporter = &all[at(&|s| s["name"] == "degraded/kept-restore")];
+    assert!(at(&|s| s == reporter) < install_at);
+    assert!(text(&reporter["run"]).contains("GITHUB_STEP_SUMMARY"));
     for (k, restore) in restores.iter().enumerate() {
         let id = format!("kept-{}", k + 1);
         let lookup = &all[at(&|s| s["id"] == id)];
@@ -327,14 +333,77 @@ fn a_negative_restores_every_legs_kept_builds() {
         for field in ["path", "key", "restore-keys"] {
             assert_eq!(lookup["with"][field], restore["with"][field]);
         }
-        for (hit, required) in [("true", true), ("false", true), ("", false)] {
-            let c = ctx(&[(&format!("steps.{id}.outputs.cache-hit"), hit.into())]);
+        assert_eq!(restore["id"], format!("{id}-restore"));
+        assert!(restore["with"]["fail-on-cache-miss"].is_null(), "{id}");
+        assert!(restore["continue-on-error"].is_null(), "{id}");
+        for (found, restored, degraded) in [
+            ("", "", false),
+            ("false", "", true),
+            ("true", "", true),
+            ("false", "false", false),
+            ("true", "true", false),
+        ] {
+            // Every other leg skipped: neither looked up nor restored.
+            let mut c = ctx(&[("always()", true.into())]);
+            for n in 1..=8 {
+                for step in [format!("kept-{n}"), format!("kept-{n}-restore")] {
+                    c.insert(format!("steps.{step}.outputs.cache-hit"), "".into());
+                }
+            }
+            c.insert(format!("steps.{id}.outputs.cache-hit"), found.into());
+            c.insert(
+                format!("steps.{id}-restore.outputs.cache-hit"),
+                restored.into(),
+            );
             assert_eq!(
-                value(text(&restore["with"]["fail-on-cache-miss"]), &c).truthy(),
-                required,
-                "{id}: {hit}"
+                value(text(&reporter["if"]), &c).truthy(),
+                degraded,
+                "{id}: {found} {restored}"
             );
         }
+    }
+}
+
+/// The base's save, restored after the wait, goes into a fresh directory:
+/// the wait's plan had the nix daemon open the kept builds, which made
+/// root-owned log/ and nar/ there that tar can't extract into (#1161). What
+/// was there is set aside first and put back if the restore fails, and a
+/// failed restore builds without the base's builds rather than fail the
+/// leg.
+#[test]
+fn a_failed_restore_after_the_wait_builds_without_it() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert!(at("kept-wait") < at("kept-aside"));
+    assert!(at("kept-aside") + 1 == at("kept-rewait"));
+    assert!(at("kept-rewait") + 1 == at("kept-back"));
+    assert!(at("kept-back") < at("gate"));
+    let (aside, rewait, back) = (
+        &all[at("kept-aside")],
+        &all[at("kept-rewait")],
+        &all[at("kept-back")],
+    );
+    assert_eq!(aside["if"], rewait["if"]);
+    assert_eq!(rewait["continue-on-error"], true);
+    assert_eq!(rewait["name"], "soft/kept-rewait");
+    assert_eq!(rewait["with"]["path"], "${{ runner.temp }}/kept");
+    // The fresh directory is the one the restore extracts into.
+    assert_eq!(
+        text(&aside["run"]),
+        r#"mv "$RUNNER_TEMP/kept" "$RUNNER_TEMP/kept-aside" && mkdir "$RUNNER_TEMP/kept""#
+    );
+    assert_eq!(
+        text(&back["run"]),
+        r#"rm -rf "$RUNNER_TEMP/kept" && mv "$RUNNER_TEMP/kept-aside" "$RUNNER_TEMP/kept""#
+    );
+    for (outcome, puts_back) in [("failure", true), ("success", false), ("skipped", false)] {
+        let c = ctx(&[("steps.kept-rewait.outcome", outcome.into())]);
+        assert_eq!(
+            value(text(&back["if"]), &c).truthy(),
+            puts_back,
+            "{outcome}"
+        );
     }
 }
 

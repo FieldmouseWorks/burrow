@@ -88,7 +88,9 @@ commit, which is the key this leg restores. The waiter lists the push's runs onc
 building, which keeps a long wait inside the token's hourly requests. A
 leg that ended without saving, or no such run, ends the wait. A request
 past its poll's deadline (`WAIT_REQUEST`, 120 seconds) fails the step,
-which reports `degraded/kept-wait`.
+which reports `degraded/kept-wait`. A saved entry that then fails to
+restore (evicted, or unextractable) leaves the leg building without it and
+reports `degraded/kept-rewait` (#1161).
 
 The job inherits the caller's token permissions. Shipped callers grant
 `actions: read` for both runs and caches, including in private repositories;
