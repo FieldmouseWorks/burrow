@@ -9,7 +9,7 @@ import train as T
 import waits
 from common import CFG, DRY, MIN, load, log, repo_cfg, ts
 from tasks import judged_on
-from prs import MERGE_STEPS, post_status, show_waiting
+from prs import MERGE_STEPS, post_status, show_waiting, stage_item
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -166,7 +166,10 @@ class Context:
         ok = post_status(self.repo, self.pr, state, desc)
         # A draft or a held PR is out of the pipeline, and GitHub's draft
         # mark or the hold label says so: no stage's label, whatever said it.
-        show_waiting(self.repo, self.pr, self.labels, S.NONE if self.pr["isDraft"] or CFG["labels"]["hold"] in self.labels else stage)
+        stage = S.NONE if self.pr["isDraft"] or CFG["labels"]["hold"] in self.labels else stage
+        show_waiting(self.repo, self.pr, self.labels, stage)
+        # Where it stands, for proj's snapshot (crates/burrow-proj/src/snapshot.rs).
+        self.st["stage"] = stage_item(self.st.get("stage"), self.repo, self.n, stage, wait, desc)
         if why:
             self.digest.append((why, self.line, desc))
         self.refresh["usage_release"] = self.usage_grace()

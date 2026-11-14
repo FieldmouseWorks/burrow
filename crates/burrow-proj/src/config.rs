@@ -16,6 +16,9 @@ pub struct Config {
     pub policy_unit: Option<String>,
     #[serde(default)]
     pub proofs_state: Option<PathBuf>,
+    /// The steward's state dir, whose `pr-*.json` files the snapshot reads.
+    #[serde(default)]
+    pub steward_state: Option<PathBuf>,
     #[serde(default)]
     pub agent_tool: Option<PathBuf>,
     #[serde(default)]

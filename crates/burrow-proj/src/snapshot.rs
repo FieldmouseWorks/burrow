@@ -17,6 +17,9 @@
 //!   however old (its age says), and their holds.
 //! - **holds**: what's configured to hold work back: paused repos, the
 //!   pipeline's own repos and slots, and the drain and sorting.
+//! - **items**: each open PR the steward tracks, from its per-PR state
+//!   file: its stage (the steward's `stages.py`), who has it, what it waits
+//!   on and since when.
 //! - **jobs**: the jobs most recently changed, as `proj status` lists them.
 //!
 //! It never holds a secret, a prompt or an issue's text: only names, numbers,
@@ -38,7 +41,7 @@ use crate::turn::lines;
 use crate::{Fail, io_fail, mtime, now, read, usage};
 
 /// The shape's version: a reader refuses one it doesn't know.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// How many recently changed jobs it lists unless asked for another number.
 pub const JOBS: usize = 15;
@@ -56,6 +59,7 @@ pub struct Snapshot {
     pub meters: Vec<Meter>,
     pub holds: Holds,
     pub jobs: Vec<JobRow>,
+    pub items: Vec<Item>,
 }
 
 /// A ready issue the drain will hand on, next first.
@@ -289,6 +293,28 @@ pub struct Triage {
     pub waiting: Vec<String>,
 }
 
+/// An open PR the steward tracks, as its state file says it stands.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Item {
+    /// OWNER/REPO.
+    pub repo: String,
+    pub number: u64,
+    /// The steward's stage name (`stages.py`): review, reviewer, fix, ci,
+    /// proofSlot, proof, releaseAge, train, merge, owner or base. None: out
+    /// of the pipeline (a draft, or on hold).
+    pub stage: Option<String>,
+    /// Who has it: the kind of wait the steward noted (steward, hold, sweep,
+    /// renovate or train); none when it noted none.
+    pub by: Option<String>,
+    /// What it waits on: the status the steward last posted.
+    pub on: String,
+    /// When it came to this stage, in seconds since the epoch.
+    pub since: i64,
+    /// Seconds since then.
+    pub age: i64,
+}
+
 /// A job, as `proj status` lists it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -341,6 +367,7 @@ impl Snapshot {
             meters: meters(cfg, at),
             holds: holds(cfg),
             jobs: recent(cfg, jobs, view)?,
+            items: items(cfg, at),
         })
     }
 
@@ -656,6 +683,42 @@ fn meters(cfg: &Config, at: i64) -> Vec<Meter> {
             })
         }))
         .collect()
+}
+
+/// The steward's open PRs, from the `stage` it saves in each `pr-*.json` in
+/// its state dir (`settle` in modules/autoland/step_context.py). Oldest in
+/// their stage first.
+fn items(cfg: &Config, at: i64) -> Vec<Item> {
+    let Some(dir) = cfg.steward_state.as_deref() else {
+        return Vec::new();
+    };
+    let mut items: Vec<Item> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("pr-") && name.ends_with(".json")
+        })
+        .filter_map(|e| {
+            let v: serde_json::Value = serde_json::from_slice(&fs::read(e.path()).ok()?).ok()?;
+            let s = v.get("stage")?;
+            let text = |k: &str| s.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+            let since = s.get("since").and_then(|x| x.as_f64())? as i64;
+            Some(Item {
+                repo: text("repo")?,
+                number: s.get("number")?.as_u64()?,
+                stage: text("stage"),
+                by: text("by"),
+                on: text("on").unwrap_or_default(),
+                since,
+                age: (at - since).max(0),
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| (a.since, &a.repo, a.number).cmp(&(b.since, &b.repo, b.number)));
+    items
 }
 
 /// The issues the inbox says wait for sorting, each with why.

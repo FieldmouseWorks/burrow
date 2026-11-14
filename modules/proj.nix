@@ -113,6 +113,7 @@ let
     # The configured sandbox wrapper; without sandboxes there are no VM jobs to stop.
     agentTool = if config.burrow.agents.enable or false then lib.getExe config.burrow.agents.package else null;
     proofsState = "${stateDir}/autoland/builds";
+    stewardState = "${stateDir}/autoland";
     proofRun = "${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof}/bin/burrow-proof";
     proofDriverConfig = config.burrow.autoland.configFile or null;
     proofBuildDriver = [ "${pkgs.python3}/bin/python3" "-E" "-s" "${./autoland}/steward.py" ];

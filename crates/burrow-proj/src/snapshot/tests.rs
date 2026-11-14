@@ -149,6 +149,15 @@ fn full() -> Snapshot {
             ends: vec!["ask".into()],
             answer: "all done".into(),
         }],
+        items: vec![Item {
+            repo: "sam/box".into(),
+            number: 8,
+            stage: Some("ci".into()),
+            by: Some("steward".into()),
+            on: "Settled; waiting for CI".into(),
+            since: 1_799_999_000,
+            age: 1000,
+        }],
     }
 }
 
@@ -525,4 +534,68 @@ fn github_installation_budgets_are_live_snapshot_meters() {
     let json = serde_json::to_value(&snapshot).unwrap();
     validates(&json).unwrap();
     assert_eq!(serde_json::from_value::<Snapshot>(json).unwrap(), snapshot);
+}
+
+/// The stage names the steward's `stages.py` has, in its `ALL`.
+fn steward_stages() -> Vec<String> {
+    let src = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../modules/autoland/stages.py"
+    ))
+    .unwrap();
+    let all = src.lines().find(|l| l.starts_with("ALL = (")).unwrap();
+    let consts: Vec<(&str, &str)> = src
+        .lines()
+        .filter_map(|l| {
+            let (name, rest) = l.split_once(" = \"")?;
+            Some((name, rest.split_once('"')?.0))
+        })
+        .collect();
+    all.trim_start_matches("ALL = (")
+        .trim_end_matches(')')
+        .split(", ")
+        .map(|c| consts.iter().find(|(n, _)| *n == c).unwrap().1.to_owned())
+        .collect()
+}
+
+#[test]
+fn items_report_the_stage_the_steward_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let stages = steward_stages();
+    assert_eq!(stages.len(), 11);
+    for (i, stage) in stages.iter().enumerate() {
+        let n = i as u64 + 1;
+        // As `save` writes it: a state file with other facts beside `stage`.
+        let state = serde_json::json!({
+            "head": "abc", "rv": {},
+            "stage": {"repo": "sam/box", "number": n, "stage": stage, "by": "steward",
+                      "on": "waiting", "since": 1000 + n},
+        });
+        fs::write(
+            dir.path().join(format!("pr-sam_box-{n}.json")),
+            state.to_string(),
+        )
+        .unwrap();
+    }
+    // Out of the pipeline, a draft; and files that aren't PR states.
+    let draft = serde_json::json!({"stage": {"repo": "sam/box", "number": 99, "stage": null, "by": null, "on": "d", "since": 5}});
+    fs::write(dir.path().join("pr-sam_box-99.json"), draft.to_string()).unwrap();
+    fs::write(dir.path().join("pr-sam_box-98.json"), "{}").unwrap();
+    fs::write(dir.path().join("wake.json"), "{}").unwrap();
+
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.steward_state = Some(dir.path().to_owned());
+    // The example's jobs dir is this machine's: the snapshot makes it, so a
+    // sandboxed test can't have it.
+    cfg.jobs = dir.path().join("jobs");
+    let found = items(&cfg, 2000);
+    assert_eq!(found.len(), stages.len() + 1);
+    assert_eq!(found[0].stage, None);
+    for (i, stage) in stages.iter().enumerate() {
+        let item = found.iter().find(|x| x.number == i as u64 + 1).unwrap();
+        assert_eq!(item.stage.as_deref(), Some(stage.as_str()));
+        assert_eq!(item.age, 2000 - 1000 - item.number as i64);
+    }
+    let json = serde_json::to_value(Snapshot::take(&cfg, 0).unwrap()).unwrap();
+    validates(&json).unwrap();
 }

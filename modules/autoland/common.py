@@ -413,6 +413,7 @@ def ts(s):
 # burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
+STAGE_NEWS = []  # non-empty once this pass changed a PR's saved stage (prs.stage_item)
 RETRY_AFTER = "retry-after.json"  # rate limits apply across both event lines
 
 
