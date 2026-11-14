@@ -114,6 +114,11 @@ fn start_with(
         }
         sleep(Duration::from_millis(500));
     }
+    // The last turn's answers are kept before the next rewrites them (its
+    // end may not have run, or failed): no turn starts on a capture that
+    // failed.
+    job.capture()
+        .map_err(|e| format!("proj: {id}'s last turn's answers aren't kept yet: {e}"))?;
     let last: u64 = match job.turns() {
         None => 0,
         Some(t) => t

@@ -826,6 +826,7 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     {
         crate::github_quota::finish(&job, &n).map_err(|e| Fail::new(1, e))?;
     }
+    job.capture().map_err(|e| Fail::new(1, e))?;
     job.mark_ended();
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);

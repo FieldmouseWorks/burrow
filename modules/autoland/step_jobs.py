@@ -8,6 +8,9 @@ import waits
 from common import CFG, MIN, log, ts
 from step_context import STRIKES, STRIKE_LIMIT, ON, VERB, clock, _HEAD
 
+# What a fix job between turns on its own PR awaits, as its status says it.
+OWN = "this PR's next change"
+
 
 class Jobs:
     def usage_grace(self):
@@ -56,6 +59,12 @@ class Jobs:
         """running's look at the job: what proj says of it, once."""
         snapshot = C.lifecycle(jid)
         state, target = C.job_lifecycle(jid, self.tag, snapshot)
+        if (not target and kind in claims.KINDS and state not in (None, "queued", "running")
+                and (self.st.get("answering") or {}).get(jid, {}).get("owns")):
+            # A fix job claims.rs says may still push to the branch (resumed
+            # by what its answers put up, or retiring until proj confirms
+            # it's over): none other is handed the branch meanwhile.
+            target = OWN
         usage = C.job_usage(jid, snapshot)
         records = self.st.setdefault("usageJobs", {})
         self.st.pop("usageRelease", None)  # replaced by job-scoped releases
@@ -122,6 +131,10 @@ class Jobs:
         those."""
         if at is _HEAD:
             at = self.head
+        if kind in claims.KINDS and not claims.stand_down(self.repo, self.pr, self.st, self.tag, self.strike, self.cleared, self.after):
+            log(f"{self.tag}: no new {kind} job yet: an earlier one on the branch may still push, or its answers just went up")
+            self.after(C.NOW, 1)  # ends: the next try to stop it
+            return False
         jid = begin() if begin else C.job(self.repo, task, since=ts(self.pr["createdAt"]), role=f"steward-{kind}")
         step = "build" if begin else "job"
         if jid:

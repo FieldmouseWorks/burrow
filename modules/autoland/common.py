@@ -814,7 +814,9 @@ def job_lifecycle(jid, key=None, snapshot=None):
     reversible one's deadline, with its default), the owner's to a one-way
     one whose deadline passed, or a PR or issue it awaits other than key
     (OWNER/REPO#N, the PR it was handed: awaiting only that is ending its
-    turn). None when it holds nothing: it ended. This is the one word on
+    turn, but for a fix job whose turn's answers just went up, which
+    step_jobs.look takes for one between turns). None when it holds
+    nothing: it ended. This is the one word on
     whether a job ended, for every kind of job and every path that asks
     (at_work; burrow-upkeep's Lifecycle::at_work reads proj the same): one
     that holds a question and is taken for ended gets a second job on its
