@@ -1,6 +1,8 @@
 # Claude Code, configured once, system-wide, so no project ever asks about
 # permissions again. Everything runs in bypassPermissions; the only prompts are
-# the one-way doors (R2) in claude/r2.nix. Also writes /etc/claude-code/CLAUDE.md,
+# the one-way doors (R2) in claude/r2.nix. The standing-authority commands in
+# claude/standing.nix are allowed outright, for sessions whose mode puts an
+# auto-mode check in front of the rest. Also writes /etc/claude-code/CLAUDE.md,
 # which every Claude session on the box reads: each burrow module adds its
 # section to burrow.claude.machineMd.
 inputs:
@@ -16,11 +18,13 @@ let
   both = cmds: lib.concatMap (c: [ "Bash(${c})" "Bash(sudo ${c})" ]) cmds;
 
   r2 = both ((import ./claude/r2.nix) ++ cfg.extraAsk);
+  standing = map (c: "Bash(${c})") (import ./claude/standing.nix);
 
   managed = lib.recursiveUpdate ({
     permissions = {
       defaultMode = "bypassPermissions";
       ask = r2;
+      allow = standing;
     };
     skipDangerousModePermissionPrompt = true;
     env = {
