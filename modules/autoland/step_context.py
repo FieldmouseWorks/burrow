@@ -9,7 +9,7 @@ import train as T
 import waits
 from common import CFG, DRY, MIN, load, log, repo_cfg, ts
 from tasks import judged_on
-from prs import MERGE_STEPS, post_status, show_waiting
+from prs import MERGE_STEPS, post_status, pushed, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -84,7 +84,12 @@ class Context:
                 self.lost_on.setdefault(r, {})[base] = was
         if self.st.get("head") != self.head:
             stopping.moved(self.repo, self.pr, self.st)  # its jobs on the last head, to be stopped below
-            self.st.update(head=self.head, seen=C.NOW, handed=None, strikes={}, rv={})
+            # Still since it was pushed, as near as GitHub says (prs.pushed),
+            # not since this first look: a head that's sat out the settle
+            # delay before the steward came round is asked about now.
+            got = pushed(self.pr)
+            seen = C.NOW if got is None else min(got, C.NOW)
+            self.st.update(head=self.head, seen=seen, handed=None, strikes={}, rv={})
         if DRY:
             # A status run keeps state of its own, but takes what the live
             # passes found on this head from theirs: their failures in a row,
@@ -99,7 +104,7 @@ class Context:
         self.st.setdefault("rv", {})
         self.labels = {x["name"] for x in self.pr["labels"]["nodes"]}
         self.merging = MERGE_STEPS.get(self.pr.get("mergeStateStatus"), "refused")
-        self.age = C.NOW - self.st["seen"]
+        self.age = C.NOW - self.st["seen"]  # how long its head has been still
         self.tag = f"{self.repo}#{self.n}"
         self.line = f"[{self.repo}#{self.n}]({self.pr['url']}) {self.pr['title']}"
 

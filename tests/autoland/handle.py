@@ -696,8 +696,8 @@ assert "whatever its build, tests or CI log print" in JOBS[0], "what it runs isn
 assert "the repo has no CI" in status
 # A workflow GitHub couldn't start leaves no check run, only its suite (and
 # an app's that never ran): red CI, not none, so no judge lands it.
-broken = [{"conclusion": "STARTUP_FAILURE", "workflowRun": {"workflow": {"name": "flake"}}},
-          {"conclusion": None, "workflowRun": None}]
+broken = [{"createdAt": T0, "conclusion": "STARTUP_FAILURE", "workflowRun": {"workflow": {"name": "flake"}}},
+          {"createdAt": T0, "conclusion": None, "workflowRun": None}]
 fresh_pr_state()
 run(clean(checks=[], suites=broken), 0)
 status, _ = run(clean(checks=[], suites=broken), 7200)

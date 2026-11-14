@@ -51,7 +51,7 @@ query($owner: String!, $name: String!, $cursor: String) {
             ... on CheckRun { databaseId externalId name status conclusion checkSuite { id status app { slug } workflowRun { databaseId file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { id createdAt status conclusion workflowRun { databaseId createdAt file { path } workflow { id name } } checkRuns(first: 1) { totalCount } } } } }
         }
       }
     }
@@ -107,6 +107,20 @@ def open_prs(owner, name):
                 older = got["node"][field]
                 pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
     return info, prs
+
+
+def pushed(pr):
+    """When GitHub got the PR's head, as near as it says, or None: the
+    earliest check suite on it, each App that checks the repo getting one
+    as the push comes in. GraphQL has no push time, and the commit's own
+    dates say when it was made, which can be long before it was pushed.
+    None with no suite on it (nothing checks the repo yet), or when the
+    commit read isn't the head."""
+    nodes = pr["commits"]["nodes"]
+    commit = nodes[0]["commit"] if nodes else {}
+    if commit.get("oid") != pr["headRefOid"]:
+        return None
+    return min((C.ts(s["createdAt"]) for s in (commit.get("checkSuites") or {}).get("nodes", [])), default=None)
 
 
 def has_ci(pr, proofs=()):
