@@ -163,7 +163,11 @@ impl Pass<'_> {
         issue: &Value,
         claimed: &BTreeSet<String>,
     ) -> bool {
+        // A proj question's notice waits on a person, whatever its labels:
+        // a job's reply isn't an answer, and its `proj done` closing the
+        // notice only gets it posted again.
         if issue.get("pull_request").is_some()
+            || crate::question::is_notice(issue)
             || !self.eligible(repo, issue)
             || super::enrollment::automatic_parked(self.inbox, repo, issue)
             || claimed.contains(&raw(&issue["number"]))

@@ -323,7 +323,7 @@ impl Pass<'_> {
         };
         let fresh = all
             .iter()
-            .filter(|i| i.get("pull_request").is_none())
+            .filter(|i| i.get("pull_request").is_none() && !crate::question::is_notice(i))
             .filter(|i| {
                 i["labels"]
                     .as_array()

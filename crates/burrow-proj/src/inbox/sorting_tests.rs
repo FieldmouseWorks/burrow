@@ -370,6 +370,45 @@ fn what_counts_as_sorted() {
     assert!(p.sorted("sam/box", &t, &pr, &Default::default()));
 }
 
+// A proj question's notice is never sorted nor drained, whatever labels it
+// has: only a person answers it, and a job closing it gets it posted again.
+#[test]
+fn a_question_notice_is_never_handed_to_a_job() {
+    let b = Box::new();
+    let t = b.cfg.inbox.as_ref().unwrap().triage.clone().unwrap();
+    let notice = |n, labels: &[&str]| {
+        let mut i = issue(n, "sam", labels);
+        i["title"] =
+            json!("[proj-question-wend-20261110-153036-F5wP-5] A project job needs an answer");
+        i["repository_url"] = json!("https://api.github.com/repos/sam/box");
+        i["created_at"] = json!("2026-11-01T00:00:00Z");
+        i
+    };
+    let mut p = b.pass();
+    for labels in [&["updates"][..], &[], &["ready"]] {
+        let i = notice(1, labels);
+        assert!(p.sorted("sam/box", &t, &i, &Default::default()), "{i}");
+    }
+    // Only the notice's own key in brackets, at the start, marks one.
+    for title in [
+        "Fix [proj-question-x-1]",
+        "[proj] question",
+        "proj-question-x-1",
+    ] {
+        let mut i = issue(1, "sam", &[]);
+        i["title"] = json!(title);
+        assert!(!p.sorted("sam/box", &t, &i, &Default::default()), "{i}");
+    }
+    // One labelled ready before this is never kept for the drain.
+    let mut fix = issue(2, "sam", &["ready"]);
+    fix["repository_url"] = json!("https://api.github.com/repos/sam/box");
+    fix["created_at"] = json!("2026-11-02T00:00:00Z");
+    p.note_ready("sam/box", &[notice(1, &["updates", "ready"]), fix])
+        .unwrap();
+    let next: Vec<String> = p.next_ready(&t).into_iter().map(|c| c.n).collect();
+    assert_eq!(next, ["2"]);
+}
+
 /// What a sorting job for issue N, as the fixtures have it, read of it.
 fn input(b: &Box, n: u64) -> String {
     b.pass().issue_text("sam/box", &issue(n, "sam", &[]), &[])
