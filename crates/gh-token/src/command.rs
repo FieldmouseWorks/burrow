@@ -149,6 +149,12 @@ impl Help {
                 Some((name, _type)) => (name, Takes::One),
                 None => (long, Takes::Nothing),
             };
+            // gh 2.104.0 on shows a bool as `--web[=true|false]`: its value
+            // only after `=`, so it takes nothing after it, as before.
+            let (name, takes) = match name.split_once("[=") {
+                Some((name, _)) => (name, Takes::Nothing),
+                None => (name, takes),
+            };
             if let Some(c) = short {
                 self.short.insert(c, name.to_owned());
             }
@@ -374,7 +380,8 @@ fn slots(usage: &str) -> Vec<Slot> {
 
 #[cfg(test)]
 pub mod fake {
-    //! gh's help, in gh 2.103.2's layout, for the commands the tests call.
+    //! gh's help, in gh 2.103.2's layout but for `repo list`'s, in 2.104.0's,
+    //! for the commands the tests call.
 
     use super::*;
 
@@ -434,7 +441,8 @@ pub mod fake {
             "repo list",
             &["ls"],
             "[<owner>] [flags]",
-            "  -q, --jq expression       Filter JSON output using a jq expression\n  -L, --limit int           Maximum number of repositories to list (default 30)\n      --source              Show only non-forks\n",
+            // gh 2.104.0's layout: a bool flag's value only after `=`.
+            "      --archived[=true|false]      Show only archived repositories\n  -q, --jq expression              Filter JSON output using a jq expression\n      --json fields                Output JSON with the specified fields\n  -L, --limit int                  Maximum number of repositories to list (default 30)\n      --no-archived[=true|false]   Omit archived repositories\n      --source[=true|false]        Show only non-forks\n",
         ),
         (
             "repo clone",
@@ -612,6 +620,18 @@ mod tests {
         let h = Help::of("USAGE\n  gh x\n\nFLAGS\n  -a, --aa x   y\n\n  -b, --bb x   y\n\nEXAMPLES\n  -c, --cc x   y\n", &[]).unwrap();
         assert_eq!(h.long.len(), 2);
         assert!(h.long.contains_key("aa") && h.long.contains_key("bb"));
+        // gh 2.104.0 shows a bool flag as `--web[=true|false]`: it takes
+        // the next argument no more than before.
+        let list = Help::of(&help(&["repo".into(), "list".into()]).unwrap(), &[]).unwrap();
+        assert_eq!(list.long.get("no-archived"), Some(&Takes::Nothing));
+        assert_eq!(list.long.get("source"), Some(&Takes::Nothing));
+        assert_eq!(list.long.get("json"), Some(&Takes::One));
+        let h = Help::of(
+            "USAGE\n  gh x\n\nINHERITED FLAGS\n  --help[=true|false]   Show help\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(h.long.get("help"), Some(&Takes::Nothing));
         // gh printed nothing, or no usage: refused.
         assert!(Help::of("", &[]).is_err());
         assert!(Help::of("Some topic.\n", &[]).is_err());
@@ -652,6 +672,14 @@ mod tests {
         assert_eq!(values("pr view 5 -R=sam/r"), [v("repo", "sam/r")]);
         assert_eq!(values("pr view 5 -wcRsam/r"), [v("repo", "sam/r")]);
         assert_eq!(values("pr view 5 -w=true"), []);
+        // The ledger's call, under gh 2.104.0's help: its bools take no
+        // value, so `sam` stays the owner.
+        let ledger = read("repo list --no-archived sam --limit 1000 --source --no-archived=false --json nameWithOwner").unwrap();
+        assert_eq!(
+            ledger.values,
+            [v("limit", "1000"), v("json", "nameWithOwner")]
+        );
+        assert_eq!(ledger.args, [("sam".to_owned(), vec!["owner".to_owned()])]);
         assert_eq!(
             values("issue -R sam/r comment 5 --body https://github.com/eve/x"),
             [v("repo", "sam/r"), v("body", "https://github.com/eve/x")]
