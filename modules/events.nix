@@ -21,7 +21,7 @@ let
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
     handlers = lib.mapAttrs (name: h: {
-      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap;
+      inherit (h) events unit wake ownStatuses ownLabels pullRequestActions perRepo repos pushes branches issueTitles gap yieldTo;
       issueDir = if h.issueNumbers then "${issueDir}/${name}" else null;
     }) cfg.handlers;
   });
@@ -226,6 +226,19 @@ in
               wake-ups in between come to. A handler whose passes read a lot
               of GitHub, on events that come thick and fast, sets a longer
               one.
+            '';
+          };
+          yieldTo = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "autoland";
+            description = ''
+              Another handler whose passes go first: this one starts none
+              while that one has a pass running or due, and looks again as
+              each of its passes ends. For work that only carries on what
+              the other's passes started and shares their lock (the
+              steward's continuations), so it never holds a pass over new
+              work off. That handler must yield to none itself.
             '';
           };
         };

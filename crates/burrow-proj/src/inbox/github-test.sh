@@ -18,7 +18,7 @@ if [ "$path" = graphql ]; then
     if [ -f "$TEST/fail" ] && grep -qF merged-query "$TEST/fail"; then exit 1; fi
     n=$(printf '%s' "$body" | jq -r .variables.n)
     printf 'HTTP/2.0 200 OK\n\n'
-    cat "$TEST/merged-$n" 2>/dev/null || printf '{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}'
+    cat "$TEST/merged-$n" 2>/dev/null || printf '{"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}}'
     exit 0
   fi
   if [ -f "$TEST/fail" ] && printf '%s' "api graphql" | grep -qF -f "$TEST/fail"; then exit 1; fi
@@ -45,6 +45,13 @@ echo "$request" >>"$TEST/log"
 if [ -f "$TEST/fail" ] && printf '%s' "$request" | grep -qF -f "$TEST/fail"; then exit 1; fi
 if [ "$method" != GET ]; then
   case "$path" in */comments) printf '%s' "$body" | jq -r .body >>"$TEST/posted" ;; esac
+  # Closing an issue answers it as closed, as GitHub does.
+  f="$TEST/$(printf '%s' "$path" | tr / _)"
+  if [ "$method" = PATCH ] && [ -e "$f" ] && [ "$(printf '%s' "$body" | jq -r .state)" = closed ]; then
+    printf 'HTTP/2.0 200 OK\n\n'
+    jq -c '.state = "closed" | .closed_at = "2026-11-13T21:00:00Z"' "$f"
+    exit 0
+  fi
   printf 'HTTP/2.0 200 OK\n\n{}'; exit 0
 fi
 page=1; case "$path" in *\?page=*|*\&page=*) page=${path##*page=} ;; esac
