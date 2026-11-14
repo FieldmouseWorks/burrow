@@ -254,6 +254,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             Ok(())
         }
         Some(how @ ("ask" | "done")) => ends(cfg, how, &args[1..]),
+        Some("plan") => crate::inbox::plan(cfg, &args[1..]),
         Some("merge-questions") => {
             let key = arg(args, 1, MERGE_USAGE)?;
             if args.len() < 3 {
@@ -289,7 +290,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|merge-questions",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|plan|merge-questions",
         )),
     }
 }
