@@ -381,8 +381,8 @@ The rules the stages keep:
 
 ### Where it stands
 
-Stage 0 is in flight: #957, #970 (as #1136) and #943 have landed; #1110
-is next. No later stage has landed.
+Stage 0 has landed: #957, #970 (as #1136), #943 (as #1137) and #1110.
+Its review leftovers are #1138. No later stage has landed.
 
 ## What this doesn't do
 

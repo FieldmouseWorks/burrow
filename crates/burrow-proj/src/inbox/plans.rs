@@ -28,6 +28,10 @@ struct Child {
     /// Closed with no merged PR tied to it: the list waits, and has said so.
     #[serde(default)]
     waits: bool,
+    /// Closed as continued in this issue, `OWNER/REPO#N`, which the list
+    /// waits on instead.
+    #[serde(default)]
+    continued: Option<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct Retained {
@@ -60,10 +64,11 @@ impl List {
             let number = child
                 .number
                 .map_or("(creating)".into(), |n| format!("#{n}"));
-            let pr = child
-                .merged_pr
-                .as_ref()
-                .map_or(String::new(), |pr| format!(" — {pr}"));
+            let pr = match (&child.merged_pr, &child.continued) {
+                (Some(pr), _) => format!(" — {pr}"),
+                (None, Some(to)) => format!(" — continued as {to}"),
+                (None, None) => String::new(),
+            };
             text.push_str(&format!("\n- [{check}] {number}: {}{pr}", task.title));
         }
         if let Some(child) = self.next().map(|i| &self.children[i])
@@ -71,7 +76,7 @@ impl List {
             && let Some(n) = child.number
         {
             text.push_str(&format!(
-                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`."
+                "\n\n#{n} closed without a merged PR; the list waits. If its work landed some other way, an author records the PR with `proj plan done {repo}#{n} PR-URL`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{n}."
             ));
         }
         text
@@ -800,7 +805,37 @@ impl Pass<'_> {
                 self.miss(repo);
                 return Hold::Unknown;
             };
-            landed
+            match landed {
+                Some(pr) => Some(pr),
+                None => match self.successor(repo, child) {
+                    Successor::Landed(pr) => Some(pr),
+                    Successor::None => None,
+                    Successor::Unknown => {
+                        self.miss(repo);
+                        return Hold::Unknown;
+                    }
+                    // Its place is the successor's: no notice, nothing to
+                    // record by hand.
+                    Successor::Open(to) => {
+                        let at = &mut list.children[index];
+                        if at.continued.as_ref() != Some(&to) || at.waits {
+                            at.continued = Some(to.clone());
+                            at.waits = false;
+                            if !self.save_list(repo, n, &list) {
+                                self.retry(repo);
+                                return Hold::Unknown;
+                            }
+                        }
+                        if !self.render_list(repo, n, &mut list) {
+                            self.miss(repo);
+                        }
+                        self.reconcile_notice(repo, n, None);
+                        return Hold::Yes(format!(
+                            "its next child #{child} continues as {to}, which hasn't landed"
+                        ));
+                    }
+                },
+            }
         } else {
             self.recorded_landing(repo, child)
         };
@@ -819,8 +854,10 @@ impl Pass<'_> {
         } else if issue["state"] == "closed" {
             // Closed by hand: a no-op, said once on the checklist, and to
             // the owner until the list moves on, never left in silence.
-            if !list.children[index].waits {
-                list.children[index].waits = true;
+            let at = &mut list.children[index];
+            if !at.waits || at.continued.is_some() {
+                at.waits = true;
+                at.continued = None;
                 if !self.save_list(repo, n, &list) {
                     self.retry(repo);
                     return Hold::Unknown;
@@ -903,6 +940,7 @@ enum Hold {
 
 #[path = "landed.rs"]
 mod landed;
+use landed::Successor;
 pub(super) use landed::{Closing, PLAN_USAGE, declared_done};
 
 #[cfg(test)]

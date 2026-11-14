@@ -8,6 +8,10 @@
 //! handed it); `landed`, from `proj plan done` outside any job, under the
 //! inbox's pass lock. An awaited one counts once it has merged, whenever
 //! that is, and a reopened child drops what its earlier job awaited.
+//!
+//! A child closed as continued elsewhere (an author's comment on it with a
+//! line `Continued as OWNER/REPO#N`) hands its place to that issue: the list
+//! waits on it, saying so, and is done when a merged PR closes it.
 use super::{List, Pass, key};
 use crate::{Fail, job::Job, read, swap};
 use serde_json::{Value, json};
@@ -28,6 +32,27 @@ const AWAITED_LOOK: i64 = 3600;
 /// In a parent's plan folder: a notice that its list waits may be open, so
 /// it's closed (and that confirmed) once the list stops waiting.
 const NOTICE: &str = "notice";
+
+/// How an author's comment on a closed child names the issue its work went
+/// on in, at the start of a line: `Continued as OWNER/REPO#N` or `#N`.
+const CONTINUED: &str = "Continued as ";
+
+/// How many continuations are followed from one child before the chain is
+/// taken as having none.
+const HOPS: usize = 4;
+
+/// Where a closed child's work went on, by its successor ([`CONTINUED`]).
+#[derive(Debug, PartialEq)]
+pub(super) enum Successor {
+    /// None named, or every one named closed without a merged PR.
+    None,
+    /// This merged PR closed the successor.
+    Landed(String),
+    /// The successor, `OWNER/REPO#N`, is open.
+    Open(String),
+    /// GitHub couldn't be asked.
+    Unknown,
+}
 
 /// Whether an issue may close with its finished job ([`Pass::child_can_close`]).
 #[derive(Debug, PartialEq)]
@@ -102,6 +127,22 @@ fn reference(s: &str) -> Option<(String, u64)> {
         .flatten()
 }
 
+/// The successor a comment's text names ([`CONTINUED`]), `#N` being in `repo`.
+fn continued_as(repo: &str, body: &str) -> Option<(String, u64)> {
+    body.lines().find_map(|l| {
+        let named = l
+            .trim()
+            .strip_prefix(CONTINUED)?
+            .split_whitespace()
+            .next()?;
+        let named = named.trim_end_matches(['.', ',', ':', ';']);
+        match named.strip_prefix('#') {
+            Some(n) => reference(&format!("{repo}#{n}")),
+            None => reference(named),
+        }
+    })
+}
+
 /// `https://github.com/OWNER/REPO/pull/N` as `OWNER/REPO#N`.
 fn pull_url(s: &str) -> Option<(String, u64)> {
     let path = s.trim().strip_prefix("https://github.com/")?;
@@ -154,6 +195,47 @@ impl Pass<'_> {
             Some(None) if !unsure => Some(None),
             _ => None,
         }
+    }
+
+    /// Where closed child N's work went on: the successor the newest
+    /// author's comment on it names, followed through a successor that
+    /// closed without a merged PR to the one it names in turn. While one is
+    /// open the repo is looked at again in a while, since a merge elsewhere
+    /// sends no event here.
+    pub(super) fn successor(&mut self, repo: &str, n: u64) -> Successor {
+        let mut from = (repo.to_owned(), n);
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(format!("{}#{}", from.0, from.1).to_lowercase()) && seen.len() <= HOPS {
+            let Some(comments) = crate::github::every(
+                self.cfg,
+                &format!("repos/{}/issues/{}/comments", from.0, from.1),
+            ) else {
+                return Successor::Unknown;
+            };
+            let Some((at, m)) = comments
+                .iter()
+                .rev()
+                .filter(|c| self.heard(c))
+                .find_map(|c| continued_as(&from.0, c["body"].as_str().unwrap_or_default()))
+            else {
+                return Successor::None;
+            };
+            match self.closing_reference(&at, m) {
+                Some(Some(pr)) => return Successor::Landed(pr),
+                Some(None) => {}
+                None => return Successor::Unknown,
+            }
+            let Some(issue) = crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}"))
+            else {
+                return Successor::Unknown;
+            };
+            if issue["state"] != "closed" {
+                self.book(repo, crate::now() + AWAITED_LOOK);
+                return Successor::Open(format!("{at}#{m}"));
+            }
+            from = (at, m);
+        }
+        Successor::None
     }
 
     fn closing_reference(&self, repo: &str, n: u64) -> Option<Option<String>> {
@@ -369,7 +451,7 @@ impl Pass<'_> {
                     &id,
                     &format!("{repo}#{parent}'s task list waits on #{child}"),
                     &format!(
-                        "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start. If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; otherwise reopen it."
+                        "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start. If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; if it went on in another issue, an author comments `Continued as OWNER/REPO#N` on #{child}; otherwise reopen it."
                     ),
                 ]);
                 if !said.is_some_and(|s| s.success()) {
@@ -476,5 +558,23 @@ mod parse_tests {
         );
         assert_eq!(pull_url("https://github.com/sam/box/issues/10"), None);
         assert_eq!(pull_url("https://example.com/sam/box/pull/10"), None);
+    }
+
+    #[test]
+    fn continuations() {
+        let said = "Continued as FieldmouseWorks/burrow#948, opened as an owner issue.";
+        assert_eq!(
+            continued_as("sam/box", said),
+            Some(("FieldmouseWorks/burrow".into(), 948))
+        );
+        assert_eq!(
+            continued_as("sam/box", "Done here.\n\nContinued as #12."),
+            Some(("sam/box".into(), 12))
+        );
+        assert_eq!(continued_as("sam/box", "It was continued as #12."), None);
+        assert_eq!(
+            continued_as("sam/box", "Continued as soon as we can."),
+            None
+        );
     }
 }

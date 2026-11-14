@@ -59,7 +59,8 @@ path=${path%%\?*}
 printf 'HTTP/2.0 200 OK\n'
 case "$path" in
   */comments)
-    pages=$(cat "$TEST/comments" 2>/dev/null || echo '[[]]')
+    # One issue's own comments when the test gave them, else everyone's.
+    pages=$(cat "$TEST/$(printf '%s' "$path" | tr / _)" 2>/dev/null || cat "$TEST/comments" 2>/dev/null || echo '[[]]')
     count=$(printf '%s' "$pages" | jq length)
     if [ "$page" -lt "$count" ]; then printf 'Link: <https://api.github.com/%s?page=%s>; rel="next"\n' "$path" "$((page+1))"; fi
     printf '\n'; printf '%s' "$pages" | jq ".[$((page-1))] // []" ;;

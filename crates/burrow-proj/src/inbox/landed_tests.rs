@@ -592,3 +592,105 @@ fn a_list_whose_child_is_still_open_is_unchanged() {
     assert_eq!(after.rendered, before.rendered);
     assert!(!b.log().contains("issues/8 -f state=closed"));
 }
+
+/// Comments on #8, as GitHub gives them: `body` by `login`.
+fn said_on_child(b: &Box, login: &str, body: &str) {
+    let c = json!({"id": 5, "user": burrow_github::fake::actor(login), "body": body,
+        "created_at": "2026-11-13T17:22:33Z"});
+    fs::write(
+        b.path("repos_sam_box_issues_8_comments"),
+        json!([[c]]).to_string(),
+    )
+    .unwrap();
+}
+
+/// The successor, sam/machine#948, as GitHub has it now.
+fn successor(b: &Box, state: &str) {
+    let mut it = issue(948, "sam", &[]);
+    it["state"] = json!(state);
+    fs::write(b.path("repos_sam_machine_issues_948"), it.to_string()).unwrap();
+}
+
+#[test]
+fn a_child_continued_elsewhere_waits_on_its_successor_and_lands_with_it() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(
+        &b,
+        "sam",
+        "Continued as sam/machine#948, opened in the repo the work lives in.",
+    );
+    successor(&b, "open");
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!advanced(&b));
+    assert!(!notice_open(&b), "a live successor is no stall");
+    assert!(
+        p.wake.contains_key("sam/box"),
+        "a merge elsewhere is looked for"
+    );
+    let list = stored(&b).checklist("sam/box", "7");
+    assert!(
+        list.contains("[ ] #8: task 0 — continued as sam/machine#948"),
+        "{list}"
+    );
+    assert!(!list.contains("the list waits"), "{list}");
+
+    successor(&b, "closed");
+    fs::write(
+        b.path("merged-948"),
+        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+            {"merged":true,"url":"https://github.com/sam/machine/pull/979"}]}}}}})
+        .to_string(),
+    )
+    .unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(advanced(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains("[x] #8: task 0 — https://github.com/sam/machine/pull/979")
+    );
+}
+
+#[test]
+fn only_an_authors_comment_continues_a_child() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(&b, "mallory", "Continued as sam/machine#948.");
+    successor(&b, "open");
+    fs::write(
+        b.path("merged-948"),
+        json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+            {"merged":true,"url":"https://github.com/sam/machine/pull/979"}]}}}}})
+        .to_string(),
+    )
+    .unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!advanced(&b));
+    assert!(
+        notice_open(&b),
+        "closed by hand with no successor: the owner hears"
+    );
+}
+
+#[test]
+fn a_successor_closed_without_a_landing_leaves_the_child_waiting() {
+    let (mut b, parent, _) = parent_fixture();
+    notifier(&mut b);
+    child(&b, "closed");
+    said_on_child(&b, "sam", "Continued as #948.");
+    let mut gone = issue(948, "sam", &[]);
+    gone["state"] = json!("closed");
+    fs::write(b.path("repos_sam_box_issues_948"), gone.to_string()).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!advanced(&b));
+    assert!(notice_open(&b));
+    assert!(
+        stored(&b)
+            .checklist("sam/box", "7")
+            .contains("the list waits")
+    );
+}
