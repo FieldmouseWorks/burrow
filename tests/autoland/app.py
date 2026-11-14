@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_GH, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp, upkeep_config)
 from harness import head as HEAD
 
@@ -299,6 +299,62 @@ assert ASKED == [("sam", "sam", None), ("sam", "sam", "c1"), ("eve", "eve", None
 C.gh, C.CFG["owners"] = (lambda *a, **k: {"data": {"repositoryOwner": None}}), ["gone"]
 assert R.discover() == []
 C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
+
+# A status run discovers them as whoever runs it, through their gh: gh-token,
+# holding a token for each account they act in, which takes the account a
+# call is about from what it names, then GH_REPO, then the checkout it runs
+# in, then GH_TOKEN_OWNER, and refuses a call it can't place (account.rs).
+# The GraphQL query names no repo, so each goes as its owner's: not refused
+# (remi's status view failed on it, burrow#1074), and not as the account
+# GH_REPO or the checkout the status view runs in would give.
+os.makedirs(f"{tmp}/token-bin")
+with open(f"{tmp}/token-bin/gh", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, re, subprocess, sys
+a = sys.argv[1:]
+assert a[:2] == ["api", "graphql"], a
+asked = dict(x.split("=", 1) for x in a[3::2] if not x.startswith("query="))
+remotes = subprocess.run(["git", "config", "--get-regexp", r"^remote\\..*\\.url$"],
+                         capture_output=True, text=True).stdout.split()
+remote = next((m.group(1) for u in remotes[1::2] for m in [re.search(r"github\\.com[:/]([^/]+)/", u)] if m), None)
+who = (os.environ.get("GH_REPO") or "").split("/")[0] or remote or os.environ.get("GH_TOKEN_OWNER")
+if not who:
+    sys.exit("gh-token: which account is `gh api graphql` for? Give it -R OWNER/REPO")
+if who.lower() != asked["owner"].lower():
+    sys.exit(f"gh: {{who}}'s installation can't list {{asked['owner']}}'s repos")
+nodes = {{"sam": [{node(1, "sam/r", True, "trunk")!r}], "eve": [{node(2, "eve/p")!r}]}}[asked["owner"]]
+print(json.dumps({{"data": {{"repositoryOwner": {{"repositories": {{
+    "nodes": nodes, "pageInfo": {{"hasNextPage": False, "endCursor": None}}}}}}}}}}))
+""")
+os.chmod(f"{tmp}/token-bin/gh", 0o755)
+os.makedirs(f"{tmp}/elsewhere")
+sh("git", "init", "-q", f"{tmp}/checkout")
+sh("git", "-C", f"{tmp}/checkout", "remote", "add", "origin", "https://github.com/eve/checkout")
+kept = (C.gh, C.CFG["owners"], C.CFG["exclude"], os.environ["PATH"], os.environ.get("GH_REPO"), os.getcwd())
+C.gh, C.CFG["owners"], C.CFG["exclude"] = REAL_GH, ["sam", "eve"], []
+os.environ["PATH"] = f"{tmp}/token-bin:{kept[3]}"
+S.DRY = C.DRY = R.DRY = True
+try:
+    want = [{"repo": "sam/r", "id": 1, "private": True, "default": "trunk", "created": T0},
+            {"repo": "eve/p", "id": 2, "private": False, "default": "main", "created": T0}]
+    # Nothing around the call says whose it is; then GH_REPO says eve's,
+    # and the checkout the status view runs in says eve's too.
+    os.environ.pop("GH_REPO", None)
+    os.chdir(f"{tmp}/elsewhere")
+    assert R.discover() == want
+    os.environ["GH_REPO"] = "eve/elsewhere"
+    assert R.discover() == want
+    os.environ.pop("GH_REPO")
+    os.chdir(f"{tmp}/checkout")
+    assert R.discover() == want
+finally:
+    S.DRY = C.DRY = R.DRY = False
+    C.gh, C.CFG["owners"], C.CFG["exclude"], os.environ["PATH"] = kept[:4]
+    if kept[4] is None:
+        os.environ.pop("GH_REPO", None)
+    else:
+        os.environ["GH_REPO"] = kept[4]
+    os.chdir(kept[5])
 
 # A pass asks about each repo as the App's installation on that repo's
 # owner: its PRs are read for sam/r as sam's, for eve/p as eve's.

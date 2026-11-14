@@ -118,7 +118,7 @@ def limited(stderr, env):
     if LIMITED or not re.search(r"rate limit", stderr, re.I):
         return
     p = remote(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
-               capture_output=True, text=True, env=env)
+               capture_output=True, text=True, env=env, cwd=GH_CWD)
     try:
         LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
     except ValueError:
@@ -173,12 +173,29 @@ def token(owner):
 def gh_env(repo=None):
     """The environment gh runs in, and git with gh as its only credential
     helper (GIT_AUTH): the App's token for repo's owner, else for the owner
-    it's acting for. A status run only reads, as whoever runs it."""
-    if DRY:
-        return None
+    it's acting for. A status run only reads, as whoever runs it: their gh,
+    which (gh-token) holds a token for each account they act in, and is
+    told the account here, as burrow-github's transport tells it
+    (crates/burrow-github/src/transport.rs). A call naming no repo (a
+    GraphQL one) is about GH_TOKEN_OWNER's, unless GH_REPO or the checkout
+    it runs in says otherwise (crates/gh-token/src/account.rs): neither is
+    what the call is about, so GH_REPO goes, and gh runs outside any
+    checkout (GH_CWD)."""
     if repo is None and not _for:
+        if DRY:
+            return None
         raise RuntimeError("a GitHub call outside acting_for: it would go as the machine user's own login")
-    return {**os.environ, "GH_TOKEN": token(repo.split("/")[0].lower() if repo else _for[-1])}
+    owner = repo.split("/")[0].lower() if repo else _for[-1]
+    if DRY:
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GIT_DIR")}
+        return {**env, "GH_TOKEN_OWNER": owner}
+    return {**os.environ, "GH_TOKEN": token(owner)}
+
+
+# Where gh runs: in no checkout, whose remotes gh-token would take for the
+# account a call naming no repo is about. Every call of the steward's names
+# its repo, or its owner by gh_env.
+GH_CWD = "/"
 
 
 # How long one call of burrow-upkeep may take: its look at a repo is a few
@@ -213,7 +230,7 @@ def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
     Unavailable when GitHub didn't answer, RuntimeError when it said no."""
     env = gh_env()
-    p = remote(["gh", *args], input=input, capture_output=True, text=True, env=env)
+    p = remote(["gh", *args], input=input, capture_output=True, text=True, env=env, cwd=GH_CWD)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
         limited(p.stderr, env)
@@ -254,7 +271,7 @@ def fresh(path, etag=None):
     gh() does, and Gone when there's no such thing."""
     env = gh_env()
     p = remote(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
-               capture_output=True, text=True, env=env)
+               capture_output=True, text=True, env=env, cwd=GH_CWD)
     status, _, rest = p.stdout.partition("\n")
     code = status.split(" ")[1:2]
     if code == ["304"]:
