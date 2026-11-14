@@ -47,6 +47,23 @@ let
   fresh = lib.attrByPath [ "burrow" "dispatch" ] { } config;
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
   socket = "/run/conary/conaryd.sock";
+  # The flow's controller, when it has one of its own (controllerUser):
+  # the flow's passes and workers, and so its plugins, run as it, and it
+  # alone may ask a producer for work. Each producer listens in a directory
+  # of its own under `producers`, which only the controller's group may
+  # enter, and checks its peer is the controller too (crates/burrow-producer).
+  controller = cfg.controllerUser;
+  producers = "/run/conary-producers";
+  # The flow's mutable state (Conary's docs/flow.md, "State and workers"),
+  # private to the controller.
+  flowData = "${config.burrow.stateDir}/flow";
+  # Units other than the flow's that run as the controller, and users in
+  # its group: the controller must be neither's.
+  others = lib.attrNames (lib.filterAttrs (_: s:
+    (s.serviceConfig.User or null) == controller
+    && (s.environment.CONARY_DATA or null) != flowData) config.systemd.services);
+  joined = lib.attrNames (lib.filterAttrs (n: u:
+    n != controller && lib.elem controller (u.extraGroups or [ ])) config.users.users);
 
   # The passes' own state: when each repo's next pass is due, for
   # burrow-events ({"OWNER/REPO": epoch}).
@@ -342,6 +359,53 @@ in
       '';
     };
 
+    controllerUser = mkOption {
+      type = types.nullOr (types.strMatching "[a-z_][a-z0-9_-]*");
+      default = null;
+      example = "conary-flow";
+      description = ''
+        A system user of its own, which no authoring job, sandbox or proj
+        run shares (and which nothing else on the machine runs as or is in
+        the group of), for Conary's flow: its passes and workers, and so the
+        plugins they run, run as it, and only it may ask a producer for
+        work, both by the producers' socket directory (${producers}, which
+        only its group may enter) and by each producer's peer check. Its
+        state (`CONARY_DATA`) is its own, in ${flowData}. It reads the
+        ledger as everyone does. Null, the default, runs the flow as
+        burrow.user, as before.
+      '';
+    };
+
+    flow = mkOption {
+      type = types.attrsOf types.anything;
+      readOnly = true;
+      default = {
+        user = if controller == null then user else controller;
+        # Whom a producer's peer check accepts: the controller, never
+        # burrow.user (null with no controller).
+        controller = controller;
+        # Where producers listen, each in a directory of its own; null
+        # with no controller, since a producer would trust burrow.user.
+        producers = if controller == null then null else producers;
+        env = lib.optionalAttrs (controller != null) { CONARY_DATA = flowData; };
+        # A producer unit's serviceConfig for its socket's directory,
+        # ${producers}/NAME: the producer is let through the directory only
+        # the controller's group may enter, to listen in its own.
+        # Refused with no controller: a producer would trust burrow.user.
+        producer = name: lib.throwIf (controller == null)
+          "burrow.ledger.controllerUser: a producer needs the flow's controller, or it would trust burrow.user" {
+          RuntimeDirectory = "${lib.removePrefix "/run/" producers}/${name}";
+          RuntimeDirectoryMode = "0755";
+          SupplementaryGroups = [ controller ];
+        };
+      };
+      description = ''
+        Who runs the flow, the environment it adds, where producers listen,
+        and a producer unit's serviceConfig for its socket's directory: for
+        the units that run `cn flow` and the producers.
+      '';
+    };
+
     env = mkOption {
       type = types.attrsOf types.str;
       readOnly = true;
@@ -507,6 +571,14 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [{
+      assertion = controller != null -> controller != user && controller != "root";
+      message = "burrow.ledger.controllerUser: a user of its own, never burrow.user or root, or a producer would trust every authoring session.";
+    } {
+      # The controller's alone: only the flow's own units (those that run
+      # on its state, flow.env) run as it, and no user is in its group.
+      assertion = controller == null || (others == [ ] && joined == [ ]);
+      message = "burrow.ledger.controllerUser: ${toString controller} is already someone else's: ${lib.concatStringsSep ", " (others ++ joined)} run as it or join its group, so a producer would trust them.";
+    } {
       assertion = cfg.reviewers != [ ];
       message = "burrow.ledger.reviewers: name the steward's App (its SLUG[bot]), or no merge could be told from a bypass.";
     } {
@@ -534,7 +606,21 @@ in
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
       ${cfg.dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
       ${passDir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+    } // lib.optionalAttrs (controller != null) {
+      ${flowData}.d = { mode = "0700"; user = controller; group = controller; };
+      # Entered, not listed, by the controller's group alone; each producer
+      # is let in to make its own directory there (flow.producer).
+      ${producers}.d = { mode = "0710"; user = "root"; group = controller; };
     };
+
+    users.users = lib.mkIf (controller != null) {
+      ${controller} = {
+        isSystemUser = true;
+        group = controller;
+        description = "Conary's flow, and the only asker of its producers";
+      };
+    };
+    users.groups = lib.mkIf (controller != null) { ${controller} = { }; };
 
     burrow.events.handlers.ledger = {
       # A PR opened, pushed, retargeted, closed or merged; a review; CI

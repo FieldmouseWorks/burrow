@@ -1,5 +1,5 @@
 //! A reviewer queued on a PR's head: its snapshot taken (snapshot.rs), its
-//! brief written (brief.rs) with its earlier findings and the replies they
+//! brief written (burrow-brief's) with its earlier findings and the replies they
 //! got, and the entry left where the reviewers' service takes it
 //! (burrow-review's `Item`).
 
@@ -7,10 +7,9 @@ use burrow_review::queue::Item;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::brief::brief;
 use crate::pass::Pass;
 use crate::post::finding;
-use crate::snapshot::{self, Look};
+use crate::snapshot::{self, Look, Meta};
 use crate::verdict::named;
 
 /// Under the steward's state dir: the looks queued, the answers the
@@ -90,6 +89,27 @@ pub fn queue(p: &mut Pass, ask: &Ask) -> Result<String, String> {
     let entry = format!("{}--{}", ask.reviewer, ask.name);
     p.save(&format!("{QUEUE}/{entry}.json"), &item)?;
     Ok(entry)
+}
+
+/// The reviewer's brief for `ask`: burrow-brief's, with the PR, the base's
+/// rules nearest what it changes, the paths it can't see, and the
+/// reviewer's own earlier findings with their replies (`prior`). The
+/// reviewers' service tells a look that resumes its session where it left
+/// off; the rest is this.
+pub fn brief(owner: &str, repo: &str, ask: &Ask, meta: &Meta, prior: &str) -> String {
+    burrow_brief::review(&burrow_brief::Review {
+        owner,
+        repo,
+        number: ask.number,
+        title: &ask.title,
+        base: &ask.base,
+        quoted: &ask.quoted,
+        reasons: &ask.reasons,
+        rules: &meta.rules,
+        house: &meta.house,
+        secret: &meta.secret,
+        prior,
+    })
 }
 
 /// The reviewer's earlier findings on the PR, the steward's threads with
