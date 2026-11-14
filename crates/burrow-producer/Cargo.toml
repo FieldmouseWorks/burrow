@@ -1,0 +1,34 @@
+[package]
+name = "burrow-producer"
+description = "The kit every Conary flow plugin and its producer service share: the plugin's thin client, the producer's socket, its records, its signer and its check runs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-github = { path = "../burrow-github" }
+burrow-process = { path = "../burrow-process" }
+# Conary owns the plugin contract, the service statement and the receipts;
+# the kit uses them, never a copy. Pinned by Cargo.lock.
+conary-core = { git = "https://github.com/FieldmouseWorks/Conary", rev = "eac5fc9df1c22fd9560e9fddc9e31ce52f119f27" }
+conary-github = { git = "https://github.com/FieldmouseWorks/Conary", rev = "eac5fc9df1c22fd9560e9fddc9e31ce52f119f27" }
+ed25519-dalek = "3.0.0"
+rustix = { version = "1.1.6", features = ["net", "process", "rand"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+
+[dev-dependencies]
+base64.workspace = true
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+
+[lints]
+workspace = true
+
+# Conary's own conformance check runs this test's binary as the plugin, so
+# the test writes its own main.
+[[test]]
+name = "conformance"
+harness = false
