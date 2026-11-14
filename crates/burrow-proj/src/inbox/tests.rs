@@ -50,6 +50,8 @@ fn pass(cfg: &Config) -> Pass<'_> {
         looked: Vec::new(),
         observe: false,
         scope: None,
+        drain_at: None,
+        skipped: Vec::new(),
     }
 }
 

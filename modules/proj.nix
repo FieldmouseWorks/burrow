@@ -19,6 +19,7 @@ let
   inherit (config.burrow.github) machineApp;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
+  inboxDrainWake = "${stateDir}/proj-inbox/drain-wake.json";
   enginesWake = "${stateDir}/engines-door/wake.json";
   # The pipeline's own repos, whose projects' pipeline jobs get its slots,
   # and the lead ones, what it's built from, whose go first of all (pipeline
@@ -128,6 +129,7 @@ let
       inherit (cfg.inbox) planning;
       host = config.networking.hostName;
       wake = inboxWake;
+      drainWake = inboxDrainWake;
       triage = if cfg.inbox.triage.enable || cfg.inbox.planning then {
         inherit (cfg.inbox.triage) ownerLabel owner skip atOnce drain drainJobs;
         sortUnlabelled = cfg.inbox.triage.enable;
@@ -586,7 +588,8 @@ in
         restartIfChanged = false;
         wantedBy = [ "multi-user.target" ];
         before = [
-          "burrow-engines-door.service" "proj-inbox.service" "proj-watch.service"
+          "burrow-engines-door.service" "proj-inbox.service" "proj-inbox-drain.service"
+          "proj-watch.service"
           "proj-retry-transfer.service"
         ];
         serviceConfig = {
@@ -798,6 +801,16 @@ in
       issueNumbers = true;
       wake = inboxWake;
     };
+    # The drain's own pass (proj-inbox drain): every turn's end kicks it
+    # while a ready issue waits for a slot, and the drain books it in its
+    # wake file. It reads the passes' saved ready lists and lists nothing;
+    # its kicks within the gap come to one pass.
+    burrow.events.handlers.proj-inbox-drain = {
+      events = [ ];
+      unit = "proj-inbox-drain";
+      perRepo = false;
+      wake = inboxDrainWake;
+    };
     systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
       description = "Hand GitHub issues labelled ${lib.concatStringsSep ", " (lib.attrNames cfg.inbox.labels)} to proj jobs${lib.optionalString (name == "proj-inbox@") " in %I"}";
       after = [ "network-online.target" ];
@@ -807,7 +820,18 @@ in
         User = user;
         ExecStart = "${inbox}/bin/proj-inbox${lib.optionalString (name == "proj-inbox@") " %I"}";
       };
-    });
+    }) // {
+      proj-inbox-drain = {
+        description = "Hand a ready GitHub issue to an idle slot (proj-inbox's drain)";
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          User = user;
+          ExecStart = "${inbox}/bin/proj-inbox drain";
+        };
+      };
+    };
     systemd.tmpfiles.rules = [ "d ${stateDir}/proj-inbox 0755 ${user} ${config.users.users.${user}.group} -" ];
 
     burrow.claude.machineMd = lib.mkOrder 701 ''

@@ -41,7 +41,6 @@ use serde_json::Value;
 
 use crate::cmd::{New, start_job};
 use crate::config::{Config, Inbox};
-use crate::github::every;
 use crate::job::Job;
 use crate::pick::origin;
 use crate::{Fail, io_fail, now, read, swap};
@@ -56,7 +55,7 @@ const FORGET_WAIT: Duration = Duration::from_secs(600);
 /// What a turn cut off before it answered (proj reply --cut-off) is told.
 const CUT_OFF: &str = "Your last turn was cut off before you answered: its whole unit was killed (out of memory, as a rule), and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
 
-/// `proj-inbox [status | forget OWNER/REPO | OWNER/REPO]`.
+/// `proj-inbox [status | forget OWNER/REPO | drain | OWNER/REPO]`.
 pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     let inbox = cfg
         .inbox
@@ -101,9 +100,21 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         unreached: Vec::new(),
         looked: Vec::new(),
         observe: false,
-        scope: if only.is_empty() { None } else { told() },
+        scope: if only.is_empty() || only == "drain" {
+            None
+        } else {
+            told()
+        },
+        drain_at: None,
+        skipped: Vec::new(),
     };
-    let result = p.run(only).and_then(|()| p.finish(only));
+    // `drain`: the drain's own pass, from the saved ready lists alone.
+    let result = if only == "drain" {
+        p.drain_once()
+    } else {
+        p.run(only)
+    }
+    .and_then(|()| p.finish(only));
     release_parked(cfg, pass);
     result
 }
@@ -194,7 +205,7 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
         ));
     }
-    let permit = resumption::Permit::new(held);
+    let permit = resumption::Permit::pass(held);
     let p = Pass {
         cfg,
         inbox,
@@ -204,6 +215,8 @@ pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         looked: Vec::new(),
         observe: false,
         scope: None,
+        drain_at: None,
+        skipped: Vec::new(),
     };
     let repo = p.plan_done(child, pr, caller)?;
     drop(permit);
@@ -330,6 +343,13 @@ struct Pass<'a> {
     /// the repo's issues, and what it keeps of the others stays as it is.
     /// None: every one, listed.
     scope: Option<BTreeSet<u64>>,
+    /// When the drain's own pass is wanted, as this pass works out
+    /// (drain.rs): written to the drain's wake file as it ends.
+    drain_at: Option<i64>,
+    /// Repos this pass looked at in part, leaving the listing of every
+    /// open issue to a later pass (scope.rs): it says nothing of whether
+    /// that listing reaches GitHub again.
+    skipped: Vec<String>,
 }
 
 impl Pass<'_> {
@@ -711,21 +731,30 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             }
             self.jobs(&repo, &p, &open)?;
             if self.inbox.triage.is_some() {
-                let Some(all) = all.or_else(|| {
-                    every(
-                        self.cfg,
-                        &format!("repos/{repo}/issues?state=open&per_page=100"),
-                    )
-                }) else {
-                    self.miss(&repo);
-                    continue;
+                // Every open issue, listed at most once a gap: a pass sooner
+                // than that leaves triage and the ready list to the pass it
+                // books for the gap's end (scope.rs).
+                let all = match all {
+                    Some(all) => all,
+                    None => {
+                        if let Some(due) = self.listing_due(&repo) {
+                            self.book(&repo, due);
+                            self.skipped.push(repo.clone());
+                            continue;
+                        }
+                        let Some(all) = self.list_all(&repo)? else {
+                            self.miss(&repo);
+                            continue;
+                        };
+                        all
+                    }
                 };
                 self.triage(&repo, &all)?;
                 self.sequence(&repo, &all);
                 self.note_ready(&repo, &all)?;
             }
         }
-        self.drain()
+        self.drain_once()
     }
 
     /// Whether an agent may read the issue: one of the authors opened it,
@@ -798,19 +827,26 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         let text = serde_json::to_string_pretty(&at)
             .map_err(|e| Fail::new(1, format!("proj-inbox: {e}")))?;
         swap(wake, &format!("{text}\n")).map_err(|e| io_fail(wake, e))?;
+        self.wake_drain(now)?;
 
-        // Since when each repo has been out of reach, until a pass reaches it
-        // again in full: a scoped success hasn't verified the failed work.
+        // Since when each repo has been out of reach (the drain's misses
+        // too, whatever pass it ran in), until a pass reaches it again in
+        // full: a scoped success, or a pass that left the listing to a later
+        // one, hasn't verified the failed work.
         let gone = self.inbox.state.join(".unreached");
         fs::create_dir_all(&gone).map_err(|e| io_fail(&gone, e))?;
-        for repo in &self.looked {
+        for repo in &self.unreached {
             let f = gone.join(key(repo));
-            if self.unreached.contains(repo) {
-                if !f.exists() {
-                    fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
-                }
-            } else if self.scope.is_none() {
-                let _ = fs::remove_file(&f);
+            if !f.exists() {
+                fs::write(&f, format!("{now}\n")).map_err(|e| io_fail(&f, e))?;
+            }
+        }
+        for repo in &self.looked {
+            if self.scope.is_none()
+                && !self.unreached.contains(repo)
+                && !self.skipped.contains(repo)
+            {
+                let _ = fs::remove_file(gone.join(key(repo)));
             }
         }
         let left = || -> Vec<(String, PathBuf)> {
@@ -885,6 +921,25 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
     }
 }
 
+impl Pass<'_> {
+    /// The drain's wake file, {"": epoch}, for burrow-events to run its pass
+    /// then: the soonest of what it had still to come and this pass's
+    /// [`Pass::drain_at`].
+    fn wake_drain(&self, now: i64) -> Result<(), Fail> {
+        let Some(want) = self.drain_at else {
+            return Ok(());
+        };
+        let f = &self.inbox.drain_wake;
+        let had = fs::read(f)
+            .ok()
+            .and_then(|t| serde_json::from_slice::<BTreeMap<String, Value>>(&t).ok())
+            .and_then(|m| m.get("").and_then(Value::as_i64))
+            .filter(|at| *at > now);
+        let at = had.map_or(want, |had| had.min(want));
+        swap(f, &format!("{}\n", serde_json::json!({ "": at }))).map_err(|e| io_fail(f, e))
+    }
+}
+
 /// What proj would have said on stderr about a command that didn't work.
 fn say(f: Fail) {
     if let Some(s) = f.say {
@@ -903,7 +958,7 @@ pub(crate) mod resumption;
 mod retirement;
 mod written;
 
-pub(crate) use drain::WAITING;
+pub(crate) use drain::{DRAIN_KICK, WAITING};
 mod planner_waits;
 mod sorting_questions;
 mod triage;
@@ -915,6 +970,8 @@ mod drain_tests;
 mod enrollment_review_tests;
 #[cfg(test)]
 mod handed_tests;
+#[cfg(test)]
+mod once_tests;
 #[cfg(test)]
 mod parking_tests;
 #[cfg(test)]

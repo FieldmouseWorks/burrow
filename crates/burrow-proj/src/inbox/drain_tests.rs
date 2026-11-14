@@ -134,12 +134,13 @@ fn the_drain_picks_across_every_repo() {
         &[boxed.clone(), found("sam/box", 9, "sam", &["later"], old)],
     )
     .unwrap();
-    // Not open any more, as GitHub has it now: left, its repo's pass booked.
+    // Closed, as GitHub has it now: left (and its list put right).
     let mut p = b.pass();
     p.drain().unwrap();
     assert!(!b.log().contains("labels[]="), "{}", b.log());
-    assert!(p.wake.contains_key("sam/box"));
     on_github(&b, &boxed);
+    p.note_ready("sam/box", std::slice::from_ref(&boxed))
+        .unwrap();
     b.pass().drain().unwrap();
     assert!(
         b.log()
