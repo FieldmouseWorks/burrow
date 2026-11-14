@@ -144,6 +144,9 @@ of the commit (`self.rev`, `shortRev`, `revCount`, `lastModified`) is then
 the same for every checkout of the tree, whichever commit it was, shallow
 or full, a repository or a worktree, on the run that attests and on the
 push that asks alike; a flake reads a `revCount` and `lastModified` of 1.
+Relative submodule URLs resolve against what the checkout's would (its
+default remote's URL, or with none the checkout itself), and a checkout
+with changes it hasn't committed is refused: its tree isn't what it holds.
 Its lock file is the tree's too: a lock that needs changing fails the gate.
 The kept-build waiter plans from the same source, and the caller's checkout
 is never touched. The gate says `"source": "tree"`.

@@ -282,6 +282,155 @@ fn with_gate_reuse_a_tree_is_checked_as_its_tree_alone() {
     assert_eq!(g.s.git(&d, &["symbolic-ref", "HEAD"]), "refs/heads/main");
 }
 
+/// gate-reuse refuses a checkout with changes it doesn't commit, in both
+/// modes, rather than check the committed tree in its place: whatever the
+/// change (staged or not, an addition, an edit, a deletion, a mode or a
+/// symlink, a submodule's content), the gate fails and builds nothing.
+#[test]
+fn with_gate_reuse_uncommitted_changes_are_refused() {
+    let g = Gate::new();
+    let sub = g.dir();
+    sub_repo(&g, &sub, "committed");
+    let d = g.flake_with(
+        r#"{ checks.${system}.a = drv "a"; }"#,
+        "inputs.self.submodules = true;",
+    );
+    write(&d.join("other"), "other");
+    std::os::unix::fs::symlink("other", d.join("link")).unwrap();
+    g.s.git(&d, &["add", "other", "link"]);
+    g.s.git(
+        &d,
+        &["submodule", "add", "-q", sub.to_str().unwrap(), "sub"],
+    );
+    g.s.git(&d, &["commit", "-qm", "more"]);
+    let change: [(&str, &dyn Fn()); 7] = [
+        ("a staged addition", &|| {
+            write(&d.join("new"), "new");
+            g.s.git(&d, &["add", "new"]);
+        }),
+        ("a staged edit", &|| {
+            write(&d.join("other"), "edited");
+            g.s.git(&d, &["add", "other"]);
+        }),
+        ("an edit", &|| write(&d.join("other"), "edited")),
+        ("a deletion", &|| fs::remove_file(d.join("other")).unwrap()),
+        ("a mode", &|| {
+            burrow_test::executable(d.join("other"), "other")
+        }),
+        ("a symlink", &|| {
+            fs::remove_file(d.join("link")).unwrap();
+            std::os::unix::fs::symlink("flake.nix", d.join("link")).unwrap();
+        }),
+        ("a submodule's content", &|| {
+            write(&d.join("sub/file"), "changed")
+        }),
+    ];
+    for (what, make) in change {
+        make();
+        for whole in [false, true] {
+            let r = g.run(
+                &d,
+                Run {
+                    whole,
+                    env: &[("TREE_SOURCE", "true")],
+                    ..Run::default()
+                },
+            );
+            assert!(
+                r.fails_with("changes it doesn't hold") && r.builds().is_empty(),
+                "{what}, whole {whole}: {}",
+                r.out
+            );
+        }
+        g.s.git(&d, &["reset", "-q", "--hard"]);
+        g.s.git(&d.join("sub"), &["reset", "-q", "--hard"]);
+        assert_eq!(g.s.git(&d, &["status", "--porcelain"]), "", "clean again");
+    }
+}
+
+/// gate-reuse keeps where relative submodule URLs resolve, in both modes:
+/// beside the checkout with no remote, against its default remote's URL
+/// with one, and so in a worktree of it.
+#[test]
+fn with_gate_reuse_relative_submodules_resolve_as_the_checkouts() {
+    let g = Gate::new();
+    let parent = g.dir();
+    let sub = parent.join("sub");
+    fs::create_dir(&sub).unwrap();
+    sub_repo(&g, &sub, "beside");
+    let d = g.flake_with(SUBMODULE_CHECK, "inputs.self.submodules = true;");
+    let top = parent.join("top");
+    fs::rename(&d, &top).unwrap();
+    g.s.git(&top, &["submodule", "add", "-q", "../sub", "sub"]);
+    g.s.git(&top, &["commit", "-qm", "submodule"]);
+    // A clone elsewhere, whose origin is top: ../sub is beside top still.
+    let elsewhere = g.dir().join("clone");
+    g.s.git(
+        g.s.path(),
+        &[
+            "clone",
+            "-q",
+            "--recurse-submodules",
+            top.to_str().unwrap(),
+            elsewhere.to_str().unwrap(),
+        ],
+    );
+    let worktree = g.dir().join("worktree");
+    g.s.git(
+        &elsewhere,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    for at in [&top, &elsewhere, &worktree] {
+        for whole in [false, true] {
+            let r = g.run(
+                at,
+                Run {
+                    whole,
+                    env: &[("TREE_SOURCE", "true")],
+                    ..Run::default()
+                },
+            );
+            assert_eq!(r.code, 0, "{} whole {whole}: {}", at.display(), r.out);
+            assert!(r.build().contains("-beside.drv^*"), "{}", at.display());
+        }
+    }
+}
+
+/// gate-reuse with the caller's repository named by the environment
+/// (GIT_DIR, GIT_WORK_TREE): it's found there, the private checkout is
+/// made and checked in a git context of its own, and the caller's is left
+/// as it was.
+#[test]
+fn with_gate_reuse_git_locations_in_the_environment_stay_the_callers() {
+    let g = Gate::new();
+    let d = g.flake(r#"{ checks.${system}.a = drv "a-${toString self.revCount}"; }"#);
+    let head = g.s.git(&d, &["rev-parse", "HEAD"]);
+    let refs = g.s.git(&d, &["for-each-ref"]);
+    let (gitdir, worktree) = (d.join(".git"), d.clone());
+    let r = g.run(
+        &d,
+        Run {
+            env: &[
+                ("TREE_SOURCE", "true"),
+                ("GIT_DIR", gitdir.to_str().unwrap()),
+                ("GIT_WORK_TREE", worktree.to_str().unwrap()),
+            ],
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(r.build().contains("-a-1.drv^*"), "{}", r.out);
+    assert_eq!(g.s.git(&d, &["rev-parse", "HEAD"]), head);
+    assert_eq!(g.s.git(&d, &["for-each-ref"]), refs);
+    assert_eq!(g.s.git(&d, &["status", "--porcelain"]), "");
+}
+
 /// gate-reuse, without eval-apart (whose snapshot refuses it already): a
 /// lock file that needs changing fails the gate, rather than pass on inputs
 /// the tree doesn't lock, and the checkout's is left as it was.

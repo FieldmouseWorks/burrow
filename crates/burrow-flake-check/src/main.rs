@@ -27,9 +27,29 @@ fn var(k: &str) -> String {
 fn temp() -> PathBuf {
     PathBuf::from(var("RUNNER_TEMP"))
 }
+/// Where git finds a repository, when the environment says: once gate-reuse's
+/// private source is entered, no command inherits these (source.rs).
+const GIT_LOCATIONS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+];
+static PRIVATE_SOURCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn cmd(p: &str, args: &[&str]) -> Command {
     let mut c = Command::new(p);
     c.args(args);
+    if PRIVATE_SOURCE.load(std::sync::atomic::Ordering::SeqCst) {
+        for k in GIT_LOCATIONS {
+            c.env_remove(k);
+        }
+    }
     c
 }
 fn exit_code(status: std::process::ExitStatus) -> i32 {
