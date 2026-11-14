@@ -34,8 +34,8 @@ let
     inherit (config.burrow.events) kick;
     escalateAfter = cfg.escalateAfterMinutes * 60;
     # The stuck issue is the steward's to publish (autoland/repos.py), on the
-    # pass this kicks.
-    stewardKick = if autoland then "autoland" else null;
+    # continuation this kicks (stewardPublish), not a full pass.
+    stewardKick = if autoland then (import ./autoland/paths.nix config).stewardPublish else null;
     labels = if autoland then { inherit (config.burrow.autoland.labels) owner hold; } else null;
     notify = lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify);
     inherit (config.burrow) owner;

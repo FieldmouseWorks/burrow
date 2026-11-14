@@ -94,6 +94,6 @@ pub(crate) fn tend(cfg: &Config, job: &Job) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
-    crate::job::kick(cfg, vec!["autoland".into()]);
+    crate::job::republish(cfg);
     Ok(())
 }

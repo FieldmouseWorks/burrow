@@ -19,4 +19,10 @@ in
   # Where a repo's pass is kicked: the reviewers' service kicks it when an
   # answer comes back, the steward when it books one.
   stewardKick = "${config.burrow.events.kick}/autoland";
+  # The handler that carries on a traversal a full pass yielded, or with
+  # none under way only publishes the owner's issue and the stuck issue
+  # (steward.run_pass): what to kick when only those changed (a stall the
+  # watchdog took, a job's question), never the full pass, which would
+  # start a slice over every repo each time.
+  stewardPublish = "autoland-continue";
 }

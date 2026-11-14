@@ -544,6 +544,13 @@ pub fn kick(cfg: &Config, names: impl IntoIterator<Item = String>) {
     }
 }
 
+/// Have the steward publish the owner's issue again, which lists the jobs'
+/// questions (`proj _questions`): its publishing door, never its full pass,
+/// which would spend a slice over every repo for one issue.
+pub fn republish(cfg: &Config) {
+    kick(cfg, cfg.steward_publish.clone());
+}
+
 /// A unit name's part, as systemd-escape writes it: `/` becomes `-`, and
 /// each byte that isn't a letter, digit, `:`, `_` or `.` (or is a leading
 /// `.`) becomes `\xNN`.

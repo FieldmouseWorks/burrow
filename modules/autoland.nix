@@ -27,7 +27,7 @@ let
   rv = cfg.reviewers;
   # The reviewers' user, the queue and snapshots it reads, and the kick,
   # as the reviewers' service (autoland/review.nix) has them.
-  inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
+  inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick stewardPublish;
   # burrow-upkeep, what keeps up each repo besides its PRs.
   burrowUpkeep = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-upkeep;
   # burrow-proof, what runs a proof that's a command (a repo's proofRuns).
@@ -180,7 +180,7 @@ let
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
     kick = stewardKick;
-    continuationKick = "${config.burrow.events.kick}/autoland-continue";
+    continuationKick = "${config.burrow.events.kick}/${stewardPublish}";
     reviewers = {
       codex = { inherit (rv.codex) enable; };
     };

@@ -198,7 +198,8 @@ fn start_with(
         false
     };
     if crate::ask::host_path(&job, "label").exists() {
-        crate::job::kick(cfg, ["proj-watch".into(), "autoland".into()]);
+        kick(cfg, ["proj-watch".to_owned()]);
+        crate::job::republish(cfg);
     }
     if reconcile_pending || crate::question::needs_watch(&job) {
         kick(cfg, ["proj-watch".to_owned()]);

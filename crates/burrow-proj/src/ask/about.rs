@@ -393,6 +393,7 @@ pub(crate) fn merge(cfg: &Config, key: &str, ids: &[String]) -> Result<String, S
     state.save(cfg)?;
     drop(_lock);
     drop(held);
-    crate::job::kick(cfg, ["proj-watch".to_owned(), "autoland".to_owned()]);
+    crate::job::kick(cfg, ["proj-watch".to_owned()]);
+    crate::job::republish(cfg);
     Ok(leader)
 }

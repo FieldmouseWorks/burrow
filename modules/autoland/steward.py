@@ -242,6 +242,12 @@ def run_pass(kick, continuing=False):
     batch = Batch(kick, continuing)
     if not batch.active(kick):
         batch.end(True, kick)
+        if kick is None and load(C.RETRY_AFTER, 0) <= C.NOW:
+            # No traversal to carry on: kicked for the owner's issues alone
+            # (the watchdog's stuck issue, proj's job questions), which need
+            # no pass over every repo (one under way publishes them as it
+            # yields), only the last one's digest.
+            publish(load("digest-repos.json", {}))
         return
     if (at := load(C.RETRY_AFTER, 0)) > C.NOW:
         # Even discovery is remote work. A startup or local event must not
@@ -462,9 +468,15 @@ def run_pass(kick, continuing=False):
     batch.end(complete, kick)
     if kick is None and batch.traversal_full and complete:
         R.hooks(all_repos)
-    # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once. The stalls the
-    # watchdog took past a Claude job go on the stuck issue with the rest.
+    # Last: GitHub failing it leaves the pass's state saved.
+    publish(digest)
+
+
+def publish(digest):
+    """The owner's issue and the stuck issue, from what waits by repo. A
+    line more than one repo has (a reviewer out of service) is listed once.
+    The stalls the watchdog took past a Claude job go on the stuck issue
+    with the rest."""
     R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + waits.escalated())
 
 

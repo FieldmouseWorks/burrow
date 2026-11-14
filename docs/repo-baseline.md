@@ -54,6 +54,12 @@ or deadlines. Train steps, branch cleanup and upkeep wait for the repo's
 traversal to complete, retaining previous failure-watch clocks until those
 operations are retried. Later repos retain their notices and watches.
 
+Every pass publishes the owner's issue and the stuck issue at its end. What
+changes only those (a stall the watchdog took, a job's question) kicks
+`autoland-continue`, never the full pass: with a traversal under way the
+continuation's slice publishes them as it yields, and with none it
+publishes them from the last digest and passes over no repo.
+
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and
 change nothing else in the same PR.

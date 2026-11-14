@@ -829,9 +829,10 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
     crate::policy::wake(cfg);
     rewatch(cfg, &[id]);
     let mut names = lines(&job.path("kick"));
-    if !matches!(crate::ask::load(&job), Ok(None)) || crate::ask::host_path(&job, "label").exists()
-    {
-        names.extend(["proj-watch".into(), "autoland".into()]);
+    let asks = !matches!(crate::ask::load(&job), Ok(None))
+        || crate::ask::host_path(&job, "label").exists();
+    if asks {
+        names.push("proj-watch".into());
     }
     if crate::question::needs_watch(&job) {
         names.push("proj-watch".into());
@@ -847,6 +848,9 @@ pub(crate) fn finish(cfg: &Config, id: &str) -> Result<(), Fail> {
         names.push(format!("proj-inbox/{repo}"));
     }
     kick(cfg, names);
+    if asks {
+        crate::job::republish(cfg);
+    }
     // A job this turn left over has its scratch cleared, after the kicks so
     // nothing waits on it; its next turn (a reply) starts only once this has
     // ended, and makes its own afresh.
