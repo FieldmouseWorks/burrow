@@ -1,14 +1,17 @@
 //! Claude stream and usage contracts, including empty resume results.
 
-use super::{claude_limit, is_error};
+use super::{Refusal, claude_limit, is_error};
 use serde_json::Value;
 
-/// Whether a run ended refused for usage, and if so when Claude Code says
-/// the limit resets (None when it doesn't) and a normalized limit name. `last` is the
-/// run's result; `stream` its lines, where the reset time is as a
-/// timestamp; failing that, its words say it ([`crate::limit`]), read at
-/// `now`.
-pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, String)> {
+/// Whether a run ended refused, for usage or for its login. For usage, when
+/// Claude Code says the limit resets (None when it doesn't) and a
+/// normalized limit name. `last` is the run's result; `stream` its lines,
+/// where the reset time is as a timestamp; failing that, its words say it
+/// ([`crate::limit`]), read at `now`. For its login, the stream's own
+/// `error` says so (`authentication_failed`, on the message Claude Code
+/// makes of the API's refusal): an OAuth session that couldn't be
+/// refreshed, or the API turning the credentials away.
+pub fn refused(last: &Value, stream: &str, now: i64) -> Option<Refusal> {
     refused_records(
         last,
         stream
@@ -22,17 +25,17 @@ pub(super) fn refused_records(
     last: &Value,
     records: impl Iterator<Item = Value>,
     now: i64,
-) -> Option<(Option<i64>, String)> {
+) -> Option<Refusal> {
     if !is_error(last) {
         return None;
     }
     let said = last["result"].as_str().unwrap_or_default().trim();
-    if last["api_error"] != "usage_limit_reached" && !limit_words(said) {
-        return None;
-    }
+    let usage = last["api_error"] == "usage_limit_reached" || limit_words(said);
     let mut until = None;
     let mut named = None;
+    let mut login = false;
     for v in records {
+        login |= v["error"] == "authentication_failed";
         for info in [
             &v["api_error_params"]["rate_limit_info"],
             &v["rate_limit_info"],
@@ -51,6 +54,17 @@ pub(super) fn refused_records(
             }
         }
     }
+    if !usage {
+        return login.then(|| Refusal {
+            until: None,
+            said: if said.is_empty() {
+                "Failed to authenticate".into()
+            } else {
+                said.to_owned()
+            },
+            login: true,
+        });
+    }
     // Claude Code's older answer gives its reset after a bar:
     // "Claude AI usage limit reached|1730000000".
     if until.is_none()
@@ -58,7 +72,7 @@ pub(super) fn refused_records(
     {
         until = t.trim().parse().ok();
     }
-    Some((
+    Some(Refusal::usage(
         until.or_else(|| claude_limit::resets(said, now)),
         format!(
             "Claude reached its {}",
@@ -79,7 +93,7 @@ fn limit_words(said: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Older streams have only words; never pass their billing instructions on.
 fn limit_name(said: &str) -> &'static str {

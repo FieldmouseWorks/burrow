@@ -931,6 +931,8 @@ fn pending(r: &Rig, id: &str, retained: bool) -> (Checkpoint, String) {
     (state, name)
 }
 
+mod login;
+
 mod review2;
 
 mod review3;

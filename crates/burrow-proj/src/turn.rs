@@ -23,9 +23,9 @@ use crate::{
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
 
-/// What a run refused for usage is told in the next, once it's back, with
-/// what it was refused saying and the turn's prompt.
-pub(crate) const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every Claude job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
+/// What a run refused for its usage or login is told in the next, once
+/// it's back, with what it was refused saying and the turn's prompt.
+pub(crate) const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, or its login was refused, and every Claude job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
 
 /// Start the job's next turn with this prompt, ahead of the line or not.
 /// Fails, saying why, when it can't: the job is then as it was.
@@ -502,16 +502,16 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             crate::waits::rewatch_all(cfg);
             return Ok(());
         }
-        // Refused because the plan's usage is spent: so is every other
-        // turn's, until the limit resets (usage.rs). This one gives up its
-        // slot and waits in line again, where none is handed out till then,
-        // and runs once more in its own conversation, its clock stood still
-        // meanwhile. Any other answer says usage is there.
+        // Refused because the plan's usage is spent or its login refused:
+        // so is every other turn's, until it's back (usage.rs). This one
+        // gives up its slot and waits in line again, where none is handed
+        // out till then, and runs once more in its own conversation, its
+        // clock stood still meanwhile. Any other answer says usage is there.
         let refusal = last
             .as_ref()
             .and_then(|l| engine::refused_file(choice.engine, l, &stream, from, now()));
         if choice.engine == Engine::Codex {
-            if let Some((Some(due), _)) = &refusal {
+            if let Some(due) = refusal.as_ref().and_then(|r| r.until) {
                 if let Err(e) = crate::state_reads::write(
                     job.path("await"),
                     format!("{USAGE_LIMIT}\t{}\t{due}\n", now()),
@@ -538,10 +538,10 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             }
         }
         match refusal {
-            Some((until, said)) => {
+            Some(ref refused @ engine::Refusal { ref said, .. }) => {
                 // A hold that can't be written holds nothing: this turn
                 // ends refused, as one did before the hold.
-                let spent = match usage::record(cfg, id, until, &said, now()) {
+                let spent = match usage::refused(cfg, id, refused, now()) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("{e}: so the turn ends here, refused");
@@ -566,7 +566,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                     drop(held.take());
                     rewatch(cfg, &[id]);
                     let waited = now_nanos();
-                    crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, &said)
+                    crate::retry::Checkpoint::retry(&job, &n, given == Class::First, waited, said)
                         .map_err(|e| Fail::new(1, e.to_string()))?;
                     crate::snapshot::stream::notify(cfg);
                     let _ = held.insert(take(true)?);

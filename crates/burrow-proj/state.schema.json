@@ -664,6 +664,11 @@
       "description": "No turn of the engine starts while it holds.",
       "type": "object",
       "properties": {
+        "login": {
+          "description": "Refused for the engine's login, not its usage: the next turn after\n`until` tests it again.",
+          "type": "boolean",
+          "default": false
+        },
         "owner": {
           "description": "The owner paused it (`proj usage hold`), rather than a refusal.",
           "type": "boolean"

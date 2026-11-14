@@ -117,6 +117,7 @@ fn full() -> Snapshot {
             }),
             hold: Some(UsageHold {
                 owner: true,
+                login: false,
                 since: 1_799_999_000,
                 until: 1_800_003_600,
                 reason: "paused".into(),

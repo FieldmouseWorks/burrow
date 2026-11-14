@@ -77,7 +77,7 @@ fn final_answer_is_last_agent_message_and_limit_uses_shared_parser() {
     assert_eq!(
         super::super::refused(Engine::Codex, &error, "", 100)
             .unwrap()
-            .0,
+            .until,
         Some(1300)
     );
 }
@@ -202,7 +202,7 @@ fn large_transcripts_keep_results_sessions_offsets_questions_and_handoffs() {
     assert_eq!(
         crate::engine::refused_file(Engine::Claude, &last, &stream, offset, 0)
             .unwrap()
-            .0,
+            .until,
         Some(1234567890)
     );
 }
