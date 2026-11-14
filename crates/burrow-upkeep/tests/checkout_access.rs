@@ -8,7 +8,7 @@ use rustix::fs::{XattrFlags, fgetxattr, fremovexattr, fsetxattr};
 use rustix::io::Errno;
 use rustix::time::{ClockId, clock_gettime};
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+use std::os::unix::fs::{MetadataExt, chown};
 use std::path::Path;
 
 const ACCESS: &str = "system.posix_acl_access";
@@ -58,10 +58,6 @@ fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().mode() & 0o7777
 }
 
-fn chmod(path: &Path, mode: u32) {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-}
-
 /// What the published checkout's root must keep of its folder.
 fn controls(path: &Path) -> (u32, u32, u32, Option<Vec<u8>>, Option<Vec<u8>>) {
     let m = fs::metadata(path).unwrap();
@@ -92,7 +88,7 @@ fn publication_keeps_the_folders_access_controls() {
     // Restrictive: a private folder stays private, not the umask's 0755.
     let dest = projects.join("private");
     fs::create_dir(&dest).unwrap();
-    chmod(&dest, 0o700);
+    burrow_test::permissions(&dest, 0o700);
     let had = controls(&dest);
     clone_with(&gh, "o/private", &dest, deadline()).unwrap();
     assert_eq!(controls(&dest), had, "a private folder's controls");
@@ -112,10 +108,10 @@ fn publication_keeps_the_folders_access_controls() {
     }
     // Nix's build sandbox refuses setgid with EPERM: there the sticky bit
     // stands in for it as the special bit kept.
-    let setgid = fs::set_permissions(&dest, fs::Permissions::from_mode(0o2775)).is_ok();
+    let setgid = burrow_test::try_permissions(&dest, 0o2775).is_ok();
     if !setgid {
         eprintln!("setgid can't be set here: the sticky bit stands in");
-        chmod(&dest, 0o1775);
+        burrow_test::permissions(&dest, 0o1775);
     }
     let had = controls(&dest);
     clone_with(&gh, "o/shared", &dest, deadline()).unwrap();
@@ -149,7 +145,7 @@ fn publication_keeps_the_folders_access_controls() {
     // A folder filled during the clone is neither replaced nor changed.
     let dest = projects.join("filled");
     fs::create_dir(&dest).unwrap();
-    chmod(&dest, 0o750);
+    burrow_test::permissions(&dest, 0o750);
     let racer = tmp.path().join("racer");
     burrow_test::executable(
         &racer,
@@ -213,7 +209,7 @@ fn acl_cases(tmp: &Path, projects: &Path, gh: &str, me: u32) {
             Err(e) => panic!("{name}: {e}"),
         }
     }
-    chmod(&dest, 0o700);
+    burrow_test::permissions(&dest, 0o700);
     let had = controls(&dest);
     assert_eq!((had.3.clone(), had.4.clone()), (None, None));
     clone_with(gh, "o/app", &dest, deadline()).unwrap();

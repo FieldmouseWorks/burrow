@@ -33,13 +33,19 @@ pub fn executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
 /// Change fixture permissions, never making a regular file executable.
 /// Directories need search bits; executable files must use [`executable`].
 pub fn permissions(path: impl AsRef<Path>, mode: u32) {
+    try_permissions(path, mode).unwrap();
+}
+
+/// [`permissions`], returning the error for a test that probes whether the
+/// system lets a mode be set (a sandbox refusing setgid, say).
+pub fn try_permissions(path: impl AsRef<Path>, mode: u32) -> std::io::Result<()> {
     let path = path.as_ref();
     assert!(
-        fs::metadata(path).unwrap().is_dir() || mode & 0o111 == 0,
+        fs::metadata(path)?.is_dir() || mode & 0o111 == 0,
         "use burrow_test::executable for {}",
         path.display()
     );
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 /// Copy a data fixture, refusing executable sources or destinations.
@@ -90,6 +96,13 @@ mod tests {
     fn permissions_cannot_make_a_file_executable() {
         let file = tempfile::NamedTempFile::new().unwrap();
         permissions(file.path(), 0o755);
+    }
+
+    #[test]
+    #[should_panic(expected = "use burrow_test::executable")]
+    fn trying_permissions_cannot_make_a_file_executable() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let _ = try_permissions(file.path(), 0o755);
     }
     #[test]
     #[should_panic(expected = "use burrow_test::executable")]
