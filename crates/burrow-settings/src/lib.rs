@@ -23,6 +23,10 @@ pub struct Config {
     pub allowed: Vec<String>,
     #[serde(default)]
     pub pipeline_repos: Vec<String>,
+    /// `burrow.claude.effort`: where every role's Claude effort starts. A
+    /// declared default of `proj.models`, never a pin: a live change wins.
+    #[serde(default)]
+    pub claude_effort: Option<String>,
 }
 
 /// A scheduling decision and its next change without another external event.

@@ -147,12 +147,21 @@ conversation when a role moves between them. A steward judge follows its
 role like any other.
 
 Nothing is an implicit fallback: the schema declares each default and
-`proj settings show` shows it as one. Every role runs on Claude (`*`)
-but the planner, on Codex, which needs an explicit model to run on Claude;
-a role with no model runs at its engine's own (`* claude`, `* codex`,
+`proj settings show` shows it as one, with its source (`default` or
+`live`). Every role runs on Claude (`*`) but the planner, on Codex, and
+`update`, `backup` and `firmware`, which are Claude with no overflow by
+policy (the reasons are in the `proj.roles` entry, and a live `role` line
+changes any of them like any other). Any of them can run on either engine,
+with or without a model. proj with no settings configured routes nothing.
+A role with no model runs at its engine's own (`* claude`, `* codex`,
 model and effort null): for Claude, the job user's
-`~/.claude/settings.json` `model` and the machine's `burrow.claude.effort`;
-for Codex, the job user's `.codex/config.toml`. The tuning for the engine a
+`~/.claude/settings.json` `model`; for Codex, the job user's
+`.codex/config.toml`. The flake's `burrow.claude.effort` is where
+`* claude`'s effort starts, a declared default a live `model` line
+replaces; it is never written into Claude Code's managed settings
+(`/etc/claude-code/managed-settings.json`, here or in agent sandboxes),
+which would outrank the live settings. proj passes the settings' model and
+effort to each turn as flags. The tuning for the engine a
 turn ends on applies, overflow included. New sandbox
 guests (`agent new`, `proj run --vm`) copy the user's Claude `model` and its
 `env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE`

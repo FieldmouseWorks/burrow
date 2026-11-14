@@ -116,18 +116,11 @@ pub(crate) fn resolve(
         engine = Engine::parse(e)?;
     }
     let tuning = settings.tuning(role, repo, engine.name());
-    let choice = Choice {
+    Ok(Choice {
         engine,
         model: tuning.model,
         effort: tuning.effort,
-    };
-    if role == "planner" && choice.engine == Engine::Claude && choice.model.is_none() {
-        return Err(
-            "the planner role requires an explicit small model on Claude; its default is Codex"
-                .into(),
-        );
-    }
-    Ok(choice)
+    })
 }
 
 /// Normalized terminal records let the job lifecycle and log reader share outcomes.
@@ -226,30 +219,122 @@ mod tests {
     use crate::config::tests::set;
 
     #[test]
-    fn planning_defaults_to_codex_and_never_falls_through_to_the_claude_default() {
+    fn planning_is_a_declared_default_with_no_fallback_or_model_restriction() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
         assert_eq!(
             resolve(&cfg, "planner", None, None).unwrap().engine,
             Engine::Codex
         );
+        // Live, at the next decision: Claude with no model needs no
+        // explicit small model, and the planner's own model and effort win.
         set(&mut cfg, tmp.path(), &["role planner claude"]);
-        assert!(
-            resolve(&cfg, "planner", None, None)
-                .unwrap_err()
-                .contains("explicit small model")
+        assert_eq!(
+            resolve(&cfg, "planner", None, None).unwrap(),
+            Choice {
+                engine: Engine::Claude,
+                model: None,
+                effort: None
+            }
         );
         set(
             &mut cfg,
             tmp.path(),
             &[
                 "offer claude models selected",
-                "model planner claude selected",
+                "model planner claude selected high",
             ],
         );
         let chosen = resolve(&cfg, "planner", None, None).unwrap();
         assert_eq!(chosen.engine, Engine::Claude);
         assert_eq!(chosen.model.as_deref(), Some("selected"));
+        assert_eq!(chosen.effort.as_deref(), Some("high"));
+        set(&mut cfg, tmp.path(), &["role planner codex"]);
+        assert_eq!(
+            resolve(&cfg, "planner", None, None).unwrap().engine,
+            Engine::Codex
+        );
+    }
+
+    #[test]
+    fn update_backup_and_firmware_stay_on_claude_and_never_spill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let meters = tmp.path().join("meters");
+        fs::create_dir_all(&meters).unwrap();
+        // Claude's week is used up and Codex has credits: anything with an
+        // overflow would move.
+        fs::write(
+            meters.join("claude.json"),
+            json!({"windows": {"seven_day": {"used": 100.0, "resets_at": 20000}}, "credits": false, "read_at": crate::now()}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            meters.join("codex.json"),
+            json!({"windows": {"300m": {"used": 1.0, "resets_at": 20000}}, "credits": true, "read_at": crate::now()}).to_string(),
+        )
+        .unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.meters = Some(meters);
+        // Every other role overflows to Codex, as `*` is told; the
+        // deliberate three do not, by their own declared routes.
+        set(&mut cfg, tmp.path(), &["role * claude over 50 codex"]);
+        assert_eq!(
+            resolve(&cfg, "routine", None, None).unwrap().engine,
+            Engine::Codex
+        );
+        for (role, _) in burrow_settings::roles::CLAUDE_ONLY {
+            assert_eq!(
+                resolve(&cfg, role, None, None).unwrap().engine,
+                Engine::Claude,
+                "{role}"
+            );
+            assert_eq!(
+                resolve(&cfg, role, Some("sam/box"), None).unwrap().engine,
+                Engine::Claude,
+                "{role}"
+            );
+        }
+        // Their declared route is the live setting: changing it moves them.
+        set(&mut cfg, tmp.path(), &["role update codex"]);
+        assert_eq!(
+            resolve(&cfg, "update", None, None).unwrap().engine,
+            Engine::Codex
+        );
+    }
+
+    #[test]
+    fn an_unspecified_roles_declared_defaults_change_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        assert_eq!(
+            resolve(&cfg, "never-heard-of", None, None).unwrap(),
+            Choice::default()
+        );
+        set(
+            &mut cfg,
+            tmp.path(),
+            &[
+                "offer codex models small",
+                "model * codex small low",
+                "role * codex",
+            ],
+        );
+        assert_eq!(
+            resolve(&cfg, "never-heard-of", None, None).unwrap(),
+            Choice {
+                engine: Engine::Codex,
+                model: Some("small".into()),
+                effort: Some("low".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn roles_cannot_be_routed_while_settings_are_unconfigured() {
+        let mut cfg: Config = serde_json::from_value(crate::config::tests::example()).unwrap();
+        cfg.settings = None;
+        let err = resolve(&cfg, "routine", None, None).unwrap_err();
+        assert!(err.contains("settings are not configured"), "{err}");
     }
 
     #[test]

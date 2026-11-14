@@ -718,8 +718,10 @@ in
       `ROLE@OWNER/REPO` beats the bare role in that repo, a named role beats `*`.
       A role moves to its `over PCT ENGINE` when its own engine's fresh meter has
       any window at PCT and no credits, or Claude is out of usage, and the other
-      engine's has room. The planner defaults to Codex and needs an explicit
-      small model to use Claude.
+      engine's has room. The planner defaults to Codex; update, backup and
+      firmware default to Claude with no overflow, by policy. All of these are
+      declared defaults that `proj settings show` names, and a live line changes
+      any of them at the next decision.
       Codex has ${toString cfg.codex.slots} slots of its own. Log the job user in with
       `autoland-codex-login job`, separately from the reviewer's login. Codex
       jobs cannot run in agent VMs. ${if machineApp == null

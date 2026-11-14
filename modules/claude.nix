@@ -39,8 +39,6 @@ let
         ];
       }
     ];
-  } // lib.optionalAttrs (cfg.effort != null) {
-    effortLevel = cfg.effort;
   }) cfg.extraSettings;
 
   robot = config.burrow.robot.enable or false;

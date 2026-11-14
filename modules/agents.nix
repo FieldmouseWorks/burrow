@@ -31,7 +31,6 @@ let
           inherit (account) uid group home;
           inherit gid;
           claudePackage = config.burrow.claude.package;
-          claudeEffort = config.burrow.claude.effort;
         };
         microvm.mem = cfg.memory;
         microvm.vcpu = cfg.vcpus;

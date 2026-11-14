@@ -113,7 +113,9 @@ impl Config {
     pub fn role_view(&self) -> Result<View, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        let in_force = doc.routing.in_force(&doc.offers)?;
+        let in_force = doc
+            .routing
+            .in_force(&doc.offers, self.claude_effort.as_deref())?;
         Ok(View {
             in_force,
             set: (
@@ -141,7 +143,8 @@ impl Config {
     pub fn engines(&self) -> Result<String, String> {
         let doc = self.roles_doc()?;
         self.ready(&doc, false)?;
-        doc.routing.in_force(&doc.offers)?;
+        doc.routing
+            .in_force(&doc.offers, self.claude_effort.as_deref())?;
         let active = active(&doc.routing, &doc.setups);
         Ok(status(active.as_deref(), &doc.routing, &doc.setups))
     }
@@ -196,6 +199,10 @@ impl Config {
             |doc: &mut Document| {
                 self.ready(doc, true)?;
                 let answer = apply(&mut doc.routing, &mut doc.offers, &mut doc.setups, words)?;
+                // The result must stay readable with the flake's starting
+                // effort too, or no turn could resolve its role.
+                doc.routing
+                    .in_force(&doc.offers, self.claude_effort.as_deref())?;
                 // With no migration source configured this is a fresh store.
                 // Its first accepted mutation establishes the complete state;
                 // a later import must not resurrect values it deliberately lacks.
@@ -237,7 +244,7 @@ impl Config {
                     }
                 }
                 let routing = from.routing;
-                routing.in_force(&offers)?;
+                routing.in_force(&offers, self.claude_effort.as_deref())?;
                 let setups = from.setups;
                 for (name, setup) in &setups.saved {
                     if !valid_setup(name) {
