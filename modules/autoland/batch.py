@@ -117,9 +117,6 @@ class Batch:
         st["stops"] = {k: v for k, v in st.get("stops", {}).items() if k in live}
         st["unseen"] = [k for k in st.get("unseen", []) if k in live]
         pending = [pr for pr in prs if done.get(str(pr["number"])) != self.rev(pr, info)]
-        if st and pending and not any(self.due(repo, pr) for pr in pending):
-            # Each pending PR has had its look this round: the next starts.
-            st["round"] = st.get("sequence", 1)
         # A closed or changed PR's old owner line mustn't suppress its new
         # watchdog wait. Repo-wide notices survive until its traversal ends.
         keep = {f"[{repo}#{pr['number']}](" for pr in prs if pr not in pending}
@@ -152,6 +149,15 @@ class Batch:
         would take each slice again and the rest wait for good: each open
         PR gets a look before any gets its second."""
         return self.visited(repo, pr) <= self.state["repos"].get(repo.lower(), {}).get("round", 0)
+
+    def turn(self, repo, pending):
+        """Starts the next round once each pending PR has had its look in
+        this one. The pass calls it before every visit, so the round ends
+        where its last look did: a look past it, later in the same slice,
+        counts in the next round rather than making its PR due again."""
+        st = self.state["repos"].get(repo.lower())
+        if st and pending and not any(self.due(repo, pr) for pr in pending):
+            st["round"] = st.get("sequence", 1)
 
     def stopped(self, repo):
         return next(iter(self.state["repos"].get(repo.lower(), {}).get("stops", {}).values()), None)
