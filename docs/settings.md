@@ -70,6 +70,7 @@ The host's `settings` command and `proj settings` share the write door:
 settings show
 settings pause OWNER/REPO
 settings allow OWNER/REPO
+settings land OWNER/REPO#N HEAD
 proj usage hold UNIX_TIMESTAMP --only pipeline
 proj usage back
 ```
@@ -113,6 +114,37 @@ Question and await deadlines advance by the parked duration. The overlay path
 wakes reconciliation immediately, scope expiry books its own wake, and a
 short recovery timer handles a machine restart or interrupted reconciliation.
 Turn completions and inbox admission changes also wake control directly.
+
+### Handing one PR to the steward
+
+`settings land OWNER/REPO#N HEAD` (or the door's `land OWNER/REPO#N HEAD`)
+hands one PR, at its full head commit id, to the steward while its
+repository stays paused: the sanctioned way for a session to have a PR in a
+paused repo merged, since the steward is what merges. It is the same
+authority as `allow` (the machine user, or the door's authors), scoped to
+far less, and logged with its actor like every write. The handoff admits
+that PR's own steward pass and its landing at that head, and nothing else:
+
+- every landing requirement still holds: a clean review of the change on
+  that head, every thread resolved, CI green, proofs passed, no hold or
+  owner label, a judge's verdict where one is owed, and the train's own
+  checks where the repo has one;
+- whatever it still needs is paused with the repository: no Claude job
+  (a fix, a judge, a proof job), no proof build or run and no review starts
+  for it, so a PR missing any of them keeps waiting, its status saying so;
+- another head isn't the one handed, so a push since keeps it paused; a new
+  request for the new head replaces the old one;
+- in a train repo it may join the train, and the train steps only while
+  every PR in it is handed, so no other PR lands with it;
+- it is one-shot: the steward spends it once the PR has merged, and on the
+  repo's next pass after the PR has closed or the train landed it, so a
+  redelivered request (a door receipt answers again without writing),
+  duplicate event or restarted steward finds nothing to reuse;
+- a `pause OWNER/REPO` written after it revokes every handoff in the repo.
+
+`settings show` lists the outstanding handoffs, and `decision OWNER/REPO`
+gives them (`handed`) to the steward
+([admission.py](../modules/autoland/admission.py)).
 
 Automation binds its repository identity in host-owned control state before
 launch. A missing identity fails closed; deliberately local automated work

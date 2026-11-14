@@ -187,6 +187,10 @@ def ask(repo, pr, key, r, rs, after):
         # a hiccup gets time to pass before all three are spent.
         after(rs["failedAt"], 5)  # ends: three tries, then hourly, and listed
         return
+    # Reviews are paused with the repo, a PR handed to the steward's too: it
+    # lands only on a review it already has (admission.py).
+    if C.paused(repo):
+        raise C.JobPaused(f"{repo}: reviews paused")
     try:
         queue(repo, pr, key, r)
     except Exception as e:  # the snapshot: GitHub, git, the disk

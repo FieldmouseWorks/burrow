@@ -247,6 +247,12 @@ root only.
    updates close the same way: their bot need not run again to retire work
    already present on the base, and they are never cleared to merge.
 
+A repo whose automated work is paused (docs/settings.md) has its PRs wait
+too, the steward posting why; one PR can still land through it when a
+trusted request hands it over at its head
+([Handing one PR to the steward](settings.md#handing-one-pr-to-the-steward)),
+on every check above and nothing more.
+
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside
 contributions. What the pipeline itself is stuck on (a reviewer that keeps
