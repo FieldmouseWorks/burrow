@@ -6,7 +6,9 @@
 # pipeline whose proofs and jobs run as user units (PSIV#624: a gate's test
 # failed so, at the moment a switch went live). switch-to-configuration,
 # patched by the module (user_reexec.rs), re-executes a user manager only
-# when it runs another systemd binary than the new system's, as it does PID 1.
+# when it runs another systemd binary than the new system's, or user.conf
+# changed (some of its settings only a starting manager applies), as it does
+# PID 1.
 #
 #   nix build .#checks.x86_64-linux.switch-user-reexec -L
 { self, pkgs }:
@@ -33,6 +35,13 @@ pkgs.testers.runNixOSTest {
       environment.etc.switch-test.text = "next";
       systemd.user.services.mark.environment.FLAVOUR = "next";
     };
+
+    # A user.conf setting only a starting manager applies (systemd's
+    # initialize_runtime), with systemd itself unchanged.
+    specialisation.slack.configuration = {
+      environment.etc.switch-test.text = "slack";
+      systemd.user.extraConfig = "TimerSlackNSec=1ms";
+    };
   };
 
   testScript = ''
@@ -46,6 +55,7 @@ pkgs.testers.runNixOSTest {
     base = machine.succeed("readlink -f /run/current-system").strip()
     machine.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {base} /nix/var/nix/profiles/system")
     nxt = machine.succeed(f"readlink -f {base}/specialisation/next").strip()
+    slack = machine.succeed(f"readlink -f {base}/specialisation/slack").strip()
 
     def reexecs():
         return int(machine.succeed(
@@ -54,6 +64,10 @@ pkgs.testers.runNixOSTest {
 
     def socket():
         return machine.succeed("stat -c %i /run/user/1000/systemd/private").strip()
+
+    def timer_slack():
+        pid = machine.succeed("systemctl show -P MainPID user@1000.service").strip()
+        return int(machine.succeed(f"cat /proc/{pid}/timerslack_ns"))
 
     with subtest("a switch that keeps systemd reloads the user manager without re-executing it"):
         before, inode = reexecs(), socket()
@@ -85,6 +99,19 @@ pkgs.testers.runNixOSTest {
         # The reload still took the new unit files.
         machine.succeed(f"{user} systemctl --user restart mark.service")
         machine.succeed("grep -qx next /run/user/1000/mark")
+        machine.succeed("machine-confirm")
+
+    with subtest("a switch that changes user.conf still re-executes the user manager"):
+        before = reexecs()
+        assert timer_slack() != 1000000
+        rc, out = machine.execute(
+            f"BURROW_CONFIRM_WITHIN={window}s machine-switch --toplevel {slack} 2>&1",
+            timeout=2 * window,
+        )
+        assert rc == 0 and f"live: {slack}" in out, out
+        assert reexecs() - before == 1, out
+        # Its setting took: a reload alone leaves it unapplied.
+        assert timer_slack() == 1000000, timer_slack()
         machine.succeed("machine-confirm")
   '';
 }

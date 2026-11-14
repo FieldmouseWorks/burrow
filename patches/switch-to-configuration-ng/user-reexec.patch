@@ -4,37 +4,45 @@
  
  // burrow: never wait on a job queued behind a run already going.
  mod held;
-+// burrow: re-execute a user manager only for a new systemd binary.
++// burrow: re-execute a user manager only for what only that applies.
 +mod user_reexec;
  
  mod systemd_manager {
      #![allow(non_upper_case_globals)]
-@@ -1548,7 +1550,10 @@ fn do_user_switch(parent_exe: String) -> anyhow::Result<()> {
+@@ -1548,7 +1550,13 @@ fn do_user_switch(parent_exe: String) -> anyhow::Result<()> {
  
      // The systemd user session seems to not send a Reloaded signal, so we don't have anything to
      // wait on here.
 -    _ = systemd.reexecute();
-+    // burrow: only when the manager runs another systemd than the new one.
-+    if user_reexec::wanted(std::env::var(user_reexec::ENV).ok().as_deref()) {
++    // burrow: only when the switch changes what only a re-execution applies.
++    if user_reexec::wanted(
++        std::env::var(user_reexec::ENV).ok().as_deref(),
++        user_reexec::own_config(user_config_unit_dir.as_deref().and_then(Path::parent)),
++    ) {
 +        _ = systemd.reexecute();
 +    }
  
      // Reset failed and reload so that subsequent starts use the new unit files.
      _ = systemd.reset_failed();
-@@ -2416,6 +2421,12 @@ won't take effect until you reboot the system.
+@@ -2416,6 +2424,17 @@ won't take effect until you reboot the system.
                      .canonicalize()
                      .context("Failed to get full path to /proc/self/exe")?;
  
-+                // burrow: whether its manager needs the new systemd binary.
++                // burrow: whether its manager needs the new systemd binary or
++                // user.conf.
 +                let reexec = user_reexec::value(
 +                    user_reexec::manager_binary(&dbus_conn, uid).as_deref(),
 +                    &new_pid1_path,
++                    user_reexec::config_changed(
++                        &old_toplevel.join("etc/systemd"),
++                        &toplevel.join("etc/systemd"),
++                    ),
 +                );
 +
                  log::debug!("Performing user switch for {name}");
                  let status = std::process::Command::new(&myself)
                      .uid(uid)
-@@ -2426,6 +2437,7 @@ won't take effect until you reboot the system.
+@@ -2426,6 +2445,7 @@ won't take effect until you reboot the system.
                      .env("TOPLEVEL", &toplevel)
                      .env("OLD_TOPLEVEL", &old_toplevel)
                      .env("NIXOS_ACTION", Into::<&'static str>::into(action))

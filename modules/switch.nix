@@ -241,7 +241,7 @@ in
       # if nixpkgs' main.rs moves under it.
       #
       # It also re-executes a user manager only when the new system's systemd
-      # binary differs from the one it runs, as it does PID 1: a re-execution
+      # binary or user.conf differs, as it does PID 1: a re-execution
       # closes the manager's private socket, so every `systemctl --user` and
       # `systemd-run --user` in that window was refused, at every switch, under
       # a pipeline that runs as user units (user_reexec.rs says why the reload
