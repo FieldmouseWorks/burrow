@@ -2,7 +2,7 @@
 //! Engine adapters render this data; they do not invent additional grants.
 use super::sandbox::{self, Env, Machine};
 use crate::{
-    config::{Config, McpServer},
+    config::{ClaudeGuard, Config, McpServer},
     job::Job,
 };
 use serde::Serialize;
@@ -116,11 +116,18 @@ impl Capabilities {
         flags.extend(["-c".into(), format!("mcp_servers={{{servers}}}")]);
         flags
     }
-    pub fn claude_flags(&self) -> Vec<String> {
-        let mut flags = vec![
-            "--settings".into(),
-            serde_json::json!({"env":self.environment()}).to_string(),
-        ];
+    /// Claude Code's flags for these grants, and with `guard`, the
+    /// machine's guard as its PreToolUse hook on every command, as the
+    /// managed settings give it where they're installed (modules/claude.nix).
+    pub fn claude_flags(&self, guard: Option<&ClaudeGuard>) -> Vec<String> {
+        let mut settings = serde_json::json!({"env":self.environment()});
+        if let Some(guard) = guard {
+            settings["hooks"] = serde_json::json!({"PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": guard.command, "timeout": guard.timeout}],
+            }]});
+        }
+        let mut flags = vec!["--settings".into(), settings.to_string()];
         for grant in &self.items {
             for (path, write) in &grant.paths {
                 if *write && path.is_dir() {
@@ -338,8 +345,30 @@ mod tests {
         };
         let machine = sandbox::tests::machine_in(dir.path());
         let grants = resolve(&cfg, &job, &dir.path().join("scratch"), &env, &machine).unwrap();
-        let claude = grants.claude_flags();
+        let claude = grants.claude_flags(None);
         let config: serde_json::Value = serde_json::from_str(claude.last().unwrap()).unwrap();
+        // The managed settings run the guard: the job's settings don't.
+        let settings: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
+        assert_eq!(claude[0], "--settings");
+        assert!(settings.get("hooks").is_none(), "{settings}");
+        assert!(settings["env"].is_object(), "{settings}");
+        // Where nothing else does, the job's settings give it, on every
+        // command, with its env.
+        let guard = ClaudeGuard {
+            command: "/bin/claude-guard".into(),
+            timeout: 10,
+        };
+        let guarded = grants.claude_flags(Some(&guard));
+        let settings: serde_json::Value = serde_json::from_str(&guarded[1]).unwrap();
+        assert_eq!(
+            settings["hooks"]["PreToolUse"],
+            serde_json::json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": "/bin/claude-guard", "timeout": 10}]}])
+        );
+        assert_eq!(
+            settings["env"],
+            serde_json::from_str::<serde_json::Value>(&claude[1]).unwrap()["env"]
+        );
+        assert_eq!(guarded[2..], claude[2..]);
         assert_eq!(
             config["mcpServers"]["machine.ledger"]["command"],
             "/bin/server"

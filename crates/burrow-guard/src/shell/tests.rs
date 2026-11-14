@@ -549,3 +549,56 @@ fn nesting_past_the_limit_is_refused() {
     assert!(commands(&"$(".repeat(DEPTH)).is_ok());
     assert_eq!(commands(&"${".repeat(DEPTH + 1)), Err(TooDeep));
 }
+
+/// Read with marks, an expansion is told from a literal `$`, and an
+/// unquoted one, or an unquoted substitution, is marked as splitting:
+/// `%` is UNKNOWN, `^` SPLITS.
+#[test]
+fn marks_tell_expansions_from_text_and_quoted_from_split() {
+    let marked = |text: &str| {
+        super::read(text, true).map(|cmds| {
+            cmds.into_iter()
+                .map(|c| {
+                    c.into_iter()
+                        .map(|w| w.replace(UNKNOWN, "%").replace(super::SPLITS, "^"))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        marked(r#"a '$x' "$y" $z "${w}" ${v:-u} $ "a$" $'$q' $"$" p$1"#).unwrap(),
+        vec![vec![
+            "a",
+            "$x",
+            "%$y",
+            "^%$z",
+            "%${w}",
+            "^%${v:-u}",
+            "$",
+            "a$",
+            "$q",
+            "$",
+            "p^%$1"
+        ]]
+    );
+    assert_eq!(
+        marked(r#"b $(c) "$(d)" `e` "`f`" "x $g y""#).unwrap(),
+        vec![
+            vec!["c"],
+            vec!["d"],
+            vec!["e"],
+            vec!["f"],
+            vec!["b", "^%", "%", "^%", "%", "x %$g y"]
+        ]
+    );
+    // The plain reading marks none of them.
+    assert_eq!(commands(r#"a "$y" $z"#), want(&[&["a", "$y", "$z"]]));
+    assert!(super::splits(
+        "^%$z".replace('^', &super::SPLITS.to_string()).as_str()
+    ));
+    assert!(super::splits(&format!("a{UNKNOWN}*")));
+    assert!(!super::splits(&format!("{UNKNOWN}$y")));
+    assert!(super::unread(&format!("{UNKNOWN}$y")));
+    assert!(!super::unread("$x"));
+}

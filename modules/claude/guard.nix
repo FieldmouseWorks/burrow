@@ -1,8 +1,9 @@
 # The PreToolUse guard (crates/burrow-guard), with this machine's config (its
 # src/config.rs): Claude Code's hook (claude.nix), and Codex's for proj's
 # Codex jobs (proj.nix), which installs it whenever Codex jobs can run,
-# burrow.claude on or off. A compiled wrapper rather than a script, since it
-# runs on every tool call.
+# burrow.claude on or off; with burrow.claude off, proj gives its Claude
+# jobs Claude Code's hook itself (its config's claudeGuard). A compiled
+# wrapper rather than a script, since it runs on every tool call.
 { inputs, pkgs, lib, config }:
 let
   # How long Claude Code and Codex give the hook; past it, the command runs

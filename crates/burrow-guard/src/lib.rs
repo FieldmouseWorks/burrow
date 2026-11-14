@@ -66,8 +66,8 @@ pub struct Guard<'a> {
     pub config: &'a Config,
     /// Whether it guards a Codex job, which gets codex.rs's refusals too.
     pub codex: bool,
-    /// Whether it guards a proj job (every Codex it guards is one), which
-    /// gets first.rs's refusal too.
+    /// Whether it guards a proj job, whichever engine (main.rs's
+    /// `in_a_job`), which gets first.rs's refusal too.
     pub job: bool,
     /// When the last undo snapshot was taken, as its mtime: one round per
     /// five seconds is plenty for a burst of commands.

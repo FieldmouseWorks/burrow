@@ -273,7 +273,7 @@ pub fn exec_claude(cfg: &Config, args: &[String]) -> Result<(), crate::Fail> {
         command.env_clear();
     }
     let error = command
-        .args(capabilities.claude_flags())
+        .args(capabilities.claude_flags(cfg.claude_guard.as_ref()))
         .args(args)
         .envs(capabilities.environment())
         .exec();

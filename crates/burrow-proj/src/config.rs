@@ -127,6 +127,11 @@ pub struct Config {
     /// Codex's own pool, and the immutable hooks dir it gives git.
     pub codex_slots: usize,
     pub codex_hooks: PathBuf,
+    /// The machine's guard, as the jobs' Claude Code's PreToolUse hook,
+    /// where nothing else installs it (burrow.claude off): None where the
+    /// machine's managed settings already run it for every Claude.
+    #[serde(default)]
+    pub claude_guard: Option<ClaudeGuard>,
     /// Root-owned heavy slot directory, read-only in Codex jobs; None when CPU sharing is off.
     pub heavy_dir: Option<PathBuf>,
     /// How many slots heavy has there (burrow.cpu.heavy.slots).
@@ -144,6 +149,14 @@ pub struct Config {
     /// The proj this is, whole: PROJ_SELF, its wrapper, as a store path.
     #[serde(skip)]
     pub me: PathBuf,
+}
+
+/// A PreToolUse hook's command, and how long Claude Code gives it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaudeGuard {
+    pub command: PathBuf,
+    pub timeout: u64,
 }
 
 /// A stdio MCP server and the host paths its tools need.

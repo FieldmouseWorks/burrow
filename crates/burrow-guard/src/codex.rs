@@ -317,11 +317,11 @@ fn gh_api(words: &[&str]) -> bool {
 /// Whether a write to GitHub's API (curl.rs's [`curl::Counts`]) writes
 /// commits or refs: at git data, or a GraphQL mutation that does. Where
 /// it goes unread, or a GraphQL body unread, it may.
-fn writes_git(endpoint: Option<&str>, body: &[&str], unread_body: bool) -> bool {
+fn writes_git(endpoint: Option<&str>, body: &curl::Body, unread_body: bool) -> bool {
     match endpoint {
         None => true,
         Some(path) if path.ends_with("graphql") => {
-            unread_body || body.iter().any(|b| MUTATION.is_match(b))
+            unread_body || body.texts().any(|b| MUTATION.is_match(b))
         }
         Some(path) => GIT_DATA.is_match(path),
     }
@@ -349,10 +349,9 @@ pub fn refusals(cmd: &str) -> Vec<String> {
                     match curl::read(&words, &writes_git) {
                         Curl::Writes => Some(Refusal::Api),
                         Curl::Config => Some(Refusal::CurlConfig),
-                        Curl::Fine => (!curl::skips_default_config(words.first().copied())
-                            && (curl::moves_default_config(cmd)
-                                || curl::default_config(|k| std::env::var_os(k))))
-                        .then_some(Refusal::CurlConfig),
+                        Curl::Fine => {
+                            curl::reads_default_config(&words, cmd).then_some(Refusal::CurlConfig)
+                        }
                     }
                 }
                 _ => None,

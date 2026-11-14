@@ -90,11 +90,50 @@ fn check(args: &[String]) -> Result<Option<String>, String> {
     let guard = Guard {
         config: &config,
         codex: user.is_some(),
-        // Codex's hook guards only the jobs' user's Codex, which runs only
-        // as a job; Claude Code runs as one under proj, which names it.
-        job: user.is_some() || std::env::var_os("PROJ_JOB").is_some_and(|j| !j.is_empty()),
+        job: in_a_job(),
         mark: runtime.join("claude-guard-last-snapshot"),
         namespace: Namespace::here(),
     };
     Ok(guard.check(&hook, SystemTime::now()))
+}
+
+/// Whether this guard runs for a proj job, whichever engine runs it: proj
+/// names the job (PROJ_JOB) in its engine's environment, which the engine's
+/// hook inherits. The jobs' user runs Codex and Claude Code of its own too,
+/// the owner's, which proj didn't start and which name none. Where the
+/// guard's environment says nothing (an engine that gives its hook an
+/// environment of its own), the processes it runs under say: the engine's
+/// own environment, as proj started it, which no command of the job's can
+/// change.
+fn in_a_job() -> bool {
+    if let Some(job) = std::env::var_os("PROJ_JOB") {
+        return !job.is_empty();
+    }
+    let mut pid = std::os::unix::process::parent_id();
+    // Far more than any engine's hook runs under.
+    for _ in 0..64 {
+        if pid <= 1 {
+            return false;
+        }
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        if let Some(job) = environ
+            .split(|b| *b == 0)
+            .find_map(|var| var.strip_prefix(b"PROJ_JOB="))
+        {
+            return !job.is_empty();
+        }
+        let Some(parent) = parent_of(pid) else {
+            return false;
+        };
+        pid = parent;
+    }
+    false
+}
+
+/// A process's parent, from /proc: the field after its state, past its
+/// name, which may hold anything but ends at the last `)`.
+fn parent_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    after_name.split_whitespace().nth(1)?.parse().ok()
 }
