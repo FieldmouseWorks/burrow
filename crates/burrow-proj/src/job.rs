@@ -38,6 +38,7 @@ mod locking_tests;
 
 use crate::config::Config;
 use crate::engine::last_result;
+use crate::flock::Flock;
 use crate::waits::Facts;
 use crate::{filled, mtime, now, read, systemd, usage};
 
@@ -55,22 +56,6 @@ pub struct Job<'a> {
     pub cfg: &'a Config,
     pub id: &'a str,
     pub dir: PathBuf,
-}
-
-/// A job transaction ends when its owner releases it, even if another thread
-/// forked a child that still has the open file description before exec.
-pub struct JobLock(File);
-
-impl std::os::fd::AsFd for JobLock {
-    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        std::os::fd::AsFd::as_fd(&self.0)
-    }
-}
-
-impl Drop for JobLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
 }
 
 impl<'a> Job<'a> {
@@ -171,24 +156,24 @@ impl<'a> Job<'a> {
     }
 
     /// The lock turns start under: held, no turn starts until it's let go.
-    pub fn lock(&self) -> io::Result<JobLock> {
+    pub fn lock(&self) -> io::Result<Flock> {
         let f = self.lock_file()?;
         f.lock()?;
-        Ok(JobLock(f))
+        Ok(Flock::held(f))
     }
 
     /// The same lock, shared: while it's held, no turn is halfway through
     /// starting, so its state and turn count agree.
-    pub fn read_lock(&self) -> io::Result<JobLock> {
+    pub fn read_lock(&self) -> io::Result<Flock> {
         let f = self.lock_file()?;
         f.lock_shared()?;
-        Ok(JobLock(f))
+        Ok(Flock::held(f))
     }
 
-    pub(crate) fn try_lock(&self) -> io::Result<Option<JobLock>> {
+    pub(crate) fn try_lock(&self) -> io::Result<Option<Flock>> {
         let f = self.lock_file()?;
         match f.try_lock() {
-            Ok(()) => Ok(Some(JobLock(f))),
+            Ok(()) => Ok(Some(Flock::held(f))),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(e)) => Err(e),
         }

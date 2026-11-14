@@ -1,4 +1,5 @@
 use super::*;
+use std::os::fd::AsFd;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 
@@ -225,7 +226,8 @@ fn cutover_holds_both_retired_locks_until_the_generation_stops() {
     let (mut cfg, _) = rig(dir, "named", false);
     let door = dir.join("door/lock");
     cfg.legacy_engines_lock = Some(door.clone());
-    run_with(&cfg, dir, |answer| {
+    let mut inherited = Vec::new();
+    run_with(&cfg, dir, |answer, held| {
         assert!(answer.is_ok());
         // These are exactly the lock inodes a fetched legacy pass or a CLI
         // already waiting for its turn would use, not replacement files.
@@ -233,17 +235,23 @@ fn cutover_holds_both_retired_locks_until_the_generation_stops() {
             let waiter = File::options().write(true).open(path).unwrap();
             assert!(waiter.try_lock().is_err(), "{}", path.display());
         }
+        // What a child another thread forks now holds until it execs: the
+        // held locks' own open file descriptions, kept open past the drop.
+        for lock in held {
+            inherited.push(lock.as_fd().try_clone_to_owned().unwrap());
+        }
         assert!(cfg.roles_migrated().unwrap());
         Ok(())
     })
     .unwrap();
+    assert_eq!(inherited.len(), 2);
     for path in [door, dir.join("roles.lock")] {
         File::options()
             .write(true)
-            .open(path)
+            .open(&path)
             .unwrap()
             .try_lock()
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
     }
 }
 

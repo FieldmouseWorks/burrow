@@ -1,7 +1,7 @@
 //! A parked handoff reacquires the same shared admission capacity as a new
 //! one. The inbox pass lock serializes both; off operations never take it.
 use super::{Pass, dirs};
-use crate::{config::Config, job::Job, read};
+use crate::{config::Config, flock::Flock, job::Job, read};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions, TryLockError},
@@ -9,21 +9,13 @@ use std::{
 };
 
 pub(crate) struct Permit {
-    _guard: Option<File>,
+    _guard: Option<Flock>,
 }
 
 impl Permit {
     pub(super) fn new(lock: File) -> Self {
-        Self { _guard: Some(lock) }
-    }
-}
-
-impl Drop for Permit {
-    fn drop(&mut self) {
-        // Closing alone leaves the lock held while a concurrently forked
-        // child has the same open file description, until that child execs.
-        if let Some(lock) = &self._guard {
-            let _ = lock.unlock();
+        Self {
+            _guard: Some(Flock::held(lock)),
         }
     }
 }
@@ -146,7 +138,7 @@ mod tests {
         // A concurrent fork inherits this same open file description until
         // exec closes it. Keep a duplicate to make that interval deterministic.
         let inherited = file.try_clone().unwrap();
-        let permit = Permit { _guard: Some(file) };
+        let permit = Permit::new(file);
         let next = OpenOptions::new().append(true).open(&lock).unwrap();
         assert!(matches!(next.try_lock(), Err(TryLockError::WouldBlock)));
         drop(permit);
