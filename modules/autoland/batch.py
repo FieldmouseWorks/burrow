@@ -166,26 +166,21 @@ class Batch:
         st["wake"] = C.WAKE.get(repo)
         self.advanced = True
 
-    def finish(self, repo):
+    def finish(self, repo, seen=True):
+        """The repo is done with for this traversal. Its PR cursor goes too,
+        unless the look failed before it had seen them all (not seen): the
+        look that retries it then goes on with the PRs no slice has visited,
+        where one starting over left the last of a long list without a look
+        for as long as the read failed now and then."""
         self.advanced = True
         self.done.add(repo.lower())
         repo = repo.lower()
-        self.state["repos"].pop(repo, None)
+        if seen:
+            self.state["repos"].pop(repo, None)
         self.state["retry"].pop(repo, None)
         self.state["owed"] = [r for r in self.state["owed"] if r != repo]
         if self.traversal_full and repo not in self.state["finished"]:
             self.state["finished"].append(repo)
-
-    def failed(self, repo):
-        """The repo's turn ends on a failure, as finish's does, so the
-        traversal goes on without it, but its PR cursor stays: the next
-        traversal takes first the PRs this one never reached. Dropping it
-        would start the repo again at its first PR, and a repo that fails
-        now and then would never get to its newest ones."""
-        cursor = self.state["repos"].get(repo.lower())
-        self.finish(repo)
-        if cursor is not None:
-            self.state["repos"][repo.lower()] = cursor
 
     def end(self, complete, kick):
         if C.LIMITED and C.LIMITED[0] > C.NOW:
