@@ -32,7 +32,7 @@ fn github_quota_excludes_only_its_installation_from_admission() {
         .record(&cfg.github_meters.as_ref().unwrap().clone())
         .unwrap();
     assert!(
-        look(&cfg, name, &job.dir, Class::Normal)
+        look(&cfg, name, &job, Class::Normal)
             .unwrap()
             .line
             .is_empty()
@@ -44,13 +44,7 @@ fn github_quota_excludes_only_its_installation_from_admission() {
         request.save(&job).unwrap();
     };
     app("other");
-    assert_eq!(
-        look(&cfg, name, &job.dir, Class::Normal)
-            .unwrap()
-            .line
-            .len(),
-        1
-    );
+    assert_eq!(look(&cfg, name, &job, Class::Normal).unwrap().line.len(), 1);
     app("workers");
     // At the reset it rejoins without a correction, owner action or API call.
     meter.at += 1;
@@ -63,11 +57,5 @@ fn github_quota_excludes_only_its_installation_from_admission() {
         .unwrap()
         .path();
     fs::write(file, serde_json::to_vec(&meter).unwrap()).unwrap();
-    assert_eq!(
-        look(&cfg, name, &job.dir, Class::Normal)
-            .unwrap()
-            .line
-            .len(),
-        1
-    );
+    assert_eq!(look(&cfg, name, &job, Class::Normal).unwrap().line.len(), 1);
 }

@@ -28,11 +28,10 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::config::Config;
-use crate::read;
+use crate::job::{Job, Request, Schedule};
 
 /// What a turn goes as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,11 +360,11 @@ pub fn pipeline_project(cfg: &Config, path: &str) -> bool {
     flake_project(cfg, path) || listed(&github_repo(cfg, path), &cfg.pipeline_repos)
 }
 
-/// The project a job runs in, as its dir's published copy has it, for
-/// scheduling; "" when it can't be read. What it runs as reads the
-/// protected request ([`crate::job::Request`]).
-pub fn project(dir: &Path) -> String {
-    read(&dir.join("project")).unwrap_or_default()
+/// The project a job runs in, as its protected request has it
+/// ([`crate::job::Request`]), never the copy its dir publishes; "" when it
+/// can't be read.
+pub fn project(job: &Job) -> String {
+    Request::load(job).map(|r| r.project).unwrap_or_default()
 }
 
 /// What's been found of each project's jobs' class: asking means git, so a
@@ -374,7 +373,7 @@ pub fn project(dir: &Path) -> String {
 pub struct Classes(HashMap<String, Class>);
 
 impl Classes {
-    /// A job's class, from its dir. One run with --pipeline is a pipeline
+    /// A job's class, from its protected schedule and request. One run with --pipeline is a pipeline
     /// one, every turn of it, only while its project is one of the pipeline's
     /// own; anywhere else it's steward, every turn of it, so it still goes ahead
     /// of the line, with the first ones, and has the slot of its project's cap
@@ -383,11 +382,11 @@ impl Classes {
     /// fill the machine). In a lead repo's project it's lead. Asked anew by
     /// each new Classes, so a job whose repo was taken off a list since is held
     /// to it too. Otherwise first or normal, as the turn was started (`given`).
-    pub fn class(&mut self, cfg: &Config, dir: &Path, given: Class) -> Class {
-        if !dir.join("pipeline").exists() {
+    pub fn class(&mut self, cfg: &Config, job: &Job, given: Class) -> Class {
+        if !Schedule::of(job).pipeline {
             return given;
         }
-        let d = project(dir);
+        let d = project(job);
         if let Some(&c) = self.0.get(&d) {
             return c;
         }
@@ -410,13 +409,13 @@ impl Classes {
     /// past maxWait), and its class what that makes it now, so a job whose
     /// origin or list changed while it waits moves in line and is held to its
     /// project's cap as what it is now.
-    pub fn place(&mut self, cfg: &Config, name: &str, dir: &Path) -> (Class, String) {
+    pub fn place(&mut self, cfg: &Config, name: &str, job: &Job) -> (Class, String) {
         let given = if name.starts_with("2-") {
             Class::Normal
         } else {
             Class::First
         };
-        let c = self.class(cfg, dir, given);
+        let c = self.class(cfg, job, given);
         let p = match c {
             Class::Lead | Class::Pipeline => 0,
             Class::Steward | Class::First => 1,
@@ -432,11 +431,11 @@ impl Classes {
 /// What proj says of a job that asked to be pipeline work and isn't, so a
 /// mis-set origin or list doesn't quietly demote it: None for any other.
 /// Never the origin itself, which can hold a token: only the repo it names.
-pub fn demoted(cfg: &Config, dir: &Path) -> Option<String> {
-    if !dir.join("pipeline").exists() {
+pub fn demoted(cfg: &Config, job: &Job) -> Option<String> {
+    if !Schedule::of(job).pipeline {
         return None;
     }
-    let d = project(dir);
+    let d = project(job);
     if pipeline_project(cfg, &d) {
         return None;
     }

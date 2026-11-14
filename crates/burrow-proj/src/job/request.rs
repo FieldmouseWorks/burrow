@@ -5,46 +5,10 @@
 //! directory's files of the same names are its published copy, for readers
 //! such as the probe and `proj status`: a job may write those, and nothing
 //! proj runs it as follows them.
-use super::Job;
+use super::{Job, record};
 use crate::{engine::Engine, read};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-/// Write `bytes` to a staging file created exclusively beside `path`: a name
-/// that exists already (another writer's, or an orphan a crash left, which
-/// may alias the live record) is never opened, and a fresh one is tried.
-fn stage(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    use io::Write;
-    static N: AtomicU64 = AtomicU64::new(0);
-    loop {
-        let staged = path.with_file_name(format!(
-            "{}.new.{}.{}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
-        {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(bytes) {
-                    let _ = fs::remove_file(&staged);
-                    return Err(e);
-                }
-                return Ok(staged);
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-}
+use std::{collections::BTreeMap, io, path::PathBuf};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Request {
@@ -66,45 +30,25 @@ impl Request {
     /// identity), else its published files, once: from then on the record
     /// holds, as `policy`'s admission does.
     pub fn load(job: &Job) -> Result<Self, String> {
-        match crate::state_reads::bytes(&Self::path(job)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let request = match crate::retry::Identity::legacy_files(job)? {
-                    Some(files) => Self::from(|key| files.get(key).cloned().flatten())?,
-                    None => Self::from(|key| read(&job.path(key)))?,
-                };
-                request.adopt(job)
-            }
-            Err(e) => Err(e.to_string()),
+        if let Some(request) = record::load(&Self::path(job))? {
+            return Ok(request);
         }
+        let request = match crate::retry::Identity::legacy_files(job)? {
+            Some(files) => Self::from(|key| files.get(key).cloned().flatten())?,
+            None => Self::from(|key| read(&job.path(key)))?,
+        };
+        request.adopt(job)
     }
 
     /// Initialize the record if no one has, and return the winner: a
     /// reader holding stale values never overwrites a record, or an
     /// enrollment's update, that landed after it looked.
     fn adopt(self, job: &Job) -> Result<Self, String> {
-        crate::ask::ensure(job)?;
-        let path = Self::path(job);
-        let staged = stage(
-            &path,
-            serde_json::to_string(&self)
-                .map_err(|e| e.to_string())?
-                .as_bytes(),
-        )
-        .map_err(|e| e.to_string())?;
-        let linked = fs::hard_link(&staged, &path);
-        let _ = fs::remove_file(&staged);
-        match linked {
-            Ok(()) => {
-                self.publish(job).map_err(|e| e.to_string())?;
-                Ok(self)
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let bytes = crate::state_reads::bytes(&path).map_err(|e| e.to_string())?;
-                serde_json::from_slice(&bytes).map_err(|e| e.to_string())
-            }
-            Err(e) => Err(e.to_string()),
+        let (winner, mine) = record::adopt(job, &Self::path(job), self)?;
+        if mine {
+            winner.publish(job).map_err(|e| e.to_string())?;
         }
+        Ok(winner)
     }
 
     fn from(read: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
@@ -122,16 +66,7 @@ impl Request {
     /// Only the starter and host-side changes it authorizes (an inbox
     /// label's role) call this; it publishes the copy too.
     pub fn save(&self, job: &Job) -> Result<(), String> {
-        crate::ask::ensure(job)?;
-        let path = Self::path(job);
-        let staged = stage(
-            &path,
-            serde_json::to_string(self)
-                .map_err(|e| e.to_string())?
-                .as_bytes(),
-        )
-        .map_err(|e| e.to_string())?;
-        fs::rename(&staged, &path).map_err(|e| e.to_string())?;
+        record::save(job, &Self::path(job), self)?;
         self.publish(job).map_err(|e| e.to_string())
     }
 
@@ -180,31 +115,20 @@ impl Request {
 
     /// The published copy, put back as the record has it.
     pub fn publish(&self, job: &Job) -> io::Result<()> {
-        let files: BTreeMap<&str, Option<String>> = BTreeMap::from([
-            (
-                "project",
-                (!self.project.is_empty()).then(|| format!("{}\n", self.project)),
-            ),
-            ("engine", self.engine.map(|e| e.name().to_owned())),
-            ("role", self.role.as_ref().map(|r| format!("{r}\n"))),
-            ("app", self.app.as_ref().map(|a| format!("{a}\n"))),
-            ("agent", self.agent.as_ref().map(|a| format!("{a}\n"))),
-            ("owned", self.owned.then(String::new)),
-        ]);
-        for (key, value) in files {
-            let path = job.path(key);
-            if read(&path).as_deref() == value.as_deref().map(|v| v.trim_end_matches('\n')) {
-                continue;
-            }
-            match value {
-                Some(value) => crate::state_reads::write_public(&path, value)?,
-                None => match crate::state_reads::remove(&path) {
-                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                    _ => {}
-                },
-            }
-        }
-        Ok(())
+        record::publish(
+            job,
+            [
+                (
+                    "project",
+                    (!self.project.is_empty()).then(|| format!("{}\n", self.project)),
+                ),
+                ("engine", self.engine.map(|e| e.name().to_owned())),
+                ("role", self.role.as_ref().map(|r| format!("{r}\n"))),
+                ("app", self.app.as_ref().map(|a| format!("{a}\n"))),
+                ("agent", self.agent.as_ref().map(|a| format!("{a}\n"))),
+                ("owned", self.owned.then(String::new)),
+            ],
+        )
     }
 }
 
@@ -212,6 +136,7 @@ impl Request {
 mod tests {
     use super::*;
     use crate::{config::Config, retry::Identity};
+    use std::fs;
 
     fn rig() -> (tempfile::TempDir, Config) {
         let tmp = tempfile::TempDir::new().unwrap();

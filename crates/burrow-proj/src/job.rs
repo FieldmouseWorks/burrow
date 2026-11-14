@@ -4,8 +4,10 @@
 //! start and end kick, a line each), `timeout` and `idle`, `pipeline` and
 //! `owned` (there or not), `link`, `app`, and `agent` (its sandbox, with
 //! --vm). What it runs as (`project`, `engine`, `role`, `app`, `agent`,
-//! `owned`) is its protected request ([`Request`]); those files are its
-//! published copy. Kept across turns: `turns` (the latest turn's number), `session`
+//! `owned`) is its protected request ([`Request`]), and how it's scheduled
+//! and bounded (`unstick`, `pipeline`, `timeout`, `idle`, `kick`, `link`)
+//! its protected schedule ([`Schedule`]); those files are their published
+//! copy. Kept across turns: `turns` (the latest turn's number), `session`
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
 //! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
 //! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
@@ -30,10 +32,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod record;
 mod request;
+mod schedule;
 mod start;
 
 pub(crate) use request::Request;
+pub(crate) use schedule::Schedule;
 #[cfg(test)]
 mod locking_tests;
 
@@ -467,13 +472,14 @@ impl<'a> Job<'a> {
         let state = self.state();
         let prompt = self.path(&format!("prompt.{n}"));
         let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
+        let schedule = Schedule::of(self);
         Some(Facts {
             id: self.id.to_owned(),
             owned: Request::load(self).is_ok_and(|r| r.owned),
-            unstick: self.path("unstick").exists(),
+            unstick: schedule.unstick,
             stopped: self.turn(&n, "stopped").exists(),
             end: opt(self.turn(&n, "end")),
-            link: opt(self.path("link")),
+            link: schedule.link.filter(|l| !l.is_empty()),
             queued: mtime(&prompt).unwrap_or(0),
             slot: if self.retry_pending(&n) {
                 0

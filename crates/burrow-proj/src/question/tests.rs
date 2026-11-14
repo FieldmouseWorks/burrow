@@ -149,7 +149,7 @@ fn notifications_disabled_do_not_add_watcher_kicks() {
     f.ending(1, "ask");
     crate::turn::start_answer(&f.cfg, "j1", "answer", false).unwrap();
     f.ending(2, "ask");
-    fs::write(f.job().path("kick"), "completion").unwrap();
+    crate::job::Schedule::amend(&f.job(), |s| s.kick = vec!["completion".into()]);
     crate::cmd::finish(&f.cfg, "j1").unwrap();
     f.cfg.tools.systemctl = "true".into();
     crate::cmd::stop(&f.cfg, "j1", false).unwrap();
@@ -453,7 +453,7 @@ fn ordinary_jobs_do_not_add_question_watcher_kicks() {
     f.ending(1, "done");
     crate::turn::start(&f.cfg, "j1", "new work", false).unwrap();
     f.ending(2, "await");
-    fs::write(f.job().path("kick"), "completion").unwrap();
+    crate::job::Schedule::amend(&f.job(), |s| s.kick = vec!["completion".into()]);
     crate::cmd::finish(&f.cfg, "j1").unwrap();
     f.cfg.tools.systemctl = "true".into();
     crate::cmd::stop(&f.cfg, "j1", false).unwrap();
@@ -617,7 +617,7 @@ fn finalization_runs_every_obligation_despite_notification_errors() {
         let mut request = crate::job::Request::load(&f.job()).unwrap();
         request.owned = true;
         request.save(&f.job()).unwrap();
-        fs::write(f.job().path("kick"), "completion").unwrap();
+        crate::job::Schedule::amend(&f.job(), |s| s.kick = vec!["completion".into()]);
         let scratch = crate::scratch::dir(&f.cfg, "j1");
         fs::create_dir_all(&scratch).unwrap();
         fs::write(scratch.join("artifact"), "work").unwrap();

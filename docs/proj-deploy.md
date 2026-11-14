@@ -76,6 +76,16 @@ earliest, engine and role from the latest), else from its published files. A
 retry's execution record still carries those files in the earlier format, so a
 rolled-back proj's transfer consumer can restore it.
 
+How a job is scheduled and bounded (`--unstick`, `--pipeline`, its turns'
+`--timeout` and `--idle`, what each turn's start and end kick, and the
+`--link` its GitHub quota is held to) is its schedule, saved beside the request
+(`crates/burrow-proj/src/job/schedule.rs`). Only the starter and `proj unstick`
+change it. The line's class, project cap and emergency slot, the retry census,
+the inbox drain's limits, each turn's budget and quiet limit, its kicks and its
+quota hold all read the schedule, with the project from the request; the job
+directory's files of those names are a published copy, put back at each turn's
+start. A job from before the schedule adopts its published files once.
+
 Each retained turn occupies one queue place, even after promotion or a
 configuration-driven class change. The census and replacement adoption remove
 obsolete names under the admission lock. Every replacement launch records its

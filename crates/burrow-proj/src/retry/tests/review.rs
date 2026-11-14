@@ -317,7 +317,7 @@ fn checkpoint_creation_yields_to_emergency_promotion_during_census_contention() 
     start(&mut r, "escape", "new-retry", "/ordinary");
     sleep(Duration::from_millis(100));
     assert!(!r.cfg.jobs.join("escape/1.retry-migration").exists());
-    fs::write(r.cfg.jobs.join("escape/unstick"), "").unwrap();
+    crate::job::Schedule::unstick(&Job::new(&r.cfg, "escape")).unwrap();
     until(|| r.cfg.jobs.join("escape/took").exists());
     assert_eq!(
         read(&r.cfg.jobs.join("escape/1.slot")).as_deref(),

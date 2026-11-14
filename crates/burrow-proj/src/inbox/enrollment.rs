@@ -102,8 +102,8 @@ fn source(job: &Job) -> Result<Option<(String, String)>, String> {
             .ok_or_else(|| format!("proj: {}'s inbox issue is invalid", job.id));
     }
     if job.path("inbox-issue").exists() {
-        let source =
-            read(&crate::ask::host_path(job, "source")).or_else(|| read(&job.path("link")));
+        let source = read(&crate::ask::host_path(job, "source"))
+            .or_else(|| crate::job::Schedule::of(job).link);
         return source
             .as_deref()
             .and_then(crate::github::target)

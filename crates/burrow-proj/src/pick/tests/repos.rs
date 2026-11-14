@@ -5,15 +5,33 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::super::{Classes, demoted, github_repo, pipeline_project};
+use super::super::{Classes, github_repo, pipeline_project};
 use super::{Class, Config, case, config};
+use crate::job::Job;
+
+/// `f` on the job whose dir is `dir`, under `cfg` with its jobs where that is.
+fn on<R>(cfg: &Config, dir: &Path, f: impl FnOnce(&Config, &Job) -> R) -> R {
+    let mut cfg = cfg.clone();
+    cfg.jobs = dir.parent().unwrap().to_owned();
+    cfg.host_state = None;
+    let id = dir.file_name().unwrap().to_str().unwrap().to_owned();
+    f(&cfg, &Job::new(&cfg, &id))
+}
 
 fn class(cfg: &Config, dir: &Path, given: Class) -> Class {
-    Classes::default().class(cfg, dir, given)
+    on(cfg, dir, |cfg, job| {
+        Classes::default().class(cfg, job, given)
+    })
 }
 
 fn place(cfg: &Config, name: &str, dir: &Path) -> (Class, String) {
-    Classes::default().place(cfg, name, dir)
+    on(cfg, dir, |cfg, job| {
+        Classes::default().place(cfg, name, job)
+    })
+}
+
+fn demoted(cfg: &Config, dir: &Path) -> Option<String> {
+    on(cfg, dir, super::super::demoted)
 }
 
 /// Clones and jobs in a scratch dir.
@@ -50,16 +68,25 @@ impl Scratch {
         git(&["remote", "add", "origin", origin]);
     }
 
-    /// A job's dir: run with --pipeline or not, in a project.
+    /// A job's dir: run with --pipeline or not, in a project, as its
+    /// starter records it.
     fn job(&self, name: &str, pipeline: bool, project: Option<&str>) -> PathBuf {
         let d = self.path(&format!("jobs/{name}"));
         fs::create_dir_all(&d).unwrap();
-        if pipeline {
-            fs::write(d.join("pipeline"), "").unwrap();
-        }
-        if let Some(p) = project {
-            fs::write(d.join("project"), format!("{p}\n")).unwrap();
-        }
+        on(&config(), &d, |_, job| {
+            crate::job::Request {
+                project: project.unwrap_or_default().to_owned(),
+                ..Default::default()
+            }
+            .save(job)
+            .unwrap();
+            crate::job::Schedule {
+                pipeline,
+                ..Default::default()
+            }
+            .save(job)
+            .unwrap();
+        });
         d
     }
 }

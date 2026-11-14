@@ -20,7 +20,7 @@ fn retained_queue_renames_occupy_one_logical_project_place() {
     for name in ["0-100-renamed", "1-100-renamed", "2-100-renamed"] {
         fs::write(queue.join(name), "dead\n").unwrap();
     }
-    let seen = look(&cfg, "1-100-renamed", &job.dir, Class::First).unwrap();
+    let seen = look(&cfg, "1-100-renamed", &job, Class::First).unwrap();
     assert_eq!(seen.line.len(), 1);
     assert_eq!(seen.line[0].name, "1-100-renamed");
     assert_eq!(fs::read_dir(queue).unwrap().count(), 1);

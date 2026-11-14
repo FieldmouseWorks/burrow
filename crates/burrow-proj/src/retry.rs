@@ -173,7 +173,7 @@ fn is_codex(job: &Job, n: &str) -> io::Result<bool> {
 }
 
 fn census(job: &Job, n: &str) -> io::Result<Option<fs::File>> {
-    if job.path("unstick").exists() || is_codex(job, n)? {
+    if crate::job::Schedule::of(job).unstick || is_codex(job, n)? {
         return Ok(None);
     }
     let file = fs::File::create(job.cfg.jobs.join(".slots/.admission-lock"))?;
@@ -198,7 +198,7 @@ pub(crate) fn admission(cfg: &Config) -> io::Result<Vec<(String, String, i64)>> 
         if crate::policy::denied(&job)
             || crate::policy::parked(&job)
             || !job.retry_pending(&n)
-            || job.path("unstick").exists()
+            || crate::job::Schedule::of(&job).unstick
             || is_codex(&job, &n)?
         {
             continue;

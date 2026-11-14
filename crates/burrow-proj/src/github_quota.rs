@@ -46,7 +46,8 @@ pub(crate) fn admission_reset(
     let app = crate::turn::github_app(cfg, request.app, engine)
         .ok()
         .flatten()?;
-    let repo = read(&job.path("link"))
+    let repo = crate::job::Schedule::of(job)
+        .link
         .and_then(|link| crate::github::target(&link).map(|(r, _)| r))
         .unwrap_or_else(|| crate::pick::github_repo(cfg, &request.project));
     let owner = repo.split('/').next()?;

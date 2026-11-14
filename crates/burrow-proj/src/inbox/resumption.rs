@@ -105,7 +105,8 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
         || dirs(&inbox.state.join(".triage"), "")
             .iter()
             .any(|d| mine(d));
-    if !associated || inbox.triage.is_none() || job.path("unstick").exists() {
+    let unstick = crate::job::Schedule::of(job).unstick;
+    if !associated || inbox.triage.is_none() || unstick {
         return Ok(Resume::Ready(Permit::unlocked()));
     }
     let permit = if HELD.with(Cell::get) {
@@ -141,7 +142,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     if drained
         .iter()
         .any(|d| mine(d) && d.join("drained").exists())
-        && !job.path("unstick").exists()
+        && !unstick
         && drained
             .iter()
             .filter(|d| !mine(d) && pass.draining_record(d))
@@ -152,7 +153,7 @@ pub(crate) fn admission(cfg: &Config, job: &Job) -> Result<Resume, String> {
     }
     let sorting = dirs(&inbox.state.join(".triage"), "");
     if sorting.iter().any(|d| mine(d))
-        && !job.path("unstick").exists()
+        && !unstick
         && sorting
             .iter()
             .filter(|d| !mine(d) && pass.sorting_slot(d))

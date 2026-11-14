@@ -317,6 +317,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             return Err(Fail::quiet(1));
         }
     };
+    let schedule = match crate::job::Schedule::restore(&job) {
+        Ok(s) => s,
+        Err(e) => {
+            outcome(&e);
+            return Err(Fail::quiet(1));
+        }
+    };
     let agent = request.agent.clone();
     // Its scratch, made before it takes a slot: one that can't be made fails
     // the turn rather than leave its work nowhere to go. A sandbox's job works
@@ -364,7 +371,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         }
     }
     // In the turn's journal too, where its wait would be looked into.
-    if let Some(why) = demoted(cfg, &job.dir) {
+    if let Some(why) = demoted(cfg, &job) {
         eprintln!("proj: {why}");
     }
     let given = if given == "first" {
@@ -381,8 +388,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let mut held = Some(take(true)?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
-    kick(cfg, lines(&job.path("kick")));
-    let limit = read(&job.path("timeout")).unwrap_or_else(|| cfg.timeout.clone());
+    kick(cfg, schedule.kick.clone());
+    let limit = schedule
+        .timeout
+        .clone()
+        .unwrap_or_else(|| cfg.timeout.clone());
     // One budget for the whole turn from the moment it took its slot,
     // however many runs it takes and the clearing up between them, to the
     // nanosecond; 0 is none. Its deadline is kept in N.deadline, which the
@@ -426,7 +436,9 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         crate::snapshot::stream::notify(cfg);
     }
     rewatch(cfg, &[id]);
-    let quiet = read(&job.path("idle"))
+    let quiet = schedule
+        .idle
+        .clone()
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
         .unwrap_or(0);
@@ -584,7 +596,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                         .map_err(|e| Fail::new(1, e.to_string()))?;
                     crate::snapshot::stream::notify(cfg);
                     let _ = held.insert(take(true)?);
-                    kick(cfg, lines(&job.path("kick")));
+                    kick(cfg, schedule.kick.clone());
                     let state = crate::retry::Checkpoint::load(&job, &n)
                         .map_err(|e| Fail::new(1, e.to_string()))?
                         .ok_or_else(|| Fail::new(1, "retry checkpoint disappeared"))?;
@@ -704,7 +716,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             let _ = crate::state_reads::remove(job.path(f));
         }
     } else if job.turn(&n, "quiet").exists() {
-        let idle = read(&job.path("idle")).unwrap_or_default();
+        let idle = schedule.idle.clone().unwrap_or_default();
         outcome(&format!("went quiet for {idle}"));
     } else if job.turn(&n, "late").exists() {
         outcome(&format!("timed out after {limit}"));
