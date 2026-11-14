@@ -99,3 +99,44 @@ with tempfile.TemporaryDirectory() as tmp:
             pass
         else:
             raise AssertionError('a cut-off answer must raise Unavailable')
+
+    # Through gh itself: a 504, then an answer gh exits 0 on though it's cut
+    # off part way (or empty), then pages. Each is asked again smaller, and
+    # the pass goes on at the size that answered (FieldmouseWorks/burrow#1042).
+    def page(n, more):
+        return json.dumps({'data': {'repository': {'squashMergeAllowed': True, 'pullRequests': {
+            'pageInfo': {'hasNextPage': more, 'endCursor': f'after-{n}'}, 'nodes': [{'number': n}]}}}})
+
+    def answers(*said):
+        asked = []
+
+        def run(cmd, **kw):
+            args = list(cmd)
+            sized = [a for a in args if a.startswith('first=')]
+            cursor = [a for a in args if a.startswith('cursor=')]
+            asked.append((int(sized[0][6:]) if sized else None, cursor[0][7:] if cursor else None))
+            code, out, err = said[len(asked) - 1]
+            return subprocess.CompletedProcess(cmd, code, stdout=out, stderr=err)
+        return run, asked
+
+    run, asked = answers((1, '', 'gh: HTTP 504'), (0, '{"data": {"repository": {"pullRequ', ''),
+                         (0, '', ''), (0, page(1, True), ''), (0, page(2, False), ''))
+    with patch.object(C, 'paused', return_value=False), patch.object(C, 'gh_env', return_value={}), \
+            patch.object(C.subprocess, 'run', side_effect=run), patch.object(C, 'acted_on', lambda pr: False), \
+            patch.object(P, 'log', lambda *a: None):
+        _, prs = P.open_prs('sam', 'r')
+    assert [pr['number'] for pr in prs] == [1, 2], prs
+    assert asked == [(30, None), (15, None), (7, None), (3, None), (3, 'after-1')], asked
+
+    # Any other graphql call that gets a cut-off answer gh exits 0 on defers
+    # as GitHub not answering, not a TypeError out of the pass.
+    for out in ('', '{"data": {"repos', '"just a string"', '{"data": null}'):
+        run, _ = answers((0, out, ''))
+        with patch.object(C, 'paused', return_value=False), patch.object(C, 'gh_env', return_value={}), \
+                patch.object(C.subprocess, 'run', side_effect=run):
+            try:
+                C.graphql('query { viewer { login } }')
+            except C.Unavailable as error:
+                assert C.HEAVY.search(str(error)), error
+            else:
+                raise AssertionError(f'{out!r}: a cut-off answer must raise Unavailable')

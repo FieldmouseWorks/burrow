@@ -67,9 +67,10 @@ class Gone(RuntimeError):
 # query" is a 5xx by another name.
 UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|unexpected end of JSON input|network is unreachable|no such host|TLS handshake|something went wrong while executing your query", re.I)
 # Of those, GitHub giving up on the query itself: its gateway's error, an
-# answer cut off part way, or its own word that the query failed. Asking for
-# less can get an answer where asking again for the same can't (prs.open_prs).
-HEAVY = re.compile(r"HTTP 50[24]|unexpected end of JSON input|something went wrong while executing your query", re.I)
+# answer cut off part way (gh's own word for it, or graphql's when gh exits 0
+# on one), or its own word that the query failed. Asking for less can get an
+# answer where asking again for the same can't (prs.open_prs).
+HEAVY = re.compile(r"HTTP 50[24]|unexpected end of JSON input|an answer cut off|something went wrong while executing your query", re.I)
 
 
 # When the rate limit that turned one of this pass's calls away resets, once
@@ -283,7 +284,10 @@ def graphql(query, **variables):
     for k, v in variables.items():
         if v is not None:
             args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
-    return gh(*args)["data"]
+    got = gh(*args)  # gh exits 0 on an empty or cut-short body: not an object
+    if not isinstance(got, dict) or not isinstance(got.get("data"), dict):
+        raise Unavailable(f"gh api graphql: an answer cut off ({len(str(got))} characters, not a JSON object with data)")
+    return got["data"]
 
 
 def comment(repo, n, body):
