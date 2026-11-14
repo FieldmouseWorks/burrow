@@ -426,6 +426,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-brief"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-browser-close"
 version = "0.0.0"
 dependencies = [
@@ -857,6 +864,7 @@ name = "burrow-upkeep"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "burrow-brief",
  "burrow-github",
  "burrow-process",
  "burrow-review",
