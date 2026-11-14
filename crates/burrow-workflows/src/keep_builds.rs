@@ -92,22 +92,17 @@ fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
         install["if"],
         "inputs.install-nix && needs.reuse.outputs.hit != 'true'"
     );
-    for (keep, said) in [
-        (
-            true,
-            "extra-substituters = file:///tmp/runner/kept?trusted=true",
-        ),
-        (false, ""),
-    ] {
-        let c = ctx(&[
-            ("inputs.keep-builds", keep.into()),
-            ("runner.temp", "/tmp/runner".into()),
-        ]);
-        assert_eq!(
-            value(text(&install["with"]["extra_nix_config"]), &c).text(),
-            said
-        );
-    }
+    // What it says, a_failed_restore_builds_without_the_kept_builds says.
+    let c = ctx(&[
+        ("inputs.keep-builds", true.into()),
+        ("runner.temp", "/tmp/runner".into()),
+    ]);
+    assert!(
+        value(text(&install["with"]["extra_nix_config"]), &c)
+            .text()
+            .lines()
+            .any(|l| l.trim() == "extra-substituters = file:///tmp/runner/kept?trusted=true")
+    );
     let tool = crate::harness::step(&job, "keep-tool");
     let keep = crate::harness::step(&job, "keep");
     let save = crate::harness::step(&job, "keep-save");
@@ -364,46 +359,70 @@ fn a_negative_restores_every_legs_kept_builds() {
     }
 }
 
-/// The base's save, restored after the wait, goes into a fresh directory:
-/// the wait's plan had the nix daemon open the kept builds, which made
-/// root-owned log/ and nar/ there that tar can't extract into (#1161). What
-/// was there is set aside first and put back if the restore fails, and a
-/// failed restore builds without the base's builds rather than fail the
-/// leg.
+/// A restore that fails after the wait (the entry evicted mid-download, an
+/// extraction cut short) never fails the leg: it builds without the base's
+/// builds and reports degraded/kept-rewait (#1161). What a failed restore
+/// left half extracted is Nix's fallback's: a narinfo naming a truncated NAR
+/// is built rather than failed on, in a leg and in the negative alike.
 #[test]
-fn a_failed_restore_after_the_wait_builds_without_it() {
+fn a_failed_restore_builds_without_the_kept_builds() {
     let job = job();
     let all = steps(&job);
-    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
-    assert!(at("kept-wait") < at("kept-aside"));
-    assert!(at("kept-aside") + 1 == at("kept-rewait"));
-    assert!(at("kept-rewait") + 1 == at("kept-back"));
-    assert!(at("kept-back") < at("gate"));
-    let (aside, rewait, back) = (
-        &all[at("kept-aside")],
-        &all[at("kept-rewait")],
-        &all[at("kept-back")],
-    );
-    assert_eq!(aside["if"], rewait["if"]);
+    let rewait = step(&job, "kept-rewait");
     assert_eq!(rewait["continue-on-error"], true);
     assert_eq!(rewait["name"], "soft/kept-rewait");
-    assert_eq!(rewait["with"]["path"], "${{ runner.temp }}/kept");
-    // The fresh directory is the one the restore extracts into.
-    assert_eq!(
-        text(&aside["run"]),
-        r#"mv "$RUNNER_TEMP/kept" "$RUNNER_TEMP/kept-aside" && mkdir "$RUNNER_TEMP/kept""#
-    );
-    assert_eq!(
-        text(&back["run"]),
-        r#"rm -rf "$RUNNER_TEMP/kept" && mv "$RUNNER_TEMP/kept-aside" "$RUNNER_TEMP/kept""#
-    );
-    for (outcome, puts_back) in [("failure", true), ("success", false), ("skipped", false)] {
-        let c = ctx(&[("steps.kept-rewait.outcome", outcome.into())]);
+    assert_eq!(rewait["with"]["fail-on-cache-miss"], true);
+    let reporter = all
+        .iter()
+        .find(|s| s["name"] == "degraded/kept-rewait")
+        .unwrap();
+    for (outcome, degraded) in [("failure", true), ("success", false), ("skipped", false)] {
+        let c = ctx(&[
+            ("always()", true.into()),
+            ("steps.kept-rewait.outcome", outcome.into()),
+        ]);
         assert_eq!(
-            value(text(&back["if"]), &c).truthy(),
-            puts_back,
+            value(text(&reporter["if"]), &c).truthy(),
+            degraded,
             "{outcome}"
         );
+    }
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let negative = &wf["jobs"]["negative"];
+    let installs = steps(&job)
+        .iter()
+        .chain(steps(negative))
+        .filter(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("cachix/install-nix-action@"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(installs.len(), 2);
+    for install in &installs {
+        for (keep, said) in [
+            (
+                true,
+                vec![
+                    "extra-substituters = file:///tmp/runner/kept?trusted=true",
+                    "fallback = true",
+                ],
+            ),
+            (false, vec![]),
+        ] {
+            let c = ctx(&[
+                ("inputs.keep-builds", keep.into()),
+                ("runner.temp", "/tmp/runner".into()),
+            ]);
+            let config = value(text(&install["with"]["extra_nix_config"]), &c).text();
+            let lines: Vec<&str> = config
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(lines, said, "keep-builds {keep}");
+        }
     }
 }
 
@@ -434,6 +453,60 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("pull_request", "o/r", "true")));
     assert!(!on(&c("pull_request", "someone/r", "")));
     assert!(!on(&c("push", "", "")));
+}
+
+/// The wait plans with Nix installed, so when the leg restored nothing the
+/// root daemon has made the empty kept cache's nar/ and log/ its own, and
+/// the second restore couldn't extract into them: tar's "Cannot open:
+/// Permission denied" failed the leg (#1087's leg 1). Right before that
+/// restore, on the same condition, the runner's user takes the directory
+/// back.
+#[test]
+fn a_pr_leg_takes_the_kept_cache_back_from_the_daemon_before_restoring_again() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert_eq!(at("kept-reclaim") + 1, at("kept-rewait"));
+    assert!(at("kept-wait") < at("kept-reclaim"));
+    let reclaim = &all[at("kept-reclaim")];
+    assert_eq!(reclaim["if"], all[at("kept-rewait")]["if"]);
+
+    // Run with a sudo that only says what it was asked to do.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let said = dir.path().join("said");
+    let sudo = bin.join("sudo");
+    burrow_test::executable(
+        &sudo,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", said.display()),
+    );
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-euo", "pipefail", "-c", script(reclaim)])
+        .env("RUNNER_TEMP", dir.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+    let out = crate::harness::output(cmd);
+    assert!(out.status.success(), "{out:?}");
+    let id = |flag: &str| {
+        let o = crate::harness::output({
+            let mut c = std::process::Command::new("id");
+            c.arg(flag);
+            c
+        });
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(
+        std::fs::read_to_string(&said).unwrap(),
+        format!(
+            "chown\n-R\n{}:{}\n{}/kept\n",
+            id("-u"),
+            id("-g"),
+            dir.path().display()
+        )
+    );
 }
 
 /// A PR's exact key is the one its base's push saved under: the merge

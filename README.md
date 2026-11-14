@@ -371,10 +371,10 @@ Each has an entry below, and each can be imported on its own.
   sits idle while a job only it could take is queued is restarted after
   `quietMinutes`, or started at once if it failed: at most twice in six hours,
   and never while a switch is in flight. A push run on a runner repo's default
-  branch that hasn't started is cancelled once a later run of its workflow on
-  that branch is live, so the later one takes its place (a run that has
-  started finishes, so the branch always gets a result; this takes Actions:
-  read and write on the machinery's App). With `fresh.enable`, each job queued
+  branch that hasn't finished, started or not, is cancelled once a later run
+  of its workflow on that branch is live, so the later one takes its place
+  and gives the branch its result (a run someone ran again is left; this
+  takes Actions: read and write on the machinery's App). With `fresh.enable`, each job queued
   in `fresh.repos` that asks for `fresh.label` and nothing else gets a runner
   of its own: registered for that one job with the organization `fresh.owner`
   (GitHub's JIT config, which takes the organization's Self-hosted runners

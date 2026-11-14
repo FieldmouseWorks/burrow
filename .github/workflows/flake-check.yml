@@ -492,7 +492,12 @@ jobs:
       - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
-          extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
+          # fallback: a kept entry whose restore failed part way can leave
+          # a narinfo naming a truncated NAR, which nix would otherwise fail
+          # on rather than build (#1161): the kept builds only save time.
+          extra_nix_config: |
+            ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
+            ${{ inputs.keep-builds && 'fallback = true' || '' }}
       # The gate's own files, at this workflow's commit: its script and the
       # plan it evaluates (crates/burrow-flake-check), beside the checkout, which
       # they're no part of (nix reads only what git tracks).
@@ -546,17 +551,19 @@ jobs:
           LEG_JOB: *leg-job
           KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
         run: bash "$TOOLS/run.sh" wait
-      # The wait's plan had the nix daemon open the kept builds, and opening
-      # a file cache creates its own log/ and nar/, root-owned, which tar
-      # can't then extract into (#1161; the negative's restores say the
-      # same). So the base's save is restored into a fresh directory, with
-      # what was there set aside and put back if the restore fails. The kept
-      # builds only save time: a failed restore builds without the base's
-      # and says so as degraded/kept-rewait, rather than fail the PR.
-      - id: kept-aside
+      # The wait's plan ran with Nix installed, so when nothing was restored
+      # the root daemon opened the empty kept cache and made its nar/ and
+      # log/ as root, where the restore below can't extract (the reason the
+      # first restore runs before Nix is installed). Hand the directory back
+      # to the runner's user first: installing Nix needed sudo, so it's here.
+      - id: kept-reclaim
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         shell: bash
-        run: mv "$RUNNER_TEMP/kept" "$RUNNER_TEMP/kept-aside" && mkdir "$RUNNER_TEMP/kept"
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/kept"
+      # The kept builds only save time: a restore that fails (an entry
+      # evicted mid-download, an extraction cut short) builds without the
+      # base's and says so as degraded/kept-rewait, rather than fail the PR
+      # (#1161). What it left half extracted, Nix's fallback builds.
       - id: kept-rewait
         name: soft/kept-rewait
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
@@ -566,10 +573,6 @@ jobs:
           path: ${{ runner.temp }}/kept
           key: ${{ steps.kept-wait.outputs.key }}
           fail-on-cache-miss: true
-      - id: kept-back
-        if: ${{ steps.kept-rewait.outcome == 'failure' }}
-        shell: bash
-        run: rm -rf "$RUNNER_TEMP/kept" && mv "$RUNNER_TEMP/kept-aside" "$RUNNER_TEMP/kept"
       # The gate: the Rust runner owns the policy; gate.sh only bootstraps it.
       # With gate-reuse, Nix reads a commit of the tree alone, so the verdict
       # is the tree's (crates/burrow-flake-check/src/source.rs).
@@ -1135,7 +1138,12 @@ jobs:
       - if: inputs.install-nix
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
-          extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
+          # fallback: a kept entry whose restore failed part way can leave
+          # a narinfo naming a truncated NAR, which nix would otherwise fail
+          # on rather than build (#1161): the kept builds only save time.
+          extra_nix_config: |
+            ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
+            ${{ inputs.keep-builds && 'fallback = true' || '' }}
       # Whether it needs a negative, which git alone can tell.
       - id: paths
         shell: bash

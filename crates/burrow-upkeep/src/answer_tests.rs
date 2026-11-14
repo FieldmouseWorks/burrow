@@ -480,6 +480,8 @@ fn the_description_is_read_again_and_written_once() {
         let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
         reread(&mut hub, "open", PUSHED, BODY);
         hub.on("PATCH", "repos/sam/r/pulls/7$", reply(status, json!({})));
+        // A 429 is a rate limit: the pass asks when its budgets reset.
+        hub.on("GET", "rate_limit$", reply(200, json!({"resources": {}})));
         assert!(
             matches!(answered(&mut hub, &h), Err(Unposted::Unanswered(_))),
             "{status}"

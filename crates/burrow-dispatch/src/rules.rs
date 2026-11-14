@@ -31,11 +31,12 @@ pub enum Move {
         state: String,
         why: String,
     },
-    /// Cancel a push run that hasn't started, that a later one of its
-    /// workflow on the same branch has made moot.
+    /// Cancel a push run that hasn't finished, that a later one of its
+    /// workflow on the same branch (`later`) has made moot.
     Cancel {
         repo: String,
         run: u64,
+        later: u64,
         url: String,
         why: String,
     },
@@ -522,19 +523,19 @@ fn runner(
     }
 }
 
-/// A push run on the default branch that no job of has started, and that a
-/// later one of its workflow on that branch (queued, next in line, or under
-/// way) checks past, is moot: it's cancelled, so the later one gets its
-/// place. One that has started is left to finish, so the branch always gets
-/// a result, and so is one someone ran again. Each run is tried once in
-/// RECENT, whatever came of it.
+/// A push run on the default branch that hasn't finished (queued, next in
+/// line, or under way), and that a later one of its workflow on that branch,
+/// also unfinished, checks past, is moot: it's cancelled, so the later one
+/// gets its place, and the branch gets its result from that one. Having
+/// started protects nothing: a run that can no longer matter is ended by the
+/// machine (docs/gate-design.md). One someone ran again is theirs. Each run
+/// is tried once in RECENT, whatever came of it.
 fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
-    for r in runs
-        .iter()
-        .filter(|r| r.status == "queued" && r.attempt == 1)
-    {
+    let live = |r: &&Run| r.status != "completed";
+    for r in runs.iter().filter(live).filter(|r| r.attempt == 1) {
         let Some(later) = runs
             .iter()
+            .filter(live)
             .find(|l| l.id != r.id && l.workflow == r.workflow && l.at > r.at)
         else {
             continue;
@@ -547,11 +548,17 @@ fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
         d.moves.push(Move::Cancel {
             repo: repo.to_owned(),
             run: r.id,
+            later: later.id,
             url: r.url.clone(),
             why: format!(
-                "it checks {} on {} and hasn't started, and {} checks {}, which came after it",
+                "it checks {} on {} and {}, and {} checks {}, which came after it",
                 short(&r.sha),
                 r.branch,
+                match r.status.as_str() {
+                    "queued" => "hasn't started",
+                    "pending" => "is next in line",
+                    _ => "is under way",
+                },
                 later.url,
                 short(&later.sha)
             ),
