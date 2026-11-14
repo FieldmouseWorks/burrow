@@ -546,6 +546,15 @@ jobs:
           LEG_JOB: *leg-job
           KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
         run: bash "$TOOLS/run.sh" wait
+      # The wait's plan ran with Nix installed, so when nothing was restored
+      # the root daemon opened the empty kept cache and made its nar/ and
+      # log/ as root, where the restore below can't extract (the reason the
+      # first restore runs before Nix is installed). Hand the directory back
+      # to the runner's user first: installing Nix needed sudo, so it's here.
+      - id: kept-reclaim
+        if: ${{ steps.kept-wait.outputs.saved == 'true' }}
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/kept"
       - id: kept-rewait
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
