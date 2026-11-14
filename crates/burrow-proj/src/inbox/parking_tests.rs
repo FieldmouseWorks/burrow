@@ -74,7 +74,7 @@ fn parking_stops_running_and_policy_parked_issue_jobs_too() {
         let b = fixture();
         let job = Job::new(&b.cfg, "j1");
         if policy_parked {
-            crate::policy::mark(&job, "done", false).unwrap();
+            crate::policy::mark(&job, "done", false, None).unwrap();
         } else {
             fs::remove_file(job.turn("1", "outcome")).unwrap();
             fs::remove_file(job.turn("1", "jsonl")).unwrap();
@@ -233,7 +233,7 @@ fn relabelling_after_a_refused_wake_retires_the_old_record() {
 fn a_repository_release_cannot_launch_a_parked_issues_queued_turn() {
     let b = fixture();
     let job = Job::new(&b.cfg, "j1");
-    crate::policy::mark(&job, "queued", false).unwrap();
+    crate::policy::mark(&job, "queued", false, None).unwrap();
     on_github(&b, &issue(7, "sam", &["later"]));
     crate::policy::reconcile(&b.cfg).unwrap();
     assert!(!b.path("launched").exists());

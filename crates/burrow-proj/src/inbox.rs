@@ -88,11 +88,11 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 "proj-inbox: a pass is still going after ten minutes; nothing forgotten",
             ));
         }
-        let _permit = resumption::Permit::new(pass);
+        let _permit = resumption::Permit::pass(pass);
         return forget(cfg, &inbox.state, repo);
     }
     pass.lock().map_err(|e| io_fail(&lock, e))?;
-    let pass = resumption::Permit::new(pass);
+    let pass = resumption::Permit::pass(pass);
     let mut p = Pass {
         cfg,
         inbox,
@@ -104,9 +104,23 @@ pub fn main(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         scope: if only.is_empty() { None } else { told() },
     };
     let result = p.run(only).and_then(|()| p.finish(only));
-    drop(pass);
-    crate::policy::wake(cfg);
+    release_parked(cfg, pass);
     result
+}
+
+/// What's parked waits for capacity this pass may have freed, and for the
+/// lock the pass holds; passes run back to back, so the policy unit's own
+/// try for that lock almost never finds it free (#1009). So the pass, still
+/// holding it, releases them itself, in the policy's own order and under the
+/// same capacity count (`resumption::admission` sees the permit), and only
+/// then lets go. Should that fail, the policy unit takes its turn after.
+fn release_parked(cfg: &Config, pass: resumption::Permit) {
+    let released = crate::policy::reconcile(cfg);
+    drop(pass);
+    if let Err(error) = released {
+        eprintln!("proj-inbox: releasing parked work: {error}");
+        crate::policy::wake(cfg);
+    }
 }
 
 /// Which issue is which job.
@@ -134,6 +148,70 @@ fn status(cfg: &Config, inbox: &Inbox) {
         let st = Job::new(cfg, &id).state();
         println!("{issue:<40} {st:<8} {id}");
     }
+}
+
+/// `proj plan done OWNER/REPO#N PR-URL`: one of the inbox's authors, on the
+/// host and never from a job, records the merged PR that landed a task
+/// list's child, and the list moves on at its repo's next pass. The author
+/// is the GitHub account the caller's own gh answers as.
+pub fn plan(cfg: &Config, args: &[String]) -> Result<(), Fail> {
+    let [done, child, pr] = args else {
+        return Err(Fail::new(2, plans::PLAN_USAGE));
+    };
+    if done != "done" {
+        return Err(Fail::new(2, plans::PLAN_USAGE));
+    }
+    if std::env::var_os("PROJ_JOB").is_some_and(|id| !id.is_empty()) {
+        return Err(Fail::new(
+            2,
+            "proj plan done is the host's, for an author: a job never records a landed PR",
+        ));
+    }
+    let inbox = cfg
+        .inbox
+        .as_ref()
+        .filter(|i| i.planning)
+        .ok_or_else(|| Fail::new(1, "proj plan done: inbox planning isn't on here"))?;
+    let caller = crate::github::reported(burrow_github::call_repeating(
+        &mut burrow_github::Gh::default(),
+        "GET",
+        "user",
+        None,
+    ))
+    .and_then(|r| r.json().ok())
+    .and_then(|v| v["id"].as_u64());
+    // Under the pass lock, as passes and `forget` are: the child's place on
+    // its list and the record land together, with no pass writing beside it.
+    let lock = PathBuf::from(format!("{}.lock", inbox.wake.display()));
+    let held = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&lock)
+        .map_err(|e| io_fail(&lock, e))?;
+    if !lock_within(&held, FORGET_WAIT).map_err(|e| io_fail(&lock, e))? {
+        return Err(Fail::new(
+            1,
+            "proj plan done: an inbox pass is still going after ten minutes; nothing recorded",
+        ));
+    }
+    let permit = resumption::Permit::new(held);
+    let p = Pass {
+        cfg,
+        inbox,
+        project: projects(cfg),
+        wake: BTreeMap::new(),
+        unreached: Vec::new(),
+        looked: Vec::new(),
+        observe: false,
+        scope: None,
+    };
+    let repo = p.plan_done(child, pr, caller)?;
+    drop(permit);
+    crate::job::kick(cfg, [format!("proj-inbox/{repo}")]);
+    println!(
+        "Recorded {pr} as {child}'s landed PR; its task list moves on at the repo's next pass."
+    );
+    Ok(())
 }
 
 mod dirs;
@@ -843,6 +921,8 @@ mod enrollment_review_tests;
 mod handed_tests;
 #[cfg(test)]
 mod parking_tests;
+#[cfg(test)]
+mod pass_release_tests;
 #[cfg(test)]
 mod question_tests;
 #[cfg(test)]

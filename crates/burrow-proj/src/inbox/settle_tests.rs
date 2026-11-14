@@ -312,6 +312,7 @@ fn restoring(job: &Job, state: &str, turn: &str) {
         turn: turn.into(),
         first: false,
         at: 0,
+        wait: None,
     };
     fs::write(
         crate::policy::path(job, "restoring"),

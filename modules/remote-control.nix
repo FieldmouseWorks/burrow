@@ -146,11 +146,23 @@ let
         fi
         want+=("$(systemd-escape --template claude-rc@.service "$name")")
       done
+      # settling UNIT: whether systemd is already restarting it (or gave up).
+      settling() {
+        local props
+        props=$(systemctl --user show -p SubState -p Result --value "$1" | tr '\n' ' ')
+        [[ $props == *auto-restart* || $props == *start-limit-hit* ]]
+      }
       # only GLOB UNIT...: start each UNIT, and stop every other GLOB matches.
       only() {
         local glob=$1 unit w keep
         shift
         for unit in "$@"; do
+          # A start on a unit waiting out its RestartSec restarts it at once,
+          # and a server that crashes would be started once a second, each
+          # death touching ~/.claude/sessions and so the scan again. A unit
+          # in auto-restart, or failed by the start limit, is left to its
+          # own restart.
+          if settling "$unit"; then continue; fi
           systemctl --user start --no-block "$unit"
         done
         while read -r unit _; do

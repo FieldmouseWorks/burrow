@@ -12,10 +12,9 @@ they're read and changed.
 
 An option that isn't live is set in the machine's flake, under `burrow.`
 and its name: a change is a PR to the flake and a deploy. A live one is kept
-in a file on the machine (the settings overlay under `burrow.stateDir`;
-proj's in the job user's `~/.config/proj`, setups in `roles.d/` beside the
-roles file, and the usage hold in proj's jobs directory), and its readers
-read it again at their next decision.
+in a file on the machine (the settings overlays under `burrow.stateDir`,
+and the usage hold in proj's jobs directory), and its readers read it
+again at their next decision.
 
 | Option | Type | Allowed | Default | Live | Owner | Kept in | What it is |
 |---|---|---|---|---|---|---|---|
