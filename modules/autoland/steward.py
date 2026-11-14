@@ -99,7 +99,6 @@ def token(repo):
         sys.exit(1)
 
 
-
 def firsts(repo, prs):
     """The PRs that go first in the proof line and this pass: an author's
     `first` on them or on an issue they close, as burrow-upkeep's `firsts`
