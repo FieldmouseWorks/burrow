@@ -346,6 +346,49 @@ refused); after the usual review, a Claude job judges whether their PR lands, as
 3. Tell the owner the result or the question in your own words. Post their
    answer as a reply on the issue, and check back again.
 4. Close the issue when the owner has what they asked for.
+5. Requests for the owner come as issues under the escalation relay's label
+   in the machine's repo ([escalations](#asking-the-owner-escalations)).
+   Raise each with the owner in the project chat, then comment
+   `delivered KEY` on it: until you do, its owner label waits.
+
+## Asking the owner: escalations
+
+The owner label goes on through `HOST-escalation` (`burrow.escalation`,
+crates/burrow-escalation) and nothing else. A producer names a reason as
+one of a closed set of words: creating, rotating or deleting a secret; the
+irreversible actions (destroying or rolling back a ZFS dataset, wiping or
+partitioning a disk, deleting remote data, force-pushing a default branch,
+flashing firmware, the hosting provider's cancel or reinstall); or a
+sign-in, two-factor or Confirm access prompt that only a person can clear and
+that is still there. Only a word the machine keeps in
+`escalation.ownerReasons`, naming what it's about, reaches the owner.
+Anything else, such as a hold to explain, a pause, or a request someone must
+restate, goes to the operator, who decides it under the owner's standing
+authority. With no `escalation.relay.repo`, everything goes there.
+
+```
+HOST-escalation route KIND DETAIL                         where it would go; changes nothing
+HOST-escalation escalate KEY OWNER/NAME#N KIND DETAIL ASK send it there
+HOST-escalation pass                                      carry on what's part-way
+HOST-escalation show                                      the records
+```
+
+An owner escalation is one durable operation. The request opens as an issue
+titled `[escalation KEY]` in the relay repo, under the relay label, which the
+inbox never sorts. That issue is not delivery. It counts once one of
+`escalation.relay.acknowledgers` (matched by account id) comments with
+`delivered KEY` as its first line, after raising the request with the owner
+in their project. Only then does the owner label go on the target, and the
+label writer takes that receipt as an argument. Each step is recorded
+before the next, so a failure, crash or restart between any two effects
+leaves the record where it got to. The next `escalate` with the same key, or
+a `pass`, carries it on. The relay finds the request it already opened
+rather than open another, and a delivered request is never sent again.
+Until the acknowledgement, the outcome is `pending` and the target carries
+no owner label.
+
+The coordinator (below) watches the relay label, raises each request with the
+owner in the project chat, and acknowledges it on its issue.
 
 ## Sessions: Remote Control, one tap per thread
 

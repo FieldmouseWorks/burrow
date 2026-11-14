@@ -48,4 +48,8 @@ lib.genAttrs [
   "autoland.reviewers.codex.parallel"
   "autoland.reviewers.timeoutMinutes"
   "autoland.reviewers.skipPaths"
+  "escalation.ownerReasons"
+  "escalation.relay.repo"
+  "escalation.relay.label"
+  "escalation.relay.acknowledgers"
 ] read

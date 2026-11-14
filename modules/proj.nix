@@ -509,8 +509,9 @@ in
         skip = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ "probe" "undo" "flaky" ];
-          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label ++ lib.optional config.burrow.settings.door.enable config.burrow.settings.door.label);
-          description = "Labels whose issues other machinery owns: never sorted or handed on. The engines door's configured label always joins them while the door is on.";
+          apply = names: lib.unique (names ++ lib.optional cfg.engines.door.enable cfg.engines.door.label ++ lib.optional config.burrow.settings.door.enable config.burrow.settings.door.label
+            ++ lib.optional ((config.burrow.escalation.relay.repo or null) != null) config.burrow.escalation.relay.label);
+          description = "Labels whose issues other machinery owns: never sorted or handed on. The engines and settings doors' labels always join them while each door is on, and the escalation relay's while it has a repo.";
         };
         atOnce = lib.mkOption {
           type = lib.types.ints.positive;

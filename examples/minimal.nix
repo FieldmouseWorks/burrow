@@ -17,6 +17,14 @@
       enable = true;
       repo = "sam/homelab";
     };
+    # The owner label only for one-way doors, once sam's project has it.
+    escalation = {
+      enable = true;
+      relay = {
+        repo = "sam/homelab";
+        acknowledgers = [ { login = "sam"; id = 1; } ];
+      };
+    };
     updates = {
       enable = true;
       origin = "https://github.com/sam/homelab";
