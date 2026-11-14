@@ -50,11 +50,14 @@ pub enum Move {
     /// Stop a fresh runner's unit that has sat idle: one that hasn't taken
     /// a job in `quiet` won't.
     Retire { unit: String, why: String },
-    /// `systemctl stop` each of `stop`, in turn: the units that start a
-    /// runner GitHub has deleted the registration of, then the runner, which
-    /// exits as it starts and is started again, without end.
+    /// `systemctl stop` each of `stop`, in turn: the path unit of its own
+    /// name that starts a runner GitHub has deleted the registration of,
+    /// then the runner, which exits as it starts and is started again,
+    /// without end. `reg` is the registration found gone: one that's
+    /// changed since isn't stopped (halt.rs).
     Halt {
         unit: String,
+        reg: Registration,
         stop: Vec<String>,
         why: String,
     },
@@ -601,11 +604,30 @@ fn gone(
             refresh: false,
         },
     );
-    let stop: Vec<String> = seen
+    // Only its own path unit is stopped, which polkit lets dispatch do;
+    // anything else that starts it is named in its wait, never stopped,
+    // and never keeps what can be stopped from being stopped.
+    let own = format!("{unit}.path");
+    let (ours, others): (Vec<&String>, Vec<&String>) = seen
         .triggers
         .iter()
         .filter(|(_, u)| up(&u.state))
-        .map(|(t, _)| t.clone())
+        .map(|(t, _)| t)
+        .partition(|t| **t == own);
+    if !others.is_empty() {
+        let others: Vec<&str> = others.iter().map(|t| t.as_str()).collect();
+        let item = d
+            .items
+            .get_mut(&format!("runner/{unit}"))
+            .expect("just put");
+        item.phase.push_str(&format!(
+            "; {} starts it too, which dispatch doesn't stop",
+            others.join(" and ")
+        ));
+    }
+    let stop: Vec<String> = ours
+        .into_iter()
+        .cloned()
         .chain(up(&seen.unit.state).then(|| unit.to_owned()))
         .collect();
     if stop.is_empty() {
@@ -617,6 +639,7 @@ fn gone(
     }
     d.moves.push(Move::Halt {
         unit: unit.to_owned(),
+        reg: reg.clone(),
         stop,
         why: format!("its registration is gone at GitHub: {missing}"),
     });

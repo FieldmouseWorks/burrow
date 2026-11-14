@@ -295,6 +295,29 @@ fn gone_registration() {
         it.phase
     );
 
+    // Started by a timer too, which sorts first: never in the stop set,
+    // which polkit allows only its own path unit and it, and named in its
+    // wait; an inactive one isn't.
+    let mut s = gone("active", &[]);
+    let up = s.triggers["ci.path"].clone();
+    s.triggers.insert("a-recovery.timer".into(), up);
+    s.triggers.insert(
+        "b.path".into(),
+        Unit {
+            state: "inactive".into(),
+            ..Unit::default()
+        },
+    );
+    let d = decide(&cfg, &snap(s), &st, &none, T + Q);
+    assert_eq!(halts(&d), [vec!["ci.path", "ci"]]);
+    assert!(
+        d.items["runner/ci"]
+            .phase
+            .ends_with("until it's registered again; a-recovery.timer starts it too, which dispatch doesn't stop"),
+        "{}",
+        d.items["runner/ci"].phase
+    );
+
     // Stopped: nothing more to do, and still waiting to be registered.
     let mut s = gone("inactive", &[]);
     s.triggers.get_mut("ci.path").unwrap().state = "inactive".into();

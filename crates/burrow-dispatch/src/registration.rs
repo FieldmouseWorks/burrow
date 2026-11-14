@@ -14,7 +14,6 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::snapshot::every;
 use crate::world::World;
 
 /// What a pass found of a runner's registration.
@@ -133,20 +132,62 @@ impl Lists {
 }
 
 /// Every runner GitHub lists for the scope, by id: all of them, or an error.
+/// Only a whole list says a runner is gone, so it's read strictly: each
+/// page must have its `runners` array and `total_count`, each entry its id,
+/// and the pages must hold exactly the total, read up to it. Anything short
+/// of that (a malformed page, one short before the total's reached, a total
+/// that moves) is an error, which leaves the registration unknown.
 fn ids(world: &dyn World, scope: &str) -> Result<BTreeSet<u64>, String> {
+    const PER: usize = 100;
     let path = if scope.contains('/') {
         format!("repos/{scope}/actions/runners")
     } else {
         format!("orgs/{scope}/actions/runners")
     };
-    every(world, &path, "runners")?
-        .iter()
-        .map(|r| {
-            r.get("id")
+    let mut out = BTreeSet::new();
+    let mut read = 0u64;
+    let mut total = None;
+    for page in 1.. {
+        let got = world.github(&format!("{path}?per_page={PER}&page={page}"))?;
+        let entries = got
+            .get("runners")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("page {page} has no list of runners"))?;
+        let count = got
+            .get("total_count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("page {page} has no total_count"))?;
+        if *total.get_or_insert(count) != count {
+            return Err(format!(
+                "its total moved from {} to {count} while it was read",
+                total.unwrap_or(count)
+            ));
+        }
+        for r in entries {
+            let id = r
+                .get("id")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| "a runner without an id".to_owned())
-        })
-        .collect()
+                .ok_or_else(|| format!("page {page} has a runner without an id"))?;
+            out.insert(id);
+        }
+        read += entries.len() as u64;
+        if read >= count {
+            break;
+        }
+        if entries.len() < PER {
+            return Err(format!(
+                "page {page} ends the list at {read} of the {count} runners it counts"
+            ));
+        }
+    }
+    let count = total.unwrap_or(0);
+    if read != count || out.len() as u64 != count {
+        return Err(format!(
+            "it lists {read} runners ({} ids) where it counts {count}",
+            out.len()
+        ));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -244,6 +285,112 @@ pub mod tests {
             panic!("an enterprise's runner checked");
         };
         assert!(why.contains("neither a repo nor an organization"), "{why}");
+    }
+
+    // Only a whole list says a runner is gone, a repo's or an
+    // organization's alike: one read across its pages to exactly the total
+    // it counts. A page without its runners or its total, a runner without
+    // an id, a page short before the total, a total that moves between
+    // pages, more runners or fewer distinct ids than it counts: unknown.
+    #[test]
+    fn whole_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = |kind: &str, scope: &str, n: u32| {
+            format!("{kind}/{scope}/actions/runners?per_page=100&page={n}")
+        };
+        let runners = |from: u64, n: u64| -> Vec<serde_json::Value> {
+            (from..from + n).map(|id| json!({"id": id})).collect()
+        };
+        for (kind, scope, url) in [
+            ("repos", "sam/r", "https://github.com/sam/r"),
+            ("orgs", "sam", "https://github.com/sam"),
+        ] {
+            let dot = dot_runner(dir.path(), "box", 21, url);
+            let check = |pages: &[serde_json::Value]| {
+                let mut w = Fake::default();
+                for (i, p) in pages.iter().enumerate() {
+                    w.github
+                        .insert(page(kind, scope, i as u32 + 1), Ok(p.clone()));
+                }
+                Lists::default().check(&w, &dot)
+            };
+
+            // Whole: over two pages, or none at all.
+            let two = [
+                json!({"total_count": 150, "runners": runners(100, 100)}),
+                json!({"total_count": 150, "runners": runners(200, 50)}),
+            ];
+            assert!(matches!(check(&two), Registered::Gone(_)), "{scope}");
+            let mut found = two.clone();
+            found[1]["runners"][0]["id"] = json!(21);
+            assert_eq!(check(&found), Registered::Listed, "{scope}");
+            assert!(
+                matches!(
+                    check(&[json!({"total_count": 0, "runners": []})]),
+                    Registered::Gone(_)
+                ),
+                "{scope}"
+            );
+
+            for (what, pages, why) in [
+                (
+                    "no runners",
+                    vec![json!({"total_count": 0})],
+                    "no list of runners",
+                ),
+                (
+                    "runners not a list",
+                    vec![json!({"total_count": 1, "runners": {"id": 22}})],
+                    "no list of runners",
+                ),
+                (
+                    "no total",
+                    vec![json!({"runners": [{"id": 22}]})],
+                    "no total_count",
+                ),
+                (
+                    "a runner without an id",
+                    vec![json!({"total_count": 2, "runners": [{"id": 22}, {"name": "x"}]})],
+                    "without an id",
+                ),
+                (
+                    "short of its total",
+                    vec![json!({"total_count": 101, "runners": []})],
+                    "ends the list at 0 of the 101",
+                ),
+                (
+                    "a page short of its total",
+                    vec![
+                        json!({"total_count": 250, "runners": runners(100, 100)}),
+                        json!({"total_count": 250, "runners": runners(200, 50)}),
+                    ],
+                    "page 2 ends the list at 150 of the 250",
+                ),
+                (
+                    "a total that moves",
+                    vec![
+                        json!({"total_count": 150, "runners": runners(100, 100)}),
+                        json!({"total_count": 140, "runners": runners(200, 40)}),
+                    ],
+                    "moved from 150 to 140",
+                ),
+                (
+                    "more than its total",
+                    vec![json!({"total_count": 1, "runners": runners(22, 2)})],
+                    "lists 2 runners",
+                ),
+                (
+                    "an id twice",
+                    vec![json!({"total_count": 2, "runners": [{"id": 22}, {"id": 22}]})],
+                    "(1 ids)",
+                ),
+            ] {
+                let Registered::Unknown(e) = check(&pages) else {
+                    panic!("{scope}, {what}: taken for an answer");
+                };
+                assert!(e.contains(why), "{scope}, {what}: {e}");
+            }
+        }
     }
 
     #[test]

@@ -18,8 +18,9 @@
 //!     RECENT: past that, restarting isn't the fix.
 //!   - A runner whose registration GitHub has deleted (its `.runner`'s id
 //!     missing from the runners GitHub lists where it was registered) is
-//!     never restarted: it exits as it starts, so it and what starts it
-//!     again (its path unit) are stopped (registration.rs).
+//!     never restarted: it exits as it starts, so it and the path unit of
+//!     its own name that starts it again are stopped (registration.rs,
+//!     halt.rs). Anything else that starts it is named in its wait.
 //!   - A push run on a runner repo's default branch that no job of has
 //!     started, with a later run of its workflow on that branch live, is
 //!     cancelled, so the later one takes its place on the runner. One that
@@ -63,6 +64,7 @@
 
 pub mod config;
 pub mod fresh;
+pub mod halt;
 pub mod pass;
 pub mod private;
 pub mod registration;

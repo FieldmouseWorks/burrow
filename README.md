@@ -361,7 +361,8 @@ Each has an entry below, and each can be imported on its own.
   `.runner`) set is checked against GitHub's list of runners where it was
   registered: one missing from it is reported as its registration gone,
   never restarted, and stopped with the `UNIT.path` that would start it
-  again, since it exits as it starts; it's registered again by hand. A push run on a runner repo's default
+  again, since it exits as it starts (anything else that starts it is named
+  in its wait, not stopped); it's registered again by hand. A push run on a runner repo's default
   branch that hasn't started is cancelled once a later run of its workflow on
   that branch is live, so the later one takes its place (a run that has
   started finishes, so the branch always gets a result; this takes Actions:

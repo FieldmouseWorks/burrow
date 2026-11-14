@@ -345,12 +345,11 @@ fn fits(labels: &[String], r: &Runner) -> bool {
 /// Every entry of one of GitHub's paged lists (`key` in each page), all of
 /// it or an error: a page that can't be read fails the whole list, so what
 /// it would have held is never taken for nothing.
-pub(crate) fn every(world: &dyn World, path: &str, key: &str) -> Result<Vec<Value>, String> {
+fn every(world: &dyn World, path: &str, key: &str) -> Result<Vec<Value>, String> {
     const PER: usize = 100;
     let mut out = Vec::new();
-    let sep = if path.contains('?') { '&' } else { '?' };
     for page in 1.. {
-        let got = world.github(&format!("{path}{sep}per_page={PER}&page={page}"))?;
+        let got = world.github(&format!("{path}&per_page={PER}&page={page}"))?;
         let entries = list(&got, key);
         out.extend_from_slice(entries);
         let total = got.get("total_count").and_then(Value::as_u64);
