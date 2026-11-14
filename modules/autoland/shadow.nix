@@ -49,6 +49,12 @@ let
         reviewers = lib.optional codex "codex";
         review_authors = [ stewardLogin ];
         verdict_authors = [ stewardLogin ] ++ lib.optional (settings.machineryLogin != null) settings.machineryLogin;
+        # A commit with an `Engine: codex` trailer (burrow-proj's git hook
+        # marks a Codex job's with it) goes to a judge, and one by none of the
+        # bots' addresses is someone editing a dependency update, as the
+        # steward reads a PR's commits (touches.py, burrow-upkeep's commits).
+        judge_engines = [ "codex" ];
+        bot_emails = [ settings.dependabotEmail ];
         renovate_email = settings.renovateEmail;
         renovate_login = settings.renovate;
         batch_label = cfg.labels.batch;

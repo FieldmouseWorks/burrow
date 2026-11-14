@@ -6,7 +6,7 @@ own update is the bot's to rebase, and one renovate-sweep has is its job's."""
 
 from harness import CI_GREEN, COMMITS, JOBS, ROLES, S, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, queued, \
     run, said, stand_in, swept
-from touches import DEPENDABOT_EMAIL
+DEPENDABOT_EMAIL = S.CFG["dependabotEmail"]
 
 import waits
 

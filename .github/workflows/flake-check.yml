@@ -546,13 +546,20 @@ jobs:
           LEG_JOB: *leg-job
           KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
         run: bash "$TOOLS/run.sh" wait
-      # The wait's plan had the nix daemon open the kept builds, and opening
-      # a file cache creates its own log/ and nar/, root-owned, which tar
-      # can't then extract into (#1161; the negative's restores say the
-      # same). So the base's save is restored into a fresh directory, with
-      # what was there set aside and put back if the restore fails. The kept
-      # builds only save time: a failed restore builds without the base's
-      # and says so as degraded/kept-rewait, rather than fail the PR.
+      # The wait's plan ran with Nix installed, so the root daemon opened the
+      # kept cache, and opening a file cache creates its own log/ and nar/,
+      # root-owned, which tar can't then extract into (#1161; the negative's
+      # restores say the same). Hand the directory back to the runner's user
+      # first (installing Nix needed sudo, so it's here), so whatever is put
+      # back below is the runner's again. Then the base's save is restored
+      # into a fresh directory, with what was there set aside and put back if
+      # the restore fails. The kept builds only save time: a failed restore
+      # builds without the base's and says so as degraded/kept-rewait, rather
+      # than fail the PR.
+      - id: kept-reclaim
+        if: ${{ steps.kept-wait.outputs.saved == 'true' }}
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/kept"
       - id: kept-aside
         if: ${{ steps.kept-wait.outputs.saved == 'true' }}
         shell: bash

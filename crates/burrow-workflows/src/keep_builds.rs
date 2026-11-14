@@ -436,6 +436,62 @@ fn a_pr_leg_waits_for_its_bases_kept_builds_before_the_gate() {
     assert!(!on(&c("push", "", "")));
 }
 
+/// The wait plans with Nix installed, so when the leg restored nothing the
+/// root daemon has made the empty kept cache's nar/ and log/ its own, and
+/// the second restore couldn't extract into them: tar's "Cannot open:
+/// Permission denied" failed the leg (#1087's leg 1). Right before that
+/// restore sets the directory aside for a fresh one, on the same condition,
+/// the runner's user takes it back, so what a failed restore puts back is
+/// the runner's too.
+#[test]
+fn a_pr_leg_takes_the_kept_cache_back_from_the_daemon_before_restoring_again() {
+    let job = job();
+    let all = steps(&job);
+    let at = |id: &str| all.iter().position(|s| s["id"] == id).unwrap();
+    assert_eq!(at("kept-reclaim") + 1, at("kept-aside"));
+    assert_eq!(at("kept-aside") + 1, at("kept-rewait"));
+    assert!(at("kept-wait") < at("kept-reclaim"));
+    let reclaim = &all[at("kept-reclaim")];
+    assert_eq!(reclaim["if"], all[at("kept-rewait")]["if"]);
+
+    // Run with a sudo that only says what it was asked to do.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let said = dir.path().join("said");
+    let sudo = bin.join("sudo");
+    burrow_test::executable(
+        &sudo,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", said.display()),
+    );
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-euo", "pipefail", "-c", script(reclaim)])
+        .env("RUNNER_TEMP", dir.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+    let out = crate::harness::output(cmd);
+    assert!(out.status.success(), "{out:?}");
+    let id = |flag: &str| {
+        let o = crate::harness::output({
+            let mut c = std::process::Command::new("id");
+            c.arg(flag);
+            c
+        });
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(
+        std::fs::read_to_string(&said).unwrap(),
+        format!(
+            "chown\n-R\n{}:{}\n{}/kept\n",
+            id("-u"),
+            id("-g"),
+            dir.path().display()
+        )
+    );
+}
+
 /// A PR's exact key is the one its base's push saved under: the merge
 /// step's tip, never GitHub's merge commit (github.sha), which no run saves
 /// under. Keyed on that, a PR never hit exactly, so the wait's guard on an

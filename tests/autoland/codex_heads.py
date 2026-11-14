@@ -7,7 +7,8 @@ import json
 
 from harness import COMPARE, C, JOBS, S, clean, commit, compare_calls, compare_pages, fresh_pr_state, head, merged, \
     mkpr, pr_state, queued, run, serve_compare, worker
-from touches import DEPENDABOT_EMAIL, codex_written, provenance
+from touches import codex_written, provenance
+DEPENDABOT_EMAIL = S.CFG["dependabotEmail"]
 
 N = mkpr()["number"]
 

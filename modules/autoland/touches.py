@@ -88,8 +88,6 @@ def dep_kind(pr):
     return "minor"
 
 
-# The address Dependabot commits as, on every repo.
-DEPENDABOT_EMAIL = "49699333+dependabot[bot]@users.noreply.github.com"
 # The address GitHub commits as for a commit it makes or signs itself, on
 # github.com. Renovate doesn't count it as someone editing the branch.
 GITHUB_EMAIL = "noreply@github.com"
@@ -126,7 +124,7 @@ def pr_commits(repo, pr, st):
     and bots' addresses, since retargeting changes which commits are the
     PR's, and setting Renovate's address right changes whose they are. A
     missing address is no bot's."""
-    bots = [e for e in (CFG["renovateEmail"], DEPENDABOT_EMAIL) if e]
+    bots = [e for e in (CFG["renovateEmail"], CFG["dependabotEmail"]) if e]
     seen = [pr["headRefOid"], pr["baseRefName"], *bots]
     if st.get("commitsHead") != seen:
         out = C.upkeep("commits", repo, input=json.dumps({
