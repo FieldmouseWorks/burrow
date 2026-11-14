@@ -43,6 +43,7 @@ __all__ = ["handle", "fix_task", "judge_task", "proof_task", "negative", "MERGE_
 
 
 def handle(repo, pr, repo_info, digest, held=None, below=None):
+    P.look(repo, pr["number"])  # back in line only if this look finds it waiting
     p = Pass(repo, pr, repo_info, digest, held, below, land=land, onto=onto)
     try:
         if C.paused(repo):
