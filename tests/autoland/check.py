@@ -1,6 +1,6 @@
 """The steward, with gh, Claude jobs, GitHub's git remote and the review
 agent stood in for: the App it acts as, the reviewers (the snapshot they read, the brief
-they're queued with, the reviewers' service taking it, what gets posted), handle() end to end, a judge that fails a head on its code or its description alone, past the review-round limit,
+they're queued with, the reviewers' service taking it, what gets posted), handle() end to end, the briefs as they were before their text moved to burrow-brief, a judge that fails a head on its code or its description alone, past the review-round limit,
 a clean look carried to a head that only merged its base in,
 on a conflict with its base and on dependency updates too, and the reviewers'
 answers through it, a PR whose merge would change nothing, one stacked on another's branch, Claude jobs that end without their answer, a fix job's answers (posted only on its own push), what a pass
@@ -12,12 +12,13 @@ Each module is one part, run in this order. Needs git, bash, jq and openssl
 on PATH, as checks/autoland.nix supplies them.
 
   policy=$(nix eval --raw .#nixosConfigurations.example.config.burrow.ledger.env.CONARY_POLICY)
-  (cd crates && cargo build -p burrow-review -p burrow-upkeep -p burrow-proof -p burrow-settings)
+  (cd crates && cargo build -p burrow-review -p burrow-upkeep -p burrow-proof -p burrow-settings -p burrow-brief)
   python3 -I tests/autoland/check.py modules/autoland/steward.py "$policy" \
     crates/target/debug/burrow-review crates/burrow-review/tests/fakes \
     crates/target/debug/burrow-upkeep crates/burrow-upkeep/src \
     crates/target/debug/burrow-proof crates/burrow-proj/src/ask.rs \
-    crates/target/debug/burrow-settings
+    crates/target/debug/burrow-settings \
+    crates/target/debug/burrow-brief crates/burrow-brief/tests/golden
   nix build .#checks.x86_64-linux.autoland
 """
 

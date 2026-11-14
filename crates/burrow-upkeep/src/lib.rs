@@ -2,7 +2,7 @@
 //! labels and settings (settle.rs) and its webhook (hook.rs), the branches
 //! nothing needs any more (branches.rs), Renovate's dashboard (dashboard.rs)
 //! and the flaky tests' quarantine (flaky.rs); and for the reviewers, each
-//! one's look at a PR queued (queue.rs) with its brief (brief.rs) on the
+//! one's look at a PR queued (queue.rs) with its brief (burrow-brief) on the
 //! snapshot it reads (snapshot.rs, from the steward's mirror of the repo,
 //! mirror.rs), their answers, posted on its PRs (post.rs) and read back
 //! as their verdicts (verdict.rs), carried to a head that only merged its
@@ -23,7 +23,6 @@
 
 pub mod answer;
 pub mod branches;
-pub mod brief;
 pub mod carry;
 pub mod ci;
 mod ci_runs;

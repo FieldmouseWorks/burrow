@@ -3,7 +3,9 @@
 # queues is taken by the reviewers' own service, burrow-review, with
 # its tests' stand-ins for codex and bubblewrap (they need bash and jq).
 # Its passes run burrow-upkeep, whose source says what it lists, and
-# start a proof run through burrow-proof, which reads what they write. Each
+# start a proof run through burrow-proof, which reads what they write; its
+# tasks read their policy text from burrow-brief, and its briefs are held
+# to that crate's goldens. Each
 # stage the steward names has a label in the module (AUTOLAND_STAGES).
 { self, pkgs, system, ... }:
 pkgs.runCommand "autoland-check" {
@@ -17,6 +19,7 @@ pkgs.runCommand "autoland-check" {
     ${self.packages.${system}.burrow-review}/bin/burrow-review ${../crates/burrow-review/tests/fakes} \
     ${self.packages.${system}.burrow-upkeep}/bin/burrow-upkeep ${../crates/burrow-upkeep/src} \
     ${self.packages.${system}.burrow-proof}/bin/burrow-proof ${../crates/burrow-proj/src/ask.rs} \
-    ${self.packages.${system}.burrow-settings}/bin/burrow-settings
+    ${self.packages.${system}.burrow-settings}/bin/burrow-settings \
+    ${self.packages.${system}.burrow-brief}/bin/burrow-brief ${../crates/burrow-brief/tests/golden}
   touch $out
 ''

@@ -7,6 +7,7 @@ import os
 
 from harness import (C, JOBS, POSTED, STUB, T0, V, WROTE, fresh_pr_state, head, judgment, merged, mkpr, pr_state,
                      queued, run, rv_review, said, stand_in, tmp, worker)
+import tasks as T
 
 stand_in()
 newer = "9" * 40
@@ -23,8 +24,8 @@ assert queued() == [] and "Past the review-round limit (5): 1 open review thread
 assert len(JOBS) == 1 and "won't look again" in JOBS[0], JOBS
 # Past the limit the job is held to the same policy as round one's (tasks.FINDINGS),
 # stated once: no second, looser instruction beside it.
-assert "Weigh every finding on its merits, the same from the first round on, past the review-round limit too" in JOBS[0], JOBS
-assert "counts as P2 here" in JOBS[0] and JOBS[0].count("on its merits") + JOBS[0].count("on their merits") == 1, JOBS
+assert JOBS[0].count(T.FINDINGS) == 1, JOBS
+assert JOBS[0].count("on its merits") + JOBS[0].count("on their merits") == 1, JOBS
 assert "fix what's a real defect" not in JOBS[0], JOBS
 # Answered without a push: still no look, a judge instead, told to read the answers too.
 answered = {"reviews": stuck["reviews"], "threads": [True]}
@@ -32,7 +33,7 @@ status, digest = run(mkpr(**answered), 7300)
 assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (queued(), JOBS)
 assert "a finding answered away" in JOBS[0] and "found nothing" not in JOBS[0], JOBS
 # The judge counts an answer as failing by the same measure the fix job fixed by.
-assert "a finding answered away that is a concrete defect" in JOBS[0] and "list as P1 counts as failing" in JOBS[0], JOBS
+assert T.PAST_LIMIT in JOBS[0] and f"a finding answered away that is {T.MUST_FIX} counts as failing" in JOBS[0], JOBS
 assert "a Claude job is judging it (it went past the review-round limit" in status and not merged() and digest == [], status
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **answered), 7400)
 assert merged() and "judged it fine to land" in status, status
