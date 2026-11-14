@@ -60,10 +60,13 @@ already. Then the steward brings it up to date instead of building it
 A job holds what it holds until it ends, whatever its PR does meanwhile
 (marked a draft, say), but for a new head: a verdict on a head the PR no
 longer has proves nothing, so the steward stops it (superseded), unless
-it's building what the new head's proof wants. A turn in the line is only
-this pass's: a PR is ahead while it's waiting in the same pass (they go in
-their line's order, place), so one held, drafted or done since holds
-nobody up."""
+it's building what the new head's proof wants. A turn in the line lasts
+until the PR's next look (look): a PR is ahead while the last look at it
+found it waiting, so one held, drafted or done since holds nobody up once
+the steward looks at it, and the line's PRs get their look first in a pass
+(steward.py's order), so a slot that comes free goes to the first of them.
+Kept only for one pass, a slice of a pass that looked at a later PR first
+gave it the turn of one an earlier slice found waiting."""
 
 import os
 import re
@@ -80,7 +83,8 @@ from common import CFG, STATE, load, log, save
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
 FIRST = {}  # those of them labelled to go first
-WAITING = {}  # the PRs of each repo this pass found waiting their turn
+WAITING = {}  # the PRs of each repo found waiting their turn, and not looked at since
+LINE = "proof-line.json"  # WAITING, kept from one pass to the next
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
@@ -95,10 +99,35 @@ KEEP_INPUTS = 1  # days an ended prebuild's folder, the roots of what it built, 
 
 def begin(repo, numbers, first=()):
     """A pass over the repo's open PRs starts: only theirs count, and those
-    in first go ahead of the rest."""
+    in first go ahead of the rest. Those an earlier pass found waiting their
+    turn, and that no pass has looked at since, are still in line: one
+    closed meanwhile isn't."""
     OPEN[repo] = set(numbers)
     FIRST[repo] = set(first)
-    WAITING[repo] = set()
+    kept = set(load(LINE, {}).get(repo, ()))
+    WAITING[repo] = kept & OPEN[repo]
+    if WAITING[repo] != kept:
+        keep_line(repo)
+
+
+def keep_line(repo):
+    line = load(LINE, {})
+    line[repo] = sorted(WAITING.get(repo, ()))
+    save(LINE, {r: ns for r, ns in line.items() if ns})
+
+
+def waiting(repo, n):
+    """Whether PR n is in its repo's line: found waiting its turn, and not
+    looked at since."""
+    return n in WAITING.get(repo, ())
+
+
+def look(repo, n):
+    """PR n's look starts: it leaves the line, and is back in it only if
+    this look finds it waiting its turn again (wait)."""
+    if waiting(repo, n):
+        WAITING[repo].discard(n)
+        keep_line(repo)
 
 
 def place(repo, n):
@@ -313,7 +342,7 @@ def unbuilt(paths):
 def ahead(repo, n, st, slots, outs=None):
     """How many proofs are ahead of PR n's: the builds every open PR's live
     jobs, its own included, are running, and the PRs ahead of it in line
-    waiting their turn this pass. None when its job may start now; FREE
+    waiting their turn (begin). None when its job may start now; FREE
     when it may whatever the line, since all it builds (outs, None when
     unknown) is built or being built already."""
     def held(state, js):
@@ -732,8 +761,11 @@ def still(st, said, rc):
 
 
 def wait(repo, n):
-    """PR n waits its turn this pass: the ones after it wait behind it."""
-    WAITING.setdefault(repo, set()).add(n)
+    """PR n waits its turn: the ones after it wait behind it, in this pass
+    and the next, until its next look."""
+    if not waiting(repo, n):
+        WAITING.setdefault(repo, set()).add(n)
+        keep_line(repo)
 
 
 def started(st, outs=None):

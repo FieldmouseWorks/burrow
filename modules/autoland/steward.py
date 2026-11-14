@@ -338,12 +338,14 @@ def run_pass(kick, continuing=False):
                 heads = {pr.get("headRefName"): pr.get("number") for pr in prs if not pr.get("isCrossRepository")}
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                # Preserve first-labelled priority, then finish unvisited
-                # PRs before revisiting changed ones from an earlier batch.
+                # Preserve first-labelled priority, then the PRs in the proof
+                # line (a slot that came free goes to its first, not to one
+                # this slice reaches before it), then finish unvisited PRs
+                # before revisiting changed ones from an earlier batch.
 
                 def order(pr):
                     n = pr["number"]
-                    return n not in held, n not in first, batch.visited(repo, pr), P.place(repo, n)
+                    return n not in held, n not in first, not P.waiting(repo, n), batch.visited(repo, pr), P.place(repo, n)
 
                 partial = False
                 for pr in sorted(pending, key=order):

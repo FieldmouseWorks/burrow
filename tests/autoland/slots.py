@@ -3,7 +3,8 @@ time, the PRs labelled first ahead of the rest and the oldest first within
 each, the rest waiting their turn rather than their timeout; a job's end
 kicks the pass that starts the next. A slot is held by a job until it ends,
 whatever its PR does meanwhile but move to a new head (superseded.py), and
-a turn in the line only by a PR waiting in this same pass."""
+a turn in the line only by a PR found waiting and not looked at since, in
+this pass or an earlier slice of it."""
 
 import itertools
 import json
@@ -110,6 +111,29 @@ for kw, held in (({"draft": True}, None), ({"labels": (hold,)}, None), ({"labels
     status = line(3, 800)
     assert RUNNING in status and len(JOBS) == 1, (kw, status, JOBS)
 
+# A pass works in slices, each its own process (batch.py): a PR an earlier
+# slice found waiting keeps its turn from one a later slice looks at first,
+# until its own next look takes the slot.
+fresh_pr_state()
+P.begin("sam/r", {1, 2, 3})
+line(1)
+assert ahead(1) in line(2) and JOBS == []
+ends(1)
+P.WAITING.clear()  # the next slice
+P.begin("sam/r", {1, 2, 3})
+assert ahead(1) in line(3, 800) and JOBS == [], JOBS
+assert RUNNING in line(2, 800) and len(JOBS) == 1, JOBS
+assert not P.waiting("sam/r", 2)
+# One closed while in line holds nobody up.
+fresh_pr_state()
+P.begin("sam/r", {1, 2, 3})
+line(1)
+assert ahead(1) in line(2) and JOBS == []
+ends(1)
+P.WAITING.clear()
+P.begin("sam/r", {1, 3})
+assert RUNNING in line(3, 800) and len(JOBS) == 1, JOBS
+
 # Labelled first: ahead of every PR without the label, whatever their
 # numbers, and the oldest first among the labelled.
 first = S.CFG["labels"]["first"]
@@ -134,8 +158,15 @@ S.R.publish = lambda *a: None
 S.open_prs = lambda owner, name: (info, [mkpr(number=k, labels=lb) for k, lb in ((2, ()), (9, (first,)), (1, ()), (7, (first,)))])
 S.step.handle = lambda repo, pr, *a: order.append(pr["number"])
 S.main()
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle = kept_fns
 assert order == [7, 9, 1, 2], order
+# And one in line from an earlier slice before the rest without the label,
+# so the slot that came free goes to it, not to one ahead of it this pass.
+order.clear()
+P.WAITING["sam/r"] = {2}
+P.keep_line("sam/r")
+S.main()
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle = kept_fns
+assert order == [7, 9, 2, 1], order
 
 # Unset, no limit.
 fresh_pr_state()
