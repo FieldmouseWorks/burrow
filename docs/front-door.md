@@ -434,7 +434,8 @@ The host records only the App, owner,
 remaining REST budget, reset, reading time and any primary or secondary
 hold. `proj usage` includes these readings in a `github` array inside its
 single JSON object; an active Claude hold keeps its existing top-level
-fields for consumers such as the watchdog. The version 2 live snapshot (`proj state --json`) includes these same
+fields for consumers such as the watchdog. The live snapshot (`proj state --json`, at the version in
+[`snapshot.rs`](../crates/burrow-proj/src/snapshot.rs)'s `VERSION`) includes these same
 installation readings in `meters`, alongside the engine readings. Each
 installation entry identifies its App and owner and includes the reading's
 age and whether its hold is active.
