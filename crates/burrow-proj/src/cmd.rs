@@ -123,6 +123,26 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
                 .collect::<String>());
             Ok(())
         }
+        Some("why") => {
+            let usage = "usage: proj why ID [--json]";
+            let id = arg(args, 1, usage)?;
+            let json = match args.get(2).map(String::as_str) {
+                None => false,
+                Some("--json") if args.len() == 3 => true,
+                _ => return Err(Fail::new(2, usage)),
+            };
+            let job = Job::new(cfg, id);
+            if !job.dir.is_dir() {
+                return Err(Fail::new(1, format!("no job {id}")));
+            }
+            let record = crate::record::derive(&job);
+            put(&if json {
+                format!("{}\n", record.json(id))
+            } else {
+                view.plain(&record.why(id))
+            });
+            Ok(())
+        }
         Some("find") => {
             let key = arg(args, 1, "usage: proj find KEY")?;
             if let Some(id) = run::find(cfg, key)? {
@@ -130,9 +150,15 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
             }
             Ok(())
         }
-        Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),
-        Some("withdraw") => stop(cfg, arg(args, 1, "usage: proj withdraw ID")?, true),
-        Some("unstick") => unstick(cfg, arg(args, 1, "usage: proj unstick ID")?),
+        Some(cmd @ ("stop" | "withdraw" | "unstick")) => {
+            let id = arg(args, 1, &format!("usage: proj {cmd} ID"))?;
+            let done = match cmd {
+                "unstick" => unstick(cfg, id),
+                _ => stop(cfg, id, cmd == "withdraw"),
+            };
+            crate::record::noted(&Job::new(cfg, id), &format!("proj {cmd}"));
+            done
+        }
         Some("list") => {
             let mut names: Vec<String> = fs::read_dir(&cfg.projects)
                 .map_err(|e| io_fail(&cfg.projects, e))?
@@ -300,7 +326,7 @@ pub(crate) fn dispatch_as(cfg: &Config, args: &[String], view: View) -> Result<(
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|plan|merge-questions",
+            "usage: proj run|reply|status|log|state|why|find|stop|withdraw|unstick|list|check-config|usage|await|ask|done|plan|merge-questions",
         )),
     }
 }
@@ -800,6 +826,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     // an OOM kill included): news for the stream's subscribers.
     let done = finish(cfg, &id);
     crate::snapshot::stream::notify(cfg);
+    crate::record::noted(&Job::new(cfg, &id), "its turn ended");
     done
 }
 

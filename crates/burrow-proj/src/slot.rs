@@ -203,6 +203,7 @@ fn took_slot(job: &Job, n: &str, s: &str, class: &str) -> io::Result<()> {
     crate::state_reads::write(job.turn(n, "slot"), format!("{s}\n"))?;
     crate::policy::accepted(job).map_err(io::Error::other)?;
     snapshot::stream::notify(job.cfg);
+    crate::record::noted(job, &format!("turn {n} took a slot"));
     Ok(())
 }
 

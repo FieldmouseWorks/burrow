@@ -152,7 +152,9 @@ reversible default resumes it, or `proj stop` ends it, the job is still at work:
 question, a one-way one left for the owner, the PRs and issues it awaits),
 read together under its turn-start lock, and the steward never takes one that
 holds anything for ended, however its turn ended, or starts a second job on
-its work.
+its work. `proj why ID` says the rest of its record: what each wait is and what
+ends it, since when, when it's overdue, what happens next, and the changes
+its history noted (`--json` for the record whole).
 
 ## Engines with no agent
 

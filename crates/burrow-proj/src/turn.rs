@@ -218,6 +218,7 @@ fn start_with(
         kick(cfg, ["proj-watch".to_owned()]);
     }
     rewatch(cfg, &[id]);
+    crate::record::noted(&job, &format!("turn {n} started"));
     Ok(())
 }
 

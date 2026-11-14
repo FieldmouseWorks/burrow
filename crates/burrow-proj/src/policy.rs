@@ -222,6 +222,7 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
     )
     .map_err(|e| e.to_string())?;
     wake(job.cfg);
+    crate::record::noted(job, "parked by the policy");
     Ok(())
 }
 
@@ -309,8 +310,13 @@ fn reconcile_pass(cfg: &Config, release_generation: &Generation) -> Result<(), S
         systemd::up(cfg, "proj-*.service").ok_or("could not list the job units that are up")?;
     let mut errors = Vec::new();
     for id in ids {
+        let job = Job::new(cfg, &id);
+        let was = parked(&job);
         if let Err(error) = reconcile_job(cfg, &id, release_generation, &up) {
             errors.push(format!("{id}: {error}"));
+        }
+        if parked(&job) != was {
+            crate::record::noted(&job, "the policy's pass");
         }
     }
     if let Err(error) = crate::policy_proofs::reconcile(cfg) {
