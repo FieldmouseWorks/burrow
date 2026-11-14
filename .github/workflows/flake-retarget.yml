@@ -26,10 +26,10 @@ jobs:
   check:
     if: github.event.changes.base && (github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/conary/train/'))
     uses: ./.github/workflows/flake-check.yml
-    # What the shared workflow needs to attest its result.
+    # The same as flake.yml's check (its comment says why actions: write).
     permissions:
       contents: read
-      actions: read
+      actions: write
       id-token: write
       attestations: write
     with:
@@ -68,7 +68,7 @@ jobs:
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
     permissions:
       contents: read
-      actions: read
+      actions: write
       id-token: write
       attestations: write
     with:

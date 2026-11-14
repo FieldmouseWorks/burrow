@@ -8,7 +8,8 @@
 # be split across legs, each on a runner of its own, and then attested
 # together by one more job. Called from a repo's own
 # workflow with `uses:`, whose job grants `id-token: write` and
-# `attestations: write`; `actions: read` also enables kept-build waiting. Its
+# `attestations: write`; `actions: read` also enables kept-build waiting, and
+# `actions: write` lets a push keep one kept-build entry a leg. Its
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
 #
@@ -722,9 +723,30 @@ jobs:
         run: |
           cargo build --release --locked --quiet -p burrow-keep
           "$CARGO_TARGET_DIR/release/burrow-keep" --gate "$GATE" "$RUNNER_TEMP"
+      # One entry a leg (#1011): each push saves its own, and a generation of
+      # them comes close to the repo's whole Actions cache, whose eviction
+      # takes whatever was read longest ago (often one this push just saved
+      # for another leg) once it's over. So the leg chooses: before its
+      # save, a newer commit's entry for it already there (a newer push that
+      # finished first) means this push's would never be restored, and it
+      # isn't saved; after, every entry its commit supersedes goes, its own
+      # too if a newer commit's turned up meanwhile. burrow-keep-prune,
+      # built beside burrow-keep, says which (crates/burrow-keep/src/prune.rs).
+      # Deleting needs actions: write, which only burrow's flake.yml grants.
+      - id: keep-newer
+        name: soft/keep-newer
+        if: ${{ !cancelled() && steps.keep.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env: &prune
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
+          PRUNE: ${{ runner.temp }}/keep-build/release/burrow-keep-prune
+        run: '"$PRUNE" before'
       - id: keep-save
         name: soft/keep-save
-        if: ${{ !cancelled() && steps.keep.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.keep.outcome == 'success' && steps.keep-newer.outputs.superseded != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -753,6 +775,21 @@ jobs:
         if: ${{ always() && steps.saved-lookup.outcome == 'success' && steps.saved-lookup.outputs.cache-hit != 'true' }}
         shell: bash
         run: echo 'degraded/keep-save-missing' >> "$GITHUB_STEP_SUMMARY"
+      - id: keep-prune
+        name: soft/keep-prune
+        if: ${{ !cancelled() && steps.saved-lookup.outputs.cache-hit == 'true' }}
+        continue-on-error: true
+        shell: bash
+        env: *prune
+        run: '"$PRUNE" after'
+      - name: degraded/keep-newer
+        if: ${{ always() && steps.keep-newer.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/keep-newer' >> "$GITHUB_STEP_SUMMARY"
+      - name: degraded/keep-prune
+        if: ${{ always() && steps.keep-prune.outcome == 'failure' }}
+        shell: bash
+        run: echo 'degraded/keep-prune' >> "$GITHUB_STEP_SUMMARY"
       # gate-reuse's hit: every step above skipped, so nothing was built,
       # attested or kept, and the gate passed as it did in the run named.
       - &reused
