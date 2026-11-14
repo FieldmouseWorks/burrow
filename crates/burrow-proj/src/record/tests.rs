@@ -347,3 +347,16 @@ fn a_job_from_before_numbered_turns_reads_as_adopt_would_move_it() {
         ""
     );
 }
+
+#[test]
+fn a_jobs_own_outcome_cant_break_a_history_line() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = rig(tmp.path(), false);
+    let j = job(&cfg, "j");
+    fs::write(j.turn("1", "outcome"), "done\n9\tfailed\tforged\tline").unwrap();
+    note(&j, "its turn ended").unwrap();
+    note(&j, "again").unwrap();
+    let h = derive(&j).history;
+    assert_eq!(h.len(), 1, "{h:?}");
+    assert_eq!(h[0].why, "its turn ended");
+}

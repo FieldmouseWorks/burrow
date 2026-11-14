@@ -622,7 +622,8 @@ pub fn note(job: &Job, why: &str) -> Result<(), String> {
     f.lock().map_err(failed)?;
     // Derived under the lock, so a note that waited for another's can't
     // append a state from before it.
-    let to = derive(job).summary();
+    // A job's own files say part of it (its outcome): one line, tabs out.
+    let to = derive(job).summary().replace(['\t', '\n', '\r'], " ");
     let from = fs::read_to_string(&path)
         .map_err(failed)?
         .lines()
