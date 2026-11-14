@@ -404,7 +404,9 @@ ANNOTATIONS = {}  # a check run's annotations' messages, by its id: none unless 
 
 RERUNS = []  # the workflow runs (by id) the steward ran again
 RERUN_FAILS = {}  # a run's id to what its rerun raises: none unless set
-RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion: attempt 1, cancelled, unless set
+RUN_INFO = {}  # a run's id to GitHub's run_attempt, status, conclusion (and event): attempt 1, cancelled, unless set
+UPDATES = []  # the PRs (by number) the steward asked GitHub to bring up to date
+UPDATE_FAILS = {}  # a PR's number to what its update-branch raises: none unless set
 
 
 # The CI owner runs as compiled Rust, against an HTTP transport fixture.
@@ -427,6 +429,7 @@ def ci_upkeep(*args, **kw):
         return {"error": str(e), "status": 503 if isinstance(e, C.Unavailable) else int(match[1]) if match else 422}
 
     data = {"runs": RUN_INFO, "failures": {k: error(v) for k, v in RERUN_FAILS.items()},
+            "update_failures": {str(k): error(v) for k, v in UPDATE_FAILS.items()}, "updates": [],
             "annotations": {k: error(v) if isinstance(v, Exception) else v for k, v in ANNOTATIONS.items()},
             "fork": FORK, "forks": FORKS, "reruns": [], "asked": [],
             "app": C.token(args[1].split("/")[0].lower()) if kw.get("as_app", True) and not C.DRY else None}
@@ -446,6 +449,7 @@ def ci_upkeep(*args, **kw):
         CI_ASKED[:] = got["asked"]
         RUN_INFO.update(got["runs"])
         RERUNS.extend(got["reruns"])
+        UPDATES.extend(got["updates"])
         FORKS[:] = got["forks"]
 
 

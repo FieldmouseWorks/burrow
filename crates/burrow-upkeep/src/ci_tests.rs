@@ -14,8 +14,8 @@ struct Hub {
     status: u16,
     lost: bool,
     annotation_failure: bool,
-    /// The runs' event: GitHub reruns no `dynamic` one, whoever asks.
-    event: &'static str,
+    /// The runs whose event is `dynamic`: GitHub reruns none, whoever asks.
+    dynamic: Vec<&'static str>,
     /// What update-branch answers: 202, unless set.
     update: u16,
     /// The bodies of the update-branch asks.
@@ -31,6 +31,16 @@ impl Api for Hub {
         _: Option<&str>,
     ) -> Result<Response, Failed> {
         self.asked.push((method.into(), path.into()));
+        let run = path
+            .split("/actions/runs/")
+            .nth(1)
+            .and_then(|r| r.split('/').next())
+            .unwrap_or("");
+        let event = if self.dynamic.contains(&run) {
+            "dynamic"
+        } else {
+            "pull_request"
+        };
         let (status, body) = if method == "PUT" {
             assert!(path.ends_with("/pulls/5/update-branch"), "{path}");
             self.updates.push(body.cloned().unwrap_or_default());
@@ -41,7 +51,7 @@ impl Api for Hub {
                     json!({"message": "There are no new commits on the base branch."}),
                 ),
             }
-        } else if method == "POST" && self.event == "dynamic" {
+        } else if method == "POST" && event == "dynamic" {
             (
                 403,
                 json!({"message": "This workflow run cannot be retried"}),
@@ -73,7 +83,7 @@ impl Api for Hub {
             (
                 200,
                 json!({"run_attempt": self.attempt.max(1), "status": if self.going { "queued" } else { "completed" },
-                "conclusion": if self.going { Value::Null } else { json!("cancelled") }, "event": self.event}),
+                "conclusion": if self.going { Value::Null } else { json!("cancelled") }, "event": event}),
             )
         };
         Ok(Response {
@@ -200,12 +210,12 @@ fn a_refused_rerun_quotes_github_and_is_asked_again_next_pass() {
     // GitHub's words, never a guess at why (a permission it may not lack).
     assert_eq!(
         run(&mut h, &a, false).unwrap().names,
-        ["build (cancelled; not run again: HTTP 403: refused)"]
+        ["build (cancelled; rerun: HTTP 403: refused)"]
     );
     h.status = 409;
     assert_eq!(
         run(&mut h, &a, false).unwrap().names,
-        ["build (cancelled; not run again: HTTP 409: refused)"]
+        ["build (cancelled; rerun: HTTP 409: refused)"]
     );
     h.status = 201;
     assert_eq!(run(&mut h, &a, false).unwrap().state, "pending");
@@ -219,7 +229,7 @@ fn a_cancelled_dynamic_run_brings_the_branch_up_to_date_instead_of_a_rerun() {
     // (the Hub's, for a dynamic run), so none is asked for at all.
     let mut h = Hub {
         attempt: 1,
-        event: "dynamic",
+        dynamic: vec!["7"],
         ..Hub::default()
     };
     let a = ask(vec![
@@ -231,8 +241,8 @@ fn a_cancelled_dynamic_run_brings_the_branch_up_to_date_instead_of_a_rerun() {
     assert_eq!(
         got.names,
         [
-            "Analyze (rust) (cancelled; GitHub reruns no dynamic run: its branch is being updated)",
-            "Analyze (python) (cancelled; GitHub reruns no dynamic run: its branch is being updated)",
+            "Analyze (rust) (cancelled, dynamic: updating its branch)",
+            "Analyze (python) (cancelled, dynamic: updating its branch)",
         ]
     );
     assert_eq!(posts(&h), 0);
@@ -245,8 +255,7 @@ fn a_cancelled_dynamic_run_brings_the_branch_up_to_date_instead_of_a_rerun() {
     assert_eq!(got.state, "pending");
     assert_eq!(
         got.names[0],
-        "Analyze (rust) (cancelled; GitHub reruns no dynamic run; updating its branch said \
-         HTTP 422: There are no new commits on the base branch.)"
+        "Analyze (rust) (cancelled; update-branch: HTTP 422: There are no new commits on the base branch.)"
     );
     assert_eq!((posts(&h), puts(&h)), (0, 2));
 
@@ -264,31 +273,116 @@ fn a_cancelled_dynamic_run_brings_the_branch_up_to_date_instead_of_a_rerun() {
 }
 
 #[test]
-fn a_dynamic_run_beside_a_genuine_failure_is_left_to_the_failure() {
+fn a_dynamic_run_waits_for_the_whole_head_to_be_done_and_none_of_it_red() {
+    let dynamic = check_run("Analyze (rust)", 11, 7, "CANCELLED");
+    let mut going = check_run("build", 21, 8, "SUCCESS");
+    going["status"] = json!("IN_PROGRESS");
+    going["checkSuite"]["status"] = json!("IN_PROGRESS");
+    let mut running = check_run("build", 21, 8, "SUCCESS");
+    running["checkSuite"]["status"] = json!("IN_PROGRESS");
+    let status =
+        |state: &str| json!({"__typename": "StatusContext", "context": "ext", "state": state});
+    // Red or still going anywhere on the head, in its own run or another
+    // workflow's, a check or a status: no new head to supersede it.
+    for (why, other) in [
+        (
+            "its own run failed",
+            check_run("Analyze (python)", 12, 7, "FAILURE"),
+        ),
+        (
+            "another workflow failed",
+            check_run("build", 21, 8, "FAILURE"),
+        ),
+        ("another workflow's check is going", going),
+        ("another workflow's suite is going", running),
+        ("a status is pending", status("PENDING")),
+        ("a status is expected", status("EXPECTED")),
+        ("a status failed", status("FAILURE")),
+    ] {
+        let mut h = Hub {
+            attempt: 1,
+            dynamic: vec!["7"],
+            ..Hub::default()
+        };
+        run(&mut h, &ask(vec![dynamic.clone(), other]), false).unwrap();
+        assert_eq!((posts(&h), puts(&h)), (0, 0), "{why}");
+    }
+    // All done and green but it: brought up to date.
     let mut h = Hub {
         attempt: 1,
-        event: "dynamic",
+        dynamic: vec!["7"],
+        ..Hub::default()
+    };
+    let a = ask(vec![
+        dynamic,
+        check_run("build", 21, 8, "SUCCESS"),
+        status("SUCCESS"),
+    ]);
+    run(&mut h, &a, false).unwrap();
+    assert_eq!((posts(&h), puts(&h)), (0, 1));
+}
+
+#[test]
+fn a_branch_update_takes_the_place_of_the_passes_reruns() {
+    // A plain cancelled run beside a dynamic one: the new head runs both
+    // afresh, so the plain one isn't also rerun on the old head.
+    let mut h = Hub {
+        attempt: 1,
+        dynamic: vec!["7"],
         ..Hub::default()
     };
     let a = ask(vec![
         check_run("Analyze (rust)", 11, 7, "CANCELLED"),
-        check_run("Analyze (python)", 12, 7, "FAILURE"),
+        check_run("build", 21, 8, "CANCELLED"),
     ]);
-    assert_eq!(run(&mut h, &a, false).unwrap().state, "red");
-    assert_eq!((posts(&h), puts(&h)), (0, 0));
+    run(&mut h, &a, false).unwrap();
+    assert_eq!((posts(&h), puts(&h)), (0, 1));
+    // Alone, the plain one is rerun as ever.
+    let mut h = Hub {
+        attempt: 1,
+        ..Hub::default()
+    };
+    run(
+        &mut h,
+        &ask(vec![check_run("build", 21, 8, "CANCELLED")]),
+        false,
+    )
+    .unwrap();
+    assert_eq!((posts(&h), puts(&h)), (1, 0));
+}
+
+#[test]
+fn githubs_refusals_lead_the_names() {
+    let mut h = Hub {
+        attempt: 1,
+        status: 403,
+        ..Hub::default()
+    };
+    let mut lint = check_run("lint", 31, 9, "SUCCESS");
+    lint["status"] = json!("IN_PROGRESS");
+    let got = run(
+        &mut h,
+        &ask(vec![lint, check_run("build", 21, 8, "CANCELLED")]),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        got.names,
+        ["build (cancelled; rerun: HTTP 403: refused)", "lint"]
+    );
 }
 
 #[test]
 fn a_never_started_dynamic_run_brings_the_branch_up_to_date() {
     let mut h = Hub {
         attempt: 1,
-        event: "dynamic",
+        dynamic: vec!["7"],
         ..Hub::default()
     };
     let got = run(&mut h, &unstarted(), false).unwrap();
     assert_eq!(
         got.names,
-        ["CI (never started; GitHub reruns no dynamic run: its branch is being updated)"]
+        ["CI (never started, dynamic: updating its branch)"]
     );
     assert_eq!((posts(&h), puts(&h)), (0, 1));
 }

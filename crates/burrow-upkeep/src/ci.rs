@@ -100,22 +100,45 @@ impl Run {
     }
 }
 
+/// Why a run waits to be run again, when it's more than that it will be.
+enum Again {
+    /// GitHub reruns no dynamic run: its branch is to be updated, or is.
+    Dynamic(&'static str),
+    /// GitHub said no to the last ask, in its words: the ask, then them,
+    /// as early in the status as they'll go, since the steward's status
+    /// holds 140 characters.
+    Refused(String),
+}
+
 impl Recovery {
-    /// Why a run waits to be run again, when it's more than that it will
-    /// be: GitHub won't rerun it, or said no to the last ask, in its words.
-    fn again(&self, key: &str) -> Option<String> {
+    fn again(&self, key: &str) -> Option<Again> {
         if self.runs.get(key).is_some_and(Run::dynamic) {
             return Some(match &self.updated {
-                None => "GitHub reruns no dynamic run: its branch is to be updated".into(),
-                Some(Ok(())) => "GitHub reruns no dynamic run: its branch is being updated".into(),
-                Some(Err(said)) => {
-                    format!("GitHub reruns no dynamic run; updating its branch said {said}")
-                }
+                None => Again::Dynamic("dynamic: its branch to be updated"),
+                Some(Ok(())) => Again::Dynamic("dynamic: updating its branch"),
+                Some(Err(said)) => Again::Refused(format!("update-branch: {said}")),
             });
         }
         self.refused
             .get(key)
-            .map(|said| format!("not run again: {said}"))
+            .map(|said| Again::Refused(format!("rerun: {said}")))
+    }
+
+    /// A run's pending name: those GitHub refused go in `said`, which
+    /// leads the verdict's names, so its words aren't cut off the status.
+    fn wait(
+        &self,
+        key: Option<&str>,
+        name: &str,
+        how: &str,
+        said: &mut Vec<String>,
+        pending: &mut Vec<String>,
+    ) {
+        match key.and_then(|k| self.again(k)) {
+            Some(Again::Refused(why)) => said.push(format!("{name} ({how}; {why})")),
+            Some(Again::Dynamic(why)) => pending.push(format!("{name} ({how}, {why})")),
+            None => pending.push(format!("{name} ({how}, to be run again)")),
+        }
     }
 }
 
@@ -278,6 +301,10 @@ fn classify(
         .iter()
         .map(|w| format!("{w} for {base}"))
         .collect();
+    let mut said = Vec::new();
+    // Work still going anywhere on the head (a check, a suite, a status):
+    // a new head would cancel or supersede it, so no branch update yet.
+    let mut busy = false;
     let mut seen = runs.unrun.len();
     let mut broken = BTreeSet::new();
     let mut going = BTreeSet::new();
@@ -295,10 +322,13 @@ fn classify(
         seen += 1;
         let name = text(&s["workflowRun"]["workflow"]["name"]).unwrap_or("a workflow");
         let key = if ask.recover { suite_run_id(s) } else { None };
-        match key.as_deref().and_then(|k| recovery.again(k)) {
-            Some(why) => pending.push(format!("{name} (never started; {why})")),
-            None => pending.push(format!("{name} (never started, to be run again)")),
-        }
+        recovery.wait(
+            key.as_deref(),
+            name,
+            "never started",
+            &mut said,
+            &mut pending,
+        );
         if let Some(key) = key {
             match recovery.runs.get(&key) {
                 None => {
@@ -318,6 +348,7 @@ fn classify(
             let name = text(&c["name"]).unwrap_or("");
             if c["status"] != "COMPLETED" || suite(c)["status"] != "COMPLETED" {
                 going.insert(run_id(c));
+                busy = true;
             }
             // A replacement run is alive: wait for its verdict before asking
             // GitHub to start this workflow yet again.
@@ -333,6 +364,7 @@ fn classify(
                 && c["databaseId"]
                     .as_u64()
                     .is_some_and(|id| recovery.timed_out.contains(&id));
+            busy |= replaced;
             if c["status"] != "COMPLETED" || (replaced && !timed) {
                 pending.push(name.into());
             } else if cancelled(c)
@@ -362,12 +394,7 @@ fn classify(
                             red.push(format!("{name} (cancelled again after a rerun)"))
                         }
                         Some(_) => {
-                            match recovery.again(&k) {
-                                Some(why) => pending.push(format!("{name} (cancelled; {why})")),
-                                None => {
-                                    pending.push(format!("{name} (cancelled, to be run again)"))
-                                }
-                            }
+                            recovery.wait(Some(&k), name, "cancelled", &mut said, &mut pending);
                             cancelled_jobs.insert(Some(k));
                         }
                     },
@@ -400,6 +427,7 @@ fn classify(
                 .get(&name.to_lowercase())
                 .map_or(name.clone(), |s| s.to_string());
             if ["PENDING", "EXPECTED"].iter().any(|s| c["state"] == *s) {
+                busy = true;
                 pending.push(name);
             } else if c["state"] != "SUCCESS" {
                 red.push(name);
@@ -417,6 +445,16 @@ fn classify(
             recovery.due.insert(key.clone(), "rerun-failed-jobs");
         }
     }
+    // A new head is for a head whose every other check is done and none
+    // red; and it runs every workflow afresh, so it takes the place of
+    // this pass's reruns, which would only start work it supersedes.
+    if !red.is_empty() || busy {
+        recovery.fresh = false;
+    } else if recovery.fresh {
+        recovery.due.clear();
+    }
+    said.append(&mut pending);
+    let mut pending = said;
     let named: BTreeSet<_> = contexts
         .iter()
         .filter_map(|c| {

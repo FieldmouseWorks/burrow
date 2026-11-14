@@ -7,7 +7,7 @@ it or someone cancelled it by hand: run again once, and red if cancelled again,
 since a hang is the head's to look at."""
 
 from docs import at, check, docs, whole
-from harness import ANNOTATIONS, JOBS, RERUN_FAILS, RERUNS, RUN_INFO, C, clean, fresh_pr_state, run as one_pass
+from harness import ANNOTATIONS, JOBS, RERUN_FAILS, RERUNS, RUN_INFO, UPDATE_FAILS, UPDATES, C, clean, fresh_pr_state, run as one_pass
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
@@ -217,6 +217,8 @@ def start():
     RERUNS.clear()
     RERUN_FAILS.clear()
     RUN_INFO.clear()
+    UPDATES.clear()
+    UPDATE_FAILS.clear()
     fresh_pr_state()
 
 
@@ -352,20 +354,44 @@ assert RERUNS == ["a", "b"], RERUNS
 start()
 RERUN_FAILS["s1"] = RuntimeError("HTTP 403: Resource not accessible by integration")
 status, _ = one_pass(clean(checks=hung(51)), 700)
-assert RERUNS == [] and "not run again: HTTP 403" in status and not JOBS, (RERUNS, status, JOBS)
+assert RERUNS == [] and "rerun: HTTP 403" in status and not JOBS, (RERUNS, status, JOBS)
 RERUN_FAILS["s1"] = RuntimeError("HTTP 403: Resource not accessible by integration")
 status, _ = one_pass(clean(checks=hung(51)), 730)
-assert RERUNS == [] and "not run again: HTTP 403" in status, (RERUNS, status)
+assert RERUNS == [] and "rerun: HTTP 403" in status, (RERUNS, status)
 RERUN_FAILS.clear()
 status, _ = one_pass(clean(checks=hung(51)), 760)
-assert RERUNS == ["s1"] and "not run again" not in status, (RERUNS, status)
+assert RERUNS == ["s1"] and "rerun:" not in status, (RERUNS, status)
 start()
 RERUN_FAILS["s1"] = RuntimeError("HTTP 409: workflow run is still running")
 status, _ = one_pass(clean(checks=hung(51)), 700)
-assert RERUNS == [] and "not run again: HTTP 409" in status and "waiting for CI" in status, (RERUNS, status)
+assert RERUNS == [] and "rerun: HTTP 409" in status and "waiting for CI" in status, (RERUNS, status)
 RERUN_FAILS.clear()
 one_pass(clean(checks=hung(51)), 760)
 assert RERUNS == ["s1"], RERUNS
+
+# A dynamic run (CodeQL's default setup), which GitHub reruns for no one: no
+# rerun, the branch brought up to date instead. GitHub's no to that is in the
+# posted status in its own words, a long check name and all.
+LONG = "Analyze (javascript-typescript)"
+codeql = [{**c, "name": LONG} if c["name"] == CHECK else c for c in hung(61, whole(suite="s1"))]
+codeql[-2]["conclusion"] = CANCEL
+start()
+RUN_INFO["s1"] = {"run_attempt": 1, "status": "completed", "conclusion": "cancelled", "event": "dynamic"}
+pr = clean(checks=codeql)
+status, _ = one_pass(pr, 700)
+assert RERUNS == [] and UPDATES == [pr["number"]] and "dynamic: updating its branch" in status, (RERUNS, UPDATES, status)
+UPDATES.clear()
+UPDATE_FAILS[pr["number"]] = RuntimeError("There are no new commits on the base branch.")  # a 422
+status, _ = one_pass(pr, 760)
+assert RERUNS == [] and UPDATES == [], (RERUNS, UPDATES)
+# Whole: the status's description ends where GitHub's words do.
+assert f"description=Settled; waiting for CI: {LONG} (cancelled; update-branch: HTTP 422: There are no new commits on the base branch.) -f" in status, status
+# Beside another workflow's check still going: no new head to supersede it.
+start()
+RUN_INFO["s1"] = {"run_attempt": 1, "status": "completed", "conclusion": "cancelled", "event": "dynamic"}
+other = [check("build", None, "IN_PROGRESS", suite="s2", workflow="build", done="IN_PROGRESS")]
+status, _ = one_pass(clean(checks=codeql + other), 700)
+assert RERUNS == [] and UPDATES == [] and "waiting for CI" in status, (RERUNS, UPDATES, status)
 
 # A check that isn't an Actions job (another App's, no workflow) isn't sent to
 # gh run rerun: it waits as before.

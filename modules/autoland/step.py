@@ -242,7 +242,9 @@ class Pass(Context, Jobs, Actions):
         elif proof_only or build_early:
             self.prove()
         elif self.ci == "pending":
-            self.settle("pending", "Settled; waiting for CI: " + ", ".join(self.ci_names)[:90], stage=S.CI)
+            # As much as the status holds (post_status cuts it): the CI owner
+            # puts GitHub's refusals first, so its words aren't the part cut.
+            self.settle("pending", "Settled; waiting for CI: " + ", ".join(self.ci_names), stage=S.CI)
         elif (codex := codex_written(self.repo, self.pr, self.st)) is None:
             self.settle("pending", "Settled; couldn't read its commits; next pass", stage=S.REVIEW)
         elif codex or self.gate() or unseen or self.ci == "none" or asked or capped:

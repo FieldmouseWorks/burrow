@@ -26,12 +26,24 @@ if "/check-runs/" in path:
         body = [{"message": m} for m in got[(page - 1) * 100:page * 100]]
         if len(got) > page * 100:
             headers = f'Link: <https://api.github.com/{path.partition("?")[0]}?per_page=100&page={page + 1}>; rel="next"\r\n'
+elif path.endswith("/update-branch"):
+    assert method == "PUT", method
+    n = path.split("/pulls/", 1)[1].split("/")[0]
+    got = data["update_failures"].get(n)
+    if got:
+        status, body = got["status"], {"message": got["error"]}
+    else:
+        data["updates"].append(int(n))
+        status, body = 202, {"message": "Updating pull request branch."}
 elif "/actions/runs/" in path:
     key = path.split("/actions/runs/", 1)[1].split("/")[0]
     info = data["runs"].get(key, {"run_attempt": 1, "status": "completed", "conclusion": "cancelled"})
     if method == "POST":
         got = data["failures"].get(key)
-        if got:
+        if info.get("event") == "dynamic":
+            # GitHub's own answer to any rerun of a dynamic run.
+            status, body = 403, {"message": "This workflow run cannot be retried"}
+        elif got:
             status, body = got["status"], {"message": got["error"]}
         else:
             assert path.endswith(("/rerun-failed-jobs", "/rerun")), path
