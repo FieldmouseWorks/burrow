@@ -33,7 +33,10 @@ fn codex_slots_do_not_take_claude_slots_or_wait_on_claude_usage() {
     assert!(!cfg.jobs.join(".slots/1").exists());
     let other = File::create(cfg.jobs.join(".codex-slots/1")).unwrap();
     assert!(other.try_lock().is_err());
-    drop(slot);
+    // Let go of by unlocking, not by dropping: the slot is open across exec
+    // (held), so a child another test spawns meanwhile keeps a dropped one
+    // locked for as long as it runs.
+    slot.unlock().unwrap();
     assert!(other.try_lock().is_ok());
 }
 
