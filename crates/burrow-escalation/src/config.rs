@@ -28,13 +28,15 @@ pub struct Config {
     pub home: PathBuf,
 }
 
-/// The coordinator's path: a request issue in `repo` under `label`, which
-/// counts as delivered only once one of `acknowledgers` says so on it.
+/// The coordinator's path: a request issue in `repo` under `label`, opened
+/// as `sender` (the account its gh acts as), which counts as delivered only
+/// once one of `acknowledgers` says so on it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Relay {
     pub repo: String,
     pub label: String,
+    pub sender: Author,
     pub acknowledgers: Vec<Author>,
 }
 
@@ -58,9 +60,12 @@ impl Config {
             // An acknowledgement only counts from an account the machine
             // trusts by its numeric id; with none, nothing could ever be
             // delivered.
-            if relay.acknowledgers.is_empty() || relay.acknowledgers.iter().any(|a| a.id == 0) {
+            if relay.sender.id == 0
+                || relay.acknowledgers.is_empty()
+                || relay.acknowledgers.iter().any(|a| a.id == 0)
+            {
                 return Err(format!(
-                    "{}: the relay needs acknowledgers, each with its account id",
+                    "{}: the relay needs its sender and acknowledgers, each with its account id",
                     path.display()
                 ));
             }

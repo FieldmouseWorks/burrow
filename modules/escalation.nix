@@ -62,6 +62,7 @@ let
         else
           {
             inherit (cfg.relay) repo label;
+            sender = { inherit (cfg.relay.sender) login id; };
             acknowledgers = map (a: { inherit (a) login id; }) cfg.relay.acknowledgers;
           };
       home = config.users.users.${user}.home;
@@ -132,6 +133,37 @@ in
         description = "The label on each request issue. The inbox never sorts or hands one on.";
       };
 
+      sender = lib.mkOption {
+        type = lib.types.nullOr (
+          lib.types.submodule {
+            options = {
+              login = lib.mkOption { type = lib.types.str; };
+              id = lib.mkOption {
+                type = lib.types.ints.positive;
+                description = "The account's numeric id: what's matched.";
+              };
+            };
+          }
+        );
+        default =
+          let
+            app = config.burrow.github.machineApp;
+          in
+          if app == null then
+            null
+          else
+            {
+              login = "${app.slug}[bot]";
+              id = app.accountId;
+            };
+        defaultText = lib.literalMD "the `burrow.github.machinery` App's bot account, else null";
+        description = ''
+          The account HOST-escalation's gh opens requests as. Only an issue
+          it opened, marked with the request's digest, is taken for a request
+          already made, so no one else's issue can stand in for one.
+        '';
+      };
+
       acknowledgers = lib.mkOption {
         type = lib.types.listOf (
           lib.types.submodule {
@@ -169,6 +201,10 @@ in
         {
           assertion = cfg.relay.repo == null || cfg.relay.acknowledgers != [ ];
           message = "burrow.escalation.relay.repo needs acknowledgers: with none, no request is ever delivered.";
+        }
+        {
+          assertion = cfg.relay.repo == null || cfg.relay.sender != null;
+          message = "burrow.escalation.relay.repo needs relay.sender (or burrow.github.machinery): the account its requests are opened as.";
         }
       ];
       environment.systemPackages = [ escalation ];

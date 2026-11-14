@@ -29,6 +29,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 pub use store::{Dir, Held, Records};
 
@@ -138,6 +139,16 @@ impl From<&Kept> for Receipt {
     }
 }
 
+/// A request on the route: the repo it was opened in and its number. Kept
+/// whole, so a changed or removed relay never reinterprets the number in
+/// another repo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayRef {
+    pub repo: String,
+    pub number: u64,
+}
+
 /// How far an escalation got.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "camelCase", deny_unknown_fields)]
@@ -145,11 +156,11 @@ enum Stage {
     /// Kept, nothing sent yet (or sent with its answer lost).
     Recorded,
     /// The request is on the route, as `relay`; not acknowledged yet.
-    Relayed { relay: u64 },
+    Relayed { relay: RelayRef },
     /// Acknowledged: the owner's project has it. The label is next.
-    Delivered { relay: u64, receipt: Kept },
+    Delivered { relay: RelayRef, receipt: Kept },
     /// The owner label is on: done.
-    Labelled { relay: u64, receipt: Kept },
+    Labelled { relay: RelayRef, receipt: Kept },
 }
 
 /// One escalation, as its file keeps it.
@@ -214,16 +225,39 @@ pub struct Request<'a> {
     pub since: u64,
 }
 
+impl Request<'_> {
+    /// What identifies this exact request, whatever its key: a digest of
+    /// the key, target, reason, detail, ask and when it was kept. The route
+    /// marks the request with it, so an issue someone else opened under the
+    /// same key, or an older request for it, is never taken for this one.
+    pub fn digest(&self) -> String {
+        let whole = json!([
+            self.key,
+            self.target.repo,
+            self.target.number,
+            self.reason.kind.word(),
+            self.reason.detail,
+            self.ask,
+            self.since
+        ]);
+        Sha256::digest(whole.to_string().as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
 /// The route to the owner's project, through the operator's coordinator.
 pub trait Project {
     /// Puts the request on the route, once per key: a request it already
-    /// made for this key (one whose answer was lost, say) is found and
-    /// returned, never made again. Returns its number.
-    fn send(&mut self, request: &Request) -> Result<u64, Error>;
+    /// made for this exact request (one whose answer was lost, say) is
+    /// found and returned, never made again. Returns where it is.
+    fn send(&mut self, request: &Request) -> Result<RelayRef, Error>;
 
     /// The acknowledgement that the owner's project has request `relay`,
-    /// verified as from an acknowledger; None while there's none.
-    fn acknowledged(&mut self, key: &str, relay: u64) -> Result<Option<Receipt>, Error>;
+    /// verified as from an acknowledger; None while there's none. It reads
+    /// `relay` where it is, whatever the route's configured now.
+    fn acknowledged(&mut self, key: &str, relay: &RelayRef) -> Result<Option<Receipt>, Error>;
 }
 
 /// The owner label's one writer.
@@ -240,7 +274,7 @@ pub enum Outcome {
     Operator { why: String },
     /// The owner's, on its way: the label waits for the project to
     /// acknowledge the request.
-    Pending { relay: Option<u64> },
+    Pending { relay: Option<RelayRef> },
     /// The project has it, and the owner label is on.
     Escalated { receipt: Receipt },
 }
@@ -249,7 +283,9 @@ impl Outcome {
     pub fn json(&self) -> Value {
         match self {
             Outcome::Operator { why } => json!({"outcome": "operator", "why": why}),
-            Outcome::Pending { relay } => json!({"outcome": "pending", "relay": relay}),
+            Outcome::Pending { relay } => {
+                json!({"outcome": "pending", "relay": relay.as_ref().map(|r| format!("{}#{}", r.repo, r.number))})
+            }
             Outcome::Escalated { receipt } => {
                 json!({"outcome": "escalated", "receipt": receipt.json()})
             }
@@ -286,6 +322,22 @@ impl Escalations<'_> {
         ask: &str,
     ) -> Result<Outcome, Error> {
         check_key(key)?;
+        let _held = self.records.lock()?;
+        // A key is one request, whole and for good: asked again, it must be
+        // the same request, whichever way it would route now.
+        if let Some(kept) = self.records.load(key)? {
+            let same = kept.target == *target
+                && kept.kind == word.trim()
+                && kept.detail == detail.trim()
+                && kept.ask == ask.trim();
+            if !same {
+                return Err(format!(
+                    "{key} is already an escalation of {} for {} ({:?}), asking {:?}: a changed request needs a key of its own",
+                    kept.target, kept.kind, kept.detail, kept.ask
+                ));
+            }
+            return self.drive(kept);
+        }
         let reason = match self.policy.route(word, detail) {
             Route::Operator(why) => return Ok(Outcome::Operator { why }),
             Route::Owner(reason) => reason,
@@ -293,35 +345,18 @@ impl Escalations<'_> {
         if ask.trim().is_empty() {
             return Err("an escalation needs what the owner is asked".into());
         }
-        let _held = self.records.lock()?;
-        let record = match self.records.load(key)? {
-            Some(kept) => {
-                if kept.target != *target || kept.kind != reason.kind.word() {
-                    return Err(format!(
-                        "{key} is already an escalation of {} for {}, not of {target} for {}",
-                        kept.target,
-                        kept.kind,
-                        reason.kind.word()
-                    ));
-                }
-                kept
-            }
-            None => {
-                let record = Record {
-                    key: key.to_owned(),
-                    target: target.clone(),
-                    kind: reason.kind.word().to_owned(),
-                    detail: reason.detail.clone(),
-                    ask: ask.trim().to_owned(),
-                    recorded: self.now,
-                    stage: Stage::Recorded,
-                };
-                // Kept before anything is sent: whatever happens next, a
-                // pass finds it and carries it on.
-                self.records.save(&record)?;
-                record
-            }
+        let record = Record {
+            key: key.to_owned(),
+            target: target.clone(),
+            kind: reason.kind.word().to_owned(),
+            detail: reason.detail.clone(),
+            ask: ask.trim().to_owned(),
+            recorded: self.now,
+            stage: Stage::Recorded,
         };
+        // Kept before anything is sent: whatever happens next, a pass finds
+        // it and carries it on.
+        self.records.save(&record)?;
         self.drive(record)
     }
 
@@ -365,8 +400,8 @@ impl Escalations<'_> {
                     record.stage = Stage::Relayed { relay };
                 }
                 Stage::Relayed { relay } => {
-                    let relay = *relay;
-                    let Some(receipt) = self.project.acknowledged(&record.key, relay)? else {
+                    let relay = relay.clone();
+                    let Some(receipt) = self.project.acknowledged(&record.key, &relay)? else {
                         return Ok(Outcome::Pending { relay: Some(relay) });
                     };
                     record.stage = Stage::Delivered {
@@ -375,7 +410,7 @@ impl Escalations<'_> {
                     };
                 }
                 Stage::Delivered { relay, receipt } => {
-                    let (relay, kept) = (*relay, receipt.clone());
+                    let (relay, kept) = (relay.clone(), receipt.clone());
                     self.labels
                         .add(&record.target, self.owner_label, &Receipt::from(&kept))?;
                     record.stage = Stage::Labelled {

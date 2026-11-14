@@ -383,7 +383,12 @@ label writer takes that receipt as an argument. Each step is recorded
 before the next, so a failure, crash or restart between any two effects
 leaves the record where it got to. The next `escalate` with the same key, or
 a `pass`, carries it on. The relay finds the request it already opened
-rather than open another, and a delivered request is never sent again.
+rather than open another: only an issue its own account opened
+(`escalation.relay.sender`, the machine's App by default), marked with that
+request's digest, counts. A request is read in the repo where it was opened,
+even after the relay moves, and its relay label is put back while it
+waits. A key is one request: reusing it with any other target, reason,
+detail or ask is refused. A delivered request is never sent again.
 Until the acknowledgement, the outcome is `pending` and the target carries
 no owner label.
 

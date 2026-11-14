@@ -25,7 +25,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use burrow_escalation::config::Config;
 use burrow_escalation::reason::{Policy, Route};
 use burrow_escalation::relay::{GitHub, GitHubLabels};
-use burrow_escalation::{Dir, Escalations, Records, Target};
+use burrow_escalation::{
+    Dir, Error, Escalations, Project, Receipt, Records, RelayRef, Request, Target,
+};
 use burrow_github::Gh;
 use serde_json::json;
 
@@ -91,21 +93,24 @@ fn main() -> ExitCode {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let Some(relay) = &cfg.relay else {
-        // No route to the owner's project: the policy sends everything to
-        // the operator, and there's nothing kept to carry on.
-        return match words.as_slice() {
-            ["escalate", _, _, kind, detail, _] => route(&policy, kind, detail),
-            _ => ExitCode::SUCCESS,
-        };
-    };
     let mut gh = Gh::default();
     let mut gh_labels = Gh::default();
-    let mut project = GitHub {
-        api: &mut gh,
-        relay,
-        owner: &cfg.owner,
-        owner_label: &cfg.owner_label,
+    // With no relay, nothing new reaches the owner (the policy routes it to
+    // the operator), and a record an earlier relay left part-way fails each
+    // pass, saying so, rather than be read against another route.
+    let mut none = NoRoute;
+    let mut github;
+    let project: &mut dyn Project = match &cfg.relay {
+        Some(relay) => {
+            github = GitHub {
+                api: &mut gh,
+                relay,
+                owner: &cfg.owner,
+                owner_label: &cfg.owner_label,
+            };
+            &mut github
+        }
+        None => &mut none,
     };
     let mut labels = GitHubLabels {
         api: &mut gh_labels,
@@ -114,7 +119,7 @@ fn main() -> ExitCode {
         policy: &policy,
         owner_label: &cfg.owner_label,
         records: &mut records,
-        project: &mut project,
+        project,
         labels: &mut labels,
         now,
     };
@@ -164,6 +169,25 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+    }
+}
+
+/// The route when none is configured.
+struct NoRoute;
+
+impl Project for NoRoute {
+    fn send(&mut self, request: &Request) -> Result<RelayRef, Error> {
+        Err(format!(
+            "{}: no relay is configured to reach the owner's project",
+            request.key
+        ))
+    }
+
+    fn acknowledged(&mut self, key: &str, relay: &RelayRef) -> Result<Option<Receipt>, Error> {
+        Err(format!(
+            "{key}: its request {}#{} waits on a relay that's no longer configured",
+            relay.repo, relay.number
+        ))
     }
 }
 

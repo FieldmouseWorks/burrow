@@ -61,12 +61,12 @@ impl FakeProject {
 }
 
 impl Project for FakeProject {
-    fn send(&mut self, request: &Request) -> Result<u64, Error> {
+    fn send(&mut self, request: &Request) -> Result<RelayRef, Error> {
         if self.fail_send {
             return Err("the route is down".into());
         }
         if let Some(n) = self.made.get(request.key) {
-            return Ok(*n);
+            return Ok(rr(*n));
         }
         let n = 100 + self.made.len() as u64;
         self.made.insert(request.key.to_owned(), n);
@@ -77,14 +77,14 @@ impl Project for FakeProject {
         if self.lose_answer {
             return Err("the answer was lost".into());
         }
-        Ok(n)
+        Ok(rr(n))
     }
 
-    fn acknowledged(&mut self, key: &str, relay: u64) -> Result<Option<Receipt>, Error> {
+    fn acknowledged(&mut self, key: &str, relay: &RelayRef) -> Result<Option<Receipt>, Error> {
         if self.fail_ack {
             return Err("can't read the route".into());
         }
-        let r = self.acked.get(&relay).cloned();
+        let r = self.acked.get(&relay.number).cloned();
         if r.is_some() {
             self.log.borrow_mut().push(format!("ack {key}"));
         }
@@ -223,6 +223,13 @@ impl World {
     }
 }
 
+fn rr(number: u64) -> RelayRef {
+    RelayRef {
+        repo: "sam/homelab".into(),
+        number,
+    }
+}
+
 fn target() -> Target {
     Target::parse("sam/homelab#1239").unwrap()
 }
@@ -334,13 +341,17 @@ fn the_label_waits_for_the_acknowledgement() {
     let mut w = World::new();
     assert_eq!(
         w.escalate("renovate-confirm").unwrap(),
-        Outcome::Pending { relay: Some(100) }
+        Outcome::Pending {
+            relay: Some(rr(100))
+        }
     );
     assert!(!w.labelled());
     // Asked again before it's acknowledged: still one request, no label.
     assert_eq!(
         w.escalate("renovate-confirm").unwrap(),
-        Outcome::Pending { relay: Some(100) }
+        Outcome::Pending {
+            relay: Some(rr(100))
+        }
     );
     assert!(
         w.pass()[0]
@@ -415,10 +426,12 @@ fn a_lost_answer_is_found_again_not_sent_again() {
     w.project.lose_answer = true;
     assert!(w.escalate("k").is_err());
     w.project.lose_answer = false;
-    assert!(matches!(
+    assert_eq!(
         w.pass()[0].1,
-        Ok(Outcome::Pending { relay: Some(100) })
-    ));
+        Ok(Outcome::Pending {
+            relay: Some(rr(100))
+        })
+    );
     w.project.ack("k");
     w.labels.lose_answer = true;
     assert!(w.pass()[0].1.is_err());
@@ -470,6 +483,56 @@ fn a_key_is_one_escalation() {
     let other = Target::parse("sam/homelab#7").unwrap();
     let again = w.run(|e| e.escalate("k", &other, "confirm-access", "x", "y"));
     assert!(again.unwrap_err().contains("already"));
+    // Nor another secret or prompt on the same target, another ask, or a
+    // word that would go to the operator.
+    for (word, detail, ask) in [
+        (
+            "confirm-access",
+            "another App's settings",
+            "Clear the Confirm access prompt in remi's browser.",
+        ),
+        (
+            "confirm-access",
+            "GitHub settings for the Renovate App",
+            "Something else.",
+        ),
+        (
+            "sign-in",
+            "GitHub settings for the Renovate App",
+            "Clear the Confirm access prompt in remi's browser.",
+        ),
+        (
+            "hold",
+            "GitHub settings for the Renovate App",
+            "Clear the Confirm access prompt in remi's browser.",
+        ),
+    ] {
+        let again = w.run(|e| e.escalate("k", &target(), word, detail, ask));
+        assert!(
+            again.unwrap_err().contains("already"),
+            "{word} {detail} {ask}"
+        );
+    }
+    // The same request, spaced differently, is the same one.
+    let same = w.run(|e| {
+        e.escalate(
+            "k",
+            &target(),
+            " confirm-access",
+            "GitHub settings for the Renovate App ",
+            " Clear the Confirm access prompt in remi's browser.",
+        )
+    });
+    assert!(matches!(same, Ok(Outcome::Pending { .. })), "{same:?}");
+    // Done, it's still the one request.
+    w.project.ack("k");
+    assert!(matches!(
+        w.escalate("k").unwrap(),
+        Outcome::Escalated { .. }
+    ));
+    let after = w.run(|e| e.escalate("k", &target(), "confirm-access", "x", "y"));
+    assert!(after.unwrap_err().contains("already"));
+    assert_eq!(w.project.sent(), 1);
     let wrong = w.run(|e| e.escalate("../k", &target(), "confirm-access", "x", "y"));
     assert!(wrong.is_err());
     assert!(
@@ -498,6 +561,10 @@ fn relay() -> Relay {
     Relay {
         repo: "sam/homelab".into(),
         label: "escalation".into(),
+        sender: Author {
+            login: "sam-workers[bot]".into(),
+            id: 77,
+        },
         acknowledgers: vec![Author {
             login: "sam".into(),
             id: 42,
@@ -515,8 +582,24 @@ fn request_parts() -> (Target, Reason) {
     )
 }
 
+fn github<'a>(api: &'a mut Fake, relay: &'a Relay) -> GitHub<'a> {
+    GitHub {
+        api,
+        relay,
+        owner: "Sam",
+        owner_label: "needs-owner",
+    }
+}
+
+/// An issue as GitHub lists it.
+fn issue(n: u64, by: u64, created: &str, body: &str, labels: &[&str]) -> serde_json::Value {
+    json!({"number": n, "user": {"login": "x", "id": by}, "created_at": created,
+           "title": "[escalation k] GitHub's Confirm access prompt: sam/homelab#1239",
+           "body": body, "labels": labels.iter().map(|l| json!({"name": l})).collect::<Vec<_>>()})
+}
+
 #[test]
-fn the_relay_finds_its_request_before_it_makes_one() {
+fn the_relay_finds_only_its_own_request_before_it_makes_one() {
     let relay = relay();
     let (target, reason) = request_parts();
     let request = Request {
@@ -526,30 +609,108 @@ fn the_relay_finds_its_request_before_it_makes_one() {
         ask: "Clear it.",
         since: 1_800_000_000,
     };
-    // One made already, its answer lost.
+    let marker = format!(
+        "<!-- burrow-escalation k confirm-access {} -->",
+        request.digest()
+    );
+    let other = Request {
+        ask: "Something else.",
+        ..request
+    };
+    assert_ne!(request.digest(), other.digest());
+    let older = Request {
+        since: 1_700_000_000,
+        ..request
+    };
+    assert_ne!(request.digest(), older.digest());
+    let now = "2027-01-15T08:00:05Z";
+    let decoys = vec![
+        // Someone else's issue under its key and marker.
+        issue(4, 5, now, &marker, &["escalation"]),
+        // Another request for the key: a changed ask, or an older one.
+        issue(
+            5,
+            77,
+            now,
+            &format!(
+                "<!-- burrow-escalation k confirm-access {} -->",
+                other.digest()
+            ),
+            &["escalation"],
+        ),
+        issue(6, 77, "2026-01-01T00:00:00Z", &marker, &["escalation"]),
+        // A PR.
+        {
+            let mut pr = issue(3, 77, now, &marker, &["escalation"]);
+            pr["pull_request"] = json!({});
+            pr
+        },
+    ];
+    // Only decoys: it's made, under its label, marked and saying how it's
+    // acknowledged.
     let mut api = Fake::default();
     api.on(
         "GET",
         "repos/sam/homelab/issues?state=all",
+        vec![ok(200, json!(decoys), &[])],
+    )
+    .on(
+        "POST",
+        "repos/sam/homelab/labels",
+        vec![ok(201, json!({}), &[])],
+    )
+    .on(
+        "POST",
+        "repos/sam/homelab/issues",
         vec![ok(
-            200,
-            json!([
-                {"number": 5, "title": "[escalation k2] other", "pull_request": null},
-                {"number": 9, "title": "[escalation k] GitHub's Confirm access prompt: sam/homelab#1239"},
-                {"number": 3, "title": "[escalation k] a PR", "pull_request": {}},
-            ]),
+            201,
+            json!({"number": 12, "labels": [{"name": "escalation"}]}),
             &[],
         )],
     );
-    let mut gh = GitHub {
-        api: &mut api,
-        relay: &relay,
-        owner: "Sam",
-        owner_label: "needs-owner",
-    };
-    assert_eq!(gh.send(&request).unwrap(), 9);
+    assert_eq!(github(&mut api, &relay).send(&request).unwrap(), rr(12));
+    let since = &api.asked("GET")[0].1;
+    assert!(since.contains("since=2027-01-15T07%3A59%3A00Z"), "{since}");
+    let made = api.asked("POST")[1].2.clone().unwrap();
+    assert!(
+        made["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("[escalation k] ")
+    );
+    assert_eq!(made["labels"], json!(["escalation"]));
+    let body = made["body"].as_str().unwrap();
+    assert!(body.contains("\ndelivered k\n"), "{body}");
+    assert!(body.contains(&marker), "{body}");
+    assert!(
+        body.contains("https://github.com/sam/homelab/issues/1239"),
+        "{body}"
+    );
+    // Its own, made earlier with the answer lost: found, not made again.
+    let mut mine = decoys.clone();
+    mine.push(issue(9, 77, now, &marker, &["escalation"]));
+    let mut api = Fake::default();
+    api.on(
+        "GET",
+        "repos/sam/homelab/issues?state=all",
+        vec![ok(200, json!(mine), &[])],
+    );
+    assert_eq!(github(&mut api, &relay).send(&request).unwrap(), rr(9));
     assert!(api.asked("POST").is_empty());
-    // None yet: it's made, under its label, saying how it's acknowledged.
+}
+
+#[test]
+fn a_dropped_relay_label_is_put_back_or_the_send_fails() {
+    let relay = relay();
+    let (target, reason) = request_parts();
+    let request = Request {
+        key: "k",
+        target: &target,
+        reason: &reason,
+        ask: "Clear it.",
+        since: 1_800_000_000,
+    };
+    // Made, with GitHub dropping its label: put back on the same issue.
     let mut api = Fake::default();
     api.on(
         "GET",
@@ -563,32 +724,37 @@ fn the_relay_finds_its_request_before_it_makes_one() {
     )
     .on(
         "POST",
+        "repos/sam/homelab/issues/12/labels",
+        vec![
+            ok(200, json!([]), &[]),
+            ok(200, json!([{"name": "escalation"}]), &[]),
+        ],
+    )
+    .on(
+        "POST",
         "repos/sam/homelab/issues",
-        vec![ok(201, json!({"number": 12}), &[])],
+        vec![ok(201, json!({"number": 12, "labels": []}), &[])],
     );
-    let mut gh = GitHub {
-        api: &mut api,
-        relay: &relay,
-        owner: "Sam",
-        owner_label: "needs-owner",
-    };
-    assert_eq!(gh.send(&request).unwrap(), 12);
-    let since = &api.asked("GET")[0].1;
-    assert!(since.contains("since=2027-01-15T07%3A59%3A00Z"), "{since}");
-    let made = api.asked("POST")[1].2.clone().unwrap();
-    assert!(
-        made["title"]
-            .as_str()
-            .unwrap()
-            .starts_with("[escalation k] ")
+    // GitHub won't keep it at first: the send fails, and makes nothing more.
+    assert!(github(&mut api, &relay).send(&request).is_err());
+    // Found again on the next try, its label put back, still one issue.
+    let marker = format!(
+        "<!-- burrow-escalation k confirm-access {} -->",
+        request.digest()
     );
-    assert_eq!(made["labels"], json!(["escalation"]));
-    let body = made["body"].as_str().unwrap();
-    assert!(body.contains("\ndelivered k\n"), "{body}");
-    assert!(
-        body.contains("https://github.com/sam/homelab/issues/1239"),
-        "{body}"
-    );
+    api.answers[0].2 = vec![ok(
+        200,
+        json!([issue(12, 77, "2027-01-15T08:00:05Z", &marker, &[])]),
+        &[],
+    )]
+    .into();
+    assert_eq!(github(&mut api, &relay).send(&request).unwrap(), rr(12));
+    let made = api
+        .asked("POST")
+        .iter()
+        .filter(|a| a.1 == "repos/sam/homelab/issues")
+        .count();
+    assert_eq!(made, 1);
 }
 
 #[test]
@@ -600,14 +766,13 @@ fn only_an_acknowledgers_word_is_delivery() {
             "GET",
             "repos/sam/homelab/issues/9/comments",
             vec![ok(200, comments, &[])],
+        )
+        .on(
+            "GET",
+            "repos/sam/homelab/issues/9",
+            vec![ok(200, json!({"labels": [{"name": "escalation"}]}), &[])],
         );
-        let mut gh = GitHub {
-            api: &mut api,
-            relay: &relay,
-            owner: "Sam",
-            owner_label: "needs-owner",
-        };
-        gh.acknowledged("k", 9).unwrap()
+        github(&mut api, &relay).acknowledged("k", &rr(9)).unwrap()
     };
     let by = |login: &str, id: u64, body: &str| {
         json!({"user": {"login": login, "id": id}, "body": body,
@@ -647,6 +812,39 @@ fn only_an_acknowledgers_word_is_delivery() {
     }
 }
 
+/// A request is read where it was made, whatever the relay is now, and
+/// while it waits its label is kept on.
+#[test]
+fn a_request_is_read_where_it_was_made() {
+    let mut moved = relay();
+    moved.repo = "sam/elsewhere".into();
+    // Only sam/homelab is scripted: asking sam/elsewhere#9 would panic.
+    let mut api = Fake::default();
+    api.on(
+        "GET",
+        "repos/sam/homelab/issues/9/comments",
+        vec![ok(200, json!([]), &[])],
+    )
+    .on(
+        "GET",
+        "repos/sam/homelab/issues/9",
+        vec![ok(200, json!({"labels": []}), &[])],
+    )
+    .on(
+        "POST",
+        "repos/sam/homelab/issues/9/labels",
+        vec![ok(200, json!([{"name": "escalation"}]), &[])],
+    );
+    assert_eq!(
+        github(&mut api, &moved).acknowledged("k", &rr(9)).unwrap(),
+        None
+    );
+    assert_eq!(
+        api.asked("POST")[0].2,
+        Some(json!({"labels": ["escalation"]}))
+    );
+}
+
 #[test]
 fn the_label_counts_once_github_kept_it() {
     let receipt = Receipt::new("sam".into(), 42, "t".into(), "u".into());
@@ -682,38 +880,50 @@ fn over_github_the_label_follows_the_acknowledgement() {
     let policy = all_reasons(true);
     let mut records = Dir(tmp.path().to_owned());
     let mut api = Fake::default();
-    api.on("GET", "repos/sam/homelab/issues?state=all", vec![ok(200, json!([]), &[])])
-        .on("POST", "repos/sam/homelab/labels", vec![ok(201, json!({}), &[])])
-        .on(
-            "POST",
-            "repos/sam/homelab/issues",
-            vec![ok(201, json!({"number": 12}), &[])],
-        )
-        .on(
-            "GET",
-            "repos/sam/homelab/issues/12/comments",
-            vec![
-                ok(200, json!([]), &[]),
-                ok(
-                    200,
-                    json!([{"user": {"login": "sam", "id": 42}, "body": "delivered k",
-                            "created_at": "2026-11-14T05:00:00Z", "html_url": "https://github.com/c/2"}]),
-                    &[],
-                ),
-            ],
-        );
+    api.on(
+        "GET",
+        "repos/sam/homelab/issues?state=all",
+        vec![ok(200, json!([]), &[])],
+    )
+    .on(
+        "GET",
+        "repos/sam/homelab/issues/12/comments",
+        vec![
+            ok(200, json!([]), &[]),
+            ok(
+                200,
+                json!([{"user": {"login": "sam", "id": 42}, "body": "delivered k",
+                        "created_at": "2026-11-14T05:00:00Z", "html_url": "https://github.com/c/2"}]),
+                &[],
+            ),
+        ],
+    )
+    .on(
+        "GET",
+        "repos/sam/homelab/issues/12",
+        vec![ok(200, json!({"labels": [{"name": "escalation"}]}), &[])],
+    )
+    .on(
+        "POST",
+        "repos/sam/homelab/labels",
+        vec![ok(201, json!({}), &[])],
+    )
+    .on(
+        "POST",
+        "repos/sam/homelab/issues",
+        vec![ok(
+            201,
+            json!({"number": 12, "labels": [{"name": "escalation"}]}),
+            &[],
+        )],
+    );
     let mut label_api = Fake::default();
     label_api.on(
         "POST",
         "repos/sam/homelab/issues/1239/labels",
         vec![ok(200, json!([{"name": "needs-owner"}]), &[])],
     );
-    let mut project = GitHub {
-        api: &mut api,
-        relay: &relay,
-        owner: "Sam",
-        owner_label: "needs-owner",
-    };
+    let mut project = github(&mut api, &relay);
     let mut labels = GitHubLabels {
         api: &mut label_api,
     };
@@ -734,7 +944,12 @@ fn over_github_the_label_follows_the_acknowledgement() {
             "Clear it.",
         )
         .unwrap();
-    assert_eq!(first, Outcome::Pending { relay: Some(12) });
+    assert_eq!(
+        first,
+        Outcome::Pending {
+            relay: Some(rr(12))
+        }
+    );
     let passed = e.pass().unwrap();
     let Ok(Outcome::Escalated { receipt }) = &passed[0].1 else {
         panic!("{passed:?}")
