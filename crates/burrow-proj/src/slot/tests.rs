@@ -131,7 +131,8 @@ fn child() {
     let mut held = None;
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
-    // child holds it open for writing as it's run.
+    // child holds it open for writing as it's run. Its answer is moved into
+    // place whole, so a test that sees `handed` exist reads all of it.
     if matches!(
         what.as_str(),
         "hand-over" | "stay" | "paused-hand-over" | "paused-codex-hand-over"
@@ -145,7 +146,8 @@ fn child() {
 case $1 in
   _handover_format) echo 1 ;;
   _retry_format) echo 4 ;;
-  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
+  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed.tmp"
+    mv "{jobs}/$2/handed.tmp" "{jobs}/$2/handed" ;;
 esac
 "#
             ),
