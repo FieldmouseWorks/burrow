@@ -38,12 +38,7 @@ fn stored(b: &Box) -> List {
 /// a job's record of) as its current child and #9 after it, with job j1
 /// for #7: its one turn awaited `target`, then said it ends with `end`.
 /// GitHub has #7 `state`, with `labels`. Its record, and #6.
-fn child_job(
-    target: &str,
-    end: &str,
-    state: &str,
-    labels: &[&str],
-) -> (Box, PathBuf, Value) {
+fn child_job(target: &str, end: &str, state: &str, labels: &[&str]) -> (Box, PathBuf, Value) {
     let mut b = Box::new();
     b.cfg.inbox.as_mut().unwrap().planning = true;
     let mut parent = issue(6, "sam", &["tracker"]);
@@ -114,18 +109,23 @@ fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
         let url = pr(&b, repo, 10, true);
         // Asked alone, nothing is recorded: only an accepted completion is.
         assert_eq!(
-            b.pass().child_can_close("sam/box", "7", Some(&crate::job::Job::new(&b.cfg, "j1"))),
+            b.pass()
+                .child_can_close("sam/box", "7", Some(&crate::job::Job::new(&b.cfg, "j1"))),
             Closing::Record(url.clone())
         );
         assert!(b.pass().recorded_landing("sam/box", 7).is_none(), "{repo}");
         jobs(&b, true);
         assert!(
-            b.log().contains("-X PATCH repos/sam/box/issues/7 -f state=closed"),
+            b.log()
+                .contains("-X PATCH repos/sam/box/issues/7 -f state=closed"),
             "{repo}: {}",
             b.log()
         );
         assert!(!d.exists(), "{repo}");
-        assert_eq!(b.pass().recorded_landing("sam/box", 7).as_deref(), Some(url.as_str()));
+        assert_eq!(
+            b.pass().recorded_landing("sam/box", 7).as_deref(),
+            Some(url.as_str())
+        );
         let mut closed = issue(7, "sam", &["claude"]);
         closed["state"] = json!("closed");
         fs::write(b.path("repos_sam_box_issues_7"), closed.to_string()).unwrap();
@@ -154,22 +154,33 @@ fn an_edit_while_the_job_ran_records_nothing() {
 }
 
 /// Closed by hand before the pass saw the job finish: the awaited PR is
-/// kept before the record goes. Not for a job that hadn't finished.
+/// kept before the record goes. Not for a job that hadn't finished, nor
+/// one whose issue was edited after it was handed it.
 #[test]
 fn a_hand_close_after_the_jobs_done_keeps_its_landing() {
-    for (end, kept) in [("done", true), ("await", false)] {
+    for (end, edited, kept) in [
+        ("done", false, true),
+        ("await", false, false),
+        ("done", true, false),
+    ] {
         let (b, d, parent) = child_job("sam/machine#1218", end, "closed", &["claude"]);
+        if edited {
+            let mut now = issue(7, "sam", &["claude"]);
+            now["state"] = json!("closed");
+            now["body"] = json!("It's broken, and the docs need it too.");
+            fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+        }
         let url = pr(&b, "sam/machine", 1218, true);
         jobs(&b, false);
         assert!(!d.exists(), "{end}");
         assert_eq!(
             b.pass().recorded_landing("sam/box", 7),
             kept.then_some(url),
-            "{end}: {}",
+            "{end} {edited}: {}",
             b.log()
         );
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-        assert_eq!(moved_on(&b), kept, "{end}");
+        assert_eq!(moved_on(&b), kept, "{end} {edited}");
     }
 }
 
@@ -179,7 +190,12 @@ fn a_repair_lane_child_closes_with_its_landing() {
     let (b, _, _) = child_job("sam/box#10", "done", "open", &["claude", "stuck"]);
     let url = pr(&b, "sam/box", 10, true);
     jobs(&b, true);
-    assert!(b.log().contains("-X PATCH repos/sam/box/issues/7 -f state=closed"), "{}", b.log());
+    assert!(
+        b.log()
+            .contains("-X PATCH repos/sam/box/issues/7 -f state=closed"),
+        "{}",
+        b.log()
+    );
     assert_eq!(b.pass().recorded_landing("sam/box", 7), Some(url));
 }
 
@@ -255,13 +271,23 @@ fn a_child_closed_by_hand_waits_and_says_so_once() {
     let said = |text: &str| {
         b.log()
             .lines()
-            .filter(|l| l.contains("-X PATCH repos/sam/box/issues/comments/100") && l.contains(text))
+            .filter(|l| {
+                l.contains("-X PATCH repos/sam/box/issues/comments/100") && l.contains(text)
+            })
             .count()
     };
-    assert_eq!(said("#8 closed without a merged PR; the list waits"), 1, "{}", b.log());
+    assert_eq!(
+        said("#8 closed without a merged PR; the list waits"),
+        1,
+        "{}",
+        b.log()
+    );
     // One notice, ensured each pass: asking again never opens another.
     let notices = fs::read_to_string(b.path("notices")).unwrap();
-    assert!(notices.lines().all(|l| l == "ensure proj-plan-sam_box-7"), "{notices}");
+    assert!(
+        notices.lines().all(|l| l == "ensure proj-plan-sam_box-7"),
+        "{notices}"
+    );
     assert!(notice_open(&b));
     // An author records the PR that landed it: the list moves on, and the
     // notice is closed, the close tried again until it's known to be.
@@ -271,7 +297,11 @@ fn a_child_closed_by_hand_waits_and_says_so_once() {
     b.pass().plan_done("sam/box#8", &url, Some(author)).unwrap();
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(advanced(&b));
-    assert!(!stored(&b).checklist("sam/box", "7").contains("the list waits"));
+    assert!(
+        !stored(&b)
+            .checklist("sam/box", "7")
+            .contains("the list waits")
+    );
     assert!(notice_open(&b));
     fs::remove_file(b.path("close-fails")).unwrap();
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
@@ -294,7 +324,11 @@ fn plan_done_records_only_an_authors_merged_pr() {
         ("sam/box#8", &landed, Some(stranger)),
         ("sam/box#8", &landed, None),
         ("sam/box#8", &open, Some(author)),
-        ("sam/box#9", &"https://github.com/sam/box/issues/10".to_owned(), Some(author)),
+        (
+            "sam/box#9",
+            &"https://github.com/sam/box/issues/10".to_owned(),
+            Some(author),
+        ),
         ("sam/box#5", &landed, Some(author)),
         ("sam/else#8", &landed, Some(author)),
     ] {
@@ -307,12 +341,22 @@ fn plan_done_records_only_an_authors_merged_pr() {
     }
     assert!(b.pass().recorded_landing("sam/box", 8).is_none());
     // Spelled another way, it's still the clone's repo.
-    assert_eq!(b.pass().plan_done("Sam/Box#8", &landed, Some(author)).unwrap(), "sam/box");
+    assert_eq!(
+        b.pass()
+            .plan_done("Sam/Box#8", &landed, Some(author))
+            .unwrap(),
+        "sam/box"
+    );
     assert_eq!(b.pass().recorded_landing("sam/box", 8), Some(landed));
     // The child was still open: it's closed with the list moving on.
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(advanced(&b));
-    assert!(b.log().contains("-X PATCH repos/sam/box/issues/8 -f state=closed"), "{}", b.log());
+    assert!(
+        b.log()
+            .contains("-X PATCH repos/sam/box/issues/8 -f state=closed"),
+        "{}",
+        b.log()
+    );
 }
 
 #[test]
@@ -332,7 +376,12 @@ fn a_list_whose_child_is_still_open_is_unchanged() {
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
     assert!(!advanced(&b));
     let after = stored(&b);
-    assert!(after.children.iter().all(|c| c.merged_pr.is_none() && !c.waits));
+    assert!(
+        after
+            .children
+            .iter()
+            .all(|c| c.merged_pr.is_none() && !c.waits)
+    );
     assert_eq!(after.rendered, before.rendered);
     assert!(!b.log().contains("issues/8 -f state=closed"));
 }

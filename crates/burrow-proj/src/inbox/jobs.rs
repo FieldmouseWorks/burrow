@@ -343,7 +343,8 @@ impl Pass<'_> {
                 && read(&job.turn(&turns.to_string(), "end")).as_deref() == Some("done");
             let closing = if completed
                 && (!self.lane(listed_now)
-                    || n.parse().is_ok_and(|c| self.inbox.planning && self.is_child(repo, c)))
+                    || n.parse()
+                        .is_ok_and(|c| self.inbox.planning && self.is_child(repo, c)))
             {
                 self.child_can_close(repo, n, Some(&job))
             } else {
@@ -409,9 +410,7 @@ impl Pass<'_> {
                         // now: this completion is accepted, and no turn
                         // starts before the issue closes.
                         if let super::plans::Closing::Record(pr) = &closing
-                            && !n
-                                .parse()
-                                .is_ok_and(|c| self.record_landing(repo, c, pr))
+                            && !n.parse().is_ok_and(|c| self.record_landing(repo, c, pr))
                         {
                             drop(held);
                             self.retry(repo);

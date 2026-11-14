@@ -178,7 +178,12 @@ impl Pass<'_> {
         };
         let seen = number(&d.join("seen"));
         let after = |c: &Value| c["id"].as_i64().is_some_and(|i| i > seen);
-        let had: Vec<Value> = written.comments.iter().filter(|c| !after(c)).cloned().collect();
+        let had: Vec<Value> = written
+            .comments
+            .iter()
+            .filter(|c| !after(c))
+            .cloned()
+            .collect();
         if !Self::handed(d, &self.issue_text(repo, &written.issue, &had))
             || written.comments.iter().any(|c| after(c) && self.heard(c))
         {
