@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct State {
     /// Each runner a pass found idle with jobs queued for it, since when.
     pub idle: BTreeMap<String, f64>,
+    /// Each runner a pass found GitHub had deleted the registration of,
+    /// since when.
+    pub gone: BTreeMap<String, f64>,
     /// Since when jobs have waited for a fresh runner with room for more.
     pub fresh: Option<f64>,
     pub private: BTreeMap<String, f64>,

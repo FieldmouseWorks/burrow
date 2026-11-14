@@ -8,6 +8,7 @@ use burrow_watchdog::watch::Item;
 use burrow_watchdog::words::clock;
 
 use crate::config::{Config, Deploy};
+use crate::registration::{Registered, Registration};
 use crate::snapshot::{Run, Seen, Snapshot};
 use crate::state::State;
 use crate::world::Unit;
@@ -49,6 +50,14 @@ pub enum Move {
     /// Stop a fresh runner's unit that has sat idle: one that hasn't taken
     /// a job in `quiet` won't.
     Retire { unit: String, why: String },
+    /// `systemctl stop` each of `stop`, in turn: the units that start a
+    /// runner GitHub has deleted the registration of, then the runner, which
+    /// exits as it starts and is started again, without end.
+    Halt {
+        unit: String,
+        stop: Vec<String>,
+        why: String,
+    },
 }
 
 impl Move {
@@ -61,6 +70,7 @@ impl Move {
                 format!("start fresh runner {instance}")
             }
             Move::Retire { unit, .. } => format!("stop {unit}"),
+            Move::Halt { stop, .. } => format!("stop {}", stop.join(" and ")),
         }
     }
 
@@ -70,7 +80,8 @@ impl Move {
             | Move::Cancel { why, .. }
             | Move::Fresh { why, .. }
             | Move::PrivateFresh { why, .. }
-            | Move::Retire { why, .. } => why,
+            | Move::Retire { why, .. }
+            | Move::Halt { why, .. } => why,
         }
     }
 }
@@ -153,9 +164,30 @@ pub fn decide(
                 if let Some(t) = st.idle.get(unit) {
                     d.state.idle.insert(unit.clone(), *t);
                 }
+                if let Some(t) = st.gone.get(unit) {
+                    d.state.gone.insert(unit.clone(), *t);
+                }
             }
             continue;
         };
+        match &seen.registered {
+            Registered::Gone(reg) => {
+                let since = st.gone.get(unit).copied();
+                gone(cfg, snap.switching, unit, seen, reg, since, now, &mut d);
+                continue;
+            }
+            // Gone when last looked at, and not known now: as the last pass
+            // saw it, never restarted on a look that couldn't tell.
+            Registered::Unknown(_) if st.gone.contains_key(unit) => {
+                d.state.gone.insert(unit.clone(), st.gone[unit]);
+                if let Some(it) = was.get(&key) {
+                    d.items.insert(key, it.clone());
+                }
+                book(&mut d, now + cfg.quiet);
+                continue;
+            }
+            _ => {}
+        }
         runner(
             cfg,
             snap,
@@ -520,6 +552,79 @@ fn runner(
         // Starting, stopping, or stopped on purpose: a look later.
         _ => book(d, now + cfg.quiet),
     }
+}
+
+/// A runner whose registration GitHub has deleted: it takes no job until
+/// it's registered again, which no restart does, so it's never restarted,
+/// and its wait says so whether or not jobs are queued for it, due once a
+/// fresh look has had its time. Started, it exits at once, and whatever
+/// starts it again (a path unit on its `.runner`) loops it, so that and the
+/// runner are stopped; not while a switch is in flight, which starts what
+/// it changes itself.
+#[allow(clippy::too_many_arguments)]
+fn gone(
+    cfg: &Config,
+    switching: bool,
+    unit: &str,
+    seen: &Seen,
+    reg: &Registration,
+    since: Option<f64>,
+    now: f64,
+    d: &mut Decision,
+) {
+    let since = since.unwrap_or(now);
+    d.state.gone.insert(unit.to_owned(), since);
+    let missing = format!("{} lists no runner {} ({})", reg.scope, reg.id, reg.name);
+    let mut phase = format!(
+        "its registration is gone at GitHub: {missing}, so it takes no job until it's registered again"
+    );
+    if let Some(oldest) = seen.queued.first() {
+        phase.push_str(&format!(
+            "; {} queued for it (the oldest since {})",
+            jobs(seen.queued.len()),
+            clock(oldest.at)
+        ));
+    }
+    d.items.insert(
+        format!("runner/{unit}"),
+        Item {
+            repo: Some(seen.repo.clone()),
+            what: format!("{unit}, {}'s Actions runner", seen.repo),
+            phase,
+            since,
+            due: since + cfg.quiet + cfg.gap,
+            link: Some(reg.page()),
+            kick: Some(cfg.handler.clone()),
+            line: false,
+            unstick: false,
+            claude: false,
+            refresh: false,
+        },
+    );
+    let stop: Vec<String> = seen
+        .triggers
+        .iter()
+        .filter(|(_, u)| up(&u.state))
+        .map(|(t, _)| t.clone())
+        .chain(up(&seen.unit.state).then(|| unit.to_owned()))
+        .collect();
+    if stop.is_empty() {
+        return;
+    }
+    if switching {
+        book(d, now + cfg.quiet);
+        return;
+    }
+    d.moves.push(Move::Halt {
+        unit: unit.to_owned(),
+        stop,
+        why: format!("its registration is gone at GitHub: {missing}"),
+    });
+}
+
+/// Whether a unit in this state is running, or starting.
+fn up(state: &str) -> bool {
+    matches!(state, "active" | "activating" | "reloading" | "refreshing")
 }
 
 /// A push run on the default branch that no job of has started, and that a

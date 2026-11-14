@@ -357,7 +357,11 @@ Each has an entry below, and each can be imported on its own.
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that
   sits idle while a job only it could take is queued is restarted after
   `quietMinutes`, or started at once if it failed: at most twice in six hours,
-  and never while a switch is in flight. A push run on a runner repo's default
+  and never while a switch is in flight. One with its `registration` (its
+  `.runner`) set is checked against GitHub's list of runners where it was
+  registered: one missing from it is reported as its registration gone,
+  never restarted, and stopped with the `UNIT.path` that would start it
+  again, since it exits as it starts; it's registered again by hand. A push run on a runner repo's default
   branch that hasn't started is cancelled once a later run of its workflow on
   that branch is live, so the later one takes its place (a run that has
   started finishes, so the branch always gets a result; this takes Actions:

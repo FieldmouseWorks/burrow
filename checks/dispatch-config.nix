@@ -6,7 +6,8 @@
 # dirty tree and the same tree committed are one system; and each
 # runner's labels,
 # GitHub's defaults for the machine's architecture among them unless
-# it has none.
+# it has none; and the `.runner` of each that's checked against GitHub's
+# list of runners, whose path unit alone it may stop besides the runners.
 { self, pkgs, nixpkgs, cnStandIn, ... }:
 let
   inherit (nixpkgs) lib;
@@ -21,7 +22,7 @@ let
         burrow.dispatch = {
           enable = true;
           runners = {
-            ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; };
+            ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; registration = "/var/lib/ci/runner/.runner"; };
             bare = { repo = "sam/homelab"; labels = [ "bare" ]; defaultLabels = false; };
           };
           fresh = { enable = true; owner = "sam-org"; repos = [ "sam-org/homelab" ]; };
@@ -95,6 +96,11 @@ let
   ) (builtins.tail (lib.splitString "\n[" ("\n" + builtins.unsafeDiscardStringContext committed.config.systemd.units."burrow-fresh-runner@.service".text))));
   freshGot = lib.mapAttrs (name: want: builtins.filter (l: builtins.elem l (freshSections.${name} or [ ])) want) freshWant;
   handled = committed.config.burrow.events.handlers.dispatch.repos;
+  # A runner with its `.runner` is checked against GitHub's list, and one
+  # gone from it is stopped with the path unit that starts it again: that
+  # path unit, and none of a runner not checked.
+  registrations = lib.mapAttrs (_: r: r.registration) (settings committed).runners;
+  polkit = committed.config.security.polkit.extraConfig;
 in
   assert lib.assertMsg ((settings privateRepos).private == { owners = [ "sam" ]; app = 123; gh = "${pkgs.gh}/bin/gh"; }
     && privateRepos.config.burrow.events.handlers.dispatch.repos == null
@@ -110,6 +116,10 @@ in
   # What HOST-update tells main from local changes by: the switch stamps it.
   assert lib.assertMsg (revisions == [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty" ])
     "dispatch: the systems are stamped ${builtins.toJSON revisions}";
+  assert lib.assertMsg (registrations == { ci-runner = "/var/lib/ci/runner/.runner"; bare = null; })
+    "dispatch: the runners' registrations are ${builtins.toJSON registrations}";
+  assert lib.assertMsg (lib.hasInfix ''var paths = ["ci-runner.path"];'' polkit)
+    "dispatch: it may stop the path units ${polkit}";
   assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
   assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
   assert lib.assertMsg ((settings committed).fresh == wantFresh) "dispatch: fresh runners ${builtins.toJSON (settings committed).fresh}";
