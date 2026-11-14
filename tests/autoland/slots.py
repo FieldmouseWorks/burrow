@@ -7,6 +7,7 @@ a turn in the line by a PR waiting at its last look, this pass or before."""
 
 import itertools
 import json
+import os
 
 import proofs as P
 from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, clean, fresh_pr_state, info, mkpr, pr_state, run, tmp
@@ -77,6 +78,15 @@ ends(1)
 P.begin("sam/r", {2, 3})  # the first one landed; this pass looks at 3 first
 assert ahead(1) in line(3, 800) and JOBS == [], JOBS
 assert RUNNING in line(2, 800) and len(JOBS) == 1, JOBS
+# One this pass found waiting is ahead whether or not its state was saved
+# (its status timed out, say, before its look could save it).
+fresh_pr_state()
+P.begin("sam/r", {1, 2, 3})
+assert RUNNING in line(1) and len(JOBS) == 1, JOBS
+assert ahead(1) in line(2)
+os.remove(f"{tmp}/state/pr-sam_r-2.json")
+ends(1)
+assert ahead(1) in line(3, 800) and JOBS == [], JOBS
 
 # Every job a PR started holds a slot until it ends, however many heads
 # since: one on its last head that proj couldn't stop yet and its new

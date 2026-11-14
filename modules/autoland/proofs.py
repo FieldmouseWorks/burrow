@@ -326,15 +326,17 @@ def ahead(repo, n, st, slots, outs=None):
                 for rec in [state.get("proofPaths", {}).get(j) or {}]]
 
     jobs_now = held(st, live(st))
-    waiting = 0
+    # This pass's look at the PRs it has taken, whether or not their state
+    # was saved; the kept one at those it hasn't.
+    turns = {k for k in WAITING.get(repo, ()) if repo not in OPEN or k in OPEN[repo]}
     mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
     for f in os.listdir(STATE):
         m = re.fullmatch(mine, f)
         if m and (k := int(m[1])) != n and (repo not in OPEN or k in OPEN[repo]):
             other = load(f, {})
             jobs_now += held(other, [j for j in jobs(other) if running(j)])
-            looked = k in LOOKED.get(repo, ())
-            waiting += place(repo, k) < place(repo, n) and (k in WAITING.get(repo, ()) if looked else bool(other.get("proofTurn")))
+            if k not in LOOKED.get(repo, ()) and other.get("proofTurn"):
+                turns.add(k)
     todo = unbuilt({p for _, _, ps in jobs_now if ps for p in ps} | set(outs or ()))
     # In the order they started: a job is a build when it has paths still
     # to build that those before it aren't building, or when they're
@@ -344,6 +346,7 @@ def ahead(repo, n, st, slots, outs=None):
         rest = todo.intersection(ps) if ps is not None else None
         builds += rest is None or not rest <= building
         building |= rest or set()
+    waiting = sum(place(repo, k) < place(repo, n) for k in turns - {n})
     if builds + waiting < slots:
         return None
     if outs is not None and todo.intersection(outs) <= building:
