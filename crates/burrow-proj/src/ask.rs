@@ -6,8 +6,7 @@ use std::fs;
 
 mod about;
 pub(crate) use about::{
-    cohort, follows, footer, identity, key_of, load, locked, merge, open,
-    restore, still_waiting,
+    cohort, follows, footer, identity, key_of, load, locked, merge, open, restore, still_waiting,
 };
 mod host;
 pub(crate) use host::{control_root, ensure, ensure_root, host_path, initialize};
