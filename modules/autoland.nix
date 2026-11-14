@@ -75,6 +75,9 @@ let
   dashboardTitle = "Dependency Dashboard";
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
+    # The address Dependabot commits as, on every repo: a commit by anyone
+    # else on its branch is someone editing it (touches.py, autoland/shadow.nix).
+    dependabotEmail = "49699333+dependabot[bot]@users.noreply.github.com";
     inherit (cfg) owners exclude context rulesets baselineJobs baselinePerPass;
     app = { inherit (cfg.app) id slug; };
     inherit (cfg) authors;

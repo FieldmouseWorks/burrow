@@ -37,14 +37,16 @@ let
   keys = {
     top = [ "evidence" "plugins" "settings" "trusted_authors" ];
     evidence = [ "fresh" "negative" "require" "signer" ];
-    settings = [ "batch_label" "first_label" "handoff_after" "hold_label" "hold_stall_after"
-      "job_login" "job_timeout" "owner_label" "people" "proof_slots" "proof_timeout" "proofs"
+    settings = [ "batch_label" "bot_emails" "first_label" "handoff_after" "hold_label" "hold_stall_after"
+      "job_login" "job_timeout" "judge_engines" "owner_label" "people" "proof_slots" "proof_timeout" "proofs"
       "renovate_email" "renovate_login" "renovate_merge_after" "renovate_sweep" "require_ci"
       "review_authors" "reviewers" "rounds" "session_handoff_after" "settle_delay" "stall_after"
       "train" "train_stall_after" "verdict_authors" ];
   };
-  # Every key a config has: all of Settings' but the seal keys,
-  # judge_engines, bot_emails and renovate_run, left to Conary's defaults.
+  # Every key a config has: all of Settings' but the seal keys and
+  # renovate_run, left to Conary's defaults. Conary's defaults name no
+  # machine (Conary#381), so the engines a judge is owed for and the bots'
+  # addresses are the steward's own.
   wiring = {
     onSuccess = units."autoland@".unitConfig.OnSuccess == [ "autoland-shadow@%i.service" ];
     hourly = (units.autoland.unitConfig.OnSuccess or [ ]) == [ ];
@@ -75,7 +77,9 @@ in pkgs.runCommand "autoland-shadow-check" { nativeBuildInputs = [ pkgs.jq ]; } 
   jq -e '.evidence == null and (.settings.train | not)' ${withApp.plain} >/dev/null || fail "plain has evidence with no train negative"
   jq -e '.settings.settle_delay == 120 and .settings.reviewers == [] and .settings.proof_slots == 1
     and .settings.proofs == {gate: {Run: [.settings.proofs.gate.Run[0], "-c", "make check"]}, vm: {Build: "checks.x86_64-linux.vm"}}
-    and .settings.review_authors == ["sams-steward[bot]"] and .settings.people == ["sam"]' \
+    and .settings.review_authors == ["sams-steward[bot]"] and .settings.people == ["sam"]
+    and .settings.judge_engines == ["codex"]
+    and .settings.bot_emails == ["49699333+dependabot[bot]@users.noreply.github.com"]' \
     ${withApp.plain} >/dev/null || fail "plain's settings aren't the steward's: $(jq -c .settings ${withApp.plain})"
   jq -e '.trusted_authors == ["sam", "dependabot[bot]", "renovate[bot]", "sam-workers[bot]"]' ${withApp.plain} >/dev/null \
     || fail "with a machinery App, not the steward's authors and bots: $(jq -c .trusted_authors ${withApp.plain})"
