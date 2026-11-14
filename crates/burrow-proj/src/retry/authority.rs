@@ -144,13 +144,36 @@ pub(super) fn holds_slot(cfg: &Config, pid: u32) -> io::Result<bool> {
             }
         }
     }
-    let locks = fs::read_to_string("/proc/locks")?;
-    Ok(locks.lines().any(|line| {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        fields.len() >= 6
-            && fields[1] == "FLOCK"
-            && fields[4] == pid.to_string()
-            && held.contains(fields[5])
+    holds(Path::new("/proc"), pid, &held)
+}
+
+/// Whether one of `pid`'s own descriptors carries a FLOCK it took on one of
+/// `held`. The parent's fdinfo lists the locks each descriptor holds, a small
+/// file apiece, and its fd directory is walked by descriptor number, so
+/// nothing else opening or closing files can shift a lock held all along out
+/// of the answer, as it can out of a read of /proc/locks.
+fn holds(proc: &Path, pid: u32, held: &std::collections::HashSet<String>) -> io::Result<bool> {
+    let dir = proc.join(pid.to_string());
+    let fds = match fs::read_dir(dir.join("fd")) {
+        Ok(fds) => fds,
+        // A parent that is gone holds nothing.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let pid = pid.to_string();
+    Ok(fds.filter_map(Result::ok).any(|fd| {
+        // A descriptor closed since the listing holds nothing either.
+        fs::read_to_string(dir.join("fdinfo").join(fd.file_name())).is_ok_and(|info| {
+            info.lines().any(|line| {
+                // lock:\t1: FLOCK  ADVISORY  WRITE PID MAJ:MIN:INODE 0 EOF
+                let f: Vec<_> = line.split_whitespace().collect();
+                f.len() >= 7
+                    && f[0] == "lock:"
+                    && f[2] == "FLOCK"
+                    && f[5] == pid
+                    && held.contains(f[6])
+            })
+        })
     }))
 }
 
@@ -186,15 +209,16 @@ pub(super) fn legacy_waiting(cfg: &Config, pid: u32) -> io::Result<bool> {
     {
         waiters.extend(children.split_whitespace().map(str::to_owned));
     }
-    let locks = fs::read_to_string("/proc/locks")?;
-    Ok(locks.lines().any(|line| {
-        let fields: Vec<_> = line.split_whitespace().collect();
+    // A `->` waiter is listed only while the census is taken, and while it
+    // is, a read of the table that skipped one is read again.
+    let blocked = crate::slot::table::listed(&cfg.jobs.join(".slots/.lock"), |fields| {
         fields.len() >= 9
             && fields[1] == "->"
             && fields[2] == "FLOCK"
             && waiters.iter().any(|w| w == fields[5])
             && fields[6] == want
-    }))
+    })?;
+    Ok(blocked.is_some())
 }
 
 /// A nonblocking scheduler (3bdabc2's) never blocks on the census: each pass
@@ -268,4 +292,52 @@ pub(super) fn legacy_handover(cfg: &Config, exe: &Path, args: &[&[u8]]) -> bool 
             same(path, &cfg.deployed) || store_tool(path, "proj") || store_tool(path, "burrow-proj")
         })
         && args[6] == b"_exec"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A running parent's slot lock, which a read of /proc/locks skipped
+    /// (left out of the fake table entirely), is still found on its own fd.
+    #[test]
+    fn a_slot_lock_is_read_from_the_parents_own_descriptors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proc = tmp.path().join("proc");
+        let dir = proc.join("42");
+        fs::create_dir_all(dir.join("fd")).unwrap();
+        fs::create_dir_all(dir.join("fdinfo")).unwrap();
+        fs::write(
+            proc.join("locks"),
+            "1: FLOCK  ADVISORY  WRITE 7 00:01:1 0 EOF\n",
+        )
+        .unwrap();
+        let slot = "00:2a:1234";
+        let held = std::collections::HashSet::from([slot.to_owned()]);
+        let fd = |n: &str, info: &str| {
+            fs::write(dir.join("fd").join(n), "").unwrap();
+            fs::write(dir.join("fdinfo").join(n), info).unwrap();
+        };
+        fd("0", "pos:\t0\nflags:\t02\n");
+        assert!(!holds(&proc, 42, &held).unwrap());
+        // Another process's lock on the same file, or this one's on another.
+        fd(
+            "8",
+            &format!("pos:\t0\nlock:\t1: FLOCK  ADVISORY  WRITE 43 {slot} 0 EOF\n"),
+        );
+        fd(
+            "9",
+            "pos:\t0\nlock:\t1: FLOCK  ADVISORY  WRITE 42 00:2a:99 0 EOF\n",
+        );
+        assert!(!holds(&proc, 42, &held).unwrap());
+        fd(
+            "10",
+            &format!(
+                "pos:\t0\nflags:\t02000002\nlock:\t1: FLOCK  ADVISORY  WRITE 42 {slot} 0 EOF\n"
+            ),
+        );
+        assert!(holds(&proc, 42, &held).unwrap());
+        // A parent gone holds nothing.
+        assert!(!holds(&proc, 41, &held).unwrap());
+    }
 }
