@@ -209,7 +209,7 @@ pub fn mark(job: &Job, state: &str, mut first: bool, wait: Option<&str>) -> Resu
 /// park of the job's latest turn takes the reason, and nothing else in it
 /// changes. One a stop removed, or a newer turn's start replaced, is left as
 /// it is, and no park is ever made here.
-fn refresh(job: &Job, _held: &crate::job::JobLock, wait: &str) -> Result<(), String> {
+fn refresh(job: &Job, _held: &crate::flock::Flock, wait: &str) -> Result<(), String> {
     let bytes = match fs::read(path(job, "park")) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

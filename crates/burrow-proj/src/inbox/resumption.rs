@@ -5,7 +5,7 @@
 //! second try for the lock to the pass itself, and the pass releases what's
 //! parked before it lets go (`inbox::main`).
 use super::{Pass, dirs};
-use crate::{config::Config, job::Job, read};
+use crate::{config::Config, flock::Flock, job::Job, read};
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -19,7 +19,7 @@ thread_local! {
 }
 
 pub(crate) struct Permit {
-    _guard: Option<File>,
+    _guard: Option<Flock>,
     /// Taken by [`Permit::pass`]: it, not admission's own, marks the thread.
     pass: bool,
 }
@@ -29,7 +29,7 @@ impl Permit {
     /// admission behind its launch.
     fn held(lock: File) -> Self {
         Self {
-            _guard: Some(lock),
+            _guard: Some(Flock::held(lock)),
             pass: false,
         }
     }
@@ -39,7 +39,7 @@ impl Permit {
     pub(super) fn pass(lock: File) -> Self {
         HELD.with(|h| h.set(true));
         Self {
-            _guard: Some(lock),
+            _guard: Some(Flock::held(lock)),
             pass: true,
         }
     }
@@ -55,11 +55,9 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        // Closing alone leaves the lock held while a concurrently forked
-        // child has the same open file description, until that child execs.
-        if let Some(lock) = &self._guard {
-            let _ = lock.unlock();
-        }
+        // Let go of the lock first (`Flock` unlocks, not just closes), then
+        // stop marking the thread.
+        drop(self._guard.take());
         if self.pass {
             HELD.with(|h| h.set(false));
         }

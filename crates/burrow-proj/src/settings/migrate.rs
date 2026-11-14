@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
 
+use crate::flock::Flock;
 use burrow_settings::roles::{self, Key, Migration, Offer, Roles, Setups, Tuning};
 
 mod fence;
@@ -173,7 +174,7 @@ fn read(dir: &Path) -> Result<Migration, String> {
     })
 }
 
-fn lock(path: &Path) -> Result<File, String> {
+fn lock(path: &Path) -> Result<Flock, String> {
     fs::create_dir_all(path.parent().ok_or("lock has no parent")?).map_err(|e| e.to_string())?;
     let file = File::options()
         .create(true)
@@ -183,7 +184,8 @@ fn lock(path: &Path) -> Result<File, String> {
         .map_err(|e| format!("{}: {e}", path.display()))?;
     file.lock()
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(file)
+    std::mem::forget(Flock::held(file.try_clone().unwrap()));
+    Ok(Flock::held(file))
 }
 
 /// Both locks remain held for the deployed generation with --fence. A retained
@@ -194,25 +196,26 @@ pub(crate) fn run(settings: &burrow_settings::Config, dir: &Path) -> Result<Stri
         settings.migrate(Migration::default(), "proj settings migrate")?;
         return Ok("The settings took the old files already.\n".into());
     }
-    run_with(settings, dir, |_| Ok(()))
+    run_with(settings, dir, |_, _| Ok(()))
 }
 
 fn run_with(
     settings: &burrow_settings::Config,
     dir: &Path,
-    after: impl FnOnce(&Result<String, String>) -> Result<(), String>,
+    after: impl FnOnce(&Result<String, String>, &[&Flock]) -> Result<(), String>,
 ) -> Result<String, String> {
-    let _door = settings
+    let door = settings
         .legacy_engines_lock
         .as_deref()
         .map(lock)
         .transpose()?;
-    let _roles = lock(&dir.join("roles.lock"))?;
+    let roles = lock(&dir.join("roles.lock"))?;
     let answer = migrate_locked(settings, dir);
     // A failed migration must not release the retired writers. The deployed
     // fence stays up through refusal as well as success; health separately
     // checks the durable cutover before a deployment can be confirmed.
-    after(&answer)?;
+    let held: Vec<&Flock> = door.iter().chain([&roles]).collect();
+    after(&answer, &held)?;
     answer
 }
 
@@ -233,7 +236,7 @@ fn migrate_locked(settings: &burrow_settings::Config, dir: &Path) -> Result<Stri
 }
 
 pub(crate) fn fenced(settings: &burrow_settings::Config, dir: &Path) -> Result<String, String> {
-    run_with(settings, dir, |answer| {
+    run_with(settings, dir, |answer, _| {
         if let Err(error) = answer {
             eprintln!("proj: migration failed; retained writers stay fenced: {error}");
         }
