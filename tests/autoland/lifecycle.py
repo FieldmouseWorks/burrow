@@ -23,6 +23,9 @@ BRIEF = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
 subprocess.run([sys.executable, str(Path(__file__).with_name("timeouts.py")),
                 *sys.argv[1:]], check=True)
 
+subprocess.run([sys.executable, str(Path(__file__).with_name("limits.py")),
+                *sys.argv[1:]], check=True)
+
 subprocess.run([sys.executable, str(Path(__file__).with_name("batches.py")),
                 *sys.argv[1:]], check=True)
 
