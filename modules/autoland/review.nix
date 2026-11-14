@@ -2,10 +2,12 @@
 # steward's passes queue (autoland/reviewers.py), as the reviewers' own user,
 # and runs each agent in a sandbox that shows it the snapshot and only the
 # store paths it needs, its traffic through a gate that lets it reach its
-# API and nothing else. Part of burrow.autoland, which imports it.
+# API and nothing else, and its options (burrow.autoland.reviewers). Part of
+# burrow.autoland, which imports it.
 inputs:
 { config, lib, pkgs, ... }:
 let
+  inherit (lib) mkOption types;
   cfg = config.burrow.autoland;
   rv = cfg.reviewers;
   inherit (import ./paths.nix config) reviewer reviewerHome reviewDir snapDir stewardKick;
@@ -81,6 +83,54 @@ let
 in
 {
   imports = [ { key = "burrow/codex-login"; imports = [ (import ../codex-login.nix inputs) ]; } ];
+
+  options.burrow.autoland.reviewers = {
+    codex = {
+      enable = lib.mkEnableOption ''
+        Codex as a reviewer: the codex CLI, logged in to your ChatGPT plan
+        (`autoland-codex-login`, once). Its model is codex's default, unless
+        the reviewers' home has a `.codex/config.toml` that names one: which
+        model does what is the machine's business. It's the steward's one
+        reviewer: while the plan's usage is spent, or it's logged out, PRs
+        wait for it, and it comes back on its own
+      '';
+      effort = mkOption {
+        type = types.enum [ "low" "medium" "high" "xhigh" ];
+        default = "high";
+        description = "How hard it thinks (`model_reasoning_effort`).";
+      };
+      parallel = mkOption {
+        type = types.ints.positive;
+        default = 2;
+        description = "At most this many Codex reviews at once.";
+      };
+    };
+
+    timeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 30;
+      description = ''
+        How long one review may run before it's stopped and counted a
+        failed try, like any other error: the steward asks again, three
+        tries in all, then three more an hour on.
+      '';
+    };
+
+    skipPaths = mkOption {
+      type = types.listOf types.str;
+      default = [ "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)\\.env(\\..*)?$" "\\.(pem|key|p12|pfx)$" ];
+      description = ''
+        Path regexes left out of the snapshot the reviewers read, on both
+        sides of the diff: they're told such a file changed, not how, so a
+        PR that changes one is judged before it lands. A directory matches
+        with a trailing slash. A repo's own `skipPaths` (in `repos`) adds
+        to these. They're Rust's regex syntax, which has no lookaround or
+        backreferences: one it can't read stops every snapshot it's for,
+        so those reviews wait rather than read what it was meant to hide.
+      '';
+    };
+  };
+
   config = lib.mkIf cfg.enable {
 
     users.users.${reviewer} = {
