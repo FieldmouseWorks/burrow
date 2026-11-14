@@ -12,7 +12,9 @@
 # of its own, with no network and no git. Every Claude of burrow.user gets
 # them, and `why`, as the `conary` MCP server (conary-mcp). With `door`, an
 # `undo` issue in a repo (the probe's, by default) asks the ledger for an
-# undo with no Claude in between (crates/burrow-ledger-door).
+# undo with no Claude in between (crates/burrow-ledger-door). With
+# `gateReuse`, a conaryd of its own answers CI's gate-reuse lookups over
+# HTTP (Conary's docs/gate-reuse.md), apart from the socket's.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -69,12 +71,18 @@ let
   wake = "${passDir}/wake.json";
   doorWake = "${passDir}/door-wake.json";
 
+  # Where the ledger's GitHub tokens come from: the machine's own App's, a
+  # repo's from its owner's installation (the repo is the last argument),
+  # else the user's own gh login, the same for every repo.
+  appToken = "${config.burrow.tools.gh-token}/bin/gh-token get";
+  userToken = "gh auth token";
+
   # How a writer of the ledger asks GitHub, and what it tells cn: the
   # passes' and the door's alike.
   writer = (if machineApp == null then ''
     # The user's own gh login reads GitHub and writes the anchor, notes and
     # undo PRs.
-    GH_TOKEN=$(gh auth token)
+    GH_TOKEN=$(${userToken})
     export GH_TOKEN
   '' else ''
     # The machine's own App reads GitHub and writes the anchor, notes and
@@ -82,7 +90,7 @@ let
     # each repo.
     # shellcheck source=/dev/null
     . ${machineApp.envFile}
-    export CONARY_TOKEN_COMMAND=${lib.escapeShellArg "${config.burrow.tools.gh-token}/bin/gh-token get"}
+    export CONARY_TOKEN_COMMAND=${lib.escapeShellArg appToken}
   '') + ''
     # What cn is told about the ledger (env, below).
     ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") cfg.env)}
@@ -103,6 +111,27 @@ let
     host = config.networking.hostName;
     cn = lib.getExe cfg.writer;
   });
+
+  # The gate-reuse lookup's: conaryd, apart from the socket's (`gateReuse`).
+  reuse = cfg.gateReuse;
+  # Its own socket, which nobody else may reach: conaryd always serves one.
+  reuseSocket = "/run/conary-gate-reuse/conaryd.sock";
+  # A repo's token for the lookup, as the ledger's writers get one: the
+  # program Conary runs with the repo as its last argument (token_command).
+  # It reads check runs, Actions jobs and artifacts, commits and PRs.
+  reuseToken = pkgs.writeShellApplication {
+    name = "burrow-ledger-token";
+    runtimeInputs = [ cfg.gh ];
+    text = if machineApp == null then ''
+      exec ${userToken}
+    '' else ''
+      GH_TOKEN_SOCKET=${lib.escapeShellArg machineApp.socket} exec ${appToken} "$1"
+    '';
+  };
+  # What conaryd reads (CONARY_GATE_REUSE_CONFIG; Conary's docs/gate-reuse.md,
+  # "Running it"), which refuses a field it doesn't know. Whose attestations
+  # count is the train's own, from `env`: one fact, one home.
+  reuseConfig = pkgs.writeText "conary-gate-reuse.json" (builtins.toJSON reuse.settings);
 
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
@@ -423,6 +452,69 @@ in
       '';
     };
 
+    gateReuse = {
+      enable = lib.mkEnableOption ''
+        Conary's gate-reuse lookup (its docs/gate-reuse.md): a conaryd of its
+        own answers, over HTTP on `listen`, whether CI already attested a pass
+        of a gate on a push's tree, for burrow's flake-check.yml (its
+        `gate-reuse` and `gate-reuse-lookup`). It runs as burrow.user, with
+        the ledger's GitHub tokens (as `writer` gets them) and the train's
+        signer workflow and fresh runners, and reaches the network; the
+        socket's conaryd stays as it is. The package must have conaryd from
+        FieldmouseWorks/Conary#380 or later
+      '';
+
+      listen = mkOption {
+        type = types.strMatching "([0-9.]+|\\[[0-9a-fA-F:.]+]):[0-9]+";
+        default = "127.0.0.1:8091";
+        example = "[::1]:8091";
+        description = ''
+          The address it listens on, IP:PORT. Plain HTTP: a runner on this
+          machine may ask it over loopback, any other asks over `path`.
+        '';
+      };
+
+      repos = mkOption {
+        type = types.listOf (types.strMatching "[^/]+/[^/]+");
+        default = [ ];
+        example = [ "sam/homelab" ];
+        description = "The repositories (OWNER/NAME) it answers for: any other is refused.";
+      };
+
+      path = mkOption {
+        type = types.nullOr (types.strMatching "/.*");
+        default = null;
+        example = "/conary/gate-reuse";
+        description = ''
+          Where on burrow.events' `host` nginx passes lookups to it, over
+          HTTPS, for runners GitHub hosts. null: no runner off this machine
+          can ask.
+        '';
+      };
+
+      url = mkOption {
+        type = types.nullOr types.str;
+        readOnly = true;
+        default = if reuse.path == null || config.burrow.events.host == null then null
+          else "https://${config.burrow.events.host}${reuse.path}";
+        defaultText = lib.literalExpression ''"https://''${config.burrow.events.host}''${path}"'';
+        description = "The lookup's URL for runners off this machine: a caller's `gate-reuse-lookup`.";
+      };
+
+      settings = mkOption {
+        type = types.attrs;
+        readOnly = true;
+        internal = true;
+        default = {
+          inherit (reuse) listen repos;
+          token_command = lib.getExe reuseToken;
+          signer = cfg.env.CONARY_SIGNER_WORKFLOW;
+          fresh = cfg.env.CONARY_FRESH_RUNNERS or null;
+        };
+        description = "What conaryd's gate-reuse configuration file holds.";
+      };
+    };
+
     door = {
       enable = lib.mkEnableOption ''
         the undo door: an issue labelled `label` in `repo`, from one of
@@ -495,6 +587,12 @@ in
     } {
       assertion = cfg.door.enable -> cfg.door.repo != null;
       message = "burrow.ledger.door.repo: name the repo whose issues ask for undos.";
+    } {
+      assertion = reuse.enable -> reuse.repos != [ ];
+      message = "burrow.ledger.gateReuse.repos: name the repositories the lookup answers for.";
+    } {
+      assertion = reuse.path != null -> reuse.enable && config.burrow.events.host != null;
+      message = "burrow.ledger.gateReuse.path: needs gateReuse.enable, and burrow.events.host to serve it on.";
     }];
 
     # `cn` for everyone, on this ledger.
@@ -570,6 +668,15 @@ in
       wantedBy = [ "paths.target" ];
       pathConfig.PathExists = "${cfg.dir}/key.pub";
     };
+    systemd.paths.conary-gate-reuse = lib.mkIf reuse.enable {
+      wantedBy = [ "paths.target" ];
+      pathConfig.PathExists = "${cfg.dir}/key.pub";
+    };
+    # For runners GitHub hosts. The lookup reads at most 64 KiB of a
+    # request, under nginx's own cap.
+    services.nginx.virtualHosts = lib.mkIf (reuse.path != null) {
+      ${config.burrow.events.host}.locations.${reuse.path}.proxyPass = "http://${reuse.listen}";
+    };
     systemd.services = lib.genAttrs [ "burrow-ledger" "burrow-ledger@" ] (name: {
       description = if name == "burrow-ledger"
         then "ledger: record every repo's PRs in Conary's ledger"
@@ -626,6 +733,40 @@ in
           ProtectHome = true;
           PrivateNetwork = true;
           RestrictAddressFamilies = [ "AF_UNIX" ];
+          CapabilityBoundingSet = "";
+          Restart = "always";
+          RestartSec = 1;
+        };
+      };
+      # Apart from the socket's conaryd, which keeps no network and no
+      # token: this one needs both, and serves a socket of its own that only
+      # it can reach.
+      conary-gate-reuse = lib.mkIf reuse.enable {
+        description = "ledger: answer gate-reuse lookups on ${reuse.listen}";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+        unitConfig.ConditionPathExists = "${cfg.dir}/key.pub";
+        environment = {
+          CONARY_LEDGER = cfg.dir;
+          CONARY_SOCKET = reuseSocket;
+          CONARY_GATE_REUSE_CONFIG = "${reuseConfig}";
+        };
+        serviceConfig = {
+          ExecStart = "${cfg.package}/bin/conaryd";
+          # burrow.user, whose are the ledger's tokens (the App's socket
+          # lets only its users ask). It reads the ledger, which everyone
+          # may, and writes nothing but its socket's directory.
+          User = user;
+          RuntimeDirectory = builtins.baseNameOf (builtins.dirOf reuseSocket);
+          RuntimeDirectoryMode = "0700";
+          ProtectSystem = "strict";
+          # gh's login is in the user's home; the App's tokens aren't.
+          ProtectHome = if machineApp == null then "read-only" else true;
+          PrivateTmp = true;
+          NoNewPrivileges = true;
+          # The App's token socket, and GitHub.
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
           CapabilityBoundingSet = "";
           Restart = "always";
           RestartSec = 1;
