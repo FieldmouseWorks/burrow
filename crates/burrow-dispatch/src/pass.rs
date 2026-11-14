@@ -163,25 +163,28 @@ fn still(world: &dyn World, m: &Move) -> Result<(), String> {
         // Started or not, a run still unfinished on its first attempt is
         // cancelled; one that finished, or was run again, is left. So is one
         // whose later run was cancelled meanwhile: it's the branch's result
-        // again.
+        // again. The later run is read first, so the run itself is read
+        // last, right before the cancel: a read can wait out GitHub's
+        // retries, and the run may finish and be run again meanwhile, when
+        // the cancel would take its new attempt.
         Move::Cancel {
             repo, run, later, ..
         } => {
-            let r = world.github(&format!("repos/{repo}/actions/runs/{run}"))?;
-            let status = r.get("status").and_then(Value::as_str).unwrap_or("");
-            if status.is_empty() || status == "completed" {
-                return Err(format!("it's {} now", or_unread(status)));
-            }
-            if r.get("run_attempt").and_then(Value::as_u64) != Some(1) {
-                return Err("someone ran it again".into());
-            }
             let l = world.github(&format!("repos/{repo}/actions/runs/{later}"))?;
             let status = l.get("status").and_then(Value::as_str).unwrap_or("");
             let conclusion = l.get("conclusion").and_then(Value::as_str);
             if status.is_empty() {
-                Err(format!("the run after it, {later}, has no status"))
-            } else if status == "completed" && conclusion == Some("cancelled") {
-                Err(format!("the run after it, {later}, was cancelled"))
+                return Err(format!("the run after it, {later}, has no status"));
+            }
+            if status == "completed" && conclusion == Some("cancelled") {
+                return Err(format!("the run after it, {later}, was cancelled"));
+            }
+            let r = world.github(&format!("repos/{repo}/actions/runs/{run}"))?;
+            let status = r.get("status").and_then(Value::as_str).unwrap_or("");
+            if status.is_empty() || status == "completed" {
+                Err(format!("it's {} now", or_unread(status)))
+            } else if r.get("run_attempt").and_then(Value::as_u64) != Some(1) {
+                Err("someone ran it again".into())
             } else {
                 Ok(())
             }
@@ -727,6 +730,66 @@ mod tests {
 
         run(&cfg, &w, t + 60.0).unwrap();
         assert_eq!(*w.did.borrow(), ["cancel sam/r#1"]);
+    }
+
+    // A run that finishes, or finishes and is run again, while the run after
+    // it is read (a read that may wait out GitHub's retries) isn't cancelled,
+    // whether it was queued, next in line or under way when the pass looked:
+    // the cancel would take its new attempt.
+    #[test]
+    fn cancel_moved_during_later_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.runners.retain(|u, _| u == "ci");
+        let one = "repos/sam/r/actions/runs/1";
+        let two = "repos/sam/r/actions/runs/2";
+        let t = 1_793_293_200.0;
+        for was in ["queued", "pending", "in_progress"] {
+            for (became, result) in [
+                (
+                    json!({"status": "completed", "conclusion": "success", "run_attempt": 1}),
+                    "not made: it's completed now",
+                ),
+                (
+                    json!({"status": "queued", "run_attempt": 2}),
+                    "not made: someone ran it again",
+                ),
+            ] {
+                let mut w = repo();
+                w.github.insert(
+                    page(&format!("repos/sam/r/actions/runs?status={was}"), 1),
+                    Ok(json!({"workflow_runs": [push(1, 7, "main", "a1", was, "2026-10-29T16:00:00Z")]})),
+                );
+                let pending = page("repos/sam/r/actions/runs?status=pending", 1);
+                let mut listed = w.github[&pending].clone().unwrap();
+                listed["workflow_runs"].as_array_mut().unwrap().push(push(
+                    2,
+                    7,
+                    "main",
+                    "b2",
+                    "pending",
+                    "2026-10-29T16:10:00Z",
+                ));
+                w.github.insert(pending, Ok(listed));
+                w.github.insert(
+                    page("repos/sam/r/actions/runs/1/jobs?filter=latest", 1),
+                    Ok(json!({"jobs": []})),
+                );
+                w.github
+                    .insert(one.into(), Ok(json!({"status": was, "run_attempt": 1})));
+                w.github.insert(
+                    two.into(),
+                    Ok(json!({"status": "pending", "conclusion": null})),
+                );
+                w.moves.insert(two.into(), (one.into(), became));
+                run(&cfg, &w, t).unwrap();
+                assert!(w.did.borrow().is_empty(), "{was}: {result}");
+                let st: State = load(dir.path(), "state.json");
+                assert!(st.cancels.is_empty(), "{was}: {result}");
+                assert_eq!(st.log.last().unwrap().result, result, "{was}");
+            }
+        }
     }
 
     // burrow's main on 2026-11-14 (#1108), replayed: flake's push runs for
