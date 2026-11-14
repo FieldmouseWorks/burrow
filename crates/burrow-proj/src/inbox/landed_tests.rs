@@ -80,6 +80,9 @@ fn child_job(target: &str, end: &str, state: &str, labels: &[&str]) -> (Box, Pat
     let d = b.record("j1");
     let mut now = issue(7, "sam", labels);
     now["state"] = json!(state);
+    if state == "closed" {
+        now["closed_at"] = json!("2026-11-13T20:00:55Z");
+    }
     fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
     (b, d, parent)
 }
@@ -98,17 +101,33 @@ fn moved_on(b: &Box) -> bool {
     b.pass().child_admissible("sam/box", "9")
 }
 
-/// What the host kept of what #7's job awaited.
+/// What the host kept of what #7's job awaited, one per line.
 fn kept(b: &Box) -> Option<String> {
-    crate::read(&b.pass().plan_dir("sam/box", "7").join("awaited"))
+    let kept: Value =
+        serde_json::from_str(&crate::read(&b.pass().plan_dir("sam/box", "7").join("awaited"))?)
+            .unwrap();
+    Some(
+        kept["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
-/// GitHub has #7 closed now, as it was.
-fn closed(b: &Box) {
+/// GitHub has #7 closed now, at `at`.
+fn closed_at(b: &Box, at: &str) {
     let mut now: Value =
         serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
     now["state"] = json!("closed");
+    now["closed_at"] = json!(at);
     fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
+}
+
+fn closed(b: &Box) {
+    closed_at(b, "2026-11-13T20:00:55Z");
 }
 
 /// FieldmouseWorks/Conary#304 and #310: the job awaited its PR, which said
@@ -134,9 +153,13 @@ fn a_refs_pr_the_childs_job_awaited_lands_it_in_any_repo() {
             "{repo}: {}",
             b.log()
         );
+        // Kept only on the closure GitHub has: the close's own pass.
+        assert!(d.exists(), "{repo}");
+        assert_eq!(kept(&b), None, "{repo}");
+        closed(&b);
+        jobs(&b, false);
         assert!(!d.exists(), "{repo}");
         assert_eq!(kept(&b), Some(format!("{repo}#10")), "{repo}");
-        closed(&b);
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
         assert!(moved_on(&b), "{repo}");
         assert_eq!(
@@ -203,6 +226,7 @@ fn a_hand_close_after_the_jobs_done_keeps_its_landing() {
             "edited" => {
                 let mut now = issue(7, "sam", &["claude"]);
                 now["state"] = json!("closed");
+                now["closed_at"] = json!("2026-11-13T20:00:55Z");
                 now["body"] = json!("It's broken, and the docs need it too.");
                 fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
             }
@@ -227,8 +251,9 @@ fn a_hand_close_after_the_jobs_done_keeps_its_landing() {
 }
 
 /// The awaited PR hadn't merged when the child closed: the list waits, and
-/// moves on once it does, with no job left to revive. Reopened, the child
-/// drops what its earlier job awaited.
+/// moves on once it does, with no job left to revive. Reopened and closed
+/// again, whether or not a pass saw it open, or edited, the closure isn't
+/// the one the job's awaits were kept on, and they don't count.
 #[test]
 fn an_awaited_pr_that_merges_after_the_close_lands_it_then() {
     let (b, _, parent) = child_job("sam/machine#1218", "done", "closed", &["claude"]);
@@ -239,12 +264,19 @@ fn an_awaited_pr_that_merges_after_the_close_lands_it_then() {
     p.sequence("sam/box", std::slice::from_ref(&parent));
     assert!(!moved_on(&b));
     assert!(p.wake.contains_key("sam/box"), "a later look is booked");
-    // Reopened while it waits: what the old job awaited goes.
-    let mut now = issue(7, "sam", &["claude"]);
-    now["state"] = json!("open");
+    // Reopened and closed again by hand, unseen; it merges meanwhile.
+    closed_at(&b, "2026-11-14T09:00:00Z");
+    pr(&b, "sam/machine", 1218, true);
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert!(!moved_on(&b));
+    // Edited, on the same closure, likewise.
+    closed(&b);
+    let mut now: Value =
+        serde_json::from_slice(&fs::read(b.path("repos_sam_box_issues_7")).unwrap()).unwrap();
+    now["title"] = json!("Fix it, and the docs");
     fs::write(b.path("repos_sam_box_issues_7"), now.to_string()).unwrap();
     b.pass().sequence("sam/box", std::slice::from_ref(&parent));
-    assert_eq!(kept(&b), None);
+    assert!(!moved_on(&b));
     // Kept again, and merged since.
     let (b, _, parent) = child_job("sam/machine#1218", "done", "closed", &["claude"]);
     pr(&b, "sam/machine", 1218, false);
@@ -272,7 +304,45 @@ fn a_repair_lane_child_closes_with_its_landing() {
         "{}",
         b.log()
     );
+    closed(&b);
+    jobs(&b, false);
     assert_eq!(kept(&b).as_deref(), Some("sam/box#10"));
+}
+
+/// One awaited target GitHub won't answer for vetoes nothing another
+/// source proves: an older target that merged, or a closing reference.
+/// With no proof at all, it's a miss, never a merge.
+#[test]
+fn an_unreadable_await_never_vetoes_other_proof() {
+    for proof in ["await", "closing", "none"] {
+        let (b, _, parent) = child_job("sam/gone#1", "done", "closed", &["claude"]);
+        let job = crate::job::Job::new(&b.cfg, "j1");
+        let mut awaits = "sam/gone#1\t1000\t{}\n".to_owned();
+        if proof == "await" {
+            // Awaited first, so the unreadable one is newer.
+            awaits = format!("sam/box#10\t900\t{{}}\n{awaits}");
+            pr(&b, "sam/box", 10, true);
+        }
+        fs::write(job.turn("1", "github-awaits"), awaits).unwrap();
+        if proof == "closing" {
+            fs::write(
+                b.path("merged-7"),
+                json!({"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+                    {"merged":true,"url":"https://github.com/sam/box/pull/12"}]}}}}})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        fs::write(b.path("fail"), "api repos/sam/gone/issues/1\n").unwrap();
+        jobs(&b, false);
+        assert!(kept(&b).is_some(), "{proof}");
+        let mut p = b.pass();
+        p.sequence("sam/box", std::slice::from_ref(&parent));
+        assert_eq!(moved_on(&b), proof != "none", "{proof}");
+        if proof == "none" {
+            assert!(p.unreached.contains(&"sam/box".to_owned()), "{proof}");
+        }
+    }
 }
 
 #[test]
@@ -306,9 +376,10 @@ fn a_closing_reference_from_another_repo_advances_the_list() {
     );
 }
 
-/// A notifier that keeps one notice per key as a file, and says so with
-/// `pending`, as burrow-notify does; delivery fails while `ensure-fails` or
-/// `close-fails` is there.
+/// A notifier as burrow-notify is: a stamp per key, written before the
+/// issue is made and dropped once it's closed, which `pending` reads; the
+/// issue itself (`notices.d/KEY`) made unless `ensure-fails` is there,
+/// closed unless `close-fails` is. Either failing still exits 0.
 fn notifier(b: &mut Box) {
     let notify = b.path("notify");
     let at = b.path("notices.d");
@@ -316,7 +387,7 @@ fn notifier(b: &mut Box) {
     burrow_test::executable(
         &notify,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$1 $2\" >>'{log}'\ncase \"$1\" in\n  ensure) [ -e '{efails}' ] || touch '{at}'/\"$2\" ;;\n  close) [ -e '{fails}' ] || rm -f '{at}'/\"$2\" ;;\n  pending) [ -e '{at}'/\"$2\" ] && exit 0; exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$1 $2\" >>'{log}'\ncase \"$1\" in\n  ensure) touch '{at}'/\"$2\".stamp; [ -e '{efails}' ] || touch '{at}'/\"$2\" ;;\n  close) [ -e '{fails}' ] || rm -f '{at}'/\"$2\" '{at}'/\"$2\".stamp ;;\n  pending) [ -e '{at}'/\"$2\".stamp ] && exit 0; exit 1 ;;\nesac\n",
             log = b.path("notices").display(),
             at = at.display(),
             fails = b.path("close-fails").display(),
@@ -335,10 +406,13 @@ fn a_child_closed_by_hand_waits_and_says_so_once() {
     let (mut b, parent, _) = parent_fixture();
     notifier(&mut b);
     child(&b, "closed");
-    // The first pass's notice doesn't get through: a later pass's does.
+    // The first pass's notice is stamped but never made: a later look is
+    // booked all the same, and its ensure makes it.
     fs::write(b.path("ensure-fails"), "").unwrap();
-    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    let mut p = b.pass();
+    p.sequence("sam/box", std::slice::from_ref(&parent));
     assert!(!notice_open(&b));
+    assert!(p.wake.contains_key("sam/box"), "ensured again later");
     fs::remove_file(b.path("ensure-fails")).unwrap();
     for _ in 0..2 {
         b.pass().sequence("sam/box", std::slice::from_ref(&parent));
@@ -366,6 +440,12 @@ fn a_child_closed_by_hand_waits_and_says_so_once() {
             .all(|l| ["ensure proj-plan-sam_box-7", "pending proj-plan-sam_box-7"].contains(&l)),
         "{notices}"
     );
+    assert!(notice_open(&b));
+    // A scoped pass about another issue says nothing of this parent: its
+    // notice stays.
+    let mut p = b.pass();
+    p.scope = Some(BTreeSet::from([42]));
+    p.sequence("sam/box", &[]);
     assert!(notice_open(&b));
     // An author records the PR that landed it: the list moves on, and the
     // notice is closed, the close tried again until it's known to be.

@@ -20,8 +20,9 @@ const LANDED: &str = "landed";
 /// closed with that job's completion accepted.
 const AWAITED: &str = "awaited";
 
-/// How long a closed child whose job awaited a PR that hasn't merged waits
-/// before its repo is looked at again: a merge elsewhere sends no event here.
+/// How long before a repo is looked at again while a closed child's awaited
+/// PR hasn't merged (a merge elsewhere sends no event here), or while a list
+/// waits and its notice is ensured again.
 const AWAITED_LOOK: i64 = 3600;
 
 /// In a parent's plan folder: a notice that its list waits may be open, so
@@ -57,6 +58,11 @@ pub(in crate::inbox) fn declared_done(job: &Job) -> bool {
         && !job.turn(&turn, "stopped").exists()
         && !job.turn(&turn, "timeout").exists()
         && !crate::ask::host_path(job, "question-needs-owner").exists()
+}
+
+/// What a closed issue's closure is: when it closed, and what it said then.
+fn closure(issue: &Value) -> Value {
+    json!({"closed_at": issue["closed_at"], "title": issue["title"], "body": issue["body"]})
 }
 
 /// Every PR or issue the job's turns awaited, newest first, as `OWNER/REPO#N`.
@@ -105,32 +111,21 @@ fn pull_url(s: &str) -> Option<(String, u64)> {
 
 impl Pass<'_> {
     /// The merged PR tied to child N: Some(Some(url)) when there is one,
-    /// Some(None) when there's none, None when GitHub couldn't be asked.
-    /// What a finished job awaited counts only for a `closed` child.
+    /// Some(None) when there's none, None when there may be one GitHub
+    /// couldn't be asked about. A source that can't be read never vetoes
+    /// another that proves it. What a finished job awaited counts only for
+    /// the closure it was kept on: `closed` is the child as GitHub has it
+    /// now, when closed.
     pub(super) fn landed_child(
         &mut self,
         repo: &str,
         n: u64,
-        closed: bool,
+        closed: Option<&Value>,
     ) -> Option<Option<String>> {
         if let Some(pr) = self.recorded_landing(repo, n) {
             return Some(Some(pr));
         }
-        if closed {
-            let kept = self.plan_dir(repo, &n.to_string()).join(AWAITED);
-            let targets: Vec<String> = read(&kept)
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            if let Some(pr) = self.first_merged(&targets)? {
-                return Some(Some(pr));
-            }
-            if !targets.is_empty() {
-                self.book(repo, crate::now() + AWAITED_LOOK);
-            }
-        }
-        // A child split again is done when its own list is.
+        // A child split again is done when its own list is, and only then.
         if let Ok(bytes) = fs::read(self.plan_dir(repo, &n.to_string()).join("tasks.json"))
             && let Ok(list) = serde_json::from_slice::<List>(&bytes)
             && !list.children.is_empty()
@@ -141,7 +136,27 @@ impl Pass<'_> {
                     .then(|| format!("https://github.com/{repo}/issues/{n}")),
             );
         }
+        let mut unsure = false;
+        if let Some(issue) = closed {
+            let targets = self.awaited_for(repo, n, issue);
+            match self.first_merged(&targets) {
+                Some(Some(pr)) => return Some(Some(pr)),
+                Some(None) => {}
+                None => unsure = true,
+            }
+            if !targets.is_empty() {
+                self.book(repo, crate::now() + AWAITED_LOOK);
+            }
+        }
         // A closing reference, from whichever repo.
+        match self.closing_reference(repo, n) {
+            Some(Some(pr)) => Some(Some(pr)),
+            Some(None) if !unsure => Some(None),
+            _ => None,
+        }
+    }
+
+    fn closing_reference(&self, repo: &str, n: u64) -> Option<Option<String>> {
         let (owner, name) = repo.split_once('/')?;
         let query = "query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){closedByPullRequestsReferences(first:100,includeClosedPrs:true){nodes{merged url}}}}}";
         let got = crate::github::query_for(
@@ -169,40 +184,6 @@ impl Pass<'_> {
         fs::create_dir_all(&d).is_ok() && swap(&d.join(LANDED), &format!("{pr}\n")).is_ok()
     }
 
-    /// Keep what child N's job awaited, once N is closed with that job's
-    /// completion accepted.
-    pub(in crate::inbox) fn keep_awaited(&self, repo: &str, n: u64, job: &Job) -> bool {
-        let targets = awaited_targets(job);
-        if targets.is_empty() {
-            return true;
-        }
-        let d = self.plan_dir(repo, &n.to_string());
-        fs::create_dir_all(&d).is_ok()
-            && swap(&d.join(AWAITED), &format!("{}\n", targets.join("\n"))).is_ok()
-    }
-
-    /// A reopened child: its earlier job's awaits are no evidence for it now.
-    pub(super) fn drop_awaited(&self, repo: &str, n: u64) -> bool {
-        !matches!(
-            fs::remove_file(self.plan_dir(repo, &n.to_string()).join(AWAITED)),
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound
-        )
-    }
-
-    /// The first of these that's a merged PR, as its URL.
-    fn first_merged(&self, targets: &[String]) -> Option<Option<String>> {
-        for target in targets {
-            let Some((at, m)) = reference(target) else {
-                continue;
-            };
-            let issue = crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}"))?;
-            if let Some(pr) = merged(&issue) {
-                return Some(Some(pr));
-            }
-        }
-        Some(None)
-    }
-
     /// Whether N is a child on any of the repo's task lists.
     pub(in crate::inbox) fn is_child(&self, repo: &str, n: u64) -> bool {
         self.plan_dirs(repo).iter().any(|d| {
@@ -211,6 +192,57 @@ impl Pass<'_> {
                 .and_then(|bytes| serde_json::from_slice::<List>(&bytes).ok())
                 .is_some_and(|list| list.children.iter().any(|c| c.number == Some(n)))
         })
+    }
+
+    /// Keep what child N's job awaited, once N is `closed` with that job's
+    /// completion accepted: bound to that closure (when it closed, and the
+    /// title and body it closed with), so a reopened, edited or reclosed
+    /// child never inherits it, whether or not a pass saw it open.
+    pub(in crate::inbox) fn keep_awaited(
+        &self,
+        repo: &str,
+        n: u64,
+        job: &Job,
+        closed: &Value,
+    ) -> bool {
+        let targets = awaited_targets(job);
+        if targets.is_empty() || closed["state"] != "closed" || !closed["closed_at"].is_string() {
+            return true;
+        }
+        let kept = json!({"closure": closure(closed), "targets": targets});
+        let d = self.plan_dir(repo, &n.to_string());
+        fs::create_dir_all(&d).is_ok() && swap(&d.join(AWAITED), &kept.to_string()).is_ok()
+    }
+
+    /// What child N's finished job awaited, if it was kept on the closure
+    /// `closed` is: none for another closure, or an unreadable record.
+    fn awaited_for(&self, repo: &str, n: u64, closed: &Value) -> Vec<String> {
+        read(&self.plan_dir(repo, &n.to_string()).join(AWAITED))
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .filter(|kept| kept["closure"] == closure(closed))
+            .and_then(|kept| serde_json::from_value(kept["targets"].clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// The first of these that's a merged PR, as its URL. One that can't
+    /// be read is passed over: None only when none has merged and one
+    /// couldn't be read.
+    fn first_merged(&self, targets: &[String]) -> Option<Option<String>> {
+        let mut unsure = false;
+        for target in targets {
+            let Some((at, m)) = reference(target) else {
+                continue;
+            };
+            match crate::github::api(self.cfg, &format!("repos/{at}/issues/{m}")) {
+                Some(issue) => {
+                    if let Some(pr) = merged(&issue) {
+                        return Some(Some(pr));
+                    }
+                }
+                None => unsure = true,
+            }
+        }
+        (!unsure).then_some(None)
     }
 
     /// The newest PR any of the job's turns awaited that has merged, in
@@ -268,7 +300,7 @@ impl Pass<'_> {
         };
         job.turns().as_deref() != Some(turns.as_str())
             || !declared_done(job)
-            || self.keep_awaited(repo, child, job)
+            || self.keep_awaited(repo, child, job, issue)
     }
 
     /// Notices owed for lists the open-parent pass doesn't reach: a parent
@@ -287,6 +319,10 @@ impl Pass<'_> {
             else {
                 continue;
             };
+            // A scoped pass's list says nothing of a parent outside it.
+            if !self.in_scope(&parent) {
+                continue;
+            }
             let listed = open
                 .iter()
                 .any(|i| super::raw(&i["number"]) == parent && self.eligible(repo, i));
@@ -331,13 +367,13 @@ impl Pass<'_> {
                         "{repo}#{child} closed without a merged PR tied to it, so the task list on {repo}#{parent} waits and its next child doesn't start. If its work landed, an author records the PR with `proj plan done {repo}#{child} PR-URL`; otherwise reopen it."
                     ),
                 ]);
-                // pending exits 0 once the notifier holds the notice.
-                if !said.is_some_and(|s| s.success())
-                    || !run(&["pending", &id]).is_some_and(|s| s.code() == Some(0))
-                {
+                if !said.is_some_and(|s| s.success()) {
                     eprintln!("proj-inbox: couldn't tell the owner {repo}#{parent} waits");
                     self.retry(repo);
                 }
+                // The notifier can't say it reached GitHub: while the list
+                // waits, ensure it again in a while (safe to repeat).
+                self.book(repo, crate::now() + AWAITED_LOOK);
             }
             None if owed.exists() => {
                 run(&["close", &id, "The task list moved on."]);

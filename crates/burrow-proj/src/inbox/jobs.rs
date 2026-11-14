@@ -417,13 +417,14 @@ impl Pass<'_> {
                             self.miss(repo);
                             continue;
                         }
-                        // What the job awaited is the child's only once the
-                        // close went through. Not kept: the record stays, and
-                        // the next pass, finding the child closed, keeps it
-                        // under the same checks (keep_landing).
-                        if awaited && !n.parse().is_ok_and(|c| self.keep_awaited(repo, c, &job)) {
+                        // What the job awaited becomes the child's only on the
+                        // closure GitHub now has: the record stays, unhalted,
+                        // and the next pass (the close's own event) finds the
+                        // child closed and keeps it under the closed child's
+                        // checks, bound to that closure (keep_landing).
+                        if awaited {
                             drop(held);
-                            self.retry(repo);
+                            self.book(repo, crate::now());
                             continue;
                         }
                         if let Err(f) = halt(self.cfg, &job, false) {

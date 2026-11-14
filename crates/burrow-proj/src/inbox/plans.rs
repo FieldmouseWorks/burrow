@@ -351,7 +351,7 @@ impl Pass<'_> {
                 let Ok(n) = n.parse() else {
                     return Closing::No;
                 };
-                let closing = match self.landed_child(repo, n, false) {
+                let closing = match self.landed_child(repo, n, None) {
                     Some(Some(_)) => Some(Closing::Yes),
                     Some(None) => match job.filter(|job| landed::declared_done(job)) {
                         Some(job) => self
@@ -768,17 +768,12 @@ impl Pass<'_> {
             // A child is done when a merged PR is tied to it, whatever its
             // issue's state: an open one recorded so is closed with it.
             let landed = if issue["state"] == "closed" {
-                let Some(landed) = self.landed_child(repo, child, true) else {
+                let Some(landed) = self.landed_child(repo, child, Some(&issue)) else {
                     self.miss(repo);
                     continue;
                 };
                 landed
             } else {
-                // Reopened: what an earlier job awaited no longer counts.
-                if !self.drop_awaited(repo, child) {
-                    self.retry(repo);
-                    continue;
-                }
                 self.recorded_landing(repo, child)
             };
             if let Some(pr) = landed {
