@@ -434,25 +434,37 @@ fn tracker_split_transactions_recover_every_durable_stage() {
     }
 }
 
+/// A live job (queued, running or awaiting) whose own issue is `of` and
+/// whose brief names parent #7.
+fn live_job(b: &Box, state: &str, of: &str) {
+    b.job("lane", "done", "working");
+    let record = b.record("lane");
+    Pass::hand(&record, "Deliver #7").unwrap();
+    let lane = record.with_file_name(format!("sam_box-{of}"));
+    fs::rename(record, &lane).unwrap();
+    fs::write(lane.join("issue"), format!("sam/box#{of}")).unwrap();
+    if state == "awaiting" {
+        fs::write(b.cfg.jobs.join("lane/await"), "sam/box#99\t0\told\n").unwrap();
+    } else {
+        fs::write(b.path("active"), "").unwrap();
+        if state == "running" {
+            fs::write(b.cfg.jobs.join("lane/1.slot"), "").unwrap();
+        }
+    }
+}
+
+fn open_child(b: &Box) {
+    let mut child = issue(8, "sam", &["later"]);
+    child["state"] = json!("open");
+    fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+}
+
 #[test]
 fn planning_preserves_queued_running_and_awaiting_reference_ownership() {
     for state in ["queued", "running", "awaiting"] {
         let (b, mut parent, _) = parent_fixture();
         parent["repository_url"] = json!("https://api.github.com/repos/sam/box");
-        b.job("lane", "done", "working");
-        let record = b.record("lane");
-        Pass::hand(&record, "Deliver #7").unwrap();
-        let lane = record.with_file_name("sam_box-100");
-        fs::rename(record, &lane).unwrap();
-        fs::write(lane.join("issue"), "sam/box#100").unwrap();
-        if state == "awaiting" {
-            fs::write(b.cfg.jobs.join("lane/await"), "sam/box#99\t0\told\n").unwrap();
-        } else {
-            fs::write(b.path("active"), "").unwrap();
-            if state == "running" {
-                fs::write(b.cfg.jobs.join("lane/1.slot"), "").unwrap();
-            }
-        }
+        live_job(&b, state, "100");
         let t = b.cfg.inbox.as_ref().unwrap().triage.as_ref().unwrap();
         let mut pass = b.pass();
         let task_file = pass.plan_dir("sam/box", "7").join("tasks.json");
@@ -463,10 +475,78 @@ fn planning_preserves_queued_running_and_awaiting_reference_ownership() {
             "{state}"
         );
         fs::write(task_file, tasks).unwrap();
-        assert!(!pass.child_admissible("sam/box", "8"), "{state}");
-        pass.sequence("sam/box", &[parent]);
-        assert!(!b.log().contains("labels[]=ready"), "{state}");
     }
+}
+
+// FieldmouseWorks/burrow#1129: a job parked on an await whose brief named
+// two parents held both their lists, silently, while it waited on them.
+#[test]
+fn a_brief_that_mentions_a_parent_does_not_hold_its_list() {
+    for state in ["queued", "running", "awaiting"] {
+        let (b, parent, _) = parent_fixture();
+        open_child(&b);
+        live_job(&b, state, "100");
+        assert!(b.pass().child_admissible("sam/box", "8"), "{state}");
+        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(
+            b.log().contains("issues/8/labels -f labels[]=ready"),
+            "{state}: {}",
+            b.log()
+        );
+        assert!(!b.pass().plan_dir("sam/box", "7").join("held").exists());
+    }
+}
+
+#[test]
+fn the_parents_own_live_job_holds_its_list_and_says_so() {
+    for state in ["queued", "running", "awaiting"] {
+        let (b, parent, _) = parent_fixture();
+        open_child(&b);
+        live_job(&b, state, "7");
+        let held = b.pass().plan_dir("sam/box", "7").join("held");
+        assert!(!b.pass().child_admissible("sam/box", "8"), "{state}");
+        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(!b.log().contains("labels[]=ready"), "{state}");
+        assert_eq!(
+            read(&held).as_deref(),
+            Some("its own job lane is still live"),
+            "{state}"
+        );
+        // Once it ends, the list moves on and the word is taken back.
+        fs::remove_file(b.cfg.jobs.join("lane/await")).ok();
+        fs::remove_file(b.cfg.jobs.join("lane/1.slot")).ok();
+        fs::remove_file(b.path("active")).ok();
+        b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+        assert!(
+            b.log().contains("issues/8/labels -f labels[]=ready"),
+            "{state}"
+        );
+        assert!(!held.exists(), "{state}");
+    }
+}
+
+#[test]
+fn every_held_list_says_why() {
+    // An ineligible next child.
+    let (b, parent, _) = parent_fixture();
+    let mut child = issue(8, "stranger", &[]);
+    child["state"] = json!("open");
+    fs::write(b.path("repos_sam_box_issues_8"), child.to_string()).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    let held = b.pass().plan_dir("sam/box", "7").join("held");
+    assert_eq!(
+        read(&held).as_deref(),
+        Some("its next child #8 isn't one the inbox may read")
+    );
+    // A parent edited since its split.
+    let (b, mut parent, _) = parent_fixture();
+    parent["body"] = json!("Changed scope");
+    fs::write(b.path("repos_sam_box_issues_7"), parent.to_string()).unwrap();
+    b.pass().sequence("sam/box", std::slice::from_ref(&parent));
+    assert_eq!(
+        read(&b.pass().plan_dir("sam/box", "7").join("held")).as_deref(),
+        Some("the parent changed after its split")
+    );
 }
 
 #[test]
