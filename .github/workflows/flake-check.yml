@@ -377,7 +377,8 @@ jobs:
   check:
     needs: [lane, reuse]
     if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' && (needs.reuse.outputs.hit != 'true' || inputs.legs <= 1) }}
-    name: ${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}
+    # The waiter finds the base push's own leg by this name (kept-wait).
+    name: &leg-job ${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}
     strategy:
       # Every leg runs to its end, as the gate builds every check it can
       # (--keep-going): one failing says nothing of the others.
@@ -456,8 +457,14 @@ jobs:
             echo "::error title=Conflicts with its base::$HEAD_SHA no longer merges cleanly with $BASE at $tip, so nothing was checked. Merge $BASE into the branch and push."
             exit 1
           fi
+          # The base it merged onto, the merge's first parent: the commit
+          # whose push keeps the builds this check restores first.
+          echo "tip=$tip" >> "$GITHUB_OUTPUT"
       # keep-builds: the builds the last push to the default branch kept, for
-      # nix to substitute from, unsigned. No PR's run saves them, but one can
+      # nix to substitute from, unsigned. A PR's exact key is the base it was
+      # merged onto (no run ever saves under GitHub's merge commit), so an
+      # exact hit is that push's own kept builds and nothing is left to wait
+      # for. No PR's run saves them, but one can
       # write the cache under its own ref, which that PR's later runs restore
       # from first, so a PR from a fork, whose author needs no access to this
       # repo, restores nothing. The directory is there before nix, whose
@@ -472,14 +479,14 @@ jobs:
         with:
           lookup-only: true
           path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ steps.merge.outputs.tip || github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
       - id: kept-restore
         if: ${{ inputs.keep-builds && inputs.install-nix && needs.reuse.outputs.hit != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kept
-          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ steps.merge.outputs.tip || github.sha }}
           restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
       - if: inputs.install-nix && needs.reuse.outputs.hit != 'true'
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
@@ -509,8 +516,12 @@ jobs:
       # source this wait can share. It plans
       # as the gate does, stopped before building, with a nix cache of its
       # own so the substituter's misses it saw aren't remembered by the gate.
-      # The token inherits actions: read when the caller grants it. Missing
-      # permission or other runtime API errors fail this step softly and
+      # It waits only while that push's own leg is running on a runner, and
+      # then until it ends, with no cap: one still queued may be queued for
+      # the very runner this leg holds, and one cut off part way would have
+      # cost the wait and saved nothing (#929). The token inherits actions:
+      # read when the caller grants it. Missing permission, other runtime API
+      # errors and a request past its deadline fail this step softly and
       # leave the gate to build cold.
       - id: kept-wait
         name: soft/kept-wait
@@ -528,6 +539,8 @@ jobs:
           TOOLS: ${{ github.workspace }}/.flake-check/.github/flake-check
           XDG_CACHE_HOME: ${{ runner.temp }}/kept-wait-cache
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TIP: ${{ steps.merge.outputs.tip }}
+          LEG_JOB: *leg-job
           KEPT_KEY: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
         run: bash "$TOOLS/run.sh" wait
       - id: kept-rewait

@@ -614,7 +614,9 @@ fn a_pr_is_checked_merged_with_its_base_as_it_is_now() {
         "{}",
         ran.said()
     );
-    assert_eq!(r.parents(&ws), [now, head.clone()]);
+    assert_eq!(r.parents(&ws), [now.clone(), head.clone()]);
+    // The base it merged onto, for the kept builds' exact key.
+    assert_eq!(ran.outputs, format!("tip={now}\n"));
     assert_eq!(std::fs::read_to_string(ws.join("c")).unwrap(), "later\n");
     assert_eq!(std::fs::read_to_string(ws.join("b")).unwrap(), "feature\n");
     assert_eq!(r.s.git(&ws, &["status", "--porcelain"]), "");
@@ -654,7 +656,8 @@ fn with_legs_the_base_is_where_the_lane_job_found_it() {
         "{}",
         ran.said()
     );
-    assert_eq!(r.parents(&ws), [event_base, head.clone()]);
+    assert_eq!(r.parents(&ws), [event_base.clone(), head.clone()]);
+    assert_eq!(ran.outputs, format!("tip={event_base}\n"));
     assert!(!ws.join("c").exists());
     for (tip, why) in [
         ("", "the lane job didn't say where main was"),
